@@ -435,6 +435,7 @@ impl TrackManager {
                     result.replacement_gate_reason,
                     executor::refresh_state(
                         &resumed.executor_state,
+                        &resumed.config,
                         &resumed.current_exposure,
                         &result.desired_exposure,
                         resumed.config.min_rebalance_units,
@@ -1133,6 +1134,7 @@ impl TrackManager {
         if target.suppress_execution {
             let executor_state = executor::refresh_state(
                 &track.executor_state,
+                &track.config,
                 &track.current_exposure,
                 &target.desired_exposure,
                 track.config.min_rebalance_units,
@@ -1212,4 +1214,142 @@ fn market_mutation_requires_durable_write(
         || has_non_target_events
         || has_execution_effects
         || durable_target_change
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
+    use poise_core::types::{ExchangeRules, Side};
+
+    use crate::execution_plan::ExecutionAction;
+    use crate::ports::ExecutionQuote;
+    use crate::track::Venue;
+
+    #[derive(Debug)]
+    struct FixedClock(chrono::DateTime<Utc>);
+
+    impl ClockPort for FixedClock {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            self.0
+        }
+    }
+
+    fn manager() -> (TrackManager, TrackId) {
+        let mut manager = TrackManager::new(Arc::new(FixedClock(
+            Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
+        )));
+        let id = TrackId::from("test");
+        manager
+            .add_track(
+                id.clone(),
+                Instrument::new(Venue::Binance, "BTCUSDT"),
+                config(),
+                budget(),
+                rules(),
+            )
+            .unwrap();
+        (manager, id)
+    }
+
+    fn config() -> TrackConfig {
+        TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 100.0,
+            min_rebalance_units: 1.0,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: BandProtectionPolicy::Freeze,
+        }
+    }
+
+    fn budget() -> CapacityBudget {
+        CapacityBudget {
+            max_notional: 10_000.0,
+            daily_loss_limit: 1_000.0,
+            total_loss_limit: 5_000.0,
+        }
+    }
+
+    fn rules() -> ExchangeRules {
+        ExchangeRules {
+            price_tick: 0.1,
+            quantity_step: 0.01,
+            min_qty: 0.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        }
+    }
+
+    fn market(price: f64) -> TrackObservation {
+        TrackObservation::Market(MarketObservation {
+            mark_price: price,
+            execution_quote: Some(ExecutionQuote {
+                best_bid: price - 0.1,
+                best_ask: price + 0.1,
+            }),
+        })
+    }
+
+    #[test]
+    fn reconcile_track_submits_catch_up_action_from_due_boundary_operation() {
+        let (mut manager, id) = manager();
+
+        let transition = manager.observe(&id, market(95.0)).unwrap();
+
+        let [ExecutionAction::SubmitOrder { request, .. }] = transition.effects.as_slice() else {
+            panic!("expected one catch-up submit order");
+        };
+        assert_eq!(request.side, Side::Buy);
+        assert!((request.price - 95.1).abs() < 1e-9);
+        assert!((request.quantity - 4.0).abs() < 1e-9);
+
+        let track = manager.tracks.get(&id).unwrap();
+        assert_eq!(track.executor_state.bindings.len(), 1);
+        assert_eq!(track.executor_state.bindings[0].allocations.len(), 4);
+    }
+
+    #[test]
+    fn reconcile_track_reopens_boundary_ledger_when_profile_revision_changes() {
+        let (mut manager, id) = manager();
+        manager.observe(&id, market(95.0)).unwrap();
+        let old_revision = manager
+            .tracks
+            .get(&id)
+            .unwrap()
+            .executor_state
+            .ledger_state
+            .profile_revision
+            .clone();
+
+        {
+            let track = manager.tracks.get_mut(&id).unwrap();
+            track.config.notional_per_unit = 120.0;
+        }
+
+        manager.observe(&id, market(100.0)).unwrap();
+
+        let track = manager.tracks.get(&id).unwrap();
+        assert_ne!(track.executor_state.ledger_state.profile_revision, old_revision);
+        assert_eq!(track.executor_state.ledger_state.ledger_anchor_exposure, Exposure(0.0));
+        assert!(track.executor_state.bindings.is_empty());
+    }
+
+    #[test]
+    fn reconcile_track_projects_no_round_or_slot_state_after_executor_refresh() {
+        let (mut manager, id) = manager();
+
+        manager.observe(&id, market(100.0)).unwrap();
+
+        let state_json = serde_json::to_value(&manager.snapshot(id.as_str()).unwrap()).unwrap();
+        let executor_state = state_json.get("executor_state").unwrap();
+        assert!(executor_state.get("active_round").is_none());
+        assert!(executor_state.get("slots").is_none());
+        assert!(executor_state.get("ledger_state").is_some());
+        assert!(executor_state.get("bindings").is_some());
+    }
 }

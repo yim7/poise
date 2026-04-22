@@ -209,12 +209,13 @@ pub fn current_submit_hint(input: SubmitIntentInput<'_>) -> Option<PendingSubmit
 
 pub fn refresh_state(
     previous_state: &ExecutorState,
-    _current_exposure: &Exposure,
+    config: &TrackConfig,
+    current_exposure: &Exposure,
     _desired_exposure: &Exposure,
     _min_rebalance_units: f64,
     _observed_at: DateTime<Utc>,
 ) -> ExecutorState {
-    previous_state.clone()
+    previous_state.ensure_revision(config, current_exposure.clone())
 }
 
 fn noop_plan(state: ExecutorState) -> ExecutorPlan {
