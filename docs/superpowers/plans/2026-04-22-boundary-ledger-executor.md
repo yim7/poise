@@ -97,7 +97,7 @@
 - Modify: `engine/src/executor/mod.rs`
 - Test: `engine/src/executor/boundary.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 boundary 原语和反解**
+- [x] **Step 1: 先写失败测试，锁住 boundary 原语和反解**
 
 在 `engine/src/executor/boundary.rs` 新增测试，至少覆盖：
 
@@ -122,7 +122,7 @@ fn profile_revision_for_config_is_deterministic_for_identical_configs() {}
 - `BoundaryId` 只编码 revision 和相邻 exposure 边界，不编码方向
 - `ProfileRevision` 的生成规则是确定性的
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -134,7 +134,7 @@ Expected:
 
 - 当前实现失败，因为 `boundary.rs` 尚不存在，旧 executor 也没有边界目录和反解函数。
 
-- [ ] **Step 3: 做最小实现，建立 boundary 纯函数模块**
+- [x] **Step 3: 做最小实现，建立 boundary 纯函数模块**
 
 在 `engine/src/executor/boundary.rs` 实现最小骨架：
 
@@ -190,7 +190,7 @@ pub fn trigger_price_for_boundary(
 - `BoundaryOperation` 只是查询视角，不落持久化 owner
 - 这一 task 不引入 runtime 状态变更，也不改 planner；它只是建立后续迁移所需的纯域模型
 
-- [ ] **Step 4: 运行 Task 1 回归**
+- [x] **Step 4: 运行 Task 1 回归**
 
 Run:
 
@@ -201,7 +201,7 @@ Expected:
 - 边界目录和反解测试通过
 - 当前 executor 其他行为不变
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/executor/boundary.rs engine/src/executor/mod.rs
@@ -210,7 +210,7 @@ git commit -m "feat(engine): add boundary discretization domain"
 
 Commit:
 
-- `待执行时回写 SHA`
+- `3f045e7`
 
 ## Task 2: 落 pure ledger / binding / policy 模块，不接 manager
 
