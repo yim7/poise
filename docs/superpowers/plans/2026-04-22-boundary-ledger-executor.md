@@ -224,7 +224,7 @@ Commit:
 - Test: `engine/src/executor/binding.rs`
 - Test: `engine/src/executor/policy.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住纯模块边界**
+- [x] **Step 1: 先写失败测试，锁住纯模块边界**
 
 新增测试至少覆盖：
 
@@ -249,7 +249,7 @@ fn catch_up_policy_selects_due_uncovered_operations_only() {}
 - `BindingProposal` 的匹配键固定为 `(policy, ordered_operation_keys)`
 - `CatchUpPolicy` 作为纯策略函数只选择 `due && remaining > 0 && uncovered` 的操作
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -261,7 +261,7 @@ Expected:
 
 - 当前实现失败，因为 `ledger.rs`、`binding.rs`、`policy.rs` 尚不存在。
 
-- [ ] **Step 3: 做最小实现，建立纯模块**
+- [x] **Step 3: 做最小实现，建立纯模块**
 
 要求：
 
@@ -281,7 +281,7 @@ Expected:
   - `select_catch_up_operations(...)`
 - 这一 task 不改 runtime / snapshot / manager；新模块先作为纯域层存在
 
-- [ ] **Step 4: 运行 Task 2 回归**
+- [x] **Step 4: 运行 Task 2 回归**
 
 Run:
 
@@ -294,7 +294,7 @@ Expected:
 - 纯 boundary progress / binding / catch-up policy 模块通过
 - 旧 executor 行为仍未切换
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/executor/ledger.rs engine/src/executor/binding.rs engine/src/executor/policy.rs engine/src/executor/mod.rs
@@ -303,7 +303,7 @@ git commit -m "feat(engine): add boundary ledger core modules"
 
 Commit:
 
-- `待执行时回写 SHA`
+- `323488a`
 
 ## Task 3: 用 CatchUp-only 垂直切片替换 executor 内核
 
