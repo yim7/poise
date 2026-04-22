@@ -876,6 +876,7 @@ impl TrackManager {
             current_exposure: &track.current_exposure,
             desired_exposure: track.desired_exposure.as_ref(),
             min_rebalance_units: track.config.min_rebalance_units,
+            exchange_rules: &track.exchange_rules,
             previous_state: Some(&previous_state),
             live_orders: &open_orders,
             pending_submit_hints: &pending_submit_hints,

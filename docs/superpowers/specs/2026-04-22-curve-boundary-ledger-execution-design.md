@@ -450,13 +450,20 @@ target_is_upper = spot_target >= upper - exposure_epsilon
 
 ```rust
 pub struct BoundaryLedgerState {
+    pub profile_revision: ProfileRevision,
     pub ledger_anchor_exposure: Exposure,
-    pub progress: BTreeMap<BoundaryId, BoundaryProgress>,
+    pub progress: Vec<BoundaryProgressEntry>,
+}
+
+pub struct BoundaryProgressEntry {
+    pub boundary_id: BoundaryId,
+    pub progress: BoundaryProgress,
 }
 ```
 
 这里只持久化最小非派生事实：
 
+- `profile_revision`
 - `ledger_anchor_exposure`
 - 每条边界自锚点以来的双向累计成交
 
@@ -524,14 +531,15 @@ pub struct BoundaryOperation {
 
 ```rust
 pub struct LiveOrderBinding {
-    pub binding_id: BindingId,
-    pub policy: PolicyKind,
-    pub operations: BoundaryOperationSelection,
+    pub binding_id: String,
+    pub proposal_key: BindingProposalKey,
+    pub allocations: Vec<BindingOperationAllocation>,
     pub request: OrderRequest,
-    pub order: Option<WorkingOrder>,
+    pub desired_exposure: Exposure,
+    pub submit_purpose: SubmitPurpose,
+    pub order_id: Option<String>,
     pub status: BindingStatus,
-    pub filled_qty: f64,
-    pub policy_state: Option<BindingPolicyState>,
+    pub policy_state: BindingPolicyState,
 }
 
 pub enum BindingStatus {
@@ -542,35 +550,37 @@ pub enum BindingStatus {
 }
 
 pub enum BindingPolicyState {
-    CurveMaker(CurveMakerBindingState),
-}
-
-pub struct CurveMakerBindingState {
-    pub due_grace_started_at: Option<DateTime<Utc>>,
+    Stateless,
+    CurveMaker {
+        due_grace_started_at: Option<DateTime<Utc>>,
+    },
 }
 ```
 
 这里：
 
-- `operations` 表示这张单正在覆盖哪一组边界操作
-- `filled_qty` 是这张单自身已经完成多少
+- `proposal_key` 是 diff 用的稳定匹配键，等于 `(policy, ordered_operation_keys)`
+- `allocations` 表示这张单正在覆盖哪一组边界操作，以及每个操作分到的 exposure 数量
+- `order_id` 是交易所 live order id；提交前可以为空
 - `policy_state` 只保存 owner policy 私有的运行态，不进入通用 binding 语义
 - 边界进度由 fills 吸收后再统一回写
 
 第一阶段只有 `CurveMakerPolicy` 使用私有状态：
 
-- 当 maker binding 覆盖的操作全部进入 `due`，且 `due_grace_started_at` 为空时，置为 `now`
-- 只要其中任一操作回到 `future`，则清空 `due_grace_started_at`
+- 当 maker binding 覆盖的操作进入 `due`，且 `due_grace_started_at` 为空时，置为 `now`
+- 只要该 maker binding 覆盖的操作回到 `future`，则清空 `due_grace_started_at`
 - binding 被 replace、终止或被别的 policy 抢占时，新的 binding 重新从 `None` 开始
 
 ### 8.4 progress 回写规则
 
 progress 回写采用两阶段：
 
-1. 先把交易所回报吸收到 binding 上，更新 `binding.filled_qty`
-2. 再把 `binding.filled_qty` 的增量按 `operations` 顺序回写到 boundary progress
+1. 先把交易所回报吸收到 binding 上，更新 binding 的订单生命周期状态
+2. 再把已确认完成的 `allocations` 按顺序回写到 boundary progress
 
 当一个 binding 覆盖多条边界操作时，部分成交按 **操作顺序贪心分配**，不按比例分配。
+
+第一阶段的代码只在交易所回报明确进入 `Filled` 终态时回写对应 allocations；若后续 adapter 提供累计成交量，仍按这里的顺序贪心规则把增量吸收到同一套 boundary progress。
 
 第一阶段固定规则：
 
@@ -666,7 +676,7 @@ curve_maker_grace_ms = 60_000
 - 操作已 `due`
 - 操作仍有 `remaining`
 - 当前只被 `CurveMakerPolicy` 的 maker binding 覆盖
-- 且该 binding 的 `CurveMakerBindingState.due_grace_started_at` 已持续超过 `curve_maker_grace_ms`
+- 且该 binding 的 `BindingPolicyState::CurveMaker { due_grace_started_at }` 已持续超过 `curve_maker_grace_ms`
 
 满足这四条时，`CatchUpPolicy` 才会抢占 `CurveMakerPolicy`。
 
@@ -850,14 +860,17 @@ diff 规则：
 
 ### 11.3 live order 认领
 
-恢复时优先按 binding 快照认领 live order。
+恢复时优先按 binding 快照认领 live order：
 
-若无快照 backing，可做受限结构匹配：
+- `client_order_id` 命中已知 binding
+- 或 `order_id` 命中已知 binding
+
+若无 id backing，可做受限结构匹配：
 
 - `side`
 - `price ± tick tolerance`
 - `qty ± step tolerance`
-- 且只能在当前某个期望 binding 候选上唯一匹配
+- 且只能在当前 active binding 候选上唯一匹配
 
 否则进入：
 

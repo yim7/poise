@@ -630,6 +630,46 @@ mod tests {
         assert!(value.get("ledger_state").is_some());
         assert!(value.get("bindings").is_some());
     }
+
+    #[test]
+    fn runtime_live_view_derives_gap_and_mode_from_boundary_ledger_without_persisting_them() {
+        let runtime = TrackRuntime::new(
+            "test".into(),
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            TrackConfig {
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 100.0,
+                min_rebalance_units: 1.0,
+                shape_family: poise_core::strategy::ShapeFamily::Linear,
+                out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
+            },
+            CapacityBudget {
+                max_notional: 10_000.0,
+                daily_loss_limit: 1_000.0,
+                total_loss_limit: 5_000.0,
+            },
+            ExchangeRules {
+                price_tick: 0.1,
+                quantity_step: 0.01,
+                min_qty: 0.0,
+                min_notional: 0.0,
+                maker_fee_rate: 0.0,
+                taker_fee_rate: 0.0,
+            },
+            Utc::now(),
+        );
+
+        let snapshot_json = serde_json::to_value(runtime.snapshot()).unwrap();
+        let executor_state = snapshot_json.get("executor_state").unwrap();
+        assert!(executor_state.get("gap").is_none());
+        assert!(executor_state.get("mode").is_none());
+        assert!(executor_state.get("core_resting").is_none());
+        assert!(executor_state.get("ledger_state").is_some());
+        assert!(executor_state.get("bindings").is_some());
+    }
 }
 
 fn validate_snapshot_invariants(snapshot: &TrackRuntimeSnapshot) -> Result<()> {
