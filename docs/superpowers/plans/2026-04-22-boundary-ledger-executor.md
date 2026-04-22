@@ -325,7 +325,7 @@ Commit:
 - Test: `engine/src/executor/recording.rs`
 - Test: `engine/src/executor/recovery.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住新状态边界和 CatchUp-only 中间态**
+- [x] **Step 1: 先写失败测试，锁住新状态边界和 CatchUp-only 中间态**
 
 新增测试至少覆盖：
 
@@ -350,20 +350,21 @@ fn recording_applies_fill_to_binding_then_updates_boundary_progress() {}
 - `recording.rs` 已改成“先更新 binding，再回写 boundary progress”
 - 旧 `round + slot` 语义已从 executor 内核移除
 
-- [ ] **Step 2: 运行定向测试，确认旧模型失败**
+- [x] **Step 2: 运行定向测试，确认旧模型失败**
 
 Run:
 
 - `cargo test -p poise-engine runtime::tests::snapshot_round_trips_boundary_ledger_state_and_bindings -- --exact --nocapture`
-- `cargo test -p poise-engine executor::tests::catch_up_policy_submits_buy_for_due_up_operation_when_uncovered -- --exact --nocapture`
-- `cargo test -p poise-engine executor::tests::planning_no_longer_depends_on_active_round_or_slots -- --exact --nocapture`
-- `cargo test -p poise-engine recording::tests::recording_applies_fill_to_binding_then_updates_boundary_progress -- --exact --nocapture`
+- `cargo test -p poise-engine executor::planning::tests::catch_up_policy_submits_buy_for_due_up_operation_when_uncovered -- --exact --nocapture`
+- `cargo test -p poise-engine executor::planning::tests::planning_no_longer_depends_on_active_round_or_slots -- --exact --nocapture`
+- `cargo test -p poise-engine executor::recording::tests::recording_applies_fill_to_binding_then_updates_boundary_progress -- --exact --nocapture`
+- `cargo test -p poise-engine executor::recovery::tests::recovery_does_not_fabricate_boundary_progress_from_live_order_alone -- --exact --nocapture`
 
 Expected:
 
 - 当前实现失败，因为 runtime 仍持有 `active_round + slots`，planner 也仍依赖旧模型。
 
-- [ ] **Step 3: 做最小实现，切到新内核**
+- [x] **Step 3: 做最小实现，切到新内核**
 
 要求：
 
@@ -381,15 +382,19 @@ Expected:
 - `round_policy.rs`、`rebalance_trigger.rs`、`slots.rs` 在本 task 内一起删除
 - 如果现有 executor 测试 helper 过度依赖 slot/round，直接重写，不做兼容包装
 
-- [ ] **Step 4: 运行 Task 3 回归**
+- [x] **Step 4: 运行 Task 3 回归**
 
 Run:
 
 - `cargo test -p poise-engine runtime::tests:: -- --nocapture`
-- `cargo test -p poise-engine executor::tests::catch_up_policy_ -- --nocapture`
-- `cargo test -p poise-engine executor::tests::planning_no_longer_depends_on_active_round_or_slots -- --exact --nocapture`
-- `cargo test -p poise-engine recording::tests:: -- --nocapture`
-- `cargo test -p poise-engine recovery::tests:: -- --nocapture`
+- `cargo test -p poise-engine executor::boundary::tests:: -- --nocapture`
+- `cargo test -p poise-engine executor::ledger::tests:: -- --nocapture`
+- `cargo test -p poise-engine executor::binding::tests:: -- --nocapture`
+- `cargo test -p poise-engine executor::policy::tests:: -- --nocapture`
+- `cargo test -p poise-engine executor::planning::tests:: -- --nocapture`
+- `cargo test -p poise-engine executor::recording::tests:: -- --nocapture`
+- `cargo test -p poise-engine executor::recovery::tests:: -- --nocapture`
+- `cargo test -p poise-engine -- --list`
 
 Expected:
 
@@ -397,7 +402,7 @@ Expected:
 - `CatchUpPolicy` 垂直切片跑通
 - snapshot / restore / recording / recovery 已使用同一套状态语义
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/runtime.rs engine/src/snapshot.rs engine/src/persisted_runtime.rs engine/src/manager.rs engine/src/executor/mod.rs engine/src/executor/planning.rs engine/src/executor/recording.rs engine/src/executor/recovery.rs
@@ -407,7 +412,7 @@ git commit -m "refactor(engine): rebuild executor core on boundary ledger"
 
 Commit:
 
-- `待执行时回写 SHA`
+- `887b8f4`
 
 ## Task 4: 接 manager reconcile 路径，但只补 focused manager 测试
 
