@@ -424,7 +424,7 @@ Commit:
 - Modify: `engine/src/executor/mod.rs`
 - Test: `engine/src/manager.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 manager 对新 executor 的最小集成**
+- [x] **Step 1: 先写失败测试，锁住 manager 对新 executor 的最小集成**
 
 新增测试至少覆盖：
 
@@ -445,18 +445,19 @@ fn reconcile_track_projects_no_round_or_slot_state_after_executor_refresh() {}
 - revision 变化时只会重开新账本
 - manager 不再依赖 round/slot 字段
 
-- [ ] **Step 2: 运行定向测试，确认 manager 仍绑定旧模型**
+- [x] **Step 2: 运行定向测试，确认 manager 仍绑定旧模型**
 
 Run:
 
 - `cargo test -p poise-engine manager::tests::reconcile_track_submits_catch_up_action_from_due_boundary_operation -- --exact --nocapture`
 - `cargo test -p poise-engine manager::tests::reconcile_track_reopens_boundary_ledger_when_profile_revision_changes -- --exact --nocapture`
+- `cargo test -p poise-engine manager::tests::reconcile_track_projects_no_round_or_slot_state_after_executor_refresh -- --exact --nocapture`
 
 Expected:
 
 - 当前实现失败，因为 manager 仍按旧 executor 调用路径组织输入和测试夹具。
 
-- [ ] **Step 3: 做最小实现，接通 manager 到新 planner**
+- [x] **Step 3: 做最小实现，接通 manager 到新 planner**
 
 要求：
 
@@ -468,7 +469,7 @@ Expected:
 - `manager.rs` 不再解释 `round / slot`
 - 本 task 只补 focused reconcile 测试，不要求把 4800 行 manager 测试全部迁回；与新 executor 无关的其余测试留到最终清理 task 再处理
 
-- [ ] **Step 4: 运行 Task 4 回归**
+- [x] **Step 4: 运行 Task 4 回归**
 
 Run:
 
@@ -479,7 +480,7 @@ Expected:
 - manager 的核心 reconcile 路径已切到新 executor
 - focused manager 测试通过
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/manager.rs engine/src/executor/planning.rs engine/src/runtime.rs engine/src/executor/mod.rs
@@ -488,7 +489,7 @@ git commit -m "refactor(engine): wire manager to boundary ledger executor"
 
 Commit:
 
-- `待执行时回写 SHA`
+- `aa0268a`
 
 ## Task 5: 加入 CurveMakerPolicy 与串行 policy 仲裁
 
