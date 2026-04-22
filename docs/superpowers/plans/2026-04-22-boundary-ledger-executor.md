@@ -503,7 +503,7 @@ Commit:
 - Test: `engine/src/executor/mod.rs`
 - Test: `engine/src/executor/recording.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 maker policy 与 CatchUp 抢占关系**
+- [x] **Step 1: 先写失败测试，锁住 maker policy 与 CatchUp 抢占关系**
 
 新增测试至少覆盖：
 
@@ -528,19 +528,20 @@ fn binding_diff_replaces_maker_binding_with_catch_up_binding_on_preemption() {}
 - `due_grace_started_at` 只存在于 `BindingPolicyState::CurveMaker`
 - diff 看到更高优 proposal 时会取消 maker binding 并提交 catch-up binding
 
-- [ ] **Step 2: 运行定向测试，确认当前中间态失败**
+- [x] **Step 2: 运行定向测试，确认当前中间态失败**
 
 Run:
 
 - `cargo test -p poise-engine executor::tests::curve_maker_policy_emits_future_operations_near_spot -- --exact --nocapture`
 - `cargo test -p poise-engine executor::tests::catch_up_policy_preempts_curve_maker_after_due_grace_expires -- --exact --nocapture`
+- `cargo test -p poise-engine executor::tests::curve_maker_policy_state_is_private_to_binding -- --exact --nocapture`
 - `cargo test -p poise-engine executor::tests::binding_diff_replaces_maker_binding_with_catch_up_binding_on_preemption -- --exact --nocapture`
 
 Expected:
 
 - 当前实现失败，因为前面只有 `CatchUpPolicy`，也还没有 maker 私有状态和串行仲裁。
 
-- [ ] **Step 3: 做最小实现，补齐 maker policy 与 arbitration**
+- [x] **Step 3: 做最小实现，补齐 maker policy 与 arbitration**
 
 要求：
 
@@ -551,13 +552,18 @@ Expected:
 - `BindingProposal` 的匹配键固定为 `(policy, ordered_operation_keys)`
 - `CurveMakerBindingState` 的创建、清空和抢占只在 owner policy 代码里维护
 
-- [ ] **Step 4: 运行 Task 5 回归**
+- [x] **Step 4: 运行 Task 5 回归**
 
 Run:
 
 - `cargo test -p poise-engine executor::tests::curve_maker_policy_ -- --nocapture`
 - `cargo test -p poise-engine executor::tests::catch_up_policy_preempts_ -- --nocapture`
-- `cargo test -p poise-engine recording::tests::binding_diff_replaces_maker_binding_with_catch_up_binding_on_preemption -- --exact --nocapture`
+- `cargo test -p poise-engine executor::tests::binding_diff_replaces_maker_binding_with_catch_up_binding_on_preemption -- --exact --nocapture`
+- `cargo test -p poise-engine executor::policy::tests:: -- --nocapture`
+- `cargo test -p poise-engine executor::planning::tests:: -- --nocapture`
+- `cargo test -p poise-engine executor::recording::tests:: -- --nocapture`
+- `cargo test -p poise-engine manager::tests::reconcile_track_ -- --nocapture`
+- `cargo test -p poise-engine -- --list`
 
 Expected:
 
@@ -565,7 +571,7 @@ Expected:
 - maker 升级时机只留在 policy 私有状态
 - 同一 `BoundaryOperation` 仍然最多只有一个 active binding
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/executor/policy.rs engine/src/executor/planning.rs engine/src/executor/binding.rs engine/src/executor/recording.rs engine/src/executor/mod.rs
@@ -574,7 +580,7 @@ git commit -m "feat(engine): add curve maker arbitration on boundary ledger"
 
 Commit:
 
-- `待执行时回写 SHA`
+- `df41e75`
 
 ## Task 6: 收紧 recovery、补 broader manager tests，并完成文档回写
 
