@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod boundary;
 mod planning;
 mod rebalance_trigger;
 mod recording;
