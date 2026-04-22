@@ -600,7 +600,7 @@ Commit:
 - Test: `engine/src/runtime.rs`
 - Test: `engine/src/executor/mod.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住恢复与最终派生诊断**
+- [x] **Step 1: 先写失败测试，锁住恢复与最终派生诊断**
 
 新增测试至少覆盖：
 
@@ -629,19 +629,21 @@ fn runtime_live_view_derives_gap_and_mode_from_boundary_ledger_without_persistin
 - 恢复路径不会凭 live order 推导已完成进度
 - `gap / mode / core_resting` 只在 planner 或 read path 派生
 
-- [ ] **Step 2: 运行定向测试，确认尾部规则仍需收紧**
+- [x] **Step 2: 运行定向测试，确认尾部规则仍需收紧**
 
 Run:
 
-- `cargo test -p poise-engine recovery::tests::recovery_matches_live_order_to_single_expected_binding_candidate -- --exact --nocapture`
-- `cargo test -p poise-engine recovery::tests::recovery_does_not_fabricate_boundary_progress_from_live_order_alone -- --exact --nocapture`
+- `cargo test -p poise-engine executor::recovery::tests::recovery_matches_live_order_to_single_expected_binding_candidate -- --exact --nocapture`
+- `cargo test -p poise-engine executor::recovery::tests::recovery_marks_unknown_live_order_when_no_binding_candidate_matches -- --exact --nocapture`
+- `cargo test -p poise-engine executor::recovery::tests::recovery_marks_ambiguous_live_order_when_multiple_binding_candidates_match -- --exact --nocapture`
+- `cargo test -p poise-engine executor::recovery::tests::recovery_does_not_fabricate_boundary_progress_from_live_order_alone -- --exact --nocapture`
 - `cargo test -p poise-engine runtime::tests::runtime_live_view_derives_gap_and_mode_from_boundary_ledger_without_persisting_them -- --exact --nocapture`
 
 Expected:
 
 - 若恢复匹配过宽、诊断仍被持久化，测试会失败。
 
-- [ ] **Step 3: 做最小实现，完成恢复和收尾**
+- [x] **Step 3: 做最小实现，完成恢复和收尾**
 
 要求：
 
@@ -657,7 +659,7 @@ Expected:
 - 若实际落地的类型名、函数名、文件边界与 spec 有细小修正，必须在本 task 回写 spec
 - 执行过程中同步勾选本 plan 的步骤并回写 commit SHA
 
-- [ ] **Step 4: 运行最终 focused 回归**
+- [x] **Step 4: 运行最终 focused 回归**
 
 Run:
 
@@ -666,10 +668,11 @@ Run:
 - `cargo test -p poise-engine executor::binding::tests:: -- --nocapture`
 - `cargo test -p poise-engine executor::policy::tests:: -- --nocapture`
 - `cargo test -p poise-engine executor::tests:: -- --nocapture`
-- `cargo test -p poise-engine recovery::tests:: -- --nocapture`
-- `cargo test -p poise-engine recording::tests:: -- --nocapture`
+- `cargo test -p poise-engine executor::recovery::tests:: -- --nocapture`
+- `cargo test -p poise-engine executor::recording::tests:: -- --nocapture`
 - `cargo test -p poise-engine runtime::tests:: -- --nocapture`
 - `cargo test -p poise-engine manager::tests:: -- --nocapture`
+- `cargo test -p poise-engine -- --list`
 
 Expected:
 
@@ -677,7 +680,7 @@ Expected:
 - 没有 round/slot 旧状态残留
 - spec 和 plan 已与最终实现边界一致
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add engine/src/executor/recovery.rs engine/src/executor/recording.rs engine/src/executor/binding.rs engine/src/runtime.rs engine/src/manager.rs engine/src/executor/planning.rs engine/src/executor/mod.rs docs/superpowers/specs/2026-04-22-curve-boundary-ledger-execution-design.md docs/superpowers/plans/2026-04-22-boundary-ledger-executor.md
@@ -686,7 +689,7 @@ git commit -m "refactor(engine): finalize boundary ledger executor integration"
 
 Commit:
 
-- `待执行时回写 SHA`
+- `0a4455a`
 
 ## Coverage Check
 
