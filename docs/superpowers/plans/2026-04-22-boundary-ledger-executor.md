@@ -312,6 +312,7 @@ Commit:
 - Modify: `engine/src/runtime.rs`
 - Modify: `engine/src/snapshot.rs`
 - Modify: `engine/src/persisted_runtime.rs`
+- Modify: `engine/src/manager.rs`
 - Modify: `engine/src/executor/mod.rs`
 - Modify: `engine/src/executor/planning.rs`
 - Modify: `engine/src/executor/recording.rs`
@@ -376,6 +377,7 @@ Expected:
 - `planning.rs` 继续产出 `ExecutionAction`，并继续使用 `engine/src/execution_plan.rs` 的 helper
 - `recording.rs` 改成“binding -> boundary progress”
 - `recovery.rs` 改成消费 `BoundaryLedgerState + bindings` 的最小版本
+- 为保证 crate 在 Task 3 结束时可编译，`manager.rs` 中直接依赖旧 executor API 的调用点允许做最小接线调整；本 task 不要求补齐 manager 行为测试
 - `round_policy.rs`、`rebalance_trigger.rs`、`slots.rs` 在本 task 内一起删除
 - 如果现有 executor 测试 helper 过度依赖 slot/round，直接重写，不做兼容包装
 
@@ -398,7 +400,7 @@ Expected:
 - [ ] **Step 5: Commit**
 
 ```bash
-git add engine/src/runtime.rs engine/src/snapshot.rs engine/src/persisted_runtime.rs engine/src/executor/mod.rs engine/src/executor/planning.rs engine/src/executor/recording.rs engine/src/executor/recovery.rs
+git add engine/src/runtime.rs engine/src/snapshot.rs engine/src/persisted_runtime.rs engine/src/manager.rs engine/src/executor/mod.rs engine/src/executor/planning.rs engine/src/executor/recording.rs engine/src/executor/recovery.rs
 git rm engine/src/executor/round_policy.rs engine/src/executor/rebalance_trigger.rs engine/src/executor/slots.rs
 git commit -m "refactor(engine): rebuild executor core on boundary ledger"
 ```
