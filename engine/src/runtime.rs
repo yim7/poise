@@ -157,6 +157,21 @@ pub struct LiveQuoteState {
     pub last_tick_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CurrentMarketData {
+    pub strategy_price: f64,
+    pub mark_price: Option<f64>,
+    pub execution_quote: ExecutionQuote,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FreshSessionExternalInputs {
+    pub current_exposure: Exposure,
+    pub market_data: Option<CurrentMarketData>,
+    pub exchange_rules: ExchangeRules,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StrategyTargetView {
     pub desired_exposure: Option<Exposure>,
@@ -353,6 +368,56 @@ impl TrackRuntime {
         &self.loss_limits
     }
 
+    pub fn exchange_rules(&self) -> &ExchangeRules {
+        &self.exchange_rules
+    }
+
+    pub fn fresh_start(
+        &self,
+        track_state: TrackState,
+        ledger_state: TrackLedgerState,
+        external_inputs: FreshSessionExternalInputs,
+        started_at: DateTime<Utc>,
+    ) -> Self {
+        let FreshSessionExternalInputs {
+            current_exposure,
+            market_data,
+            exchange_rules,
+        } = external_inputs;
+        let mut fresh = Self::with_tick_timeout_secs(
+            self.id.clone(),
+            self.instrument.clone(),
+            self.config.clone(),
+            self.max_notional,
+            self.loss_limits.clone(),
+            exchange_rules,
+            started_at,
+            self.tick_timeout_secs,
+        );
+        fresh.track_state = track_state.clone();
+        fresh.current_exposure = current_exposure.clone();
+        fresh.desired_exposure = track_state.manual_target_override();
+        fresh.executor_state = ExecutorState::empty(started_at)
+            .ensure_revision(&fresh.config, current_exposure);
+        fresh.ledger_state = ledger_state;
+        fresh.execution_gate_state = ExecutionGateState::open();
+        fresh.price_execution_gate = PriceExecutionGate::NoSubmit {
+            reason: PriceExecutionBlockReason::MissingExecutionQuote,
+        };
+
+        if let Some(market_data) = market_data {
+            fresh.strategy_price = Some(market_data.strategy_price);
+            fresh.strategy_price_status = StrategyPriceStatus::Live;
+            fresh.mark_price = market_data.mark_price;
+            fresh.best_bid = Some(market_data.execution_quote.best_bid);
+            fresh.best_ask = Some(market_data.execution_quote.best_ask);
+            fresh.last_tick_at = Some(market_data.observed_at);
+        }
+
+        fresh.price_execution_gate = fresh.quote_health_view().price_execution_gate;
+        fresh
+    }
+
     pub fn snapshot(&self) -> TrackRuntimeSnapshot {
         TrackRuntimeSnapshot {
             track_id: self.id.clone(),
@@ -499,7 +564,7 @@ impl TrackRuntime {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
 
     use super::*;
     use crate::executor::binding::{
@@ -562,29 +627,10 @@ mod tests {
         let runtime = TrackRuntime::new(
             "test".into(),
             Instrument::new(Venue::Binance, "BTCUSDT"),
-            TrackConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 100.0,
-                min_rebalance_units: 1.0,
-                shape_family: poise_core::strategy::ShapeFamily::Linear,
-                out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
-            },
+            test_config(),
             10_000.0,
-            LossLimits {
-                daily_loss_limit: 1_000.0,
-                total_loss_limit: 5_000.0,
-            },
-            ExchangeRules {
-                price_tick: 0.1,
-                quantity_step: 0.01,
-                min_qty: 0.0,
-                min_notional: 0.0,
-                maker_fee_rate: 0.0,
-                taker_fee_rate: 0.0,
-            },
+            test_loss_limits(),
+            test_rules(0.1),
             Utc::now(),
         );
 
@@ -595,6 +641,201 @@ mod tests {
         assert!(executor_state.get("core_resting").is_none());
         assert!(executor_state.get("ledger_state").is_some());
         assert!(executor_state.get("bindings").is_some());
+    }
+
+    #[test]
+    fn fresh_start_discards_local_execution_state_and_reanchors_boundary_ledger() {
+        let mut runtime = test_runtime();
+        runtime.current_exposure = Exposure(7.0);
+        runtime.desired_exposure = Some(Exposure(4.0));
+        runtime.executor_state = dirty_executor_state();
+        runtime.strategy_price = Some(101.0);
+        runtime.strategy_price_status = StrategyPriceStatus::Live;
+        runtime.mark_price = Some(100.5);
+        runtime.best_bid = Some(100.4);
+        runtime.best_ask = Some(100.6);
+        runtime.last_tick_at = Some(Utc.with_ymd_and_hms(2026, 4, 23, 8, 0, 0).unwrap());
+        runtime.market_data_stale_since =
+            Some(Utc.with_ymd_and_hms(2026, 4, 23, 7, 59, 0).unwrap());
+
+        let fresh = runtime.fresh_start(
+            TrackState::WaitingMarketData,
+            TrackLedgerState {
+                ledger_utc_day: Utc.with_ymd_and_hms(2026, 4, 23, 0, 0, 0).unwrap().date_naive(),
+                gross_realized_pnl_cumulative: 55.0,
+                ..TrackLedgerState::default()
+            },
+            FreshSessionExternalInputs {
+                current_exposure: Exposure(2.5),
+                market_data: Some(CurrentMarketData {
+                    strategy_price: 96.0,
+                    mark_price: Some(95.8),
+                    execution_quote: ExecutionQuote {
+                        best_bid: 95.7,
+                        best_ask: 95.9,
+                    },
+                    observed_at: Utc.with_ymd_and_hms(2026, 4, 23, 8, 1, 0).unwrap(),
+                }),
+                exchange_rules: test_rules(0.5),
+            },
+            Utc.with_ymd_and_hms(2026, 4, 23, 8, 2, 0).unwrap(),
+        );
+
+        assert_eq!(fresh.current_exposure, Exposure(2.5));
+        assert_eq!(fresh.exchange_rules.price_tick, 0.5);
+        assert_eq!(fresh.executor_state.bindings, Vec::<LiveOrderBinding>::new());
+        assert_eq!(fresh.executor_state.recent_terminal_orders.len(), 0);
+        assert!(fresh.executor_state.recovery_anomaly.is_none());
+        assert_eq!(
+            fresh.executor_state.ledger_state.profile_revision,
+            profile_revision_for_config(&test_config())
+        );
+        assert_eq!(
+            fresh.executor_state.ledger_state.ledger_anchor_exposure,
+            Exposure(2.5)
+        );
+        assert!(fresh.executor_state.ledger_state.progress.is_empty());
+        assert_eq!(fresh.desired_exposure, None);
+        assert_eq!(fresh.strategy_price, Some(96.0));
+        assert_eq!(fresh.strategy_price_status, StrategyPriceStatus::Live);
+        assert_eq!(fresh.mark_price, Some(95.8));
+        assert_eq!(fresh.best_bid, Some(95.7));
+        assert_eq!(fresh.best_ask, Some(95.9));
+        assert_eq!(
+            fresh.last_tick_at,
+            Some(Utc.with_ymd_and_hms(2026, 4, 23, 8, 1, 0).unwrap())
+        );
+        assert!(fresh.market_data_stale_since.is_none());
+        assert_eq!(fresh.ledger_state.gross_realized_pnl_cumulative, 55.0);
+    }
+
+    #[test]
+    fn fresh_start_without_market_data_keeps_waiting_market_data_and_clears_old_quotes() {
+        let mut runtime = test_runtime();
+        runtime.track_state =
+            TrackState::Running(ControlState::Manual(ManualState::TargetOverride {
+                target: Exposure(3.0),
+            }));
+        runtime.desired_exposure = Some(Exposure(3.0));
+        runtime.strategy_price = Some(101.0);
+        runtime.strategy_price_status = StrategyPriceStatus::Live;
+        runtime.mark_price = Some(100.5);
+        runtime.best_bid = Some(100.4);
+        runtime.best_ask = Some(100.6);
+
+        let fresh = runtime.fresh_start(
+            TrackState::WaitingMarketData,
+            TrackLedgerState::default(),
+            FreshSessionExternalInputs {
+                current_exposure: Exposure(1.0),
+                market_data: None,
+                exchange_rules: test_rules(1.0),
+            },
+            Utc.with_ymd_and_hms(2026, 4, 23, 8, 3, 0).unwrap(),
+        );
+
+        assert_eq!(fresh.status(), TrackStatus::WaitingMarketData);
+        assert_eq!(fresh.desired_exposure, None);
+        assert_eq!(fresh.strategy_price, None);
+        assert_eq!(fresh.mark_price, None);
+        assert_eq!(fresh.best_bid, None);
+        assert_eq!(fresh.best_ask, None);
+        assert_eq!(fresh.strategy_price_status, StrategyPriceStatus::Stale);
+        assert_eq!(fresh.exchange_rules.price_tick, 1.0);
+    }
+
+    fn test_config() -> TrackConfig {
+        TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 100.0,
+            min_rebalance_units: 1.0,
+            shape_family: poise_core::strategy::ShapeFamily::Linear,
+            out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
+        }
+    }
+
+    fn test_loss_limits() -> LossLimits {
+        LossLimits {
+            daily_loss_limit: 1_000.0,
+            total_loss_limit: 5_000.0,
+        }
+    }
+
+    fn test_rules(price_tick: f64) -> ExchangeRules {
+        ExchangeRules {
+            price_tick,
+            quantity_step: 0.01,
+            min_qty: 0.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        }
+    }
+
+    fn test_runtime() -> TrackRuntime {
+        TrackRuntime::new(
+            "test".into(),
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            test_config(),
+            10_000.0,
+            test_loss_limits(),
+            test_rules(0.1),
+            Utc::now(),
+        )
+    }
+
+    fn dirty_executor_state() -> ExecutorState {
+        let mut state = ExecutorState::empty(Utc::now()).ensure_revision(&test_config(), Exposure(7.0));
+        let boundary_id = BoundaryId {
+            profile_revision: state.ledger_state.profile_revision.clone(),
+            lower_exposure_bp: 0,
+            upper_exposure_bp: 10_000,
+        };
+        let operation = BoundaryOperation {
+            boundary_id,
+            direction: BoundaryDirection::Up,
+        };
+        state
+            .ledger_state
+            .progress
+            .push(crate::executor::ledger::BoundaryProgressEntry {
+                boundary_id: operation.boundary_id.clone(),
+                progress: crate::executor::ledger::BoundaryProgress {
+                    cumulative_up: 1.0,
+                    cumulative_down: 0.0,
+                },
+            });
+        state.bindings.push(LiveOrderBinding {
+            binding_id: "binding-1".to_string(),
+            proposal_key: BindingProposalKey {
+                policy: PolicyKind::CatchUp,
+                operations: vec![operation],
+            },
+            allocations: Vec::new(),
+            absorbed_exposure_qty: 0.0,
+            request: OrderRequest {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                side: poise_core::types::Side::Buy,
+                price: 100.0,
+                quantity: 1.0,
+                client_order_id: "client-1".to_string(),
+                reduce_only: false,
+            },
+            desired_exposure: Exposure(1.0),
+            submit_purpose: SubmitPurpose::AutoReconcile,
+            order_id: None,
+            status: BindingStatus::Working,
+            policy_state: BindingPolicyState::Stateless,
+        });
+        state.recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
+        state.recent_terminal_orders.push(RecentTerminalOrder {
+            client_order_id: "old-client".into(),
+            order_id: "old-order".into(),
+        });
+        state
     }
 }
 

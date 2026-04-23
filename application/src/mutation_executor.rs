@@ -18,7 +18,9 @@ use poise_engine::observation::{
     MarketObservation, OrderObservation, PositionObservation, TrackObservation,
 };
 use poise_engine::ports::{ExchangeOrder, OrderReceipt, OrderRequest};
-use poise_engine::runtime::{QuoteHealthView, StrategyTargetView, TrackLiveView};
+use poise_engine::runtime::{
+    FreshSessionExternalInputs, QuoteHealthView, StrategyTargetView, TrackLiveView,
+};
 use poise_engine::track::{Instrument, TrackId};
 use poise_engine::transition::{TrackEffect, TrackTransition};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
@@ -292,6 +294,26 @@ impl MutationExecutor {
         snapshot.ledger_state = state.ledger_state;
         snapshot.desired_exposure = snapshot.runtime_state.manual_target_override();
         manager.restore_track_state(&snapshot)?;
+        Ok(true)
+    }
+
+    pub(crate) async fn fresh_start_track_runtime(
+        &self,
+        track_id: &TrackId,
+        state: TrackPersistentState,
+        external_inputs: FreshSessionExternalInputs,
+    ) -> Result<bool> {
+        let _mutation_guard = self.lock_track_mutation(track_id.as_str()).await;
+        let mut manager = self.manager.write().await;
+        if manager.get_track(track_id.as_str()).is_none() {
+            return Ok(false);
+        }
+        manager.fresh_start_track(
+            track_id,
+            state.control_state.to_startup_runtime_state(),
+            state.ledger_state,
+            external_inputs,
+        )?;
         Ok(true)
     }
 

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::NaiveDate;
+use poise_engine::runtime::FreshSessionExternalInputs;
 use poise_engine::track::TrackId;
 
 use crate::mutation_executor::MutationExecutor;
@@ -66,6 +67,23 @@ impl TrackRuntimeLifecycleService {
         self.executor.apply_track_persistent_state(track_id, state).await
     }
 
+    pub async fn fresh_start_track_runtime(
+        &self,
+        track_id: &TrackId,
+        current_utc_day: NaiveDate,
+        external_inputs: FreshSessionExternalInputs,
+    ) -> Result<bool> {
+        let Some(state) = self
+            .load_track_persistent_state(track_id, current_utc_day)
+            .await?
+        else {
+            return Ok(false);
+        };
+        self.executor
+            .fresh_start_track_runtime(track_id, state, external_inputs)
+            .await
+    }
+
     pub async fn load_track_recovery_summary(
         &self,
         track_id: &TrackId,
@@ -111,7 +129,10 @@ mod tests {
     use poise_engine::ledger::TrackLedgerState;
     use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::ExecutionQuote;
-    use poise_engine::runtime::{AutoState, ControlState, ExecutorState, RiskState, TrackState};
+    use poise_engine::runtime::{
+        AutoState, ControlState, CurrentMarketData, ExecutorState, FreshSessionExternalInputs,
+        RiskState, TrackState,
+    };
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
 
@@ -240,6 +261,84 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.status(), poise_engine::runtime::TrackStatus::Paused);
         assert_eq!(snapshot.ledger_state.gross_realized_pnl_cumulative, 42.0);
+    }
+
+    #[tokio::test]
+    async fn fresh_start_track_runtime_rebuilds_manager_from_persistent_state_and_external_inputs() {
+        let repository = Arc::new(MemoryRepository::default());
+        TrackMutationStore::save_track_persistent_state(
+            repository.as_ref(),
+            &TrackPersistentState {
+                track_id: TrackId::new("btc-core"),
+                control_state: TrackControlState::Paused {
+                    resume_mode: PersistedControlMode::Automatic,
+                },
+                ledger_state: TrackLedgerState {
+                    gross_realized_pnl_cumulative: 42.0,
+                    ..TrackLedgerState::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let (services, _) = track_write_services(seeded_manager(), repository.clone());
+        {
+            let manager_handle = services.runtime_lifecycle.manager();
+            let mut manager = manager_handle.write().await;
+            let mut snapshot = manager.snapshot("btc-core").unwrap();
+            snapshot.current_exposure = Exposure(9.0);
+            snapshot.desired_exposure = Some(Exposure(4.0));
+            snapshot.executor_state.recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+
+        assert!(
+            services
+                .runtime_lifecycle
+                .fresh_start_track_runtime(
+                    &TrackId::new("btc-core"),
+                    Utc::now().date_naive(),
+                    FreshSessionExternalInputs {
+                        current_exposure: Exposure(1.5),
+                        market_data: Some(CurrentMarketData {
+                            strategy_price: 96.0,
+                            mark_price: Some(95.9),
+                            execution_quote: ExecutionQuote {
+                                best_bid: 95.8,
+                                best_ask: 96.2,
+                            },
+                            observed_at: Utc.with_ymd_and_hms(2026, 4, 23, 9, 1, 0).unwrap(),
+                        }),
+                        exchange_rules: poise_core::types::ExchangeRules {
+                            price_tick: 0.5,
+                            quantity_step: 0.001,
+                            min_qty: 0.001,
+                            min_notional: 5.0,
+                            maker_fee_rate: 0.0,
+                            taker_fee_rate: 0.0,
+                        },
+                    },
+                )
+                .await
+                .unwrap()
+        );
+
+        let manager = services.runtime_lifecycle.manager();
+        let manager = manager.read().await;
+        let snapshot = manager.snapshot("btc-core").unwrap();
+        assert_eq!(snapshot.status(), poise_engine::runtime::TrackStatus::Paused);
+        assert_eq!(snapshot.current_exposure, Exposure(1.5));
+        assert_eq!(snapshot.desired_exposure, None);
+        assert!(snapshot.executor_state.bindings.is_empty());
+        assert!(snapshot.executor_state.recovery_anomaly.is_none());
+        assert_eq!(snapshot.ledger_state.gross_realized_pnl_cumulative, 42.0);
+        let live_view = manager.track_live_view(&TrackId::new("btc-core")).unwrap();
+        assert_eq!(live_view.strategy_price, Some(96.0));
+        assert_eq!(live_view.best_bid, Some(95.8));
+        assert_eq!(live_view.best_ask, Some(96.2));
+        let track = manager.get_track("btc-core").unwrap();
+        assert_eq!(track.exchange_rules().price_tick, 0.5);
     }
 
     #[tokio::test]

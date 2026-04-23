@@ -19,8 +19,9 @@ use crate::ports::{ClockPort, ExchangeOrder, ExecutionQuote, OrderReceipt, Order
 use crate::price_gate::{SubmitPurpose, evaluate_price_execution_gate};
 use crate::reconciler;
 use crate::runtime::{
-    AutoState, ControlState, ExecutorState, ManualState, QuoteHealthView, StrategyPriceStatus,
-    StrategyTargetView, TerminationCause, TrackLiveView, TrackRuntime, TrackState,
+    AutoState, ControlState, ExecutorState, FreshSessionExternalInputs, ManualState,
+    QuoteHealthView, StrategyPriceStatus, StrategyTargetView, TerminationCause, TrackLiveView,
+    TrackRuntime, TrackState,
 };
 use crate::snapshot::TrackRuntimeSnapshot;
 use crate::track::{Instrument, TrackId};
@@ -389,6 +390,24 @@ impl TrackManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         track.executor_state = track.executor_state.reset_for_activation(activated_at);
+        Ok(())
+    }
+
+    pub fn fresh_start_track(
+        &mut self,
+        id: &TrackId,
+        track_state: TrackState,
+        ledger_state: crate::ledger::TrackLedgerState,
+        external_inputs: FreshSessionExternalInputs,
+    ) -> Result<()> {
+        let started_at = self.clock.now();
+        let track = self
+            .tracks
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
+            .clone();
+        let fresh = track.fresh_start(track_state, ledger_state, external_inputs, started_at);
+        self.tracks.insert(id.clone(), fresh);
         Ok(())
     }
 
@@ -1208,8 +1227,11 @@ mod tests {
     use poise_core::types::{ExchangeRules, Side};
 
     use crate::execution_plan::ExecutionAction;
+    use crate::executor::binding::LiveOrderBinding;
     use crate::executor::{PolicyContext, policy::PolicyKind};
+    use crate::ledger::TrackLedgerState;
     use crate::ports::ExecutionQuote;
+    use crate::runtime::{CurrentMarketData, TrackStatus};
     use crate::track::Venue;
 
     #[derive(Debug)]
@@ -1397,5 +1419,82 @@ mod tests {
                 PolicyContext::Flatten
             );
         }
+    }
+
+    #[test]
+    fn fresh_start_track_replaces_existing_runtime_with_new_session_state() {
+        let (mut manager, id) = manager();
+        {
+            let track = manager.tracks.get_mut(&id).unwrap();
+            track.current_exposure = Exposure(9.0);
+            track.desired_exposure = Some(Exposure(4.0));
+            track.executor_state.bindings.push(LiveOrderBinding {
+                binding_id: "binding-1".into(),
+                proposal_key: crate::executor::binding::BindingProposalKey {
+                    policy: PolicyKind::CatchUp,
+                    operations: Vec::new(),
+                },
+                allocations: Vec::new(),
+                absorbed_exposure_qty: 0.0,
+                request: crate::ports::OrderRequest {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    side: Side::Buy,
+                    price: 100.0,
+                    quantity: 1.0,
+                    client_order_id: "client-1".into(),
+                    reduce_only: false,
+                },
+                desired_exposure: Exposure(1.0),
+                submit_purpose: crate::price_gate::SubmitPurpose::AutoReconcile,
+                order_id: None,
+                status: crate::executor::binding::BindingStatus::Working,
+                policy_state: crate::executor::binding::BindingPolicyState::Stateless,
+            });
+            track.executor_state.recovery_anomaly = Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder);
+            track.strategy_price = Some(100.0);
+            track.strategy_price_status = StrategyPriceStatus::Live;
+            track.best_bid = Some(99.9);
+            track.best_ask = Some(100.1);
+        }
+
+        manager
+            .fresh_start_track(
+                &id,
+                TrackState::Paused {
+                    suspended: ControlState::Automatic(AutoState::FollowingBand),
+                },
+                TrackLedgerState {
+                    gross_realized_pnl_cumulative: 13.0,
+                    ..TrackLedgerState::default()
+                },
+                FreshSessionExternalInputs {
+                    current_exposure: Exposure(1.5),
+                    market_data: Some(CurrentMarketData {
+                        strategy_price: 96.0,
+                        mark_price: Some(95.9),
+                        execution_quote: ExecutionQuote {
+                            best_bid: 95.8,
+                            best_ask: 96.2,
+                        },
+                        observed_at: Utc.with_ymd_and_hms(2026, 4, 22, 9, 1, 0).unwrap(),
+                    }),
+                    exchange_rules: ExchangeRules {
+                        price_tick: 0.5,
+                        ..rules()
+                    },
+                },
+            )
+            .unwrap();
+
+        let track = manager.get_track(id.as_str()).unwrap();
+        assert_eq!(track.status(), TrackStatus::Paused);
+        assert_eq!(track.current_exposure, Exposure(1.5));
+        assert_eq!(track.desired_exposure, None);
+        assert!(track.executor_state.bindings.is_empty());
+        assert!(track.executor_state.recovery_anomaly.is_none());
+        assert_eq!(track.ledger_state.gross_realized_pnl_cumulative, 13.0);
+        assert_eq!(track.strategy_price, Some(96.0));
+        assert_eq!(track.best_bid, Some(95.8));
+        assert_eq!(track.best_ask, Some(96.2));
     }
 }
