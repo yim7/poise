@@ -239,11 +239,13 @@ Expected:
 
 - Modify: `engine/src/runtime.rs`
 - Modify: `engine/src/manager.rs`
+- Modify: `application/src/mutation_executor.rs`
 - Modify: `application/src/runtime_lifecycle_service.rs`
 - Test: `engine/src/runtime.rs`
 - Test: `engine/src/manager.rs`
+- Test: `application/src/runtime_lifecycle_service.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 fresh-session 初始状态**
+- [x] **Step 1: 先写失败测试，锁住 fresh-session 初始状态**
 
 覆盖点：
 
@@ -254,18 +256,19 @@ Expected:
 - `TrackRuntime::fresh_start(...)` 必须显式接收 `FreshSessionExternalInputs`
 - `ExchangeRules` 只能来自 `FreshSessionExternalInputs`，不能从旧 runtime 或旧 snapshot 读取
 
-- [ ] **Step 2: 运行定向测试，确认当前 reset 语义失败**
+- [x] **Step 2: 运行定向测试，确认当前 reset 语义失败**
 
 Run:
 
 - `cargo test -p poise-engine runtime::tests:: -- --nocapture`
 - `cargo test -p poise-engine manager::tests:: -- --nocapture`
+- `cargo test -p poise-application runtime_lifecycle_service::tests::fresh_start_track_runtime_rebuilds_manager_from_persistent_state_and_external_inputs -- --nocapture`
 
 Expected:
 
 - 当前实现仍是“在旧 runtime 上 reset 一部分字段”，新测试失败。
 
-- [ ] **Step 3: 做最小实现，建立 `TrackRuntime::fresh_start(...)`**
+- [x] **Step 3: 做最小实现，建立 `TrackRuntime::fresh_start(...)`**
 
 要求：
 
@@ -274,17 +277,20 @@ Expected:
 - 不新增 factory / bootstrapper 类型，也不新增 `TrackSessionRuntime` 包装类型；startup 和 manager 只能调用 `TrackRuntime::fresh_start(...)`
 - 旧 runtime snapshot 不再作为 startup 执行语义恢复输入
 - manager 不再负责猜测需要保留哪些旧 session 字段
+- application lifecycle 层通过显式 fresh-start 入口把持久 `TrackControlState / TrackLedgerState` 与 `FreshSessionExternalInputs` 连接到 manager，不再通过 snapshot restore 拼装新 session
 
-- [ ] **Step 4: 运行 Task 2 回归**
+- [x] **Step 4: 运行 Task 2 回归**
 
 Run:
 
 - `cargo test -p poise-engine runtime::tests:: -- --nocapture`
 - `cargo test -p poise-engine manager::tests:: -- --nocapture`
+- `cargo test -p poise-application runtime_lifecycle_service::tests:: -- --nocapture`
 
 Expected:
 
 - fresh-session 的初始 runtime 由 `TrackRuntime::fresh_start(...)` 根据定义、持久状态和外部真值构造。
+- Task 2 implementation commit: `f4b645f`
 
 ## Task 3: 重写 startup 三阶段，并同时让旧会话 work 全部失效
 
