@@ -1614,6 +1614,13 @@ total_loss_limit = 600.0
             Ok(Vec::new())
         }
 
+        async fn list_session_reset_effects_for_track(
+            &self,
+            _track_id: &TrackId,
+        ) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(Vec::new())
+        }
+
         async fn list_pending_submit_effects_for_track(
             &self,
             _track_id: &TrackId,

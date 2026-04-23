@@ -3,6 +3,7 @@ use std::future::Future;
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
+use poise_engine::runtime::FreshSessionExternalInputs;
 use poise_engine::ports::{AccountCapacitySnapshot, UserDataEvent};
 use poise_engine::track::Instrument;
 use tokio::sync::mpsc;
@@ -14,11 +15,30 @@ use super::{
 };
 
 struct TrackStartupSeed {
-    track_id: String,
-    position: poise_engine::observation::PositionObservation,
-    open_orders: Vec<poise_engine::observation::OrderObservation>,
-    account_capacity_snapshot: AccountCapacitySnapshot,
+    definition: RuntimeStartupDefinition,
     cleanup_filter: CleanupReplayFilter,
+}
+
+impl TrackStartupSeed {
+    fn track_id(&self) -> &str {
+        self.definition.track_id().as_str()
+    }
+
+    fn instrument(&self) -> &Instrument {
+        self.definition.instrument()
+    }
+
+    fn required_additional_notional(&self, position_qty: f64) -> f64 {
+        self.definition.required_additional_notional(position_qty)
+    }
+
+    fn exposure_from_position_qty(&self, position_qty: f64) -> poise_core::types::Exposure {
+        self.definition.exposure_from_position_qty(position_qty)
+    }
+
+    fn startup_capacity_mode(&self) -> &RuntimeStartupCapacityMode {
+        self.definition.startup_capacity_mode()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -46,20 +66,155 @@ impl CleanupReplayFilter {
     }
 }
 
+#[derive(Debug, Default)]
+struct CleanupTracker {
+    filters: HashMap<String, CleanupReplayFilter>,
+    saw_cleanup_event: bool,
+}
+
+impl CleanupTracker {
+    fn from_track_seeds(track_seeds: &[TrackStartupSeed]) -> Self {
+        Self {
+            filters: track_seeds
+                .iter()
+                .map(|seed| (seed.track_id().to_string(), seed.cleanup_filter.clone()))
+                .collect(),
+            saw_cleanup_event: false,
+        }
+    }
+
+    fn begin_round(&mut self) {
+        self.saw_cleanup_event = false;
+    }
+
+    fn should_ignore(&mut self, track_id: &str, event: &UserDataEvent) -> bool {
+        let Some(filter) = self.filters.get(track_id) else {
+            return false;
+        };
+        let is_cleanup_event = match &event.payload {
+            poise_engine::ports::UserDataPayload::OrderUpdate(order) => filter.matches_order(order),
+            _ => false,
+        };
+        if is_cleanup_event {
+            self.saw_cleanup_event = true;
+        }
+        is_cleanup_event
+    }
+
+    fn quiesced(&self) -> bool {
+        !self.saw_cleanup_event
+    }
+}
+
+struct StartupReplayEvent {
+    track_id: String,
+    event: UserDataEvent,
+}
+
 pub(super) async fn complete_startup(
     runtime: &ServerRuntime,
     receiver: &mut mpsc::Receiver<UserDataEvent>,
     startup_cutoff: DateTime<Utc>,
 ) -> Result<DateTime<Utc>> {
-    let mut account_capacity_snapshots: HashMap<Instrument, AccountCapacitySnapshot> =
-        HashMap::new();
     let mut track_seeds = Vec::new();
 
     for track in &runtime.startup_definitions {
-        let instrument = track.instrument().clone();
-        let seed = prepare_track_startup_seed(runtime, track).await?;
-        account_capacity_snapshots.insert(instrument, seed.account_capacity_snapshot.clone());
+        let seed = prepare_track_startup_seed(runtime, track.clone()).await?;
         track_seeds.push(seed);
+    }
+
+    for seed in &track_seeds {
+        runtime
+            .state
+            .reconcile
+            .runtime_lifecycle_service
+            .prepare_fresh_session_for_activation(seed.track_id())
+            .await?;
+    }
+
+    rebuild_fresh_sessions(runtime, &track_seeds).await?;
+
+    let mut cleanup_tracker = CleanupTracker::from_track_seeds(&track_seeds);
+    loop {
+        let steady_state_cutoff =
+            retry_startup_step("get_server_time", || runtime.metadata.get_server_time()).await?;
+        cleanup_tracker.begin_round();
+        let replay_events =
+            collect_startup_replay_events(runtime, receiver, startup_cutoff, &mut cleanup_tracker)
+                .await?;
+        if cleanup_tracker.quiesced() {
+            apply_startup_replay_events(runtime, replay_events).await?;
+            return Ok(steady_state_cutoff);
+        }
+        rebuild_fresh_sessions(runtime, &track_seeds).await?;
+        apply_startup_replay_events(runtime, replay_events).await?;
+    }
+}
+
+async fn prepare_track_startup_seed(
+    runtime: &ServerRuntime,
+    track: RuntimeStartupDefinition,
+) -> Result<TrackStartupSeed> {
+    let instrument = track.instrument().clone();
+    let cleanup_filter = clear_inherited_open_orders(runtime, &instrument).await?;
+    Ok(TrackStartupSeed {
+        definition: track,
+        cleanup_filter,
+    })
+}
+
+async fn rebuild_fresh_sessions(runtime: &ServerRuntime, track_seeds: &[TrackStartupSeed]) -> Result<()> {
+    let mut account_capacity_snapshots: HashMap<Instrument, AccountCapacitySnapshot> =
+        HashMap::new();
+    let current_utc_day = runtime.clock.now().date_naive();
+
+    for seed in track_seeds {
+        let instrument = seed.instrument().clone();
+        let position = retry_startup_step("get_position", || {
+            runtime.execution.get_position(&instrument)
+        })
+        .await?;
+        let account_capacity_snapshot = probe_startup_account_capacity(runtime, seed).await?;
+        let required_additional_notional = seed.required_additional_notional(position.qty);
+        if required_additional_notional > account_capacity_snapshot.max_increase_notional {
+            return Err(anyhow!(
+                "insufficient account margin for configured max_notional on track `{}`: required {}, available {}",
+                seed.track_id(),
+                required_additional_notional,
+                account_capacity_snapshot.max_increase_notional
+            ));
+        }
+        let exchange_info = retry_startup_step("get_exchange_info", || {
+            runtime.metadata.get_exchange_info(&instrument)
+        })
+        .await?;
+        let applied = runtime
+            .state
+            .reconcile
+            .runtime_lifecycle_service
+            .fresh_start_track_runtime(
+                &poise_engine::track::TrackId::new(seed.track_id()),
+                current_utc_day,
+                FreshSessionExternalInputs {
+                    current_exposure: seed.exposure_from_position_qty(position.qty),
+                    market_data: None,
+                    exchange_rules: exchange_info.rules,
+                },
+            )
+            .await?;
+        if !applied {
+            return Err(anyhow!(
+                "track `{}` missing during fresh-session startup rebuild",
+                seed.track_id()
+            ));
+        }
+        runtime
+            .state
+            .reconcile
+            .observation_service
+            .observe_position(seed.track_id(), exchange_state::position_observation(&position))
+            .await?;
+        account_capacity_snapshots.insert(instrument, account_capacity_snapshot);
     }
 
     runtime
@@ -67,56 +222,7 @@ pub(super) async fn complete_startup(
         .account_margin_guard
         .replace_snapshots(account_capacity_snapshots);
 
-    let mut cleanup_filters = HashMap::new();
-    for seed in track_seeds {
-        cleanup_filters.insert(seed.track_id.clone(), seed.cleanup_filter.clone());
-        runtime
-            .state
-            .reconcile
-            .runtime_lifecycle_service
-            .prepare_fresh_session_for_activation(&seed.track_id)
-            .await?;
-        runtime
-            .state
-            .reconcile
-            .observation_service
-            .sync_exchange_state(&seed.track_id, seed.position, seed.open_orders)
-            .await?;
-    }
-
-    replay_startup_user_data(runtime, receiver, startup_cutoff, &cleanup_filters).await?;
-    retry_startup_step("get_server_time", || runtime.metadata.get_server_time()).await
-}
-
-async fn prepare_track_startup_seed(
-    runtime: &ServerRuntime,
-    track: &RuntimeStartupDefinition,
-) -> Result<TrackStartupSeed> {
-    let instrument = track.instrument().clone();
-    let cleanup_filter = clear_inherited_open_orders(runtime, &instrument).await?;
-    let position = retry_startup_step("get_position", || {
-        runtime.execution.get_position(&instrument)
-    })
-    .await?;
-    let account_capacity_snapshot = probe_startup_account_capacity(runtime, track).await?;
-
-    let required_additional_notional = track.required_additional_notional(position.qty);
-    if required_additional_notional > account_capacity_snapshot.max_increase_notional {
-        return Err(anyhow!(
-            "insufficient account margin for configured max_notional on track `{}`: required {}, available {}",
-            track.track_id().as_str(),
-            required_additional_notional,
-            account_capacity_snapshot.max_increase_notional
-        ));
-    }
-
-    Ok(TrackStartupSeed {
-        track_id: track.track_id().as_str().to_string(),
-        position: exchange_state::position_observation(&position),
-        open_orders: Vec::new(),
-        account_capacity_snapshot,
-        cleanup_filter,
-    })
+    Ok(())
 }
 
 async fn clear_inherited_open_orders(
@@ -152,7 +258,7 @@ async fn clear_inherited_open_orders(
 
 async fn probe_startup_account_capacity(
     runtime: &ServerRuntime,
-    track: &RuntimeStartupDefinition,
+    track: &TrackStartupSeed,
 ) -> Result<AccountCapacitySnapshot> {
     match track.startup_capacity_mode() {
         RuntimeStartupCapacityMode::AvailableBalanceTimesLeverage { leverage } => {
@@ -174,18 +280,19 @@ async fn probe_startup_account_capacity(
     }
 }
 
-async fn replay_startup_user_data(
+async fn collect_startup_replay_events(
     runtime: &ServerRuntime,
     receiver: &mut mpsc::Receiver<UserDataEvent>,
     startup_cutoff: DateTime<Utc>,
-    cleanup_filters: &HashMap<String, CleanupReplayFilter>,
-) -> Result<()> {
+    cleanup_tracker: &mut CleanupTracker,
+) -> Result<Vec<StartupReplayEvent>> {
     let mut buffered_events = Vec::new();
     while let Ok(event) = receiver.try_recv() {
         buffered_events.push(event);
     }
 
     buffered_events.sort_by_key(|event| event.event_time);
+    let mut replay_events = Vec::new();
     for event in buffered_events {
         if event.event_time > startup_cutoff {
             let instrument = event.instrument().clone();
@@ -203,36 +310,32 @@ async fn replay_startup_user_data(
                 );
                 continue;
             };
-            if should_ignore_cleanup_event(cleanup_filters, &track_id, &event) {
+            if cleanup_tracker.should_ignore(&track_id, &event) {
                 continue;
             }
-            exchange_state::apply_user_data_event(
-                &runtime.state.reconcile,
-                runtime.execution.as_ref(),
-                &track_id,
-                event,
-            )
-            .await
-            .map_err(super::mutate_error)?;
+            replay_events.push(StartupReplayEvent { track_id, event });
         }
     }
 
-    Ok(())
+    Ok(replay_events)
 }
 
-fn should_ignore_cleanup_event(
-    cleanup_filters: &HashMap<String, CleanupReplayFilter>,
-    track_id: &str,
-    event: &UserDataEvent,
-) -> bool {
-    let Some(filter) = cleanup_filters.get(track_id) else {
-        return false;
-    };
-
-    match &event.payload {
-        poise_engine::ports::UserDataPayload::OrderUpdate(order) => filter.matches_order(order),
-        _ => false,
+async fn apply_startup_replay_events(
+    runtime: &ServerRuntime,
+    replay_events: Vec<StartupReplayEvent>,
+) -> Result<()> {
+    for replay_event in replay_events {
+        exchange_state::apply_user_data_event(
+            &runtime.state.reconcile,
+            runtime.execution.as_ref(),
+            &replay_event.track_id,
+            replay_event.event,
+        )
+        .await
+        .map_err(super::mutate_error)?;
     }
+
+    Ok(())
 }
 
 pub(super) async fn retry_startup_step<T, F, Fut>(
@@ -272,6 +375,7 @@ where
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
@@ -505,7 +609,7 @@ mod tests {
 
         assert!(!runtime_context.exchange_freshness.is_stale("btc-core").await);
         assert_eq!(exchange.get_open_orders_calls.load(Ordering::SeqCst), 2);
-        assert_eq!(exchange.get_position_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(exchange.get_position_calls.load(Ordering::SeqCst), 2);
         let snapshot = services
             .observation_service
             .manager()
@@ -631,6 +735,102 @@ mod tests {
         user_task.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn startup_replays_events_emitted_during_final_cutoff_query_before_handoff() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let manager = seeded_manager_with_active_binding();
+        let snapshot = manager.snapshot("btc-core").unwrap();
+        repository
+            .save_transition("btc-core", &snapshot, &[], &[])
+            .await
+            .unwrap();
+
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            manager,
+            repository.clone() as Arc<dyn TrackMutationStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectStore>,
+            notifications.clone(),
+            account_margin_guard,
+        );
+        let account_monitor = unavailable_account_monitor(notifications.clone());
+        let (runtime_context, effect_worker_context) = build_runtime_and_effect_worker_test_contexts(
+            &services,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectStore>,
+            account_monitor,
+        );
+        let (sender, mut receiver) = mpsc::channel(8);
+        let startup_cutoff = Utc.with_ymd_and_hms(2026, 4, 23, 12, 0, 0).unwrap();
+        let steady_state_cutoff = startup_cutoff + chrono::TimeDelta::seconds(5);
+        let delayed_event = UserDataEvent {
+            event_time: steady_state_cutoff,
+            payload: UserDataPayload::PositionUpdate(Position {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                qty: 1.25,
+                avg_price: 100.0,
+                unrealized_pnl: 12.0,
+            }),
+        };
+        let exchange = Arc::new(StartupExchange::with_server_time_event(
+            "BTCUSDT",
+            steady_state_cutoff,
+            sender,
+            delayed_event,
+        ));
+        let runtime = super::ServerRuntime::new(
+            runtime_context.runtime_state(),
+            effect_worker_context.effect_worker_state,
+            RuntimePorts::new(
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                Arc::new(SystemClock),
+            ),
+            vec![RuntimeStartupDefinition::new(
+                test_prepared_registry("btc-core")
+                    .get(&TrackId::new("btc-core"))
+                    .unwrap()
+                    .startup_definition(),
+                RuntimeStartupCapacityMode::AccountCapacitySnapshot,
+            )],
+        );
+
+        let returned_cutoff = complete_startup(&runtime, &mut receiver, startup_cutoff)
+            .await
+            .unwrap();
+        assert_eq!(returned_cutoff, steady_state_cutoff);
+        let user_task =
+            runtime.spawn_user_task(receiver, returned_cutoff, runtime.shutdown_tx.subscribe());
+
+        tokio::time::timeout(std::time::Duration::from_millis(200), async {
+            loop {
+                let snapshot = services
+                    .observation_service
+                    .manager()
+                    .read()
+                    .await
+                    .snapshot("btc-core")
+                    .unwrap();
+                if snapshot.current_exposure == Exposure(0.3333333333333333)
+                    && snapshot.risk.unrealized_pnl == 12.0
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        runtime.shutdown_tx.send(true).unwrap();
+        user_task.await.unwrap();
+    }
+
     fn seeded_manager_with_active_binding() -> TrackManager {
         let mut manager = TrackManager::new(Arc::new(SystemClock));
         manager
@@ -701,6 +901,8 @@ mod tests {
         get_position_calls: AtomicUsize,
         get_open_orders_calls: AtomicUsize,
         instrument: Instrument,
+        server_time_response: chrono::DateTime<Utc>,
+        server_time_event: Mutex<Option<(mpsc::Sender<UserDataEvent>, UserDataEvent)>>,
     }
 
     impl StartupExchange {
@@ -711,6 +913,25 @@ mod tests {
                 get_position_calls: AtomicUsize::new(0),
                 get_open_orders_calls: AtomicUsize::new(0),
                 instrument: Instrument::new(Venue::Binance, symbol),
+                server_time_response: Utc::now(),
+                server_time_event: Mutex::new(None),
+            }
+        }
+
+        fn with_server_time_event(
+            symbol: &str,
+            server_time_response: chrono::DateTime<Utc>,
+            sender: mpsc::Sender<UserDataEvent>,
+            event: UserDataEvent,
+        ) -> Self {
+            Self {
+                inherited_order_present: AtomicBool::new(true),
+                cancel_all_calls: AtomicUsize::new(0),
+                get_position_calls: AtomicUsize::new(0),
+                get_open_orders_calls: AtomicUsize::new(0),
+                instrument: Instrument::new(Venue::Binance, symbol),
+                server_time_response,
+                server_time_event: Mutex::new(Some((sender, event))),
             }
         }
     }
@@ -815,7 +1036,14 @@ mod tests {
         }
 
         async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
-            Ok(Utc::now())
+            let event = self.server_time_event.lock().unwrap().take();
+            if let Some((sender, event)) = event {
+                sender
+                    .send(event)
+                    .await
+                    .map_err(|error| anyhow!("failed to inject startup user event: {error}"))?;
+            }
+            Ok(self.server_time_response)
         }
     }
 

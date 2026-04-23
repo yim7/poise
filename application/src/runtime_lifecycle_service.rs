@@ -7,7 +7,8 @@ use poise_engine::track::TrackId;
 
 use crate::mutation_executor::MutationExecutor;
 use crate::{
-    TrackObservationService, TrackPersistentState, TrackQueryStore, TrackRecoveryIssue,
+    TrackControlState, TrackObservationService, TrackPersistentState, TrackQueryStore,
+    TrackRecoveryIssue,
     runtime_read_state_loader,
 };
 
@@ -73,12 +74,18 @@ impl TrackRuntimeLifecycleService {
         current_utc_day: NaiveDate,
         external_inputs: FreshSessionExternalInputs,
     ) -> Result<bool> {
-        let Some(state) = self
+        let state = self
             .load_track_persistent_state(track_id, current_utc_day)
             .await?
-        else {
-            return Ok(false);
-        };
+            .unwrap_or_else(|| {
+                let mut ledger_state = poise_engine::ledger::TrackLedgerState::default();
+                ledger_state.normalize_utc_day(current_utc_day);
+                TrackPersistentState {
+                    track_id: track_id.clone(),
+                    control_state: TrackControlState::default(),
+                    ledger_state,
+                }
+            });
         self.executor
             .fresh_start_track_runtime(track_id, state, external_inputs)
             .await
@@ -382,6 +389,34 @@ mod tests {
         let repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
         repository.seed_pending_mixed_effect_batch("btc-core", "btc-core:batch-1");
+        let snapshot = services
+            .runtime_lifecycle
+            .manager()
+            .read()
+            .await
+            .snapshot("btc-core")
+            .unwrap();
+        let executing_effect_id = repository
+            .pending_effects()
+            .into_iter()
+            .find(|effect| effect.sequence == 0)
+            .map(|effect| effect.effect_id)
+            .unwrap();
+        crate::TrackMutationStore::save_transition_with_effect_status(
+            repository.as_ref(),
+            "btc-core",
+            &snapshot,
+            &[],
+            &[],
+            Some(&crate::EffectStatusUpdate {
+                effect_id: executing_effect_id,
+                status: EffectStatus::Executing,
+                attempt_delta: 0,
+                last_error: None,
+            }),
+        )
+        .await
+        .unwrap();
         repository
             .save_follow_up_retirement_request(
                 &TrackId::new("btc-core"),

@@ -14,6 +14,7 @@ use poise_engine::ports::{
     AccountPort, AccountSummaryPort, ClockPort, ExecutionPort, MarketDataPort, MetadataPort,
     UserDataEvent,
 };
+use poise_core::types::Exposure;
 use poise_engine::track::{Instrument, TrackId};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -64,6 +65,10 @@ impl RuntimeStartupDefinition {
 
     pub(crate) fn required_additional_notional(&self, position_qty: f64) -> f64 {
         self.track.required_additional_notional(position_qty)
+    }
+
+    pub(crate) fn exposure_from_position_qty(&self, position_qty: f64) -> Exposure {
+        self.track.exposure_from_position_qty(position_qty)
     }
 
     pub(crate) fn startup_capacity_mode(&self) -> &RuntimeStartupCapacityMode {

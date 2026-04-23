@@ -5,6 +5,7 @@ use poise_core::risk::{LossLimits, validate_loss_limits, validate_max_notional};
 use poise_core::strategy::{
     BandProtectionPolicy, DEFAULT_MIN_REBALANCE_UNITS, ShapeFamily, TrackConfig, validate_config,
 };
+use poise_core::types::Exposure;
 use poise_engine::track::{Instrument, TrackId, Venue};
 
 const DEFAULT_TICK_TIMEOUT_SECS: u64 = 30;
@@ -212,6 +213,15 @@ impl TrackStartupDefinition {
             .track_config
             .abs_notional_from_position_qty(position_qty);
         (self.max_notional - current_position_notional).max(0.0)
+    }
+
+    pub fn exposure_from_position_qty(&self, position_qty: f64) -> Exposure {
+        let unit_qty = self.track_config.base_qty_per_unit();
+        if unit_qty <= f64::EPSILON {
+            Exposure(0.0)
+        } else {
+            Exposure(position_qty / unit_qty)
+        }
     }
 }
 

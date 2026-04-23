@@ -1141,6 +1141,13 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn list_session_reset_effects_for_track(
+            &self,
+            _track_id: &TrackId,
+        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
+            Ok(Vec::new())
+        }
+
         async fn list_pending_submit_effects_for_track(
             &self,
             _track_id: &TrackId,

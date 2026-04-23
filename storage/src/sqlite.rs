@@ -850,6 +850,37 @@ impl SqliteStorage {
         Ok(effects)
     }
 
+    fn list_session_reset_effects_for_track_blocking(
+        conn: Arc<Mutex<Connection>>,
+        track_id: TrackId,
+    ) -> Result<Vec<PersistedTrackEffect>> {
+        let conn = Self::lock_connection(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT effect_id, track_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
+                 FROM track_effects
+                 WHERE track_id = ?1
+                   AND status IN (?2, ?3)
+                 ORDER BY created_at ASC, batch_id ASC, sequence ASC, effect_id ASC",
+            )
+            .context("failed to prepare track-scoped session reset effect query")?;
+
+        let effects = stmt
+            .query_map(
+                params![
+                    track_id.as_str(),
+                    EffectStatus::Pending.as_str(),
+                    EffectStatus::Executing.as_str()
+                ],
+                Self::persisted_effect_from_row,
+            )
+            .context("failed to query track-scoped session reset effects")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to deserialize track-scoped session reset effects")?;
+
+        Ok(effects)
+    }
+
     fn list_all_pending_submit_effects_blocking(
         conn: Arc<Mutex<Connection>>,
     ) -> Result<Vec<PersistedTrackEffect>> {
@@ -1199,6 +1230,20 @@ impl TrackEffectStore for SqliteStorage {
         })
         .await
         .context("failed to join list_all_pending_effects_for_track blocking task")?
+    }
+
+    async fn list_session_reset_effects_for_track(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Vec<PersistedTrackEffect>> {
+        let conn = Arc::clone(&self.conn);
+        let track_id = track_id.clone();
+
+        tokio::task::spawn_blocking(move || {
+            Self::list_session_reset_effects_for_track_blocking(conn, track_id)
+        })
+        .await
+        .context("failed to join list_session_reset_effects_for_track blocking task")?
     }
 
     async fn list_pending_submit_effects_for_track(
@@ -2396,6 +2441,48 @@ mod tests {
         assert_eq!(pending[0].effect_id, btc_persisted.effects[0].effect_id);
         assert_eq!(pending[1].effect_id, btc_persisted.effects[1].effect_id);
         assert!(pending.iter().all(|effect| effect.track_id.as_str() == "btc-core"));
+    }
+
+    #[tokio::test]
+    async fn list_session_reset_effects_for_track_returns_pending_and_executing_effects() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let snapshot = test_snapshot_for("btc-core", "BTCUSDT");
+        let effects = vec![
+            TrackEffect::SubmitOrder {
+                request: test_order_request_for_symbol("BTCUSDT"),
+                desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                recovery_token: SubmitRecoveryToken::empty(),
+            },
+            TrackEffect::CancelAll {
+                instrument: test_instrument("BTCUSDT"),
+            },
+        ];
+
+        let persisted = storage
+            .save_transition("btc-core", &snapshot, &[], &effects)
+            .await
+            .unwrap();
+        save_effect_status_update(
+            &storage,
+            "btc-core",
+            EffectStatusUpdate {
+                effect_id: persisted.effects[0].effect_id.clone(),
+                status: EffectStatus::Executing,
+                attempt_delta: 0,
+                last_error: None,
+            },
+        )
+        .await;
+
+        let session_reset_effects = storage
+            .list_session_reset_effects_for_track(&TrackId::new("btc-core"))
+            .await
+            .unwrap();
+
+        assert_eq!(session_reset_effects.len(), 2);
+        assert_eq!(session_reset_effects[0].effect_id, persisted.effects[0].effect_id);
+        assert_eq!(session_reset_effects[1].effect_id, persisted.effects[1].effect_id);
     }
 
     #[tokio::test]

@@ -226,9 +226,9 @@ impl MutationExecutor {
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?
         };
-        let pending_effect_ids = self
+        let session_reset_effect_ids = self
             .effect_store
-            .list_all_pending_effects_for_track(&TrackId::new(id))
+            .list_session_reset_effects_for_track(&TrackId::new(id))
             .await
             .map_err(TrackMutationError::Persistence)?
             .into_iter()
@@ -240,7 +240,7 @@ impl MutationExecutor {
             .await
             .map_err(TrackMutationError::Persistence)?;
 
-        for effect_id in &pending_effect_ids {
+        for effect_id in &session_reset_effect_ids {
             self.mutation_store
                 .save_transition_bundle_with_effect_status(
                     id,
@@ -1674,6 +1674,23 @@ pub(crate) mod test_support {
                 .filter(|effect| {
                     effect.track_id == *track_id
                         && matches!(effect.status, EffectStatus::Pending)
+                })
+                .cloned()
+                .collect())
+        }
+
+        async fn list_session_reset_effects_for_track(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|effect| {
+                    effect.track_id == *track_id
+                        && matches!(effect.status, EffectStatus::Pending | EffectStatus::Executing)
                 })
                 .cloned()
                 .collect())

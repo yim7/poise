@@ -12,6 +12,10 @@ pub trait TrackEffectStore: Send + Sync {
         &self,
         track_id: &TrackId,
     ) -> Result<Vec<PersistedTrackEffect>>;
+    async fn list_session_reset_effects_for_track(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Vec<PersistedTrackEffect>>;
     async fn list_pending_submit_effects_for_track(
         &self,
         track_id: &TrackId,

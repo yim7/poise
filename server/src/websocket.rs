@@ -1795,6 +1795,23 @@ mod tests {
                 .collect())
         }
 
+        async fn list_session_reset_effects_for_track(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|effect| effect.track_id == *track_id)
+                .filter(|effect| {
+                    matches!(effect.status, EffectStatus::Pending | EffectStatus::Executing)
+                })
+                .cloned()
+                .collect())
+        }
+
         async fn list_pending_submit_effects_for_track(
             &self,
             track_id: &TrackId,
