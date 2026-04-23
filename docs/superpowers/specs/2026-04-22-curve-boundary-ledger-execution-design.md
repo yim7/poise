@@ -13,6 +13,7 @@
 - 当前订单回报吸收：[`../../../engine/src/executor/recording.rs`](../../../engine/src/executor/recording.rs)
 - 曲线与带外策略：[`../../../core/src/strategy.rs`](../../../core/src/strategy.rs)
 - 保护状态模型：[2026-04-20-track-protection-state-model-design.md](2026-04-20-track-protection-state-model-design.md)
+- fresh-session 启动边界：[2026-04-23-track-session-runtime-fresh-start-design.md](2026-04-23-track-session-runtime-fresh-start-design.md)
 
 ## 1. 目标
 
@@ -55,6 +56,12 @@
 从这三个事实往下推，执行器真正需要管理的，不是 round，也不是 slot，而是：
 
 > 哪些边界操作还没完成、已经完成了多少、当前由什么执行方式在覆盖它们。
+
+这里还要明确一条和启动恢复相关的边界：
+
+- `boundary progress + binding` 只属于单个进程会话里的执行真值
+- 进程重启后，不恢复旧会话的 binding、pending work 或 boundary progress
+- fresh-session 如何基于 `TrackDefinition + TrackControlState + TrackLedgerState + FreshSessionExternalInputs` 重建新的 `TrackRuntime`，由 [2026-04-23-track-session-runtime-fresh-start-design.md](2026-04-23-track-session-runtime-fresh-start-design.md) 单独定义
 
 这里的“边界操作”指：
 

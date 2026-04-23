@@ -118,7 +118,7 @@ pub struct CurrentMarketData {
 其中：
 
 - `current_exposure`：来自交易所当前真实仓位
-- `market_data`：当前有效行情；如果没有，或缺少执行报价，则新 session 进入 `WaitingMarketData`
+- `market_data`：当前有效行情；startup 第一阶段允许显式传 `None`。如果没有，或缺少执行报价，则新 session 进入 `WaitingMarketData`
 - `exchange_rules`：当前标的的交易规则，包括 price tick、quantity step、min qty、min notional 和手续费参数
 
 `exchange_rules` 不是会话状态，也不是从旧 runtime 恢复出来的字段。它必须由 startup 阶段从配置或交易所规则缓存的单一 owner 读取，并作为 `TrackRuntime::fresh_start(...)` 的显式输入。
@@ -214,6 +214,8 @@ pub enum PersistedControlMode {
     },
 }
 ```
+
+除这里列出的三类顶层状态外，不存在其他可持久化的 `TrackControlState` 变体。
 
 这类状态必须跨重启保留，否则重启后会把产品层控制语义丢掉。
 
@@ -347,6 +349,31 @@ Track session runtime 是概念边界，对应当前代码里的 `TrackRuntime` 
 - boundary progress
 - startup cleanup filter
 
+分层上需要再明确一层：
+
+- application 生命周期层拥有 `TrackControlState`
+- 它负责把 `TrackControlState` 映射成 startup 时使用的 `TrackState`
+- `TrackRuntime::fresh_start(...)` 只拥有 engine 内部构造规则，不直接依赖 application-owned `TrackControlState`
+
+因此，fresh-session 的产品级输入仍然是：
+
+- `TrackDefinition`
+- `TrackControlState`
+- `TrackLedgerState`
+- `FreshSessionExternalInputs`
+
+但真正进入 `TrackRuntime::fresh_start(...)` 的参数是：
+
+- 现有 `TrackRuntime` 上承载的定义层字段
+- startup `TrackState`
+- `TrackLedgerState`
+- `FreshSessionExternalInputs`
+
+如果某条 track 还没有持久化的 `TrackPersistentState`，application lifecycle 必须先合成默认真值，再进入 fresh-session：
+
+- `TrackControlState::Enabled { mode: Automatic }`
+- 按当前 UTC 日标准化后的空 `TrackLedgerState`
+
 ### 6.2 新 session 初始状态
 
 给定当前真实仓位 `current_exposure`，新 session runtime 的执行内核初始化为：
@@ -369,6 +396,8 @@ active_risk_cap = none
 - runtime 进入 `WaitingMarketData`
 - 不沿用上一会话的 `strategy_price`
 - 不沿用上一会话的 `desired_exposure`
+
+startup 第一阶段允许故意用 `market_data = None` 构建 fresh session，然后等待 steady-state 行情任务提供本会话的第一笔有效报价。这样可以避免把旧会话残留或启动瞬间尚未确认新鲜度的行情，误当作 fresh-session 的初始真值。
 
 ### 6.3 `Executing` 语义
 
@@ -404,9 +433,8 @@ active_risk_cap = none
 
 `CleanupTracker` 持有：
 
-- 本次 startup cleanup 创建的 cleanup identity 集合
-- 每个 cleanup identity 当前是否已经解析为终态
-- startup replay 期间需要忽略的预期 cleanup update
+- 本次 startup cleanup 识别出来的 inherited order identity filter
+- 当前 drain 轮次里是否观察到命中这些 identity 的 cleanup update
 
 它是 startup 私有 owner，不进入 steady-state runtime。
 
@@ -420,15 +448,21 @@ active_risk_cap = none
 
 这个阶段只负责调用构造入口，不拥有“如何从定义与外部真值构造新 runtime”的规则。构造规则由 `TrackRuntime::fresh_start(...)` 自己拥有，不允许分散到 startup bootstrap、manager、mutation executor 和测试夹具里。
 
+第一阶段的 startup bootstrap 至少会查询并传入：
+
+- 当前真实仓位
+- 当前标的 `ExchangeRules`
+
+当前有效市场数据是可选输入。如果 startup 当下没有可靠的新鲜报价，允许显式传 `market_data = None`，让 runtime 以 `WaitingMarketData` 开始本会话。
+
 ### 7.3 Phase C: `SteadyStateHandoff`
 
 职责：
 
-- 建立 cleanup barrier
 - 取得候选 steady-state cutoff
-- 把 `event_time <= candidate_cutoff` 的 buffered user-data 完整 replay 给 startup phase
-- 若 replay 后 cleanup 状态又发生变化，则重新等待 barrier 并取得新的 cutoff
-- 然后把 receiver 移交给 steady-state user task
+- 由 startup phase 继续独占 receiver，drain 当前缓冲区里已经到达的 post-startup 事件
+- 若本轮 drain 命中 cleanup update，则先重建 fresh session，再回放同轮非 cleanup 事件，并重新取得下一轮 cutoff
+- 若本轮 drain 没有命中 cleanup update，则回放同轮非 cleanup 事件，然后把 receiver 移交给 steady-state user task
 
 steady-state user task 只处理：
 
@@ -438,42 +472,39 @@ event_time > steady_state_cutoff
 
 startup replay 和 steady-state task 之间不允许有时间空窗，也不允许重叠消费。
 
-这里的前提不是“cleanup 已经发起”，而是：
-
-> cleanup 相关的旧订单回报已经在 startup phase 内被完整吸收或解析完毕。
-
 ## 8. Startup replay 与 steady-state 交接
 
 ### 8.1 正确语义
 
-startup replay 必须消费到最终交接边界，而不是消费“当前缓冲区里已经有的事件”。
+startup replay 的关键不是“按一个理想时间区间完整扫描历史”，而是：
 
-因此不允许采用这种做法：
+- startup phase 在 handoff 前一直独占 receiver
+- startup 自己决定哪一轮 drain 可以作为最终交接轮次
+- steady-state 只从 startup 已经选定的 cutoff 之后继续处理
 
-- `try_recv` 一遍当前缓冲区
-- 之后再取新的 cutoff
-- steady-state 再按新的 cutoff 丢事件
-
-因为这会在 replay 结束与最终 cutoff 取得之间留下事件空窗。
+因此，startup 不允许把 cleanup 过滤规则泄漏到 steady-state，也不允许让 steady-state 去补 startup 专用的 cleanup 吸收逻辑。
 
 ### 8.2 唯一允许的交接方式
 
-第一阶段只允许一种交接模型：startup phase 独占 receiver，反复建立 barrier，直到 cleanup quiesced 和 cutoff drain 在同一次循环里同时成立。
+第一阶段落地的是下面这一种交接模型：
 
 1. startup phase 独占 user-data receiver
-2. `InheritedOrderCleanup` 发起当前标的 cleanup
-3. startup phase 持续消费 user-data，并把 cleanup 相关 update 交给 `CleanupTracker`
-4. 等待 `CleanupTracker` 达到 quiesced
-5. startup phase 查询最终外部真值：
-   - 当前仓位
+2. `InheritedOrderCleanup` 查询当前标的 open orders；若存在 inherited orders，则执行 `cancel_all(instrument)`，并同步确认当前 open-order snapshot 已清空
+3. startup 调用 `prepare_fresh_session_for_activation(...)`，先把旧会话本地执行工作作废
+4. startup 依据当前外部真值重建 fresh session：
+   - 当前真实仓位
    - 当前标的 `ExchangeRules`
-   - 当前 open orders
-   - 当前有效市场数据
-6. 调用 `TrackRuntime::fresh_start(...)` 构建新 session runtime
-7. 取得候选 `steady_state_cutoff`
-8. startup phase replay / drain 所有 `event_time <= steady_state_cutoff` 的 buffered event
-9. 若第 8 步吸收到 cleanup 相关 update、改变了 `CleanupTracker` 或发现新的 cleanup gap，则回到第 4 步
-10. 若第 8 步完成后 `CleanupTracker` 仍然 quiesced，且 `TrackRuntime` 仍由最新外部真值构建，则把 receiver 移交给 steady-state user task
+   - 可选的 `market_data`
+5. startup 取得候选 `steady_state_cutoff`
+6. startup 在仍然持有 receiver 的前提下，drain 当前缓冲区里 `event_time > startup_cutoff` 的事件
+7. `CleanupTracker` 只判断本轮 drain 是否看到了命中 cleanup identity 的 `OrderUpdate`
+8. 若本轮 drain 命中了 cleanup update：
+   - 先再次依据当前外部真值重建一遍 fresh session
+   - 再回放这一轮里与 cleanup 无关的合法事件
+   - 然后回到第 5 步重新取得下一轮 cutoff
+9. 若本轮 drain 没有命中 cleanup update：
+   - 回放这一轮里与 cleanup 无关的合法事件
+   - 把 receiver 与 `steady_state_cutoff` 一起移交给 steady-state user task
 
 steady-state user task 只按通用 cutoff 过滤：
 
@@ -483,32 +514,22 @@ event_time > steady_state_cutoff
 
 它不接收 cleanup identity，也不持有 cleanup filter。
 
-这个模型必须满足：
+当前实现下，这个模型必须满足：
 
-- `CleanupTracker` 在最终 drain 之后仍然 quiesced
-- startup cleanup 产生的预期 order update 只在 startup replay 内忽略
+- startup cleanup 产生的预期 `OrderUpdate` 只在 startup replay 内忽略
 - steady-state user task 不保留 startup cleanup 专用过滤规则
 - steady-state 只知道 cutoff，不知道 cleanup identity
 
-`CleanupTracker.quiesced` 的第一阶段定义为同时满足：
+`CleanupTracker.quiesced` 的第一阶段定义也保持最小化：
 
-1. 当前标的最新 open-order snapshot 已经为空
-2. 每个 cleanup identity 都已经在 startup phase 内解析为以下之一，并完成 ledger 影响处理：
-   - `Canceled`
-   - `Filled`
-   - `Expired`
-   - `Rejected`
-   - `AbsentAfterEmptySnapshotWithGap`
+1. Phase A 已经确认当前标的 open-order snapshot 为空
+2. 当前 drain 轮次没有观察到命中 cleanup identity 的 `OrderUpdate`
 
-其中 `AbsentAfterEmptySnapshotWithGap` 表示：
+也就是说，startup handoff 的合同不是“保留一个长期 cleanup owner 跨过 handoff”，而是：
 
-- 这张 inherited order 没有再出现在当前标的最新空 snapshot 里
-- 但 startup phase 没有拿到足够信息确认它的完整终态或 ledger delta
-- 因此必须向 `TrackLedgerState.unresolved_gaps` 追加一条 cleanup gap
-
-也就是说，cleanup 不能用“订单已经不在 open orders 里”静默吞掉可能存在的成交、手续费或资金费影响。无法确定的部分必须显式进入账本 gap。
-
-只有当 `CleanupTracker` 在最终 cutoff drain 之后仍然 quiesced，steady-state handoff 才允许发生。
+- startup 自己完成 inherited-order cleanup
+- startup 自己吸收本轮还能看到的 cleanup update
+- 一旦某个 drain 轮次已经不再看到 cleanup update，就把后续完全交给 steady-state
 
 ## 9. 模块 owner
 
@@ -583,8 +604,8 @@ owner：
 ```rust
 impl TrackRuntime {
     pub fn fresh_start(
-        definition: TrackDefinition,
-        control_state: TrackControlState,
+        &self,
+        track_state: TrackState,
         ledger_state: TrackLedgerState,
         external_inputs: FreshSessionExternalInputs,
         started_at: DateTime<Utc>,
@@ -592,9 +613,18 @@ impl TrackRuntime {
 }
 ```
 
-这个方法负责从 `TrackDefinition + TrackControlState + TrackLedgerState + FreshSessionExternalInputs` 构造新的 `TrackRuntime`。
+这里的 owner 划分是：
 
-`FreshSessionExternalInputs` 必须显式携带当前真实仓位、当前有效市场数据和当前标的 `ExchangeRules`。`TrackRuntime::fresh_start(...)` 不允许读取旧 runtime、旧 snapshot、manager 全局字段或 startup cleanup state 来补齐缺失输入。
+- `TrackDefinition + TrackControlState + TrackLedgerState + FreshSessionExternalInputs` 共同决定 fresh session 的产品级输入
+- application 生命周期层负责把 `TrackControlState` 变成 startup `TrackState`
+- `TrackRuntime::fresh_start(...)` 只负责用现有 runtime 上承载的定义层字段，加上 `track_state + ledger_state + external_inputs`，构造新的 session runtime
+
+因此它必须满足：
+
+- 只复用定义层字段：`id / instrument / config / max_notional / loss_limits / tick_timeout_secs`
+- 不复用上一会话的 bindings、boundary progress、pending work、recovery anomaly、live quote、desired target
+- `exchange_rules` 只能来自 `FreshSessionExternalInputs`
+- `market_data` 可以显式缺失，此时 fresh session 以 `WaitingMarketData` 开始
 
 startup 只调用这个方法，不内联持有这套构造规则。除非后续构造逻辑复杂到 `TrackRuntime` 无法清晰承载，否则不引入额外 factory / bootstrapper 类型，也不新增 `TrackSessionRuntime` 包装类型。
 

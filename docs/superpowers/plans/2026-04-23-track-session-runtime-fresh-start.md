@@ -27,8 +27,8 @@
   - `FreshSessionExternalInputs`
 - `FreshSessionExternalInputs` 第一阶段包含：
   - 当前真实仓位
-  - 当前有效市场数据
   - 当前标的 `ExchangeRules`
+  - 可选的当前有效市场数据；若 startup 当下没有可靠新鲜报价，允许显式传 `None`
 - `TrackDefinition` 不再使用 `CapacityBudget`。定义层改成：
   - `config: TrackConfig`
   - `max_notional`
@@ -72,7 +72,7 @@
 - Modify: `application/src/runtime_lifecycle_service.rs`
   - 从持久状态 owner 读取 `TrackControlState / TrackLedgerState`
   - 在 fresh-session 前先请求 UTC 日边界标准化后的 `TrackLedgerState`
-  - 组装 `FreshSessionExternalInputs`，包括当前仓位、当前有效市场数据和 `ExchangeRules`
+  - 组装 `FreshSessionExternalInputs`，包括当前仓位、当前标的 `ExchangeRules`，以及可选的当前有效市场数据
 - Modify: `storage/src/sqlite.rs`
   - 提供 `TrackControlState / TrackLedgerState` 的持久化读写入口
 - Modify: `storage/src/schema.rs`
@@ -93,7 +93,7 @@
 ### 会话 runtime 构造
 
 - Modify: `engine/src/runtime.rs`
-  - 新增 `TrackRuntime::fresh_start(...)`
+  - 在现有 `TrackRuntime` 上新增 `TrackRuntime::fresh_start(...)`
   - 定义 `FreshSessionExternalInputs` 输入值对象
 - Modify: `engine/src/manager.rs`
   - 去掉“在旧 runtime 上局部 reset 后继续运行”的入口
@@ -273,7 +273,7 @@ Expected:
 要求：
 
 - 新 session runtime 的构造规则由现有 `TrackRuntime` 自己拥有
-- 引入 `FreshSessionExternalInputs`，包含当前仓位、当前有效市场数据和当前标的 `ExchangeRules`
+- 引入 `FreshSessionExternalInputs`，包含当前仓位、当前标的 `ExchangeRules`，以及可选的当前有效市场数据
 - 不新增 factory / bootstrapper 类型，也不新增 `TrackSessionRuntime` 包装类型；startup 和 manager 只能调用 `TrackRuntime::fresh_start(...)`
 - 旧 runtime snapshot 不再作为 startup 执行语义恢复输入
 - manager 不再负责猜测需要保留哪些旧 session 字段
@@ -317,7 +317,8 @@ Expected:
 - inherited orders 只参与 cleanup
 - handoff 前 `CleanupTracker` 必须 quiesced
 - startup phase 独占 user-data receiver，handoff 前完成 cleanup quiesce、最终外部真值查询、session 构建和 cutoff drain
-- 最终外部真值查询必须包含当前仓位、当前标的 `ExchangeRules` 和当前有效市场数据
+- 最终外部真值查询必须至少包含当前仓位与当前标的 `ExchangeRules`
+- 若 startup 当下没有可靠有效市场数据，fresh-session 允许显式以 `market_data = None` 进入 `WaitingMarketData`
 - 若 cutoff drain 后 cleanup 状态变化，必须回到 cleanup barrier 重新建立 handoff
 - startup replay 与 steady-state handoff 没有丢事件窗口
 - cleanup filter 不会泄漏到 steady-state user task
@@ -354,13 +355,11 @@ Expected:
 
 1. startup 独占 user-data receiver
 2. cleanup 当前标的 inherited orders
-3. 消费 user-data 直到 `CleanupTracker.quiesced`
-4. 查询最终外部真值
-5. 调用 `TrackRuntime::fresh_start(...)` 构建 fresh session runtime
-6. 取得 steady-state cutoff
-7. drain / replay `event_time <= cutoff`
-8. 若 drain 后 cleanup 状态变化，回到第 3 步
-9. 若 drain 后仍 quiesced，把 receiver 移交 steady-state
+3. 清空旧会话本地 work，并先按当前外部真值构建一次 fresh session runtime
+4. 取得候选 steady-state cutoff
+5. drain 当前缓冲区里已经到达的 post-startup 事件
+6. 若本轮 drain 命中 cleanup update，先重建 fresh session，再回放同轮非 cleanup 事件，然后回到第 4 步
+7. 若本轮 drain 没有命中 cleanup update，回放同轮非 cleanup 事件，再把 receiver 移交 steady-state
 
 - [x] **Step 4: 运行 Task 3 回归**
 
@@ -383,16 +382,20 @@ Expected:
 - Modify: `docs/superpowers/plans/2026-04-23-track-session-runtime-fresh-start.md`
 - Modify: `docs/superpowers/specs/2026-04-22-curve-boundary-ledger-execution-design.md`
 
-- [ ] **Step 1: 复核 spec 与实现是否仍一致**
+- [x] **Step 1: 复核 spec 与实现是否仍一致**
 
 检查：
 
 - `TrackDefinition` 的形状
+- `TrackControlState` 是否仍是封闭的持久控制集合，且明确排除了 session transient state
 - fresh-session 语义
+- `TrackRuntime::fresh_start(...)` 是否仍由现有 `TrackRuntime` 自己拥有，而不是新增浅封装
+- `FreshSessionExternalInputs` 是否明确包含 `ExchangeRules`，并允许 startup 第一阶段以 `market_data = None` 启动
 - startup 三阶段
+- startup handoff 是否已经回写成当前实现采用的 drain / rebuild / reapply 模型
 - inherited order cleanup 与 session bootstrap 的 owner 分离
 
-- [ ] **Step 2: 运行 focused 验收**
+- [x] **Step 2: 运行 focused 验收**
 
 Run:
 
