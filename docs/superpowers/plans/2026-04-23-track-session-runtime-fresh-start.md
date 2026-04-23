@@ -231,7 +231,7 @@ Run:
 Expected:
 
 - 定义层、持久控制状态、持久账本真值和公开协议边界完成，旧 `CapacityBudget` 与旧 runtime snapshot 不再作为共享边界。
-- Task 1 implementation commit: `TASK1_COMMIT_SHA_PENDING`
+- Task 1 implementation commit: `cd6c874`
 
 ## Task 2: 定义 `TrackRuntime::fresh_start(...)`
 
