@@ -412,6 +412,7 @@ Run:
 Expected:
 
 - 新设计的不变量都被 focused 测试覆盖，文档与代码一致。
+- Task 4 implementation commit: `e66d613`
 
 ## 计划自检
 
