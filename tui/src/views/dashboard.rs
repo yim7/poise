@@ -42,7 +42,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let execution = format_execution_badge(
             item.execution.state,
             item.execution.execution_status,
-            item.execution.active_slot_count,
+            item.execution.active_binding_count,
         );
         let price = format_price_summary(item.strategy_price, item.strategy_price_status.clone());
         let exposure = format_exposure_summary(item.exposure.current, item.exposure.target);
@@ -178,7 +178,7 @@ fn format_price_summary(
 fn format_execution_badge(
     state: ExecutionStateView,
     execution_status: ExecutionStatusView,
-    active_slot_count: u32,
+    active_binding_count: u32,
 ) -> SignalDisplay {
     let state = match state {
         ExecutionStateView::Open => "open",
@@ -191,8 +191,8 @@ fn format_execution_badge(
     } else {
         state.to_string()
     };
-    let text = if active_slot_count > 0 {
-        format!("{badge} ({active_slot_count})")
+    let text = if active_binding_count > 0 {
+        format!("{badge} ({active_binding_count})")
     } else {
         badge
     };
@@ -420,7 +420,7 @@ mod tests {
                         "strategy_price": null,
                         "strategy_price_status": "live",
                         "exposure": {"current": 3.5, "target": 3.0},
-                        "execution": {"state": "open", "execution_status": "normal", "active_slot_count": 0},
+                        "execution": {"state": "open", "execution_status": "normal", "active_binding_count": 0},
                         "ledger": {"total_pnl": 12.3, "has_unresolved_gaps": false}
                     }
                 ]
@@ -531,7 +531,7 @@ mod tests {
                         "strategy_price": 101.25,
                         "strategy_price_status": "live",
                         "exposure": {"current": 3.5, "target": 3.0},
-                        "execution": {"state": "open", "execution_status": "attention_required", "active_slot_count": 1},
+                        "execution": {"state": "open", "execution_status": "attention_required", "active_binding_count": 1},
                         "ledger": {"total_pnl": 12345.67, "has_unresolved_gaps": false}
                     }
                 ]
@@ -563,7 +563,7 @@ mod tests {
                         "strategy_price": 101.25,
                         "strategy_price_status": "live",
                         "exposure": {"current": 3.5, "target": 3.0},
-                        "execution": {"state": "open", "execution_status": "normal", "active_slot_count": 0},
+                        "execution": {"state": "open", "execution_status": "normal", "active_binding_count": 0},
                         "ledger": {"total_pnl": 12.3, "has_unresolved_gaps": false}
                     }
                 ]
@@ -601,7 +601,7 @@ mod tests {
                         "strategy_price": 101.25,
                         "strategy_price_status": "live",
                         "exposure": {"current": 3.5, "target": 3.0},
-                        "execution": {"state": "open", "execution_status": "normal", "active_slot_count": 0},
+                        "execution": {"state": "open", "execution_status": "normal", "active_binding_count": 0},
                         "ledger": {"total_pnl": -245.3, "has_unresolved_gaps": false}
                     }
                 ]

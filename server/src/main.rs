@@ -830,6 +830,7 @@ total_loss_limit = 600.0
             Ok(OrderReceipt {
                 order_id: "order-1".into(),
                 client_order_id: "client-1".into(),
+                filled_qty: 0.0,
                 status: OrderStatus::New,
             })
         }

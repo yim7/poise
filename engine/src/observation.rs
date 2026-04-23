@@ -21,6 +21,8 @@ pub struct OrderObservation {
     pub side: poise_core::types::Side,
     pub price: f64,
     pub quantity: f64,
+    #[serde(default)]
+    pub filled_qty: f64,
     pub realized_pnl: f64,
     pub status: OrderStatus,
 }

@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 use poise_core::events::ExecutionGateReason;
-use poise_core::events::ReplacementGateReason;
 use poise_core::types::Exposure;
 use poise_engine::execution_gate::ExecutionGateDecision;
 use poise_engine::ledger::TrackLedgerState;
@@ -18,7 +17,6 @@ pub struct TrackRuntimeReadState {
     pub desired_exposure: Option<Exposure>,
     pub manual_target_override: Option<Exposure>,
     pub executor_state: ExecutorState,
-    pub replacement_gate_reason: Option<ReplacementGateReason>,
     pub ledger_state: TrackLedgerState,
     pub unrealized_pnl: f64,
     pub has_account_margin_guard: bool,
@@ -42,7 +40,6 @@ impl TrackRuntimeReadState {
             current_exposure,
             desired_exposure,
             executor_state,
-            replacement_gate_reason,
             execution_gate_state,
             ledger_state,
             risk,
@@ -56,7 +53,6 @@ impl TrackRuntimeReadState {
             desired_exposure: live.desired_exposure.map(Exposure).or(desired_exposure),
             manual_target_override: runtime_state.manual_target_override(),
             executor_state,
-            replacement_gate_reason,
             ledger_state,
             unrealized_pnl: risk.unrealized_pnl,
             has_account_margin_guard: matches!(
@@ -149,7 +145,6 @@ mod tests {
             current_exposure: Exposure(0.0),
             desired_exposure: Some(Exposure(0.0)),
             executor_state: ExecutorState::empty(Utc::now()),
-            replacement_gate_reason: None,
             execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
             ledger_state: Default::default(),
             risk: RiskState::default(),

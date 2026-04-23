@@ -2,7 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::persisted_runtime::TrackRestoreRevision;
-use poise_core::events::ReplacementGateReason;
 use poise_core::types::Exposure;
 
 use crate::execution_gate::ExecutionGateState;
@@ -41,8 +40,6 @@ pub struct TrackRuntimeSnapshot {
     pub current_exposure: Exposure,
     pub desired_exposure: Option<Exposure>,
     pub executor_state: ExecutorState,
-    #[serde(default)]
-    pub replacement_gate_reason: Option<ReplacementGateReason>,
     #[serde(default)]
     pub execution_gate_state: ExecutionGateState,
     pub ledger_state: TrackLedgerState,

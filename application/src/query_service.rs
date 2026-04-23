@@ -59,15 +59,12 @@ mod tests {
     use poise_core::events::DomainEvent;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
-    use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
+    use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::observation::MarketObservation;
     use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::ExecutionQuote;
-    use poise_engine::ports::{OrderRequest, OrderStatus};
-    use poise_engine::runtime::{
-        AutoState, ControlState, ExecutionSlot, ExecutionStats, ExecutorState, RiskState,
-        SlotState, TrackState, WorkingOrder,
-    };
+    use poise_engine::ports::OrderRequest;
+    use poise_engine::runtime::{AutoState, ControlState, ExecutorState, RiskState, TrackState};
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
@@ -107,7 +104,7 @@ mod tests {
             sources[0].updated_at,
             Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap()
         );
-        assert_eq!(sources[0].active_slot_count, 1);
+        assert_eq!(sources[0].active_binding_count, 0);
         assert_eq!(repository.recorded_effect_limits(), Vec::<usize>::new());
     }
 
@@ -265,6 +262,7 @@ mod tests {
                             },
                             desired_exposure: Exposure(4.0),
                             submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                            recovery_token: SubmitRecoveryToken::empty(),
                         },
                         status: EffectStatus::Executing,
                         attempt_count: 1,
@@ -332,42 +330,10 @@ mod tests {
             runtime_state: TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)),
             current_exposure: Exposure(3.5),
             desired_exposure: Some(Exposure(4.0)),
-            executor_state: ExecutorState {
-                active_round: Some(poise_engine::runtime::ExecutionRound {
-                    desired_exposure: Exposure(4.0),
-                    mode: ExecutionMode::Passive,
-                    started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                }),
-                diagnostics: poise_engine::runtime::ExecutorDiagnostics {
-                    mode: ExecutionMode::Passive,
-                    inventory_gap: Exposure(0.5),
-                    gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
-                    last_reprice_at: None,
-                    last_execution_reason: None,
-                    recovery_anomaly: None,
-                },
-                slots: vec![ExecutionSlot {
-                    slot: OrderSlot::new("inventory_core"),
-                    state: SlotState::Working,
-                    working_order: Some(WorkingOrder {
-                        order_id: Some("order-1".into()),
-                        client_order_id: "client-1".into(),
-                        side: Side::Buy,
-                        price: 100.5,
-                        quantity: 0.1,
-                        status: OrderStatus::New,
-                        role: OrderRole::IncreaseInventory,
-                    }),
-                }],
-                recent_terminal_orders: Vec::new(),
-                stats: ExecutionStats {
-                    started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                    max_inventory_gap_abs: Exposure(0.5),
-                    max_gap_age_ms: 0,
-                },
-            },
+            executor_state: ExecutorState::empty(
+                Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+            ),
             ledger_state: Default::default(),
-            replacement_gate_reason: None,
             execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
             risk: RiskState {
                 unrealized_pnl: 265.2,

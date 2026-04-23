@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use poise_application::PersistedTrackEffect;
+use poise_engine::executor::SubmitRecoveryToken;
 use poise_engine::ports::{AccountPort, ExecutionPort, OrderRequest};
 use poise_engine::track::Instrument;
 use tokio::sync::watch;
@@ -95,9 +96,10 @@ impl EffectWorker {
         &self,
         persisted: &PersistedTrackEffect,
         request: OrderRequest,
+        recovery_token: SubmitRecoveryToken,
         desired_exposure: poise_core::types::Exposure,
     ) -> Result<()> {
-        execute::execute_submit(self, persisted, request, desired_exposure).await
+        execute::execute_submit(self, persisted, request, recovery_token, desired_exposure).await
     }
 
     async fn execute_cancellation(
@@ -148,6 +150,3 @@ impl Cancellation {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

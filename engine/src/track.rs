@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use poise_core::risk::CapacityBudget;
+use poise_core::risk::LossLimits;
 use poise_core::strategy::TrackConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -64,7 +64,8 @@ pub struct TrackDefinition {
     pub id: TrackId,
     pub instrument: Instrument,
     pub config: TrackConfig,
-    pub budget: CapacityBudget,
+    pub max_notional: f64,
+    pub loss_limits: LossLimits,
 }
 
 #[cfg(test)]
@@ -82,13 +83,15 @@ impl TrackDefinition {
         id: TrackId,
         instrument: Instrument,
         config: TrackConfig,
-        budget: CapacityBudget,
+        max_notional: f64,
+        loss_limits: LossLimits,
     ) -> Self {
         Self {
             id,
             instrument,
             config,
-            budget,
+            max_notional,
+            loss_limits,
         }
     }
 }

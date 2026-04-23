@@ -70,6 +70,8 @@ pub(crate) struct OrderUpdate {
     pub price: f64,
     #[serde(deserialize_with = "deserialize_f64")]
     pub qty: f64,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    pub cum_exec_qty: Option<f64>,
     #[serde(deserialize_with = "deserialize_order_status")]
     pub order_status: BybitOrderStatus,
     #[serde(default)]

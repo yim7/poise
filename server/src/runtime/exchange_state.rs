@@ -100,6 +100,7 @@ pub(super) fn order_observation(order: &ExchangeOrder) -> OrderObservation {
         side: order.side,
         price: order.price,
         quantity: order.qty,
+        filled_qty: order.filled_qty,
         realized_pnl: order.realized_pnl,
         status: order.status,
     }

@@ -80,7 +80,7 @@
       "execution": {
         "state": "open",
         "execution_status": "normal",
-        "active_slot_count": 1
+        "active_binding_count": 1
       },
       "ledger": {
         "total_pnl": 1245.3,
@@ -103,7 +103,7 @@
 - `ledger.has_unresolved_gaps`：当前累计账本里是否还有未解决 gap。
 - `execution.state`：执行面是否处于 `open / paused / closed`。
 - `execution.execution_status`：执行是否需要人工关注。当前稳定值为 `normal` 和 `attention_required`。
-- `execution.active_slot_count`：当前执行器中有多少个活跃槽位。它表达的是槽位工作集数量，不等于交易所原始 open orders 数量。
+- `execution.active_binding_count`：当前执行器中有多少个活跃执行绑定。它表达的是执行工作集数量，不等于交易所原始 open orders 数量。
 
 ### 2.2 `GET /tracks/:id` -> `TrackDetailView`
 
@@ -116,7 +116,6 @@
 - `market`
 - `position`
 - `ledger`
-- `execution_stats`
 - `execution`
 - `activity`
 - `available_commands`
@@ -145,21 +144,18 @@
 - `budget` 提供当前轨道风险预算。
 - `market` 提供 `mark_price`、`best_bid` 和 `best_ask`。
 - `ledger` 提供累计盈亏读模型，当前包含 `gross_realized_pnl`、`net_realized_pnl`、`unrealized_pnl`、`total_pnl`、费用累计和未解决 ledger gaps。
-- `execution_stats` 提供执行统计窗口读模型，当前包含 `max_inventory_gap_abs`、`max_gap_age_ms` 和 `stats_started_at`。
 - `execution` 提供执行摘要，当前包含：
   - `state`
   - `execution_status`
   - `inventory_gap`
-  - `gap_age_ms`
-  - `active_slot_count`
-  - `slots`
-  - `replacement_gate`
-- `execution.slots` 是执行器对外稳定槽位视图。每个槽位只暴露：
+  - `active_binding_count`
+  - `bindings`
+- `execution.bindings` 是执行器对外稳定的执行绑定视图。每个绑定只暴露：
   - `label`
-  - `phase`
+  - `status`
   - `intent`
   - `order`
-- `execution.slots[].order` 只包含 `side`、`price`、`quantity`；不暴露 `client_order_id`、交易所订单状态或内部恢复字段。
+- `execution.bindings[].order` 只包含 `side`、`price`、`quantity`；不暴露 `client_order_id`、交易所订单状态或内部恢复字段。
 - `activity` 是已经投影过的活动流，不直接暴露原始 `DomainEvent`。
 - `available_commands` 直接给出命令是否可执行以及禁用原因，客户端不再自行推断。
 
@@ -291,6 +287,6 @@
 - WebSocket 推送到达后，TUI 直接应用 `track_list_item_changed` / `track_detail_changed`，不再做旧快照兼容解析。
 - 客户端必须允许这些字段为空：
   - 列表：`items[].reference_price`、`items[].exposure.target`
-  - 详情：`status.reference_price`、`market.mark_price`、`market.index_price`、`position.desired_exposure`、`execution_stats.stats_started_at`、`execution.replacement_gate`
-  - 详情槽位订单：`execution.slots[].order`
+  - 详情：`status.reference_price`、`market.mark_price`、`market.index_price`、`position.desired_exposure`
+  - 详情绑定订单：`execution.bindings[].order`
   - 命令描述：`available_commands[].disabled_reason`

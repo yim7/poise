@@ -261,7 +261,8 @@ async fn assemble_with_state_store(
             track_id.clone(),
             instrument,
             track.track_config().clone(),
-            track.budget(),
+            track.max_notional(),
+            track.loss_limits().clone(),
             info.rules,
             track.tick_timeout_secs(),
         )?;
@@ -369,12 +370,8 @@ async fn assemble_with_state_store(
         build_test_contexts_from_runtime_states(
             runtime_state.clone(),
             effect_worker_state.clone(),
-            manager.clone(),
             notifications.clone(),
-            projector.clone(),
-            command_service.clone(),
             observation_service.clone(),
-            effect_service.clone(),
         );
 
     Ok(ServerPlatform {
@@ -836,7 +833,7 @@ total_loss_limit = 600.0
 
         assert_eq!(manager.list_tracks().len(), 2);
         let track = manager.get_track("btc-core").unwrap();
-        assert_eq!(track.budget().max_notional, 3000.0);
+        assert_eq!(track.max_notional(), 3000.0);
         assert!(
             crate::instance_dir::InstanceDir::new(instance_dir.path())
                 .db_path()
@@ -1268,8 +1265,8 @@ total_loss_limit = 600.0
                     shape_family: poise_core::strategy::ShapeFamily::Linear,
                     out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
                 },
-                poise_core::risk::CapacityBudget {
-                    max_notional: 3000.0,
+                3000.0,
+                poise_core::risk::LossLimits {
                     daily_loss_limit: 100.0,
                     total_loss_limit: 300.0,
                 },
@@ -1303,7 +1300,6 @@ total_loss_limit = 600.0
                 repository.clone() as Arc<dyn TrackQueryStore>,
                 effect_store,
                 account_monitor.clone(),
-                projector.clone(),
             );
 
         (
@@ -1516,6 +1512,13 @@ total_loss_limit = 600.0
         }
 
         async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_all_pending_effects_for_track(
+            &self,
+            _track_id: &TrackId,
+        ) -> Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }
 

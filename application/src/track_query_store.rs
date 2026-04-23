@@ -2,7 +2,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use poise_engine::track::TrackId;
 
-use crate::track_persistence::{PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot};
+use crate::track_persistence::{
+    PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackPersistentState,
+};
 
 #[async_trait]
 pub trait TrackQueryStore: Send + Sync {
@@ -18,4 +20,11 @@ pub trait TrackQueryStore: Send + Sync {
         track_id: &TrackId,
         limit: usize,
     ) -> Result<Vec<PersistedTrackEffect>>;
+
+    async fn load_track_persistent_state(
+        &self,
+        _track_id: &TrackId,
+    ) -> Result<Option<TrackPersistentState>> {
+        Ok(None)
+    }
 }

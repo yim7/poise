@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use poise_core::events::ReplacementGateReason;
-use poise_core::risk::CapacityBudget;
+use poise_core::risk::LossLimits;
 use poise_core::strategy::TrackConfig;
 use poise_core::types::Exposure;
 use serde::{Deserialize, Serialize};
@@ -42,13 +41,15 @@ pub struct TrackRuntimeSeed {
     pub track_id: TrackId,
     pub instrument: Instrument,
     pub track_config: TrackConfig,
-    pub budget: CapacityBudget,
+    pub max_notional: f64,
+    pub loss_limits: LossLimits,
     pub tick_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PostRestoreConstraints {
-    pub budget: CapacityBudget,
+    pub max_notional: f64,
+    pub loss_limits: LossLimits,
     pub tick_timeout_secs: u64,
 }
 
@@ -60,7 +61,6 @@ pub struct PersistedRuntimeRow {
     pub current_exposure: f64,
     pub desired_exposure: Option<f64>,
     pub executor_state_json: Option<String>,
-    pub replacement_gate_reason_json: Option<String>,
     pub execution_gate_state_json: Option<String>,
     pub ledger_state_json: Option<String>,
     pub unrealized_pnl: f64,
@@ -94,12 +94,6 @@ impl PersistedRuntimeCodec {
             .map(serde_json::from_str::<ExecutorState>)
             .transpose()
             .context("failed to deserialize executor state")?;
-        let replacement_gate_reason = row
-            .replacement_gate_reason_json
-            .as_deref()
-            .map(serde_json::from_str::<ReplacementGateReason>)
-            .transpose()
-            .context("failed to deserialize replacement gate reason")?;
         let ledger_state = row
             .ledger_state_json
             .as_deref()
@@ -147,7 +141,6 @@ impl PersistedRuntimeCodec {
             current_exposure: Exposure(row.current_exposure),
             desired_exposure: row.desired_exposure.map(Exposure),
             executor_state,
-            replacement_gate_reason,
             execution_gate_state: execution_gate_state.unwrap_or_else(ExecutionGateState::open),
             ledger_state: ledger_state.unwrap_or_default(),
             risk: RiskState {

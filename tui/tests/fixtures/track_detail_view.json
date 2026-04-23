@@ -22,11 +22,12 @@
     "notional_per_unit": 375.0,
     "min_rebalance_units": 0.5,
     "shape_family": "linear",
-    "out_of_band_policy": {
-      "freeze": {
-        "recover": "back_in_band"
-      }
-    }
+    "out_of_band_policy": "freeze"
+  },
+  "max_notional": 3000.0,
+  "loss_limits": {
+    "daily_loss_limit": 100.0,
+    "total_loss_limit": 300.0
   },
   "market": {
     "mark_price": 101.3,
@@ -46,21 +47,17 @@
     "funding_fee_cumulative": -4.0,
     "unresolved_gaps": []
   },
-  "execution_stats": {
-    "max_inventory_gap_abs": 1.5,
-    "max_gap_age_ms": 120000,
-    "stats_started_at": "2026-03-26T09:45:00Z"
-  },
   "execution": {
     "state": "open",
     "execution_status": "normal",
     "inventory_gap": 0.5,
-    "gap_age_ms": 60000,
-    "active_slot_count": 1,
-    "slots": [
+    "active_binding_count": 1,
+    "bindings": [
       {
-        "label": "inventory_core",
-        "phase": "opening",
+        "id": "binding-instance-1",
+        "policy": "curve_maker",
+        "label": "maker 1",
+        "status": "submit_pending",
         "intent": "increase_inventory",
         "order": {
           "side": "buy",
@@ -68,17 +65,12 @@
           "quantity": 0.01
         }
       }
-    ],
-    "replacement_gate": {
-      "kind": "improvement_below_threshold",
-      "improvement_bps": 9.0,
-      "threshold_bps": 13.0
-    }
+    ]
   },
   "activity": [
     {
       "ts": "2026-03-26T10:01:00Z",
-      "message": "replacement gate: improvement 9.0 bps < threshold 13.0 bps",
+      "message": "boundary ledger recovered active binding",
       "level": "info"
     }
   ],

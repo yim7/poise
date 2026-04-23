@@ -43,10 +43,16 @@ pub(super) async fn process_effect(
         TrackEffect::SubmitOrder {
             ref request,
             ref desired_exposure,
+            ref recovery_token,
             ..
         } => {
             worker
-                .execute_submit(&persisted, request.clone(), desired_exposure.clone())
+                .execute_submit(
+                    &persisted,
+                    request.clone(),
+                    recovery_token.clone(),
+                    desired_exposure.clone(),
+                )
                 .await
         }
         TrackEffect::CancelOrder {

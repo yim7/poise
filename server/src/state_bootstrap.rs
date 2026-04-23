@@ -894,7 +894,7 @@ mod tests {
              SET ledger_state_json = ?1
              WHERE track_id = 'btc-core'",
             [serde_json::json!({
-                "realized_pnl_day": null,
+                "ledger_utc_day": "2026-04-23",
                 "gross_realized_pnl_today": -150.0,
                 "gross_realized_pnl_cumulative": -150.0,
                 "trading_fee_today": 0.0,
@@ -1008,8 +1008,8 @@ mod tests {
                     shape_family: poise_core::strategy::ShapeFamily::Linear,
                     out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
                 },
-                poise_core::risk::CapacityBudget {
-                    max_notional: 3000.0,
+                3000.0,
+                poise_core::risk::LossLimits {
                     daily_loss_limit: 300.0,
                     total_loss_limit: 600.0,
                 },

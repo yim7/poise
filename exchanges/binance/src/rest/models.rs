@@ -6,6 +6,8 @@ pub struct BinanceOrderResponse {
     pub order_id: u64,
     #[serde(rename = "clientOrderId")]
     pub client_order_id: String,
+    #[serde(default, rename = "executedQty")]
+    pub executed_qty: Option<String>,
     pub status: String,
 }
 
@@ -55,6 +57,8 @@ pub struct BinanceOpenOrder {
     pub price: String,
     #[serde(rename = "origQty")]
     pub orig_qty: String,
+    #[serde(default, rename = "executedQty")]
+    pub executed_qty: Option<String>,
     pub status: String,
 }
 

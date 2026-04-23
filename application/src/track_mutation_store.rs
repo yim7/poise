@@ -4,7 +4,7 @@ use poise_core::events::DomainEvent;
 use poise_engine::snapshot::TrackRuntimeSnapshot;
 use poise_engine::transition::TrackEffect;
 
-use crate::track_persistence::{CommittedTrackWrite, EffectStatusUpdate};
+use crate::track_persistence::{CommittedTrackWrite, EffectStatusUpdate, TrackPersistentState};
 
 #[async_trait]
 pub trait TrackMutationStore: Send + Sync {
@@ -30,4 +30,8 @@ pub trait TrackMutationStore: Send + Sync {
 
     async fn load_track_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>>;
     async fn list_track_events(&self, id: &str) -> Result<Vec<DomainEvent>>;
+
+    async fn save_track_persistent_state(&self, _state: &TrackPersistentState) -> Result<()> {
+        Ok(())
+    }
 }

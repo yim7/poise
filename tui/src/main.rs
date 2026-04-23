@@ -844,7 +844,7 @@ mod tests {
             execution: crate::protocol::ExecutionBadgeView {
                 state: detail.execution.state,
                 execution_status: detail.execution.execution_status,
-                active_slot_count: detail.execution.active_slot_count,
+                active_binding_count: detail.execution.active_binding_count,
             },
             ledger: TrackListLedgerView {
                 total_pnl: detail.ledger.total_pnl,

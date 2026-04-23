@@ -676,7 +676,7 @@ shape_family = "concave"
     }
 
     #[test]
-    fn budget_uses_explicit_risk_limits_when_configured() {
+    fn track_definition_uses_flat_max_notional_and_loss_limits_when_configured() {
         let config = parse_config(
             r#"
 [exchange]
@@ -697,14 +697,13 @@ total_loss_limit = 500.0
         )
         .unwrap();
 
-        let budget = ConfiguredTrackDefinition::try_from_input(
+        let definition = ConfiguredTrackDefinition::try_from_input(
             config.tracks[0].to_configured_input(config.exchange.venue()),
         )
-        .unwrap()
-        .budget();
-        assert!((budget.max_notional - 5000.0).abs() < f64::EPSILON);
-        assert!((budget.daily_loss_limit - 200.0).abs() < f64::EPSILON);
-        assert!((budget.total_loss_limit - 500.0).abs() < f64::EPSILON);
+        .unwrap();
+        assert!((definition.max_notional() - 5000.0).abs() < f64::EPSILON);
+        assert!((definition.loss_limits().daily_loss_limit - 200.0).abs() < f64::EPSILON);
+        assert!((definition.loss_limits().total_loss_limit - 500.0).abs() < f64::EPSILON);
     }
 
     #[test]

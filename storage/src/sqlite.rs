@@ -7,7 +7,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use poise_application::{
     self as app, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
     PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore,
-    TrackMutationStore, TrackQueryStore,
+    TrackMutationStore, TrackPersistentState, TrackQueryStore,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -328,12 +328,6 @@ impl SqliteStorage {
             .context("failed to serialize runtime state")?;
         let executor_state_json = serde_json::to_string(&state.executor_state)
             .context("failed to serialize executor state")?;
-        let replacement_gate_reason_json = state
-            .replacement_gate_reason
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .context("failed to serialize replacement gate reason")?;
         let execution_gate_state_json = serde_json::to_string(&state.execution_gate_state)
             .context("failed to serialize execution gate state")?;
         let ledger_state = state.ledger_state.clone();
@@ -343,11 +337,15 @@ impl SqliteStorage {
             .observed
             .out_of_band_since
             .map(|value| value.to_rfc3339());
-        let last_tick_at: Option<String> = None;
+        let last_tick_at = state.observed.last_tick_at.map(|value| value.to_rfc3339());
         let market_data_stale_since = state
             .observed
             .market_data_stale_since
             .map(|value| value.to_rfc3339());
+        let strategy_price_status = serde_json::to_string(&state.observed.strategy_price_status)
+            .context("failed to serialize strategy price status")?
+            .trim_matches('"')
+            .to_string();
         let updated_at = Utc::now();
         let updated_at_text = updated_at.to_rfc3339();
         let batch_nonce = updated_at
@@ -367,7 +365,6 @@ impl SqliteStorage {
                 current_exposure,
                 desired_exposure,
                 executor_state_json,
-                replacement_gate_reason_json,
                 execution_gate_state_json,
                 ledger_state_json,
                 unrealized_pnl,
@@ -380,7 +377,7 @@ impl SqliteStorage {
                 last_tick_at,
                 market_data_stale_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 id,
                 state.restore_revision.as_str(),
@@ -388,15 +385,14 @@ impl SqliteStorage {
                 state.current_exposure.0,
                 state.desired_exposure.as_ref().map(|exposure| exposure.0),
                 executor_state_json,
-                replacement_gate_reason_json,
                 execution_gate_state_json,
                 ledger_state_json,
                 state.risk.unrealized_pnl,
-                Option::<f64>::None,
-                "stale",
-                Option::<f64>::None,
-                Option::<f64>::None,
-                Option::<f64>::None,
+                state.observed.strategy_price,
+                strategy_price_status,
+                state.observed.mark_price,
+                state.observed.best_bid,
+                state.observed.best_ask,
                 out_of_band_since,
                 last_tick_at,
                 market_data_stale_since,
@@ -520,7 +516,7 @@ impl SqliteStorage {
             .query_row(
                 "SELECT track_id, runtime_state_json, current_exposure, desired_exposure,
                         restore_revision,
-                        executor_state_json, replacement_gate_reason_json, execution_gate_state_json, ledger_state_json,
+                        executor_state_json, execution_gate_state_json, ledger_state_json,
                         unrealized_pnl, strategy_price, strategy_price_status, mark_price, best_bid, best_ask,
                         out_of_band_since, last_tick_at, market_data_stale_since
                  FROM track_snapshots
@@ -543,7 +539,7 @@ impl SqliteStorage {
             .query_row(
                 "SELECT track_id, runtime_state_json, current_exposure, desired_exposure,
                         restore_revision,
-                        executor_state_json, replacement_gate_reason_json, execution_gate_state_json, ledger_state_json,
+                        executor_state_json, execution_gate_state_json, ledger_state_json,
                         unrealized_pnl, strategy_price, strategy_price_status, mark_price, best_bid, best_ask,
                         out_of_band_since, last_tick_at, market_data_stale_since, updated_at
                  FROM track_snapshots
@@ -565,18 +561,17 @@ impl SqliteStorage {
             desired_exposure: row.get(3)?,
             restore_revision: row.get(4)?,
             executor_state_json: row.get(5)?,
-            replacement_gate_reason_json: row.get(6)?,
-            execution_gate_state_json: row.get(7)?,
-            ledger_state_json: row.get(8)?,
-            unrealized_pnl: row.get(9)?,
-            strategy_price: row.get(10)?,
-            strategy_price_status: row.get(11)?,
-            mark_price: row.get(12)?,
-            best_bid: row.get(13)?,
-            best_ask: row.get(14)?,
-            out_of_band_since: row.get(15)?,
-            last_tick_at: row.get(16)?,
-            market_data_stale_since: row.get(17)?,
+            execution_gate_state_json: row.get(6)?,
+            ledger_state_json: row.get(7)?,
+            unrealized_pnl: row.get(8)?,
+            strategy_price: row.get(9)?,
+            strategy_price_status: row.get(10)?,
+            mark_price: row.get(11)?,
+            best_bid: row.get(12)?,
+            best_ask: row.get(13)?,
+            out_of_band_since: row.get(14)?,
+            last_tick_at: row.get(15)?,
+            market_data_stale_since: row.get(16)?,
         })
         .map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(
@@ -595,11 +590,11 @@ impl SqliteStorage {
     fn stored_track_snapshot_from_row(
         row: &rusqlite::Row<'_>,
     ) -> rusqlite::Result<StoredTrackSnapshot> {
-        let updated_at: String = row.get(18)?;
+        let updated_at: String = row.get(17)?;
 
         Ok(StoredTrackSnapshot {
             snapshot: Self::track_snapshot_from_row(row)?,
-            updated_at: Self::deserialize_timestamp(&updated_at, 18)?,
+            updated_at: Self::deserialize_timestamp(&updated_at, 17)?,
         })
     }
 
@@ -611,7 +606,7 @@ impl SqliteStorage {
             .prepare(
                 "SELECT track_id, runtime_state_json, current_exposure, desired_exposure,
                         restore_revision,
-                        executor_state_json, replacement_gate_reason_json, execution_gate_state_json, ledger_state_json,
+                        executor_state_json, execution_gate_state_json, ledger_state_json,
                         unrealized_pnl, strategy_price, strategy_price_status, mark_price, best_bid, best_ask,
                         out_of_band_since, last_tick_at, market_data_stale_since, updated_at
                  FROM track_snapshots
@@ -801,6 +796,33 @@ impl SqliteStorage {
             .collect())
     }
 
+    fn list_all_pending_effects_for_track_blocking(
+        conn: Arc<Mutex<Connection>>,
+        track_id: TrackId,
+    ) -> Result<Vec<PersistedTrackEffect>> {
+        let conn = Self::lock_connection(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT effect_id, track_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
+                 FROM track_effects
+                 WHERE track_id = ?1
+                   AND status = ?2
+                 ORDER BY created_at ASC, batch_id ASC, sequence ASC, effect_id ASC",
+            )
+            .context("failed to prepare track-scoped all pending effect query")?;
+
+        let effects = stmt
+            .query_map(
+                params![track_id.as_str(), EffectStatus::Pending.as_str()],
+                Self::persisted_effect_from_row,
+            )
+            .context("failed to query track-scoped all pending effects")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to deserialize track-scoped all pending effects")?;
+
+        Ok(effects)
+    }
+
     fn list_all_pending_submit_effects_blocking(
         conn: Arc<Mutex<Connection>>,
     ) -> Result<Vec<PersistedTrackEffect>> {
@@ -935,6 +957,69 @@ impl SqliteStorage {
         .context("failed to delete follow-up retirement request")?;
         Ok(())
     }
+
+    fn save_track_persistent_state_blocking(
+        conn: Arc<Mutex<Connection>>,
+        state: TrackPersistentState,
+    ) -> Result<()> {
+        let control_state_json = serde_json::to_string(&state.control_state)
+            .context("failed to serialize track control state")?;
+        let ledger_state_json = serde_json::to_string(&state.ledger_state)
+            .context("failed to serialize track ledger state")?;
+        let updated_at = Utc::now().to_rfc3339();
+        let conn = Self::lock_connection(&conn)?;
+
+        conn.execute(
+            "INSERT INTO track_persistent_state (
+                track_id,
+                control_state_json,
+                ledger_state_json,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(track_id) DO UPDATE SET
+                control_state_json = excluded.control_state_json,
+                ledger_state_json = excluded.ledger_state_json,
+                updated_at = excluded.updated_at",
+            params![
+                state.track_id.as_str(),
+                control_state_json,
+                ledger_state_json,
+                updated_at
+            ],
+        )
+        .context("failed to save track persistent state")?;
+        Ok(())
+    }
+
+    fn load_track_persistent_state_blocking(
+        conn: Arc<Mutex<Connection>>,
+        track_id: TrackId,
+    ) -> Result<Option<TrackPersistentState>> {
+        let conn = Self::lock_connection(&conn)?;
+        let row = conn
+            .query_row(
+                "SELECT control_state_json, ledger_state_json
+                 FROM track_persistent_state
+                 WHERE track_id = ?1",
+                params![track_id.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .context("failed to load track persistent state")?;
+
+        row.map(|(control_state_json, ledger_state_json)| {
+            let control_state = serde_json::from_str(&control_state_json)
+                .context("failed to deserialize track control state")?;
+            let ledger_state = serde_json::from_str(&ledger_state_json)
+                .context("failed to deserialize track ledger state")?;
+            Ok(TrackPersistentState {
+                track_id,
+                control_state,
+                ledger_state,
+            })
+        })
+        .transpose()
+    }
 }
 
 #[async_trait]
@@ -984,6 +1069,17 @@ impl TrackMutationStore for SqliteStorage {
             .await
             .context("failed to join list_events blocking task")?
     }
+
+    async fn save_track_persistent_state(&self, state: &TrackPersistentState) -> Result<()> {
+        let conn = Arc::clone(&self.conn);
+        let state = state.clone();
+
+        tokio::task::spawn_blocking(move || {
+            Self::save_track_persistent_state_blocking(conn, state)
+        })
+        .await
+        .context("failed to join save_track_persistent_state blocking task")?
+    }
 }
 
 #[async_trait]
@@ -1002,6 +1098,20 @@ impl TrackEffectStore for SqliteStorage {
         tokio::task::spawn_blocking(move || Self::list_all_pending_submit_effects_blocking(conn))
             .await
             .context("failed to join list_all_pending_submit_effects blocking task")?
+    }
+
+    async fn list_all_pending_effects_for_track(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Vec<PersistedTrackEffect>> {
+        let conn = Arc::clone(&self.conn);
+        let track_id = track_id.clone();
+
+        tokio::task::spawn_blocking(move || {
+            Self::list_all_pending_effects_for_track_blocking(conn, track_id)
+        })
+        .await
+        .context("failed to join list_all_pending_effects_for_track blocking task")?
     }
 
     async fn list_pending_submit_effects_for_track(
@@ -1129,6 +1239,20 @@ impl TrackQueryStore for SqliteStorage {
         .await
         .context("failed to join list_recent_track_effects blocking task")?
     }
+
+    async fn load_track_persistent_state(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Option<TrackPersistentState>> {
+        let conn = Arc::clone(&self.conn);
+        let track_id = track_id.clone();
+
+        tokio::task::spawn_blocking(move || {
+            Self::load_track_persistent_state_blocking(conn, track_id)
+        })
+        .await
+        .context("failed to join load_track_persistent_state blocking task")?
+    }
 }
 
 #[async_trait]
@@ -1194,14 +1318,12 @@ mod tests {
         BandProtectionPolicy, DEFAULT_MIN_REBALANCE_UNITS, ShapeFamily, TrackConfig,
     };
     use poise_core::types::{Exposure, Side};
-    use poise_engine::executor::{ExecutionMode, ExecutionReason, OrderRole, OrderSlot};
+    use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
     use poise_engine::persisted_runtime::TrackRestoreRevision;
-    use poise_engine::ports::{OrderRequest, OrderStatus};
+    use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::{
-        AutoState, ControlState, ExecutionRound, ExecutionSlot, ExecutionStats,
-        ExecutorDiagnostics, ExecutorState, RiskState, SlotState, TrackState, TrackStatus,
-        WorkingOrder,
+        AutoState, ControlState, ExecutorState, RiskState, TrackState, TrackStatus,
     };
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
@@ -1235,10 +1357,9 @@ mod tests {
             runtime_state: TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)),
             current_exposure: Exposure(4.0),
             desired_exposure: Some(Exposure(6.0)),
-            replacement_gate_reason: None,
             execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
             ledger_state: TrackLedgerState {
-                realized_pnl_day: Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()),
+                ledger_utc_day: NaiveDate::from_ymd_opt(2026, 3, 24).unwrap(),
                 gross_realized_pnl_today: 12.5,
                 gross_realized_pnl_cumulative: 17.5,
                 trading_fee_today: 1.2,
@@ -1270,52 +1391,11 @@ mod tests {
                 unrealized_pnl: -3.0,
                 ..RiskState::default()
             },
-            executor_state: ExecutorState {
-                active_round: Some(ExecutionRound {
-                    desired_exposure: Exposure(6.0),
-                    mode: ExecutionMode::Passive,
-                    started_at: DateTime::parse_from_rfc3339("2026-03-24T07:30:00+00:00")
-                        .unwrap()
-                        .with_timezone(&Utc),
-                }),
-                diagnostics: ExecutorDiagnostics {
-                    mode: ExecutionMode::Passive,
-                    inventory_gap: Exposure(2.0),
-                    gap_started_at: Some(
-                        DateTime::parse_from_rfc3339("2026-03-24T07:31:00+00:00")
-                            .unwrap()
-                            .with_timezone(&Utc),
-                    ),
-                    last_reprice_at: Some(
-                        DateTime::parse_from_rfc3339("2026-03-24T07:32:00+00:00")
-                            .unwrap()
-                            .with_timezone(&Utc),
-                    ),
-                    last_execution_reason: Some(ExecutionReason::GapEnteredPassive),
-                    recovery_anomaly: None,
-                },
-                slots: vec![ExecutionSlot {
-                    slot: OrderSlot::new("passive_buy_1"),
-                    state: SlotState::Working,
-                    working_order: Some(WorkingOrder {
-                        order_id: Some("order-1".into()),
-                        client_order_id: "client-1".into(),
-                        side: Side::Buy,
-                        price: 94.5,
-                        quantity: 0.25,
-                        status: OrderStatus::New,
-                        role: OrderRole::IncreaseInventory,
-                    }),
-                }],
-                recent_terminal_orders: Vec::new(),
-                stats: ExecutionStats {
-                    started_at: DateTime::parse_from_rfc3339("2026-03-24T07:30:00+00:00")
-                        .unwrap()
-                        .with_timezone(&Utc),
-                    max_inventory_gap_abs: Exposure(3.5),
-                    max_gap_age_ms: 42_000,
-                },
-            },
+            executor_state: ExecutorState::empty(
+                DateTime::parse_from_rfc3339("2026-03-24T07:30:00+00:00")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
             observed: ObservedState {
                 strategy_price: Some(95.0),
                 strategy_price_status: poise_engine::runtime::StrategyPriceStatus::Live,
@@ -1420,6 +1500,7 @@ mod tests {
             request: test_order_request(),
             desired_exposure: Exposure(6.0),
             submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+            recovery_token: SubmitRecoveryToken::empty(),
         };
 
         let first_btc = storage
@@ -1489,6 +1570,7 @@ mod tests {
                     request: test_order_request(),
                     desired_exposure: Exposure(6.0),
                     submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                    recovery_token: SubmitRecoveryToken::empty(),
                 }],
             )
             .await
@@ -1576,6 +1658,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn track_persistent_state_round_trips_outside_runtime_snapshot() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let expected = TrackPersistentState {
+            track_id: TrackId::new("btc-core"),
+            control_state: app::TrackControlState::Paused {
+                resume_mode: app::PersistedControlMode::ManualFlatten,
+            },
+            ledger_state: TrackLedgerState {
+                ledger_utc_day: NaiveDate::from_ymd_opt(2026, 4, 23).unwrap(),
+                gross_realized_pnl_today: 12.0,
+                gross_realized_pnl_cumulative: 120.0,
+                trading_fee_today: 1.0,
+                trading_fee_cumulative: 10.0,
+                funding_fee_today: -0.5,
+                funding_fee_cumulative: -2.0,
+                unresolved_gaps: vec![],
+            },
+        };
+
+        TrackMutationStore::save_track_persistent_state(&storage, &expected)
+            .await
+            .unwrap();
+        let actual =
+            TrackQueryStore::load_track_persistent_state(&storage, &TrackId::new("btc-core"))
+                .await
+                .unwrap();
+
+        assert_eq!(actual, Some(expected));
+    }
+
+    #[tokio::test]
     async fn rejects_partial_account_monitor_snapshot_rows() {
         let storage = SqliteStorage::in_memory().unwrap();
         {
@@ -1654,8 +1767,8 @@ mod tests {
         assert!((loaded.current_exposure.0 - 4.0).abs() < f64::EPSILON);
         assert_eq!(loaded.desired_exposure, Some(Exposure(6.0)));
         assert_eq!(
-            loaded.ledger_state.realized_pnl_day,
-            Some(NaiveDate::from_ymd_opt(2026, 3, 24).unwrap())
+            loaded.ledger_state.ledger_utc_day,
+            NaiveDate::from_ymd_opt(2026, 3, 24).unwrap()
         );
         assert!((loaded.ledger_state.gross_realized_pnl_today - 12.5).abs() < f64::EPSILON);
         assert!((loaded.risk.unrealized_pnl + 3.0).abs() < f64::EPSILON);
@@ -1839,10 +1952,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(loaded.executor_state, snapshot.executor_state);
-        assert_eq!(
-            loaded.executor_state.stats.started_at,
-            snapshot.executor_state.stats.started_at
-        );
     }
 
     #[tokio::test]
@@ -1870,6 +1979,7 @@ mod tests {
             request: test_order_request(),
             desired_exposure: Exposure(6.0),
             submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+            recovery_token: SubmitRecoveryToken::empty(),
         }];
 
         let persisted = storage
@@ -1900,6 +2010,7 @@ mod tests {
             request: test_order_request(),
             desired_exposure: Exposure(6.0),
             submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+            recovery_token: SubmitRecoveryToken::empty(),
         }];
 
         let persisted = storage
@@ -1954,6 +2065,7 @@ mod tests {
                 request: test_order_request(),
                 desired_exposure: Exposure(6.0),
                 submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                recovery_token: SubmitRecoveryToken::empty(),
             },
         ];
 
@@ -1990,6 +2102,7 @@ mod tests {
                 request: test_order_request(),
                 desired_exposure: Exposure(6.0),
                 submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                recovery_token: SubmitRecoveryToken::empty(),
             },
         ];
 
@@ -2022,6 +2135,7 @@ mod tests {
                 request: test_order_request(),
                 desired_exposure: Exposure(6.0),
                 submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                recovery_token: SubmitRecoveryToken::empty(),
             },
         ];
 
@@ -2060,12 +2174,14 @@ mod tests {
                 request: test_order_request_for_symbol("BTCUSDT"),
                 desired_exposure: Exposure(6.0),
                 submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                recovery_token: SubmitRecoveryToken::empty(),
             },
         ];
         let eth_effects = vec![TrackEffect::SubmitOrder {
             request: test_order_request_for_symbol("ETHUSDT"),
             desired_exposure: Exposure(3.0),
             submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+            recovery_token: SubmitRecoveryToken::empty(),
         }];
 
         let btc_persisted = storage
@@ -2116,6 +2232,7 @@ mod tests {
                 request: test_order_request_for_symbol("BTCUSDT"),
                 desired_exposure: Exposure(6.0),
                 submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                recovery_token: SubmitRecoveryToken::empty(),
             },
         ];
 
@@ -2132,6 +2249,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_all_pending_effects_for_track_returns_all_pending_effects() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let btc_snapshot = test_snapshot_for("btc-core", "BTCUSDT");
+        let eth_snapshot = test_snapshot_for("eth-core", "ETHUSDT");
+        let btc_effects = vec![
+            TrackEffect::CancelAll {
+                instrument: test_instrument("BTCUSDT"),
+            },
+            TrackEffect::SubmitOrder {
+                request: test_order_request_for_symbol("BTCUSDT"),
+                desired_exposure: Exposure(6.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                recovery_token: SubmitRecoveryToken::empty(),
+            },
+        ];
+        let eth_effects = vec![TrackEffect::SubmitOrder {
+            request: test_order_request_for_symbol("ETHUSDT"),
+            desired_exposure: Exposure(3.0),
+            submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+            recovery_token: SubmitRecoveryToken::empty(),
+        }];
+
+        let btc_persisted = storage
+            .save_transition("btc-core", &btc_snapshot, &[], &btc_effects)
+            .await
+            .unwrap();
+        storage
+            .save_transition("eth-core", &eth_snapshot, &[], &eth_effects)
+            .await
+            .unwrap();
+
+        let pending = storage
+            .list_all_pending_effects_for_track(&TrackId::new("btc-core"))
+            .await
+            .unwrap();
+
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].effect_id, btc_persisted.effects[0].effect_id);
+        assert_eq!(pending[1].effect_id, btc_persisted.effects[1].effect_id);
+        assert!(pending.iter().all(|effect| effect.track_id.as_str() == "btc-core"));
+    }
+
+    #[tokio::test]
     async fn list_pending_submit_effects_for_track_batch_returns_same_batch_submit_without_ready_filter()
      {
         let storage = SqliteStorage::in_memory().unwrap();
@@ -2145,6 +2305,7 @@ mod tests {
                 request: test_order_request_for_symbol("BTCUSDT"),
                 desired_exposure: Exposure(4.0),
                 submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                recovery_token: SubmitRecoveryToken::empty(),
             },
         ];
         let unrelated_effects = vec![TrackEffect::SubmitOrder {
@@ -2154,6 +2315,7 @@ mod tests {
             },
             desired_exposure: Exposure(2.0),
             submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+            recovery_token: SubmitRecoveryToken::empty(),
         }];
 
         let replacement_persisted = storage
@@ -2494,7 +2656,6 @@ mod tests {
                 current_exposure REAL NOT NULL,
                 desired_exposure REAL,
                 executor_state_json TEXT,
-                replacement_gate_reason_json TEXT,
                 execution_gate_state_json TEXT,
                 ledger_state_json TEXT,
                 unrealized_pnl REAL NOT NULL DEFAULT 0,
@@ -2518,7 +2679,6 @@ mod tests {
                 current_exposure,
                 desired_exposure,
                 executor_state_json,
-                replacement_gate_reason_json,
                 execution_gate_state_json,
                 ledger_state_json,
                 unrealized_pnl,
@@ -2531,7 +2691,7 @@ mod tests {
                 last_tick_at,
                 market_data_stale_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, ?6, ?7, 0, ?8, ?9, NULL, NULL, NULL, NULL, NULL, NULL, ?10)",
+            ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, 0, ?8, ?9, NULL, NULL, NULL, NULL, NULL, NULL, ?10)",
             params![
                 "test-1",
                 TrackRestoreRevision::for_track(&test_instrument("BTCUSDT"), &test_track_config())
@@ -2576,7 +2736,6 @@ mod tests {
                 desired_exposure REAL,
                 manual_target_override REAL,
                 executor_state_json TEXT,
-                replacement_gate_reason_json TEXT,
                 ledger_state_json TEXT,
                 unrealized_pnl REAL NOT NULL DEFAULT 0,
                 reference_price REAL,
@@ -2596,7 +2755,6 @@ mod tests {
                 desired_exposure,
                 manual_target_override,
                 executor_state_json,
-                replacement_gate_reason_json,
                 ledger_state_json,
                 unrealized_pnl,
                 reference_price,
@@ -2604,7 +2762,7 @@ mod tests {
                 last_tick_at,
                 market_data_stale_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, ?6, 0, ?7, NULL, NULL, NULL, ?8)",
+            ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, 0, ?7, NULL, NULL, NULL, ?8)",
             params![
                 "test-1",
                 TrackRestoreRevision::for_track(&test_instrument("BTCUSDT"), &test_track_config())
@@ -2626,7 +2784,11 @@ mod tests {
             Ok(_) => panic!("legacy reference_price schema should be rejected"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("runtime_state_json"));
+        let message = error.to_string();
+        assert!(
+            message.contains("failed to initialize sqlite schema"),
+            "unexpected schema rejection error: {message}"
+        );
     }
 
     #[tokio::test]
@@ -2641,7 +2803,6 @@ mod tests {
                 desired_exposure REAL,
                 manual_target_override REAL,
                 executor_state_json TEXT,
-                replacement_gate_reason_json TEXT,
                 price_execution_block_reason TEXT,
                 ledger_state_json TEXT,
                 unrealized_pnl REAL NOT NULL DEFAULT 0,
@@ -2665,7 +2826,6 @@ mod tests {
                 desired_exposure,
                 manual_target_override,
                 executor_state_json,
-                replacement_gate_reason_json,
                 price_execution_block_reason,
                 ledger_state_json,
                 unrealized_pnl,
@@ -2677,7 +2837,7 @@ mod tests {
                 last_tick_at,
                 market_data_stale_since,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, ?6, ?7, 0, ?8, ?9, NULL, NULL, NULL, NULL, NULL, ?10)",
+            ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, 0, ?8, ?9, NULL, NULL, NULL, NULL, NULL, ?10)",
             params![
                 "test-1",
                 TrackRestoreRevision::for_track(&test_instrument("BTCUSDT"), &test_track_config())
@@ -2701,7 +2861,11 @@ mod tests {
             Ok(_) => panic!("legacy price_execution_block_reason schema should be rejected"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("runtime_state_json"));
+        let message = error.to_string();
+        assert!(
+            message.contains("failed to initialize sqlite schema"),
+            "unexpected schema rejection error: {message}"
+        );
     }
 
     #[tokio::test]

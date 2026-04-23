@@ -19,6 +19,12 @@ impl TryFrom<BinanceOrderResponse> for OrderReceipt {
         Ok(Self {
             order_id: value.order_id.to_string(),
             client_order_id: value.client_order_id,
+            filled_qty: value
+                .executed_qty
+                .as_deref()
+                .map(|qty| parse_decimal("executedQty", qty))
+                .transpose()?
+                .unwrap_or(0.0),
             status: parse_order_status(&value.status)?,
         })
     }
@@ -70,6 +76,12 @@ impl TryFrom<BinanceOpenOrder> for ExchangeOrder {
             side: parse_side(&value.side)?,
             price: parse_decimal("price", &value.price)?,
             qty: parse_decimal("origQty", &value.orig_qty)?,
+            filled_qty: value
+                .executed_qty
+                .as_deref()
+                .map(|qty| parse_decimal("executedQty", qty))
+                .transpose()?
+                .unwrap_or(0.0),
             realized_pnl: 0.0,
             status: parse_order_status(&value.status)?,
         })
@@ -176,6 +188,7 @@ mod tests {
             OrderReceipt {
                 order_id: "20072994037".to_string(),
                 client_order_id: "grid-order-001".to_string(),
+                filled_qty: 0.0,
                 status: OrderStatus::New,
             }
         );
@@ -265,6 +278,7 @@ mod tests {
             "side": "SELL",
             "price": "65123.4",
             "origQty": "0.010",
+            "executedQty": "0.004",
             "status": "PARTIALLY_FILLED"
         }
         "#;
@@ -281,6 +295,7 @@ mod tests {
                 side: Side::Sell,
                 price: 65123.4,
                 qty: 0.01,
+                filled_qty: 0.004,
                 realized_pnl: 0.0,
                 status: OrderStatus::PartiallyFilled,
             }

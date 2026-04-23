@@ -61,6 +61,8 @@ pub struct OrderRequest {
 pub struct OrderReceipt {
     pub order_id: String,
     pub client_order_id: String,
+    #[serde(default)]
+    pub filled_qty: f64,
     pub status: OrderStatus,
 }
 
@@ -80,6 +82,8 @@ pub struct ExchangeOrder {
     pub side: Side,
     pub price: f64,
     pub qty: f64,
+    #[serde(default)]
+    pub filled_qty: f64,
     pub realized_pnl: f64,
     pub status: OrderStatus,
 }

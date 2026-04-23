@@ -5,6 +5,7 @@ use poise_application::PersistedTrackEffect;
 use poise_application::submit_effect_service::{
     SubmitAttempt, SubmitAttemptResult, SubmitDispatch, SubmitEffectService,
 };
+use poise_engine::executor::SubmitRecoveryToken;
 use poise_engine::ports::{ExecutionPort, OrderReceipt, OrderRequest};
 
 use crate::submit_preflight::{SubmitPreflight, SubmitPreflightDecision};
@@ -33,7 +34,7 @@ impl SubmitCoordinator {
         &self,
         persisted: &PersistedTrackEffect,
         request: OrderRequest,
-        desired_exposure: poise_core::types::Exposure,
+        recovery_token: SubmitRecoveryToken,
     ) -> Result<Option<SubmitFlight>> {
         let preflight_decision = self
             .submit_preflight
@@ -56,8 +57,7 @@ impl SubmitCoordinator {
             .recover_or_dispatch(
                 persisted.track_id.as_str(),
                 &persisted.effect_id,
-                request,
-                desired_exposure,
+                recovery_token,
                 live_order.as_ref(),
             )
             .await?;

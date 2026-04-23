@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::executor::binding::SubmitRecoveryToken;
 use poise_core::events::DomainEvent;
 use poise_core::types::{ExchangeRules, Exposure};
 
@@ -19,6 +20,7 @@ pub enum ExecutionAction {
         request: OrderRequest,
         desired_exposure: Exposure,
         submit_purpose: SubmitPurpose,
+        recovery_token: SubmitRecoveryToken,
     },
     CancelOrder {
         instrument: Instrument,

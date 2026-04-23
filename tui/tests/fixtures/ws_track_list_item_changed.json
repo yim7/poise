@@ -20,7 +20,7 @@
     "execution": {
       "state": "open",
       "execution_status": "normal",
-      "active_slot_count": 0
+      "active_binding_count": 0
     },
     "ledger": {
       "total_pnl": 1229.0,

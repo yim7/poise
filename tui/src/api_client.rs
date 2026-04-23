@@ -331,7 +331,6 @@ mod tests {
         assert!((detail.ledger.net_realized_pnl - 963.8).abs() < 1e-9);
         assert!((detail.ledger.total_pnl - 1229.0).abs() < 1e-9);
         assert!((detail.ledger.unrealized_pnl - 265.2).abs() < f64::EPSILON);
-        assert!((detail.execution_stats.max_inventory_gap_abs - 1.5).abs() < f64::EPSILON);
         assert_eq!(
             detail.available_commands[0].command,
             TrackCommandType::Pause

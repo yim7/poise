@@ -6,9 +6,8 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::app::App;
 use crate::exposure_presentation::instance_exposure_annotation;
 use crate::protocol::{
-    ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
-    ExecutionStatusView, ReplacementGateView, TrackCommandType, TrackCommandView,
-    TrackExecutionView,
+    ActivityLevelView, ExecutionBindingIntentView, ExecutionBindingStatusView, ExecutionStateView,
+    ExecutionStatusView, TrackCommandType, TrackCommandView, TrackExecutionView,
 };
 use crate::signal::{exposure_signal, pnl_signal};
 use crate::theme::Theme;
@@ -34,15 +33,6 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let pnl = Paragraph::new(pnl_lines(detail))
             .block(Block::default().title("PnL").borders(Borders::ALL));
         frame.render_widget(pnl, pnl_area);
-    }
-
-    if let Some(execution_stats_area) = sections.execution_stats {
-        let execution_stats = Paragraph::new(execution_stats_lines(detail, sections.mode)).block(
-            Block::default()
-                .title("Execution Stats")
-                .borders(Borders::ALL),
-        );
-        frame.render_widget(execution_stats, execution_stats_area);
     }
 
     let market = Paragraph::new(market_lines(detail, sections.mode))
@@ -85,21 +75,19 @@ fn track_lines(
         ExecutionStatusView::AttentionRequired
     ) {
         let reason_summary = attention_summary(&detail.execution.attention_reasons);
-        let slot_count = format_slot_count(detail.execution.active_slot_count);
+        let binding_count = format_binding_count(detail.execution.active_binding_count);
         lines.push(Line::from(Span::styled(
             format!(
-                "{lifecycle} | {execution_state} | ATTENTION REQUIRED | {reason_summary} | gap {:.4} | age {} ms | {slot_count}",
+                "{lifecycle} | {execution_state} | ATTENTION REQUIRED | {reason_summary} | gap {:.4} | {binding_count}",
                 detail.execution.inventory_gap,
-                detail.execution.gap_age_ms,
             ),
             Theme::execution_attention(),
         )));
     } else {
         lines.push(Line::from(format!(
-            "{lifecycle} | {execution_state} | gap {:.4} | age {} ms | {}",
+            "{lifecycle} | {execution_state} | gap {:.4} | {}",
             detail.execution.inventory_gap,
-            detail.execution.gap_age_ms,
-            format_slot_count(detail.execution.active_slot_count)
+            format_binding_count(detail.execution.active_binding_count)
         )));
     }
 
@@ -133,7 +121,7 @@ fn minimal_track_line(detail: &crate::protocol::TrackDetailView) -> Line<'static
             format!(
                 "{lifecycle} | {execution_state} | ATTENTION | gap {:.4} | {}",
                 detail.execution.inventory_gap,
-                format_slot_count(detail.execution.active_slot_count)
+                format_binding_count(detail.execution.active_binding_count)
             ),
             Theme::execution_attention(),
         ))
@@ -141,7 +129,7 @@ fn minimal_track_line(detail: &crate::protocol::TrackDetailView) -> Line<'static
         Line::from(format!(
             "{lifecycle} | {execution_state} | gap {:.4} | {}",
             detail.execution.inventory_gap,
-            format_slot_count(detail.execution.active_slot_count)
+            format_binding_count(detail.execution.active_binding_count)
         ))
     }
 }
@@ -240,30 +228,6 @@ fn pnl_lines(detail: &crate::protocol::TrackDetailView) -> Vec<Line<'static>> {
         ),
         format_ledger_gap_line(&detail.ledger.unresolved_gaps),
     ]
-}
-
-fn execution_stats_lines(
-    detail: &crate::protocol::TrackDetailView,
-    mode: DetailLayoutMode,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(format!(
-        "max gap {:.4} | age {} ms",
-        detail.execution_stats.max_inventory_gap_abs, detail.execution_stats.max_gap_age_ms
-    ))];
-
-    if matches!(mode, DetailLayoutMode::Standard) {
-        lines.push(Line::from(format!(
-            "execution stats since: {}",
-            detail
-                .execution_stats
-                .stats_started_at
-                .as_deref()
-                .map(format_local_timestamp_for_display)
-                .unwrap_or_else(|| "-".to_string())
-        )));
-    }
-
-    lines
 }
 
 fn render_trace(
@@ -373,18 +337,14 @@ fn attention_summary(attention_reasons: &[String]) -> String {
 }
 
 fn execution_lines(execution: &TrackExecutionView, mode: DetailLayoutMode) -> Vec<Line<'static>> {
-    let slot_details = execution
-        .slots
+    let binding_details = execution
+        .bindings
         .iter()
-        .map(format_slot_detail)
+        .map(format_binding_detail)
         .collect::<Vec<_>>();
-    let replacement_gate = execution
-        .replacement_gate
-        .as_ref()
-        .map(format_replacement_gate);
 
     if matches!(mode, DetailLayoutMode::Minimal) {
-        return minimal_execution_lines(execution, &slot_details, replacement_gate.as_deref());
+        return minimal_execution_lines(execution, &binding_details);
     }
 
     let mut lines = Vec::new();
@@ -403,25 +363,23 @@ fn execution_lines(execution: &TrackExecutionView, mode: DetailLayoutMode) -> Ve
         }
     }
 
-    if lines.is_empty() && slot_details.is_empty() && replacement_gate.is_none() {
-        return vec![Line::from("no working slots")];
+    if lines.is_empty() && binding_details.is_empty() {
+        return vec![Line::from("no active bindings")];
     }
 
     if matches!(mode, DetailLayoutMode::Compact) {
-        let execution_summary =
-            format_compact_execution_summary(execution, replacement_gate.as_deref());
+        let execution_summary = format_compact_execution_summary(execution);
         if let Some(summary) = execution_summary {
             lines.push(Line::from(summary));
         }
     } else {
-        if !slot_details.is_empty() {
-            lines.push(Line::from(format!("slots: {}", slot_details.join(" | "))));
+        if !binding_details.is_empty() {
+            lines.push(Line::from(format!(
+                "bindings: {}",
+                binding_details.join(" | ")
+            )));
         } else if !lines.is_empty() {
-            lines.push(Line::from("slots: none"));
-        }
-
-        if let Some(replacement_gate) = replacement_gate {
-            lines.push(Line::from(format!("replacement gate: {replacement_gate}")));
+            lines.push(Line::from("bindings: none"));
         }
     }
 
@@ -430,8 +388,7 @@ fn execution_lines(execution: &TrackExecutionView, mode: DetailLayoutMode) -> Ve
 
 fn minimal_execution_lines(
     execution: &TrackExecutionView,
-    slot_details: &[String],
-    replacement_gate: Option<&str>,
+    binding_details: &[String],
 ) -> Vec<Line<'static>> {
     if matches!(
         execution.execution_status,
@@ -443,94 +400,75 @@ fn minimal_execution_lines(
         ))];
     }
 
-    if let Some(summary) = format_compact_execution_summary(execution, replacement_gate) {
+    if let Some(summary) = format_compact_execution_summary(execution) {
         return vec![Line::from(summary)];
     }
 
-    if slot_details.is_empty() && replacement_gate.is_none() {
-        return vec![Line::from("no working slots")];
+    if binding_details.is_empty() {
+        return vec![Line::from("no active bindings")];
     }
 
     vec![Line::from("execution detail unavailable")]
 }
 
-fn format_compact_execution_summary(
-    execution: &TrackExecutionView,
-    replacement_gate: Option<&str>,
-) -> Option<String> {
-    let slots = compact_slot_summary(execution);
+fn format_compact_execution_summary(execution: &TrackExecutionView) -> Option<String> {
+    let bindings = compact_binding_summary(execution);
 
-    match (slots.as_deref(), replacement_gate) {
-        (None, None) => None,
-        (Some(slots), None) => Some(slots.to_string()),
-        (None, Some(replacement_gate)) => Some(format!("gate: {replacement_gate}")),
-        (Some(slots), Some(replacement_gate)) => {
-            Some(format!("{slots} | gate: {replacement_gate}"))
-        }
-    }
+    bindings
 }
 
-fn compact_slot_summary(execution: &TrackExecutionView) -> Option<String> {
-    match execution.slots.as_slice() {
+fn compact_binding_summary(execution: &TrackExecutionView) -> Option<String> {
+    match execution.bindings.as_slice() {
         [] => None,
-        [slot] => Some(format!("slot: {}", compact_slot_label(slot))),
-        slots => Some(format!(
-            "slots {} | {}",
-            slots.len(),
-            compact_slot_label(&slots[0])
+        [binding] => Some(format!("binding: {}", compact_binding_label(binding))),
+        bindings => Some(format!(
+            "bindings {} | {}",
+            bindings.len(),
+            compact_binding_label(&bindings[0])
         )),
     }
 }
 
-fn format_slot_count(count: u32) -> String {
-    format!("slots {count}")
+fn format_binding_count(count: u32) -> String {
+    format!("bindings {count}")
 }
 
-fn format_slot_detail(slot: &poise_protocol::ExecutionSlotView) -> String {
-    let order = slot
+fn format_binding_detail(binding: &poise_protocol::ExecutionBindingView) -> String {
+    let order = binding
         .order
         .as_ref()
         .map(|order| format!("{} {:.4} @ {:.4}", order.side, order.quantity, order.price))
         .unwrap_or_else(|| "no order".to_string());
     format!(
         "{} {} {} {}",
-        slot.label,
-        format_slot_phase(slot.phase),
-        format_slot_intent(slot.intent),
+        binding.label,
+        format_binding_status(binding.status),
+        format_binding_intent(binding.intent),
         order
     )
 }
 
-fn compact_slot_label(slot: &poise_protocol::ExecutionSlotView) -> String {
-    let order = slot
+fn compact_binding_label(binding: &poise_protocol::ExecutionBindingView) -> String {
+    let order = binding
         .order
         .as_ref()
         .map(|order| format!("{} {:.4} @ {:.4}", order.side, order.quantity, order.price))
         .unwrap_or_else(|| "no order".to_string());
-    format!("{} {order}", slot.label)
+    format!("{} {order}", binding.label)
 }
 
-fn format_slot_phase(value: ExecutionSlotPhaseView) -> &'static str {
+fn format_binding_status(value: ExecutionBindingStatusView) -> &'static str {
     match value {
-        ExecutionSlotPhaseView::Opening => "opening",
-        ExecutionSlotPhaseView::Working => "working",
+        ExecutionBindingStatusView::SubmitPending => "submit_pending",
+        ExecutionBindingStatusView::Working => "working",
+        ExecutionBindingStatusView::CancelPending => "cancel_pending",
     }
 }
 
-fn format_slot_intent(value: ExecutionIntentView) -> &'static str {
+fn format_binding_intent(value: ExecutionBindingIntentView) -> &'static str {
     match value {
-        ExecutionIntentView::IncreaseInventory => "increase_inventory",
-        ExecutionIntentView::DecreaseInventory => "decrease_inventory",
-    }
-}
-
-fn format_replacement_gate(value: &ReplacementGateView) -> String {
-    match value {
-        ReplacementGateView::RoundedMatch => "rounded match".to_string(),
-        ReplacementGateView::ImprovementBelowThreshold {
-            improvement_bps,
-            threshold_bps,
-        } => format!("{improvement_bps:.1} bps < {threshold_bps:.1} bps"),
+        ExecutionBindingIntentView::IncreaseInventory => "increase_inventory",
+        ExecutionBindingIntentView::DecreaseInventory => "decrease_inventory",
     }
 }
 
@@ -749,7 +687,6 @@ mod tests {
 
         assert!(text.contains("Track"));
         assert!(text.contains("PnL"));
-        assert!(text.contains("Execution Stats"));
         assert!(text.contains("Market"));
         assert!(text.contains("Strategy"));
         assert!(text.contains("Execution"));
@@ -834,8 +771,7 @@ mod tests {
 
         assert!(text.contains("Track"));
         assert!(text.contains("PnL"));
-        assert!(text.contains("Execution Stats"));
-        assert!(!text.contains("Trace"));
+        assert!(text.contains("Trace"));
     }
 
     #[test]
@@ -852,7 +788,6 @@ mod tests {
         assert!(text.contains("Strategy"));
         assert!(text.contains("Execution"));
         assert!(!text.contains("Trace"));
-        assert!(!text.contains("Execution Stats"));
     }
 
     #[test]
@@ -870,20 +805,12 @@ mod tests {
             enabled: false,
             disabled_reason: Some("no position to flatten".to_string()),
         });
-        let expected_stats_started_at = format_local_timestamp_for_display(
-            detail
-                .execution_stats
-                .stats_started_at
-                .as_deref()
-                .expect("fixture should include stats started at"),
-        );
         let pnl_text = pnl_lines(&detail).iter().map(line_text).collect::<Vec<_>>();
         let text = render_text_with_size(detail, 180, 36);
 
         assert!(text.contains("Market"));
         assert!(text.contains("Strategy"));
         assert!(text.contains("PnL"));
-        assert!(text.contains("Execution Stats"));
         assert!(text.contains("Execution"));
         assert!(text.contains("Trace"));
         assert!(text.contains("Activity"));
@@ -896,18 +823,14 @@ mod tests {
         assert!(pnl_text[1].contains("fee cumulative ↓ -12.30"));
         assert!(pnl_text[1].contains("funding cumulative ↓ -4.00"));
         assert_eq!(pnl_text[2], "ledger gaps: none");
-        assert!(text.contains(&format!(
-            "execution stats since: {expected_stats_started_at}"
-        )));
         assert!(text.contains(
             "prices: strategy 101.2500 (live) | mark 101.3000 | bid 101.2000 | ask 101.4000"
         ));
         assert!(text.contains("exposure: 3.5000 → 4.0000 [↑ +0.5000]"));
         assert!(text.contains("lower/upper: 90.0000 / 110.0000"));
         assert!(text.contains("units 8.0000/8.0000 | notional 375.0000"));
-        assert!(text.contains("inventory_core opening increase_inventory buy 0.0100 @ 100.5000"));
-        assert!(text.contains("replacement gate"));
-        assert!(text.contains("9.0 bps < 13.0 bps"));
+        assert!(text.contains("maker 1 submit_pending increase_inventory buy 0.0100 @ 100.5000"));
+        assert!(!text.contains("replacement gate"));
         assert!(!text.contains("Diagnostics"));
         assert!(!text.contains("client-1"));
     }
@@ -1054,16 +977,9 @@ mod tests {
         let text = render_text(detail.clone());
         let expected_updated_at =
             format_local_timestamp_for_display(&detail.status.lifecycle.updated_at);
-        let original_stats_started_at = detail.execution_stats.stats_started_at.as_deref().unwrap();
-        let expected_stats_started_at =
-            format_local_timestamp_for_display(original_stats_started_at);
 
         assert!(text.contains(&format!("updated {expected_updated_at}")));
-        assert!(text.contains(&format!(
-            "execution stats since: {expected_stats_started_at}"
-        )));
         assert!(!text.contains(&detail.status.lifecycle.updated_at));
-        assert!(!text.contains(original_stats_started_at));
     }
 
     #[test]
@@ -1084,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_attention_summary_without_hiding_gap_and_age() {
+    fn renders_attention_summary_without_hiding_gap() {
         let mut detail: TrackDetailView =
             serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
                 .unwrap();
@@ -1098,7 +1014,7 @@ mod tests {
         let text = render_text_with_size(detail, 100, 36);
 
         assert!(text.contains("active | open | ATTENTION REQUIRED | 3 reasons"));
-        assert!(text.contains("gap 0.5000 | age 60000 ms"));
+        assert!(text.contains("gap 0.5000 | bindings 1"));
         assert!(text.contains("alerts: recovery anomaly: duplicate_live_orders | market data stale | insufficient account margin"));
     }
 }

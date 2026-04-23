@@ -1,20 +1,21 @@
 use poise_protocol::{
     ActivityLevelView, BandFlattenTrigger as ProtocolTrigger,
     BandProtectionPolicy as ProtocolPolicy, BandRecoverPolicy as ProtocolRecoverPolicy,
-    ExecutionBadgeView, ExecutionIntentView, ExecutionSlotOrderView, ExecutionSlotPhaseView,
-    ExecutionSlotView, ExecutionStateView, ExecutionStatusView, ExposureSummaryView,
-    InstrumentView, ReplacementGateView, ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
-    StrategyPriceStatusView, TrackActivityItemView, TrackBudgetView, TrackCommandType,
-    TrackCommandView, TrackDetailView, TrackExecutionStatsView, TrackExecutionView,
-    TrackIdentityView, TrackLedgerGapReasonView, TrackLedgerGapView, TrackLedgerView,
-    TrackLifecycleView, TrackListItemView, TrackListLedgerView, TrackMarketView, TrackPositionView,
-    TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
+    ExecutionBadgeView, ExecutionBindingIntentView, ExecutionBindingOrderView,
+    ExecutionBindingPolicyView, ExecutionBindingStatusView, ExecutionBindingView,
+    ExecutionStateView, ExecutionStatusView, ExposureSummaryView, InstrumentView,
+    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, StrategyPriceStatusView,
+    TrackActivityItemView, TrackCommandType, TrackCommandView, TrackDetailView,
+    TrackExecutionView, TrackIdentityView, TrackLedgerGapReasonView, TrackLedgerGapView,
+    TrackLedgerView, TrackLifecycleView, TrackListItemView, TrackListLedgerView,
+    TrackLossLimitsView, TrackMarketView, TrackPositionView, TrackStatus as ProtocolTrackStatus,
+    TrackStatusPanelView, TrackStrategyView,
 };
 
 use poise_application::{
-    TrackActivityLevel, TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadLedgerGap,
-    TrackReadLedgerGapReason, TrackReadModel, TrackReadOrderRole, TrackReadStatus,
-    TrackRecoveryIssue, TrackStrategyPriceStatus,
+    TrackActivityLevel, TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent,
+    TrackReadBindingPolicy, TrackReadBindingStatus, TrackReadLedgerGap, TrackReadLedgerGapReason,
+    TrackReadModel, TrackReadStatus, TrackRecoveryIssue, TrackStrategyPriceStatus,
 };
 
 pub struct TrackProjector;
@@ -52,7 +53,7 @@ impl TrackProjector {
             execution: ExecutionBadgeView {
                 state: project_list_execution_state(source),
                 execution_status: project_list_execution_status(source),
-                active_slot_count: source.active_slot_count,
+                active_binding_count: source.active_binding_count,
             },
             ledger: TrackListLedgerView {
                 total_pnl: ledger.total_pnl,
@@ -87,10 +88,10 @@ impl TrackProjector {
                 shape_family: project_shape_family(source.shape_family),
                 out_of_band_policy: project_out_of_band_policy(source.out_of_band_policy),
             },
-            budget: TrackBudgetView {
-                max_notional: source.budget.max_notional,
-                daily_loss_limit: source.budget.daily_loss_limit,
-                total_loss_limit: source.budget.total_loss_limit,
+            max_notional: source.max_notional,
+            loss_limits: TrackLossLimitsView {
+                daily_loss_limit: source.loss_limits.daily_loss_limit,
+                total_loss_limit: source.loss_limits.total_loss_limit,
             },
             market: TrackMarketView {
                 mark_price: source.mark_price,
@@ -115,26 +116,13 @@ impl TrackProjector {
                     .map(project_ledger_gap)
                     .collect(),
             },
-            execution_stats: TrackExecutionStatsView {
-                max_inventory_gap_abs: source.max_inventory_gap_abs,
-                max_gap_age_ms: source.max_gap_age_ms,
-                stats_started_at: Some(source.stats_started_at.to_rfc3339()),
-            },
             execution: TrackExecutionView {
                 state: project_execution_state(source),
                 execution_status: project_execution_status(source),
                 attention_reasons: project_attention_reasons(source),
                 inventory_gap: source.inventory_gap,
-                gap_age_ms: source
-                    .gap_started_at
-                    .map(|started_at| (source.updated_at - started_at).num_milliseconds().max(0))
-                    .unwrap_or(0),
-                active_slot_count: active_slot_count(source),
-                slots: project_execution_slots(source),
-                replacement_gate: source
-                    .replacement_gate_reason
-                    .as_ref()
-                    .map(project_replacement_gate_reason),
+                active_binding_count: source.active_binding_count,
+                bindings: project_execution_bindings(source),
             },
             activity: self.project_activity(source),
             available_commands: project_available_commands(source),
@@ -289,23 +277,6 @@ fn project_side(value: poise_core::types::Side) -> ProtocolSide {
     }
 }
 
-fn project_replacement_gate_reason(
-    reason: &poise_core::events::ReplacementGateReason,
-) -> ReplacementGateView {
-    match reason {
-        poise_core::events::ReplacementGateReason::RoundedMatch => {
-            ReplacementGateView::RoundedMatch
-        }
-        poise_core::events::ReplacementGateReason::ImprovementBelowThreshold {
-            improvement_bps,
-            threshold_bps,
-        } => ReplacementGateView::ImprovementBelowThreshold {
-            improvement_bps: *improvement_bps,
-            threshold_bps: *threshold_bps,
-        },
-    }
-}
-
 fn project_execution_state(source: &TrackReadModel) -> ExecutionStateView {
     match source.status {
         TrackReadStatus::Paused => ExecutionStateView::Paused,
@@ -400,35 +371,52 @@ fn project_recovery_issue(issue: &TrackRecoveryIssue) -> &'static str {
         TrackRecoveryIssue::UnknownLiveOrder => "unknown_live_order",
         TrackRecoveryIssue::DuplicateLiveOrders => "duplicate_live_orders",
         TrackRecoveryIssue::AmbiguousLiveOrder => "ambiguous_live_order",
+        TrackRecoveryIssue::ExpectedExposureMismatch => "expected_exposure_mismatch",
+        TrackRecoveryIssue::BoundaryProgressOutOfRange => "boundary_progress_out_of_range",
     }
 }
 
-fn active_slot_count(source: &TrackReadModel) -> u32 {
-    source.slots.len() as u32
-}
-
-fn project_execution_slots(source: &TrackReadModel) -> Vec<ExecutionSlotView> {
+fn project_execution_bindings(source: &TrackReadModel) -> Vec<ExecutionBindingView> {
     source
-        .slots
+        .bindings
         .iter()
-        .map(|slot| ExecutionSlotView {
-            label: slot.label.clone(),
-            phase: if slot.is_submit_pending {
-                ExecutionSlotPhaseView::Opening
-            } else {
-                ExecutionSlotPhaseView::Working
+        .map(|binding| ExecutionBindingView {
+            id: binding.id.clone(),
+            policy: project_binding_policy(binding.policy),
+            label: binding.label.clone(),
+            status: project_binding_status(binding.status),
+            intent: match binding.intent {
+                TrackReadBindingIntent::IncreaseInventory => {
+                    ExecutionBindingIntentView::IncreaseInventory
+                }
+                TrackReadBindingIntent::DecreaseInventory => {
+                    ExecutionBindingIntentView::DecreaseInventory
+                }
             },
-            intent: match slot.role {
-                TrackReadOrderRole::IncreaseInventory => ExecutionIntentView::IncreaseInventory,
-                TrackReadOrderRole::DecreaseInventory => ExecutionIntentView::DecreaseInventory,
-            },
-            order: Some(ExecutionSlotOrderView {
-                side: project_side(slot.side),
-                price: slot.price,
-                quantity: slot.quantity,
+            order: Some(ExecutionBindingOrderView {
+                side: project_side(binding.side),
+                price: binding.price,
+                quantity: binding.quantity,
             }),
         })
         .collect()
+}
+
+fn project_binding_policy(policy: TrackReadBindingPolicy) -> ExecutionBindingPolicyView {
+    match policy {
+        TrackReadBindingPolicy::CurveMaker => ExecutionBindingPolicyView::CurveMaker,
+        TrackReadBindingPolicy::CatchUp => ExecutionBindingPolicyView::CatchUp,
+        TrackReadBindingPolicy::ManualOverride => ExecutionBindingPolicyView::ManualOverride,
+        TrackReadBindingPolicy::Flatten => ExecutionBindingPolicyView::Flatten,
+    }
+}
+
+fn project_binding_status(status: TrackReadBindingStatus) -> ExecutionBindingStatusView {
+    match status {
+        TrackReadBindingStatus::SubmitPending => ExecutionBindingStatusView::SubmitPending,
+        TrackReadBindingStatus::Working => ExecutionBindingStatusView::Working,
+        TrackReadBindingStatus::CancelPending => ExecutionBindingStatusView::CancelPending,
+    }
 }
 
 fn project_available_commands(source: &TrackReadModel) -> Vec<TrackCommandView> {
@@ -478,16 +466,17 @@ fn project_available_commands(source: &TrackReadModel) -> Vec<TrackCommandView> 
 mod tests {
     use chrono::{TimeZone, Utc};
     use poise_application::{
-        ReadModelSlot, TrackActivityEntry, TrackActivityLevel, TrackListReadModel,
-        TrackPriceExecutionBlockReason, TrackReadExecutionMode, TrackReadLedgerGap,
-        TrackReadLedgerGapReason, TrackReadLedgerState, TrackReadModel, TrackReadOrderRole,
-        TrackReadStatus, TrackRecoveryIssue, TrackStrategyPriceStatus,
+        ReadModelBinding, TrackActivityEntry, TrackActivityLevel, TrackListReadModel,
+        TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadBindingPolicy,
+        TrackReadBindingStatus, TrackReadLedgerGap, TrackReadLedgerGapReason, TrackReadLedgerState,
+        TrackReadModel, TrackReadStatus, TrackRecoveryIssue, TrackStrategyPriceStatus,
     };
     use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily};
     use poise_core::types::Side;
     use poise_protocol::{
-        ActivityLevelView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStateView,
-        ExecutionStatusView, TrackCommandType, TrackLedgerGapReasonView,
+        ActivityLevelView, ExecutionBindingIntentView, ExecutionBindingPolicyView,
+        ExecutionBindingStatusView, ExecutionStateView, ExecutionStatusView, TrackCommandType,
+        TrackLedgerGapReasonView,
     };
 
     use super::TrackProjector;
@@ -509,7 +498,7 @@ mod tests {
         assert_eq!(item.id, "btc-core");
         assert_eq!(item.execution.state, ExecutionStateView::Open);
         assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
-        assert_eq!(item.execution.active_slot_count, 1);
+        assert_eq!(item.execution.active_binding_count, 1);
         assert_eq!(item.lifecycle.updated_at, "2026-03-26T10:01:30+00:00");
         assert!((item_json["ledger"]["total_pnl"].as_f64().unwrap() - 1229.0).abs() < 1e-9);
         assert_eq!(
@@ -689,7 +678,7 @@ mod tests {
                 .all(|item| !item.message.contains("desired exposure"))
         );
         assert!(
-            detail_json["execution"]["slots"][0]["order"]
+            detail_json["execution"]["bindings"][0]["order"]
                 .get("client_order_id")
                 .is_none()
         );
@@ -987,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn projects_execution_slots_from_slot_workset() {
+    fn projects_execution_bindings_from_binding_workset() {
         let detail = TrackProjector::new().project_detail(&source_with_submitting_effect());
 
         assert_eq!(
@@ -995,65 +984,40 @@ mod tests {
             ExecutionStatusView::Normal
         );
         assert!((detail.execution.inventory_gap - 0.5).abs() < f64::EPSILON);
-        assert_eq!(detail.execution.gap_age_ms, 90_000);
-        assert_eq!(detail.execution.active_slot_count, 1);
+        assert_eq!(detail.execution.active_binding_count, 1);
         assert_eq!(
-            detail.execution.active_slot_count,
-            detail.execution.slots.len() as u32
+            detail.execution.active_binding_count,
+            detail.execution.bindings.len() as u32
         );
-        assert_eq!(detail.execution.slots.len(), 1);
-        assert_eq!(detail.execution.slots[0].label, "inventory");
+        assert_eq!(detail.execution.bindings.len(), 1);
+        assert_eq!(detail.execution.bindings[0].id, "binding-instance-1");
         assert_eq!(
-            detail.execution.slots[0].phase,
-            ExecutionSlotPhaseView::Working
+            detail.execution.bindings[0].policy,
+            ExecutionBindingPolicyView::CurveMaker
+        );
+        assert_eq!(detail.execution.bindings[0].label, "maker 1");
+        assert_eq!(
+            detail.execution.bindings[0].status,
+            ExecutionBindingStatusView::Working
         );
         assert_eq!(
-            detail.execution.slots[0].intent,
-            ExecutionIntentView::IncreaseInventory
+            detail.execution.bindings[0].intent,
+            ExecutionBindingIntentView::IncreaseInventory
         );
-        let order = detail.execution.slots[0].order.as_ref().unwrap();
+        let order = detail.execution.bindings[0].order.as_ref().unwrap();
         assert_eq!(order.side, poise_protocol::Side::Buy);
         assert!((order.price - 100.5).abs() < f64::EPSILON);
         assert!((order.quantity - 0.1).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn projects_execution_observability_statistics() {
+    fn projects_execution_ledger_observability() {
         let detail = TrackProjector::new().project_detail(&source_with_submitting_effect());
 
         assert!((detail.ledger.gross_realized_pnl - 980.1).abs() < f64::EPSILON);
         assert!((detail.ledger.net_realized_pnl - 963.8).abs() < 1e-9);
         assert!((detail.ledger.total_pnl - 1229.0).abs() < 1e-9);
         assert!((detail.ledger.unrealized_pnl - 265.2).abs() < f64::EPSILON);
-        assert!((detail.execution_stats.max_inventory_gap_abs - 1.5).abs() < f64::EPSILON);
-        assert_eq!(detail.execution_stats.max_gap_age_ms, 120_000);
-        assert_eq!(
-            detail.execution_stats.stats_started_at.as_deref(),
-            Some("2026-03-26T09:45:00+00:00")
-        );
-    }
-
-    #[test]
-    fn project_detail_includes_replacement_gate_reason() {
-        let mut source = source_with_submitting_effect();
-        source.replacement_gate_reason = Some(
-            poise_core::events::ReplacementGateReason::ImprovementBelowThreshold {
-                improvement_bps: 9.0,
-                threshold_bps: 13.0,
-            },
-        );
-
-        let detail = TrackProjector::new().project_detail(&source);
-
-        assert_eq!(
-            detail.execution.replacement_gate,
-            Some(
-                poise_protocol::ReplacementGateView::ImprovementBelowThreshold {
-                    improvement_bps: 9.0,
-                    threshold_bps: 13.0,
-                }
-            )
-        );
     }
 
     #[test]
@@ -1081,7 +1045,7 @@ mod tests {
         source.recent_activity = vec![
             test_activity(
                 Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
-                "replacement gate: candidate matches working order after rounding",
+                "boundary ledger recovered active binding",
                 TrackActivityLevel::Info,
             ),
             test_activity(
@@ -1096,7 +1060,7 @@ mod tests {
         assert_eq!(activity.len(), 2);
         assert_eq!(
             activity[0].message,
-            "replacement gate: candidate matches working order after rounding"
+            "boundary ledger recovered active binding"
         );
         assert_eq!(activity[0].level, ActivityLevelView::Info);
     }
@@ -1132,8 +1096,8 @@ mod tests {
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
-            budget: poise_core::risk::CapacityBudget {
-                max_notional: 3000.0,
+            max_notional: 3000.0,
+            loss_limits: poise_core::risk::LossLimits {
                 daily_loss_limit: 100.0,
                 total_loss_limit: 300.0,
             },
@@ -1167,24 +1131,21 @@ mod tests {
                 ],
             },
             unrealized_pnl: 265.2,
-            executor_mode: TrackReadExecutionMode::Passive,
             inventory_gap: 0.5,
-            gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
-            max_inventory_gap_abs: 1.5,
-            max_gap_age_ms: 120_000,
-            stats_started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
             recovery_issue: None,
             has_account_margin_guard: false,
             has_stale_market_data: false,
             price_execution_block_reason: None,
-            replacement_gate_reason: None,
-            slots: vec![ReadModelSlot {
-                label: "inventory".into(),
-                is_submit_pending: false,
+            active_binding_count: 1,
+            bindings: vec![ReadModelBinding {
+                id: "binding-instance-1".into(),
+                policy: TrackReadBindingPolicy::CurveMaker,
+                label: "maker 1".into(),
+                status: TrackReadBindingStatus::Working,
                 side: Side::Buy,
                 price: 100.5,
                 quantity: 0.1,
-                role: TrackReadOrderRole::IncreaseInventory,
+                intent: TrackReadBindingIntent::IncreaseInventory,
             }],
             manual_target_override: None,
             recent_activity: vec![test_activity(

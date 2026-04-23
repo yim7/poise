@@ -188,6 +188,12 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
             let realized_pnl = parse_decimal("o.rp", &order.realized_pnl)?;
             let price = parse_decimal("o.p", &order.price)?;
             let quantity = parse_decimal("o.q", &order.quantity)?;
+            let filled_qty = order
+                .cumulative_filled_quantity
+                .as_deref()
+                .map(|value| parse_decimal("o.z", value))
+                .transpose()?
+                .unwrap_or(0.0);
             let instrument = Instrument::new(Venue::Binance, order.symbol.clone());
             let mut ledger_deltas = vec![LedgerDelta::GrossRealizedPnl(realized_pnl)];
             let mut ledger_gaps = Vec::new();
@@ -240,6 +246,7 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                             side: parse_side(&order.side)?,
                             price,
                             quantity,
+                            filled_qty,
                             realized_pnl,
                             status: parse_order_status(&order.status)?,
                         },
@@ -387,6 +394,7 @@ mod tests {
                             side: Side::Sell,
                             price: 65000.5,
                             quantity: 0.02,
+                            filled_qty: 0.0,
                             realized_pnl: 12.34,
                             status: OrderStatus::Filled,
                         },
@@ -432,6 +440,7 @@ mod tests {
                             side: Side::Sell,
                             price: 65000.5,
                             quantity: 0.02,
+                            filled_qty: 0.0,
                             realized_pnl: 12.34,
                             status: OrderStatus::Filled,
                         },
@@ -518,6 +527,7 @@ mod tests {
                             side: Side::Sell,
                             price: 65000.5,
                             quantity: 0.02,
+                            filled_qty: 0.0,
                             realized_pnl: 12.34,
                             status: OrderStatus::Filled,
                         },

@@ -234,7 +234,7 @@ mod tests {
         StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore, TrackMutationStore,
         TrackQueryStore,
     };
-    use poise_core::risk::CapacityBudget;
+    use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::{
         events::DomainEvent,
@@ -243,12 +243,12 @@ mod tests {
     use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::AccountSummarySnapshot;
-    use poise_engine::ports::{ClockPort, OrderStatus};
+    use poise_engine::ports::ClockPort;
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_protocol::{
-        AccountSummaryView, ExecutionIntentView, ExecutionSlotPhaseView, ExecutionStatusView,
-        RiskSignalView, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
-        TrackDetailView, TrackDiagnosticsView, TrackListResponse, TrackStatus,
+        AccountSummaryView, ExecutionBindingIntentView, ExecutionBindingStatusView,
+        ExecutionStatusView, RiskSignalView, TrackCommandAccepted, TrackCommandRequest,
+        TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackListResponse, TrackStatus,
     };
     use poise_storage::sqlite::SqliteStorage;
     use tower::ServiceExt;
@@ -470,8 +470,8 @@ mod tests {
                     shape_family: ShapeFamily::Linear,
                     out_of_band_policy: BandProtectionPolicy::Freeze,
                 },
-                CapacityBudget {
-                    max_notional: 3000.0,
+                3000.0,
+                LossLimits {
                     daily_loss_limit: 100.0,
                     total_loss_limit: 300.0,
                 },
@@ -497,22 +497,19 @@ mod tests {
             .expect("track should still exist")
             .clone();
         let mut snapshot = track.snapshot();
-        let slot_order = snapshot
+        let binding = snapshot
             .executor_state
-            .slots
+            .bindings
             .first_mut()
-            .and_then(|slot| slot.working_order.as_mut())
-            .expect("market observe should seed inventory_core working order");
-        slot_order.order_id = Some("order-1".into());
-        slot_order.status = OrderStatus::New;
+            .expect("market observe should seed active bindings");
+        binding.order_id = Some("order-1".into());
         manager.restore_track_state(&snapshot).unwrap();
         manager
     }
 
     fn seed_snapshot_ledger(snapshot: &mut poise_engine::snapshot::TrackRuntimeSnapshot) {
         snapshot.risk.unrealized_pnl = 265.2;
-        snapshot.ledger_state.realized_pnl_day =
-            Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap());
+        snapshot.ledger_state.ledger_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
         snapshot.ledger_state.gross_realized_pnl_today = 980.1;
         snapshot.ledger_state.gross_realized_pnl_cumulative = 980.1;
         snapshot.ledger_state.trading_fee_cumulative = 12.3;
@@ -572,7 +569,7 @@ mod tests {
             payload.items[0].execution.execution_status,
             ExecutionStatusView::Normal
         );
-        assert_eq!(payload.items[0].execution.active_slot_count, 1);
+        assert!(payload.items[0].execution.active_binding_count > 0);
     }
 
     #[tokio::test]
@@ -674,35 +671,42 @@ mod tests {
             Some(265.2)
         );
         assert_eq!(
-            payload_json["execution_stats"]["max_inventory_gap_abs"].as_f64(),
-            Some(payload.execution_stats.max_inventory_gap_abs)
-        );
-        assert_eq!(
-            payload_json["execution_stats"]["max_gap_age_ms"].as_i64(),
-            Some(0)
-        );
-        assert!(payload.execution_stats.stats_started_at.is_some());
-        assert_eq!(
-            payload_json["execution_stats"]["stats_started_at"].as_str(),
-            payload.execution_stats.stats_started_at.as_deref()
-        );
-        assert_eq!(
             payload.execution.execution_status,
             ExecutionStatusView::Normal
         );
-        assert_eq!(payload.execution.active_slot_count, 1);
-        assert_eq!(payload.execution.slots.len(), 1);
-        assert_eq!(payload.execution.slots[0].label, "inventory");
+        assert!(payload.execution.active_binding_count > 0);
         assert_eq!(
-            payload.execution.slots[0].phase,
-            ExecutionSlotPhaseView::Opening
+            payload.execution.active_binding_count,
+            payload.execution.bindings.len() as u32
         );
-        assert_eq!(
-            payload.execution.slots[0].intent,
-            ExecutionIntentView::IncreaseInventory
+        assert!(
+            payload
+                .execution
+                .bindings
+                .iter()
+                .all(|binding| binding.label.starts_with("maker ")
+                    || binding.label.starts_with("target "))
+        );
+        assert!(
+            payload
+                .execution
+                .bindings
+                .iter()
+                .all(|binding| binding.status == ExecutionBindingStatusView::SubmitPending)
+        );
+        assert!(
+            payload
+                .execution
+                .bindings
+                .iter()
+                .all(|binding| binding.intent == ExecutionBindingIntentView::IncreaseInventory)
         );
         assert!(!payload.available_commands.is_empty());
-        assert!(payload_json["execution"]["slots"][0].get("state").is_none());
+        assert!(
+            payload_json["execution"]["bindings"][0]
+                .get("phase")
+                .is_none()
+        );
         assert!(
             !payload
                 .activity
@@ -1119,6 +1123,13 @@ mod tests {
 
         async fn list_all_pending_submit_effects(
             &self,
+        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_all_pending_effects_for_track(
+            &self,
+            _track_id: &TrackId,
         ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
         }

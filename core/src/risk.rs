@@ -3,8 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::Exposure;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CapacityBudget {
-    pub max_notional: f64,
+pub struct LossLimits {
     pub daily_loss_limit: f64,
     pub total_loss_limit: f64,
 }
@@ -44,16 +43,20 @@ pub enum RiskTerminationCause {
     TotalLossLimit,
 }
 
-pub fn validate_capacity_budget(budget: &CapacityBudget) -> Result<(), String> {
-    if !budget.max_notional.is_finite() || budget.max_notional <= 0.0 {
+pub fn validate_max_notional(max_notional: f64) -> Result<(), String> {
+    if !max_notional.is_finite() || max_notional <= 0.0 {
         return Err("max_notional must be finite and > 0".to_string());
     }
 
-    if !budget.daily_loss_limit.is_finite() || budget.daily_loss_limit <= 0.0 {
+    Ok(())
+}
+
+pub fn validate_loss_limits(loss_limits: &LossLimits) -> Result<(), String> {
+    if !loss_limits.daily_loss_limit.is_finite() || loss_limits.daily_loss_limit <= 0.0 {
         return Err("daily_loss_limit must be finite and > 0".to_string());
     }
 
-    if !budget.total_loss_limit.is_finite() || budget.total_loss_limit <= 0.0 {
+    if !loss_limits.total_loss_limit.is_finite() || loss_limits.total_loss_limit <= 0.0 {
         return Err("total_loss_limit must be finite and > 0".to_string());
     }
 
@@ -61,20 +64,25 @@ pub fn validate_capacity_budget(budget: &CapacityBudget) -> Result<(), String> {
 }
 
 /// 纯函数：评估风控。
-pub fn evaluate_risk(intent: &ExposureIntent, budget: &CapacityBudget) -> RiskDecision {
+pub fn evaluate_risk(
+    intent: &ExposureIntent,
+    max_notional: f64,
+    loss_limits: &LossLimits,
+) -> RiskDecision {
     let daily_loss_amount =
         (-(intent.loss_guard.net_realized_pnl_today + intent.loss_guard.unrealized_pnl)).max(0.0);
     let total_loss_amount = (-(intent.loss_guard.net_realized_pnl_cumulative
         + intent.loss_guard.unrealized_pnl))
         .max(0.0);
 
-    if daily_loss_amount >= budget.daily_loss_limit || total_loss_amount >= budget.total_loss_limit
+    if daily_loss_amount >= loss_limits.daily_loss_limit
+        || total_loss_amount >= loss_limits.total_loss_limit
     {
         return RiskDecision::Cap(Exposure(0.0));
     }
 
-    if budget.max_notional > 0.0 && intent.unit_notional > 0.0 {
-        let max_abs_exposure = budget.max_notional / intent.unit_notional;
+    if max_notional > 0.0 && intent.unit_notional > 0.0 {
+        let max_abs_exposure = max_notional / intent.unit_notional;
         if intent.target.0.abs() > max_abs_exposure {
             return RiskDecision::Cap(Exposure(intent.target.0.signum() * max_abs_exposure));
         }
@@ -83,22 +91,26 @@ pub fn evaluate_risk(intent: &ExposureIntent, budget: &CapacityBudget) -> RiskDe
     RiskDecision::Allow(intent.target.clone())
 }
 
-pub fn evaluate_risk_outcome(intent: &ExposureIntent, budget: &CapacityBudget) -> RiskOutcome {
+pub fn evaluate_risk_outcome(
+    intent: &ExposureIntent,
+    max_notional: f64,
+    loss_limits: &LossLimits,
+) -> RiskOutcome {
     let daily_loss_amount =
         (-(intent.loss_guard.net_realized_pnl_today + intent.loss_guard.unrealized_pnl)).max(0.0);
     let total_loss_amount = (-(intent.loss_guard.net_realized_pnl_cumulative
         + intent.loss_guard.unrealized_pnl))
         .max(0.0);
 
-    if daily_loss_amount >= budget.daily_loss_limit {
+    if daily_loss_amount >= loss_limits.daily_loss_limit {
         return RiskOutcome::Terminate(RiskTerminationCause::DailyLossLimit);
     }
-    if total_loss_amount >= budget.total_loss_limit {
+    if total_loss_amount >= loss_limits.total_loss_limit {
         return RiskOutcome::Terminate(RiskTerminationCause::TotalLossLimit);
     }
 
-    if budget.max_notional > 0.0 && intent.unit_notional > 0.0 {
-        let max_abs_exposure = budget.max_notional / intent.unit_notional;
+    if max_notional > 0.0 && intent.unit_notional > 0.0 {
+        let max_abs_exposure = max_notional / intent.unit_notional;
         if intent.target.0.abs() > max_abs_exposure {
             return RiskOutcome::Cap {
                 target: Exposure(intent.target.0.signum() * max_abs_exposure),
@@ -115,9 +127,8 @@ pub fn evaluate_risk_outcome(intent: &ExposureIntent, budget: &CapacityBudget) -
 mod tests {
     use super::*;
 
-    fn budget() -> CapacityBudget {
-        CapacityBudget {
-            max_notional: 3000.0,
+    fn loss_limits() -> LossLimits {
+        LossLimits {
             daily_loss_limit: 120.0,
             total_loss_limit: 500.0,
         }
@@ -132,14 +143,14 @@ mod tests {
     }
 
     #[test]
-    fn allow_when_within_budget() {
+    fn allow_when_within_limits() {
         let intent = ExposureIntent {
             current: Exposure(0.0),
             target: Exposure(4.0),
             unit_notional: 375.0,
             loss_guard: empty_loss_guard(),
         };
-        let decision = evaluate_risk(&intent, &budget());
+        let decision = evaluate_risk(&intent, 3000.0, &loss_limits());
         assert!(matches!(decision, RiskDecision::Allow(_)));
     }
 
@@ -151,7 +162,7 @@ mod tests {
             unit_notional: 375.0,
             loss_guard: empty_loss_guard(),
         };
-        let decision = evaluate_risk(&intent, &budget());
+        let decision = evaluate_risk(&intent, 3000.0, &loss_limits());
         assert!(matches!(decision, RiskDecision::Allow(_)));
     }
 
@@ -163,7 +174,7 @@ mod tests {
             unit_notional: 375.0,
             loss_guard: empty_loss_guard(),
         };
-        let decision = evaluate_risk(&intent, &budget());
+        let decision = evaluate_risk(&intent, 3000.0, &loss_limits());
         assert!(matches!(decision, RiskDecision::Allow(_)));
     }
 
@@ -176,7 +187,7 @@ mod tests {
             loss_guard: empty_loss_guard(),
         };
 
-        let decision = evaluate_risk(&intent, &budget());
+        let decision = evaluate_risk(&intent, 3000.0, &loss_limits());
 
         assert_eq!(decision, RiskDecision::Cap(Exposure(8.0)));
     }
@@ -194,7 +205,7 @@ mod tests {
             },
         };
 
-        let decision = evaluate_risk(&intent, &budget());
+        let decision = evaluate_risk(&intent, 3000.0, &loss_limits());
 
         assert_eq!(decision, RiskDecision::Cap(Exposure(0.0)));
     }
@@ -212,8 +223,8 @@ mod tests {
                     unrealized_pnl: -35.0,
                 },
             },
-            &CapacityBudget {
-                max_notional: 3_000.0,
+            3_000.0,
+            &LossLimits {
                 daily_loss_limit: 120.0,
                 total_loss_limit: 500.0,
             },
@@ -237,32 +248,28 @@ mod tests {
                 unrealized_pnl: -30.0,
             },
         };
-        let budget = CapacityBudget {
+        let limits = LossLimits {
             daily_loss_limit: 200.0,
-            ..budget()
+            ..loss_limits()
         };
 
-        let decision = evaluate_risk(&intent, &budget);
+        let decision = evaluate_risk(&intent, 3000.0, &limits);
 
         assert_eq!(decision, RiskDecision::Cap(Exposure(0.0)));
     }
 
     #[test]
-    fn validate_capacity_budget_rejects_non_positive_max_notional() {
-        let error = validate_capacity_budget(&CapacityBudget {
-            max_notional: 0.0,
-            ..budget()
-        })
-        .unwrap_err();
+    fn validate_max_notional_rejects_non_positive_value() {
+        let error = validate_max_notional(0.0).unwrap_err();
 
         assert!(error.contains("max_notional"));
     }
 
     #[test]
-    fn validate_capacity_budget_rejects_non_positive_daily_loss_limit() {
-        let error = validate_capacity_budget(&CapacityBudget {
+    fn validate_loss_limits_rejects_non_positive_daily_loss_limit() {
+        let error = validate_loss_limits(&LossLimits {
             daily_loss_limit: 0.0,
-            ..budget()
+            ..loss_limits()
         })
         .unwrap_err();
 
@@ -270,10 +277,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_capacity_budget_rejects_non_positive_total_loss_limit() {
-        let error = validate_capacity_budget(&CapacityBudget {
+    fn validate_loss_limits_rejects_non_positive_total_loss_limit() {
+        let error = validate_loss_limits(&LossLimits {
             total_loss_limit: 0.0,
-            ..budget()
+            ..loss_limits()
         })
         .unwrap_err();
 
@@ -281,7 +288,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_capacity_budget_accepts_valid_budget() {
-        assert!(validate_capacity_budget(&budget()).is_ok());
+    fn validation_accepts_separate_max_notional_and_loss_limits() {
+        assert!(validate_max_notional(3000.0).is_ok());
+        assert!(validate_loss_limits(&loss_limits()).is_ok());
     }
 }

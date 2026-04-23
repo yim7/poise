@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use chrono::NaiveDate;
 use poise_engine::track::TrackId;
 
 use crate::mutation_executor::MutationExecutor;
 use crate::{
-    TrackObservationService, TrackQueryStore, TrackRecoveryIssue, runtime_read_state_loader,
+    TrackObservationService, TrackPersistentState, TrackQueryStore, TrackRecoveryIssue,
+    runtime_read_state_loader,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +40,22 @@ impl TrackRuntimeLifecycleService {
         self.executor.restore_persisted_track_state(id).await
     }
 
+    pub async fn prepare_fresh_session_for_activation(&self, id: &str) -> Result<()> {
+        self.executor.prepare_fresh_session_for_activation(id).await
+    }
+
+    pub async fn load_track_persistent_state(
+        &self,
+        track_id: &TrackId,
+        current_utc_day: NaiveDate,
+    ) -> Result<Option<TrackPersistentState>> {
+        let Some(mut state) = self.query_store.load_track_persistent_state(track_id).await? else {
+            return Ok(None);
+        };
+        state.ledger_state.normalize_utc_day(current_utc_day);
+        Ok(Some(state))
+    }
+
     pub async fn load_track_recovery_summary(
         &self,
         track_id: &TrackId,
@@ -55,15 +73,14 @@ impl TrackRuntimeLifecycleService {
         Ok(Some(TrackRecoverySummary {
             issue: runtime
                 .executor_state
-                .diagnostics
                 .recovery_anomaly
                 .clone()
                 .map(TrackRecoveryIssue::from),
             has_working_orders: runtime
                 .executor_state
-                .slots
+                .bindings
                 .iter()
-                .any(|slot| slot.working_order.is_some()),
+                .any(|binding| binding.is_active()),
         }))
     }
 
@@ -77,31 +94,31 @@ impl TrackRuntimeLifecycleService {
 mod tests {
     use std::sync::Arc;
 
-    use chrono::{TimeZone, Utc};
+    use chrono::{NaiveDate, TimeZone, Utc};
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
-    use poise_core::types::{Exposure, Side};
-    use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot, RecoveryAnomaly};
+    use poise_core::types::Exposure;
+    use poise_engine::executor::RecoveryAnomaly;
+    use poise_engine::ledger::TrackLedgerState;
     use poise_engine::persisted_runtime::TrackRestoreRevision;
-    use poise_engine::ports::OrderStatus;
-    use poise_engine::runtime::{
-        AutoState, ControlState, ExecutionSlot, ExecutionStats, ExecutorState, RiskState,
-        SlotState, TrackState, WorkingOrder,
-    };
+    use poise_engine::ports::ExecutionQuote;
+    use poise_engine::runtime::{AutoState, ControlState, ExecutorState, RiskState, TrackState};
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
 
     use crate::mutation_executor::test_support::{
         MemoryRepository, seeded_manager, track_write_services,
     };
-    use crate::{TrackRecoveryIssue, runtime_read_state_loader};
+    use crate::{
+        EffectStatus, PersistedControlMode, TrackControlState, TrackEffectStore,
+        TrackMutationStore, TrackPersistentState, TrackRecoveryIssue, runtime_read_state_loader,
+    };
 
     #[tokio::test]
     async fn load_track_recovery_summary_projects_application_owned_issue() {
         let write_repository = Arc::new(MemoryRepository::default());
         let mut snapshot = test_snapshot();
-        snapshot.executor_state.diagnostics.recovery_anomaly =
-            Some(RecoveryAnomaly::UnknownLiveOrder);
-        snapshot.executor_state.slots.clear();
+        snapshot.executor_state.recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
+        snapshot.executor_state.bindings.clear();
         crate::TrackMutationStore::save_transition(
             write_repository.as_ref(),
             "btc-core",
@@ -125,6 +142,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_track_persistent_state_normalizes_ledger_utc_day() {
+        let repository = Arc::new(MemoryRepository::default());
+        TrackMutationStore::save_track_persistent_state(
+            repository.as_ref(),
+            &TrackPersistentState {
+                track_id: TrackId::new("btc-core"),
+                control_state: TrackControlState::Paused {
+                    resume_mode: PersistedControlMode::Automatic,
+                },
+                ledger_state: TrackLedgerState {
+                    ledger_utc_day: NaiveDate::from_ymd_opt(2026, 4, 22).unwrap(),
+                    gross_realized_pnl_today: 25.0,
+                    gross_realized_pnl_cumulative: 100.0,
+                    trading_fee_today: 2.0,
+                    trading_fee_cumulative: 8.0,
+                    funding_fee_today: -1.0,
+                    funding_fee_cumulative: -4.0,
+                    unresolved_gaps: vec![],
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let (services, _) = track_write_services(seeded_manager(), repository);
+
+        let state = services
+            .runtime_lifecycle
+            .load_track_persistent_state(
+                &TrackId::new("btc-core"),
+                NaiveDate::from_ymd_opt(2026, 4, 23).unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            state.ledger_state.ledger_utc_day,
+            NaiveDate::from_ymd_opt(2026, 4, 23).unwrap()
+        );
+        assert_eq!(state.ledger_state.gross_realized_pnl_today, 0.0);
+        assert_eq!(state.ledger_state.trading_fee_today, 0.0);
+        assert_eq!(state.ledger_state.funding_fee_today, 0.0);
+        assert_eq!(state.ledger_state.gross_realized_pnl_cumulative, 100.0);
+        assert_eq!(state.control_state, TrackControlState::Paused {
+            resume_mode: PersistedControlMode::Automatic,
+        });
+    }
+
+    #[tokio::test]
     async fn restore_persisted_track_state_rehydrates_manager_from_store() {
         let repository = Arc::new(MemoryRepository::default());
         let mut persisted_manager = seeded_manager();
@@ -140,7 +206,7 @@ mod tests {
         .await
         .unwrap();
 
-        let (services, _) = track_write_services(seeded_manager(), repository);
+        let (services, _) = track_write_services(seeded_manager(), repository.clone());
 
         assert!(
             services
@@ -198,6 +264,82 @@ mod tests {
         assert_eq!(runtime.best_ask, Some(95.5));
     }
 
+    #[tokio::test]
+    async fn prepare_fresh_session_for_activation_clears_old_pending_work_and_executor_state() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository.clone());
+        repository.seed_pending_mixed_effect_batch("btc-core", "btc-core:batch-1");
+        repository
+            .save_follow_up_retirement_request(
+                &TrackId::new("btc-core"),
+                &crate::FollowUpRetirementRequest {
+                    batch_id: "btc-core:batch-1".into(),
+                    blocked_sequence: 0,
+                    closed_order_id: "closed-order".into(),
+                },
+            )
+            .await
+            .unwrap();
+        services
+            .observation
+            .observe_market(
+                "btc-core",
+                poise_engine::observation::MarketObservation {
+                    mark_price: 95.0,
+                    execution_quote: Some(ExecutionQuote {
+                        best_bid: 94.9,
+                        best_ask: 95.1,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        {
+            let manager_handle = services.runtime_lifecycle.manager();
+            let mut manager = manager_handle.write().await;
+            let mut snapshot = manager.snapshot("btc-core").unwrap();
+            snapshot.executor_state.recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
+            assert!(!snapshot.executor_state.bindings.is_empty());
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+
+        services
+            .runtime_lifecycle
+            .prepare_fresh_session_for_activation("btc-core")
+            .await
+            .unwrap();
+
+        let snapshot = services
+            .runtime_lifecycle
+            .manager()
+            .read()
+            .await
+            .snapshot("btc-core")
+            .unwrap();
+        let effects = repository.pending_effects();
+        assert!(snapshot.executor_state.bindings.is_empty());
+        assert!(snapshot.executor_state.recovery_anomaly.is_none());
+        assert_eq!(snapshot.executor_state.ledger_state.ledger_anchor_exposure, Exposure(0.0));
+        let btc_statuses = effects
+            .iter()
+            .filter(|effect| effect.track_id == TrackId::new("btc-core"))
+            .map(|effect| effect.status)
+            .collect::<Vec<_>>();
+        assert!(!btc_statuses.is_empty());
+        assert!(
+            btc_statuses
+                .iter()
+                .all(|status| *status == EffectStatus::Superseded)
+        );
+        assert!(
+            repository
+                .list_follow_up_retirement_requests(&TrackId::new("btc-core"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     fn test_snapshot() -> TrackRuntimeSnapshot {
         let track_config = TrackConfig {
             lower_price: 90.0,
@@ -218,42 +360,10 @@ mod tests {
             runtime_state: TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)),
             current_exposure: Exposure(3.5),
             desired_exposure: Some(Exposure(4.0)),
-            executor_state: ExecutorState {
-                active_round: Some(poise_engine::runtime::ExecutionRound {
-                    desired_exposure: Exposure(4.0),
-                    mode: ExecutionMode::Passive,
-                    started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                }),
-                diagnostics: poise_engine::runtime::ExecutorDiagnostics {
-                    mode: ExecutionMode::Passive,
-                    inventory_gap: Exposure(0.5),
-                    gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
-                    last_reprice_at: None,
-                    last_execution_reason: None,
-                    recovery_anomaly: None,
-                },
-                slots: vec![ExecutionSlot {
-                    slot: OrderSlot::new("inventory_core"),
-                    state: SlotState::Working,
-                    working_order: Some(WorkingOrder {
-                        order_id: Some("order-1".into()),
-                        client_order_id: "client-1".into(),
-                        side: Side::Buy,
-                        price: 100.5,
-                        quantity: 0.1,
-                        status: OrderStatus::New,
-                        role: OrderRole::IncreaseInventory,
-                    }),
-                }],
-                recent_terminal_orders: Vec::new(),
-                stats: ExecutionStats {
-                    started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                    max_inventory_gap_abs: Exposure(0.5),
-                    max_gap_age_ms: 0,
-                },
-            },
+            executor_state: ExecutorState::empty(
+                Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+            ),
             ledger_state: Default::default(),
-            replacement_gate_reason: None,
             execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
             risk: RiskState {
                 unrealized_pnl: 0.0,

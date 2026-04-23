@@ -11,6 +11,7 @@ mod runtime_lifecycle_service;
 mod runtime_read_state_loader;
 pub mod submit_effect_service;
 pub mod track_command_service;
+pub mod track_control_state;
 pub mod track_definition;
 mod track_diagnostic_event_loader;
 pub mod track_effect_service;
@@ -35,13 +36,14 @@ pub use mutation_executor::{
 pub use notifications::ApplicationNotification;
 pub use query_service::TrackQueryService;
 pub use read_model::{
-    ReadModelSlot, TrackActivityEntry, TrackActivityLevel, TrackListReadModel,
-    TrackPriceExecutionBlockReason, TrackReadExecutionMode, TrackReadLedgerGap,
-    TrackReadLedgerGapReason, TrackReadLedgerState, TrackReadModel, TrackReadOrderRole,
-    TrackReadStatus, TrackRecoveryIssue, TrackStrategyPriceStatus,
+    ReadModelBinding, TrackActivityEntry, TrackActivityLevel, TrackListReadModel,
+    TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadBindingPolicy,
+    TrackReadBindingStatus, TrackReadLedgerGap, TrackReadLedgerGapReason, TrackReadLedgerState,
+    TrackReadModel, TrackReadStatus, TrackRecoveryIssue, TrackStrategyPriceStatus,
 };
 pub use runtime_lifecycle_service::{TrackRecoverySummary, TrackRuntimeLifecycleService};
 pub use track_command_service::TrackCommandService;
+pub use track_control_state::{PersistedControlMode, TrackControlCommand, TrackControlState};
 pub use track_definition::{
     ConfiguredTrackDefinition, ConfiguredTrackInput, PreparedTrackRegistry,
     TrackPreparedDefinition, TrackReadDefinition, TrackStartupDefinition,
@@ -52,7 +54,7 @@ pub use track_mutation_store::TrackMutationStore;
 pub use track_observation_service::TrackObservationService;
 pub use track_persistence::{
     CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
-    PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot,
+    PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackPersistentState,
 };
 pub use track_query_store::TrackQueryStore;
 pub use track_read_services::TrackReadServices;

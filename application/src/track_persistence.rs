@@ -1,9 +1,19 @@
 use chrono::{DateTime, Utc};
 use poise_core::events::DomainEvent;
+use poise_engine::ledger::TrackLedgerState;
 use poise_engine::snapshot::TrackRuntimeSnapshot;
 use poise_engine::track::TrackId;
 use poise_engine::transition::TrackEffect;
 use serde::{Deserialize, Serialize};
+
+use crate::TrackControlState;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackPersistentState {
+    pub track_id: TrackId,
+    pub control_state: TrackControlState,
+    pub ledger_state: TrackLedgerState,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredTrackEvent {

@@ -74,6 +74,8 @@ pub(super) struct OrderTradeUpdate {
     pub(super) price: String,
     #[serde(rename = "q")]
     pub(super) quantity: String,
+    #[serde(rename = "z")]
+    pub(super) cumulative_filled_quantity: Option<String>,
     #[serde(rename = "rp")]
     pub(super) realized_pnl: String,
     #[serde(rename = "n")]

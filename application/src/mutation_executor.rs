@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
 use poise_engine::command::TrackCommand;
 use poise_engine::executor::{
-    OrderSlot, OrderUpdateAbsorbResult, SubmitRecoveryPlan, SubmitRecoveryResolution,
+    OrderUpdateAbsorbResult, SubmitRecoveryPlan, SubmitRecoveryResolution, SubmitRecoveryToken,
 };
 use poise_engine::ledger::TrackLedgerEvent;
 use poise_engine::manager::MarketMutationOutcome;
@@ -177,7 +177,7 @@ impl TransitionResult for SubmitRecoveryPlan {
     }
 
     fn effects(&self) -> &[TrackEffect] {
-        &self.effects
+        &[]
     }
 }
 
@@ -223,6 +223,67 @@ impl MutationExecutor {
         let mut manager = self.manager.write().await;
         manager.restore_track_state(&snapshot)?;
         Ok(true)
+    }
+
+    pub(crate) async fn prepare_fresh_session_for_activation(&self, id: &str) -> Result<()> {
+        let _mutation_guard = self.lock_track_mutation(id).await;
+        let snapshot = {
+            let manager = self.manager.read().await;
+            manager
+                .snapshot(id)
+                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?
+        };
+        let pending_effect_ids = self
+            .effect_store
+            .list_all_pending_effects_for_track(&TrackId::new(id))
+            .await
+            .map_err(TrackMutationError::Persistence)?
+            .into_iter()
+            .map(|effect| effect.effect_id)
+            .collect::<Vec<_>>();
+        let follow_up_retirements = self
+            .effect_store
+            .list_follow_up_retirement_requests(&TrackId::new(id))
+            .await
+            .map_err(TrackMutationError::Persistence)?;
+
+        for effect_id in &pending_effect_ids {
+            self.mutation_store
+                .save_transition_with_effect_status(
+                    id,
+                    &snapshot,
+                    &[],
+                    &[],
+                    Some(&EffectStatusUpdate::superseded(effect_id.clone())),
+                )
+                .await
+                .map_err(TrackMutationError::Persistence)?;
+        }
+
+        for request in &follow_up_retirements {
+            self.effect_store
+                .delete_follow_up_retirement_request(&TrackId::new(id), request)
+                .await
+                .map_err(TrackMutationError::Persistence)?;
+        }
+
+        let (previous_snapshot, next_snapshot) = {
+            let mut manager = self.manager.write().await;
+            let previous_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
+            manager
+                .reset_executor_for_activation(&TrackId::new(id))
+                .map_err(TrackMutationError::Mutation)?;
+            let next_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
+            (previous_snapshot, next_snapshot)
+        };
+
+        self.commit_track_mutation(id, &previous_snapshot, &next_snapshot, &(), None, false)
+            .await
+            .map_err(anyhow::Error::new)
     }
 
     pub(crate) fn emit_internal_notification(&self, notification: ApplicationNotification) {
@@ -538,10 +599,12 @@ impl MutationExecutor {
                     request,
                     desired_exposure,
                     submit_purpose,
+                    recovery_token,
                 } => Some(poise_engine::executor::PendingSubmitHint {
                     request,
                     desired_exposure,
                     submit_purpose,
+                    recovery_token,
                 }),
                 _ => None,
             })
@@ -771,11 +834,7 @@ impl MutationExecutor {
             return Ok(true);
         };
 
-        let TrackEffect::SubmitOrder {
-            request: submit_request,
-            ..
-        } = &replacement_submit.effect
-        else {
+        let TrackEffect::SubmitOrder { recovery_token, .. } = &replacement_submit.effect else {
             return Err(anyhow!(
                 "replacement effect `{}` is not submit order",
                 replacement_submit.effect_id
@@ -787,17 +846,19 @@ impl MutationExecutor {
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            let lifecycle_closed = previous_snapshot.executor_state.slots.iter().all(|slot| {
-                slot.working_order
-                    .as_ref()
-                    .and_then(|order| order.order_id.as_deref())
-                    != Some(request.closed_order_id.as_str())
-            });
+            let lifecycle_closed = previous_snapshot
+                .executor_state
+                .bindings
+                .iter()
+                .filter(|binding| binding.is_active())
+                .all(|binding| {
+                    binding.order_id.as_deref() != Some(request.closed_order_id.as_str())
+                });
             if !lifecycle_closed {
                 return Ok(false);
             }
             manager
-                .record_submit_failure(&TrackId::new(id), &submit_request.client_order_id)
+                .record_submit_failure_by_recovery_token(&TrackId::new(id), recovery_token)
                 .map_err(TrackMutationError::Mutation)?;
             let next_snapshot = manager
                 .snapshot(id)
@@ -866,18 +927,21 @@ impl MutationExecutor {
         &self,
         id: &str,
         effect_id: &str,
-        request: &OrderRequest,
-        desired_exposure: poise_core::types::Exposure,
+        recovery_token: &SubmitRecoveryToken,
         live_order: Option<&ExchangeOrder>,
     ) -> Result<SubmitExecutionRecovery> {
         Ok(
             match self
-                .recover_submit_effect(id, effect_id, request, desired_exposure, live_order)
+                .recover_submit_effect(id, effect_id, recovery_token, live_order)
                 .await?
             {
                 SubmitRecoveryResolution::Proceed {
-                    desired_exposure, ..
-                } => SubmitExecutionRecovery::Dispatch { desired_exposure },
+                    request,
+                    desired_exposure,
+                } => SubmitExecutionRecovery::Dispatch {
+                    request,
+                    desired_exposure,
+                },
                 SubmitRecoveryResolution::Recovered { .. } => {
                     SubmitExecutionRecovery::Finished(SubmitAttemptResult::changed())
                 }
@@ -895,8 +959,7 @@ impl MutationExecutor {
         &self,
         id: &str,
         effect_id: &str,
-        request: &OrderRequest,
-        desired_exposure: poise_core::types::Exposure,
+        recovery_token: &SubmitRecoveryToken,
         live_order: Option<&ExchangeOrder>,
     ) -> Result<SubmitRecoveryResolution> {
         let _mutation_guard = self.lock_track_mutation(id).await;
@@ -910,8 +973,7 @@ impl MutationExecutor {
             let plan = manager
                 .recover_submit_effect(
                     &TrackId::new(id),
-                    request,
-                    desired_exposure.clone(),
+                    recovery_token,
                     live_order,
                 )
                 .map_err(|error| {
@@ -1165,16 +1227,9 @@ impl MutationExecutor {
             return Err(TrackMutationError::Persistence(error));
         }
 
-        let previous_recovery_anomaly_active = previous_snapshot
-            .executor_state
-            .diagnostics
-            .recovery_anomaly
-            .is_some();
-        let next_recovery_anomaly_active = next_snapshot
-            .executor_state
-            .diagnostics
-            .recovery_anomaly
-            .is_some();
+        let previous_recovery_anomaly_active =
+            previous_snapshot.executor_state.recovery_anomaly.is_some();
+        let next_recovery_anomaly_active = next_snapshot.executor_state.recovery_anomaly.is_some();
         if previous_recovery_anomaly_active != next_recovery_anomaly_active {
             self.recovery_anomaly_observer
                 .observe_recovery_anomaly_change(&TrackId::new(id), next_recovery_anomaly_active);
@@ -1207,14 +1262,12 @@ fn restore_ready_pending_submit_effect(
     let snapshot = manager
         .snapshot(id)
         .ok_or_else(|| anyhow!("track `{id}` not found"))?;
-    let inventory_core_has_working_order = snapshot
+    let has_active_binding = snapshot
         .executor_state
-        .slots
+        .bindings
         .iter()
-        .find(|slot| slot.slot == OrderSlot::new("inventory_core"))
-        .and_then(|slot| slot.working_order.as_ref())
-        .is_some();
-    if inventory_core_has_working_order {
+        .any(|binding| binding.is_active());
+    if has_active_binding {
         return Ok(());
     }
 
@@ -1261,9 +1314,10 @@ pub(crate) mod test_support {
     use async_trait::async_trait;
     use chrono::Utc;
     use poise_core::events::DomainEvent;
-    use poise_core::risk::CapacityBudget;
+    use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
+    use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{ClockPort, OrderRequest};
     use poise_engine::snapshot::TrackRuntimeSnapshot;
@@ -1274,6 +1328,7 @@ pub(crate) mod test_support {
     use crate::{
         ApplicationNotification, CommittedTrackWrite, EffectStatus, EffectStatusUpdate,
         FollowUpRetirementRequest, PersistedTrackEffect, TrackEffectStore, TrackMutationStore,
+        TrackPersistentState,
     };
 
     use super::{AccountCapacityGuard, TrackServiceSet};
@@ -1298,6 +1353,7 @@ pub(crate) mod test_support {
     #[derive(Default)]
     pub(crate) struct MemoryRepository {
         snapshots: Mutex<HashMap<String, TrackRuntimeSnapshot>>,
+        persistent_states: Mutex<HashMap<String, TrackPersistentState>>,
         events: Mutex<HashMap<String, Vec<DomainEvent>>>,
         effects: Mutex<Vec<PersistedTrackEffect>>,
         retirement_requests: Mutex<HashMap<String, Vec<FollowUpRetirementRequest>>>,
@@ -1325,6 +1381,7 @@ pub(crate) mod test_support {
                     },
                     desired_exposure: Exposure(4.0),
                     submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                    recovery_token: SubmitRecoveryToken::empty(),
                 },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
@@ -1332,6 +1389,51 @@ pub(crate) mod test_support {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             });
+        }
+
+        pub(crate) fn seed_pending_mixed_effect_batch(&self, track_id: &str, batch_id: &str) {
+            let now = Utc::now();
+            let track_id = TrackId::new(track_id);
+            let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+            let effects = [
+                PersistedTrackEffect {
+                    effect_id: format!("{batch_id}:0"),
+                    track_id: track_id.clone(),
+                    batch_id: batch_id.to_string(),
+                    sequence: 0,
+                    effect: TrackEffect::SubmitOrder {
+                        request: OrderRequest {
+                            instrument: instrument.clone(),
+                            side: Side::Buy,
+                            price: 100.0,
+                            quantity: 0.1,
+                            client_order_id: "client-1".into(),
+                            reduce_only: false,
+                        },
+                        desired_exposure: Exposure(4.0),
+                        submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                        recovery_token: SubmitRecoveryToken::empty(),
+                    },
+                    status: EffectStatus::Pending,
+                    attempt_count: 0,
+                    last_error: None,
+                    created_at: now,
+                    updated_at: now,
+                },
+                PersistedTrackEffect {
+                    effect_id: format!("{batch_id}:1"),
+                    track_id,
+                    batch_id: batch_id.to_string(),
+                    sequence: 1,
+                    effect: TrackEffect::CancelAll { instrument },
+                    status: EffectStatus::Pending,
+                    attempt_count: 0,
+                    last_error: None,
+                    created_at: now,
+                    updated_at: now,
+                },
+            ];
+            self.effects.lock().unwrap().extend(effects);
         }
     }
 
@@ -1404,6 +1506,18 @@ pub(crate) mod test_support {
                 .take(limit)
                 .cloned()
                 .collect())
+        }
+
+        async fn load_track_persistent_state(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<TrackPersistentState>> {
+            Ok(self
+                .persistent_states
+                .lock()
+                .unwrap()
+                .get(track_id.as_str())
+                .cloned())
         }
     }
 
@@ -1478,6 +1592,14 @@ pub(crate) mod test_support {
                 .cloned()
                 .unwrap_or_default())
         }
+
+        async fn save_track_persistent_state(&self, state: &TrackPersistentState) -> Result<()> {
+            self.persistent_states
+                .lock()
+                .unwrap()
+                .insert(state.track_id.as_str().to_string(), state.clone());
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -1502,6 +1624,23 @@ pub(crate) mod test_support {
                 .filter(|effect| {
                     matches!(effect.status, EffectStatus::Pending)
                         && matches!(effect.effect, TrackEffect::SubmitOrder { .. })
+                })
+                .cloned()
+                .collect())
+        }
+
+        async fn list_all_pending_effects_for_track(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|effect| {
+                    effect.track_id == *track_id
+                        && matches!(effect.status, EffectStatus::Pending)
                 })
                 .cloned()
                 .collect())
@@ -1621,8 +1760,8 @@ pub(crate) mod test_support {
                     shape_family: ShapeFamily::Linear,
                     out_of_band_policy: BandProtectionPolicy::Freeze,
                 },
-                CapacityBudget {
-                    max_notional: 3_000.0,
+                3_000.0,
+                LossLimits {
                     daily_loss_limit: 300.0,
                     total_loss_limit: 600.0,
                 },
@@ -1663,16 +1802,18 @@ pub(crate) mod test_support {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use poise_engine::executor::RecoveryAnomaly;
+    use crate::{EffectStatus, FollowUpRetirementRequest};
+    use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
     use poise_engine::observation::MarketObservation;
     use poise_engine::ports::ExecutionQuote;
     use poise_engine::runtime::{AutoState, ControlState, TrackState};
     use poise_engine::snapshot::TrackRuntimeSnapshot;
     use poise_engine::track::TrackId;
+    use poise_engine::transition::TrackEffect;
     use tokio::sync::broadcast;
     use tokio::sync::broadcast::error::TryRecvError;
 
-    use super::test_support::{MemoryRepository, NoopGuard, seeded_manager};
+    use super::test_support::{MemoryRepository, NoopGuard, seeded_manager, track_write_services};
     use super::{MutationExecutor, RecoveryAnomalyObserver};
     use crate::TrackMutationStore;
 
@@ -1714,7 +1855,7 @@ mod tests {
     fn snapshot_with_recovery_anomaly(active: bool) -> TrackRuntimeSnapshot {
         let manager = seeded_manager();
         let mut snapshot = manager.get_track("btc-core").unwrap().snapshot();
-        snapshot.executor_state.diagnostics.recovery_anomaly =
+        snapshot.executor_state.recovery_anomaly =
             active.then_some(RecoveryAnomaly::UnknownLiveOrder);
         snapshot
     }
@@ -1823,8 +1964,8 @@ mod tests {
             let mut updated = track.snapshot();
             updated.runtime_state =
                 TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
-            updated.current_exposure = poise_core::types::Exposure(2.0);
-            updated.desired_exposure = Some(poise_core::types::Exposure(2.0));
+            updated.current_exposure = poise_core::types::Exposure(2.4);
+            updated.desired_exposure = Some(poise_core::types::Exposure(2.4));
             manager
                 .restore_track_state(&updated)
                 .expect("failed to seed active exposure state");
@@ -1855,5 +1996,112 @@ mod tests {
                 .is_none(),
             "live-only tick should not persist a durable snapshot"
         );
+    }
+
+    #[tokio::test]
+    async fn retire_stale_follow_up_submit_clears_current_binding_selected_by_recovery_token() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository.clone());
+
+        services
+            .observation
+            .observe_market(
+                "btc-core",
+                MarketObservation {
+                    mark_price: 105.0,
+                    execution_quote: Some(ExecutionQuote {
+                        best_bid: 104.9,
+                        best_ask: 105.1,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut pending_submits = repository
+            .pending_effects()
+            .into_iter()
+            .filter_map(|effect| match effect.effect {
+                TrackEffect::SubmitOrder {
+                    request,
+                    recovery_token,
+                    ..
+                } => Some((
+                    effect.effect_id,
+                    effect.batch_id,
+                    effect.sequence,
+                    request,
+                    recovery_token,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        pending_submits.sort_by_key(|(_, _, sequence, _, _)| *sequence);
+        assert!(
+            pending_submits.len() > 1,
+            "test requires multiple pending submit effects"
+        );
+
+        let (effect_id, batch_id, sequence, stale_request, recovery_token) =
+            pending_submits.last().unwrap().clone();
+        let current_client_order_id = "current-client".to_string();
+        let manager = services.effect.manager();
+        {
+            let mut manager = manager.write().await;
+            let mut snapshot = manager.snapshot("btc-core").expect("track snapshot");
+            let binding = snapshot
+                .executor_state
+                .bindings
+                .iter_mut()
+                .find(|binding| binding.request.client_order_id == stale_request.client_order_id)
+                .expect("replacement submit should still map to a current binding");
+            binding.request.client_order_id = current_client_order_id.clone();
+            manager
+                .restore_track_state(&snapshot)
+                .expect("updated track snapshot");
+        }
+
+        let retired = services
+            .effect
+            .retire_stale_follow_up_submit(
+                "btc-core",
+                &FollowUpRetirementRequest {
+                    batch_id: batch_id.clone(),
+                    blocked_sequence: sequence.checked_sub(1).expect("replacement effect"),
+                    closed_order_id: "closed-order".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(retired);
+
+        let snapshot = manager
+            .read()
+            .await
+            .snapshot("btc-core")
+            .expect("track snapshot");
+        let binding = snapshot
+            .executor_state
+            .bindings
+            .iter()
+            .find(|binding| binding.request.client_order_id == current_client_order_id)
+            .expect("current binding should still exist");
+        assert_eq!(binding.status, BindingStatus::Terminal);
+
+        let persisted = repository
+            .pending_effects()
+            .into_iter()
+            .find(|effect| effect.effect_id == effect_id)
+            .expect("replacement submit effect should remain persisted");
+        assert_eq!(persisted.status, EffectStatus::Superseded);
+
+        let TrackEffect::SubmitOrder {
+            recovery_token: persisted_recovery_token,
+            ..
+        } = persisted.effect
+        else {
+            panic!("expected persisted submit effect");
+        };
+        assert_eq!(persisted_recovery_token, recovery_token);
     }
 }

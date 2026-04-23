@@ -211,53 +211,6 @@ impl ServerRuntime {
         )
     }
 
-    #[cfg(test)]
-    fn with_reconcile_intervals(
-        state: RuntimeState,
-        effect_worker_state: EffectWorkerState,
-        ports: RuntimePorts,
-        startup_definitions: Vec<RuntimeStartupDefinition>,
-        recovery_retry_interval: Duration,
-        audit_interval: Duration,
-    ) -> Self {
-        Self::with_runtime_options(
-            state,
-            effect_worker_state,
-            ports,
-            startup_definitions,
-            RuntimeIntervals::new(
-                recovery_retry_interval,
-                audit_interval,
-                Duration::from_secs(5),
-                Duration::from_millis(50),
-            ),
-        )
-    }
-
-    #[cfg(test)]
-    fn with_reconcile_and_account_refresh_intervals(
-        state: RuntimeState,
-        effect_worker_state: EffectWorkerState,
-        ports: RuntimePorts,
-        startup_definitions: Vec<RuntimeStartupDefinition>,
-        recovery_retry_interval: Duration,
-        audit_interval: Duration,
-        account_refresh_interval: Duration,
-    ) -> Self {
-        Self::with_runtime_options(
-            state,
-            effect_worker_state,
-            ports,
-            startup_definitions,
-            RuntimeIntervals::new(
-                recovery_retry_interval,
-                audit_interval,
-                account_refresh_interval,
-                Duration::from_millis(50),
-            ),
-        )
-    }
-
     fn with_runtime_options(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
@@ -291,7 +244,8 @@ impl ServerRuntime {
             self.metadata.get_server_time()
         })
         .await?;
-        startup_bootstrap::complete_startup(self, &mut user_receiver, startup_cutoff).await?;
+        let steady_state_cutoff =
+            startup_bootstrap::complete_startup(self, &mut user_receiver, startup_cutoff).await?;
         let account_task = self.spawn_account_task(self.shutdown_tx.subscribe());
         let recovery_task = self.spawn_recovery_task(self.shutdown_tx.subscribe());
         let market_data_health_task =
@@ -299,7 +253,7 @@ impl ServerRuntime {
         let submit_preflight_task = self.spawn_submit_preflight_task(self.shutdown_tx.subscribe());
         let effect_task = self.spawn_effect_task(self.shutdown_tx.subscribe());
         let user_task =
-            self.spawn_user_task(user_receiver, startup_cutoff, self.shutdown_tx.subscribe());
+            self.spawn_user_task(user_receiver, steady_state_cutoff, self.shutdown_tx.subscribe());
         let market_task = self.spawn_market_task(self.shutdown_tx.subscribe());
 
         Ok(RuntimeHandles {
@@ -373,16 +327,6 @@ impl ServerRuntime {
         let _ = handles.account_task.await;
 
         tracing::info!("shutdown complete");
-    }
-
-    #[cfg(test)]
-    async fn complete_startup_for_test(&self) -> Result<()> {
-        let mut user_receiver = self.account.subscribe_user_data().await?;
-        let startup_cutoff = startup_bootstrap::retry_startup_step("get_server_time", || {
-            self.metadata.get_server_time()
-        })
-        .await?;
-        startup_bootstrap::complete_startup(self, &mut user_receiver, startup_cutoff).await
     }
 
     fn spawn_market_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
@@ -472,6 +416,3 @@ fn preserve_track_mutation_error(error: anyhow::Error) -> TrackMutationError {
 fn mutate_error(error: TrackMutationError) -> anyhow::Error {
     anyhow!(error.message())
 }
-
-#[cfg(test)]
-mod tests;

@@ -6,18 +6,22 @@ pub(crate) mod policy;
 mod recording;
 mod recovery;
 
-pub(crate) use planning::{ExecutorInput, SubmitIntentInput, plan, refresh_state};
+pub use binding::{
+    BindingExecutionClass, BindingInventoryIntent, BindingPolicyKind, BindingStatus,
+    SubmitRecoveryToken,
+};
+pub(crate) use planning::{ExecutorInput, PolicyContext, SubmitIntentInput, plan, refresh_state};
 pub use planning::{OrderRole, PendingSubmitHint};
 pub use recording::OrderUpdateAbsorbResult;
 pub(crate) use recording::{
     SubmitReceiptResolution, apply_order_observation_with_result, clear_all_working_orders,
-    clear_working_order_by_order_id, record_submit_failure, record_submit_receipt,
-    record_submit_request,
+    clear_working_order_by_order_id, record_submit_failure,
+    record_submit_failure_by_recovery_token, record_submit_receipt, record_submit_request,
 };
 pub use recovery::{RecoveryAnomaly, SubmitRecoveryPlan, SubmitRecoveryResolution};
 pub(crate) use recovery::{
     RecoveryInput, RecoveryResolution, SubmitRecoveryInput, recover_submit_effect,
-    recover_working_orders, submit_requests_match,
+    recover_working_orders,
 };
 
 #[cfg(test)]
@@ -80,6 +84,26 @@ mod tests {
         desired_exposure: Exposure,
         state: Option<&'a ExecutorState>,
     ) -> ExecutorInput<'a> {
+        input_with_context(
+            config,
+            rules,
+            instrument,
+            current_exposure,
+            desired_exposure,
+            PolicyContext::Normal,
+            state,
+        )
+    }
+
+    fn input_with_context<'a>(
+        config: &'a TrackConfig,
+        rules: &'a ExchangeRules,
+        instrument: &'a Instrument,
+        current_exposure: Exposure,
+        desired_exposure: Exposure,
+        policy_context: PolicyContext,
+        state: Option<&'a ExecutorState>,
+    ) -> ExecutorInput<'a> {
         ExecutorInput::new(
             SubmitIntentInput {
                 instrument,
@@ -93,6 +117,7 @@ mod tests {
                     best_bid: 99.9,
                     best_ask: 100.1,
                 }),
+                policy_context,
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: observed_at(),
@@ -132,6 +157,7 @@ mod tests {
                 operation,
                 exposure_qty: 1.0,
             }],
+            absorbed_exposure_qty: 0.0,
             request: OrderRequest {
                 instrument: instrument(),
                 side: Side::Buy,
@@ -147,6 +173,35 @@ mod tests {
             policy_state: BindingPolicyState::CurveMaker {
                 due_grace_started_at: Some(observed_at() - Duration::seconds(120)),
             },
+        }
+    }
+
+    fn catch_up_binding(config: &TrackConfig, operation: BoundaryOperation) -> LiveOrderBinding {
+        let proposal = binding::BindingProposal {
+            policy: PolicyKind::CatchUp,
+            operations: vec![operation.clone()],
+        };
+        LiveOrderBinding {
+            binding_id: "catch-up-binding".to_string(),
+            proposal_key: proposal.proposal_key(),
+            allocations: vec![BindingOperationAllocation {
+                operation,
+                exposure_qty: 1.0,
+            }],
+            absorbed_exposure_qty: 0.0,
+            request: OrderRequest {
+                instrument: instrument(),
+                side: Side::Buy,
+                price: 100.1,
+                quantity: config.base_qty_per_unit(),
+                client_order_id: "catch-up-client".to_string(),
+                reduce_only: false,
+            },
+            desired_exposure: Exposure(1.0),
+            submit_purpose: SubmitPurpose::AutoReconcile,
+            order_id: Some("catch-up-order".to_string()),
+            status: BindingStatus::Working,
+            policy_state: BindingPolicyState::Stateless,
         }
     }
 
@@ -195,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn catch_up_policy_preempts_curve_maker_after_due_grace_expires() {
+    fn catch_up_policy_cancels_stale_curve_maker_and_takes_over_operation_in_same_round() {
         let config = config();
         let rules = rules();
         let instrument = instrument();
@@ -218,12 +273,19 @@ mod tests {
             effect,
             ExecutionAction::CancelOrder { order_id, .. } if order_id == "maker-order"
         )));
+        let maker = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CurveMaker)
+            .expect("maker binding should remain tracked while canceling");
+        assert_eq!(maker.status, BindingStatus::CancelPending);
         assert!(plan.state.bindings.iter().any(|binding| {
             binding.proposal_key.policy == PolicyKind::CatchUp
-                && binding.allocations.iter().any(|allocation| {
-                    allocation.operation.direction == BoundaryDirection::Up
-                        && (allocation.exposure_qty - 1.0).abs() < 1e-9
-                })
+                && binding
+                    .allocations
+                    .iter()
+                    .any(|allocation| allocation.operation.direction == BoundaryDirection::Up)
         }));
     }
 
@@ -258,15 +320,15 @@ mod tests {
     }
 
     #[test]
-    fn binding_diff_replaces_maker_binding_with_catch_up_binding_on_preemption() {
+    fn cancel_pending_maker_binding_releases_boundary_operation_for_replacement() {
         let config = config();
         let rules = rules();
         let instrument = instrument();
         let maker_operation = operation(&config, 0.0, 1.0, BoundaryDirection::Up);
         let mut state = ExecutorState::empty(observed_at()).ensure_revision(&config, Exposure(0.0));
-        state
-            .bindings
-            .push(maker_binding(&config, maker_operation.clone()));
+        let mut maker = maker_binding(&config, maker_operation.clone());
+        maker.status = BindingStatus::CancelPending;
+        state.bindings.push(maker);
 
         let plan = plan(input(
             &config,
@@ -281,16 +343,107 @@ mod tests {
             .state
             .bindings
             .iter()
-            .find(|binding| binding.proposal_key.policy == PolicyKind::CurveMaker)
-            .expect("maker binding should still be tracked while canceling");
+            .find(|binding| {
+                binding.proposal_key.policy == PolicyKind::CurveMaker
+                    && binding.allocations[0].operation == maker_operation
+            })
+            .expect("canceling maker binding should stay tracked");
         assert_eq!(maker.status, BindingStatus::CancelPending);
+        assert!(plan.state.bindings.iter().any(|binding| {
+            binding.proposal_key.policy == PolicyKind::CatchUp
+                && binding.allocations[0].operation == maker_operation
+        }));
+    }
 
-        let catch_up = plan
+    #[test]
+    fn manual_override_policy_runs_exclusively_without_curve_maker_or_catch_up() {
+        let config = config();
+        let rules = rules();
+        let instrument = instrument();
+
+        let plan = plan(input_with_context(
+            &config,
+            &rules,
+            &instrument,
+            Exposure(0.0),
+            Exposure(2.0),
+            PolicyContext::ManualOverride,
+            None,
+        ));
+
+        assert!(plan.state.bindings.iter().any(|binding| {
+            binding.proposal_key.policy == PolicyKind::ManualOverride
+                && binding.request.side == Side::Buy
+                && (binding.request.quantity - 2.0).abs() < 1e-9
+        }));
+        assert!(!plan.state.bindings.iter().any(|binding| {
+            matches!(
+                binding.proposal_key.policy,
+                PolicyKind::CurveMaker | PolicyKind::CatchUp
+            )
+        }));
+    }
+
+    #[test]
+    fn flatten_policy_only_emits_risk_reducing_binding() {
+        let config = config();
+        let rules = rules();
+        let instrument = instrument();
+
+        let plan = plan(input_with_context(
+            &config,
+            &rules,
+            &instrument,
+            Exposure(2.0),
+            Exposure(0.0),
+            PolicyContext::Flatten,
+            None,
+        ));
+
+        assert!(plan.state.bindings.iter().any(|binding| {
+            binding.proposal_key.policy == PolicyKind::Flatten
+                && binding.request.side == Side::Sell
+                && binding.request.reduce_only
+                && (binding.request.quantity - 2.0).abs() < 1e-9
+        }));
+        assert!(!plan.state.bindings.iter().any(|binding| {
+            matches!(
+                binding.proposal_key.policy,
+                PolicyKind::CurveMaker | PolicyKind::CatchUp
+            )
+        }));
+    }
+
+    #[test]
+    fn stale_catch_up_binding_is_canceled_when_no_longer_desired() {
+        let config = config();
+        let rules = rules();
+        let instrument = instrument();
+        let mut state = ExecutorState::empty(observed_at()).ensure_revision(&config, Exposure(1.0));
+        state.bindings.push(catch_up_binding(
+            &config,
+            operation(&config, 0.0, 1.0, BoundaryDirection::Up),
+        ));
+
+        let plan = plan(input(
+            &config,
+            &rules,
+            &instrument,
+            Exposure(1.0),
+            Exposure(1.0),
+            Some(&state),
+        ));
+
+        assert!(plan.effects.iter().any(|effect| matches!(
+            effect,
+            ExecutionAction::CancelOrder { order_id, .. } if order_id == "catch-up-order"
+        )));
+        let binding = plan
             .state
             .bindings
             .iter()
-            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
-            .expect("catch-up replacement should be submitted");
-        assert_eq!(catch_up.allocations[0].operation, maker_operation);
+            .find(|binding| binding.request.client_order_id == "catch-up-client")
+            .expect("existing catch-up binding should remain tracked while canceling");
+        assert_eq!(binding.status, BindingStatus::CancelPending);
     }
 }

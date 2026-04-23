@@ -2,9 +2,8 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use poise_core::events::ReplacementGateReason;
 use poise_core::risk::{
-    CapacityBudget, ExposureIntent, LossGuardSnapshot, RiskOutcome, RiskTerminationCause,
+    ExposureIntent, LossGuardSnapshot, LossLimits, RiskOutcome, RiskTerminationCause,
     evaluate_risk_outcome,
 };
 use poise_core::strategy::{BandBoundary, TrackConfig};
@@ -243,7 +242,8 @@ pub struct TrackRuntime {
     pub(crate) id: TrackId,
     pub(crate) instrument: Instrument,
     pub(crate) config: TrackConfig,
-    pub(crate) budget: CapacityBudget,
+    pub(crate) max_notional: f64,
+    pub(crate) loss_limits: LossLimits,
     pub(crate) exchange_rules: ExchangeRules,
     pub(crate) track_state: TrackState,
     pub(crate) current_exposure: Exposure,
@@ -251,7 +251,6 @@ pub struct TrackRuntime {
     pub(crate) desired_exposure: Option<Exposure>,
     pub(crate) active_risk_cap: Option<AppliedRiskCap>,
     pub(crate) executor_state: ExecutorState,
-    pub(crate) replacement_gate_reason: Option<ReplacementGateReason>,
     pub(crate) ledger_state: TrackLedgerState,
     pub(crate) risk_state: RiskState,
     pub(crate) execution_gate_state: ExecutionGateState,
@@ -283,7 +282,8 @@ impl TrackRuntime {
         id: TrackId,
         instrument: Instrument,
         config: TrackConfig,
-        budget: CapacityBudget,
+        max_notional: f64,
+        loss_limits: LossLimits,
         exchange_rules: ExchangeRules,
         started_at: DateTime<Utc>,
     ) -> Self {
@@ -291,7 +291,8 @@ impl TrackRuntime {
             id,
             instrument,
             config,
-            budget,
+            max_notional,
+            loss_limits,
             exchange_rules,
             started_at,
             30,
@@ -302,7 +303,8 @@ impl TrackRuntime {
         id: TrackId,
         instrument: Instrument,
         config: TrackConfig,
-        budget: CapacityBudget,
+        max_notional: f64,
+        loss_limits: LossLimits,
         exchange_rules: ExchangeRules,
         started_at: DateTime<Utc>,
         tick_timeout_secs: u64,
@@ -311,14 +313,14 @@ impl TrackRuntime {
             id,
             instrument,
             config,
-            budget,
+            max_notional,
+            loss_limits,
             exchange_rules,
             track_state: TrackState::WaitingMarketData,
             current_exposure: Exposure(0.0),
             desired_exposure: None,
             active_risk_cap: None,
             executor_state: ExecutorState::empty(started_at),
-            replacement_gate_reason: None,
             ledger_state: TrackLedgerState::default(),
             risk_state: RiskState::default(),
             execution_gate_state: ExecutionGateState::open(),
@@ -357,8 +359,12 @@ impl TrackRuntime {
         self.track_state.manual_target_override()
     }
 
-    pub fn budget(&self) -> &CapacityBudget {
-        &self.budget
+    pub fn max_notional(&self) -> f64 {
+        self.max_notional
+    }
+
+    pub fn loss_limits(&self) -> &LossLimits {
+        &self.loss_limits
     }
 
     pub fn initial_from_seed(
@@ -370,7 +376,8 @@ impl TrackRuntime {
             seed.track_id,
             seed.instrument,
             seed.track_config,
-            seed.budget,
+            seed.max_notional,
+            seed.loss_limits,
             exchange_rules,
             started_at,
             seed.tick_timeout_secs,
@@ -400,7 +407,6 @@ impl TrackRuntime {
             current_exposure: self.current_exposure.clone(),
             desired_exposure: self.desired_exposure.clone(),
             executor_state: self.executor_state.clone(),
-            replacement_gate_reason: self.replacement_gate_reason.clone(),
             execution_gate_state: self.execution_gate_state.clone(),
             ledger_state: self.ledger_state.clone(),
             risk: self.risk_state.clone(),
@@ -439,7 +445,6 @@ impl TrackRuntime {
         self.desired_exposure = snapshot.desired_exposure.clone();
         self.active_risk_cap = None;
         self.executor_state = snapshot.executor_state.clone();
-        self.replacement_gate_reason = snapshot.replacement_gate_reason.clone();
         self.ledger_state = snapshot.ledger_state.clone();
         self.risk_state = snapshot.risk.clone();
         self.execution_gate_state = snapshot.execution_gate_state.clone();
@@ -537,7 +542,8 @@ impl TrackRuntime {
     }
 
     pub fn apply_post_restore_constraints(&mut self, constraints: PostRestoreConstraints) {
-        self.budget = constraints.budget;
+        self.max_notional = constraints.max_notional;
+        self.loss_limits = constraints.loss_limits;
         self.tick_timeout_secs = constraints.tick_timeout_secs;
 
         if let Some(target) = self.desired_exposure.clone() {
@@ -554,7 +560,8 @@ impl TrackRuntime {
                         unrealized_pnl: self.risk_state.unrealized_pnl,
                     },
                 },
-                &self.budget,
+                self.max_notional,
+                &self.loss_limits,
             );
             self.desired_exposure = Some(match decision {
                 RiskOutcome::Allow { target } | RiskOutcome::Cap { target } => target,
@@ -566,7 +573,7 @@ impl TrackRuntime {
         let total_loss_amount = (-(self.ledger_state.net_realized_pnl_cumulative()
             + self.risk_state.unrealized_pnl))
             .max(0.0);
-        if total_loss_amount >= self.budget.total_loss_limit {
+        if total_loss_amount >= self.loss_limits.total_loss_limit {
             self.desired_exposure = Some(Exposure(0.0));
         }
     }
@@ -605,6 +612,7 @@ mod tests {
                 operations: vec![operation],
             },
             allocations: Vec::new(),
+            absorbed_exposure_qty: 0.0,
             request: OrderRequest {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: poise_core::types::Side::Buy,
@@ -646,8 +654,8 @@ mod tests {
                 shape_family: poise_core::strategy::ShapeFamily::Linear,
                 out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
             },
-            CapacityBudget {
-                max_notional: 10_000.0,
+            10_000.0,
+            LossLimits {
                 daily_loss_limit: 1_000.0,
                 total_loss_limit: 5_000.0,
             },

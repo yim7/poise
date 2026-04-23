@@ -63,7 +63,7 @@ pub struct TrackListLedgerView {
 pub struct ExecutionBadgeView {
     pub state: ExecutionStateView,
     pub execution_status: ExecutionStatusView,
-    pub active_slot_count: u32,
+    pub active_binding_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,12 +72,11 @@ pub struct TrackDetailView {
     pub identity: TrackIdentityView,
     pub status: TrackStatusPanelView,
     pub strategy: TrackStrategyView,
-    #[serde(default)]
-    pub budget: TrackBudgetView,
+    pub max_notional: f64,
+    pub loss_limits: TrackLossLimitsView,
     pub market: TrackMarketView,
     pub position: TrackPositionView,
     pub ledger: TrackLedgerView,
-    pub execution_stats: TrackExecutionStatsView,
     pub execution: TrackExecutionView,
     pub activity: Vec<TrackActivityItemView>,
     pub available_commands: Vec<TrackCommandView>,
@@ -109,8 +108,7 @@ pub struct TrackStrategyView {
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct TrackBudgetView {
-    pub max_notional: f64,
+pub struct TrackLossLimitsView {
     pub daily_loss_limit: f64,
     pub total_loss_limit: f64,
 }
@@ -204,14 +202,6 @@ pub struct TrackLedgerGapView {
     pub observed_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TrackExecutionStatsView {
-    pub max_inventory_gap_abs: f64,
-    pub max_gap_age_ms: i64,
-    pub stats_started_at: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackExecutionView {
     pub state: ExecutionStateView,
@@ -222,26 +212,24 @@ pub struct TrackExecutionView {
     #[serde(default)]
     pub inventory_gap: f64,
     #[serde(default)]
-    pub gap_age_ms: i64,
+    pub active_binding_count: u32,
     #[serde(default)]
-    pub active_slot_count: u32,
-    #[serde(default)]
-    pub slots: Vec<ExecutionSlotView>,
-    #[serde(default)]
-    pub replacement_gate: Option<ReplacementGateView>,
+    pub bindings: Vec<ExecutionBindingView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExecutionSlotView {
+pub struct ExecutionBindingView {
+    pub id: String,
+    pub policy: ExecutionBindingPolicyView,
     pub label: String,
-    pub phase: ExecutionSlotPhaseView,
-    pub intent: ExecutionIntentView,
+    pub status: ExecutionBindingStatusView,
+    pub intent: ExecutionBindingIntentView,
     #[serde(default)]
-    pub order: Option<ExecutionSlotOrderView>,
+    pub order: Option<ExecutionBindingOrderView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExecutionSlotOrderView {
+pub struct ExecutionBindingOrderView {
     pub side: Side,
     pub price: f64,
     pub quantity: f64,
@@ -257,26 +245,26 @@ pub enum ExecutionStatusView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExecutionSlotPhaseView {
-    Opening,
+pub enum ExecutionBindingStatusView {
+    SubmitPending,
     Working,
+    CancelPending,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExecutionIntentView {
+pub enum ExecutionBindingIntentView {
     IncreaseInventory,
     DecreaseInventory,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ReplacementGateView {
-    RoundedMatch,
-    ImprovementBelowThreshold {
-        improvement_bps: f64,
-        threshold_bps: f64,
-    },
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionBindingPolicyView {
+    CurveMaker,
+    CatchUp,
+    ManualOverride,
+    Flatten,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -592,9 +580,12 @@ impl fmt::Display for Side {
 mod tests {
     use super::{
         AccountSummaryView, BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy,
-        RiskSignalView, ShapeFamily, StrategyPriceStatusView, StreamEvent, TrackCommandAccepted,
-        TrackCommandRequest, TrackCommandType, TrackDetailView, TrackDiagnosticsView,
-        TrackLedgerGapReasonView, TrackListResponse, TrackStatus,
+        ExecutionBindingIntentView, ExecutionBindingOrderView, ExecutionBindingPolicyView,
+        ExecutionBindingStatusView, ExecutionBindingView, ExecutionStateView, ExecutionStatusView,
+        RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView, StreamEvent,
+        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
+        TrackDiagnosticsView, TrackExecutionView, TrackLedgerGapReasonView, TrackListResponse,
+        TrackStatus,
     };
 
     #[test]
@@ -710,7 +701,7 @@ mod tests {
                         "strategy_price":64123.4,
                         "strategy_price_status":"live",
                         "exposure":{"current":0.5,"target":0.75},
-                        "execution":{"state":"open","execution_status":"normal","active_slot_count":1},
+                        "execution":{"state":"open","execution_status":"normal","active_binding_count":1},
                         "ledger":{"total_pnl":1229.0,"has_unresolved_gaps":false}
                     }
                 ]
@@ -743,7 +734,7 @@ mod tests {
                         "strategy_price":64123.4,
                         "strategy_price_status":"live",
                         "exposure":{"current":0.5,"target":0.75},
-                        "execution":{"state":"open","execution_status":"normal","active_slot_count":1},
+                        "execution":{"state":"open","execution_status":"normal","active_binding_count":1},
                         "ledger":{"total_pnl":1229.0,"has_unresolved_gaps":false}
                     }
                 ]
@@ -759,6 +750,55 @@ mod tests {
     }
 
     #[test]
+    fn execution_view_does_not_export_legacy_replacement_gate() {
+        let execution = TrackExecutionView {
+            state: ExecutionStateView::Open,
+            execution_status: ExecutionStatusView::Normal,
+            attention_reasons: Vec::new(),
+            inventory_gap: 0.0,
+            active_binding_count: 0,
+            bindings: Vec::new(),
+        };
+
+        let payload = serde_json::to_value(&execution).unwrap();
+
+        assert!(
+            payload.get("replacement_gate").is_none(),
+            "boundary-ledger protocol should not expose the old replacement gate model"
+        );
+    }
+
+    #[test]
+    fn execution_binding_view_serializes_stable_identity_and_policy() {
+        let execution = TrackExecutionView {
+            state: ExecutionStateView::Open,
+            execution_status: ExecutionStatusView::Normal,
+            attention_reasons: Vec::new(),
+            inventory_gap: 0.0,
+            active_binding_count: 1,
+            bindings: vec![ExecutionBindingView {
+                id: "binding-instance-1".into(),
+                policy: ExecutionBindingPolicyView::CurveMaker,
+                label: "maker 1".into(),
+                status: ExecutionBindingStatusView::Working,
+                intent: ExecutionBindingIntentView::IncreaseInventory,
+                order: Some(ExecutionBindingOrderView {
+                    side: Side::Buy,
+                    price: 100.5,
+                    quantity: 0.1,
+                }),
+            }],
+        };
+
+        let payload = serde_json::to_value(&execution).unwrap();
+        let binding = &payload["bindings"][0];
+
+        assert_eq!(binding["id"].as_str(), Some("binding-instance-1"));
+        assert_eq!(binding["policy"].as_str(), Some("curve_maker"));
+        assert_eq!(binding["label"].as_str(), Some("maker 1"));
+    }
+
+    #[test]
     fn detail_view_serializes_strategy_price_and_quote_fields() {
         let detail: TrackDetailView = serde_json::from_str(
             r#"{
@@ -769,12 +809,12 @@ mod tests {
                     "strategy_price_status":"live"
                 },
                 "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
-                "budget":{"max_notional":3000.0,"daily_loss_limit":100.0,"total_loss_limit":300.0},
+                "max_notional":3000.0,
+                "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                 "position":{"current_exposure":0.5,"desired_exposure":0.75},
                 "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[]},
-                "execution_stats":{"max_inventory_gap_abs":1.5,"max_gap_age_ms":120000,"stats_started_at":"2026-03-26T09:45:00Z"},
-                "execution":{"state":"open","execution_status":"attention_required","attention_reasons":["missing execution quote"],"inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                "execution":{"state":"open","execution_status":"attention_required","attention_reasons":["missing execution quote"],"inventory_gap":0.0,"active_binding_count":0,"bindings":[]},
                 "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
                 "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
             }"#,
@@ -797,6 +837,12 @@ mod tests {
         assert_eq!(json["market"]["mark_price"].as_f64(), Some(64123.4));
         assert_eq!(json["market"]["best_bid"].as_f64(), Some(64120.1));
         assert_eq!(json["market"]["best_ask"].as_f64(), Some(64124.5));
+        assert_eq!(json["max_notional"].as_f64(), Some(3000.0));
+        assert_eq!(
+            json["loss_limits"]["daily_loss_limit"].as_f64(),
+            Some(100.0)
+        );
+        assert!(json.get("budget").is_none());
     }
 
     #[test]
@@ -820,11 +866,12 @@ mod tests {
                     "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
                     "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"strategy_price":64000.0,"strategy_price_status":"live"},
                     "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                    "max_notional":3000.0,
+                    "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                     "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                     "position":{"current_exposure":0.5,"desired_exposure":0.75},
                     "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[]},
-                    "execution_stats":{"max_inventory_gap_abs":0.0,"max_gap_age_ms":0,"stats_started_at":null},
-                    "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                    "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"active_binding_count":0,"bindings":[]},
                     "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
                     "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
                 }
@@ -857,27 +904,24 @@ mod tests {
                     detail_json["ledger"]["unrealized_pnl"].as_f64(),
                     Some(265.2)
                 );
-                assert_eq!(
-                    detail_json["execution_stats"]["max_inventory_gap_abs"].as_f64(),
-                    Some(0.0)
-                );
             }
             other => panic!("unexpected event variant: {other:?}"),
         }
     }
 
     #[test]
-    fn deserializes_track_detail_with_pnl_and_execution_stats() {
+    fn deserializes_track_detail_with_pnl_and_execution_state() {
         let detail: TrackDetailView = serde_json::from_str(
             r#"{
                 "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
                 "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"strategy_price":64000.0,"strategy_price_status":"live"},
                 "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "max_notional":3000.0,
+                "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                 "position":{"current_exposure":0.5,"desired_exposure":0.75},
                 "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[{"gap_key":"gap-1","reason":"unsupported_commission_asset","observed_at":"2026-03-31T11:11:11Z"}]},
-                "execution_stats":{"max_inventory_gap_abs":1.5,"max_gap_age_ms":120000,"stats_started_at":"2026-03-26T09:45:00Z"},
-                "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"active_binding_count":0,"bindings":[]},
                 "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
                 "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
             }"#,
@@ -893,10 +937,7 @@ mod tests {
             detail.ledger.unresolved_gaps[0].reason,
             TrackLedgerGapReasonView::UnsupportedCommissionAsset
         );
-        assert_eq!(
-            detail_json["execution_stats"]["max_inventory_gap_abs"].as_f64(),
-            Some(1.5)
-        );
+        assert_eq!(detail_json["execution"]["state"].as_str(), Some("open"));
     }
 
     #[test]
@@ -906,11 +947,12 @@ mod tests {
                 "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
                 "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"strategy_price":64000.0,"strategy_price_status":"live"},
                 "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
+                "max_notional":3000.0,
+                "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                 "position":{"current_exposure":0.5,"desired_exposure":0.75},
                 "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[{"gap_key":"gap-1","reason":"future_gap_reason","observed_at":"2026-03-31T11:11:11Z"}]},
-                "execution_stats":{"max_inventory_gap_abs":1.5,"max_gap_age_ms":120000,"stats_started_at":"2026-03-26T09:45:00Z"},
-                "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"gap_age_ms":0,"active_slot_count":0,"slots":[]},
+                "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"active_binding_count":0,"bindings":[]},
                 "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
                 "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
             }"#,

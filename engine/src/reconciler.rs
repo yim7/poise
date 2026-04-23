@@ -69,7 +69,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
         loss_guard: build_loss_guard_snapshot(&track.ledger_state, &track.risk_state),
     };
 
-    let decision = risk::evaluate_risk_outcome(&intent, &track.budget);
+    let decision = risk::evaluate_risk_outcome(&intent, track.max_notional, &track.loss_limits);
 
     let (approved_target, applied_risk_cap, mut events) = match decision {
         RiskOutcome::Allow { target } => (target, None, vec![]),
@@ -385,7 +385,7 @@ mod tests {
         AutoState, ControlState, ManualState, TerminationCause, TrackState, TrackStatus,
     };
     use chrono::{TimeZone, Utc};
-    use poise_core::risk::CapacityBudget;
+    use poise_core::risk::LossLimits;
     use poise_core::strategy::*;
 
     fn test_runtime() -> TrackRuntime {
@@ -402,7 +402,8 @@ mod tests {
                 shape_family: ShapeFamily::Linear,
                 out_of_band_policy: BandProtectionPolicy::Freeze,
             },
-            test_budget(),
+            test_max_notional(),
+            test_loss_limits(),
             poise_core::types::ExchangeRules {
                 price_tick: 0.1,
                 quantity_step: 0.1,
@@ -415,9 +416,12 @@ mod tests {
         )
     }
 
-    fn test_budget() -> CapacityBudget {
-        CapacityBudget {
-            max_notional: 3000.0,
+    fn test_max_notional() -> f64 {
+        3000.0
+    }
+
+    fn test_loss_limits() -> LossLimits {
+        LossLimits {
             daily_loss_limit: 120.0,
             total_loss_limit: 500.0,
         }
@@ -487,8 +491,7 @@ mod tests {
     fn reconcile_target_terminates_when_risk_requests_termination() {
         let mut track = test_runtime();
         track.current_exposure = Exposure(4.0);
-        track.ledger_state.realized_pnl_day =
-            Some(chrono::NaiveDate::from_ymd_opt(2026, 4, 8).unwrap());
+        track.ledger_state.ledger_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 4, 8).unwrap();
         track.ledger_state.gross_realized_pnl_today = -90.0;
         track.risk_state.unrealized_pnl = -35.0;
         track.ledger_state.gross_realized_pnl_cumulative = -90.0;
@@ -597,10 +600,7 @@ mod tests {
         let mut track = test_runtime_with_strategy_target(Exposure(8.0));
         track.current_exposure = Exposure(4.0);
         track.config.out_of_band_policy = BandProtectionPolicy::Freeze;
-        track.budget = CapacityBudget {
-            max_notional: 1500.0,
-            ..test_budget()
-        };
+        track.max_notional = 1500.0;
 
         let result = reconcile_target(&track, 89.0);
 
@@ -623,10 +623,7 @@ mod tests {
             trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
             recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
         };
-        track.budget = CapacityBudget {
-            max_notional: 1500.0,
-            ..test_budget()
-        };
+        track.max_notional = 1500.0;
 
         let result = reconcile_target(&track, 89.0);
 
@@ -974,10 +971,7 @@ mod tests {
         let mut track = test_runtime();
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(0.0);
-        track.budget = CapacityBudget {
-            max_notional: 1500.0,
-            ..test_budget()
-        };
+        track.max_notional = 1500.0;
 
         let result = reconcile_target(&track, 90.0);
 
@@ -994,10 +988,7 @@ mod tests {
         let mut track = test_runtime();
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(4.0);
-        track.budget = CapacityBudget {
-            max_notional: 1500.0,
-            ..test_budget()
-        };
+        track.max_notional = 1500.0;
 
         let result = reconcile_target(&track, 90.0);
 
@@ -1023,10 +1014,7 @@ mod tests {
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(0.0);
         track.desired_exposure = Some(Exposure(4.0));
-        track.budget = CapacityBudget {
-            max_notional: 1500.0,
-            ..test_budget()
-        };
+        track.max_notional = 1500.0;
 
         let result = reconcile_target(&track, 90.0);
 
@@ -1062,10 +1050,7 @@ mod tests {
             intended: Exposure(8.0),
             capped: Exposure(4.0),
         });
-        track.budget = CapacityBudget {
-            max_notional: 1500.0,
-            ..test_budget()
-        };
+        track.max_notional = 1500.0;
 
         let result = reconcile_target(&track, 90.0);
 
@@ -1085,8 +1070,7 @@ mod tests {
         let mut track = test_runtime();
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(2.0);
-        track.ledger_state.realized_pnl_day =
-            Some(chrono::NaiveDate::from_ymd_opt(2026, 4, 8).unwrap());
+        track.ledger_state.ledger_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 4, 8).unwrap();
         track.ledger_state.gross_realized_pnl_today = 100.0;
         track.ledger_state.gross_realized_pnl_cumulative = 320.0;
         track.ledger_state.trading_fee_today = 8.0;
@@ -1094,17 +1078,20 @@ mod tests {
         track.ledger_state.funding_fee_today = -2.0;
         track.ledger_state.funding_fee_cumulative = -5.0;
         track.risk_state.unrealized_pnl = -215.0;
-        track.budget.daily_loss_limit = 120.0;
-        track.budget.total_loss_limit = 500.0;
+        track.loss_limits.daily_loss_limit = 120.0;
+        track.loss_limits.total_loss_limit = 500.0;
 
         let result = reconcile_target(&track, 90.0);
 
         assert_eq!(result.desired_exposure, Exposure(0.0));
-        assert!(result.events.iter().any(|event| matches!(
-            event,
-            DomainEvent::RiskCapApplied { intended, capped }
-                if *intended == Exposure(8.0) && *capped == Exposure(0.0)
-        )));
+        assert_eq!(
+            result.new_runtime_state,
+            Some(TrackState::Terminated {
+                cause: TerminationCause::Risk(
+                    poise_core::risk::RiskTerminationCause::DailyLossLimit,
+                ),
+            }),
+        );
     }
 
     #[test]
@@ -1126,10 +1113,7 @@ mod tests {
         let mut track = test_runtime();
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(0.0);
-        track.budget = CapacityBudget {
-            max_notional: 1500.0,
-            ..test_budget()
-        };
+        track.max_notional = 1500.0;
 
         let result = reconcile_target(&track, 90.0);
 

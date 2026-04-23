@@ -22,10 +22,10 @@ mod tests {
         let item = TrackDiagnosticItem {
             observed_at: chrono::Utc::now(),
             severity: DiagnosticSeverity::Warn,
-            message: "replacement gate active".to_string(),
+            message: "boundary ledger anomaly".to_string(),
         };
 
         assert_eq!(item.severity, DiagnosticSeverity::Warn);
-        assert_eq!(item.message, "replacement gate active");
+        assert_eq!(item.message, "boundary ledger anomaly");
     }
 }

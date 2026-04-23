@@ -4,16 +4,6 @@ use crate::strategy::{BandBoundary, BandProtectionPolicy};
 use crate::types::Exposure;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ReplacementGateReason {
-    RoundedMatch,
-    ImprovementBelowThreshold {
-        improvement_bps: f64,
-        threshold_bps: f64,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionGateReason {
     AccountCapacityInsufficient {
@@ -45,8 +35,5 @@ pub enum DomainEvent {
     },
     ExecutionGateApplied {
         reason: ExecutionGateReason,
-    },
-    ReplacementGateApplied {
-        reason: ReplacementGateReason,
     },
 }

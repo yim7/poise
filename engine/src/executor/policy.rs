@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::executor::boundary::BoundaryOperation;
+use crate::executor::boundary::{BoundaryDirection, BoundaryOperation};
 use crate::executor::ledger::BoundaryLedgerView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -34,13 +34,22 @@ pub fn select_catch_up_operations(
     coverage: &CoverageReservation,
     exposure_epsilon: f64,
 ) -> Vec<BoundaryOperation> {
-    view.operations
-        .iter()
-        .filter(|operation| operation.due)
-        .filter(|operation| operation.remaining > exposure_epsilon)
-        .filter(|operation| !coverage.is_reserved(&operation.operation))
-        .map(|operation| operation.operation.clone())
-        .collect()
+    let mut up = select_target_operations(
+        view,
+        coverage,
+        BoundaryDirection::Up,
+        exposure_epsilon,
+        true,
+    );
+    let down = select_target_operations(
+        view,
+        coverage,
+        BoundaryDirection::Down,
+        exposure_epsilon,
+        true,
+    );
+    up.extend(down);
+    up
 }
 
 pub fn select_curve_maker_operations(
@@ -77,6 +86,28 @@ pub fn select_curve_maker_operations(
 
     up.append(&mut down);
     up
+}
+
+pub fn select_target_operations(
+    view: &BoundaryLedgerView,
+    coverage: &CoverageReservation,
+    direction: BoundaryDirection,
+    exposure_epsilon: f64,
+    require_due: bool,
+) -> Vec<BoundaryOperation> {
+    let mut selected = view
+        .operations
+        .iter()
+        .filter(|operation| operation.operation.direction == direction)
+        .filter(|operation| !require_due || operation.due)
+        .filter(|operation| operation.remaining > exposure_epsilon)
+        .filter(|operation| !coverage.is_reserved(&operation.operation))
+        .map(|operation| operation.operation.clone())
+        .collect::<Vec<_>>();
+    if direction == BoundaryDirection::Down {
+        selected.reverse();
+    }
+    selected
 }
 
 #[cfg(test)]
@@ -129,6 +160,36 @@ mod tests {
         let selected = select_catch_up_operations(&view, &coverage, 1e-9);
 
         assert_eq!(selected, vec![due]);
+    }
+
+    #[test]
+    fn target_selection_prefers_nearest_down_operations_first() {
+        let far = operation(10_000, 20_000, BoundaryDirection::Down);
+        let near = operation(0, 10_000, BoundaryDirection::Down);
+        let view = BoundaryLedgerView {
+            operations: vec![
+                BoundaryOperationView {
+                    operation: near.clone(),
+                    remaining: 1.0,
+                    due: false,
+                },
+                BoundaryOperationView {
+                    operation: far.clone(),
+                    remaining: 1.0,
+                    due: false,
+                },
+            ],
+        };
+
+        let selected = select_target_operations(
+            &view,
+            &CoverageReservation::default(),
+            BoundaryDirection::Down,
+            1e-9,
+            false,
+        );
+
+        assert_eq!(selected, vec![far, near]);
     }
 
     #[test]

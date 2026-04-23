@@ -1,12 +1,15 @@
 use chrono::{DateTime, Utc};
-use poise_core::events::{DomainEvent, ExecutionGateReason, ReplacementGateReason};
-use poise_core::risk::CapacityBudget;
+use poise_core::events::{DomainEvent, ExecutionGateReason};
+use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
 use poise_core::types::Side;
-use poise_engine::executor::{ExecutionMode, OrderRole, RecoveryAnomaly};
+use poise_engine::executor::{
+    BindingExecutionClass, BindingInventoryIntent, BindingPolicyKind, BindingStatus,
+    RecoveryAnomaly,
+};
 use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
 use poise_engine::price_gate::PriceExecutionBlockReason;
-use poise_engine::runtime::{SlotState, StrategyPriceStatus, TrackStatus};
+use poise_engine::runtime::{StrategyPriceStatus, TrackStatus};
 use poise_engine::transition::TrackEffect;
 use serde::{Deserialize, Serialize};
 
@@ -46,7 +49,7 @@ pub struct TrackListReadModel {
     pub has_account_margin_guard: bool,
     pub has_stale_market_data: bool,
     pub price_execution_block_reason: Option<TrackPriceExecutionBlockReason>,
-    pub active_slot_count: u32,
+    pub active_binding_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,7 +67,8 @@ pub struct TrackReadModel {
     pub min_rebalance_units: f64,
     pub shape_family: ShapeFamily,
     pub out_of_band_policy: BandProtectionPolicy,
-    pub budget: CapacityBudget,
+    pub max_notional: f64,
+    pub loss_limits: LossLimits,
     pub strategy_price: Option<f64>,
     pub strategy_price_status: TrackStrategyPriceStatus,
     pub mark_price: Option<f64>,
@@ -74,30 +78,27 @@ pub struct TrackReadModel {
     pub desired_exposure: Option<f64>,
     pub ledger_state: TrackReadLedgerState,
     pub unrealized_pnl: f64,
-    pub executor_mode: TrackReadExecutionMode,
     pub inventory_gap: f64,
-    pub gap_started_at: Option<DateTime<Utc>>,
-    pub max_inventory_gap_abs: f64,
-    pub max_gap_age_ms: i64,
-    pub stats_started_at: DateTime<Utc>,
     pub recovery_issue: Option<TrackRecoveryIssue>,
     pub has_account_margin_guard: bool,
     pub has_stale_market_data: bool,
     pub price_execution_block_reason: Option<TrackPriceExecutionBlockReason>,
-    pub replacement_gate_reason: Option<ReplacementGateReason>,
-    pub slots: Vec<ReadModelSlot>,
+    pub active_binding_count: u32,
+    pub bindings: Vec<ReadModelBinding>,
     pub manual_target_override: Option<f64>,
     pub recent_activity: Vec<TrackActivityEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ReadModelSlot {
+pub struct ReadModelBinding {
+    pub id: String,
+    pub policy: TrackReadBindingPolicy,
     pub label: String,
-    pub is_submit_pending: bool,
+    pub status: TrackReadBindingStatus,
     pub side: Side,
     pub price: f64,
     pub quantity: f64,
-    pub role: TrackReadOrderRole,
+    pub intent: TrackReadBindingIntent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,36 +145,26 @@ impl From<StrategyPriceStatus> for TrackStrategyPriceStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TrackReadExecutionMode {
-    Passive,
-    Rebalance,
-    CatchUp,
-}
-
-impl From<ExecutionMode> for TrackReadExecutionMode {
-    fn from(value: ExecutionMode) -> Self {
-        match value {
-            ExecutionMode::Passive => Self::Passive,
-            ExecutionMode::Rebalance => Self::Rebalance,
-            ExecutionMode::CatchUp => Self::CatchUp,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TrackReadOrderRole {
+pub enum TrackReadBindingIntent {
     IncreaseInventory,
     DecreaseInventory,
 }
 
-impl From<OrderRole> for TrackReadOrderRole {
-    fn from(value: OrderRole) -> Self {
-        match value {
-            OrderRole::IncreaseInventory => Self::IncreaseInventory,
-            OrderRole::DecreaseInventory => Self::DecreaseInventory,
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackReadBindingPolicy {
+    CurveMaker,
+    CatchUp,
+    ManualOverride,
+    Flatten,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackReadBindingStatus {
+    SubmitPending,
+    Working,
+    CancelPending,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +173,8 @@ pub enum TrackRecoveryIssue {
     UnknownLiveOrder,
     DuplicateLiveOrders,
     AmbiguousLiveOrder,
+    ExpectedExposureMismatch,
+    BoundaryProgressOutOfRange,
 }
 
 impl From<RecoveryAnomaly> for TrackRecoveryIssue {
@@ -190,6 +183,8 @@ impl From<RecoveryAnomaly> for TrackRecoveryIssue {
             RecoveryAnomaly::UnknownLiveOrder => Self::UnknownLiveOrder,
             RecoveryAnomaly::DuplicateLiveOrders => Self::DuplicateLiveOrders,
             RecoveryAnomaly::AmbiguousLiveOrder => Self::AmbiguousLiveOrder,
+            RecoveryAnomaly::ExpectedExposureMismatch => Self::ExpectedExposureMismatch,
+            RecoveryAnomaly::BoundaryProgressOutOfRange => Self::BoundaryProgressOutOfRange,
         }
     }
 }
@@ -293,26 +288,13 @@ impl TrackReadModel {
             recent_effects,
         } = source;
         let list_view = TrackListReadModel::from_parts(&definition, &runtime, updated_at);
-        let replacement_gate_reason = runtime.replacement_gate_reason.clone();
         let recent_activity = project_recent_activity(recent_track_events, recent_effects);
 
-        let slots = runtime
-            .executor_state
-            .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                let order = slot.working_order.as_ref()?;
-                Some(ReadModelSlot {
-                    label: project_slot_label(index, slot.slot.0.as_str()),
-                    is_submit_pending: matches!(slot.state, SlotState::SubmitPending),
-                    side: order.side,
-                    price: order.price,
-                    quantity: order.quantity,
-                    role: TrackReadOrderRole::from(order.role.clone()),
-                })
-            })
-            .collect();
+        let bindings = project_bindings(&runtime);
+        let inventory_gap = runtime
+            .desired_exposure
+            .as_ref()
+            .map_or(0.0, |target| target.0 - runtime.current_exposure.0);
 
         Self {
             track_id: list_view.track_id.clone(),
@@ -328,7 +310,8 @@ impl TrackReadModel {
             min_rebalance_units: definition.track_config.min_rebalance_units,
             shape_family: definition.track_config.shape_family,
             out_of_band_policy: definition.track_config.out_of_band_policy,
-            budget: definition.budget,
+            max_notional: definition.max_notional,
+            loss_limits: definition.loss_limits,
             strategy_price: list_view.strategy_price,
             strategy_price_status: list_view.strategy_price_status,
             mark_price: runtime.mark_price,
@@ -338,20 +321,13 @@ impl TrackReadModel {
             desired_exposure: list_view.desired_exposure,
             ledger_state: list_view.ledger_state.clone(),
             unrealized_pnl: list_view.unrealized_pnl,
-            executor_mode: TrackReadExecutionMode::from(
-                runtime.executor_state.diagnostics.mode.clone(),
-            ),
-            inventory_gap: runtime.executor_state.diagnostics.inventory_gap.0,
-            gap_started_at: runtime.executor_state.diagnostics.gap_started_at,
-            max_inventory_gap_abs: runtime.executor_state.stats.max_inventory_gap_abs.0,
-            max_gap_age_ms: runtime.executor_state.stats.max_gap_age_ms,
-            stats_started_at: runtime.executor_state.stats.started_at,
+            inventory_gap,
             recovery_issue: list_view.recovery_issue,
             has_account_margin_guard: list_view.has_account_margin_guard,
             has_stale_market_data: list_view.has_stale_market_data,
             price_execution_block_reason: list_view.price_execution_block_reason,
-            replacement_gate_reason,
-            slots,
+            active_binding_count: list_view.active_binding_count,
+            bindings,
             manual_target_override: runtime.manual_target_override.map(|value| value.0),
             recent_activity,
         }
@@ -380,7 +356,6 @@ impl TrackListReadModel {
             unrealized_pnl: runtime.unrealized_pnl,
             recovery_issue: runtime
                 .executor_state
-                .diagnostics
                 .recovery_anomaly
                 .clone()
                 .map(TrackRecoveryIssue::from),
@@ -389,11 +364,11 @@ impl TrackListReadModel {
             price_execution_block_reason: runtime
                 .price_execution_block_reason
                 .map(TrackPriceExecutionBlockReason::from),
-            active_slot_count: runtime
+            active_binding_count: runtime
                 .executor_state
-                .slots
+                .bindings
                 .iter()
-                .filter(|slot| slot.working_order.is_some())
+                .filter(|binding| binding.is_active())
                 .count() as u32,
         }
     }
@@ -417,7 +392,7 @@ impl From<&TrackReadModel> for TrackListReadModel {
             has_account_margin_guard: value.has_account_margin_guard,
             has_stale_market_data: value.has_stale_market_data,
             price_execution_block_reason: value.price_execution_block_reason,
-            active_slot_count: value.slots.len() as u32,
+            active_binding_count: value.active_binding_count,
         }
     }
 }
@@ -474,18 +449,6 @@ fn project_domain_event_message(event: &DomainEvent) -> String {
                 required_notional, available_notional
             ),
         },
-        DomainEvent::ReplacementGateApplied { reason } => match reason {
-            ReplacementGateReason::RoundedMatch => {
-                "replacement gate: candidate matches working order after rounding".into()
-            }
-            ReplacementGateReason::ImprovementBelowThreshold {
-                improvement_bps,
-                threshold_bps,
-            } => format!(
-                "replacement gate: improvement {:.1} bps < threshold {:.1} bps",
-                improvement_bps, threshold_bps
-            ),
-        },
     }
 }
 
@@ -539,34 +502,81 @@ fn project_effect_level(status: EffectStatus) -> TrackActivityLevel {
     }
 }
 
-fn project_slot_label(index: usize, slot_name: &str) -> String {
-    match slot_name {
-        "inventory_core" => "inventory".to_string(),
-        _ => format!("slot {}", index + 1),
+fn project_bindings(runtime: &TrackRuntimeReadState) -> Vec<ReadModelBinding> {
+    runtime
+        .executor_state
+        .bindings
+        .iter()
+        .filter(|binding| binding.is_active())
+        .enumerate()
+        .map(|(index, binding)| ReadModelBinding {
+            id: binding.binding_id.clone(),
+            policy: project_binding_policy(binding.policy_kind()),
+            label: project_binding_label(index, binding.execution_class()),
+            status: project_binding_status(binding.status),
+            side: binding.request.side,
+            price: binding.request.price,
+            quantity: binding.request.quantity,
+            intent: project_binding_intent(binding.inventory_intent()),
+        })
+        .collect()
+}
+
+fn project_binding_intent(intent: BindingInventoryIntent) -> TrackReadBindingIntent {
+    match intent {
+        BindingInventoryIntent::IncreaseInventory => TrackReadBindingIntent::IncreaseInventory,
+        BindingInventoryIntent::DecreaseInventory => TrackReadBindingIntent::DecreaseInventory,
+    }
+}
+
+fn project_binding_policy(policy: BindingPolicyKind) -> TrackReadBindingPolicy {
+    match policy {
+        BindingPolicyKind::CurveMaker => TrackReadBindingPolicy::CurveMaker,
+        BindingPolicyKind::CatchUp => TrackReadBindingPolicy::CatchUp,
+        BindingPolicyKind::ManualOverride => TrackReadBindingPolicy::ManualOverride,
+        BindingPolicyKind::Flatten => TrackReadBindingPolicy::Flatten,
+    }
+}
+
+fn project_binding_status(status: BindingStatus) -> TrackReadBindingStatus {
+    match status {
+        BindingStatus::SubmitPending => TrackReadBindingStatus::SubmitPending,
+        BindingStatus::Working => TrackReadBindingStatus::Working,
+        BindingStatus::CancelPending => TrackReadBindingStatus::CancelPending,
+        BindingStatus::Terminal => {
+            unreachable!("terminal bindings should not be projected into read model")
+        }
+    }
+}
+
+fn project_binding_label(index: usize, execution_class: BindingExecutionClass) -> String {
+    match execution_class {
+        BindingExecutionClass::Passive => format!("maker {}", index + 1),
+        BindingExecutionClass::CatchUp => format!("target {}", index + 1),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use poise_core::events::{DomainEvent, ReplacementGateReason};
-    use poise_core::risk::CapacityBudget;
+    use poise_core::events::DomainEvent;
+    use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
-    use poise_engine::executor::{ExecutionMode, OrderRole, OrderSlot};
+    use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::persisted_runtime::TrackRestoreRevision;
-    use poise_engine::ports::{OrderRequest, OrderStatus};
+    use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::{
-        AutoState, ControlState, ExecutionSlot, ExecutionStats, ExecutorState, RiskState,
-        SlotState, StrategyPriceStatus, TrackLiveView, TrackState, TrackStatus, WorkingOrder,
+        AutoState, ControlState, ExecutorState, RiskState, StrategyPriceStatus, TrackLiveView,
+        TrackState, TrackStatus,
     };
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
 
     use super::{
-        TrackActivityLevel, TrackPriceExecutionBlockReason, TrackReadExecutionMode, TrackReadModel,
-        TrackReadOrderRole, TrackReadStatus, TrackStrategyPriceStatus,
+        TrackActivityLevel, TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadModel,
+        TrackReadStatus, TrackStrategyPriceStatus,
     };
     use crate::TrackReadDefinition;
     use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
@@ -597,8 +607,8 @@ mod tests {
                 track_id: TrackId::new("btc-core"),
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 track_config: track_config.clone(),
-                budget: CapacityBudget {
-                    max_notional: 3000.0,
+                max_notional: 3000.0,
+                loss_limits: LossLimits {
                     daily_loss_limit: 100.0,
                     total_loss_limit: 300.0,
                 },
@@ -612,42 +622,10 @@ mod tests {
                 runtime_state: active_runtime_state(),
                 current_exposure: Exposure(3.5),
                 desired_exposure: Some(Exposure(4.0)),
-                executor_state: ExecutorState {
-                    active_round: Some(poise_engine::runtime::ExecutionRound {
-                        desired_exposure: Exposure(4.0),
-                        mode: ExecutionMode::Passive,
-                        started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                    }),
-                    diagnostics: poise_engine::runtime::ExecutorDiagnostics {
-                        mode: ExecutionMode::Passive,
-                        inventory_gap: Exposure(0.5),
-                        gap_started_at: Some(Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap()),
-                        last_reprice_at: None,
-                        last_execution_reason: None,
-                        recovery_anomaly: None,
-                    },
-                    slots: vec![ExecutionSlot {
-                        slot: OrderSlot::new("inventory_core"),
-                        state: SlotState::Working,
-                        working_order: Some(WorkingOrder {
-                            order_id: Some("order-1".into()),
-                            client_order_id: "client-1".into(),
-                            side: Side::Buy,
-                            price: 100.5,
-                            quantity: 0.1,
-                            status: OrderStatus::New,
-                            role: OrderRole::IncreaseInventory,
-                        }),
-                    }],
-                    recent_terminal_orders: Vec::new(),
-                    stats: ExecutionStats {
-                        started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                        max_inventory_gap_abs: Exposure(0.5),
-                        max_gap_age_ms: 0,
-                    },
-                },
+                executor_state: ExecutorState::empty(
+                    Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+                ),
                 ledger_state: Default::default(),
-                replacement_gate_reason: None,
                 execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
                 risk: RiskState {
                     unrealized_pnl: 0.0,
@@ -690,6 +668,7 @@ mod tests {
                     },
                     desired_exposure: Exposure(4.0),
                     submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                    recovery_token: SubmitRecoveryToken::empty(),
                 },
                 status: EffectStatus::Executing,
                 attempt_count: 0,
@@ -702,12 +681,9 @@ mod tests {
         assert_eq!(read_model.track_id, "btc-core");
         assert_eq!(read_model.symbol, "BTCUSDT");
         assert_eq!(read_model.status, TrackReadStatus::Active);
-        assert_eq!(read_model.executor_mode, TrackReadExecutionMode::Passive);
         assert_eq!(read_model.recovery_issue, None);
-        assert_eq!(
-            read_model.slots[0].role,
-            TrackReadOrderRole::IncreaseInventory
-        );
+        assert_eq!(read_model.active_binding_count, 0);
+        assert!(read_model.bindings.is_empty());
         assert_eq!(read_model.recent_activity.len(), 1);
         assert_eq!(
             read_model.recent_activity[0].level,
@@ -720,78 +696,14 @@ mod tests {
     }
 
     #[test]
-    fn read_model_projects_replacement_gate_event_into_recent_activity() {
-        let track_config = test_track_config();
-        let read_model = TrackReadModel::from_source(TrackReadSource {
-            definition: TrackReadDefinition {
-                track_id: TrackId::new("btc-core"),
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                track_config: track_config.clone(),
-                budget: CapacityBudget {
-                    max_notional: 3000.0,
-                    daily_loss_limit: 100.0,
-                    total_loss_limit: 300.0,
-                },
-            },
-            runtime: TrackRuntimeReadState::from_snapshot(TrackRuntimeSnapshot {
-                track_id: TrackId::new("btc-core"),
-                restore_revision: TrackRestoreRevision::for_track(
-                    &Instrument::new(Venue::Binance, "BTCUSDT"),
-                    &track_config,
-                ),
-                runtime_state: active_runtime_state(),
-                current_exposure: Exposure(3.5),
-                desired_exposure: Some(Exposure(4.0)),
-                executor_state: ExecutorState::empty(
-                    Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                ),
-                ledger_state: Default::default(),
-                replacement_gate_reason: None,
-                execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
-                risk: RiskState::default(),
-                observed: ObservedState {
-                    strategy_price: Some(101.25),
-                    strategy_price_status: StrategyPriceStatus::Live,
-                    mark_price: Some(101.5),
-                    best_bid: Some(101.0),
-                    best_ask: Some(101.5),
-                    out_of_band_since: None,
-                    last_tick_at: None,
-                    market_data_stale_since: None,
-                },
-            }),
-            updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
-            recent_track_events: vec![StoredTrackEvent {
-                id: 1,
-                track_id: TrackId::new("btc-core"),
-                event: DomainEvent::ReplacementGateApplied {
-                    reason: ReplacementGateReason::RoundedMatch,
-                },
-                created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 0).unwrap(),
-            }],
-            recent_effects: Vec::new(),
-        });
-
-        assert_eq!(read_model.recent_activity.len(), 1);
-        assert_eq!(
-            read_model.recent_activity[0].level,
-            TrackActivityLevel::Info
-        );
-        assert_eq!(
-            read_model.recent_activity[0].message,
-            "replacement gate: candidate matches working order after rounding"
-        );
-    }
-
-    #[test]
     fn read_model_exposes_strategy_price_status_and_best_bid_ask() {
         let read_model = TrackReadModel::from_source(TrackReadSource {
             definition: TrackReadDefinition {
                 track_id: TrackId::new("btc-core"),
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 track_config: test_track_config(),
-                budget: CapacityBudget {
-                    max_notional: 3000.0,
+                max_notional: 3000.0,
+                loss_limits: LossLimits {
                     daily_loss_limit: 100.0,
                     total_loss_limit: 300.0,
                 },
@@ -801,18 +713,9 @@ mod tests {
                 current_exposure: Exposure(1.0),
                 desired_exposure: Some(Exposure(2.0)),
                 manual_target_override: None,
-                executor_state: ExecutorState {
-                    active_round: None,
-                    diagnostics: poise_engine::runtime::ExecutorDiagnostics::empty(),
-                    slots: Vec::new(),
-                    recent_terminal_orders: Vec::new(),
-                    stats: ExecutionStats {
-                        started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                        max_inventory_gap_abs: Exposure(0.0),
-                        max_gap_age_ms: 0,
-                    },
-                },
-                replacement_gate_reason: None,
+                executor_state: ExecutorState::empty(
+                    Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+                ),
                 ledger_state: Default::default(),
                 unrealized_pnl: 0.0,
                 has_account_margin_guard: false,
@@ -853,8 +756,8 @@ mod tests {
                 track_id: TrackId::new("btc-core"),
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 track_config: track_config.clone(),
-                budget: CapacityBudget {
-                    max_notional: 3000.0,
+                max_notional: 3000.0,
+                loss_limits: LossLimits {
                     daily_loss_limit: 100.0,
                     total_loss_limit: 300.0,
                 },
@@ -869,19 +772,10 @@ mod tests {
                     runtime_state: active_runtime_state(),
                     current_exposure: Exposure(1.0),
                     desired_exposure: Some(Exposure(4.0)),
-                    executor_state: ExecutorState {
-                        active_round: None,
-                        diagnostics: poise_engine::runtime::ExecutorDiagnostics::empty(),
-                        slots: Vec::new(),
-                        recent_terminal_orders: Vec::new(),
-                        stats: ExecutionStats {
-                            started_at: Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                            max_inventory_gap_abs: Exposure(0.0),
-                            max_gap_age_ms: 0,
-                        },
-                    },
+                    executor_state: ExecutorState::empty(
+                        Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+                    ),
                     ledger_state: Default::default(),
-                    replacement_gate_reason: None,
                     execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
                     risk: RiskState {
                         unrealized_pnl: 0.0,
@@ -927,6 +821,84 @@ mod tests {
         assert_eq!(
             read_model.price_execution_block_reason,
             Some(TrackPriceExecutionBlockReason::MissingExecutionQuote)
+        );
+    }
+
+    #[test]
+    fn read_model_derives_binding_intent_from_boundary_direction_not_reduce_only() {
+        let executor_state = serde_json::from_value::<ExecutorState>(serde_json::json!({
+            "ledger_state": {
+                "profile_revision": "rev-1",
+                "ledger_anchor_exposure": 0.0,
+                "progress": []
+            },
+            "bindings": [{
+                "binding_id": "curve-maker:positive-retrace",
+                "proposal_key": {
+                    "policy": "curve_maker",
+                    "operations": [{
+                        "boundary_id": {
+                            "profile_revision": "rev-1",
+                            "lower_exposure_bp": 0,
+                            "upper_exposure_bp": 10000
+                        },
+                        "direction": "down"
+                    }]
+                },
+                "allocations": [{
+                    "operation": {
+                        "boundary_id": {
+                            "profile_revision": "rev-1",
+                            "lower_exposure_bp": 0,
+                            "upper_exposure_bp": 10000
+                        },
+                        "direction": "down"
+                    },
+                    "exposure_qty": 1.0
+                }],
+                "absorbed_exposure_qty": 0.0,
+                "request": {
+                    "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
+                    "side": "sell",
+                    "price": 101.0,
+                    "quantity": 1.0,
+                    "client_order_id": "submit-1",
+                    "reduce_only": false
+                },
+                "desired_exposure": 0.0,
+                "submit_purpose": "auto_reconcile",
+                "order_id": "order-1",
+                "status": "working",
+                "policy_state": "stateless"
+            }],
+            "recent_terminal_orders": [],
+            "recovery_anomaly": null
+        }))
+        .unwrap();
+        let runtime = TrackRuntimeReadState {
+            status: TrackStatus::Active,
+            current_exposure: Exposure(1.0),
+            desired_exposure: Some(Exposure(0.0)),
+            manual_target_override: None,
+            executor_state,
+            ledger_state: Default::default(),
+            unrealized_pnl: 0.0,
+            has_account_margin_guard: false,
+            price_execution_block_reason: None,
+            strategy_price: Some(101.0),
+            strategy_price_status: StrategyPriceStatus::Live,
+            mark_price: Some(101.0),
+            best_bid: Some(100.9),
+            best_ask: Some(101.1),
+            market_data_stale_since: None,
+        };
+
+        let bindings = super::project_bindings(&runtime);
+
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].intent,
+            TrackReadBindingIntent::DecreaseInventory
         );
     }
 }

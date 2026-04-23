@@ -715,7 +715,7 @@ mod tests {
         PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore,
         TrackMutationStore, TrackQueryStore,
     };
-    use poise_core::risk::CapacityBudget;
+    use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::ExchangeRules;
     use poise_engine::command::TrackCommand;
@@ -1126,10 +1126,6 @@ mod tests {
             detail_json["ledger"]["unrealized_pnl"].as_f64(),
             Some(detail.ledger.unrealized_pnl)
         );
-        assert_eq!(
-            detail_json["execution_stats"]["max_inventory_gap_abs"].as_f64(),
-            Some(detail.execution_stats.max_inventory_gap_abs)
-        );
     }
 
     #[tokio::test]
@@ -1166,7 +1162,7 @@ mod tests {
         let item_json = serde_json::to_value(item).unwrap();
         assert_eq!(item.id, "btc-core");
         assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
-        assert_eq!(item.execution.active_slot_count, 1);
+        assert!(item.execution.active_binding_count > 0);
         assert_eq!(
             item_json["ledger"]["total_pnl"].as_f64(),
             Some(item.ledger.total_pnl)
@@ -1519,8 +1515,8 @@ mod tests {
                     shape_family: ShapeFamily::Linear,
                     out_of_band_policy: BandProtectionPolicy::Freeze,
                 },
-                CapacityBudget {
-                    max_notional: 3000.0,
+                3000.0,
+                LossLimits {
                     daily_loss_limit: 100.0,
                     total_loss_limit: 300.0,
                 },
@@ -1553,8 +1549,7 @@ mod tests {
 
     fn seed_snapshot_ledger(snapshot: &mut poise_engine::snapshot::TrackRuntimeSnapshot) {
         snapshot.risk.unrealized_pnl = 265.2;
-        snapshot.ledger_state.realized_pnl_day =
-            Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap());
+        snapshot.ledger_state.ledger_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
         snapshot.ledger_state.gross_realized_pnl_today = 980.1;
         snapshot.ledger_state.gross_realized_pnl_cumulative = 980.1;
         snapshot.ledger_state.trading_fee_cumulative = 12.3;
@@ -1774,6 +1769,21 @@ mod tests {
                 .collect())
         }
 
+        async fn list_all_pending_effects_for_track(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Vec<PersistedTrackEffect>> {
+            Ok(self
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|effect| effect.track_id == *track_id)
+                .filter(|effect| effect.status == EffectStatus::Pending)
+                .cloned()
+                .collect())
+        }
+
         async fn list_pending_submit_effects_for_track(
             &self,
             track_id: &TrackId,
@@ -1920,6 +1930,7 @@ mod tests {
             Ok(poise_engine::ports::OrderReceipt {
                 order_id: "noop-order".into(),
                 client_order_id: req.client_order_id,
+                filled_qty: 0.0,
                 status: poise_engine::ports::OrderStatus::New,
             })
         }

@@ -10,7 +10,6 @@ const TRACK_SNAPSHOTS_CREATE_SQL: &str = "CREATE TABLE IF NOT EXISTS track_snaps
     current_exposure REAL NOT NULL,
     desired_exposure REAL,
     executor_state_json TEXT,
-    replacement_gate_reason_json TEXT,
     execution_gate_state_json TEXT,
     ledger_state_json TEXT,
     unrealized_pnl REAL NOT NULL DEFAULT 0,
@@ -31,7 +30,6 @@ const TRACK_SNAPSHOTS_REQUIRED_COLUMNS: &[&str] = &[
     "current_exposure",
     "desired_exposure",
     "executor_state_json",
-    "replacement_gate_reason_json",
     "execution_gate_state_json",
     "ledger_state_json",
     "unrealized_pnl",
@@ -53,6 +51,13 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS persisted_track_presence (
             track_id TEXT PRIMARY KEY,
             created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS track_persistent_state (
+            track_id TEXT PRIMARY KEY,
+            control_state_json TEXT NOT NULL,
+            ledger_state_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
 
@@ -110,6 +115,16 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         conn,
         "persisted_track_presence",
         &["track_id", "created_at", "updated_at"],
+    )?;
+    ensure_columns_present(
+        conn,
+        "track_persistent_state",
+        &[
+            "track_id",
+            "control_state_json",
+            "ledger_state_json",
+            "updated_at",
+        ],
     )?;
     ensure_columns_present(
         conn,
@@ -291,6 +306,15 @@ mod tests {
             .unwrap();
         assert_eq!(account_monitor_state_count, 1);
 
+        let persistent_state_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='track_persistent_state'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persistent_state_count, 1);
+
         let index_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_track_events_created_at'",
@@ -343,6 +367,17 @@ mod tests {
         assert!(!columns.contains(&"realized_pnl_today".to_string()));
         assert!(!columns.contains(&"realized_pnl_cumulative".to_string()));
         assert!(!columns.contains(&"pending_order_json".to_string()));
+
+        let persistent_columns = table_columns(&conn, "track_persistent_state").unwrap();
+        assert_eq!(
+            persistent_columns,
+            vec![
+                "track_id".to_string(),
+                "control_state_json".to_string(),
+                "ledger_state_json".to_string(),
+                "updated_at".to_string(),
+            ]
+        );
     }
 
     #[test]

@@ -12,7 +12,6 @@ pub struct DetailSections {
     pub mode: DetailLayoutMode,
     pub track: Rect,
     pub pnl: Option<Rect>,
-    pub execution_stats: Option<Rect>,
     pub market: Rect,
     pub strategy: Option<Rect>,
     pub execution: Rect,
@@ -50,7 +49,6 @@ pub fn resolve_detail_layout(area: Rect) -> DetailSections {
                     Constraint::Length(5),
                     Constraint::Length(3),
                     Constraint::Length(4),
-                    Constraint::Length(4),
                     Constraint::Length(5),
                     Constraint::Length(5),
                     Constraint::Min(0),
@@ -61,11 +59,10 @@ pub fn resolve_detail_layout(area: Rect) -> DetailSections {
                 mode,
                 track: sections[0],
                 pnl: Some(sections[1]),
-                execution_stats: Some(sections[2]),
-                market: sections[3],
-                strategy: Some(sections[4]),
-                execution: sections[5],
-                trace: trace_panel_area(sections[6]),
+                market: sections[2],
+                strategy: Some(sections[3]),
+                execution: sections[4],
+                trace: trace_panel_area(sections[5]),
             }
         }
         DetailLayoutMode::Compact => {
@@ -74,7 +71,6 @@ pub fn resolve_detail_layout(area: Rect) -> DetailSections {
                 .constraints([
                     Constraint::Length(5),
                     Constraint::Length(3),
-                    Constraint::Length(3),
                     Constraint::Length(4),
                     Constraint::Length(4),
                     Constraint::Length(4),
@@ -86,11 +82,10 @@ pub fn resolve_detail_layout(area: Rect) -> DetailSections {
                 mode,
                 track: sections[0],
                 pnl: Some(sections[1]),
-                execution_stats: Some(sections[2]),
-                market: sections[3],
-                strategy: Some(sections[4]),
-                execution: sections[5],
-                trace: trace_panel_area(sections[6]),
+                market: sections[2],
+                strategy: Some(sections[3]),
+                execution: sections[4],
+                trace: trace_panel_area(sections[5]),
             }
         }
         DetailLayoutMode::Minimal => {
@@ -109,7 +104,6 @@ pub fn resolve_detail_layout(area: Rect) -> DetailSections {
                 mode,
                 track: sections[0],
                 pnl: Some(sections[1]),
-                execution_stats: None,
                 market: sections[2],
                 strategy: Some(sections[3]),
                 execution: sections[4],
@@ -168,7 +162,6 @@ mod tests {
         assert_eq!(layout.track.height, 5);
         assert_eq!(layout.market.height, 4);
         assert!(layout.pnl.is_some());
-        assert!(layout.execution_stats.is_some());
     }
 
     #[test]
@@ -211,7 +204,6 @@ mod tests {
         assert_eq!(layout.mode, DetailLayoutMode::Minimal);
         assert!(layout.pnl.is_some());
         assert!(layout.strategy.is_some());
-        assert!(layout.execution_stats.is_none());
         assert!(layout.trace.is_none());
     }
 

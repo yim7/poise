@@ -109,6 +109,7 @@ impl ExchangeFreshness {
 #[cfg(test)]
 mod tests {
     use poise_core::types::{Exposure, Side};
+    use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::ports::OrderRequest;
     use poise_engine::track::{Instrument, Venue};
     use poise_engine::transition::TrackEffect;
@@ -134,6 +135,7 @@ mod tests {
             },
             desired_exposure: Exposure(1.0),
             submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+            recovery_token: SubmitRecoveryToken::empty(),
         }
     }
 

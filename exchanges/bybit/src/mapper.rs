@@ -20,6 +20,7 @@ pub(crate) struct BybitActiveOrder {
     pub side: poise_core::types::Side,
     pub price: f64,
     pub qty: f64,
+    pub filled_qty: f64,
     pub order_status: BybitOrderStatus,
     pub position_idx: i64,
 }
@@ -96,6 +97,7 @@ impl TryFrom<CreateOrderResult> for OrderReceipt {
         Ok(Self {
             order_id: value.order_id,
             client_order_id: value.order_link_id.unwrap_or_default(),
+            filled_qty: 0.0,
             status: OrderStatus::Submitting,
         })
     }
@@ -127,6 +129,7 @@ impl TryFrom<OpenOrderSnapshot> for ExchangeOrder {
             side: value.side,
             price: value.price,
             qty: value.qty,
+            filled_qty: value.cum_exec_qty.unwrap_or(0.0),
             order_status: value.order_status,
             position_idx: value.position_idx,
         })
@@ -215,6 +218,7 @@ pub(crate) fn build_bybit_open_order(order: BybitActiveOrder) -> Result<Exchange
         side,
         price,
         qty,
+        filled_qty,
         order_status,
         position_idx,
     } = order;
@@ -232,6 +236,7 @@ pub(crate) fn build_bybit_open_order(order: BybitActiveOrder) -> Result<Exchange
         side,
         price,
         qty,
+        filled_qty,
         realized_pnl: 0.0,
         status: order_status
             .into_order_status()
@@ -389,6 +394,7 @@ mod tests {
             OrderReceipt {
                 order_id: "12345".to_string(),
                 client_order_id: "client-1".to_string(),
+                filled_qty: 0.0,
                 status: OrderStatus::Submitting,
             }
         );
@@ -468,6 +474,7 @@ mod tests {
             side: Side::Buy,
             price: 65000.5,
             qty: 0.25,
+            cum_exec_qty: Some(0.1),
             order_status: BybitOrderStatus::PartiallyFilled,
             stop_order_type: None,
             position_idx: 0,
@@ -479,6 +486,7 @@ mod tests {
         assert_eq!(order.side, Side::Buy);
         assert_eq!(order.price, 65000.5);
         assert_eq!(order.qty, 0.25);
+        assert_eq!(order.filled_qty, 0.1);
         assert_eq!(order.status, OrderStatus::PartiallyFilled);
     }
 
@@ -491,6 +499,7 @@ mod tests {
             side: Side::Buy,
             price: 65000.5,
             qty: 0.25,
+            cum_exec_qty: None,
             order_status: BybitOrderStatus::New,
             stop_order_type: None,
             position_idx: 1,

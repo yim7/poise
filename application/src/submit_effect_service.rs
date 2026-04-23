@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Error, Result};
+use poise_engine::executor::SubmitRecoveryToken;
 #[cfg(any(test, feature = "server-test-support"))]
 use poise_engine::manager::TrackManager;
 use poise_engine::ports::{ExchangeOrder, OrderReceipt, OrderRequest};
@@ -144,6 +145,7 @@ impl SubmitReceiptWritebackFailure {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SubmitExecutionRecovery {
     Dispatch {
+        request: OrderRequest,
         desired_exposure: poise_core::types::Exposure,
     },
     Finished(SubmitAttemptResult),
@@ -163,33 +165,46 @@ impl SubmitEffectService {
         &self,
         id: &str,
         effect_id: &str,
-        request: OrderRequest,
-        desired_exposure: poise_core::types::Exposure,
+        recovery_token: SubmitRecoveryToken,
         live_order: Option<&ExchangeOrder>,
     ) -> Result<SubmitAttempt> {
-        Ok(
-            match self
-                .executor
-                .recover_submit_execution(id, effect_id, &request, desired_exposure, live_order)
-                .await?
-            {
-                SubmitExecutionRecovery::Dispatch { desired_exposure } => {
-                    SubmitAttempt::Dispatch(SubmitDispatch::new(
-                        Arc::clone(&self.executor),
-                        TrackId::new(id),
-                        effect_id.to_string(),
-                        request,
-                        desired_exposure,
-                    ))
-                }
-                SubmitExecutionRecovery::Finished(result) => SubmitAttempt::Finished(result),
-            },
-        )
+        let recovery = self
+            .executor
+            .recover_submit_execution(id, effect_id, &recovery_token, live_order)
+            .await?;
+
+        Ok(submit_attempt_from_recovery(
+            Arc::clone(&self.executor),
+            id,
+            effect_id,
+            recovery,
+        ))
     }
 
     #[cfg(any(test, feature = "server-test-support"))]
     pub fn manager(&self) -> Arc<RwLock<TrackManager>> {
         self.executor.manager()
+    }
+}
+
+fn submit_attempt_from_recovery(
+    executor: Arc<MutationExecutor>,
+    id: &str,
+    effect_id: &str,
+    recovery: SubmitExecutionRecovery,
+) -> SubmitAttempt {
+    match recovery {
+        SubmitExecutionRecovery::Dispatch {
+            request,
+            desired_exposure,
+        } => SubmitAttempt::Dispatch(SubmitDispatch::new(
+            executor,
+            TrackId::new(id),
+            effect_id.to_string(),
+            request,
+            desired_exposure,
+        )),
+        SubmitExecutionRecovery::Finished(result) => SubmitAttempt::Finished(result),
     }
 }
 
@@ -199,15 +214,22 @@ mod tests {
     use std::time::Duration;
 
     use crate::mutation_executor::test_support::{
-        MemoryRepository, manager_with_pending_submit, track_write_services,
+        MemoryRepository, manager_with_pending_submit, seeded_manager, track_write_services,
     };
     use crate::{ApplicationNotification, EffectStatus};
     use poise_core::types::Exposure;
-    use poise_engine::ports::{OrderReceipt, OrderRequest, OrderStatus};
+    use poise_engine::executor::SubmitRecoveryToken;
+    use poise_engine::observation::MarketObservation;
+    use poise_engine::ports::{
+        ExchangeOrder, ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus,
+    };
     use poise_engine::track::{TrackId, Venue};
+    use poise_engine::transition::TrackEffect;
     use tokio::time::timeout;
 
-    use super::{SubmitDispatch, SubmitEffectService};
+    use super::{
+        SubmitDispatch, SubmitEffectService, SubmitExecutionRecovery, submit_attempt_from_recovery,
+    };
 
     #[tokio::test]
     async fn submit_effect_service_recovers_or_dispatches_without_exposing_old_phase_methods() {
@@ -219,15 +241,7 @@ mod tests {
             service.0.recover_or_dispatch(
                 "btc-core",
                 "btc-core:batch-1:0",
-                OrderRequest {
-                    instrument: poise_engine::track::Instrument::new(Venue::Binance, "BTCUSDT"),
-                    side: poise_core::types::Side::Buy,
-                    price: 100.0,
-                    quantity: 0.1,
-                    client_order_id: "client-1".into(),
-                    reduce_only: false,
-                },
-                Exposure(4.0),
+                SubmitRecoveryToken::empty(),
                 None,
             ),
         )
@@ -291,6 +305,7 @@ mod tests {
             dispatch.record_receipt(&OrderReceipt {
                 order_id: "order-1".into(),
                 client_order_id: "client-1".into(),
+                filled_qty: 0.0,
                 status: OrderStatus::New,
             }),
         )
@@ -310,6 +325,126 @@ mod tests {
         );
     }
 
+    #[test]
+    fn submit_attempt_from_recovery_uses_current_request_instead_of_stale_effect_request() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository);
+        let current_request = OrderRequest {
+            instrument: poise_engine::track::Instrument::new(Venue::Binance, "BTCUSDT"),
+            side: poise_core::types::Side::Sell,
+            price: 105.0,
+            quantity: 0.2,
+            client_order_id: "current-client".into(),
+            reduce_only: true,
+        };
+
+        let attempt = submit_attempt_from_recovery(
+            services.submit_effect.executor.clone(),
+            "btc-core",
+            "btc-core:batch-1:0",
+            SubmitExecutionRecovery::Dispatch {
+                request: current_request.clone(),
+                desired_exposure: Exposure(-4.0),
+            },
+        );
+
+        let super::SubmitAttempt::Dispatch(dispatch) = attempt else {
+            panic!("expected dispatch");
+        };
+        assert_eq!(
+            dispatch.request().client_order_id,
+            current_request.client_order_id
+        );
+        assert_eq!(dispatch.request().price, current_request.price);
+        assert_eq!(dispatch.request().quantity, current_request.quantity);
+        assert_eq!(dispatch.request().reduce_only, current_request.reduce_only);
+    }
+
+    #[tokio::test]
+    async fn submit_effect_service_recovers_live_order_into_current_binding_selected_by_recovery_token()
+     {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository.clone());
+
+        services
+            .observation
+            .observe_market(
+                "btc-core",
+                MarketObservation {
+                    mark_price: 105.0,
+                    execution_quote: Some(ExecutionQuote {
+                        best_bid: 104.9,
+                        best_ask: 105.1,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+
+        let submits = pending_submit_effects(&repository);
+        assert!(submits.len() > 1, "test requires multiple submit effects");
+
+        let stale = submits.first().unwrap().clone();
+        let target = submits.last().unwrap().clone();
+        assert_ne!(
+            stale.request.client_order_id,
+            target.request.client_order_id
+        );
+
+        let live_order = ExchangeOrder {
+            instrument: stale.request.instrument.clone(),
+            order_id: "live-order-1".into(),
+            client_order_id: stale.request.client_order_id.clone(),
+            side: stale.request.side,
+            price: stale.request.price,
+            qty: stale.request.quantity,
+            filled_qty: 0.0,
+            realized_pnl: 0.0,
+            status: OrderStatus::New,
+        };
+
+        let attempt = services
+            .submit_effect
+            .recover_or_dispatch(
+                "btc-core",
+                &target.effect_id,
+                target.recovery_token.clone(),
+                Some(&live_order),
+            )
+            .await
+            .unwrap();
+
+        let super::SubmitAttempt::Finished(result) = attempt else {
+            panic!("expected finished recovery");
+        };
+        assert!(result.invalidates_pending_submit());
+
+        let manager = services.submit_effect.manager();
+        let snapshot = manager
+            .read()
+            .await
+            .snapshot("btc-core")
+            .expect("track snapshot");
+        let binding = snapshot
+            .executor_state
+            .bindings
+            .iter()
+            .find(|binding| binding.request.client_order_id == target.request.client_order_id)
+            .expect("target binding should still exist");
+        assert_eq!(binding.order_id.as_deref(), Some("live-order-1"));
+        assert_eq!(
+            binding.status,
+            poise_engine::executor::BindingStatus::Working
+        );
+
+        let persisted = repository
+            .pending_effects()
+            .into_iter()
+            .find(|effect| effect.effect_id == target.effect_id)
+            .expect("target effect should still be stored");
+        assert_eq!(persisted.status, EffectStatus::Succeeded);
+    }
+
     fn test_service(
         repository: Arc<MemoryRepository>,
     ) -> (
@@ -320,5 +455,31 @@ mod tests {
         let (services, notifications) =
             track_write_services(manager_with_pending_submit(), repository);
         (services.submit_effect, notifications)
+    }
+
+    #[derive(Clone)]
+    struct SubmitFixture {
+        effect_id: String,
+        request: OrderRequest,
+        recovery_token: SubmitRecoveryToken,
+    }
+
+    fn pending_submit_effects(repository: &MemoryRepository) -> Vec<SubmitFixture> {
+        repository
+            .pending_effects()
+            .into_iter()
+            .filter_map(|effect| match effect.effect {
+                TrackEffect::SubmitOrder {
+                    request,
+                    recovery_token,
+                    ..
+                } => Some(SubmitFixture {
+                    effect_id: effect.effect_id,
+                    request,
+                    recovery_token,
+                }),
+                _ => None,
+            })
+            .collect()
     }
 }

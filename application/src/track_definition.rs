@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow};
-use poise_core::risk::{CapacityBudget, validate_capacity_budget};
+use poise_core::risk::{LossLimits, validate_loss_limits, validate_max_notional};
 use poise_core::strategy::{
     BandProtectionPolicy, DEFAULT_MIN_REBALANCE_UNITS, ShapeFamily, TrackConfig, validate_config,
 };
@@ -36,7 +36,8 @@ pub struct ConfiguredTrackDefinition {
     track_id: TrackId,
     instrument: Instrument,
     track_config: TrackConfig,
-    budget: CapacityBudget,
+    max_notional: f64,
+    loss_limits: LossLimits,
     tick_timeout_secs: u64,
 }
 
@@ -62,18 +63,20 @@ impl ConfiguredTrackDefinition {
             .long_exposure_units
             .max(track_config.short_exposure_units)
             * track_config.notional_per_unit;
-        let budget = CapacityBudget {
-            max_notional: input.max_notional.unwrap_or(implied_max_notional),
+        let max_notional = input.max_notional.unwrap_or(implied_max_notional);
+        let loss_limits = LossLimits {
             daily_loss_limit: input.daily_loss_limit,
             total_loss_limit: input.total_loss_limit,
         };
-        validate_capacity_budget(&budget).map_err(|error| anyhow!(error))?;
+        validate_max_notional(max_notional).map_err(|error| anyhow!(error))?;
+        validate_loss_limits(&loss_limits).map_err(|error| anyhow!(error))?;
 
         Ok(Self {
             track_id: input.track_id,
             instrument: Instrument::new(input.venue, input.symbol),
             track_config,
-            budget,
+            max_notional,
+            loss_limits,
             tick_timeout_secs: input.tick_timeout_secs.unwrap_or(DEFAULT_TICK_TIMEOUT_SECS),
         })
     }
@@ -90,8 +93,20 @@ impl ConfiguredTrackDefinition {
         self.track_config.clone()
     }
 
-    pub fn budget(&self) -> CapacityBudget {
-        self.budget.clone()
+    pub fn curve_max_notional(&self) -> f64 {
+        curve_max_notional(&self.track_config)
+    }
+
+    pub fn max_notional(&self) -> f64 {
+        self.max_notional
+    }
+
+    pub fn effective_max_notional(&self) -> f64 {
+        effective_max_notional(&self.track_config, self.max_notional)
+    }
+
+    pub fn loss_limits(&self) -> &LossLimits {
+        &self.loss_limits
     }
 
     pub fn tick_timeout_secs(&self) -> u64 {
@@ -104,7 +119,8 @@ pub struct TrackPreparedDefinition {
     track_id: TrackId,
     instrument: Instrument,
     track_config: TrackConfig,
-    budget: CapacityBudget,
+    max_notional: f64,
+    loss_limits: LossLimits,
     tick_timeout_secs: u64,
     restore_revision: TrackRestoreRevision,
 }
@@ -117,7 +133,8 @@ impl TrackPreparedDefinition {
             track_id: definition.track_id,
             instrument: definition.instrument,
             track_config: definition.track_config,
-            budget: definition.budget,
+            max_notional: definition.max_notional,
+            loss_limits: definition.loss_limits,
             tick_timeout_secs: definition.tick_timeout_secs,
             restore_revision,
         }
@@ -135,8 +152,16 @@ impl TrackPreparedDefinition {
         &self.track_config
     }
 
-    pub fn budget(&self) -> CapacityBudget {
-        self.budget.clone()
+    pub fn max_notional(&self) -> f64 {
+        self.max_notional
+    }
+
+    pub fn effective_max_notional(&self) -> f64 {
+        effective_max_notional(&self.track_config, self.max_notional)
+    }
+
+    pub fn loss_limits(&self) -> &LossLimits {
+        &self.loss_limits
     }
 
     pub fn tick_timeout_secs(&self) -> u64 {
@@ -152,7 +177,8 @@ impl TrackPreparedDefinition {
             track_id: self.track_id.clone(),
             instrument: self.instrument.clone(),
             track_config: self.track_config.clone(),
-            budget: self.budget.clone(),
+            max_notional: self.max_notional,
+            loss_limits: self.loss_limits.clone(),
         }
     }
 
@@ -161,14 +187,16 @@ impl TrackPreparedDefinition {
             track_id: self.track_id.clone(),
             instrument: self.instrument.clone(),
             track_config: self.track_config.clone(),
-            budget: self.budget.clone(),
+            max_notional: self.max_notional,
+            loss_limits: self.loss_limits.clone(),
             tick_timeout_secs: self.tick_timeout_secs,
         }
     }
 
     pub fn post_restore_constraints(&self) -> PostRestoreConstraints {
         PostRestoreConstraints {
-            budget: self.budget.clone(),
+            max_notional: self.max_notional,
+            loss_limits: self.loss_limits.clone(),
             tick_timeout_secs: self.tick_timeout_secs,
         }
     }
@@ -178,7 +206,7 @@ impl TrackPreparedDefinition {
             track_id: self.track_id.clone(),
             instrument: self.instrument.clone(),
             track_config: self.track_config.clone(),
-            budget: self.budget.clone(),
+            max_notional: self.max_notional,
         }
     }
 }
@@ -188,7 +216,8 @@ pub struct TrackReadDefinition {
     pub track_id: TrackId,
     pub instrument: Instrument,
     pub track_config: TrackConfig,
-    pub budget: CapacityBudget,
+    pub max_notional: f64,
+    pub loss_limits: LossLimits,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -196,7 +225,7 @@ pub struct TrackStartupDefinition {
     track_id: TrackId,
     instrument: Instrument,
     track_config: TrackConfig,
-    budget: CapacityBudget,
+    max_notional: f64,
 }
 
 impl TrackStartupDefinition {
@@ -212,8 +241,19 @@ impl TrackStartupDefinition {
         let current_position_notional = self
             .track_config
             .abs_notional_from_position_qty(position_qty);
-        (self.budget.max_notional - current_position_notional).max(0.0)
+        (self.max_notional - current_position_notional).max(0.0)
     }
+}
+
+pub fn curve_max_notional(config: &TrackConfig) -> f64 {
+    config
+        .long_exposure_units
+        .max(config.short_exposure_units)
+        * config.notional_per_unit
+}
+
+pub fn effective_max_notional(config: &TrackConfig, max_notional: f64) -> f64 {
+    curve_max_notional(config).min(max_notional)
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -277,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_track_definition_expands_defaults_and_validates_budget() {
+    fn configured_track_definition_expands_defaults_and_validates_definition_limits() {
         let definition = ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
             track_id: TrackId::new("btc-core"),
             venue: Venue::Binance,
@@ -303,8 +343,36 @@ mod tests {
             definition.track_config().out_of_band_policy,
             BandProtectionPolicy::Freeze
         );
-        assert_eq!(definition.budget().max_notional, 3000.0);
+        assert_eq!(definition.max_notional(), 3000.0);
+        assert_eq!(definition.loss_limits().daily_loss_limit, 300.0);
+        assert_eq!(definition.loss_limits().total_loss_limit, 600.0);
         assert_eq!(definition.tick_timeout_secs(), 30);
+    }
+
+    #[test]
+    fn configured_track_definition_derives_effective_max_notional_from_curve_and_config_limit() {
+        let definition = ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
+            track_id: TrackId::new("btc-core"),
+            venue: Venue::Binance,
+            symbol: "BTCUSDT".into(),
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 6.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: None,
+            shape_family: None,
+            out_of_band_policy: None,
+            max_notional: Some(2_000.0),
+            daily_loss_limit: 300.0,
+            total_loss_limit: 600.0,
+            tick_timeout_secs: None,
+        })
+        .unwrap();
+
+        assert_eq!(definition.curve_max_notional(), 3_000.0);
+        assert_eq!(definition.max_notional(), 2_000.0);
+        assert_eq!(definition.effective_max_notional(), 2_000.0);
     }
 
     #[test]
@@ -333,14 +401,19 @@ mod tests {
         let read_definition = prepared.read_definition();
         assert_eq!(read_definition.track_id.as_str(), "btc-core");
         assert_eq!(read_definition.instrument.symbol, "BTCUSDT");
-        assert_eq!(read_definition.budget.max_notional, 4200.0);
+        assert_eq!(read_definition.max_notional, 4200.0);
+        assert_eq!(read_definition.loss_limits.daily_loss_limit, 300.0);
+        assert_eq!(read_definition.loss_limits.total_loss_limit, 600.0);
 
         let runtime_seed = prepared.runtime_seed();
         assert_eq!(runtime_seed.track_id.as_str(), "btc-core");
         assert_eq!(runtime_seed.instrument.symbol, "BTCUSDT");
+        assert_eq!(runtime_seed.max_notional, 4200.0);
+        assert_eq!(runtime_seed.loss_limits.daily_loss_limit, 300.0);
 
         let constraints = prepared.post_restore_constraints();
-        assert_eq!(constraints.budget.max_notional, 4200.0);
+        assert_eq!(constraints.max_notional, 4200.0);
+        assert_eq!(constraints.loss_limits.total_loss_limit, 600.0);
         assert_eq!(constraints.tick_timeout_secs, 45);
     }
 

@@ -41,6 +41,13 @@ pub struct BoundaryProgressView {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct BoundaryLedgerError {
+    pub boundary_id: BoundaryId,
+    pub effective_crossed_qty: f64,
+    pub step_size: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct BoundaryOperationView {
     pub operation: BoundaryOperation,
     pub remaining: f64,
@@ -53,7 +60,11 @@ pub struct BoundaryLedgerView {
 }
 
 impl BoundaryLedgerState {
-    pub fn progress_for(&self, boundary: &BoundaryBlueprint) -> BoundaryProgressView {
+    pub fn try_progress_for(
+        &self,
+        boundary: &BoundaryBlueprint,
+        exposure_epsilon: f64,
+    ) -> Result<BoundaryProgressView, BoundaryLedgerError> {
         let progress = self
             .progress
             .iter()
@@ -61,28 +72,58 @@ impl BoundaryLedgerState {
             .map(|entry| entry.progress.clone())
             .unwrap_or_default();
         let anchor_crossed = anchor_crossed_qty(boundary, self.ledger_anchor_exposure.0);
-        let effective_crossed_qty = (anchor_crossed + progress.cumulative_up
-            - progress.cumulative_down)
-            .clamp(0.0, boundary.step_size);
+        let raw_effective_crossed_qty =
+            anchor_crossed + progress.cumulative_up - progress.cumulative_down;
+        let epsilon = exposure_epsilon.max(f64::EPSILON);
+        if raw_effective_crossed_qty < -epsilon
+            || raw_effective_crossed_qty > boundary.step_size + epsilon
+        {
+            return Err(BoundaryLedgerError {
+                boundary_id: boundary.id.clone(),
+                effective_crossed_qty: raw_effective_crossed_qty,
+                step_size: boundary.step_size,
+            });
+        }
+        let effective_crossed_qty = raw_effective_crossed_qty.clamp(0.0, boundary.step_size);
 
-        BoundaryProgressView {
+        Ok(BoundaryProgressView {
             effective_crossed_qty,
             up_remaining: (boundary.step_size - effective_crossed_qty).max(0.0),
             down_remaining: effective_crossed_qty.max(0.0),
-        }
+        })
+    }
+
+    pub fn expected_exposure(&self) -> Exposure {
+        let progress_delta = self
+            .progress
+            .iter()
+            .map(|entry| entry.progress.cumulative_up - entry.progress.cumulative_down)
+            .sum::<f64>();
+        Exposure(self.ledger_anchor_exposure.0 + progress_delta)
+    }
+
+    pub fn has_unexplained_exposure_drift(
+        &self,
+        current_exposure: &Exposure,
+        active_binding_exposure_budget: f64,
+        exposure_epsilon: f64,
+    ) -> bool {
+        let drift = (current_exposure.0 - self.expected_exposure().0).abs();
+        let explainable_budget = active_binding_exposure_budget.max(0.0);
+        drift > explainable_budget + exposure_epsilon.max(f64::EPSILON)
     }
 }
 
 impl BoundaryLedgerView {
-    pub fn from_boundaries(
+    pub fn try_from_boundaries(
         boundaries: &[BoundaryBlueprint],
         state: &BoundaryLedgerState,
         spot_target: Exposure,
         exposure_epsilon: f64,
-    ) -> Self {
+    ) -> Result<Self, BoundaryLedgerError> {
         let mut operations = Vec::new();
         for boundary in boundaries {
-            let progress = state.progress_for(boundary);
+            let progress = state.try_progress_for(boundary, exposure_epsilon)?;
             operations.push(BoundaryOperationView {
                 operation: BoundaryOperation {
                     boundary_id: boundary.id.clone(),
@@ -103,7 +144,7 @@ impl BoundaryLedgerView {
             });
         }
 
-        Self { operations }
+        Ok(Self { operations })
     }
 
     #[allow(dead_code)]
@@ -159,7 +200,7 @@ mod tests {
             }],
         };
 
-        let progress = state.progress_for(&boundary);
+        let progress = state.try_progress_for(&boundary, 1e-9).unwrap();
 
         assert!((progress.effective_crossed_qty - 0.4).abs() < 1e-9);
         assert!((progress.up_remaining - 0.6).abs() < 1e-9);
@@ -181,11 +222,29 @@ mod tests {
             }],
         };
 
-        let progress = state.progress_for(&boundary);
+        let progress = state.try_progress_for(&boundary, 1e-9).unwrap();
 
         assert!((progress.effective_crossed_qty - 0.6).abs() < 1e-9);
         assert!((progress.up_remaining - 0.4).abs() < 1e-9);
         assert!((progress.down_remaining - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn boundary_progress_rejects_out_of_range_net_progress() {
+        let boundary = boundary(1.0, 2.0);
+        let state = BoundaryLedgerState {
+            profile_revision: ProfileRevision("rev-1".to_string()),
+            ledger_anchor_exposure: Exposure(1.0),
+            progress: vec![BoundaryProgressEntry {
+                boundary_id: boundary.id.clone(),
+                progress: BoundaryProgress {
+                    cumulative_up: 1.2,
+                    cumulative_down: 0.0,
+                },
+            }],
+        };
+
+        assert!(state.try_progress_for(&boundary, 1e-9).is_err());
     }
 
     #[test]
@@ -197,13 +256,14 @@ mod tests {
             progress: Vec::new(),
         };
 
-        let up_view = BoundaryLedgerView::from_boundaries(
+        let up_view = BoundaryLedgerView::try_from_boundaries(
             std::slice::from_ref(&boundary),
             &state,
             Exposure(2.0),
             1e-9,
-        );
-        let down_view = BoundaryLedgerView::from_boundaries(
+        )
+        .unwrap();
+        let down_view = BoundaryLedgerView::try_from_boundaries(
             std::slice::from_ref(&boundary),
             &BoundaryLedgerState {
                 ledger_anchor_exposure: Exposure(2.0),
@@ -211,7 +271,8 @@ mod tests {
             },
             Exposure(1.0),
             1e-9,
-        );
+        )
+        .unwrap();
 
         assert!(up_view.is_due(&BoundaryOperation {
             boundary_id: boundary.id.clone(),

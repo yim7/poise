@@ -3016,6 +3016,7 @@ dependencies = [
  "poise-core",
  "poise-engine",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -3086,6 +3087,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -3,6 +3,7 @@ use chrono::Utc;
 use poise_application::{
     FollowUpRetirementRequest, PersistedTrackEffect, is_loaded_track_invariant_violation,
 };
+use poise_engine::executor::SubmitRecoveryToken;
 use poise_engine::ports::OrderRequest;
 
 use super::{Cancellation, EffectWorker, is_insufficient_margin_failure};
@@ -17,7 +18,8 @@ pub(super) async fn execute_submit(
     worker: &EffectWorker,
     persisted: &PersistedTrackEffect,
     request: OrderRequest,
-    desired_exposure: poise_core::types::Exposure,
+    recovery_token: SubmitRecoveryToken,
+    _desired_exposure: poise_core::types::Exposure,
 ) -> Result<()> {
     let submit = SubmitCoordinator::new(
         worker.execution.clone(),
@@ -44,10 +46,7 @@ pub(super) async fn execute_submit(
         return Ok(());
     }
 
-    let Some(flight) = submit
-        .prepare(persisted, request, desired_exposure.clone())
-        .await?
-    else {
+    let Some(flight) = submit.prepare(persisted, request, recovery_token).await? else {
         return Ok(());
     };
     let (request, completion) = flight.into_parts();

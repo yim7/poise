@@ -8,6 +8,10 @@ use crate::track_persistence::{FollowUpRetirementRequest, PersistedTrackEffect};
 pub trait TrackEffectStore: Send + Sync {
     async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>>;
     async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>>;
+    async fn list_all_pending_effects_for_track(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Vec<PersistedTrackEffect>>;
     async fn list_pending_submit_effects_for_track(
         &self,
         track_id: &TrackId,

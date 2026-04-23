@@ -221,6 +221,7 @@ fn parse_order_update(update: OrderUpdate) -> Result<ExchangeOrder> {
         side: update.side,
         price: update.price,
         qty: update.qty,
+        filled_qty: update.cum_exec_qty.unwrap_or(0.0),
         order_status: update.order_status,
         position_idx: update.position_idx,
     })
