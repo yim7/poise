@@ -1,7 +1,5 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use poise_core::risk::LossLimits;
-use poise_core::strategy::TrackConfig;
 use poise_core::types::Exposure;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,13 +9,16 @@ use crate::execution_gate::ExecutionGateState;
 use crate::ledger::TrackLedgerState;
 use crate::runtime::{ExecutorState, RiskState, StrategyPriceStatus, TrackState};
 use crate::snapshot::TrackRuntimeSnapshot;
-use crate::track::{Instrument, TrackId};
+use crate::track::TrackId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackRestoreRevision(String);
 
 impl TrackRestoreRevision {
-    pub fn for_track(instrument: &Instrument, track_config: &TrackConfig) -> Self {
+    pub fn for_track(
+        instrument: &crate::track::Instrument,
+        track_config: &poise_core::strategy::TrackConfig,
+    ) -> Self {
         let payload = serde_json::json!({
             "instrument": instrument,
             "track_config": track_config,
@@ -34,23 +35,6 @@ impl TrackRestoreRevision {
     pub fn from_stored(value: impl Into<String>) -> Self {
         Self(value.into())
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TrackRuntimeSeed {
-    pub track_id: TrackId,
-    pub instrument: Instrument,
-    pub track_config: TrackConfig,
-    pub max_notional: f64,
-    pub loss_limits: LossLimits,
-    pub tick_timeout_secs: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PostRestoreConstraints {
-    pub max_notional: f64,
-    pub loss_limits: LossLimits,
-    pub tick_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]

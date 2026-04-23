@@ -15,6 +15,16 @@ pub struct TrackPersistentState {
     pub ledger_state: TrackLedgerState,
 }
 
+impl TrackPersistentState {
+    pub(crate) fn from_runtime_snapshot(snapshot: &TrackRuntimeSnapshot) -> Self {
+        Self {
+            track_id: snapshot.track_id.clone(),
+            control_state: TrackControlState::from_runtime_state_for_write(&snapshot.runtime_state),
+            ledger_state: snapshot.ledger_state.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredTrackEvent {
     pub id: i64,

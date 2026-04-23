@@ -320,6 +320,7 @@ impl SqliteStorage {
         conn: Arc<Mutex<Connection>>,
         id: String,
         state: TrackRuntimeSnapshot,
+        persistent_state: Option<TrackPersistentState>,
         events: Vec<DomainEvent>,
         effects: Vec<TrackEffect>,
         effect_status_update: Option<EffectStatusUpdate>,
@@ -409,6 +410,32 @@ impl SqliteStorage {
             params![id, updated_at_text, updated_at_text],
         )
         .context("failed to upsert persisted track presence")?;
+
+        if let Some(persistent_state) = persistent_state {
+            let control_state_json = serde_json::to_string(&persistent_state.control_state)
+                .context("failed to serialize track control state")?;
+            let persistent_ledger_state_json = serde_json::to_string(&persistent_state.ledger_state)
+                .context("failed to serialize track persistent ledger state")?;
+            tx.execute(
+                "INSERT INTO track_persistent_state (
+                    track_id,
+                    control_state_json,
+                    ledger_state_json,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(track_id) DO UPDATE SET
+                    control_state_json = excluded.control_state_json,
+                    ledger_state_json = excluded.ledger_state_json,
+                    updated_at = excluded.updated_at",
+                params![
+                    persistent_state.track_id.as_str(),
+                    control_state_json,
+                    persistent_ledger_state_json,
+                    updated_at_text
+                ],
+            )
+            .context("failed to save track persistent state")?;
+        }
 
         for event in events {
             let event_json =
@@ -967,9 +994,12 @@ impl SqliteStorage {
         let ledger_state_json = serde_json::to_string(&state.ledger_state)
             .context("failed to serialize track ledger state")?;
         let updated_at = Utc::now().to_rfc3339();
-        let conn = Self::lock_connection(&conn)?;
+        let mut conn = Self::lock_connection(&conn)?;
+        let tx = conn
+            .transaction()
+            .context("failed to start sqlite track persistent state transaction")?;
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO track_persistent_state (
                 track_id,
                 control_state_json,
@@ -988,6 +1018,17 @@ impl SqliteStorage {
             ],
         )
         .context("failed to save track persistent state")?;
+
+        tx.execute(
+            "INSERT INTO persisted_track_presence (track_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(track_id) DO UPDATE SET
+                 updated_at = excluded.updated_at",
+            params![state.track_id.as_str(), updated_at.as_str(), updated_at.as_str()],
+        )
+        .context("failed to upsert persisted track presence from track persistent state")?;
+        tx.commit()
+            .context("failed to commit sqlite track persistent state transaction")?;
         Ok(())
     }
 
@@ -1046,10 +1087,56 @@ impl TrackMutationStore for SqliteStorage {
         let effect_status_update = effect_status_update.cloned();
 
         tokio::task::spawn_blocking(move || {
-            Self::save_transition_blocking(conn, id, state, events, effects, effect_status_update)
+            Self::save_transition_blocking(
+                conn,
+                id,
+                state,
+                None,
+                events,
+                effects,
+                effect_status_update,
+            )
         })
         .await
         .context("failed to join save_transition_with_effect_status blocking task")?
+    }
+
+    async fn save_transition_bundle_with_effect_status(
+        &self,
+        id: &str,
+        state: &TrackRuntimeSnapshot,
+        persistent_state: &TrackPersistentState,
+        events: &[DomainEvent],
+        effects: &[TrackEffect],
+        effect_status_update: Option<&EffectStatusUpdate>,
+    ) -> Result<CommittedTrackWrite> {
+        ensure!(
+            id == state.track_id.as_str(),
+            "snapshot id mismatch: key `{id}` does not match snapshot.track_id `{}`",
+            state.track_id.as_str()
+        );
+
+        let conn = Arc::clone(&self.conn);
+        let id = id.to_owned();
+        let state = state.clone();
+        let persistent_state = persistent_state.clone();
+        let events = events.to_vec();
+        let effects = effects.to_vec();
+        let effect_status_update = effect_status_update.cloned();
+
+        tokio::task::spawn_blocking(move || {
+            Self::save_transition_blocking(
+                conn,
+                id,
+                state,
+                Some(persistent_state),
+                events,
+                effects,
+                effect_status_update,
+            )
+        })
+        .await
+        .context("failed to join save_transition_bundle_with_effect_status blocking task")?
     }
 
     async fn load_track_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>> {
@@ -1686,6 +1773,26 @@ mod tests {
                 .unwrap();
 
         assert_eq!(actual, Some(expected));
+    }
+
+    #[tokio::test]
+    async fn save_track_persistent_state_records_persisted_track_presence() {
+        let storage = SqliteStorage::in_memory().unwrap();
+
+        TrackMutationStore::save_track_persistent_state(
+            &storage,
+            &TrackPersistentState {
+                track_id: TrackId::new("btc-core"),
+                control_state: app::TrackControlState::default(),
+                ledger_state: TrackLedgerState::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let found = storage.list_persisted_track_presence().await.unwrap();
+
+        assert_eq!(found, vec![TrackId::new("btc-core")]);
     }
 
     #[tokio::test]

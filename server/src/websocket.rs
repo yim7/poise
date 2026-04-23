@@ -1582,6 +1582,7 @@ mod tests {
     #[derive(Default)]
     struct TestRepository {
         snapshots: Mutex<HashMap<String, StoredTrackSnapshot>>,
+        persistent_states: Mutex<HashMap<String, poise_application::TrackPersistentState>>,
         events: Mutex<HashMap<String, Vec<StoredTrackEvent>>>,
         effects: Mutex<Vec<PersistedTrackEffect>>,
         next_event_id: Mutex<i64>,
@@ -1658,7 +1659,6 @@ mod tests {
                     updated_at: now,
                 },
             );
-
             if !events.is_empty() {
                 let mut next_event_id = self.next_event_id.lock().unwrap();
                 let mut stored_events = self.events.lock().unwrap();
@@ -1741,6 +1741,17 @@ mod tests {
                 .into_iter()
                 .map(|stored| stored.event)
                 .collect())
+        }
+
+        async fn save_track_persistent_state(
+            &self,
+            state: &poise_application::TrackPersistentState,
+        ) -> Result<()> {
+            self.persistent_states
+                .lock()
+                .unwrap()
+                .insert(state.track_id.as_str().to_string(), state.clone());
+            Ok(())
         }
     }
 
@@ -1860,6 +1871,18 @@ mod tests {
             }
             Ok(self
                 .snapshots
+                .lock()
+                .unwrap()
+                .get(track_id.as_str())
+                .cloned())
+        }
+
+        async fn load_track_persistent_state(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<poise_application::TrackPersistentState>> {
+            Ok(self
+                .persistent_states
                 .lock()
                 .unwrap()
                 .get(track_id.as_str())

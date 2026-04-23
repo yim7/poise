@@ -20,11 +20,8 @@ pub trait TrackQueryStore: Send + Sync {
         track_id: &TrackId,
         limit: usize,
     ) -> Result<Vec<PersistedTrackEffect>>;
-
     async fn load_track_persistent_state(
         &self,
-        _track_id: &TrackId,
-    ) -> Result<Option<TrackPersistentState>> {
-        Ok(None)
-    }
+        track_id: &TrackId,
+    ) -> Result<Option<TrackPersistentState>>;
 }

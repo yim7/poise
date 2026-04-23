@@ -5,9 +5,6 @@ use poise_core::risk::{LossLimits, validate_loss_limits, validate_max_notional};
 use poise_core::strategy::{
     BandProtectionPolicy, DEFAULT_MIN_REBALANCE_UNITS, ShapeFamily, TrackConfig, validate_config,
 };
-use poise_engine::persisted_runtime::{
-    PostRestoreConstraints, TrackRestoreRevision, TrackRuntimeSeed,
-};
 use poise_engine::track::{Instrument, TrackId, Venue};
 
 const DEFAULT_TICK_TIMEOUT_SECS: u64 = 30;
@@ -122,13 +119,10 @@ pub struct TrackPreparedDefinition {
     max_notional: f64,
     loss_limits: LossLimits,
     tick_timeout_secs: u64,
-    restore_revision: TrackRestoreRevision,
 }
 
 impl TrackPreparedDefinition {
     pub fn from_configured(definition: ConfiguredTrackDefinition) -> Self {
-        let restore_revision =
-            TrackRestoreRevision::for_track(definition.instrument(), &definition.track_config);
         Self {
             track_id: definition.track_id,
             instrument: definition.instrument,
@@ -136,7 +130,6 @@ impl TrackPreparedDefinition {
             max_notional: definition.max_notional,
             loss_limits: definition.loss_limits,
             tick_timeout_secs: definition.tick_timeout_secs,
-            restore_revision,
         }
     }
 
@@ -168,10 +161,6 @@ impl TrackPreparedDefinition {
         self.tick_timeout_secs
     }
 
-    pub fn restore_revision(&self) -> &TrackRestoreRevision {
-        &self.restore_revision
-    }
-
     pub fn read_definition(&self) -> TrackReadDefinition {
         TrackReadDefinition {
             track_id: self.track_id.clone(),
@@ -179,25 +168,6 @@ impl TrackPreparedDefinition {
             track_config: self.track_config.clone(),
             max_notional: self.max_notional,
             loss_limits: self.loss_limits.clone(),
-        }
-    }
-
-    pub fn runtime_seed(&self) -> TrackRuntimeSeed {
-        TrackRuntimeSeed {
-            track_id: self.track_id.clone(),
-            instrument: self.instrument.clone(),
-            track_config: self.track_config.clone(),
-            max_notional: self.max_notional,
-            loss_limits: self.loss_limits.clone(),
-            tick_timeout_secs: self.tick_timeout_secs,
-        }
-    }
-
-    pub fn post_restore_constraints(&self) -> PostRestoreConstraints {
-        PostRestoreConstraints {
-            max_notional: self.max_notional,
-            loss_limits: self.loss_limits.clone(),
-            tick_timeout_secs: self.tick_timeout_secs,
         }
     }
 
@@ -376,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_track_registry_projects_read_definition_runtime_seed_and_constraints() {
+    fn prepared_track_registry_projects_read_definition_without_restore_helpers() {
         let configured = ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
             track_id: TrackId::new("btc-core"),
             venue: Venue::Binance,
@@ -404,17 +374,8 @@ mod tests {
         assert_eq!(read_definition.max_notional, 4200.0);
         assert_eq!(read_definition.loss_limits.daily_loss_limit, 300.0);
         assert_eq!(read_definition.loss_limits.total_loss_limit, 600.0);
-
-        let runtime_seed = prepared.runtime_seed();
-        assert_eq!(runtime_seed.track_id.as_str(), "btc-core");
-        assert_eq!(runtime_seed.instrument.symbol, "BTCUSDT");
-        assert_eq!(runtime_seed.max_notional, 4200.0);
-        assert_eq!(runtime_seed.loss_limits.daily_loss_limit, 300.0);
-
-        let constraints = prepared.post_restore_constraints();
-        assert_eq!(constraints.max_notional, 4200.0);
-        assert_eq!(constraints.loss_limits.total_loss_limit, 600.0);
-        assert_eq!(constraints.tick_timeout_secs, 45);
+        assert_eq!(prepared.tick_timeout_secs(), 45);
+        assert_eq!(prepared.effective_max_notional(), 3_000.0);
     }
 
     #[test]

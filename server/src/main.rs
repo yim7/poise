@@ -147,20 +147,9 @@ fn render_startup_error(error: &StateBootstrapError) -> String {
 
             for mismatch in mismatches {
                 match &mismatch.detail {
-                    PersistedStateMismatchDetail::RestoreRevisionMismatch {
-                        expected_revision,
-                        actual_revision,
-                    } => {
+                    PersistedStateMismatchDetail::PersistedTrackMissingBusinessState => {
                         rendered.push_str(&format!(
-                            "\ntrack `{}`:\n  restore revision: expected `{}`, persisted `{}`",
-                            mismatch.track_id,
-                            expected_revision.as_str(),
-                            actual_revision.as_str(),
-                        ));
-                    }
-                    PersistedStateMismatchDetail::PersistedTrackMissingRuntime => {
-                        rendered.push_str(&format!(
-                            "\ntrack `{}`:\n  persisted runtime is missing while persisted track presence still exists",
+                            "\ntrack `{}`:\n  persisted business state is missing while persisted track presence still exists",
                             mismatch.track_id,
                         ));
                     }
@@ -203,7 +192,6 @@ mod tests {
     use chrono::Utc;
     use poise_application::{ConfiguredTrackDefinition, PreparedTrackRegistry};
     use poise_core::types::ExchangeRules;
-    use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::{
         AccountPort, ClockPort, ExchangeInfo, ExchangeOrder, ExecutionPort, MetadataPort,
         OrderReceipt, OrderRequest, OrderStatus, Position, PriceTick,
@@ -288,40 +276,11 @@ mod tests {
             mismatches: vec![
                 crate::state_bootstrap::PersistedStateMismatch {
                     track_id: "btc-core".into(),
-                    detail: PersistedStateMismatchDetail::RestoreRevisionMismatch {
-                        expected_revision: TrackRestoreRevision::for_track(
-                            &Instrument::new(Venue::Binance, "BTCUSDT"),
-                            &poise_core::strategy::TrackConfig {
-                                lower_price: 90.0,
-                                upper_price: 110.0,
-                                long_exposure_units: 8.0,
-                                short_exposure_units: 8.0,
-                                notional_per_unit: 375.0,
-                                min_rebalance_units: 0.5,
-                                shape_family: poise_core::strategy::ShapeFamily::Linear,
-                                out_of_band_policy:
-                                    poise_core::strategy::BandProtectionPolicy::Freeze,
-                            },
-                        ),
-                        actual_revision: TrackRestoreRevision::for_track(
-                            &Instrument::new(Venue::Binance, "BTCUSDT"),
-                            &poise_core::strategy::TrackConfig {
-                                lower_price: 80.0,
-                                upper_price: 110.0,
-                                long_exposure_units: 8.0,
-                                short_exposure_units: 8.0,
-                                notional_per_unit: 375.0,
-                                min_rebalance_units: 0.5,
-                                shape_family: poise_core::strategy::ShapeFamily::Linear,
-                                out_of_band_policy:
-                                    poise_core::strategy::BandProtectionPolicy::Freeze,
-                            },
-                        ),
-                    },
+                    detail: PersistedStateMismatchDetail::PersistedTrackMissingBusinessState,
                 },
                 crate::state_bootstrap::PersistedStateMismatch {
                     track_id: "eth-core".into(),
-                    detail: PersistedStateMismatchDetail::PersistedTrackMissingRuntime,
+                    detail: PersistedStateMismatchDetail::PersistedTrackMissingFromConfig,
                 },
                 crate::state_bootstrap::PersistedStateMismatch {
                     track_id: "sol-core".into(),
@@ -333,9 +292,8 @@ mod tests {
 
         assert!(rendered.contains(".data/testnet/poise-server.sqlite"));
         assert!(rendered.contains("btc-core"));
-        assert!(rendered.contains("restore revision"));
+        assert!(rendered.contains("persisted business state is missing"));
         assert!(rendered.contains("eth-core"));
-        assert!(rendered.contains("persisted runtime is missing"));
         assert!(rendered.contains("sol-core"));
         assert!(rendered.contains("missing from current config"));
         assert!(rendered.contains("--rebuild-state"));

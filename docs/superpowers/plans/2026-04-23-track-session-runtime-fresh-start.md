@@ -161,7 +161,7 @@
 - Test: `core/src/risk.rs`
 - Test: `protocol/src/lib.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住新的定义边界**
+- [x] **Step 1: 先写失败测试，锁住新的定义边界**
 
 覆盖点：
 
@@ -182,7 +182,7 @@
 - `ExchangeRules` 不从旧 runtime 恢复，而是作为 `FreshSessionExternalInputs` 显式传入
 - public protocol 不再暴露混合的 `budget`
 
-- [ ] **Step 2: 运行定向测试，确认旧结构失败**
+- [x] **Step 2: 运行定向测试，确认旧结构失败**
 
 Run:
 
@@ -198,7 +198,7 @@ Expected:
 
 - 现有实现仍依赖 `CapacityBudget`，`TrackControlState / TrackLedgerState` 还没有独立 owner，并且旧 runtime snapshot 仍是启动恢复边界，新测试失败。
 
-- [ ] **Step 3: 做最小实现，完成定义层拆分**
+- [x] **Step 3: 做最小实现，完成定义层拆分**
 
 要求：
 
@@ -216,7 +216,7 @@ Expected:
 - `PersistedRuntimeCodec / TrackRuntimeSnapshot / track_snapshots` 不再作为 startup 输入
 - protocol / TUI 同步 `max_notional + loss_limits`，不保留 `budget` 作为公开边界
 
-- [ ] **Step 4: 运行 Task 1 回归**
+- [x] **Step 4: 运行 Task 1 回归**
 
 Run:
 
@@ -231,6 +231,7 @@ Run:
 Expected:
 
 - 定义层、持久控制状态、持久账本真值和公开协议边界完成，旧 `CapacityBudget` 与旧 runtime snapshot 不再作为共享边界。
+- Task 1 implementation commit: `TASK1_COMMIT_SHA_PENDING`
 
 ## Task 2: 定义 `TrackRuntime::fresh_start(...)`
 

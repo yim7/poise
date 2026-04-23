@@ -2,10 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use poise_core::risk::{
-    ExposureIntent, LossGuardSnapshot, LossLimits, RiskOutcome, RiskTerminationCause,
-    evaluate_risk_outcome,
-};
+use poise_core::risk::{LossLimits, RiskTerminationCause};
 use poise_core::strategy::{BandBoundary, TrackConfig};
 use poise_core::types::{ExchangeRules, Exposure};
 
@@ -15,7 +12,7 @@ use crate::executor::binding::LiveOrderBinding;
 use crate::executor::boundary::{ProfileRevision, profile_revision_for_config};
 use crate::executor::ledger::BoundaryLedgerState;
 use crate::ledger::TrackLedgerState;
-use crate::persisted_runtime::{PostRestoreConstraints, TrackRestoreRevision, TrackRuntimeSeed};
+use crate::persisted_runtime::TrackRestoreRevision;
 use crate::ports::ExecutionQuote;
 use crate::price_gate::{
     PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
@@ -267,17 +264,6 @@ pub struct TrackRuntime {
 }
 
 impl TrackRuntime {
-    fn bootstrap_exchange_rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.0,
-            quantity_step: 0.0,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
-    }
-
     pub fn new(
         id: TrackId,
         instrument: Instrument,
@@ -365,38 +351,6 @@ impl TrackRuntime {
 
     pub fn loss_limits(&self) -> &LossLimits {
         &self.loss_limits
-    }
-
-    pub fn initial_from_seed(
-        seed: TrackRuntimeSeed,
-        exchange_rules: ExchangeRules,
-        started_at: DateTime<Utc>,
-    ) -> Self {
-        Self::with_tick_timeout_secs(
-            seed.track_id,
-            seed.instrument,
-            seed.track_config,
-            seed.max_notional,
-            seed.loss_limits,
-            exchange_rules,
-            started_at,
-            seed.tick_timeout_secs,
-        )
-    }
-
-    pub fn prepare_bootstrap_snapshot(
-        seed: TrackRuntimeSeed,
-        persisted_snapshot: Option<&TrackRuntimeSnapshot>,
-        constraints: PostRestoreConstraints,
-        started_at: DateTime<Utc>,
-    ) -> Result<TrackRuntimeSnapshot> {
-        let mut runtime =
-            Self::initial_from_seed(seed, Self::bootstrap_exchange_rules(), started_at);
-        if let Some(snapshot) = persisted_snapshot {
-            runtime.restore_from_snapshot(snapshot)?;
-        }
-        runtime.apply_post_restore_constraints(constraints);
-        Ok(runtime.snapshot())
     }
 
     pub fn snapshot(&self) -> TrackRuntimeSnapshot {
@@ -541,42 +495,6 @@ impl TrackRuntime {
         Some(reconciler::reconcile_target(self, strategy_price).desired_exposure)
     }
 
-    pub fn apply_post_restore_constraints(&mut self, constraints: PostRestoreConstraints) {
-        self.max_notional = constraints.max_notional;
-        self.loss_limits = constraints.loss_limits;
-        self.tick_timeout_secs = constraints.tick_timeout_secs;
-
-        if let Some(target) = self.desired_exposure.clone() {
-            let decision = evaluate_risk_outcome(
-                &ExposureIntent {
-                    current: self.current_exposure.clone(),
-                    target,
-                    unit_notional: self.config.notional_per_unit,
-                    loss_guard: LossGuardSnapshot {
-                        net_realized_pnl_today: self.ledger_state.net_realized_pnl_today(),
-                        net_realized_pnl_cumulative: self
-                            .ledger_state
-                            .net_realized_pnl_cumulative(),
-                        unrealized_pnl: self.risk_state.unrealized_pnl,
-                    },
-                },
-                self.max_notional,
-                &self.loss_limits,
-            );
-            self.desired_exposure = Some(match decision {
-                RiskOutcome::Allow { target } | RiskOutcome::Cap { target } => target,
-                RiskOutcome::Terminate(_) => Exposure(0.0),
-            });
-            return;
-        }
-
-        let total_loss_amount = (-(self.ledger_state.net_realized_pnl_cumulative()
-            + self.risk_state.unrealized_pnl))
-            .max(0.0);
-        if total_loss_amount >= self.loss_limits.total_loss_limit {
-            self.desired_exposure = Some(Exposure(0.0));
-        }
-    }
 }
 
 #[cfg(test)]

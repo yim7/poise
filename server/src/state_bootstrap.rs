@@ -7,11 +7,14 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{SecondsFormat, Utc};
 use poise_application::{
     AccountMonitorStore, ConfiguredTrackDefinition, PreparedTrackRegistry, TrackEffectStore,
-    TrackMutationStore, TrackQueryStore,
+    TrackMutationStore, TrackPersistentState, TrackQueryStore, TrackControlState,
 };
-use poise_engine::runtime::TrackRuntime;
-#[cfg(test)]
-use poise_engine::track::TrackId;
+use poise_core::types::Exposure;
+use poise_engine::execution_gate::ExecutionGateState;
+use poise_engine::ledger::TrackLedgerState;
+use poise_engine::persisted_runtime::TrackRestoreRevision;
+use poise_engine::runtime::{ExecutorState, RiskState};
+use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
 use poise_storage::sqlite::SqliteStorage;
 
 use crate::config::Config;
@@ -35,11 +38,7 @@ pub struct PersistedStateMismatch {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PersistedStateMismatchDetail {
-    RestoreRevisionMismatch {
-        expected_revision: poise_engine::persisted_runtime::TrackRestoreRevision,
-        actual_revision: poise_engine::persisted_runtime::TrackRestoreRevision,
-    },
-    PersistedTrackMissingRuntime,
+    PersistedTrackMissingBusinessState,
     PersistedTrackMissingFromConfig,
 }
 
@@ -293,14 +292,11 @@ async fn detect_persisted_state_mismatches(
         .iter()
         .map(|track| track.track_id().as_str().to_string())
         .collect::<std::collections::BTreeSet<_>>();
-    let persisted_snapshots = TrackQueryStore::list_track_snapshots(repository).await?;
-    let mut persisted_by_id = std::collections::HashMap::new();
-    for stored in persisted_snapshots {
-        persisted_by_id.insert(
-            stored.snapshot.track_id.as_str().to_string(),
-            stored.snapshot,
-        );
-    }
+    let snapshot_ids = TrackQueryStore::list_track_snapshots(repository)
+        .await?
+        .into_iter()
+        .map(|stored| stored.snapshot.track_id.as_str().to_string())
+        .collect::<std::collections::BTreeSet<_>>();
     let persisted_presence = repository
         .list_persisted_track_presence()
         .await?
@@ -311,30 +307,21 @@ async fn detect_persisted_state_mismatches(
     let mut mismatches = Vec::new();
     for track in prepared_registry.iter() {
         let track_id = track.track_id().as_str();
-        match persisted_by_id.remove(track_id) {
-            Some(snapshot) if snapshot.restore_revision != *track.restore_revision() => {
+        if persisted_presence.contains(track_id)
+            && TrackQueryStore::load_track_persistent_state(repository, track.track_id())
+                .await?
+                .is_none()
+        {
                 mismatches.push(PersistedStateMismatch {
                     track_id: track_id.to_string(),
-                    detail: PersistedStateMismatchDetail::RestoreRevisionMismatch {
-                        expected_revision: track.restore_revision().clone(),
-                        actual_revision: snapshot.restore_revision,
-                    },
+                    detail: PersistedStateMismatchDetail::PersistedTrackMissingBusinessState,
                 });
             }
-            Some(_) => {}
-            None if persisted_presence.contains(track_id) => {
-                mismatches.push(PersistedStateMismatch {
-                    track_id: track_id.to_string(),
-                    detail: PersistedStateMismatchDetail::PersistedTrackMissingRuntime,
-                });
-            }
-            None => {}
-        }
     }
 
     let orphaned_track_ids = persisted_presence
         .iter()
-        .chain(persisted_by_id.keys())
+        .chain(snapshot_ids.iter())
         .filter(|track_id| !configured_ids.contains(*track_id))
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
@@ -353,55 +340,83 @@ async fn hydrate_query_ready_state(
     prepared_registry: &PreparedTrackRegistry,
     repository: &SqliteStorage,
 ) -> Result<()> {
-    let persisted_snapshots = TrackQueryStore::list_track_snapshots(repository).await?;
-    let mut persisted_by_id = persisted_snapshots
-        .into_iter()
-        .map(|stored| {
-            (
-                stored.snapshot.track_id.as_str().to_string(),
-                stored.snapshot,
-            )
-        })
-        .collect::<std::collections::HashMap<_, _>>();
+    let current_utc_day = Utc::now().date_naive();
+    let started_at = Utc::now();
 
     for track in prepared_registry.iter() {
-        let persisted_snapshot = persisted_by_id.remove(track.track_id().as_str());
-        let next_snapshot = TrackRuntime::prepare_bootstrap_snapshot(
-            track.runtime_seed(),
-            persisted_snapshot.as_ref(),
-            track.post_restore_constraints(),
-            Utc::now(),
-        )?;
-        if persisted_snapshot
+        let mut persistent_state =
+            TrackQueryStore::load_track_persistent_state(repository, track.track_id()).await?;
+        let next_snapshot = build_query_bootstrap_snapshot(
+            track,
+            persistent_state.as_mut(),
+            current_utc_day,
+            started_at,
+        );
+        let current_snapshot =
+            TrackMutationStore::load_track_state(repository, track.track_id().as_str()).await?;
+        if current_snapshot
             .as_ref()
             .is_some_and(|snapshot| *snapshot == next_snapshot)
         {
             continue;
         }
 
-        TrackMutationStore::save_transition(
-            repository,
-            track.track_id().as_str(),
-            &next_snapshot,
-            &[],
-            &[],
-        )
-        .await?;
+        if let Some(persistent_state) = persistent_state.as_ref() {
+            TrackMutationStore::save_transition_bundle(
+                repository,
+                track.track_id().as_str(),
+                &next_snapshot,
+                persistent_state,
+                &[],
+                &[],
+            )
+            .await?;
+        } else {
+            TrackMutationStore::save_transition(
+                repository,
+                track.track_id().as_str(),
+                &next_snapshot,
+                &[],
+                &[],
+            )
+            .await?;
+        }
     }
 
     Ok(())
 }
 
-#[cfg(test)]
-fn prepared_restore_revision(
-    prepared_registry: &PreparedTrackRegistry,
-    track_id: &str,
-) -> poise_engine::persisted_runtime::TrackRestoreRevision {
-    prepared_registry
-        .get(&TrackId::new(track_id))
-        .expect("track should exist in prepared registry")
-        .restore_revision()
-        .clone()
+fn build_query_bootstrap_snapshot(
+    track: &poise_application::TrackPreparedDefinition,
+    persistent_state: Option<&mut TrackPersistentState>,
+    current_utc_day: chrono::NaiveDate,
+    started_at: chrono::DateTime<Utc>,
+) -> TrackRuntimeSnapshot {
+    let (control_state, ledger_state) = match persistent_state {
+        Some(state) => {
+            state.ledger_state.normalize_utc_day(current_utc_day);
+            (state.control_state.clone(), state.ledger_state.clone())
+        }
+        None => {
+            let mut ledger_state = TrackLedgerState::default();
+            ledger_state.normalize_utc_day(current_utc_day);
+            (TrackControlState::default(), ledger_state)
+        }
+    };
+    let runtime_state = control_state.to_startup_runtime_state();
+
+    TrackRuntimeSnapshot {
+        track_id: track.track_id().clone(),
+        restore_revision: TrackRestoreRevision::for_track(track.instrument(), track.track_config()),
+        runtime_state: runtime_state.clone(),
+        current_exposure: Exposure(0.0),
+        desired_exposure: runtime_state.manual_target_override(),
+        executor_state: ExecutorState::empty(started_at),
+        execution_gate_state: ExecutionGateState::open(),
+        ledger_state,
+        risk: RiskState::default(),
+        observed: ObservedState::default(),
+    }
 }
 
 fn backup_and_reset_state_db(db_path: &std::path::Path) -> Result<Option<StateBackup>> {
@@ -504,9 +519,14 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use poise_application::PreparedTrackRegistry;
+    use poise_application::PersistedControlMode;
     use poise_application::TrackMutationStore;
+    use poise_application::TrackPersistentState;
     use poise_application::TrackQueryStore;
+    use poise_application::TrackControlState;
+    use poise_engine::ledger::TrackLedgerState;
     use poise_engine::manager::TrackManager;
+    use poise_engine::runtime::{ControlState, ManualState, TrackState};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_storage::sqlite::SqliteStorage;
 
@@ -552,7 +572,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strict_mode_rejects_persisted_restore_revision_mismatch() {
+    async fn strict_mode_rejects_persisted_track_missing_business_state() {
         let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
         let db_path = test_db_path(instance_dir.path());
@@ -568,6 +588,62 @@ mod tests {
                 .to_string()
                 .contains("persisted state does not match current config")
         );
+    }
+
+    #[tokio::test]
+    async fn strict_mode_ignores_runtime_snapshot_restore_revision_when_persistent_state_exists() {
+        let instance_dir = tempfile::tempdir().unwrap();
+        let config = test_config(90.0);
+        let db_path = test_db_path(instance_dir.path());
+        persist_snapshot_and_persistent_state(
+            &db_path,
+            80.0,
+            TrackPersistentState {
+                track_id: TrackId::new("btc-core"),
+                control_state: TrackControlState::Enabled {
+                    mode: PersistedControlMode::Automatic,
+                },
+                ledger_state: TrackLedgerState {
+                    gross_realized_pnl_cumulative: 42.0,
+                    ..TrackLedgerState::default()
+                },
+            },
+        )
+        .await;
+
+        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
+            .await
+            .unwrap();
+        let loaded = prepared
+            .repositories
+            .mutation_store()
+            .load_track_state("btc-core")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            loaded.restore_revision,
+            poise_engine::persisted_runtime::TrackRestoreRevision::for_track(
+                &Instrument::new(Venue::Binance, "BTCUSDT"),
+                &poise_core::strategy::TrackConfig {
+                    lower_price: 90.0,
+                    upper_price: 110.0,
+                    long_exposure_units: 8.0,
+                    short_exposure_units: 8.0,
+                    notional_per_unit: 375.0,
+                    min_rebalance_units: 0.5,
+                    shape_family: poise_core::strategy::ShapeFamily::Linear,
+                    out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
+                },
+            )
+        );
+        assert_eq!(
+            loaded.status(),
+            poise_engine::runtime::TrackStatus::WaitingMarketData
+        );
+        assert_eq!(loaded.desired_exposure, None);
+        assert_eq!(loaded.ledger_state.gross_realized_pnl_cumulative, 42.0);
     }
 
     #[tokio::test]
@@ -691,10 +767,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             restored.restore_revision,
-            super::prepared_restore_revision(
-                &super::build_prepared_registry(&test_config(80.0)).unwrap(),
-                "btc-core",
-            )
+            restore_revision_for_lower_price(80.0)
         );
     }
 
@@ -724,10 +797,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             restored.restore_revision,
-            super::prepared_restore_revision(
-                &super::build_prepared_registry(&test_config(80.0)).unwrap(),
-                "btc-core",
-            )
+            restore_revision_for_lower_price(80.0)
         );
     }
 
@@ -770,26 +840,8 @@ mod tests {
                 assert_eq!(actual_db_path, db_path);
                 assert_eq!(mismatches.len(), 1);
                 match &mismatches[0].detail {
-                    super::PersistedStateMismatchDetail::RestoreRevisionMismatch {
-                        expected_revision,
-                        actual_revision,
-                    } => {
-                        assert_eq!(
-                            expected_revision.as_str(),
-                            super::prepared_restore_revision(
-                                &super::build_prepared_registry(&config).unwrap(),
-                                "btc-core",
-                            )
-                            .as_str()
-                        );
-                        assert_eq!(
-                            actual_revision.as_str(),
-                            super::prepared_restore_revision(
-                                &super::build_prepared_registry(&test_config(80.0)).unwrap(),
-                                "btc-core",
-                            )
-                            .as_str()
-                        );
+                    super::PersistedStateMismatchDetail::PersistedTrackMissingBusinessState => {
+                        assert_eq!(mismatches[0].track_id, "btc-core");
                     }
                     other => panic!("unexpected mismatch detail: {other:?}"),
                 }
@@ -851,62 +903,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strict_mode_rejects_persisted_track_missing_runtime_when_presence_exists() {
+    async fn strict_mode_rehydrates_query_snapshot_when_runtime_snapshot_is_missing() {
         let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
         let db_path = test_db_path(instance_dir.path());
-        persist_snapshot_with_lower_price(&config, &db_path, 90.0).await;
+        persist_snapshot_and_persistent_state(
+            &db_path,
+            90.0,
+            TrackPersistentState {
+                track_id: TrackId::new("btc-core"),
+                control_state: TrackControlState::Paused {
+                    resume_mode: PersistedControlMode::Automatic,
+                },
+                ledger_state: TrackLedgerState {
+                    gross_realized_pnl_cumulative: 17.0,
+                    ..TrackLedgerState::default()
+                },
+            },
+        )
+        .await;
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute(
             "DELETE FROM track_snapshots WHERE track_id = 'btc-core'",
             [],
         )
         .unwrap();
-
-        let error = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
-            .await
-            .err()
-            .unwrap();
-
-        match error {
-            super::StateBootstrapError::PersistedStateMismatch { mismatches, .. } => {
-                assert_eq!(mismatches.len(), 1);
-                assert_eq!(mismatches[0].track_id, "btc-core");
-                assert!(matches!(
-                    mismatches[0].detail,
-                    super::PersistedStateMismatchDetail::PersistedTrackMissingRuntime
-                ));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn strict_mode_applies_post_restore_constraints_without_restore_mismatch() {
-        let instance_dir = tempfile::tempdir().unwrap();
-        let mut config = test_config(90.0);
-        let db_path = test_db_path(instance_dir.path());
-        persist_snapshot_with_lower_price(&config, &db_path, 90.0).await;
-
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute(
-            "UPDATE track_snapshots
-             SET ledger_state_json = ?1
-             WHERE track_id = 'btc-core'",
-            [serde_json::json!({
-                "ledger_utc_day": "2026-04-23",
-                "gross_realized_pnl_today": -150.0,
-                "gross_realized_pnl_cumulative": -150.0,
-                "trading_fee_today": 0.0,
-                "trading_fee_cumulative": 0.0,
-                "funding_fee_today": 0.0,
-                "funding_fee_cumulative": 0.0,
-                "unresolved_gaps": []
-            })
-            .to_string()],
-        )
-        .unwrap();
-        config.tracks[0].total_loss_limit = 100.0;
 
         let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
             .await
@@ -919,10 +940,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(
-            loaded.desired_exposure,
-            Some(poise_core::types::Exposure(0.0))
-        );
+        assert_eq!(loaded.status(), poise_engine::runtime::TrackStatus::Paused);
+        assert_eq!(loaded.ledger_state.gross_realized_pnl_cumulative, 17.0);
+        assert_eq!(loaded.desired_exposure, None);
     }
 
     #[tokio::test]
@@ -1027,5 +1047,70 @@ mod tests {
             .save_transition("btc-core", &manager.snapshot("btc-core").unwrap(), &[], &[])
             .await
             .unwrap();
+    }
+
+    async fn persist_snapshot_and_persistent_state(
+        db_path: &Path,
+        lower_price: f64,
+        persistent_state: TrackPersistentState,
+    ) {
+        super::ensure_parent_dir(db_path).unwrap();
+        let storage = SqliteStorage::new(db_path).unwrap();
+        let mut manager = TrackManager::new(std::sync::Arc::new(SystemClock));
+        manager
+            .add_track(
+                TrackId::new("btc-core"),
+                Instrument::new(Venue::Binance, "BTCUSDT"),
+                poise_core::strategy::TrackConfig {
+                    lower_price,
+                    upper_price: 110.0,
+                    long_exposure_units: 8.0,
+                    short_exposure_units: 8.0,
+                    notional_per_unit: 375.0,
+                    min_rebalance_units: 0.5,
+                    shape_family: poise_core::strategy::ShapeFamily::Linear,
+                    out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
+                },
+                3000.0,
+                poise_core::risk::LossLimits {
+                    daily_loss_limit: 300.0,
+                    total_loss_limit: 600.0,
+                },
+                poise_core::types::ExchangeRules {
+                    price_tick: 0.1,
+                    quantity_step: 0.1,
+                    min_qty: 0.0,
+                    min_notional: 0.0,
+                    maker_fee_rate: 0.0,
+                    taker_fee_rate: 0.0,
+                },
+            )
+            .unwrap();
+        let mut snapshot = manager.snapshot("btc-core").unwrap();
+        snapshot.runtime_state =
+            TrackState::Running(ControlState::Manual(ManualState::TargetOverride {
+                target: poise_core::types::Exposure(3.0),
+            }));
+        snapshot.desired_exposure = Some(poise_core::types::Exposure(3.0));
+        storage
+            .save_transition_bundle("btc-core", &snapshot, &persistent_state, &[], &[])
+            .await
+            .unwrap();
+    }
+
+    fn restore_revision_for_lower_price(lower_price: f64) -> poise_engine::persisted_runtime::TrackRestoreRevision {
+        poise_engine::persisted_runtime::TrackRestoreRevision::for_track(
+            &Instrument::new(Venue::Binance, "BTCUSDT"),
+            &poise_core::strategy::TrackConfig {
+                lower_price,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: 0.5,
+                shape_family: poise_core::strategy::ShapeFamily::Linear,
+                out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
+            },
+        )
     }
 }

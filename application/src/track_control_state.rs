@@ -1,5 +1,5 @@
 use poise_core::types::Exposure;
-use poise_engine::runtime::{AutoState, TerminationCause};
+use poise_engine::runtime::{AutoState, ControlState, ManualState, TerminationCause, TrackState};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -57,14 +57,42 @@ impl TrackControlState {
         }
     }
 
-    pub fn from_auto_state(auto_state: AutoState) -> Option<Self> {
-        match auto_state {
-            AutoState::FollowingBand => Some(Self::Enabled {
+    pub(crate) fn from_runtime_state_for_write(track_state: &TrackState) -> Self {
+        match track_state {
+            TrackState::WaitingMarketData => Self::Enabled {
                 mode: PersistedControlMode::Automatic,
-            }),
-            AutoState::Frozen { .. }
-            | AutoState::FlattenPending { .. }
-            | AutoState::Flattening { .. } => None,
+            },
+            TrackState::Running(control) => Self::Enabled {
+                mode: PersistedControlMode::from_runtime_control_state(control),
+            },
+            TrackState::Paused { suspended } => Self::Paused {
+                resume_mode: PersistedControlMode::from_runtime_control_state(suspended),
+            },
+            TrackState::Terminated { cause } => Self::Terminated {
+                cause: cause.clone(),
+            },
+        }
+    }
+
+    pub fn to_startup_runtime_state(&self) -> TrackState {
+        match self {
+            Self::Enabled {
+                mode: PersistedControlMode::Automatic,
+            } => TrackState::WaitingMarketData,
+            Self::Enabled {
+                mode: PersistedControlMode::ManualFlatten,
+            } => TrackState::Running(ControlState::Manual(ManualState::Flattened)),
+            Self::Enabled {
+                mode: PersistedControlMode::ManualTargetOverride { target },
+            } => TrackState::Running(ControlState::Manual(ManualState::TargetOverride {
+                target: target.clone(),
+            })),
+            Self::Paused { resume_mode } => TrackState::Paused {
+                suspended: resume_mode.to_runtime_control_state(),
+            },
+            Self::Terminated { cause } => TrackState::Terminated {
+                cause: cause.clone(),
+            },
         }
     }
 
@@ -76,10 +104,43 @@ impl TrackControlState {
     }
 }
 
+impl PersistedControlMode {
+    fn from_runtime_control_state(control_state: &ControlState) -> Self {
+        match control_state {
+            ControlState::Automatic(
+                AutoState::FollowingBand
+                | AutoState::Frozen { .. }
+                | AutoState::FlattenPending { .. }
+                | AutoState::Flattening { .. },
+            ) => Self::Automatic,
+            ControlState::Manual(ManualState::Flattened) => Self::ManualFlatten,
+            ControlState::Manual(ManualState::TargetOverride { target }) => {
+                Self::ManualTargetOverride {
+                    target: target.clone(),
+                }
+            }
+        }
+    }
+
+    fn to_runtime_control_state(&self) -> ControlState {
+        match self {
+            Self::Automatic => ControlState::Automatic(AutoState::FollowingBand),
+            Self::ManualFlatten => ControlState::Manual(ManualState::Flattened),
+            Self::ManualTargetOverride { target } => {
+                ControlState::Manual(ManualState::TargetOverride {
+                    target: target.clone(),
+                })
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use poise_core::types::Exposure;
-    use poise_engine::runtime::{AutoState, BandTerminationCause, TerminationCause};
+    use poise_engine::runtime::{
+        AutoState, BandTerminationCause, ControlState, TerminationCause, TrackState,
+    };
 
     use super::{PersistedControlMode, TrackControlCommand, TrackControlState};
 
@@ -120,21 +181,23 @@ mod tests {
     }
 
     #[test]
-    fn session_transient_states_are_not_persistable_control_state() {
-        assert!(TrackControlState::from_auto_state(AutoState::FollowingBand).is_some());
-        assert!(TrackControlState::from_auto_state(AutoState::Frozen {
-            target_anchor: Exposure(1.0),
-        })
-        .is_none());
-        assert!(TrackControlState::from_auto_state(AutoState::FlattenPending {
-            target_anchor: Exposure(1.0),
-            boundary: poise_core::strategy::BandBoundary::Below,
-        })
-        .is_none());
-        assert!(TrackControlState::from_auto_state(AutoState::Flattening {
-            boundary: poise_core::strategy::BandBoundary::Above,
-        })
-        .is_none());
+    fn session_transient_states_fold_into_closed_control_state_on_write() {
+        assert_eq!(
+            TrackControlState::from_runtime_state_for_write(&TrackState::WaitingMarketData),
+            TrackControlState::Enabled {
+                mode: PersistedControlMode::Automatic,
+            }
+        );
+        assert_eq!(
+            TrackControlState::from_runtime_state_for_write(&TrackState::Running(
+                ControlState::Automatic(AutoState::Frozen {
+                    target_anchor: Exposure(1.0),
+                }),
+            )),
+            TrackControlState::Enabled {
+                mode: PersistedControlMode::Automatic,
+            }
+        );
     }
 
     #[test]

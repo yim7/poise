@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::{
     ApplicationNotification, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
-    PersistedTrackEffect, TrackEffectStore, TrackMutationStore,
+    PersistedTrackEffect, TrackEffectStore, TrackMutationStore, TrackPersistentState,
 };
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
@@ -216,15 +216,6 @@ impl MutationExecutor {
         Arc::clone(&self.manager)
     }
 
-    pub(crate) async fn restore_persisted_track_state(&self, id: &str) -> Result<bool> {
-        let Some(snapshot) = self.mutation_store.load_track_state(id).await? else {
-            return Ok(false);
-        };
-        let mut manager = self.manager.write().await;
-        manager.restore_track_state(&snapshot)?;
-        Ok(true)
-    }
-
     pub(crate) async fn prepare_fresh_session_for_activation(&self, id: &str) -> Result<()> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let snapshot = {
@@ -249,9 +240,10 @@ impl MutationExecutor {
 
         for effect_id in &pending_effect_ids {
             self.mutation_store
-                .save_transition_with_effect_status(
+                .save_transition_bundle_with_effect_status(
                     id,
                     &snapshot,
+                    &TrackPersistentState::from_runtime_snapshot(&snapshot),
                     &[],
                     &[],
                     Some(&EffectStatusUpdate::superseded(effect_id.clone())),
@@ -284,6 +276,23 @@ impl MutationExecutor {
         self.commit_track_mutation(id, &previous_snapshot, &next_snapshot, &(), None, false)
             .await
             .map_err(anyhow::Error::new)
+    }
+
+    pub(crate) async fn apply_track_persistent_state(
+        &self,
+        track_id: &TrackId,
+        state: TrackPersistentState,
+    ) -> Result<bool> {
+        let _mutation_guard = self.lock_track_mutation(track_id.as_str()).await;
+        let mut manager = self.manager.write().await;
+        let Some(mut snapshot) = manager.snapshot(track_id.as_str()) else {
+            return Ok(false);
+        };
+        snapshot.runtime_state = state.control_state.to_startup_runtime_state();
+        snapshot.ledger_state = state.ledger_state;
+        snapshot.desired_exposure = snapshot.runtime_state.manual_target_override();
+        manager.restore_track_state(&snapshot)?;
+        Ok(true)
     }
 
     pub(crate) fn emit_internal_notification(&self, notification: ApplicationNotification) {
@@ -1204,11 +1213,13 @@ impl MutationExecutor {
             return Ok(());
         }
 
+        let persistent_state = TrackPersistentState::from_runtime_snapshot(next_snapshot);
         if let Err(error) = self
             .mutation_store
-            .save_transition_with_effect_status(
+            .save_transition_bundle_with_effect_status(
                 id,
                 next_snapshot,
+                &persistent_state,
                 result.domain_events(),
                 result.effects(),
                 effect_status_update,

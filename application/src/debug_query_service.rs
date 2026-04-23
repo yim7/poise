@@ -258,6 +258,13 @@ mod tests {
                 Vec::new()
             })
         }
+
+        async fn load_track_persistent_state(
+            &self,
+            _track_id: &TrackId,
+        ) -> Result<Option<crate::TrackPersistentState>> {
+            Ok(None)
+        }
     }
 
     fn test_snapshot() -> TrackRuntimeSnapshot {

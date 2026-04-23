@@ -1113,6 +1113,13 @@ mod tests {
         ) -> anyhow::Result<Vec<poise_core::events::DomainEvent>> {
             Ok(Vec::new())
         }
+
+        async fn save_track_persistent_state(
+            &self,
+            _state: &poise_application::TrackPersistentState,
+        ) -> anyhow::Result<()> {
+            Err(anyhow!("persistence unavailable"))
+        }
     }
 
     #[async_trait::async_trait]
@@ -1205,6 +1212,13 @@ mod tests {
             _limit: usize,
         ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
+        }
+
+        async fn load_track_persistent_state(
+            &self,
+            _track_id: &TrackId,
+        ) -> anyhow::Result<Option<poise_application::TrackPersistentState>> {
+            Ok(None)
         }
     }
 }

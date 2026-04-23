@@ -28,10 +28,42 @@ pub trait TrackMutationStore: Send + Sync {
             .await
     }
 
+    async fn save_transition_bundle_with_effect_status(
+        &self,
+        id: &str,
+        state: &TrackRuntimeSnapshot,
+        persistent_state: &TrackPersistentState,
+        events: &[DomainEvent],
+        effects: &[TrackEffect],
+        effect_status_update: Option<&EffectStatusUpdate>,
+    ) -> Result<CommittedTrackWrite> {
+        let write = self
+            .save_transition_with_effect_status(id, state, events, effects, effect_status_update)
+            .await?;
+        self.save_track_persistent_state(persistent_state).await?;
+        Ok(write)
+    }
+
+    async fn save_transition_bundle(
+        &self,
+        id: &str,
+        state: &TrackRuntimeSnapshot,
+        persistent_state: &TrackPersistentState,
+        events: &[DomainEvent],
+        effects: &[TrackEffect],
+    ) -> Result<CommittedTrackWrite> {
+        self.save_transition_bundle_with_effect_status(
+            id,
+            state,
+            persistent_state,
+            events,
+            effects,
+            None,
+        )
+        .await
+    }
+
     async fn load_track_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>>;
     async fn list_track_events(&self, id: &str) -> Result<Vec<DomainEvent>>;
-
-    async fn save_track_persistent_state(&self, _state: &TrackPersistentState) -> Result<()> {
-        Ok(())
-    }
+    async fn save_track_persistent_state(&self, state: &TrackPersistentState) -> Result<()>;
 }

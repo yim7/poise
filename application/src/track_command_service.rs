@@ -42,7 +42,9 @@ mod tests {
     use poise_engine::track::TrackId;
 
     use super::TrackCommandService;
-    use crate::ApplicationNotification;
+    use crate::{
+        ApplicationNotification, PersistedControlMode, TrackControlState, TrackQueryStore,
+    };
     use crate::mutation_executor::test_support::{
         MemoryRepository, seeded_manager, track_write_services,
     };
@@ -50,7 +52,7 @@ mod tests {
     #[tokio::test]
     async fn command_service_pause_persists_state_and_notifies() {
         let repository = Arc::new(MemoryRepository::default());
-        let service = test_service(repository);
+        let service = test_service(repository.clone());
         let mut receiver = service.1.subscribe();
 
         service
@@ -75,6 +77,19 @@ mod tests {
                 .unwrap()
                 .status(),
             poise_engine::runtime::TrackStatus::Paused
+        );
+        assert_eq!(
+            <MemoryRepository as TrackQueryStore>::load_track_persistent_state(
+                repository.as_ref(),
+                &TrackId::new("btc-core"),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .control_state,
+            TrackControlState::Paused {
+                resume_mode: PersistedControlMode::Automatic,
+            }
         );
     }
 

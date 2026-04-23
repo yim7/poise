@@ -291,9 +291,10 @@ async fn assemble_with_state_store(
     let effect_service = Arc::new(write_services.effect);
     let submit_effect_service = Arc::new(write_services.submit_effect);
     let runtime_lifecycle_service = Arc::new(write_services.runtime_lifecycle);
+    let current_utc_day = Utc::now().date_naive();
     for track in prepared_registry.iter() {
         runtime_lifecycle_service
-            .restore_persisted_track_state(track.track_id().as_str())
+            .apply_track_persistent_state(track.track_id(), current_utc_day)
             .await?;
     }
     #[cfg(test)]
@@ -564,9 +565,9 @@ mod tests {
     use anyhow::{Result, anyhow};
     use futures_util::StreamExt;
     use poise_application::{
-        CommittedTrackWrite, EffectStatusUpdate, FollowUpRetirementRequest, PersistedTrackEffect,
-        StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore, TrackMutationStore,
-        TrackQueryStore,
+        CommittedTrackWrite, EffectStatusUpdate, FollowUpRetirementRequest, PersistedControlMode,
+        PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackControlState,
+        TrackEffectStore, TrackMutationStore, TrackPersistentState, TrackQueryStore,
     };
     use poise_core::events::DomainEvent as EngineDomainEvent;
     use poise_engine::manager::TrackManager;
@@ -575,6 +576,7 @@ mod tests {
         AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort,
         MarketDataPort, MetadataPort, OrderReceipt, OrderRequest, Position, PriceTick,
     };
+    use poise_engine::runtime::{AutoState, ControlState, TrackState};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_protocol::StreamEvent;
     use poise_storage::sqlite::SqliteStorage;
@@ -1058,6 +1060,87 @@ total_loss_limit = 600.0
     }
 
     #[tokio::test]
+    async fn reassembly_uses_persistent_control_state_not_runtime_snapshot_status() {
+        let config = Config {
+            bind_address: "127.0.0.1:0".into(),
+            tracks: vec![TrackDefinition {
+                track_id: "btc-core".into(),
+                symbol: "BTCUSDT".into(),
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: Some(0.5),
+                shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
+                out_of_band_policy: Some(poise_core::strategy::BandProtectionPolicy::Freeze),
+                max_notional: None,
+                leverage: None,
+                daily_loss_limit: 300.0,
+                total_loss_limit: 600.0,
+                tick_timeout_secs: None,
+            }],
+            exchange: ExchangeConfig::default(),
+            account_monitor: Default::default(),
+        };
+
+        let instance_dir = tempfile::tempdir().unwrap();
+        let db_path = crate::instance_dir::InstanceDir::new(instance_dir.path()).db_path();
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let repository = Arc::new(SqliteStorage::new(&db_path).unwrap());
+
+        let mut manager = TrackManager::new(Arc::new(SystemClock));
+        manager
+            .add_track(
+                TrackId::new("btc-core"),
+                Instrument::new(Venue::Binance, "BTCUSDT"),
+                poise_core::strategy::TrackConfig {
+                    lower_price: 90.0,
+                    upper_price: 110.0,
+                    long_exposure_units: 8.0,
+                    short_exposure_units: 8.0,
+                    notional_per_unit: 375.0,
+                    min_rebalance_units: 0.5,
+                    shape_family: poise_core::strategy::ShapeFamily::Linear,
+                    out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
+                },
+                3000.0,
+                poise_core::risk::LossLimits {
+                    daily_loss_limit: 300.0,
+                    total_loss_limit: 600.0,
+                },
+                test_exchange_rules(),
+            )
+            .unwrap();
+        let mut snapshot = manager.snapshot("btc-core").unwrap();
+        snapshot.runtime_state = TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
+        TrackMutationStore::save_transition(repository.as_ref(), "btc-core", &snapshot, &[], &[])
+            .await
+            .unwrap();
+        TrackMutationStore::save_track_persistent_state(
+            repository.as_ref(),
+            &TrackPersistentState {
+                track_id: TrackId::new("btc-core"),
+                control_state: TrackControlState::Paused {
+                    resume_mode: PersistedControlMode::Automatic,
+                },
+                ledger_state: snapshot.ledger_state.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let second = assemble_with_fake_ports(&config, instance_dir.path())
+            .await
+            .unwrap();
+        let manager_handle = second.manager();
+        let manager = manager_handle.read().await;
+        let track = manager.get_track("btc-core").unwrap();
+
+        assert_eq!(track.status(), poise_engine::runtime::TrackStatus::Paused);
+    }
+
+    #[tokio::test]
     async fn runtime_state_exposes_observation_and_account_paths_only() {
         let (platform, _) = test_platform();
         let state = platform.runtime_test_context();
@@ -1434,6 +1517,7 @@ total_loss_limit = 600.0
     #[derive(Default)]
     struct BlockingPersistence {
         snapshots: AsyncMutex<HashMap<String, poise_engine::snapshot::TrackRuntimeSnapshot>>,
+        persistent_states: AsyncMutex<HashMap<String, TrackPersistentState>>,
         started_saves: AtomicUsize,
         completed_saves: AtomicUsize,
         first_save_started: Notify,
@@ -1502,6 +1586,14 @@ total_loss_limit = 600.0
 
         async fn list_track_events(&self, _id: &str) -> Result<Vec<EngineDomainEvent>> {
             Ok(Vec::new())
+        }
+
+        async fn save_track_persistent_state(&self, state: &TrackPersistentState) -> Result<()> {
+            self.persistent_states
+                .lock()
+                .await
+                .insert(state.track_id.as_str().to_string(), state.clone());
+            Ok(())
         }
     }
 
@@ -1607,6 +1699,18 @@ total_loss_limit = 600.0
             _limit: usize,
         ) -> Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
+        }
+
+        async fn load_track_persistent_state(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<TrackPersistentState>> {
+            Ok(self
+                .persistent_states
+                .lock()
+                .await
+                .get(track_id.as_str())
+                .cloned())
         }
     }
 
