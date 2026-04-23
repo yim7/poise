@@ -42,11 +42,11 @@ mod tests {
     use poise_engine::track::TrackId;
 
     use super::TrackCommandService;
-    use crate::{
-        ApplicationNotification, PersistedControlMode, TrackControlState, TrackQueryStore,
-    };
     use crate::mutation_executor::test_support::{
         MemoryRepository, seeded_manager, track_write_services,
+    };
+    use crate::{
+        ApplicationNotification, PersistedControlMode, TrackControlState, TrackQueryStore,
     };
 
     #[tokio::test]
@@ -79,14 +79,13 @@ mod tests {
             poise_engine::runtime::TrackStatus::Paused
         );
         assert_eq!(
-            <MemoryRepository as TrackQueryStore>::load_track_persistent_state(
+            <MemoryRepository as TrackQueryStore>::load_track_control_state(
                 repository.as_ref(),
                 &TrackId::new("btc-core"),
             )
             .await
             .unwrap()
-            .unwrap()
-            .control_state,
+            .unwrap(),
             TrackControlState::Paused {
                 resume_mode: PersistedControlMode::Automatic,
             }

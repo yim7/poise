@@ -1,29 +1,8 @@
 use chrono::{DateTime, Utc};
 use poise_core::events::DomainEvent;
-use poise_engine::ledger::TrackLedgerState;
-use poise_engine::snapshot::TrackRuntimeSnapshot;
 use poise_engine::track::TrackId;
 use poise_engine::transition::TrackEffect;
 use serde::{Deserialize, Serialize};
-
-use crate::TrackControlState;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TrackPersistentState {
-    pub track_id: TrackId,
-    pub control_state: TrackControlState,
-    pub ledger_state: TrackLedgerState,
-}
-
-impl TrackPersistentState {
-    pub(crate) fn from_runtime_snapshot(snapshot: &TrackRuntimeSnapshot) -> Self {
-        Self {
-            track_id: snapshot.track_id.clone(),
-            control_state: TrackControlState::from_runtime_state_for_write(&snapshot.runtime_state),
-            ledger_state: snapshot.ledger_state.clone(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredTrackEvent {
@@ -31,12 +10,6 @@ pub struct StoredTrackEvent {
     pub track_id: TrackId,
     pub event: DomainEvent,
     pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StoredTrackSnapshot {
-    pub snapshot: TrackRuntimeSnapshot,
-    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

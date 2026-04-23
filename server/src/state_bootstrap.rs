@@ -1,45 +1,25 @@
-use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
-use chrono::{SecondsFormat, Utc};
+use anyhow::{Context, Result};
 use poise_application::{
     AccountMonitorStore, ConfiguredTrackDefinition, PreparedTrackRegistry, TrackEffectStore,
-    TrackMutationStore, TrackPersistentState, TrackQueryStore, TrackControlState,
+    TrackMutationStore, TrackQueryStore,
 };
-use poise_core::types::Exposure;
-use poise_engine::execution_gate::ExecutionGateState;
-use poise_engine::ledger::TrackLedgerState;
-use poise_engine::persisted_runtime::TrackRestoreRevision;
-use poise_engine::runtime::{ExecutorState, RiskState};
-use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
 use poise_storage::sqlite::SqliteStorage;
 
 use crate::config::Config;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StateBootstrapMode {
-    Strict,
-    Rebuild,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SuggestedAction {
-    RebuildState,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct PersistedStateMismatch {
     pub track_id: String,
     pub detail: PersistedStateMismatchDetail,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PersistedStateMismatchDetail {
     PersistedTrackMissingBusinessState,
-    PersistedTrackMissingFromConfig,
 }
 
 #[derive(Debug)]
@@ -47,7 +27,6 @@ pub enum StateBootstrapError {
     PersistedStateMismatch {
         db_path: PathBuf,
         mismatches: Vec<PersistedStateMismatch>,
-        suggested_action: SuggestedAction,
     },
     Unexpected(anyhow::Error),
 }
@@ -82,56 +61,19 @@ pub struct StateRepositories {
 pub struct PreparedStateStore {
     repositories: StateRepositories,
     prepared_registry: Arc<PreparedTrackRegistry>,
-    db_path: PathBuf,
-    rebuild_backup: Option<StateBackup>,
-}
-
-#[derive(Debug)]
-struct StateBackup {
-    moved_files: Vec<BackupFile>,
-}
-
-#[derive(Debug)]
-struct BackupFile {
-    live_path: PathBuf,
-    backup_path: PathBuf,
 }
 
 impl PreparedStateStore {
-    pub async fn run_startup<T, F, Fut>(mut self, startup: F) -> Result<T>
+    pub async fn run_startup<T, F, Fut>(self, startup: F) -> Result<T>
     where
         F: FnOnce(StateRepositories, Arc<PreparedTrackRegistry>) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
-        match startup(
+        startup(
             self.repositories.clone(),
             Arc::clone(&self.prepared_registry),
         )
         .await
-        {
-            Ok(result) => {
-                self.rebuild_backup = None;
-                Ok(result)
-            }
-            Err(error) => Err(self.restore_after_failure(error)),
-        }
-    }
-
-    pub fn restore_backup(&mut self) -> Result<()> {
-        let Some(backup) = self.rebuild_backup.take() else {
-            return Ok(());
-        };
-        remove_state_files(&self.db_path)?;
-        backup.restore()
-    }
-
-    fn restore_after_failure(&mut self, error: anyhow::Error) -> anyhow::Error {
-        match self.restore_backup() {
-            Ok(()) => error,
-            Err(restore_error) => error.context(format!(
-                "also failed to restore rebuilt local state after startup failure: {restore_error}"
-            )),
-        }
     }
 
     #[cfg(test)]
@@ -180,21 +122,6 @@ impl StateRepositories {
     }
 }
 
-impl StateBackup {
-    fn restore(self) -> Result<()> {
-        for moved in self.moved_files.iter().rev() {
-            fs::rename(&moved.backup_path, &moved.live_path).with_context(|| {
-                format!(
-                    "failed to restore sqlite backup from `{}` to `{}`",
-                    moved.backup_path.display(),
-                    moved.live_path.display()
-                )
-            })?;
-        }
-        Ok(())
-    }
-}
-
 fn unexpected(error: anyhow::Error) -> StateBootstrapError {
     StateBootstrapError::Unexpected(error)
 }
@@ -202,68 +129,27 @@ fn unexpected(error: anyhow::Error) -> StateBootstrapError {
 pub async fn prepare_state_repository(
     config: &Config,
     db_path: &Path,
-    mode: StateBootstrapMode,
 ) -> BootstrapResult<PreparedStateStore> {
     ensure_parent_dir(db_path).map_err(unexpected)?;
     let db_path = db_path.to_path_buf();
     let prepared_registry = Arc::new(build_prepared_registry(config).map_err(unexpected)?);
 
-    match mode {
-        StateBootstrapMode::Strict => {
-            let repository = SqliteStorage::new(&db_path).map_err(unexpected)?;
-            let mismatches =
-                detect_persisted_state_mismatches(prepared_registry.as_ref(), &repository)
-                    .await
-                    .map_err(unexpected)?;
-            if mismatches.is_empty() {
-                hydrate_query_ready_state(prepared_registry.as_ref(), &repository)
-                    .await
-                    .map_err(unexpected)?;
-                let repository = Arc::new(repository);
-                return Ok(PreparedStateStore {
-                    repositories: StateRepositories::from_sqlite_storage(repository),
-                    prepared_registry,
-                    db_path,
-                    rebuild_backup: None,
-                });
-            }
-
-            Err(StateBootstrapError::PersistedStateMismatch {
-                db_path,
-                mismatches,
-                suggested_action: SuggestedAction::RebuildState,
-            })
-        }
-        StateBootstrapMode::Rebuild => {
-            let rebuild_backup = backup_and_reset_state_db(&db_path).map_err(unexpected)?;
-            let repository = match SqliteStorage::new(&db_path) {
-                Ok(repository) => repository,
-                Err(error) => {
-                    if let Some(backup) = rebuild_backup {
-                        remove_state_files(&db_path).map_err(unexpected)?;
-                        backup.restore().map_err(unexpected)?;
-                    }
-                    return Err(unexpected(error));
-                }
-            };
-            if let Err(error) =
-                hydrate_query_ready_state(prepared_registry.as_ref(), &repository).await
-            {
-                if let Some(backup) = rebuild_backup {
-                    remove_state_files(&db_path).map_err(unexpected)?;
-                    backup.restore().map_err(unexpected)?;
-                }
-                return Err(unexpected(error));
-            }
-            let repository = Arc::new(repository);
-            Ok(PreparedStateStore {
-                repositories: StateRepositories::from_sqlite_storage(repository),
-                prepared_registry,
-                db_path,
-                rebuild_backup,
-            })
-        }
+    let repository = SqliteStorage::new(&db_path).map_err(unexpected)?;
+    let mismatches = detect_persisted_state_mismatches(prepared_registry.as_ref(), &repository)
+        .await
+        .map_err(unexpected)?;
+    if mismatches.is_empty() {
+        let repository = Arc::new(repository);
+        return Ok(PreparedStateStore {
+            repositories: StateRepositories::from_sqlite_storage(repository),
+            prepared_registry,
+        });
     }
+
+    Err(StateBootstrapError::PersistedStateMismatch {
+        db_path,
+        mismatches,
+    })
 }
 
 fn build_prepared_registry(config: &Config) -> Result<PreparedTrackRegistry> {
@@ -288,250 +174,43 @@ async fn detect_persisted_state_mismatches(
     prepared_registry: &PreparedTrackRegistry,
     repository: &SqliteStorage,
 ) -> Result<Vec<PersistedStateMismatch>> {
-    let configured_ids = prepared_registry
-        .iter()
-        .map(|track| track.track_id().as_str().to_string())
-        .collect::<std::collections::BTreeSet<_>>();
-    let snapshot_ids = TrackQueryStore::list_track_snapshots(repository)
-        .await?
-        .into_iter()
-        .map(|stored| stored.snapshot.track_id.as_str().to_string())
-        .collect::<std::collections::BTreeSet<_>>();
-    let persisted_presence = repository
-        .list_persisted_track_presence()
-        .await?
-        .into_iter()
-        .map(|track_id| track_id.as_str().to_string())
-        .collect::<std::collections::BTreeSet<_>>();
-
     let mut mismatches = Vec::new();
     for track in prepared_registry.iter() {
         let track_id = track.track_id().as_str();
-        if persisted_presence.contains(track_id)
-            && TrackQueryStore::load_track_persistent_state(repository, track.track_id())
+        let has_control_truth =
+            TrackQueryStore::load_track_control_state(repository, track.track_id())
                 .await?
-                .is_none()
-        {
-                mismatches.push(PersistedStateMismatch {
-                    track_id: track_id.to_string(),
-                    detail: PersistedStateMismatchDetail::PersistedTrackMissingBusinessState,
-                });
-            }
-    }
-
-    let orphaned_track_ids = persisted_presence
-        .iter()
-        .chain(snapshot_ids.iter())
-        .filter(|track_id| !configured_ids.contains(*track_id))
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-
-    for track_id in orphaned_track_ids {
-        mismatches.push(PersistedStateMismatch {
-            track_id,
-            detail: PersistedStateMismatchDetail::PersistedTrackMissingFromConfig,
-        });
+                .is_some();
+        let has_ledger_truth =
+            TrackQueryStore::load_track_ledger_state(repository, track.track_id())
+                .await?
+                .is_some();
+        if has_control_truth != has_ledger_truth {
+            mismatches.push(PersistedStateMismatch {
+                track_id: track_id.to_string(),
+                detail: PersistedStateMismatchDetail::PersistedTrackMissingBusinessState,
+            });
+        }
     }
 
     Ok(mismatches)
-}
-
-async fn hydrate_query_ready_state(
-    prepared_registry: &PreparedTrackRegistry,
-    repository: &SqliteStorage,
-) -> Result<()> {
-    let current_utc_day = Utc::now().date_naive();
-    let started_at = Utc::now();
-
-    for track in prepared_registry.iter() {
-        let mut persistent_state =
-            TrackQueryStore::load_track_persistent_state(repository, track.track_id()).await?;
-        let next_snapshot = build_query_bootstrap_snapshot(
-            track,
-            persistent_state.as_mut(),
-            current_utc_day,
-            started_at,
-        );
-        let current_snapshot =
-            TrackMutationStore::load_track_state(repository, track.track_id().as_str()).await?;
-        if current_snapshot
-            .as_ref()
-            .is_some_and(|snapshot| *snapshot == next_snapshot)
-        {
-            continue;
-        }
-
-        if let Some(persistent_state) = persistent_state.as_ref() {
-            TrackMutationStore::save_transition_bundle(
-                repository,
-                track.track_id().as_str(),
-                &next_snapshot,
-                persistent_state,
-                &[],
-                &[],
-            )
-            .await?;
-        } else {
-            TrackMutationStore::save_transition(
-                repository,
-                track.track_id().as_str(),
-                &next_snapshot,
-                &[],
-                &[],
-            )
-            .await?;
-        }
-    }
-
-    Ok(())
-}
-
-fn build_query_bootstrap_snapshot(
-    track: &poise_application::TrackPreparedDefinition,
-    persistent_state: Option<&mut TrackPersistentState>,
-    current_utc_day: chrono::NaiveDate,
-    started_at: chrono::DateTime<Utc>,
-) -> TrackRuntimeSnapshot {
-    let (control_state, ledger_state) = match persistent_state {
-        Some(state) => {
-            state.ledger_state.normalize_utc_day(current_utc_day);
-            (state.control_state.clone(), state.ledger_state.clone())
-        }
-        None => {
-            let mut ledger_state = TrackLedgerState::default();
-            ledger_state.normalize_utc_day(current_utc_day);
-            (TrackControlState::default(), ledger_state)
-        }
-    };
-    let runtime_state = control_state.to_startup_runtime_state();
-
-    TrackRuntimeSnapshot {
-        track_id: track.track_id().clone(),
-        restore_revision: TrackRestoreRevision::for_track(track.instrument(), track.track_config()),
-        runtime_state: runtime_state.clone(),
-        current_exposure: Exposure(0.0),
-        desired_exposure: runtime_state.manual_target_override(),
-        executor_state: ExecutorState::empty(started_at),
-        execution_gate_state: ExecutionGateState::open(),
-        ledger_state,
-        risk: RiskState::default(),
-        observed: ObservedState::default(),
-    }
-}
-
-fn backup_and_reset_state_db(db_path: &std::path::Path) -> Result<Option<StateBackup>> {
-    let timestamp = Utc::now()
-        .to_rfc3339_opts(SecondsFormat::Nanos, true)
-        .replace([':', '-'], "")
-        .replace("+0000", "Z");
-    let backup_path = next_backup_path_for_timestamp(db_path, &timestamp)?;
-
-    let mut moved_files = Vec::new();
-    for suffix in ["", "-wal", "-shm"] {
-        let live_path = state_file_path(db_path, suffix);
-        if !live_path.exists() {
-            continue;
-        }
-        let backup_file_path = state_file_path(&backup_path, suffix);
-        if let Err(error) = fs::rename(&live_path, &backup_file_path) {
-            let restore_result = StateBackup { moved_files }.restore();
-            return match restore_result {
-                Ok(()) => Err(error).with_context(|| {
-                    format!(
-                        "failed to back up sqlite state from `{}` to `{}`",
-                        live_path.display(),
-                        backup_file_path.display()
-                    )
-                }),
-                Err(restore_error) => Err(anyhow!(
-                    "failed to back up sqlite state from `{}` to `{}`; restore also failed: {restore_error}",
-                    live_path.display(),
-                    backup_file_path.display()
-                )),
-            };
-        }
-        moved_files.push(BackupFile {
-            live_path,
-            backup_path: backup_file_path,
-        });
-    }
-
-    if moved_files.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(StateBackup { moved_files }))
-    }
-}
-
-fn remove_state_files(db_path: &std::path::Path) -> Result<()> {
-    for suffix in ["", "-wal", "-shm"] {
-        let file_path = state_file_path(db_path, suffix);
-        if !file_path.exists() {
-            continue;
-        }
-        fs::remove_file(&file_path).with_context(|| {
-            format!(
-                "failed to remove sqlite state file `{}`",
-                file_path.display()
-            )
-        })?;
-    }
-    Ok(())
-}
-
-fn next_backup_path_for_timestamp(db_path: &std::path::Path, timestamp: &str) -> Result<PathBuf> {
-    let file_name = db_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow!("invalid sqlite file name `{}`", db_path.display()))?;
-    for attempt in 0.. {
-        let suffix = if attempt == 0 {
-            String::new()
-        } else {
-            format!("-{attempt}")
-        };
-        let candidate =
-            db_path.with_file_name(format!("{file_name}.rebuild-{timestamp}{suffix}.bak"));
-        if !state_backup_exists(&candidate) {
-            return Ok(candidate);
-        }
-    }
-    unreachable!("backup path search should always find an available candidate")
-}
-
-fn state_backup_exists(backup_path: &std::path::Path) -> bool {
-    ["", "-wal", "-shm"]
-        .into_iter()
-        .map(|suffix| state_file_path(backup_path, suffix))
-        .any(|path| path.exists())
-}
-
-fn state_file_path(base_path: &std::path::Path, suffix: &str) -> PathBuf {
-    if suffix.is_empty() {
-        base_path.to_path_buf()
-    } else {
-        PathBuf::from(format!("{}{}", base_path.display(), suffix))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use poise_application::PreparedTrackRegistry;
     use poise_application::PersistedControlMode;
-    use poise_application::TrackMutationStore;
-    use poise_application::TrackPersistentState;
-    use poise_application::TrackQueryStore;
+    use poise_application::PreparedTrackRegistry;
     use poise_application::TrackControlState;
+    use poise_application::TrackMutationStore;
+    use poise_application::TrackQueryStore;
     use poise_engine::ledger::TrackLedgerState;
-    use poise_engine::manager::TrackManager;
-    use poise_engine::runtime::{ControlState, ManualState, TrackState};
-    use poise_engine::track::{Instrument, TrackId, Venue};
+    use poise_engine::track::TrackId;
     use poise_storage::sqlite::SqliteStorage;
+    use rusqlite::params;
 
-    use super::{StateBootstrapMode, prepare_state_repository};
-    use crate::assembly::SystemClock;
+    use super::prepare_state_repository;
     use crate::config::{Config, ExchangeConfig, TrackDefinition};
 
     #[tokio::test]
@@ -539,9 +218,7 @@ mod tests {
         let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
         let db_path = test_db_path(instance_dir.path());
-        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
-            .await
-            .unwrap();
+        let prepared = prepare_state_repository(&config, &db_path).await.unwrap();
         let _ = prepared.repositories.mutation_store();
     }
 
@@ -550,9 +227,7 @@ mod tests {
         let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
         let db_path = test_db_path(instance_dir.path());
-        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
-            .await
-            .unwrap();
+        let prepared = prepare_state_repository(&config, &db_path).await.unwrap();
 
         let registry: &PreparedTrackRegistry = prepared.registry();
         assert_eq!(registry.iter().count(), 1);
@@ -565,10 +240,11 @@ mod tests {
         let repositories = super::StateRepositories::from_sqlite_storage(repository);
         let query_store = repositories.query_store();
 
-        let snapshots = TrackQueryStore::list_track_snapshots(query_store.as_ref())
-            .await
-            .unwrap();
-        assert!(snapshots.is_empty());
+        let updated_at =
+            TrackQueryStore::load_track_updated_at(query_store.as_ref(), &TrackId::new("btc-core"))
+                .await
+                .unwrap();
+        assert!(updated_at.is_none());
     }
 
     #[tokio::test]
@@ -576,9 +252,9 @@ mod tests {
         let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
         let db_path = test_db_path(instance_dir.path());
-        persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
+        persist_control_state_without_ledger(&db_path).await;
 
-        let error = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
+        let error = prepare_state_repository(&config, &db_path)
             .await
             .err()
             .unwrap();
@@ -591,231 +267,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strict_mode_ignores_runtime_snapshot_restore_revision_when_persistent_state_exists() {
+    async fn strict_mode_accepts_complete_business_state_for_configured_track() {
         let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
         let db_path = test_db_path(instance_dir.path());
-        persist_snapshot_and_persistent_state(
+        persist_business_state(
             &db_path,
-            80.0,
-            TrackPersistentState {
-                track_id: TrackId::new("btc-core"),
-                control_state: TrackControlState::Enabled {
-                    mode: PersistedControlMode::Automatic,
-                },
-                ledger_state: TrackLedgerState {
-                    gross_realized_pnl_cumulative: 42.0,
-                    ..TrackLedgerState::default()
-                },
+            TrackControlState::Enabled {
+                mode: PersistedControlMode::Automatic,
+            },
+            TrackLedgerState {
+                gross_realized_pnl_cumulative: 42.0,
+                ..TrackLedgerState::default()
             },
         )
         .await;
 
-        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
-            .await
-            .unwrap();
-        let loaded = prepared
-            .repositories
-            .mutation_store()
-            .load_track_state("btc-core")
-            .await
-            .unwrap()
-            .unwrap();
+        let prepared = prepare_state_repository(&config, &db_path).await.unwrap();
+        let query_store = prepared.repositories.query_store();
 
         assert_eq!(
-            loaded.restore_revision,
-            poise_engine::persisted_runtime::TrackRestoreRevision::for_track(
-                &Instrument::new(Venue::Binance, "BTCUSDT"),
-                &poise_core::strategy::TrackConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: poise_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
-                },
+            TrackQueryStore::load_track_control_state(
+                query_store.as_ref(),
+                &TrackId::new("btc-core")
             )
-        );
-        assert_eq!(
-            loaded.status(),
-            poise_engine::runtime::TrackStatus::WaitingMarketData
-        );
-        assert_eq!(loaded.desired_exposure, None);
-        assert_eq!(loaded.ledger_state.gross_realized_pnl_cumulative, 42.0);
-    }
-
-    #[tokio::test]
-    async fn rebuild_mode_recreates_repository_after_mismatch() {
-        let instance_dir = tempfile::tempdir().unwrap();
-        let config = test_config(90.0);
-        let db_path = test_db_path(instance_dir.path());
-        persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
-        std::fs::write(format!("{}-wal", db_path.display()), b"wal").unwrap();
-        std::fs::write(format!("{}-shm", db_path.display()), b"shm").unwrap();
-
-        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Rebuild)
             .await
-            .unwrap();
-
-        let loaded = prepared
-            .repositories
-            .mutation_store()
-            .load_track_state("btc-core")
-            .await
-            .unwrap();
-        assert!(loaded.is_some());
-        assert!(db_path.exists());
-        assert!(!std::path::PathBuf::from(format!("{}-wal", db_path.display())).exists());
-        assert!(!std::path::PathBuf::from(format!("{}-shm", db_path.display())).exists());
-        let backup_exists = std::fs::read_dir(db_path.parent().unwrap())
-            .unwrap()
-            .filter_map(Result::ok)
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .map(|name| {
-                        name.starts_with("poise-server.sqlite.rebuild-") && name.ends_with(".bak")
-                    })
-                    .unwrap_or(false)
-            });
-        assert!(backup_exists);
-        let backup_wal_exists = std::fs::read_dir(db_path.parent().unwrap())
-            .unwrap()
-            .filter_map(Result::ok)
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .map(|name| {
-                        name.starts_with("poise-server.sqlite.rebuild-")
-                            && name.ends_with(".bak-wal")
-                    })
-                    .unwrap_or(false)
-            });
-        assert!(backup_wal_exists);
-        let backup_shm_exists = std::fs::read_dir(db_path.parent().unwrap())
-            .unwrap()
-            .filter_map(Result::ok)
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .map(|name| {
-                        name.starts_with("poise-server.sqlite.rebuild-")
-                            && name.ends_with(".bak-shm")
-                    })
-                    .unwrap_or(false)
-            });
-        assert!(backup_shm_exists);
-    }
-
-    #[tokio::test]
-    async fn rebuild_mode_recovers_from_unreadable_existing_database() {
-        let instance_dir = tempfile::tempdir().unwrap();
-        let config = test_config(90.0);
-        let db_path = test_db_path(instance_dir.path());
-        super::ensure_parent_dir(&db_path).unwrap();
-        std::fs::write(&db_path, b"not-a-sqlite-database").unwrap();
-
-        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Rebuild)
-            .await
-            .unwrap();
-
-        let loaded = prepared
-            .repositories
-            .mutation_store()
-            .load_track_state("btc-core")
-            .await
-            .unwrap();
-        assert!(loaded.is_some());
-        assert!(db_path.exists());
-        let backup_exists = std::fs::read_dir(db_path.parent().unwrap())
-            .unwrap()
-            .filter_map(Result::ok)
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .map(|name| {
-                        name.starts_with("poise-server.sqlite.rebuild-") && name.ends_with(".bak")
-                    })
-                    .unwrap_or(false)
-            });
-        assert!(backup_exists);
-    }
-
-    #[tokio::test]
-    async fn restore_backup_recovers_original_state_after_rebuild() {
-        let instance_dir = tempfile::tempdir().unwrap();
-        let config = test_config(90.0);
-        let db_path = test_db_path(instance_dir.path());
-        persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
-
-        let mut prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Rebuild)
-            .await
-            .unwrap();
-        prepared.restore_backup().unwrap();
-
-        let restored = SqliteStorage::new(&db_path)
-            .unwrap()
-            .load_track_state("btc-core")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            restored.restore_revision,
-            restore_revision_for_lower_price(80.0)
-        );
-    }
-
-    #[tokio::test]
-    async fn run_startup_restores_backup_after_failed_operation() {
-        let instance_dir = tempfile::tempdir().unwrap();
-        let config = test_config(90.0);
-        let db_path = test_db_path(instance_dir.path());
-        persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
-
-        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Rebuild)
-            .await
-            .unwrap();
-        let error = prepared
-            .run_startup(|_, _| async {
-                Err::<(), anyhow::Error>(anyhow::anyhow!("startup failed"))
+            .unwrap(),
+            Some(TrackControlState::Enabled {
+                mode: PersistedControlMode::Automatic,
             })
-            .await
-            .unwrap_err();
-
-        assert!(error.to_string().contains("startup failed"));
-        let restored = SqliteStorage::new(&db_path)
-            .unwrap()
-            .load_track_state("btc-core")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            restored.restore_revision,
-            restore_revision_for_lower_price(80.0)
         );
-    }
-
-    #[test]
-    fn next_backup_path_appends_suffix_when_candidate_exists() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("poise-server.sqlite");
-        let existing_backup = temp_dir
-            .path()
-            .join("poise-server.sqlite.rebuild-20260403T120000Z.bak");
-        std::fs::write(&existing_backup, b"existing-backup").unwrap();
-
-        let backup_path =
-            super::next_backup_path_for_timestamp(&db_path, "20260403T120000Z").unwrap();
-
         assert_eq!(
-            backup_path.file_name().and_then(|name| name.to_str()),
-            Some("poise-server.sqlite.rebuild-20260403T120000Z-1.bak")
+            TrackQueryStore::load_track_ledger_state(
+                query_store.as_ref(),
+                &TrackId::new("btc-core")
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .gross_realized_pnl_cumulative,
+            42.0
         );
     }
 
@@ -824,9 +315,9 @@ mod tests {
         let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
         let db_path = test_db_path(instance_dir.path());
-        persist_snapshot_with_lower_price(&config, &db_path, 80.0).await;
+        persist_control_state_without_ledger(&db_path).await;
 
-        let error = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
+        let error = prepare_state_repository(&config, &db_path)
             .await
             .err()
             .unwrap();
@@ -835,7 +326,6 @@ mod tests {
             super::StateBootstrapError::PersistedStateMismatch {
                 db_path: actual_db_path,
                 mismatches,
-                suggested_action,
             } => {
                 assert_eq!(actual_db_path, db_path);
                 assert_eq!(mismatches.len(), 1);
@@ -843,16 +333,14 @@ mod tests {
                     super::PersistedStateMismatchDetail::PersistedTrackMissingBusinessState => {
                         assert_eq!(mismatches[0].track_id, "btc-core");
                     }
-                    other => panic!("unexpected mismatch detail: {other:?}"),
                 }
-                assert_eq!(suggested_action, super::SuggestedAction::RebuildState);
             }
             other => panic!("unexpected error: {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn strict_mode_rejects_persisted_track_missing_from_config() {
+    async fn strict_mode_allows_removed_config_tracks_without_rebuild() {
         let instance_dir = tempfile::tempdir().unwrap();
         let config = Config {
             bind_address: "127.0.0.1:0".into(),
@@ -860,27 +348,11 @@ mod tests {
             exchange: ExchangeConfig::default(),
             account_monitor: Default::default(),
         };
-        let seeded_config = test_config(80.0);
         let db_path = test_db_path(instance_dir.path());
-        persist_snapshot_with_lower_price(&seeded_config, &db_path, 80.0).await;
+        persist_control_state_without_ledger(&db_path).await;
 
-        let error = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
-            .await
-            .err()
-            .unwrap();
-
-        match error {
-            super::StateBootstrapError::PersistedStateMismatch { mismatches, .. } => {
-                assert_eq!(mismatches.len(), 1);
-                match &mismatches[0].detail {
-                    super::PersistedStateMismatchDetail::PersistedTrackMissingFromConfig => {
-                        assert_eq!(mismatches[0].track_id, "btc-core");
-                    }
-                    other => panic!("unexpected mismatch detail: {other:?}"),
-                }
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        let prepared = prepare_state_repository(&config, &db_path).await.unwrap();
+        assert_eq!(prepared.registry().iter().count(), 0);
     }
 
     #[tokio::test]
@@ -889,79 +361,72 @@ mod tests {
         let config = test_config(90.0);
         let db_path = test_db_path(instance_dir.path());
 
-        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
-            .await
-            .unwrap();
-
-        let loaded = prepared
-            .repositories
-            .mutation_store()
-            .load_track_state("btc-core")
-            .await
-            .unwrap();
-        assert!(loaded.is_some());
+        let prepared = prepare_state_repository(&config, &db_path).await.unwrap();
+        assert!(prepared.registry().get(&TrackId::new("btc-core")).is_some());
     }
 
     #[tokio::test]
-    async fn strict_mode_rehydrates_query_snapshot_when_runtime_snapshot_is_missing() {
+    async fn strict_mode_ignores_presence_without_control_or_ledger_truth() {
         let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
         let db_path = test_db_path(instance_dir.path());
-        persist_snapshot_and_persistent_state(
+        persist_presence_without_business_truth(&db_path).await;
+
+        let prepared = prepare_state_repository(&config, &db_path).await.unwrap();
+        assert!(prepared.registry().get(&TrackId::new("btc-core")).is_some());
+    }
+
+    #[tokio::test]
+    async fn strict_mode_allows_business_state_without_runtime_snapshot() {
+        let instance_dir = tempfile::tempdir().unwrap();
+        let config = test_config(90.0);
+        let db_path = test_db_path(instance_dir.path());
+        persist_business_state(
             &db_path,
-            90.0,
-            TrackPersistentState {
-                track_id: TrackId::new("btc-core"),
-                control_state: TrackControlState::Paused {
-                    resume_mode: PersistedControlMode::Automatic,
-                },
-                ledger_state: TrackLedgerState {
-                    gross_realized_pnl_cumulative: 17.0,
-                    ..TrackLedgerState::default()
-                },
+            TrackControlState::Paused {
+                resume_mode: PersistedControlMode::Automatic,
+            },
+            TrackLedgerState {
+                gross_realized_pnl_cumulative: 17.0,
+                ..TrackLedgerState::default()
             },
         )
         .await;
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute(
-            "DELETE FROM track_snapshots WHERE track_id = 'btc-core'",
-            [],
-        )
-        .unwrap();
 
-        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Strict)
+        let prepared = prepare_state_repository(&config, &db_path).await.unwrap();
+        let query_store = prepared.repositories.query_store();
+
+        assert_eq!(
+            TrackQueryStore::load_track_control_state(
+                query_store.as_ref(),
+                &TrackId::new("btc-core")
+            )
             .await
-            .unwrap();
-        let loaded = prepared
-            .repositories
-            .mutation_store()
-            .load_track_state("btc-core")
+            .unwrap(),
+            Some(TrackControlState::Paused {
+                resume_mode: PersistedControlMode::Automatic,
+            })
+        );
+        assert_eq!(
+            TrackQueryStore::load_track_ledger_state(
+                query_store.as_ref(),
+                &TrackId::new("btc-core")
+            )
             .await
             .unwrap()
-            .unwrap();
-
-        assert_eq!(loaded.status(), poise_engine::runtime::TrackStatus::Paused);
-        assert_eq!(loaded.ledger_state.gross_realized_pnl_cumulative, 17.0);
-        assert_eq!(loaded.desired_exposure, None);
+            .unwrap()
+            .gross_realized_pnl_cumulative,
+            17.0
+        );
     }
 
     #[tokio::test]
-    async fn rebuild_mode_only_touches_database_under_current_instance_dir() {
+    async fn strict_bootstrap_only_touches_database_under_current_instance_dir() {
         let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
         let db_path = test_db_path(instance_dir.path());
 
-        let prepared = prepare_state_repository(&config, &db_path, StateBootstrapMode::Rebuild)
-            .await
-            .unwrap();
-
-        let loaded = prepared
-            .repositories
-            .mutation_store()
-            .load_track_state("btc-core")
-            .await
-            .unwrap();
-        assert!(loaded.is_some());
+        prepare_state_repository(&config, &db_path).await.unwrap();
         assert!(db_path.exists());
         assert!(db_path.starts_with(instance_dir.path()));
     }
@@ -1010,107 +475,47 @@ mod tests {
         crate::instance_dir::InstanceDir::new(instance_dir).db_path()
     }
 
-    async fn persist_snapshot_with_lower_price(_config: &Config, db_path: &Path, lower_price: f64) {
+    async fn persist_presence_without_business_truth(db_path: &Path) {
+        super::ensure_parent_dir(db_path).unwrap();
+        drop(SqliteStorage::new(db_path).unwrap());
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO persisted_track_presence (track_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3)",
+            params!["btc-core", now, now],
+        )
+        .unwrap();
+    }
+
+    async fn persist_control_state_without_ledger(db_path: &Path) {
         super::ensure_parent_dir(db_path).unwrap();
         let storage = SqliteStorage::new(db_path).unwrap();
-        let mut manager = TrackManager::new(std::sync::Arc::new(SystemClock));
-        manager
-            .add_track(
-                TrackId::new("btc-core"),
-                Instrument::new(Venue::Binance, "BTCUSDT"),
-                poise_core::strategy::TrackConfig {
-                    lower_price,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: poise_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
-                },
-                3000.0,
-                poise_core::risk::LossLimits {
-                    daily_loss_limit: 300.0,
-                    total_loss_limit: 600.0,
-                },
-                poise_core::types::ExchangeRules {
-                    price_tick: 0.1,
-                    quantity_step: 0.1,
-                    min_qty: 0.0,
-                    min_notional: 0.0,
-                    maker_fee_rate: 0.0,
-                    taker_fee_rate: 0.0,
+        storage
+            .save_track_control_state(
+                &TrackId::new("btc-core"),
+                &TrackControlState::Enabled {
+                    mode: PersistedControlMode::Automatic,
                 },
             )
-            .unwrap();
-        storage
-            .save_transition("btc-core", &manager.snapshot("btc-core").unwrap(), &[], &[])
             .await
             .unwrap();
     }
 
-    async fn persist_snapshot_and_persistent_state(
+    async fn persist_business_state(
         db_path: &Path,
-        lower_price: f64,
-        persistent_state: TrackPersistentState,
+        control_state: TrackControlState,
+        ledger_state: TrackLedgerState,
     ) {
         super::ensure_parent_dir(db_path).unwrap();
         let storage = SqliteStorage::new(db_path).unwrap();
-        let mut manager = TrackManager::new(std::sync::Arc::new(SystemClock));
-        manager
-            .add_track(
-                TrackId::new("btc-core"),
-                Instrument::new(Venue::Binance, "BTCUSDT"),
-                poise_core::strategy::TrackConfig {
-                    lower_price,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: poise_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
-                },
-                3000.0,
-                poise_core::risk::LossLimits {
-                    daily_loss_limit: 300.0,
-                    total_loss_limit: 600.0,
-                },
-                poise_core::types::ExchangeRules {
-                    price_tick: 0.1,
-                    quantity_step: 0.1,
-                    min_qty: 0.0,
-                    min_notional: 0.0,
-                    maker_fee_rate: 0.0,
-                    taker_fee_rate: 0.0,
-                },
-            )
-            .unwrap();
-        let mut snapshot = manager.snapshot("btc-core").unwrap();
-        snapshot.runtime_state =
-            TrackState::Running(ControlState::Manual(ManualState::TargetOverride {
-                target: poise_core::types::Exposure(3.0),
-            }));
-        snapshot.desired_exposure = Some(poise_core::types::Exposure(3.0));
         storage
-            .save_transition_bundle("btc-core", &snapshot, &persistent_state, &[], &[])
+            .save_track_control_state(&TrackId::new("btc-core"), &control_state)
             .await
             .unwrap();
-    }
-
-    fn restore_revision_for_lower_price(lower_price: f64) -> poise_engine::persisted_runtime::TrackRestoreRevision {
-        poise_engine::persisted_runtime::TrackRestoreRevision::for_track(
-            &Instrument::new(Venue::Binance, "BTCUSDT"),
-            &poise_core::strategy::TrackConfig {
-                lower_price,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                min_rebalance_units: 0.5,
-                shape_family: poise_core::strategy::ShapeFamily::Linear,
-                out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
-            },
-        )
+        storage
+            .save_track_ledger_state(&TrackId::new("btc-core"), &ledger_state)
+            .await
+            .unwrap();
     }
 }

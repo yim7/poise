@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::track_persistence::CommittedTrackWrite;
 use crate::{
     ApplicationNotification, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
-    PersistedTrackEffect, TrackEffectStore, TrackMutationStore, TrackPersistentState,
+    PersistedTrackEffect, TrackControlCommand, TrackControlState, TrackEffectStore,
+    TrackMutationStore,
 };
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
@@ -19,7 +21,8 @@ use poise_engine::observation::{
 };
 use poise_engine::ports::{ExchangeOrder, OrderReceipt, OrderRequest};
 use poise_engine::runtime::{
-    FreshSessionExternalInputs, QuoteHealthView, StrategyTargetView, TrackLiveView,
+    FreshSessionExternalInputs, QuoteHealthView, StrategyTargetView, TerminationCause,
+    TrackLiveView, TrackState,
 };
 use poise_engine::track::{Instrument, TrackId};
 use poise_engine::transition::{TrackEffect, TrackTransition};
@@ -193,6 +196,57 @@ impl TransitionResult for ApplyTrackLedgerEventResult {
     }
 }
 
+fn persisted_control_state_after_command(
+    current_runtime_state: &TrackState,
+    command: &TrackCommand,
+) -> Option<TrackControlState> {
+    let current_control_state =
+        TrackControlState::from_runtime_state_for_write(current_runtime_state);
+    let control_command = match command {
+        TrackCommand::Pause => TrackControlCommand::Pause,
+        TrackCommand::Resume => TrackControlCommand::Resume,
+        TrackCommand::Terminate => TrackControlCommand::Terminate {
+            cause: TerminationCause::ManualCommand,
+        },
+        TrackCommand::Flatten => TrackControlCommand::ManualFlatten,
+        TrackCommand::Reconcile => return None,
+    };
+
+    let next_control_state =
+        TrackControlState::from_command(current_control_state.clone(), control_command);
+    if next_control_state == current_control_state {
+        None
+    } else {
+        Some(next_control_state)
+    }
+}
+
+fn persisted_control_state_after_transition(
+    previous_runtime_state: &TrackState,
+    next_runtime_state: &TrackState,
+    explicit_override: Option<&TrackControlState>,
+) -> Option<TrackControlState> {
+    if let Some(control_state) = explicit_override {
+        return Some(control_state.clone());
+    }
+
+    match next_runtime_state {
+        TrackState::Terminated { cause }
+            if !matches!(
+                previous_runtime_state,
+                TrackState::Terminated {
+                    cause: previous_cause,
+                } if previous_cause == cause
+            ) =>
+        {
+            Some(TrackControlState::Terminated {
+                cause: cause.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
 impl MutationExecutor {
     pub(crate) fn new(
         manager: TrackManager,
@@ -220,12 +274,6 @@ impl MutationExecutor {
 
     pub(crate) async fn prepare_fresh_session_for_activation(&self, id: &str) -> Result<()> {
         let _mutation_guard = self.lock_track_mutation(id).await;
-        let snapshot = {
-            let manager = self.manager.read().await;
-            manager
-                .snapshot(id)
-                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?
-        };
         let session_reset_effect_ids = self
             .effect_store
             .list_session_reset_effects_for_track(&TrackId::new(id))
@@ -242,14 +290,7 @@ impl MutationExecutor {
 
         for effect_id in &session_reset_effect_ids {
             self.mutation_store
-                .save_transition_bundle_with_effect_status(
-                    id,
-                    &snapshot,
-                    &TrackPersistentState::from_runtime_snapshot(&snapshot),
-                    &[],
-                    &[],
-                    Some(&EffectStatusUpdate::superseded(effect_id.clone())),
-                )
+                .update_effect_status(id, &EffectStatusUpdate::superseded(effect_id.clone()))
                 .await
                 .map_err(TrackMutationError::Persistence)?;
         }
@@ -261,46 +302,18 @@ impl MutationExecutor {
                 .map_err(TrackMutationError::Persistence)?;
         }
 
-        let (previous_snapshot, next_snapshot) = {
-            let mut manager = self.manager.write().await;
-            let previous_snapshot = manager
-                .snapshot(id)
-                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            manager
-                .reset_executor_for_activation(&TrackId::new(id))
-                .map_err(TrackMutationError::Mutation)?;
-            let next_snapshot = manager
-                .snapshot(id)
-                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            (previous_snapshot, next_snapshot)
-        };
-
-        self.commit_track_mutation(id, &previous_snapshot, &next_snapshot, &(), None, false)
-            .await
-            .map_err(anyhow::Error::new)
-    }
-
-    pub(crate) async fn apply_track_persistent_state(
-        &self,
-        track_id: &TrackId,
-        state: TrackPersistentState,
-    ) -> Result<bool> {
-        let _mutation_guard = self.lock_track_mutation(track_id.as_str()).await;
         let mut manager = self.manager.write().await;
-        let Some(mut snapshot) = manager.snapshot(track_id.as_str()) else {
-            return Ok(false);
-        };
-        snapshot.runtime_state = state.control_state.to_startup_runtime_state();
-        snapshot.ledger_state = state.ledger_state;
-        snapshot.desired_exposure = snapshot.runtime_state.manual_target_override();
-        manager.restore_track_state(&snapshot)?;
-        Ok(true)
+        manager
+            .reset_executor_for_activation(&TrackId::new(id))
+            .map_err(TrackMutationError::Mutation)?;
+        Ok(())
     }
 
     pub(crate) async fn fresh_start_track_runtime(
         &self,
         track_id: &TrackId,
-        state: TrackPersistentState,
+        control_state: TrackControlState,
+        ledger_state: poise_engine::ledger::TrackLedgerState,
         external_inputs: FreshSessionExternalInputs,
     ) -> Result<bool> {
         let _mutation_guard = self.lock_track_mutation(track_id.as_str()).await;
@@ -310,8 +323,8 @@ impl MutationExecutor {
         }
         manager.fresh_start_track(
             track_id,
-            state.control_state.to_startup_runtime_state(),
-            state.ledger_state,
+            control_state.to_startup_runtime_state(),
+            ledger_state,
             external_inputs,
         )?;
         Ok(true)
@@ -431,19 +444,6 @@ impl MutationExecutor {
                         .ok_or_else(|| anyhow!("track `{id}` not found"))?
                 };
 
-                if next_snapshot != previous_snapshot {
-                    self.commit_track_mutation(
-                        id,
-                        &previous_snapshot,
-                        &next_snapshot,
-                        &(),
-                        None,
-                        false,
-                    )
-                    .await
-                    .map_err(anyhow::Error::new)?;
-                }
-
                 Ok(TrackTransition {
                     snapshot: next_snapshot,
                     events: Vec::new(),
@@ -458,6 +458,7 @@ impl MutationExecutor {
                     &transition,
                     None,
                     false,
+                    None,
                 )
                 .await
                 .map_err(anyhow::Error::new)?;
@@ -467,11 +468,47 @@ impl MutationExecutor {
     }
 
     pub async fn command(&self, id: &str, command: TrackCommand) -> Result<TrackTransition> {
-        self.mutate_track(id, |manager| {
-            manager.command(&TrackId::new(id), command.clone())
-        })
+        let _mutation_guard = self.lock_track_mutation(id).await;
+        let (previous_snapshot, transition, next_snapshot, control_state_override) = {
+            let mut manager = self.manager.write().await;
+            let previous_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
+            self.sync_account_capacity_gate_state(&mut manager, id)
+                .map_err(TrackMutationError::Mutation)?;
+            let control_state_override =
+                persisted_control_state_after_command(&previous_snapshot.runtime_state, &command);
+            let transition = manager
+                .command(&TrackId::new(id), command)
+                .map_err(|error| {
+                    manager
+                        .restore_track_state(&previous_snapshot)
+                        .expect("failed to restore previous snapshot after mutation error");
+                    TrackMutationError::Mutation(error)
+                })?;
+            let next_snapshot = manager
+                .snapshot(id)
+                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
+            (
+                previous_snapshot,
+                transition,
+                next_snapshot,
+                control_state_override,
+            )
+        };
+
+        self.commit_track_mutation(
+            id,
+            &previous_snapshot,
+            &next_snapshot,
+            &transition,
+            None,
+            false,
+            control_state_override.as_ref(),
+        )
         .await
-        .map_err(anyhow::Error::new)
+        .map_err(anyhow::Error::new)?;
+        Ok(transition)
     }
 
     pub async fn refresh_market_data_health(&self, id: &str) -> Result<TrackTransition> {
@@ -493,6 +530,14 @@ impl MutationExecutor {
     pub(crate) async fn track_live_view(&self, id: &str) -> Result<TrackLiveView> {
         let manager = self.manager.read().await;
         manager.track_live_view(&TrackId::new(id))
+    }
+
+    pub(crate) async fn track_snapshot(
+        &self,
+        id: &str,
+    ) -> Result<Option<poise_engine::snapshot::TrackRuntimeSnapshot>> {
+        let manager = self.manager.read().await;
+        Ok(manager.snapshot(id))
     }
 
     pub(crate) async fn quote_health_view(&self, id: &str) -> Result<QuoteHealthView> {
@@ -689,6 +734,7 @@ impl MutationExecutor {
             &transition,
             None,
             false,
+            None,
         )
         .await
         .map_err(anyhow::Error::new)?;
@@ -796,6 +842,7 @@ impl MutationExecutor {
             &(),
             Some(&effect_status_update),
             false,
+            None,
         )
         .await
         .map_err(anyhow::Error::new)?;
@@ -906,6 +953,7 @@ impl MutationExecutor {
                 replacement_submit.effect_id.clone(),
             )),
             false,
+            None,
         )
         .await
         .map_err(anyhow::Error::new)?;
@@ -1037,6 +1085,7 @@ impl MutationExecutor {
             &plan,
             effect_status_update.as_ref(),
             true,
+            None,
         )
         .await
         .map_err(anyhow::Error::new)?;
@@ -1081,6 +1130,7 @@ impl MutationExecutor {
             &result,
             Some(&effect_status_update),
             false,
+            None,
         )
         .await?;
         Ok(result)
@@ -1147,6 +1197,7 @@ impl MutationExecutor {
             &result,
             None,
             skip_when_noop,
+            None,
         )
         .await?;
         Ok(result)
@@ -1222,11 +1273,18 @@ impl MutationExecutor {
         result: &R,
         effect_status_update: Option<&EffectStatusUpdate>,
         skip_when_noop: bool,
+        control_state_override: Option<&TrackControlState>,
     ) -> std::result::Result<(), TrackMutationError>
     where
         R: TransitionResult,
     {
-        let has_track_write = previous_snapshot != next_snapshot
+        let control_state_update = persisted_control_state_after_transition(
+            &previous_snapshot.runtime_state,
+            &next_snapshot.runtime_state,
+            control_state_override,
+        );
+        let has_track_write = control_state_update.is_some()
+            || previous_snapshot.ledger_state != next_snapshot.ledger_state
             || !result.domain_events().is_empty()
             || !result.effects().is_empty();
         let has_effect_status_update = effect_status_update.is_some();
@@ -1235,19 +1293,29 @@ impl MutationExecutor {
             return Ok(());
         }
 
-        let persistent_state = TrackPersistentState::from_runtime_snapshot(next_snapshot);
-        if let Err(error) = self
-            .mutation_store
-            .save_transition_bundle_with_effect_status(
-                id,
-                next_snapshot,
-                &persistent_state,
-                result.domain_events(),
-                result.effects(),
-                effect_status_update,
-            )
-            .await
-        {
+        let persistence_result = if has_track_write {
+            self.mutation_store
+                .commit_track_transition(
+                    id,
+                    control_state_update.as_ref(),
+                    &next_snapshot.ledger_state,
+                    result.domain_events(),
+                    result.effects(),
+                    effect_status_update,
+                )
+                .await
+        } else if let Some(effect_status_update) = effect_status_update {
+            self.mutation_store
+                .update_effect_status(id, effect_status_update)
+                .await
+        } else {
+            Ok(CommittedTrackWrite {
+                track_id: TrackId::new(id),
+                effects: Vec::new(),
+            })
+        };
+
+        if let Err(error) = persistence_result {
             let rollback_result = {
                 let mut manager = self.manager.write().await;
                 manager.restore_track_state(previous_snapshot)
@@ -1353,15 +1421,14 @@ pub(crate) mod test_support {
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{ClockPort, OrderRequest};
-    use poise_engine::snapshot::TrackRuntimeSnapshot;
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
     use tokio::sync::broadcast;
 
     use crate::{
         ApplicationNotification, CommittedTrackWrite, EffectStatus, EffectStatusUpdate,
-        FollowUpRetirementRequest, PersistedTrackEffect, TrackEffectStore, TrackMutationStore,
-        TrackPersistentState,
+        FollowUpRetirementRequest, PersistedTrackEffect, TrackControlState, TrackEffectStore,
+        TrackMutationStore,
     };
 
     use super::{AccountCapacityGuard, TrackServiceSet};
@@ -1385,8 +1452,8 @@ pub(crate) mod test_support {
 
     #[derive(Default)]
     pub(crate) struct MemoryRepository {
-        snapshots: Mutex<HashMap<String, TrackRuntimeSnapshot>>,
-        persistent_states: Mutex<HashMap<String, TrackPersistentState>>,
+        control_states: Mutex<HashMap<String, TrackControlState>>,
+        ledger_states: Mutex<HashMap<String, poise_engine::ledger::TrackLedgerState>>,
         events: Mutex<HashMap<String, Vec<DomainEvent>>>,
         effects: Mutex<Vec<PersistedTrackEffect>>,
         retirement_requests: Mutex<HashMap<String, Vec<FollowUpRetirementRequest>>>,
@@ -1472,36 +1539,6 @@ pub(crate) mod test_support {
 
     #[async_trait]
     impl crate::TrackQueryStore for MemoryRepository {
-        async fn list_track_snapshots(&self) -> Result<Vec<crate::StoredTrackSnapshot>> {
-            Ok(self
-                .snapshots
-                .lock()
-                .unwrap()
-                .values()
-                .cloned()
-                .map(|snapshot| crate::StoredTrackSnapshot {
-                    snapshot,
-                    updated_at: Utc::now(),
-                })
-                .collect())
-        }
-
-        async fn load_track_snapshot(
-            &self,
-            track_id: &TrackId,
-        ) -> Result<Option<crate::StoredTrackSnapshot>> {
-            Ok(self
-                .snapshots
-                .lock()
-                .unwrap()
-                .get(track_id.as_str())
-                .cloned()
-                .map(|snapshot| crate::StoredTrackSnapshot {
-                    snapshot,
-                    updated_at: Utc::now(),
-                }))
-        }
-
         async fn list_recent_track_events(
             &self,
             track_id: &TrackId,
@@ -1541,79 +1578,135 @@ pub(crate) mod test_support {
                 .collect())
         }
 
-        async fn load_track_persistent_state(
+        async fn load_track_control_state(
             &self,
             track_id: &TrackId,
-        ) -> Result<Option<TrackPersistentState>> {
+        ) -> Result<Option<TrackControlState>> {
             Ok(self
-                .persistent_states
+                .control_states
                 .lock()
                 .unwrap()
                 .get(track_id.as_str())
                 .cloned())
         }
+
+        async fn load_track_ledger_state(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<poise_engine::ledger::TrackLedgerState>> {
+            Ok(self
+                .ledger_states
+                .lock()
+                .unwrap()
+                .get(track_id.as_str())
+                .cloned())
+        }
+
+        async fn load_track_updated_at(
+            &self,
+            _track_id: &TrackId,
+        ) -> Result<Option<chrono::DateTime<Utc>>> {
+            Ok(None)
+        }
     }
 
     #[async_trait]
     impl TrackMutationStore for MemoryRepository {
-        async fn save_transition_with_effect_status(
+        async fn commit_track_transition(
             &self,
             id: &str,
-            state: &TrackRuntimeSnapshot,
+            control_state: Option<&TrackControlState>,
+            ledger_state: &poise_engine::ledger::TrackLedgerState,
             events: &[DomainEvent],
             effects: &[TrackEffect],
             effect_status_update: Option<&EffectStatusUpdate>,
         ) -> Result<CommittedTrackWrite> {
-            self.snapshots
-                .lock()
-                .unwrap()
-                .insert(id.to_string(), state.clone());
             self.events
                 .lock()
                 .unwrap()
                 .insert(id.to_string(), events.to_vec());
 
             let now = Utc::now();
-            let mut stored_effects = self.effects.lock().unwrap();
-            let mut committed_effects = Vec::new();
-            for (sequence, effect) in effects.iter().enumerate() {
-                let batch_id = format!("{id}:batch");
-                let effect_id = format!("{batch_id}:{sequence}");
-                let persisted = PersistedTrackEffect {
-                    effect_id: effect_id.clone(),
-                    track_id: TrackId::new(id),
-                    batch_id,
-                    sequence: sequence as u32,
-                    effect: effect.clone(),
-                    status: EffectStatus::Pending,
-                    attempt_count: 0,
-                    last_error: None,
-                    created_at: now,
-                    updated_at: now,
-                };
-                stored_effects.push(persisted.clone());
-                committed_effects.push(persisted);
-            }
+            let committed_effects = {
+                let mut stored_effects = self.effects.lock().unwrap();
+                let mut committed_effects = Vec::new();
+                for (sequence, effect) in effects.iter().enumerate() {
+                    let batch_id = format!("{id}:batch");
+                    let effect_id = format!("{batch_id}:{sequence}");
+                    let persisted = PersistedTrackEffect {
+                        effect_id: effect_id.clone(),
+                        track_id: TrackId::new(id),
+                        batch_id,
+                        sequence: sequence as u32,
+                        effect: effect.clone(),
+                        status: EffectStatus::Pending,
+                        attempt_count: 0,
+                        last_error: None,
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    stored_effects.push(persisted.clone());
+                    committed_effects.push(persisted);
+                }
 
-            if let Some(update) = effect_status_update
-                && let Some(effect) = stored_effects
-                    .iter_mut()
-                    .find(|effect| effect.effect_id == update.effect_id)
-            {
-                effect.status = update.status;
-                effect.attempt_count += update.attempt_delta;
-                effect.last_error = update.last_error.clone();
-                effect.updated_at = now;
+                if let Some(update) = effect_status_update
+                    && let Some(effect) = stored_effects
+                        .iter_mut()
+                        .find(|effect| effect.effect_id == update.effect_id)
+                {
+                    effect.status = update.status;
+                    effect.attempt_count += update.attempt_delta;
+                    effect.last_error = update.last_error.clone();
+                    effect.updated_at = now;
+                }
+                committed_effects
+            };
+
+            let track_id = TrackId::new(id);
+            let persisted_control_state = if control_state.is_none() {
+                let has_persisted_control_truth =
+                    self.control_states.lock().unwrap().contains_key(id);
+                if has_persisted_control_truth {
+                    None
+                } else {
+                    Some(TrackControlState::default())
+                }
+            } else {
+                control_state.cloned()
+            };
+            if let Some(control_state) = persisted_control_state.as_ref() {
+                self.save_track_control_state(&track_id, control_state)
+                    .await?;
             }
+            self.save_track_ledger_state(&track_id, ledger_state)
+                .await?;
 
             Ok(CommittedTrackWrite {
-                track_id: TrackId::new(id),
+                track_id,
                 effects: committed_effects,
             })
         }
 
-        async fn load_track_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>> {
-            Ok(self.snapshots.lock().unwrap().get(id).cloned())
+        async fn update_effect_status(
+            &self,
+            id: &str,
+            effect_status_update: &EffectStatusUpdate,
+        ) -> Result<CommittedTrackWrite> {
+            let now = Utc::now();
+            let mut stored_effects = self.effects.lock().unwrap();
+            if let Some(effect) = stored_effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_status_update.effect_id)
+            {
+                effect.status = effect_status_update.status;
+                effect.attempt_count += effect_status_update.attempt_delta;
+                effect.last_error = effect_status_update.last_error.clone();
+                effect.updated_at = now;
+            }
+            Ok(CommittedTrackWrite {
+                track_id: TrackId::new(id),
+                effects: Vec::new(),
+            })
         }
 
         async fn list_track_events(&self, id: &str) -> Result<Vec<DomainEvent>> {
@@ -1626,11 +1719,27 @@ pub(crate) mod test_support {
                 .unwrap_or_default())
         }
 
-        async fn save_track_persistent_state(&self, state: &TrackPersistentState) -> Result<()> {
-            self.persistent_states
+        async fn save_track_control_state(
+            &self,
+            track_id: &TrackId,
+            state: &TrackControlState,
+        ) -> Result<()> {
+            self.control_states
                 .lock()
                 .unwrap()
-                .insert(state.track_id.as_str().to_string(), state.clone());
+                .insert(track_id.as_str().to_string(), state.clone());
+            Ok(())
+        }
+
+        async fn save_track_ledger_state(
+            &self,
+            track_id: &TrackId,
+            state: &poise_engine::ledger::TrackLedgerState,
+        ) -> Result<()> {
+            self.ledger_states
+                .lock()
+                .unwrap()
+                .insert(track_id.as_str().to_string(), state.clone());
             Ok(())
         }
     }
@@ -1672,8 +1781,7 @@ pub(crate) mod test_support {
                 .unwrap()
                 .iter()
                 .filter(|effect| {
-                    effect.track_id == *track_id
-                        && matches!(effect.status, EffectStatus::Pending)
+                    effect.track_id == *track_id && matches!(effect.status, EffectStatus::Pending)
                 })
                 .cloned()
                 .collect())
@@ -1690,7 +1798,10 @@ pub(crate) mod test_support {
                 .iter()
                 .filter(|effect| {
                     effect.track_id == *track_id
-                        && matches!(effect.status, EffectStatus::Pending | EffectStatus::Executing)
+                        && matches!(
+                            effect.status,
+                            EffectStatus::Pending | EffectStatus::Executing
+                        )
                 })
                 .cloned()
                 .collect())
@@ -1853,10 +1964,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::{EffectStatus, FollowUpRetirementRequest};
+    use poise_core::risk::RiskTerminationCause;
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
     use poise_engine::observation::MarketObservation;
     use poise_engine::ports::ExecutionQuote;
-    use poise_engine::runtime::{AutoState, ControlState, TrackState};
+    use poise_engine::runtime::{AutoState, ControlState, TerminationCause, TrackState};
     use poise_engine::snapshot::TrackRuntimeSnapshot;
     use poise_engine::track::TrackId;
     use poise_engine::transition::TrackEffect;
@@ -1865,7 +1977,7 @@ mod tests {
 
     use super::test_support::{MemoryRepository, NoopGuard, seeded_manager, track_write_services};
     use super::{MutationExecutor, RecoveryAnomalyObserver};
-    use crate::TrackMutationStore;
+    use crate::{TrackControlState, TrackMutationStore, TrackQueryStore};
 
     #[derive(Default)]
     struct RecordingRecoveryAnomalyObserver {
@@ -1928,6 +2040,7 @@ mod tests {
                 &(),
                 None,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1943,6 +2056,7 @@ mod tests {
                 &(),
                 None,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1967,6 +2081,7 @@ mod tests {
                 &(),
                 None,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -2040,11 +2155,172 @@ mod tests {
         assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
         assert!(
             repository
-                .load_track_state("btc-core")
+                .load_track_control_state(&TrackId::new("btc-core"))
                 .await
                 .unwrap()
                 .is_none(),
-            "live-only tick should not persist a durable snapshot"
+            "live-only tick should not persist control state"
+        );
+        assert!(
+            repository
+                .load_track_ledger_state(&TrackId::new("btc-core"))
+                .await
+                .unwrap()
+                .is_none(),
+            "live-only tick should not persist any durable runtime projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_effect_succeeded_does_not_create_durable_track_truth() {
+        let repository = Arc::new(MemoryRepository::default());
+        repository.seed_pending_submit_effect();
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository.clone(), observer);
+
+        executor
+            .complete_effect_succeeded("btc-core", "btc-core:batch-1:0")
+            .await
+            .unwrap();
+
+        let effects = repository.pending_effects();
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].status, EffectStatus::Succeeded);
+        assert!(
+            repository
+                .load_track_control_state(&TrackId::new("btc-core"))
+                .await
+                .unwrap()
+                .is_none(),
+            "effect status writeback should not create control truth"
+        );
+        assert!(
+            repository
+                .load_track_ledger_state(&TrackId::new("btc-core"))
+                .await
+                .unwrap()
+                .is_none(),
+            "effect status writeback should not create ledger truth"
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_market_first_durable_write_persists_default_automatic_control_state() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository.clone(), observer);
+
+        let transition = executor
+            .observe_market(
+                "btc-core",
+                MarketObservation {
+                    mark_price: 95.0,
+                    execution_quote: Some(ExecutionQuote {
+                        best_bid: 94.9,
+                        best_ask: 95.1,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !transition.effects.is_empty() || !transition.events.is_empty(),
+            "test requires a durable transition"
+        );
+        assert_eq!(
+            repository
+                .load_track_control_state(&TrackId::new("btc-core"))
+                .await
+                .unwrap(),
+            Some(TrackControlState::default())
+        );
+        assert!(
+            repository
+                .load_track_ledger_state(&TrackId::new("btc-core"))
+                .await
+                .unwrap()
+                .is_some(),
+            "first durable write should also establish ledger truth"
+        );
+    }
+
+    #[tokio::test]
+    async fn mutation_store_backfills_default_control_state_on_first_durable_write() {
+        let repository = Arc::new(MemoryRepository::default());
+        repository
+            .commit_track_transition(
+                "btc-core",
+                None,
+                &poise_engine::ledger::TrackLedgerState::default(),
+                &[],
+                &[],
+                None,
+            )
+            .await
+            .expect("store owner should complete durable truth on first business write");
+        assert_eq!(
+            repository
+                .load_track_control_state(&TrackId::new("btc-core"))
+                .await
+                .unwrap(),
+            Some(TrackControlState::default())
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_market_persists_automatic_risk_termination_control_state() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository.clone(), observer);
+
+        {
+            let manager = executor.manager();
+            let mut manager = manager.write().await;
+            let track = manager
+                .get_track("btc-core")
+                .cloned()
+                .expect("seeded track should exist");
+            let mut updated = track.snapshot();
+            updated.runtime_state =
+                TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
+            updated.current_exposure = poise_core::types::Exposure(4.0);
+            updated.ledger_state.gross_realized_pnl_today = -290.0;
+            updated.ledger_state.gross_realized_pnl_cumulative = -290.0;
+            updated.risk.unrealized_pnl = -20.0;
+            manager
+                .restore_track_state(&updated)
+                .expect("failed to seed risk termination state");
+        }
+
+        let transition = executor
+            .observe_market(
+                "btc-core",
+                MarketObservation {
+                    mark_price: 95.0,
+                    execution_quote: Some(ExecutionQuote {
+                        best_bid: 95.0,
+                        best_ask: 95.0,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            transition.snapshot.runtime_state,
+            TrackState::Terminated {
+                cause: TerminationCause::Risk(RiskTerminationCause::DailyLossLimit),
+            }
+        );
+        assert_eq!(
+            repository
+                .load_track_control_state(&TrackId::new("btc-core"))
+                .await
+                .unwrap(),
+            Some(TrackControlState::Terminated {
+                cause: TerminationCause::Risk(RiskTerminationCause::DailyLossLimit),
+            })
         );
     }
 

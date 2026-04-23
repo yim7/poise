@@ -23,16 +23,13 @@ mod websocket;
 use std::env;
 
 use anyhow::Result;
-use state_bootstrap::{
-    PersistedStateMismatchDetail, StateBootstrapError, StateBootstrapMode, SuggestedAction,
-};
+use state_bootstrap::{PersistedStateMismatchDetail, StateBootstrapError};
 
 use crate::instance_dir::InstanceDir;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StartupOptions {
     instance_dir: std::path::PathBuf,
-    bootstrap_mode: StateBootstrapMode,
 }
 
 #[tokio::main]
@@ -44,14 +41,11 @@ async fn main() -> Result<()> {
     let instance_dir = InstanceDir::new(&options.instance_dir);
     let config = config::load_config(instance_dir.config_path())?;
     let db_path = instance_dir.db_path();
-    let prepared_state =
-        match state_bootstrap::prepare_state_repository(&config, &db_path, options.bootstrap_mode)
-            .await
-        {
-            Ok(repository) => repository,
-            Err(StateBootstrapError::Unexpected(error)) => return Err(error),
-            Err(error) => return Err(anyhow::anyhow!(render_startup_error(&error))),
-        };
+    let prepared_state = match state_bootstrap::prepare_state_repository(&config, &db_path).await {
+        Ok(repository) => repository,
+        Err(StateBootstrapError::Unexpected(error)) => return Err(error),
+        Err(error) => return Err(anyhow::anyhow!(render_startup_error(&error))),
+    };
     let (platform, runtime_handles, listener) = prepared_state
         .run_startup(|repositories, prepared_registry| async {
             let platform = assembly::assemble(&config, prepared_registry, repositories).await?;
@@ -107,8 +101,6 @@ async fn shutdown_signal() {
 
 fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<StartupOptions> {
     let mut instance_dir = None;
-    let mut bootstrap_mode = StateBootstrapMode::Strict;
-
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--instance-dir" => {
@@ -118,7 +110,9 @@ fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<Start
                 instance_dir = Some(std::path::PathBuf::from(value));
             }
             "--rebuild-state" => {
-                bootstrap_mode = StateBootstrapMode::Rebuild;
+                return Err(anyhow::anyhow!(
+                    "`--rebuild-state` 已移除；启动现在会直接基于当前配置、持久控制/账本状态和交易所真值 fresh-start"
+                ));
             }
             other => {
                 return Err(anyhow::anyhow!("unknown argument: {other}"));
@@ -129,7 +123,6 @@ fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<Start
     Ok(StartupOptions {
         instance_dir: instance_dir
             .ok_or_else(|| anyhow::anyhow!("missing required --instance-dir <path>"))?,
-        bootstrap_mode,
     })
 }
 
@@ -138,7 +131,6 @@ fn render_startup_error(error: &StateBootstrapError) -> String {
         StateBootstrapError::PersistedStateMismatch {
             db_path,
             mismatches,
-            suggested_action,
         } => {
             let mut rendered = format!(
                 "persisted state does not match current config in `{}`.",
@@ -153,24 +145,8 @@ fn render_startup_error(error: &StateBootstrapError) -> String {
                             mismatch.track_id,
                         ));
                     }
-                    PersistedStateMismatchDetail::PersistedTrackMissingFromConfig => {
-                        rendered.push_str(&format!(
-                            "\ntrack `{}`:\n  config status: missing from current config",
-                            mismatch.track_id,
-                        ));
-                    }
                 }
             }
-
-            match suggested_action {
-                SuggestedAction::RebuildState => {
-                    rendered.push_str(
-                        "\nuse `--rebuild-state` to back up the old database, discard local snapshots, and rebuild state from the exchange's live positions and orders.\n\
-suggested command: cargo run -p poise-server -- --instance-dir <path> --rebuild-state",
-                    );
-                }
-            }
-
             rendered
         }
         StateBootstrapError::Unexpected(error) => error.to_string(),
@@ -201,8 +177,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::state_bootstrap::{
-        PersistedStateMismatchDetail, StateBootstrapError, StateBootstrapMode, StateRepositories,
-        SuggestedAction,
+        PersistedStateMismatchDetail, StateBootstrapError, StateRepositories,
     };
 
     use super::{StartupOptions, parse_startup_options};
@@ -237,14 +212,13 @@ mod tests {
             options,
             StartupOptions {
                 instance_dir: std::path::PathBuf::from("/tmp/poise-a"),
-                bootstrap_mode: StateBootstrapMode::Strict,
             }
         );
     }
 
     #[test]
-    fn parse_startup_options_accepts_rebuild_state_flag() {
-        let options = parse_startup_options(
+    fn parse_startup_options_rejects_rebuild_state_flag() {
+        let error = parse_startup_options(
             vec![
                 "--rebuild-state".to_string(),
                 "--instance-dir".to_string(),
@@ -252,15 +226,9 @@ mod tests {
             ]
             .into_iter(),
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(
-            options,
-            StartupOptions {
-                instance_dir: std::path::PathBuf::from("/tmp/poise-a"),
-                bootstrap_mode: StateBootstrapMode::Rebuild,
-            }
-        );
+        assert!(error.to_string().contains("`--rebuild-state` 已移除"));
     }
 
     #[test]
@@ -273,31 +241,16 @@ mod tests {
     fn render_startup_error_formats_structured_mismatch_for_cli() {
         let rendered = super::render_startup_error(&StateBootstrapError::PersistedStateMismatch {
             db_path: std::path::PathBuf::from(".data/testnet/poise-server.sqlite"),
-            mismatches: vec![
-                crate::state_bootstrap::PersistedStateMismatch {
-                    track_id: "btc-core".into(),
-                    detail: PersistedStateMismatchDetail::PersistedTrackMissingBusinessState,
-                },
-                crate::state_bootstrap::PersistedStateMismatch {
-                    track_id: "eth-core".into(),
-                    detail: PersistedStateMismatchDetail::PersistedTrackMissingFromConfig,
-                },
-                crate::state_bootstrap::PersistedStateMismatch {
-                    track_id: "sol-core".into(),
-                    detail: PersistedStateMismatchDetail::PersistedTrackMissingFromConfig,
-                },
-            ],
-            suggested_action: SuggestedAction::RebuildState,
+            mismatches: vec![crate::state_bootstrap::PersistedStateMismatch {
+                track_id: "btc-core".into(),
+                detail: PersistedStateMismatchDetail::PersistedTrackMissingBusinessState,
+            }],
         });
 
         assert!(rendered.contains(".data/testnet/poise-server.sqlite"));
         assert!(rendered.contains("btc-core"));
         assert!(rendered.contains("persisted business state is missing"));
-        assert!(rendered.contains("eth-core"));
-        assert!(rendered.contains("sol-core"));
-        assert!(rendered.contains("missing from current config"));
-        assert!(rendered.contains("--rebuild-state"));
-        assert!(rendered.contains("--instance-dir <path>"));
+        assert!(!rendered.contains("--rebuild-state"));
     }
 
     fn workspace_root() -> PathBuf {

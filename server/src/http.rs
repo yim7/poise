@@ -231,8 +231,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use poise_application::{
         CommittedTrackWrite, EffectStatusUpdate, FollowUpRetirementRequest, PersistedTrackEffect,
-        StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore, TrackMutationStore,
-        TrackQueryStore,
+        StoredTrackEvent, TrackEffectStore, TrackMutationStore, TrackQueryStore,
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
@@ -313,21 +312,29 @@ mod tests {
     where
         R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
     {
-        let manager = test_manager();
+        let mut manager = test_manager();
         let mut snapshot = manager
             .snapshot("btc-core")
             .expect("seeded manager should expose runtime snapshot");
         seed_snapshot_ledger(&mut snapshot);
+        manager.restore_track_state(&snapshot).unwrap();
+        observe_seed_market(&mut manager);
         repository
-            .save_transition(
+            .commit_track_transition(
                 "btc-core",
-                &snapshot,
+                None,
+                &snapshot.ledger_state,
                 &[DomainEvent::ExposureTargetChanged {
                     from: Exposure(3.5),
                     to: Exposure(4.0),
                 }],
                 &[],
+                None,
             )
+            .await
+            .unwrap();
+        repository
+            .save_track_ledger_state(&TrackId::new("btc-core"), &snapshot.ledger_state)
             .await
             .unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
@@ -343,7 +350,11 @@ mod tests {
             notifications,
             account_margin_guard.clone(),
         );
-        let read_services = TrackReadServices::new(query_store, test_prepared_registry("btc-core"));
+        let read_services = TrackReadServices::new(
+            query_store,
+            test_prepared_registry("btc-core"),
+            services.observation_service.clone(),
+        );
         let query_service = read_services.query_service();
         let debug_query_service = read_services.debug_query_service();
         let projector = Arc::new(TrackProjector::new());
@@ -363,6 +374,7 @@ mod tests {
                 Arc::new(TrackQueryService::new(
                     repository as Arc<dyn TrackQueryStore>,
                     test_prepared_registry("btc-core"),
+                    services.observation_service.clone(),
                 )),
                 projector,
                 account_monitor,
@@ -373,21 +385,29 @@ mod tests {
 
     async fn app_state_with_account_summary() -> HttpTestState {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let manager = test_manager();
+        let mut manager = test_manager();
         let mut snapshot = manager
             .snapshot("btc-core")
             .expect("seeded manager should expose runtime snapshot");
         seed_snapshot_ledger(&mut snapshot);
+        manager.restore_track_state(&snapshot).unwrap();
+        observe_seed_market(&mut manager);
         repository
-            .save_transition(
+            .commit_track_transition(
                 "btc-core",
-                &snapshot,
+                None,
+                &snapshot.ledger_state,
                 &[DomainEvent::ExposureTargetChanged {
                     from: Exposure(3.5),
                     to: Exposure(4.0),
                 }],
                 &[],
+                None,
             )
+            .await
+            .unwrap();
+        repository
+            .save_track_ledger_state(&TrackId::new("btc-core"), &snapshot.ledger_state)
             .await
             .unwrap();
 
@@ -432,7 +452,11 @@ mod tests {
         );
         let projector = Arc::new(TrackProjector::new());
         let account_projector = Arc::new(AccountProjector::new());
-        let read_services = TrackReadServices::new(query_store, test_prepared_registry("btc-core"));
+        let read_services = TrackReadServices::new(
+            query_store,
+            test_prepared_registry("btc-core"),
+            services.observation_service.clone(),
+        );
         let query_service = read_services.query_service();
         let debug_query_service = read_services.debug_query_service();
         HttpTestState {
@@ -478,6 +502,11 @@ mod tests {
                 test_exchange_rules(),
             )
             .unwrap();
+        observe_seed_market(&mut manager);
+        manager
+    }
+
+    fn observe_seed_market(manager: &mut TrackManager) {
         manager
             .observe(
                 &TrackId::new("btc-core"),
@@ -492,24 +521,12 @@ mod tests {
                 ),
             )
             .unwrap();
-        let track = manager
-            .get_track("btc-core")
-            .expect("track should still exist")
-            .clone();
-        let mut snapshot = track.snapshot();
-        let binding = snapshot
-            .executor_state
-            .bindings
-            .first_mut()
-            .expect("market observe should seed active bindings");
-        binding.order_id = Some("order-1".into());
-        manager.restore_track_state(&snapshot).unwrap();
-        manager
     }
 
     fn seed_snapshot_ledger(snapshot: &mut poise_engine::snapshot::TrackRuntimeSnapshot) {
         snapshot.risk.unrealized_pnl = 265.2;
-        snapshot.ledger_state.ledger_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
+        snapshot.ledger_state.ledger_utc_day =
+            chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
         snapshot.ledger_state.gross_realized_pnl_today = 980.1;
         snapshot.ledger_state.gross_realized_pnl_cumulative = 980.1;
         snapshot.ledger_state.trading_fee_cumulative = 12.3;
@@ -595,15 +612,58 @@ mod tests {
     #[tokio::test]
     async fn health_returns_service_unavailable_when_attention_required_present() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let state = build_test_state(repository.clone()).await;
-        let mut snapshot = test_manager()
+        let mut manager = test_manager();
+        let mut snapshot = manager
             .snapshot("btc-core")
             .expect("seeded manager should expose runtime snapshot");
         snapshot.observed.market_data_stale_since = Some(Utc::now());
-        repository
-            .save_transition("btc-core", &snapshot, &[], &[])
-            .await
-            .unwrap();
+        manager.restore_track_state(&snapshot).unwrap();
+        let state = {
+            let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
+            let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
+            let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
+            let query_store: Arc<dyn TrackQueryStore> = repository.clone();
+            let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+            let services = build_test_application_services(
+                manager,
+                mutation_store.clone(),
+                query_store.clone(),
+                effect_store.clone(),
+                notifications,
+                account_margin_guard.clone(),
+            );
+            let read_services = TrackReadServices::new(
+                query_store,
+                test_prepared_registry("btc-core"),
+                services.observation_service.clone(),
+            );
+            let query_service = read_services.query_service();
+            let debug_query_service = read_services.debug_query_service();
+            let projector = Arc::new(TrackProjector::new());
+            let account_monitor = unavailable_account_monitor(services.notifications.clone());
+            let account_projector = Arc::new(AccountProjector::new());
+            HttpTestState {
+                http_state: build_http_state(
+                    &services,
+                    query_service.clone(),
+                    debug_query_service,
+                    projector.clone(),
+                    account_monitor.clone(),
+                    account_projector.clone(),
+                ),
+                websocket_state: build_websocket_state(
+                    &services,
+                    Arc::new(TrackQueryService::new(
+                        repository as Arc<dyn TrackQueryStore>,
+                        test_prepared_registry("btc-core"),
+                        services.observation_service.clone(),
+                    )),
+                    projector,
+                    account_monitor,
+                    account_projector,
+                ),
+            }
+        };
 
         let response = router(state)
             .oneshot(
@@ -694,13 +754,11 @@ mod tests {
                 .iter()
                 .all(|binding| binding.status == ExecutionBindingStatusView::SubmitPending)
         );
-        assert!(
-            payload
-                .execution
-                .bindings
-                .iter()
-                .all(|binding| binding.intent == ExecutionBindingIntentView::IncreaseInventory)
-        );
+        assert!(payload.execution.bindings.iter().all(|binding| matches!(
+            binding.intent,
+            ExecutionBindingIntentView::IncreaseInventory
+                | ExecutionBindingIntentView::DecreaseInventory
+        )));
         assert!(!payload.available_commands.is_empty());
         assert!(
             payload_json["execution"]["bindings"][0]
@@ -862,11 +920,6 @@ mod tests {
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
         let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
-        let read_services = TrackReadServices::new(
-            repository.clone() as Arc<dyn TrackQueryStore>,
-            test_prepared_registry("btc-core"),
-        );
-        let query_service = read_services.query_service();
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(
             manager,
@@ -876,6 +929,12 @@ mod tests {
             notifications,
             account_margin_guard,
         );
+        let read_services = TrackReadServices::new(
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            test_prepared_registry("btc-core"),
+            services.observation_service.clone(),
+        );
+        let query_service = read_services.query_service();
         let projector = Arc::new(TrackProjector::new());
         let account_monitor = unavailable_account_monitor(services.notifications.clone());
         let account_projector = Arc::new(AccountProjector::new());
@@ -1025,10 +1084,7 @@ mod tests {
 
         let body = to_bytes(detail.into_body(), usize::MAX).await.unwrap();
         let payload: TrackDetailView = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            payload.status.lifecycle.status,
-            TrackStatus::WaitingMarketData
-        );
+        assert_eq!(payload.status.lifecycle.status, TrackStatus::Active);
     }
 
     #[tokio::test]
@@ -1072,27 +1128,25 @@ mod tests {
 
     #[derive(Default)]
     struct FailingRepository {
-        snapshots: std::sync::Mutex<std::collections::HashMap<String, StoredTrackSnapshot>>,
+        updated_at: std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<Utc>>>,
     }
 
     impl FailingRepository {
         fn seed_snapshot(&self, snapshot: poise_engine::snapshot::TrackRuntimeSnapshot) {
-            self.snapshots.lock().unwrap().insert(
-                snapshot.track_id.as_str().to_string(),
-                StoredTrackSnapshot {
-                    snapshot,
-                    updated_at: Utc::now(),
-                },
-            );
+            self.updated_at
+                .lock()
+                .unwrap()
+                .insert(snapshot.track_id.as_str().to_string(), Utc::now());
         }
     }
 
     #[async_trait::async_trait]
     impl TrackMutationStore for FailingRepository {
-        async fn save_transition_with_effect_status(
+        async fn commit_track_transition(
             &self,
             _id: &str,
-            _state: &poise_engine::snapshot::TrackRuntimeSnapshot,
+            _control_state: Option<&poise_application::TrackControlState>,
+            _ledger_state: &poise_engine::ledger::TrackLedgerState,
             _events: &[poise_core::events::DomainEvent],
             _effects: &[poise_engine::transition::TrackEffect],
             _effect_status_update: Option<&EffectStatusUpdate>,
@@ -1100,11 +1154,12 @@ mod tests {
             Err(anyhow!("persistence unavailable"))
         }
 
-        async fn load_track_state(
+        async fn update_effect_status(
             &self,
             _id: &str,
-        ) -> anyhow::Result<Option<poise_engine::snapshot::TrackRuntimeSnapshot>> {
-            Ok(None)
+            _effect_status_update: &EffectStatusUpdate,
+        ) -> anyhow::Result<CommittedTrackWrite> {
+            Err(anyhow!("persistence unavailable"))
         }
 
         async fn list_track_events(
@@ -1114,9 +1169,18 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn save_track_persistent_state(
+        async fn save_track_control_state(
             &self,
-            _state: &poise_application::TrackPersistentState,
+            _track_id: &TrackId,
+            _state: &poise_application::TrackControlState,
+        ) -> anyhow::Result<()> {
+            Err(anyhow!("persistence unavailable"))
+        }
+
+        async fn save_track_ledger_state(
+            &self,
+            _track_id: &TrackId,
+            _state: &poise_engine::ledger::TrackLedgerState,
         ) -> anyhow::Result<()> {
             Err(anyhow!("persistence unavailable"))
         }
@@ -1189,20 +1253,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackQueryStore for FailingRepository {
-        async fn list_track_snapshots(&self) -> anyhow::Result<Vec<StoredTrackSnapshot>> {
-            Ok(self.snapshots.lock().unwrap().values().cloned().collect())
-        }
-
-        async fn load_track_snapshot(
+        async fn load_track_updated_at(
             &self,
             track_id: &TrackId,
-        ) -> anyhow::Result<Option<StoredTrackSnapshot>> {
+        ) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
             Ok(self
-                .snapshots
+                .updated_at
                 .lock()
                 .unwrap()
                 .get(track_id.as_str())
-                .cloned())
+                .copied())
         }
 
         async fn list_recent_track_events(
@@ -1221,10 +1281,17 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn load_track_persistent_state(
+        async fn load_track_control_state(
             &self,
             _track_id: &TrackId,
-        ) -> anyhow::Result<Option<poise_application::TrackPersistentState>> {
+        ) -> anyhow::Result<Option<poise_application::TrackControlState>> {
+            Ok(None)
+        }
+
+        async fn load_track_ledger_state(
+            &self,
+            _track_id: &TrackId,
+        ) -> anyhow::Result<Option<poise_engine::ledger::TrackLedgerState>> {
             Ok(None)
         }
     }

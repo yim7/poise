@@ -6,7 +6,6 @@ pub mod ledger;
 pub mod loss_guard;
 pub mod manager;
 pub mod observation;
-pub mod persisted_runtime;
 pub mod ports;
 pub mod price_gate;
 pub mod reconciler;

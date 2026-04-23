@@ -70,9 +70,12 @@ pub fn record_submit_failure_by_recovery_token(
     previous_state: &ExecutorState,
     recovery_token: &SubmitRecoveryToken,
 ) -> ExecutorState {
+    let Some(target) = recovery_token.decode() else {
+        return previous_state.clone();
+    };
     let mut state = previous_state.clone();
     for binding in &mut state.bindings {
-        if recovery_token.matches_submission_identity(&SubmitRecoveryToken::from_binding(binding)) {
+        if binding.binding_id == target.binding_id {
             binding.status = BindingStatus::Terminal;
         }
     }

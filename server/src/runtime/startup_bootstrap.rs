@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
-use poise_engine::runtime::FreshSessionExternalInputs;
 use poise_engine::ports::{AccountCapacitySnapshot, UserDataEvent};
+use poise_engine::runtime::FreshSessionExternalInputs;
 use poise_engine::track::Instrument;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
@@ -43,33 +43,42 @@ impl TrackStartupSeed {
 
 #[derive(Debug, Clone, Default)]
 struct CleanupReplayFilter {
-    order_ids: HashSet<String>,
-    client_order_ids: HashSet<String>,
+    orders: Vec<CleanupOrderIdentity>,
+}
+
+#[derive(Debug, Clone)]
+struct CleanupOrderIdentity {
+    order_id: String,
+    client_order_id: String,
+}
+
+impl CleanupOrderIdentity {
+    fn matches(&self, order: &poise_engine::ports::ExchangeOrder) -> bool {
+        self.order_id == order.order_id || self.client_order_id == order.client_order_id
+    }
 }
 
 impl CleanupReplayFilter {
     fn from_orders(orders: &[poise_engine::ports::ExchangeOrder]) -> Self {
         Self {
-            order_ids: orders.iter().map(|order| order.order_id.clone()).collect(),
-            client_order_ids: orders
+            orders: orders
                 .iter()
-                .map(|order| order.client_order_id.clone())
+                .map(|order| CleanupOrderIdentity {
+                    order_id: order.order_id.clone(),
+                    client_order_id: order.client_order_id.clone(),
+                })
                 .collect(),
         }
     }
 
     fn matches_order(&self, order: &poise_engine::ports::ExchangeOrder) -> bool {
-        self.order_ids.contains(order.order_id.as_str())
-            || self
-                .client_order_ids
-                .contains(order.client_order_id.as_str())
+        self.orders.iter().any(|expected| expected.matches(order))
     }
 }
 
 #[derive(Debug, Default)]
 struct CleanupTracker {
     filters: HashMap<String, CleanupReplayFilter>,
-    saw_cleanup_event: bool,
 }
 
 impl CleanupTracker {
@@ -79,30 +88,17 @@ impl CleanupTracker {
                 .iter()
                 .map(|seed| (seed.track_id().to_string(), seed.cleanup_filter.clone()))
                 .collect(),
-            saw_cleanup_event: false,
         }
     }
 
-    fn begin_round(&mut self) {
-        self.saw_cleanup_event = false;
-    }
-
-    fn should_ignore(&mut self, track_id: &str, event: &UserDataEvent) -> bool {
+    fn should_ignore(&self, track_id: &str, event: &UserDataEvent) -> bool {
         let Some(filter) = self.filters.get(track_id) else {
             return false;
         };
-        let is_cleanup_event = match &event.payload {
+        match &event.payload {
             poise_engine::ports::UserDataPayload::OrderUpdate(order) => filter.matches_order(order),
             _ => false,
-        };
-        if is_cleanup_event {
-            self.saw_cleanup_event = true;
         }
-        is_cleanup_event
-    }
-
-    fn quiesced(&self) -> bool {
-        !self.saw_cleanup_event
     }
 }
 
@@ -114,8 +110,10 @@ struct StartupReplayEvent {
 pub(super) async fn complete_startup(
     runtime: &ServerRuntime,
     receiver: &mut mpsc::Receiver<UserDataEvent>,
-    startup_cutoff: DateTime<Utc>,
-) -> Result<DateTime<Utc>> {
+    // Only classifies user-data events already buffered during startup replay.
+    // Steady-state does not receive or apply this time boundary.
+    startup_replay_floor: DateTime<Utc>,
+) -> Result<()> {
     let mut track_seeds = Vec::new();
 
     for track in &runtime.startup_definitions {
@@ -134,21 +132,13 @@ pub(super) async fn complete_startup(
 
     rebuild_fresh_sessions(runtime, &track_seeds).await?;
 
-    let mut cleanup_tracker = CleanupTracker::from_track_seeds(&track_seeds);
-    loop {
-        let steady_state_cutoff =
-            retry_startup_step("get_server_time", || runtime.metadata.get_server_time()).await?;
-        cleanup_tracker.begin_round();
-        let replay_events =
-            collect_startup_replay_events(runtime, receiver, startup_cutoff, &mut cleanup_tracker)
-                .await?;
-        if cleanup_tracker.quiesced() {
-            apply_startup_replay_events(runtime, replay_events).await?;
-            return Ok(steady_state_cutoff);
-        }
-        rebuild_fresh_sessions(runtime, &track_seeds).await?;
-        apply_startup_replay_events(runtime, replay_events).await?;
-    }
+    let cleanup_tracker = CleanupTracker::from_track_seeds(&track_seeds);
+    let replay_events =
+        collect_startup_replay_events(runtime, receiver, startup_replay_floor, &cleanup_tracker)
+            .await?;
+    apply_startup_replay_events(runtime, replay_events).await?;
+
+    Ok(())
 }
 
 async fn prepare_track_startup_seed(
@@ -163,7 +153,10 @@ async fn prepare_track_startup_seed(
     })
 }
 
-async fn rebuild_fresh_sessions(runtime: &ServerRuntime, track_seeds: &[TrackStartupSeed]) -> Result<()> {
+async fn rebuild_fresh_sessions(
+    runtime: &ServerRuntime,
+    track_seeds: &[TrackStartupSeed],
+) -> Result<()> {
     let mut account_capacity_snapshots: HashMap<Instrument, AccountCapacitySnapshot> =
         HashMap::new();
     let current_utc_day = runtime.clock.now().date_naive();
@@ -212,7 +205,10 @@ async fn rebuild_fresh_sessions(runtime: &ServerRuntime, track_seeds: &[TrackSta
             .state
             .reconcile
             .observation_service
-            .observe_position(seed.track_id(), exchange_state::position_observation(&position))
+            .observe_position(
+                seed.track_id(),
+                exchange_state::position_observation(&position),
+            )
             .await?;
         account_capacity_snapshots.insert(instrument, account_capacity_snapshot);
     }
@@ -283,8 +279,10 @@ async fn probe_startup_account_capacity(
 async fn collect_startup_replay_events(
     runtime: &ServerRuntime,
     receiver: &mut mpsc::Receiver<UserDataEvent>,
-    startup_cutoff: DateTime<Utc>,
-    cleanup_tracker: &mut CleanupTracker,
+    // This is not a handoff boundary. It only prevents replaying buffered events
+    // that predate the fresh session inputs collected during startup.
+    startup_replay_floor: DateTime<Utc>,
+    cleanup_tracker: &CleanupTracker,
 ) -> Result<Vec<StartupReplayEvent>> {
     let mut buffered_events = Vec::new();
     while let Ok(event) = receiver.try_recv() {
@@ -294,25 +292,25 @@ async fn collect_startup_replay_events(
     buffered_events.sort_by_key(|event| event.event_time);
     let mut replay_events = Vec::new();
     for event in buffered_events {
-        if event.event_time > startup_cutoff {
-            let instrument = event.instrument().clone();
-            let Some(track_id) = runtime
-                .state
-                .reconcile
-                .observation_service
-                .resolve_track_id(&instrument)
-                .await
-            else {
-                tracing::warn!(
-                    "received user data for unknown instrument {}:{}",
-                    instrument.venue.as_str(),
-                    instrument.symbol
-                );
-                continue;
-            };
-            if cleanup_tracker.should_ignore(&track_id, &event) {
-                continue;
-            }
+        let instrument = event.instrument().clone();
+        let Some(track_id) = runtime
+            .state
+            .reconcile
+            .observation_service
+            .resolve_track_id(&instrument)
+            .await
+        else {
+            tracing::warn!(
+                "received user data for unknown instrument {}:{}",
+                instrument.venue.as_str(),
+                instrument.symbol
+            );
+            continue;
+        };
+        if cleanup_tracker.should_ignore(&track_id, &event) {
+            continue;
+        }
+        if event.event_time > startup_replay_floor {
             replay_events.push(StartupReplayEvent { track_id, event });
         }
     }
@@ -375,24 +373,20 @@ where
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Mutex;
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
-    use poise_application::{
-        EffectStatus, TrackEffectStore, TrackMutationStore, TrackQueryStore,
-    };
+    use poise_application::{EffectStatus, TrackEffectStore, TrackMutationStore, TrackQueryStore};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
-        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort,
-        MetadataPort, OrderRequest, OrderStatus, Position, PriceTick, UserDataEvent,
-        UserDataPayload,
+        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort, MetadataPort,
+        OrderRequest, OrderStatus, Position, PriceTick, UserDataEvent, UserDataPayload,
     };
     use poise_engine::price_gate::SubmitPurpose;
-    use poise_engine::runtime::TrackStatus;
+    use poise_engine::runtime::{TerminationCause, TrackStatus};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
     use poise_storage::sqlite::SqliteStorage;
@@ -411,11 +405,11 @@ mod tests {
     async fn complete_startup_cancels_inherited_orders_and_rebuilds_fresh_executor_state() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let manager = seeded_manager_with_active_binding();
-        let snapshot = manager.snapshot("btc-core").unwrap();
         repository
-            .save_transition(
+            .commit_track_transition(
                 "btc-core",
-                &snapshot,
+                None,
+                &poise_engine::ledger::TrackLedgerState::default(),
                 &[],
                 &[
                     pending_submit_effect("BTCUSDT", "boundary-catch-up-legacy"),
@@ -423,6 +417,7 @@ mod tests {
                         instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                     },
                 ],
+                None,
             )
             .await
             .unwrap();
@@ -449,12 +444,13 @@ mod tests {
             account_margin_guard,
         );
         let account_monitor = unavailable_account_monitor(notifications.clone());
-        let (runtime_context, effect_worker_context) = build_runtime_and_effect_worker_test_contexts(
-            &services,
-            repository.clone() as Arc<dyn TrackQueryStore>,
-            repository.clone() as Arc<dyn TrackEffectStore>,
-            account_monitor,
-        );
+        let (runtime_context, effect_worker_context) =
+            build_runtime_and_effect_worker_test_contexts(
+                &services,
+                repository.clone() as Arc<dyn TrackQueryStore>,
+                repository.clone() as Arc<dyn TrackEffectStore>,
+                account_monitor,
+            );
         let exchange = Arc::new(StartupExchange::with_inherited_order("BTCUSDT"));
         let runtime = super::ServerRuntime::new(
             runtime_context.runtime_state(),
@@ -475,9 +471,14 @@ mod tests {
                 RuntimeStartupCapacityMode::AccountCapacitySnapshot,
             )],
         );
-        let (_sender, mut receiver) = mpsc::channel(8);
+        let (sender, mut receiver) = mpsc::channel(8);
+        let startup_replay_floor = Utc::now();
+        sender
+            .send(cleanup_canceled_event("BTCUSDT", startup_replay_floor))
+            .await
+            .unwrap();
 
-        let _steady_state_cutoff = complete_startup(&runtime, &mut receiver, Utc::now())
+        complete_startup(&runtime, &mut receiver, startup_replay_floor)
             .await
             .unwrap();
 
@@ -488,8 +489,20 @@ mod tests {
                 .has_tracked_submit_effects()
                 .await
         );
-        assert!(repository.list_all_pending_submit_effects().await.unwrap().is_empty());
-        assert!(repository.list_dispatchable_effects().await.unwrap().is_empty());
+        assert!(
+            repository
+                .list_all_pending_submit_effects()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            repository
+                .list_dispatchable_effects()
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             repository
                 .list_follow_up_retirement_requests(&TrackId::new("btc-core"))
@@ -523,12 +536,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_startup_ignores_cleanup_order_updates_but_replays_new_session_events() {
+    async fn complete_startup_rebuilds_from_persisted_control_and_ledger_not_dirty_manager_runtime()
+    {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let manager = seeded_manager_with_active_binding();
-        let snapshot = manager.snapshot("btc-core").unwrap();
         repository
-            .save_transition("btc-core", &snapshot, &[], &[])
+            .save_track_control_state(
+                &TrackId::new("btc-core"),
+                &poise_application::TrackControlState::Paused {
+                    resume_mode: poise_application::PersistedControlMode::Automatic,
+                },
+            )
+            .await
+            .unwrap();
+        repository
+            .save_track_ledger_state(
+                &TrackId::new("btc-core"),
+                &poise_engine::ledger::TrackLedgerState {
+                    gross_realized_pnl_cumulative: 42.0,
+                    ..poise_engine::ledger::TrackLedgerState::default()
+                },
+            )
             .await
             .unwrap();
 
@@ -542,13 +570,28 @@ mod tests {
             notifications.clone(),
             account_margin_guard,
         );
+        {
+            let manager_handle = services.observation_service.manager();
+            let mut manager = manager_handle.write().await;
+            let mut snapshot = manager.snapshot("btc-core").unwrap();
+            snapshot.runtime_state = poise_engine::runtime::TrackState::Terminated {
+                cause: TerminationCause::ManualCommand,
+            };
+            snapshot.current_exposure = Exposure(9.0);
+            snapshot.desired_exposure = Some(Exposure(4.0));
+            snapshot.executor_state.recovery_anomaly =
+                Some(poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder);
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+
         let account_monitor = unavailable_account_monitor(notifications.clone());
-        let (runtime_context, effect_worker_context) = build_runtime_and_effect_worker_test_contexts(
-            &services,
-            repository.clone() as Arc<dyn TrackQueryStore>,
-            repository.clone() as Arc<dyn TrackEffectStore>,
-            account_monitor,
-        );
+        let (runtime_context, effect_worker_context) =
+            build_runtime_and_effect_worker_test_contexts(
+                &services,
+                repository.clone() as Arc<dyn TrackQueryStore>,
+                repository.clone() as Arc<dyn TrackEffectStore>,
+                account_monitor,
+            );
         let exchange = Arc::new(StartupExchange::with_inherited_order("BTCUSDT"));
         let runtime = super::ServerRuntime::new(
             runtime_context.runtime_state(),
@@ -570,28 +613,95 @@ mod tests {
             )],
         );
         let (sender, mut receiver) = mpsc::channel(8);
-        let startup_cutoff = Utc.with_ymd_and_hms(2026, 4, 23, 12, 0, 0).unwrap();
+        let startup_replay_floor = Utc::now();
+        sender
+            .send(cleanup_canceled_event("BTCUSDT", startup_replay_floor))
+            .await
+            .unwrap();
+
+        complete_startup(&runtime, &mut receiver, startup_replay_floor)
+            .await
+            .unwrap();
+
+        let snapshot = services
+            .observation_service
+            .manager()
+            .read()
+            .await
+            .snapshot("btc-core")
+            .unwrap();
+        assert_eq!(snapshot.status(), TrackStatus::Paused);
+        assert_eq!(snapshot.current_exposure, Exposure(0.0));
+        assert_eq!(snapshot.desired_exposure, None);
+        assert!(snapshot.executor_state.bindings.is_empty());
+        assert!(snapshot.executor_state.recovery_anomaly.is_none());
+        assert_eq!(snapshot.ledger_state.gross_realized_pnl_cumulative, 42.0);
+    }
+
+    #[tokio::test]
+    async fn complete_startup_ignores_cleanup_order_updates_but_replays_new_session_events() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let manager = seeded_manager_with_active_binding();
+        repository
+            .commit_track_transition(
+                "btc-core",
+                None,
+                &poise_engine::ledger::TrackLedgerState::default(),
+                &[],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            manager,
+            repository.clone() as Arc<dyn TrackMutationStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectStore>,
+            notifications.clone(),
+            account_margin_guard,
+        );
+        let account_monitor = unavailable_account_monitor(notifications.clone());
+        let (runtime_context, effect_worker_context) =
+            build_runtime_and_effect_worker_test_contexts(
+                &services,
+                repository.clone() as Arc<dyn TrackQueryStore>,
+                repository.clone() as Arc<dyn TrackEffectStore>,
+                account_monitor,
+            );
+        let exchange = Arc::new(StartupExchange::with_inherited_order("BTCUSDT"));
+        let runtime = super::ServerRuntime::new(
+            runtime_context.runtime_state(),
+            effect_worker_context.effect_worker_state,
+            RuntimePorts::new(
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                Arc::new(SystemClock),
+            ),
+            vec![RuntimeStartupDefinition::new(
+                test_prepared_registry("btc-core")
+                    .get(&TrackId::new("btc-core"))
+                    .unwrap()
+                    .startup_definition(),
+                RuntimeStartupCapacityMode::AccountCapacitySnapshot,
+            )],
+        );
+        let (sender, mut receiver) = mpsc::channel(8);
+        let startup_replay_floor = Utc.with_ymd_and_hms(2026, 4, 23, 12, 0, 0).unwrap();
 
         sender
-            .send(UserDataEvent {
-                event_time: startup_cutoff + chrono::TimeDelta::seconds(1),
-                payload: UserDataPayload::OrderUpdate(ExchangeOrder {
-                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    order_id: "legacy-order".into(),
-                    client_order_id: "legacy-client-order".into(),
-                    side: Side::Buy,
-                    price: 99.0,
-                    qty: 0.1,
-                    filled_qty: 0.0,
-                    realized_pnl: 0.0,
-                    status: OrderStatus::Canceled,
-                }),
-            })
+            .send(cleanup_canceled_event("BTCUSDT", startup_replay_floor))
             .await
             .unwrap();
         sender
             .send(UserDataEvent {
-                event_time: startup_cutoff + chrono::TimeDelta::seconds(2),
+                event_time: startup_replay_floor + chrono::TimeDelta::seconds(2),
                 payload: UserDataPayload::PositionUpdate(Position {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                     qty: 1.25,
@@ -603,13 +713,18 @@ mod tests {
             .unwrap();
         drop(sender);
 
-        let _steady_state_cutoff = complete_startup(&runtime, &mut receiver, startup_cutoff)
+        complete_startup(&runtime, &mut receiver, startup_replay_floor)
             .await
             .unwrap();
 
-        assert!(!runtime_context.exchange_freshness.is_stale("btc-core").await);
+        assert!(
+            !runtime_context
+                .exchange_freshness
+                .is_stale("btc-core")
+                .await
+        );
         assert_eq!(exchange.get_open_orders_calls.load(Ordering::SeqCst), 2);
-        assert_eq!(exchange.get_position_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(exchange.get_position_calls.load(Ordering::SeqCst), 1);
         let snapshot = services
             .observation_service
             .manager()
@@ -622,12 +737,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_task_uses_steady_state_cutoff_after_startup_cleanup_phase() {
+    async fn complete_startup_uses_rest_open_orders_barrier_without_waiting_for_cleanup_update() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let manager = seeded_manager_with_active_binding();
-        let snapshot = manager.snapshot("btc-core").unwrap();
         repository
-            .save_transition("btc-core", &snapshot, &[], &[])
+            .commit_track_transition(
+                "btc-core",
+                None,
+                &poise_engine::ledger::TrackLedgerState::default(),
+                &[],
+                &[],
+                None,
+            )
             .await
             .unwrap();
 
@@ -642,12 +763,85 @@ mod tests {
             account_margin_guard,
         );
         let account_monitor = unavailable_account_monitor(notifications.clone());
-        let (runtime_context, effect_worker_context) = build_runtime_and_effect_worker_test_contexts(
-            &services,
+        let (runtime_context, effect_worker_context) =
+            build_runtime_and_effect_worker_test_contexts(
+                &services,
+                repository.clone() as Arc<dyn TrackQueryStore>,
+                repository.clone() as Arc<dyn TrackEffectStore>,
+                account_monitor,
+            );
+        let exchange = Arc::new(StartupExchange::with_inherited_order("BTCUSDT"));
+        let runtime = super::ServerRuntime::new(
+            runtime_context.runtime_state(),
+            effect_worker_context.effect_worker_state,
+            RuntimePorts::new(
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                Arc::new(SystemClock),
+            ),
+            vec![RuntimeStartupDefinition::new(
+                test_prepared_registry("btc-core")
+                    .get(&TrackId::new("btc-core"))
+                    .unwrap()
+                    .startup_definition(),
+                RuntimeStartupCapacityMode::AccountCapacitySnapshot,
+            )],
+        );
+        let (_sender, mut receiver) = mpsc::channel(8);
+        let startup_replay_floor = Utc.with_ymd_and_hms(2026, 4, 23, 12, 0, 0).unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            complete_startup(&runtime, &mut receiver, startup_replay_floor),
+        )
+        .await
+        .expect("startup should use REST open-orders cleanup barrier instead of waiting for user-data terminal update")
+        .unwrap();
+        assert!(
+            !runtime_context
+                .exchange_freshness
+                .is_stale("btc-core")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn user_task_processes_late_events_after_startup_handoff_even_when_event_time_is_old() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let manager = seeded_manager_with_active_binding();
+        repository
+            .commit_track_transition(
+                "btc-core",
+                None,
+                &poise_engine::ledger::TrackLedgerState::default(),
+                &[],
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            manager,
+            repository.clone() as Arc<dyn TrackMutationStore>,
             repository.clone() as Arc<dyn TrackQueryStore>,
             repository.clone() as Arc<dyn TrackEffectStore>,
-            account_monitor,
+            notifications.clone(),
+            account_margin_guard,
         );
+        let account_monitor = unavailable_account_monitor(notifications.clone());
+        let (runtime_context, effect_worker_context) =
+            build_runtime_and_effect_worker_test_contexts(
+                &services,
+                repository.clone() as Arc<dyn TrackQueryStore>,
+                repository.clone() as Arc<dyn TrackEffectStore>,
+                account_monitor,
+            );
         let exchange = Arc::new(StartupExchange::with_inherited_order("BTCUSDT"));
         let runtime = super::ServerRuntime::new(
             runtime_context.runtime_state(),
@@ -669,34 +863,20 @@ mod tests {
             )],
         );
         let (sender, mut receiver) = mpsc::channel(8);
-        let startup_cutoff = Utc.with_ymd_and_hms(2026, 4, 23, 12, 0, 0).unwrap();
+        let startup_replay_floor = Utc.with_ymd_and_hms(2026, 4, 23, 12, 0, 0).unwrap();
 
-        let steady_state_cutoff = complete_startup(&runtime, &mut receiver, startup_cutoff)
+        complete_startup(&runtime, &mut receiver, startup_replay_floor)
             .await
             .unwrap();
-        let user_task =
-            runtime.spawn_user_task(receiver, steady_state_cutoff, runtime.shutdown_tx.subscribe());
+        let user_task = runtime.spawn_user_task(receiver, runtime.shutdown_tx.subscribe());
 
         sender
-            .send(UserDataEvent {
-                event_time: steady_state_cutoff - chrono::TimeDelta::milliseconds(1),
-                payload: UserDataPayload::OrderUpdate(ExchangeOrder {
-                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    order_id: "legacy-order".into(),
-                    client_order_id: "legacy-client-order".into(),
-                    side: Side::Buy,
-                    price: 99.0,
-                    qty: 0.1,
-                    filled_qty: 0.0,
-                    realized_pnl: 0.0,
-                    status: OrderStatus::Canceled,
-                }),
-            })
+            .send(cleanup_canceled_event("BTCUSDT", startup_replay_floor))
             .await
             .unwrap();
         sender
             .send(UserDataEvent {
-                event_time: steady_state_cutoff + chrono::TimeDelta::seconds(1),
+                event_time: startup_replay_floor - chrono::TimeDelta::milliseconds(1),
                 payload: UserDataPayload::PositionUpdate(Position {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                     qty: 1.25,
@@ -729,103 +909,12 @@ mod tests {
 
         assert_eq!(exchange.get_open_orders_calls.load(Ordering::SeqCst), 2);
         assert_eq!(exchange.get_position_calls.load(Ordering::SeqCst), 1);
-        assert!(!runtime_context.exchange_freshness.is_stale("btc-core").await);
-
-        runtime.shutdown_tx.send(true).unwrap();
-        user_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn startup_replays_events_emitted_during_final_cutoff_query_before_handoff() {
-        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let manager = seeded_manager_with_active_binding();
-        let snapshot = manager.snapshot("btc-core").unwrap();
-        repository
-            .save_transition("btc-core", &snapshot, &[], &[])
-            .await
-            .unwrap();
-
-        let (notifications, _) = tokio::sync::broadcast::channel(16);
-        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
-        let services = build_test_application_services(
-            manager,
-            repository.clone() as Arc<dyn TrackMutationStore>,
-            repository.clone() as Arc<dyn TrackQueryStore>,
-            repository.clone() as Arc<dyn TrackEffectStore>,
-            notifications.clone(),
-            account_margin_guard,
+        assert!(
+            !runtime_context
+                .exchange_freshness
+                .is_stale("btc-core")
+                .await
         );
-        let account_monitor = unavailable_account_monitor(notifications.clone());
-        let (runtime_context, effect_worker_context) = build_runtime_and_effect_worker_test_contexts(
-            &services,
-            repository.clone() as Arc<dyn TrackQueryStore>,
-            repository.clone() as Arc<dyn TrackEffectStore>,
-            account_monitor,
-        );
-        let (sender, mut receiver) = mpsc::channel(8);
-        let startup_cutoff = Utc.with_ymd_and_hms(2026, 4, 23, 12, 0, 0).unwrap();
-        let steady_state_cutoff = startup_cutoff + chrono::TimeDelta::seconds(5);
-        let delayed_event = UserDataEvent {
-            event_time: steady_state_cutoff,
-            payload: UserDataPayload::PositionUpdate(Position {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                qty: 1.25,
-                avg_price: 100.0,
-                unrealized_pnl: 12.0,
-            }),
-        };
-        let exchange = Arc::new(StartupExchange::with_server_time_event(
-            "BTCUSDT",
-            steady_state_cutoff,
-            sender,
-            delayed_event,
-        ));
-        let runtime = super::ServerRuntime::new(
-            runtime_context.runtime_state(),
-            effect_worker_context.effect_worker_state,
-            RuntimePorts::new(
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                Arc::new(SystemClock),
-            ),
-            vec![RuntimeStartupDefinition::new(
-                test_prepared_registry("btc-core")
-                    .get(&TrackId::new("btc-core"))
-                    .unwrap()
-                    .startup_definition(),
-                RuntimeStartupCapacityMode::AccountCapacitySnapshot,
-            )],
-        );
-
-        let returned_cutoff = complete_startup(&runtime, &mut receiver, startup_cutoff)
-            .await
-            .unwrap();
-        assert_eq!(returned_cutoff, steady_state_cutoff);
-        let user_task =
-            runtime.spawn_user_task(receiver, returned_cutoff, runtime.shutdown_tx.subscribe());
-
-        tokio::time::timeout(std::time::Duration::from_millis(200), async {
-            loop {
-                let snapshot = services
-                    .observation_service
-                    .manager()
-                    .read()
-                    .await
-                    .snapshot("btc-core")
-                    .unwrap();
-                if snapshot.current_exposure == Exposure(0.3333333333333333)
-                    && snapshot.risk.unrealized_pnl == 12.0
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
 
         runtime.shutdown_tx.send(true).unwrap();
         user_task.await.unwrap();
@@ -895,14 +984,32 @@ mod tests {
         }
     }
 
+    fn cleanup_canceled_event(
+        symbol: &str,
+        startup_replay_floor: chrono::DateTime<Utc>,
+    ) -> UserDataEvent {
+        UserDataEvent {
+            event_time: startup_replay_floor + chrono::TimeDelta::seconds(1),
+            payload: UserDataPayload::OrderUpdate(ExchangeOrder {
+                instrument: Instrument::new(Venue::Binance, symbol),
+                order_id: "legacy-order".into(),
+                client_order_id: "legacy-client-order".into(),
+                side: Side::Buy,
+                price: 99.0,
+                qty: 0.1,
+                filled_qty: 0.0,
+                realized_pnl: 0.0,
+                status: OrderStatus::Canceled,
+            }),
+        }
+    }
+
     struct StartupExchange {
         inherited_order_present: AtomicBool,
         cancel_all_calls: AtomicUsize,
         get_position_calls: AtomicUsize,
         get_open_orders_calls: AtomicUsize,
         instrument: Instrument,
-        server_time_response: chrono::DateTime<Utc>,
-        server_time_event: Mutex<Option<(mpsc::Sender<UserDataEvent>, UserDataEvent)>>,
     }
 
     impl StartupExchange {
@@ -913,25 +1020,6 @@ mod tests {
                 get_position_calls: AtomicUsize::new(0),
                 get_open_orders_calls: AtomicUsize::new(0),
                 instrument: Instrument::new(Venue::Binance, symbol),
-                server_time_response: Utc::now(),
-                server_time_event: Mutex::new(None),
-            }
-        }
-
-        fn with_server_time_event(
-            symbol: &str,
-            server_time_response: chrono::DateTime<Utc>,
-            sender: mpsc::Sender<UserDataEvent>,
-            event: UserDataEvent,
-        ) -> Self {
-            Self {
-                inherited_order_present: AtomicBool::new(true),
-                cancel_all_calls: AtomicUsize::new(0),
-                get_position_calls: AtomicUsize::new(0),
-                get_open_orders_calls: AtomicUsize::new(0),
-                instrument: Instrument::new(Venue::Binance, symbol),
-                server_time_response,
-                server_time_event: Mutex::new(Some((sender, event))),
             }
         }
     }
@@ -942,11 +1030,15 @@ mod tests {
             &self,
             _req: poise_engine::ports::OrderRequest,
         ) -> Result<poise_engine::ports::OrderReceipt> {
-            Err(anyhow!("submit_order is not used during startup bootstrap tests"))
+            Err(anyhow!(
+                "submit_order is not used during startup bootstrap tests"
+            ))
         }
 
         async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
-            Err(anyhow!("cancel_order is not used during startup bootstrap tests"))
+            Err(anyhow!(
+                "cancel_order is not used during startup bootstrap tests"
+            ))
         }
 
         async fn cancel_all(&self, instrument: &Instrument) -> Result<()> {
@@ -1012,7 +1104,9 @@ mod tests {
             })
         }
 
-        async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
+        async fn subscribe_user_data(
+            &self,
+        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
         }
@@ -1036,20 +1130,16 @@ mod tests {
         }
 
         async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
-            let event = self.server_time_event.lock().unwrap().take();
-            if let Some((sender, event)) = event {
-                sender
-                    .send(event)
-                    .await
-                    .map_err(|error| anyhow!("failed to inject startup user event: {error}"))?;
-            }
-            Ok(self.server_time_response)
+            Ok(Utc::now())
         }
     }
 
     #[async_trait::async_trait]
     impl poise_engine::ports::MarketDataPort for StartupExchange {
-        async fn subscribe_prices(&self, _instrument: &Instrument) -> Result<mpsc::Receiver<PriceTick>> {
+        async fn subscribe_prices(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<mpsc::Receiver<PriceTick>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
         }

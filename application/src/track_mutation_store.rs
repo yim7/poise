@@ -1,69 +1,45 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use poise_core::events::DomainEvent;
-use poise_engine::snapshot::TrackRuntimeSnapshot;
+use poise_engine::ledger::TrackLedgerState;
+use poise_engine::track::TrackId;
 use poise_engine::transition::TrackEffect;
 
-use crate::track_persistence::{CommittedTrackWrite, EffectStatusUpdate, TrackPersistentState};
+use crate::TrackControlState;
+use crate::track_persistence::{CommittedTrackWrite, EffectStatusUpdate};
 
 #[async_trait]
 pub trait TrackMutationStore: Send + Sync {
-    async fn save_transition_with_effect_status(
+    /// 提交会改变业务真值的 track transition。
+    /// store owner 必须在同一个原子提交里确保 durable truth 完整；
+    /// 如果持久控制真值尚不存在而调用方也没有显式提供 `control_state`，
+    /// 实现需要补齐默认的 `TrackControlState::Enabled { Automatic }`。
+    async fn commit_track_transition(
         &self,
         id: &str,
-        state: &TrackRuntimeSnapshot,
+        control_state: Option<&TrackControlState>,
+        ledger_state: &TrackLedgerState,
         events: &[DomainEvent],
         effects: &[TrackEffect],
         effect_status_update: Option<&EffectStatusUpdate>,
     ) -> Result<CommittedTrackWrite>;
 
-    async fn save_transition(
+    /// 只回写已经持久化 effect 的执行状态，不推进 durable business truth。
+    async fn update_effect_status(
         &self,
         id: &str,
-        state: &TrackRuntimeSnapshot,
-        events: &[DomainEvent],
-        effects: &[TrackEffect],
-    ) -> Result<CommittedTrackWrite> {
-        self.save_transition_with_effect_status(id, state, events, effects, None)
-            .await
-    }
+        effect_status_update: &EffectStatusUpdate,
+    ) -> Result<CommittedTrackWrite>;
 
-    async fn save_transition_bundle_with_effect_status(
-        &self,
-        id: &str,
-        state: &TrackRuntimeSnapshot,
-        persistent_state: &TrackPersistentState,
-        events: &[DomainEvent],
-        effects: &[TrackEffect],
-        effect_status_update: Option<&EffectStatusUpdate>,
-    ) -> Result<CommittedTrackWrite> {
-        let write = self
-            .save_transition_with_effect_status(id, state, events, effects, effect_status_update)
-            .await?;
-        self.save_track_persistent_state(persistent_state).await?;
-        Ok(write)
-    }
-
-    async fn save_transition_bundle(
-        &self,
-        id: &str,
-        state: &TrackRuntimeSnapshot,
-        persistent_state: &TrackPersistentState,
-        events: &[DomainEvent],
-        effects: &[TrackEffect],
-    ) -> Result<CommittedTrackWrite> {
-        self.save_transition_bundle_with_effect_status(
-            id,
-            state,
-            persistent_state,
-            events,
-            effects,
-            None,
-        )
-        .await
-    }
-
-    async fn load_track_state(&self, id: &str) -> Result<Option<TrackRuntimeSnapshot>>;
     async fn list_track_events(&self, id: &str) -> Result<Vec<DomainEvent>>;
-    async fn save_track_persistent_state(&self, state: &TrackPersistentState) -> Result<()>;
+    async fn save_track_control_state(
+        &self,
+        track_id: &TrackId,
+        state: &TrackControlState,
+    ) -> Result<()>;
+    async fn save_track_ledger_state(
+        &self,
+        track_id: &TrackId,
+        state: &TrackLedgerState,
+    ) -> Result<()>;
 }

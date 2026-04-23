@@ -1,13 +1,14 @@
 use chrono::{DateTime, Utc};
+use poise_core::strategy::TrackConfig;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use crate::persisted_runtime::TrackRestoreRevision;
 use poise_core::types::Exposure;
 
 use crate::execution_gate::ExecutionGateState;
 use crate::ledger::TrackLedgerState;
 use crate::runtime::{ExecutorState, RiskState, StrategyPriceStatus, TrackState};
-use crate::track::TrackId;
+use crate::track::{Instrument, TrackId};
 
 fn strategy_price_status_is_stale(status: &StrategyPriceStatus) -> bool {
     matches!(status, StrategyPriceStatus::Stale)
@@ -30,6 +31,25 @@ pub struct ObservedState {
     pub last_tick_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub market_data_stale_since: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackRestoreRevision(String);
+
+impl TrackRestoreRevision {
+    pub fn for_track(instrument: &Instrument, track_config: &TrackConfig) -> Self {
+        let payload = serde_json::json!({
+            "instrument": instrument,
+            "track_config": track_config,
+        });
+        let mut hasher = Sha256::new();
+        hasher.update(payload.to_string().as_bytes());
+        Self(format!("{:x}", hasher.finalize()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

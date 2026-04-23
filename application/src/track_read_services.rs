@@ -16,16 +16,12 @@ impl TrackReadServices {
     pub fn new(
         repository: Arc<dyn TrackQueryStore>,
         prepared_registry: Arc<PreparedTrackRegistry>,
+        observation: Arc<TrackObservationService>,
     ) -> Self {
-        Self::new_with_observation(repository, prepared_registry, None)
-    }
-
-    pub fn new_with_observation(
-        repository: Arc<dyn TrackQueryStore>,
-        prepared_registry: Arc<PreparedTrackRegistry>,
-        observation: Option<Arc<TrackObservationService>>,
-    ) -> Self {
-        let diagnostic_loader = Arc::new(TrackDiagnosticEventLoader::new(repository.clone()));
+        let diagnostic_loader = Arc::new(TrackDiagnosticEventLoader::new(
+            repository.clone(),
+            observation.clone(),
+        ));
         let loader = Arc::new(TrackReadSourceLoader::new(
             repository,
             prepared_registry,

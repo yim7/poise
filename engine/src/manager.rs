@@ -1450,7 +1450,8 @@ mod tests {
                 status: crate::executor::binding::BindingStatus::Working,
                 policy_state: crate::executor::binding::BindingPolicyState::Stateless,
             });
-            track.executor_state.recovery_anomaly = Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder);
+            track.executor_state.recovery_anomaly =
+                Some(crate::executor::RecoveryAnomaly::UnknownLiveOrder);
             track.strategy_price = Some(100.0);
             track.strategy_price_status = StrategyPriceStatus::Live;
             track.best_bid = Some(99.9);

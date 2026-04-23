@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::NaiveDate;
+use poise_engine::ledger::TrackLedgerState;
 use poise_engine::runtime::FreshSessionExternalInputs;
 use poise_engine::track::TrackId;
 
 use crate::mutation_executor::MutationExecutor;
 use crate::{
-    TrackControlState, TrackObservationService, TrackPersistentState, TrackQueryStore,
-    TrackRecoveryIssue,
+    TrackControlState, TrackObservationService, TrackQueryStore, TrackRecoveryIssue,
     runtime_read_state_loader,
 };
 
@@ -42,30 +42,44 @@ impl TrackRuntimeLifecycleService {
         self.executor.prepare_fresh_session_for_activation(id).await
     }
 
-    pub async fn load_track_persistent_state(
+    pub async fn load_track_control_state(
         &self,
         track_id: &TrackId,
-        current_utc_day: NaiveDate,
-    ) -> Result<Option<TrackPersistentState>> {
-        let Some(mut state) = self.query_store.load_track_persistent_state(track_id).await? else {
-            return Ok(None);
-        };
-        state.ledger_state.normalize_utc_day(current_utc_day);
-        Ok(Some(state))
+    ) -> Result<Option<TrackControlState>> {
+        self.query_store.load_track_control_state(track_id).await
     }
 
-    pub async fn apply_track_persistent_state(
+    pub async fn load_track_ledger_state(
         &self,
         track_id: &TrackId,
         current_utc_day: NaiveDate,
-    ) -> Result<bool> {
-        let Some(state) = self
-            .load_track_persistent_state(track_id, current_utc_day)
-            .await?
+    ) -> Result<Option<TrackLedgerState>> {
+        let Some(mut ledger_state) = self.query_store.load_track_ledger_state(track_id).await?
         else {
-            return Ok(false);
+            return Ok(None);
         };
-        self.executor.apply_track_persistent_state(track_id, state).await
+        ledger_state.normalize_utc_day(current_utc_day);
+        Ok(Some(ledger_state))
+    }
+
+    async fn load_persisted_components(
+        &self,
+        track_id: &TrackId,
+        current_utc_day: NaiveDate,
+    ) -> Result<(TrackControlState, TrackLedgerState)> {
+        let control_state = self
+            .load_track_control_state(track_id)
+            .await?
+            .unwrap_or_default();
+        let ledger_state = self
+            .load_track_ledger_state(track_id, current_utc_day)
+            .await?
+            .unwrap_or_else(|| {
+                let mut ledger_state = TrackLedgerState::default();
+                ledger_state.normalize_utc_day(current_utc_day);
+                ledger_state
+            });
+        Ok((control_state, ledger_state))
     }
 
     pub async fn fresh_start_track_runtime(
@@ -74,20 +88,11 @@ impl TrackRuntimeLifecycleService {
         current_utc_day: NaiveDate,
         external_inputs: FreshSessionExternalInputs,
     ) -> Result<bool> {
-        let state = self
-            .load_track_persistent_state(track_id, current_utc_day)
-            .await?
-            .unwrap_or_else(|| {
-                let mut ledger_state = poise_engine::ledger::TrackLedgerState::default();
-                ledger_state.normalize_utc_day(current_utc_day);
-                TrackPersistentState {
-                    track_id: track_id.clone(),
-                    control_state: TrackControlState::default(),
-                    ledger_state,
-                }
-            });
+        let (control_state, ledger_state) = self
+            .load_persisted_components(track_id, current_utc_day)
+            .await?;
         self.executor
-            .fresh_start_track_runtime(track_id, state, external_inputs)
+            .fresh_start_track_runtime(track_id, control_state, ledger_state, external_inputs)
             .await
     }
 
@@ -95,12 +100,9 @@ impl TrackRuntimeLifecycleService {
         &self,
         track_id: &TrackId,
     ) -> Result<Option<TrackRecoverySummary>> {
-        let Some(runtime) = runtime_read_state_loader::load_runtime_read_state(
-            self.query_store.clone(),
-            Some(self.observation.clone()),
-            track_id,
-        )
-        .await?
+        let Some(runtime) =
+            runtime_read_state_loader::load_runtime_read_state(self.observation.as_ref(), track_id)
+                .await?
         else {
             return Ok(None);
         };
@@ -134,12 +136,12 @@ mod tests {
     use poise_core::types::Exposure;
     use poise_engine::executor::RecoveryAnomaly;
     use poise_engine::ledger::TrackLedgerState;
-    use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::ExecutionQuote;
     use poise_engine::runtime::{
         AutoState, ControlState, CurrentMarketData, ExecutorState, FreshSessionExternalInputs,
         RiskState, TrackState,
     };
+    use poise_engine::snapshot::TrackRestoreRevision;
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
 
@@ -148,7 +150,7 @@ mod tests {
     };
     use crate::{
         EffectStatus, PersistedControlMode, TrackControlState, TrackEffectStore,
-        TrackMutationStore, TrackPersistentState, TrackRecoveryIssue, runtime_read_state_loader,
+        TrackMutationStore, TrackRecoveryIssue, runtime_read_state_loader,
     };
 
     #[tokio::test]
@@ -157,16 +159,9 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.executor_state.recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
         snapshot.executor_state.bindings.clear();
-        crate::TrackMutationStore::save_transition(
-            write_repository.as_ref(),
-            "btc-core",
-            &snapshot,
-            &[],
-            &[],
-        )
-        .await
-        .unwrap();
-        let (services, _) = track_write_services(seeded_manager(), write_repository);
+        let mut manager = seeded_manager();
+        manager.restore_track_state(&snapshot).unwrap();
+        let (services, _) = track_write_services(manager, write_repository);
         let service = services.runtime_lifecycle;
 
         let summary = service
@@ -180,110 +175,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_track_persistent_state_normalizes_ledger_utc_day() {
+    async fn load_track_ledger_state_normalizes_utc_day() {
         let repository = Arc::new(MemoryRepository::default());
-        TrackMutationStore::save_track_persistent_state(
+        TrackMutationStore::save_track_control_state(
             repository.as_ref(),
-            &TrackPersistentState {
-                track_id: TrackId::new("btc-core"),
-                control_state: TrackControlState::Paused {
-                    resume_mode: PersistedControlMode::Automatic,
-                },
-                ledger_state: TrackLedgerState {
-                    ledger_utc_day: NaiveDate::from_ymd_opt(2026, 4, 22).unwrap(),
-                    gross_realized_pnl_today: 25.0,
-                    gross_realized_pnl_cumulative: 100.0,
-                    trading_fee_today: 2.0,
-                    trading_fee_cumulative: 8.0,
-                    funding_fee_today: -1.0,
-                    funding_fee_cumulative: -4.0,
-                    unresolved_gaps: vec![],
-                },
+            &TrackId::new("btc-core"),
+            &TrackControlState::Paused {
+                resume_mode: PersistedControlMode::Automatic,
+            },
+        )
+        .await
+        .unwrap();
+        TrackMutationStore::save_track_ledger_state(
+            repository.as_ref(),
+            &TrackId::new("btc-core"),
+            &TrackLedgerState {
+                ledger_utc_day: NaiveDate::from_ymd_opt(2026, 4, 22).unwrap(),
+                gross_realized_pnl_today: 25.0,
+                gross_realized_pnl_cumulative: 100.0,
+                trading_fee_today: 2.0,
+                trading_fee_cumulative: 8.0,
+                funding_fee_today: -1.0,
+                funding_fee_cumulative: -4.0,
+                unresolved_gaps: vec![],
             },
         )
         .await
         .unwrap();
         let (services, _) = track_write_services(seeded_manager(), repository);
 
-        let state = services
+        let ledger_state = services
             .runtime_lifecycle
-            .load_track_persistent_state(
+            .load_track_ledger_state(
                 &TrackId::new("btc-core"),
                 NaiveDate::from_ymd_opt(2026, 4, 23).unwrap(),
             )
             .await
             .unwrap()
             .unwrap();
+        let control_state = services
+            .runtime_lifecycle
+            .load_track_control_state(&TrackId::new("btc-core"))
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
-            state.ledger_state.ledger_utc_day,
+            ledger_state.ledger_utc_day,
             NaiveDate::from_ymd_opt(2026, 4, 23).unwrap()
         );
-        assert_eq!(state.ledger_state.gross_realized_pnl_today, 0.0);
-        assert_eq!(state.ledger_state.trading_fee_today, 0.0);
-        assert_eq!(state.ledger_state.funding_fee_today, 0.0);
-        assert_eq!(state.ledger_state.gross_realized_pnl_cumulative, 100.0);
-        assert_eq!(state.control_state, TrackControlState::Paused {
-            resume_mode: PersistedControlMode::Automatic,
-        });
+        assert_eq!(ledger_state.gross_realized_pnl_today, 0.0);
+        assert_eq!(ledger_state.trading_fee_today, 0.0);
+        assert_eq!(ledger_state.funding_fee_today, 0.0);
+        assert_eq!(ledger_state.gross_realized_pnl_cumulative, 100.0);
+        assert_eq!(
+            control_state,
+            TrackControlState::Paused {
+                resume_mode: PersistedControlMode::Automatic,
+            }
+        );
     }
 
     #[tokio::test]
-    async fn apply_track_persistent_state_rehydrates_manager_from_persistent_store() {
+    async fn fresh_start_track_runtime_rebuilds_manager_from_persistent_state_and_external_inputs()
+    {
         let repository = Arc::new(MemoryRepository::default());
-        TrackMutationStore::save_track_persistent_state(
+        TrackMutationStore::save_track_control_state(
             repository.as_ref(),
-            &TrackPersistentState {
-                track_id: TrackId::new("btc-core"),
-                control_state: TrackControlState::Paused {
-                    resume_mode: PersistedControlMode::Automatic,
-                },
-                ledger_state: TrackLedgerState {
-                    gross_realized_pnl_cumulative: 42.0,
-                    ..TrackLedgerState::default()
-                },
+            &TrackId::new("btc-core"),
+            &TrackControlState::Paused {
+                resume_mode: PersistedControlMode::Automatic,
             },
         )
         .await
         .unwrap();
-
-        let (services, _) = track_write_services(seeded_manager(), repository.clone());
-
-        assert!(
-            services
-                .runtime_lifecycle
-                .apply_track_persistent_state(
-                    &TrackId::new("btc-core"),
-                    Utc::now().date_naive(),
-                )
-                .await
-                .unwrap()
-        );
-        let snapshot = services
-            .runtime_lifecycle
-            .manager()
-            .read()
-            .await
-            .snapshot("btc-core")
-            .unwrap();
-        assert_eq!(snapshot.status(), poise_engine::runtime::TrackStatus::Paused);
-        assert_eq!(snapshot.ledger_state.gross_realized_pnl_cumulative, 42.0);
-    }
-
-    #[tokio::test]
-    async fn fresh_start_track_runtime_rebuilds_manager_from_persistent_state_and_external_inputs() {
-        let repository = Arc::new(MemoryRepository::default());
-        TrackMutationStore::save_track_persistent_state(
+        TrackMutationStore::save_track_ledger_state(
             repository.as_ref(),
-            &TrackPersistentState {
-                track_id: TrackId::new("btc-core"),
-                control_state: TrackControlState::Paused {
-                    resume_mode: PersistedControlMode::Automatic,
-                },
-                ledger_state: TrackLedgerState {
-                    gross_realized_pnl_cumulative: 42.0,
-                    ..TrackLedgerState::default()
-                },
+            &TrackId::new("btc-core"),
+            &TrackLedgerState {
+                gross_realized_pnl_cumulative: 42.0,
+                ..TrackLedgerState::default()
             },
         )
         .await
@@ -334,7 +305,10 @@ mod tests {
         let manager = services.runtime_lifecycle.manager();
         let manager = manager.read().await;
         let snapshot = manager.snapshot("btc-core").unwrap();
-        assert_eq!(snapshot.status(), poise_engine::runtime::TrackStatus::Paused);
+        assert_eq!(
+            snapshot.status(),
+            poise_engine::runtime::TrackStatus::Paused
+        );
         assert_eq!(snapshot.current_exposure, Exposure(1.5));
         assert_eq!(snapshot.desired_exposure, None);
         assert!(snapshot.executor_state.bindings.is_empty());
@@ -368,8 +342,7 @@ mod tests {
             .unwrap();
 
         let runtime = runtime_read_state_loader::load_runtime_read_state(
-            repository.clone(),
-            Some(Arc::new(services.observation.clone())),
+            &services.observation,
             &TrackId::new("btc-core"),
         )
         .await
@@ -385,11 +358,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_track_recovery_summary_reads_live_runtime_without_persisted_snapshot() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository);
+        {
+            let manager_handle = services.runtime_lifecycle.manager();
+            let mut manager = manager_handle.write().await;
+            let mut snapshot = manager.snapshot("btc-core").unwrap();
+            snapshot.executor_state.recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
+            manager.restore_track_state(&snapshot).unwrap();
+        }
+
+        let summary = services
+            .runtime_lifecycle
+            .load_track_recovery_summary(&TrackId::new("btc-core"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(summary.issue, Some(TrackRecoveryIssue::UnknownLiveOrder));
+    }
+
+    #[tokio::test]
     async fn prepare_fresh_session_for_activation_clears_old_pending_work_and_executor_state() {
         let repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
         repository.seed_pending_mixed_effect_batch("btc-core", "btc-core:batch-1");
-        let snapshot = services
+        let _snapshot = services
             .runtime_lifecycle
             .manager()
             .read()
@@ -402,18 +397,15 @@ mod tests {
             .find(|effect| effect.sequence == 0)
             .map(|effect| effect.effect_id)
             .unwrap();
-        crate::TrackMutationStore::save_transition_with_effect_status(
+        crate::TrackMutationStore::update_effect_status(
             repository.as_ref(),
             "btc-core",
-            &snapshot,
-            &[],
-            &[],
-            Some(&crate::EffectStatusUpdate {
+            &crate::EffectStatusUpdate {
                 effect_id: executing_effect_id,
                 status: EffectStatus::Executing,
                 attempt_delta: 0,
                 last_error: None,
-            }),
+            },
         )
         .await
         .unwrap();
@@ -467,7 +459,10 @@ mod tests {
         let effects = repository.pending_effects();
         assert!(snapshot.executor_state.bindings.is_empty());
         assert!(snapshot.executor_state.recovery_anomaly.is_none());
-        assert_eq!(snapshot.executor_state.ledger_state.ledger_anchor_exposure, Exposure(0.0));
+        assert_eq!(
+            snapshot.executor_state.ledger_state.ledger_anchor_exposure,
+            Exposure(0.0)
+        );
         let btc_statuses = effects
             .iter()
             .filter(|effect| effect.track_id == TrackId::new("btc-core"))

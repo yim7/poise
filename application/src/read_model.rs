@@ -564,12 +564,12 @@ mod tests {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::SubmitRecoveryToken;
-    use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::{
         AutoState, ControlState, ExecutorState, RiskState, StrategyPriceStatus, TrackLiveView,
         TrackState, TrackStatus,
     };
+    use poise_engine::snapshot::TrackRestoreRevision;
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
@@ -613,35 +613,38 @@ mod tests {
                     total_loss_limit: 300.0,
                 },
             },
-            runtime: TrackRuntimeReadState::from_snapshot(TrackRuntimeSnapshot {
-                track_id: TrackId::new("btc-core"),
-                restore_revision: TrackRestoreRevision::for_track(
-                    &Instrument::new(Venue::Binance, "BTCUSDT"),
-                    &track_config,
-                ),
-                runtime_state: active_runtime_state(),
-                current_exposure: Exposure(3.5),
-                desired_exposure: Some(Exposure(4.0)),
-                executor_state: ExecutorState::empty(
-                    Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                ),
-                ledger_state: Default::default(),
-                execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
-                risk: RiskState {
-                    unrealized_pnl: 0.0,
-                    ..RiskState::default()
+            runtime: TrackRuntimeReadState::from_parts(
+                TrackRuntimeSnapshot {
+                    track_id: TrackId::new("btc-core"),
+                    restore_revision: TrackRestoreRevision::for_track(
+                        &Instrument::new(Venue::Binance, "BTCUSDT"),
+                        &track_config,
+                    ),
+                    runtime_state: active_runtime_state(),
+                    current_exposure: Exposure(3.5),
+                    desired_exposure: Some(Exposure(4.0)),
+                    executor_state: ExecutorState::empty(
+                        Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
+                    ),
+                    ledger_state: Default::default(),
+                    execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
+                    risk: RiskState {
+                        unrealized_pnl: 0.0,
+                        ..RiskState::default()
+                    },
+                    observed: ObservedState {
+                        strategy_price: Some(101.25),
+                        strategy_price_status: StrategyPriceStatus::Live,
+                        mark_price: Some(101.5),
+                        best_bid: Some(101.0),
+                        best_ask: Some(101.5),
+                        out_of_band_since: None,
+                        last_tick_at: None,
+                        market_data_stale_since: None,
+                    },
                 },
-                observed: ObservedState {
-                    strategy_price: Some(101.25),
-                    strategy_price_status: StrategyPriceStatus::Live,
-                    mark_price: Some(101.5),
-                    best_bid: Some(101.0),
-                    best_ask: Some(101.5),
-                    out_of_band_since: None,
-                    last_tick_at: None,
-                    market_data_stale_since: None,
-                },
-            }),
+                TrackLiveView::default(),
+            ),
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             recent_track_events: vec![StoredTrackEvent {
                 id: 1,

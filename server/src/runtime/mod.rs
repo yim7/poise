@@ -9,12 +9,12 @@ use crate::test_support::RuntimeTestContext;
 use anyhow::{Result, anyhow};
 use poise_application::TrackMutationError;
 use poise_application::TrackStartupDefinition;
+use poise_core::types::Exposure;
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::ports::{
     AccountPort, AccountSummaryPort, ClockPort, ExecutionPort, MarketDataPort, MetadataPort,
     UserDataEvent,
 };
-use poise_core::types::Exposure;
 use poise_engine::track::{Instrument, TrackId};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -249,16 +249,14 @@ impl ServerRuntime {
             self.metadata.get_server_time()
         })
         .await?;
-        let steady_state_cutoff =
-            startup_bootstrap::complete_startup(self, &mut user_receiver, startup_cutoff).await?;
+        startup_bootstrap::complete_startup(self, &mut user_receiver, startup_cutoff).await?;
         let account_task = self.spawn_account_task(self.shutdown_tx.subscribe());
         let recovery_task = self.spawn_recovery_task(self.shutdown_tx.subscribe());
         let market_data_health_task =
             self.spawn_market_data_health_task(self.shutdown_tx.subscribe());
         let submit_preflight_task = self.spawn_submit_preflight_task(self.shutdown_tx.subscribe());
         let effect_task = self.spawn_effect_task(self.shutdown_tx.subscribe());
-        let user_task =
-            self.spawn_user_task(user_receiver, steady_state_cutoff, self.shutdown_tx.subscribe());
+        let user_task = self.spawn_user_task(user_receiver, self.shutdown_tx.subscribe());
         let market_task = self.spawn_market_task(self.shutdown_tx.subscribe());
 
         Ok(RuntimeHandles {
@@ -368,10 +366,9 @@ impl ServerRuntime {
     fn spawn_user_task(
         &self,
         receiver: mpsc::Receiver<UserDataEvent>,
-        startup_cutoff: chrono::DateTime<chrono::Utc>,
         shutdown_rx: watch::Receiver<bool>,
     ) -> JoinHandle<()> {
-        user_data::spawn_user_task(self, receiver, startup_cutoff, shutdown_rx)
+        user_data::spawn_user_task(self, receiver, shutdown_rx)
     }
 }
 

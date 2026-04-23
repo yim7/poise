@@ -5,11 +5,11 @@ use poise_protocol::{
     ExecutionBindingPolicyView, ExecutionBindingStatusView, ExecutionBindingView,
     ExecutionStateView, ExecutionStatusView, ExposureSummaryView, InstrumentView,
     ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, StrategyPriceStatusView,
-    TrackActivityItemView, TrackCommandType, TrackCommandView, TrackDetailView,
-    TrackExecutionView, TrackIdentityView, TrackLedgerGapReasonView, TrackLedgerGapView,
-    TrackLedgerView, TrackLifecycleView, TrackListItemView, TrackListLedgerView,
-    TrackLossLimitsView, TrackMarketView, TrackPositionView, TrackStatus as ProtocolTrackStatus,
-    TrackStatusPanelView, TrackStrategyView,
+    TrackActivityItemView, TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionView,
+    TrackIdentityView, TrackLedgerGapReasonView, TrackLedgerGapView, TrackLedgerView,
+    TrackLifecycleView, TrackListItemView, TrackListLedgerView, TrackLossLimitsView,
+    TrackMarketView, TrackPositionView, TrackStatus as ProtocolTrackStatus, TrackStatusPanelView,
+    TrackStrategyView,
 };
 
 use poise_application::{

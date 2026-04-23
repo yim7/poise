@@ -226,10 +226,7 @@ impl TrackStartupDefinition {
 }
 
 pub fn curve_max_notional(config: &TrackConfig) -> f64 {
-    config
-        .long_exposure_units
-        .max(config.short_exposure_units)
-        * config.notional_per_unit
+    config.long_exposure_units.max(config.short_exposure_units) * config.notional_per_unit
 }
 
 pub fn effective_max_notional(config: &TrackConfig, max_notional: f64) -> f64 {

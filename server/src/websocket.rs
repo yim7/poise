@@ -706,14 +706,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use anyhow::{Result, anyhow};
+    use anyhow::Result;
     use axum::Router;
     use chrono::{TimeZone, Utc};
     use futures_util::{SinkExt, StreamExt};
     use poise_application::{
         CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
-        PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackEffectStore,
-        TrackMutationStore, TrackQueryStore,
+        PersistedTrackEffect, StoredTrackEvent, TrackEffectStore, TrackMutationStore,
+        TrackQueryStore,
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
@@ -800,10 +800,10 @@ mod tests {
             notifications,
             account_margin_guard.clone(),
         );
-        let query_service = Arc::new(TrackQueryService::new_with_observation(
+        let query_service = Arc::new(TrackQueryService::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
             test_prepared_registry("btc-core"),
-            Some(Arc::clone(&services.observation_service)),
+            Arc::clone(&services.observation_service),
         ));
         let websocket_state = build_websocket_state(
             &services,
@@ -848,10 +848,10 @@ mod tests {
             notifications,
             account_margin_guard.clone(),
         );
-        let query_service = Arc::new(TrackQueryService::new_with_observation(
+        let query_service = Arc::new(TrackQueryService::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
             test_prepared_registry("btc-core"),
-            Some(Arc::clone(&services.observation_service)),
+            Arc::clone(&services.observation_service),
         ));
         let websocket_state = build_websocket_state(
             &services,
@@ -901,10 +901,10 @@ mod tests {
             notifications,
             account_margin_guard.clone(),
         );
-        let query_service = Arc::new(TrackQueryService::new_with_observation(
+        let query_service = Arc::new(TrackQueryService::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
             test_prepared_registry("btc-core"),
-            Some(Arc::clone(&services.observation_service)),
+            Arc::clone(&services.observation_service),
         ));
         let mut websocket_state = build_websocket_state(
             &services,
@@ -1303,7 +1303,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closes_socket_when_track_read_model_is_missing_for_notification() {
+    async fn missing_persisted_updated_at_does_not_close_socket_for_notification() {
         let repository = seeded_repository();
         repository.remove_snapshot("btc-core");
         let (url, state) = spawn_server(repository).await;
@@ -1316,24 +1316,13 @@ mod tests {
                 track_id: TrackId::new("btc-core"),
             });
 
-        let next = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                match stream.next().await {
-                    None => return None,
-                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(frame))) => {
-                        return Some(frame);
-                    }
-                    Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_)))
-                    | Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(_))) => continue,
-                    Some(other) => {
-                        panic!("unexpected websocket message after missing read model: {other:?}")
-                    }
-                }
-            }
-        })
-        .await
-        .expect("missing read model should close websocket for resync");
-        assert!(matches!(next, None | Some(_)));
+        let event = tokio::time::timeout(Duration::from_secs(1), recv_event(&mut stream))
+            .await
+            .expect("missing persisted updated_at should still allow websocket projection");
+        assert!(matches!(
+            event,
+            StreamEvent::TrackListItemChanged { ref track_id, .. } if track_id == "btc-core"
+        ));
     }
 
     #[tokio::test]
@@ -1549,7 +1538,8 @@ mod tests {
 
     fn seed_snapshot_ledger(snapshot: &mut poise_engine::snapshot::TrackRuntimeSnapshot) {
         snapshot.risk.unrealized_pnl = 265.2;
-        snapshot.ledger_state.ledger_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
+        snapshot.ledger_state.ledger_utc_day =
+            chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
         snapshot.ledger_state.gross_realized_pnl_today = 980.1;
         snapshot.ledger_state.gross_realized_pnl_cumulative = 980.1;
         snapshot.ledger_state.trading_fee_cumulative = 12.3;
@@ -1581,8 +1571,9 @@ mod tests {
 
     #[derive(Default)]
     struct TestRepository {
-        snapshots: Mutex<HashMap<String, StoredTrackSnapshot>>,
-        persistent_states: Mutex<HashMap<String, poise_application::TrackPersistentState>>,
+        updated_at: Mutex<HashMap<String, chrono::DateTime<Utc>>>,
+        control_states: Mutex<HashMap<String, poise_application::TrackControlState>>,
+        ledger_states: Mutex<HashMap<String, poise_engine::ledger::TrackLedgerState>>,
         events: Mutex<HashMap<String, Vec<StoredTrackEvent>>>,
         effects: Mutex<Vec<PersistedTrackEffect>>,
         next_event_id: Mutex<i64>,
@@ -1593,13 +1584,10 @@ mod tests {
 
     impl TestRepository {
         fn seed_snapshot(&self, snapshot: poise_engine::snapshot::TrackRuntimeSnapshot) {
-            self.snapshots.lock().unwrap().insert(
-                snapshot.track_id.as_str().to_string(),
-                StoredTrackSnapshot {
-                    snapshot,
-                    updated_at: Utc::now(),
-                },
-            );
+            self.updated_at
+                .lock()
+                .unwrap()
+                .insert(snapshot.track_id.as_str().to_string(), Utc::now());
         }
 
         fn set_read_delay(&self, delay: Duration) {
@@ -1607,7 +1595,7 @@ mod tests {
         }
 
         fn remove_snapshot(&self, track_id: &str) {
-            self.snapshots.lock().unwrap().remove(track_id);
+            self.updated_at.lock().unwrap().remove(track_id);
         }
 
         fn set_load_snapshot_error(&self, error: &str) {
@@ -1643,22 +1631,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackMutationStore for TestRepository {
-        async fn save_transition_with_effect_status(
+        async fn commit_track_transition(
             &self,
             id: &str,
-            state: &poise_engine::snapshot::TrackRuntimeSnapshot,
+            control_state: Option<&poise_application::TrackControlState>,
+            ledger_state: &poise_engine::ledger::TrackLedgerState,
             events: &[poise_core::events::DomainEvent],
             effects: &[TrackEffect],
             effect_status_update: Option<&EffectStatusUpdate>,
         ) -> Result<CommittedTrackWrite> {
             let now = Utc::now();
-            self.snapshots.lock().unwrap().insert(
-                id.to_string(),
-                StoredTrackSnapshot {
-                    snapshot: state.clone(),
-                    updated_at: now,
-                },
-            );
             if !events.is_empty() {
                 let mut next_event_id = self.next_event_id.lock().unwrap();
                 let mut stored_events = self.events.lock().unwrap();
@@ -1708,23 +1690,42 @@ mod tests {
                 effect.updated_at = now;
             }
 
+            let track_id = TrackId::new(id);
+            if let Some(control_state) = control_state {
+                self.save_track_control_state(&track_id, control_state)
+                    .await?;
+            }
+            self.save_track_ledger_state(&track_id, ledger_state)
+                .await?;
+
             Ok(CommittedTrackWrite {
-                track_id: TrackId::new(id),
+                track_id,
                 effects: persisted_effects,
             })
         }
 
-        async fn load_track_state(
+        async fn update_effect_status(
             &self,
             id: &str,
-        ) -> Result<Option<poise_engine::snapshot::TrackRuntimeSnapshot>> {
-            Ok(self
-                .snapshots
+            effect_status_update: &EffectStatusUpdate,
+        ) -> Result<CommittedTrackWrite> {
+            let now = Utc::now();
+            if let Some(effect) = self
+                .effects
                 .lock()
                 .unwrap()
-                .get(id)
-                .cloned()
-                .map(|stored| stored.snapshot))
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_status_update.effect_id)
+            {
+                effect.status = effect_status_update.status;
+                effect.attempt_count += effect_status_update.attempt_delta;
+                effect.last_error = effect_status_update.last_error.clone();
+                effect.updated_at = now;
+            }
+            Ok(CommittedTrackWrite {
+                track_id: TrackId::new(id),
+                effects: Vec::new(),
+            })
         }
 
         async fn list_track_events(
@@ -1743,14 +1744,27 @@ mod tests {
                 .collect())
         }
 
-        async fn save_track_persistent_state(
+        async fn save_track_control_state(
             &self,
-            state: &poise_application::TrackPersistentState,
+            track_id: &TrackId,
+            state: &poise_application::TrackControlState,
         ) -> Result<()> {
-            self.persistent_states
+            self.control_states
                 .lock()
                 .unwrap()
-                .insert(state.track_id.as_str().to_string(), state.clone());
+                .insert(track_id.as_str().to_string(), state.clone());
+            Ok(())
+        }
+
+        async fn save_track_ledger_state(
+            &self,
+            track_id: &TrackId,
+            state: &poise_engine::ledger::TrackLedgerState,
+        ) -> Result<()> {
+            self.ledger_states
+                .lock()
+                .unwrap()
+                .insert(track_id.as_str().to_string(), state.clone());
             Ok(())
         }
     }
@@ -1806,7 +1820,10 @@ mod tests {
                 .iter()
                 .filter(|effect| effect.track_id == *track_id)
                 .filter(|effect| {
-                    matches!(effect.status, EffectStatus::Pending | EffectStatus::Executing)
+                    matches!(
+                        effect.status,
+                        EffectStatus::Pending | EffectStatus::Executing
+                    )
                 })
                 .cloned()
                 .collect())
@@ -1872,34 +1889,41 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackQueryStore for TestRepository {
-        async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
-            self.maybe_delay_read().await;
-            Ok(self.snapshots.lock().unwrap().values().cloned().collect())
-        }
-
-        async fn load_track_snapshot(
+        async fn load_track_updated_at(
             &self,
             track_id: &TrackId,
-        ) -> Result<Option<StoredTrackSnapshot>> {
+        ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
             self.maybe_delay_read().await;
-            *self.load_snapshot_calls.lock().unwrap() += 1;
             if let Some(error) = self.load_snapshot_error.lock().unwrap().clone() {
-                return Err(anyhow!(error));
+                return Err(anyhow::anyhow!(error));
             }
+            *self.load_snapshot_calls.lock().unwrap() += 1;
             Ok(self
-                .snapshots
+                .updated_at
+                .lock()
+                .unwrap()
+                .get(track_id.as_str())
+                .copied())
+        }
+
+        async fn load_track_control_state(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<poise_application::TrackControlState>> {
+            Ok(self
+                .control_states
                 .lock()
                 .unwrap()
                 .get(track_id.as_str())
                 .cloned())
         }
 
-        async fn load_track_persistent_state(
+        async fn load_track_ledger_state(
             &self,
             track_id: &TrackId,
-        ) -> Result<Option<poise_application::TrackPersistentState>> {
+        ) -> Result<Option<poise_engine::ledger::TrackLedgerState>> {
             Ok(self
-                .persistent_states
+                .ledger_states
                 .lock()
                 .unwrap()
                 .get(track_id.as_str())

@@ -12,13 +12,12 @@ use crate::executor::binding::LiveOrderBinding;
 use crate::executor::boundary::{ProfileRevision, profile_revision_for_config};
 use crate::executor::ledger::BoundaryLedgerState;
 use crate::ledger::TrackLedgerState;
-use crate::persisted_runtime::TrackRestoreRevision;
 use crate::ports::ExecutionQuote;
 use crate::price_gate::{
     PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
 };
 use crate::reconciler;
-use crate::snapshot::{ObservedState, TrackRuntimeSnapshot};
+use crate::snapshot::{ObservedState, TrackRestoreRevision, TrackRuntimeSnapshot};
 use crate::track::{Instrument, TrackId};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -397,8 +396,8 @@ impl TrackRuntime {
         fresh.track_state = track_state.clone();
         fresh.current_exposure = current_exposure.clone();
         fresh.desired_exposure = track_state.manual_target_override();
-        fresh.executor_state = ExecutorState::empty(started_at)
-            .ensure_revision(&fresh.config, current_exposure);
+        fresh.executor_state =
+            ExecutorState::empty(started_at).ensure_revision(&fresh.config, current_exposure);
         fresh.ledger_state = ledger_state;
         fresh.execution_gate_state = ExecutionGateState::open();
         fresh.price_execution_gate = PriceExecutionGate::NoSubmit {
@@ -559,7 +558,6 @@ impl TrackRuntime {
 
         Some(reconciler::reconcile_target(self, strategy_price).desired_exposure)
     }
-
 }
 
 #[cfg(test)]
@@ -661,7 +659,10 @@ mod tests {
         let fresh = runtime.fresh_start(
             TrackState::WaitingMarketData,
             TrackLedgerState {
-                ledger_utc_day: Utc.with_ymd_and_hms(2026, 4, 23, 0, 0, 0).unwrap().date_naive(),
+                ledger_utc_day: Utc
+                    .with_ymd_and_hms(2026, 4, 23, 0, 0, 0)
+                    .unwrap()
+                    .date_naive(),
                 gross_realized_pnl_cumulative: 55.0,
                 ..TrackLedgerState::default()
             },
@@ -683,7 +684,10 @@ mod tests {
 
         assert_eq!(fresh.current_exposure, Exposure(2.5));
         assert_eq!(fresh.exchange_rules.price_tick, 0.5);
-        assert_eq!(fresh.executor_state.bindings, Vec::<LiveOrderBinding>::new());
+        assert_eq!(
+            fresh.executor_state.bindings,
+            Vec::<LiveOrderBinding>::new()
+        );
         assert_eq!(fresh.executor_state.recent_terminal_orders.len(), 0);
         assert!(fresh.executor_state.recovery_anomaly.is_none());
         assert_eq!(
@@ -788,7 +792,8 @@ mod tests {
     }
 
     fn dirty_executor_state() -> ExecutorState {
-        let mut state = ExecutorState::empty(Utc::now()).ensure_revision(&test_config(), Exposure(7.0));
+        let mut state =
+            ExecutorState::empty(Utc::now()).ensure_revision(&test_config(), Exposure(7.0));
         let boundary_id = BoundaryId {
             profile_revision: state.ledger_state.profile_revision.clone(),
             lower_exposure_bp: 0,

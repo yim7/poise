@@ -57,7 +57,7 @@ impl TrackControlState {
         }
     }
 
-    pub(crate) fn from_runtime_state_for_write(track_state: &TrackState) -> Self {
+    pub fn from_runtime_state_for_write(track_state: &TrackState) -> Self {
         match track_state {
             TrackState::WaitingMarketData => Self::Enabled {
                 mode: PersistedControlMode::Automatic,

@@ -20,14 +20,7 @@ impl TrackQueryService {
     pub fn new(
         repository: Arc<dyn TrackQueryStore>,
         prepared_registry: Arc<PreparedTrackRegistry>,
-    ) -> Self {
-        Self::new_with_observation(repository, prepared_registry, None)
-    }
-
-    pub fn new_with_observation(
-        repository: Arc<dyn TrackQueryStore>,
-        prepared_registry: Arc<PreparedTrackRegistry>,
-        observation: Option<Arc<TrackObservationService>>,
+        observation: Arc<TrackObservationService>,
     ) -> Self {
         Self::from_loader(Arc::new(TrackReadSourceLoader::new(
             repository,
@@ -55,16 +48,16 @@ mod tests {
 
     use anyhow::Result;
     use async_trait::async_trait;
-    use chrono::{TimeZone, Utc};
+    use chrono::{NaiveDate, TimeZone, Utc};
     use poise_core::events::DomainEvent;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::observation::MarketObservation;
-    use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::ExecutionQuote;
     use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::{AutoState, ControlState, ExecutorState, RiskState, TrackState};
+    use poise_engine::snapshot::TrackRestoreRevision;
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
@@ -74,7 +67,7 @@ mod tests {
     };
     use crate::{
         ConfiguredTrackDefinition, ConfiguredTrackInput, EffectStatus, PersistedTrackEffect,
-        PreparedTrackRegistry, StoredTrackEvent, StoredTrackSnapshot, TrackQueryStore,
+        PreparedTrackRegistry, StoredTrackEvent, TrackQueryStore,
         track_read_source_loader::TrackReadSourceLoader,
     };
 
@@ -128,10 +121,12 @@ mod tests {
 
     #[tokio::test]
     async fn internal_loader_reads_raw_source_for_detail_paths() {
+        let live_repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), live_repository);
         let source = TrackReadSourceLoader::new(
             Arc::new(FakeReadRepository::new()),
             test_prepared_registry(),
-            None,
+            Arc::new(services.observation),
         )
         .load_track_read_source(&TrackId::new("btc-core"))
         .await
@@ -161,10 +156,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let service = TrackQueryService::new_with_observation(
+        let service = TrackQueryService::new(
             repository,
             test_prepared_registry(),
-            Some(Arc::new(services.observation)),
+            Arc::new(services.observation),
         );
 
         let source = service
@@ -179,9 +174,89 @@ mod tests {
         assert_eq!(source.strategy_price, Some(95.0));
     }
 
+    #[tokio::test]
+    async fn load_track_detail_source_keeps_live_runtime_ledger_when_persisted_today_is_stale() {
+        let repository = Arc::new(FakeReadRepository::new().with_track_ledger_state(
+            "btc-core",
+            poise_engine::ledger::TrackLedgerState {
+                ledger_utc_day: NaiveDate::from_ymd_opt(2026, 4, 22).unwrap(),
+                gross_realized_pnl_today: 25.0,
+                gross_realized_pnl_cumulative: 100.0,
+                trading_fee_today: 2.0,
+                trading_fee_cumulative: 8.0,
+                funding_fee_today: -1.0,
+                funding_fee_cumulative: -4.0,
+                unresolved_gaps: vec![],
+            },
+        ));
+        let live_repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), live_repository);
+        let service = TrackQueryService::new(
+            repository,
+            test_prepared_registry(),
+            Arc::new(services.observation),
+        );
+
+        let source = service
+            .load_track_detail_source(&TrackId::new("btc-core"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(source.ledger_state.gross_realized_pnl_today, 0.0);
+        assert_eq!(source.ledger_state.trading_fee_today, 0.0);
+        assert_eq!(source.ledger_state.funding_fee_today, 0.0);
+    }
+
+    #[tokio::test]
+    async fn list_track_sources_reads_live_runtime_without_persisted_snapshot() {
+        let repository = Arc::new(FakeReadRepository::without_snapshots());
+        let live_repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), live_repository);
+        let service = TrackQueryService::new(
+            repository,
+            test_prepared_registry(),
+            Arc::new(services.observation),
+        );
+
+        let sources = service.list_track_sources().await.unwrap();
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].track_id, "btc-core");
+        assert_eq!(sources[0].current_exposure, 0.0);
+    }
+
+    #[tokio::test]
+    async fn load_detail_source_reads_live_runtime_without_persisted_snapshot() {
+        let repository = Arc::new(FakeReadRepository::without_snapshots());
+        let live_repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), live_repository);
+        let service = TrackQueryService::new(
+            repository,
+            test_prepared_registry(),
+            Arc::new(services.observation),
+        );
+
+        let source = service
+            .load_track_detail_source(&TrackId::new("btc-core"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(source.track_id, "btc-core");
+        assert_eq!(source.current_exposure, 0.0);
+        assert_eq!(source.recent_activity.len(), 1);
+    }
+
     fn test_query_service() -> (TrackQueryService, Arc<FakeReadRepository>) {
         let repository = Arc::new(FakeReadRepository::new());
-        let service = TrackQueryService::new(repository.clone(), test_prepared_registry());
+        let live_repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), live_repository);
+        let service = TrackQueryService::new(
+            repository.clone(),
+            test_prepared_registry(),
+            Arc::new(services.observation),
+        );
         (service, repository)
     }
 
@@ -212,9 +287,10 @@ mod tests {
     }
 
     struct FakeReadRepository {
-        snapshots: HashMap<String, StoredTrackSnapshot>,
+        updated_at: HashMap<String, chrono::DateTime<Utc>>,
         events: HashMap<String, Vec<StoredTrackEvent>>,
         effects: HashMap<String, Vec<PersistedTrackEffect>>,
+        ledger_states: HashMap<String, poise_engine::ledger::TrackLedgerState>,
         effect_limits: std::sync::Mutex<Vec<usize>>,
     }
 
@@ -225,13 +301,7 @@ mod tests {
             let updated_at = Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap();
 
             Self {
-                snapshots: HashMap::from([(
-                    track_id.as_str().to_string(),
-                    StoredTrackSnapshot {
-                        snapshot,
-                        updated_at,
-                    },
-                )]),
+                updated_at: HashMap::from([(track_id.as_str().to_string(), updated_at)]),
                 events: HashMap::from([(
                     track_id.as_str().to_string(),
                     vec![StoredTrackEvent {
@@ -271,28 +341,34 @@ mod tests {
                         updated_at,
                     }],
                 )]),
+                ledger_states: HashMap::new(),
                 effect_limits: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn without_snapshots() -> Self {
+            let mut repository = Self::new();
+            repository.updated_at.clear();
+            repository
         }
 
         fn recorded_effect_limits(&self) -> Vec<usize> {
             self.effect_limits.lock().unwrap().clone()
         }
+
+        fn with_track_ledger_state(
+            mut self,
+            track_id: &str,
+            ledger_state: poise_engine::ledger::TrackLedgerState,
+        ) -> Self {
+            self.ledger_states
+                .insert(track_id.to_string(), ledger_state);
+            self
+        }
     }
 
     #[async_trait]
     impl TrackQueryStore for FakeReadRepository {
-        async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
-            Ok(self.snapshots.values().cloned().collect())
-        }
-
-        async fn load_track_snapshot(
-            &self,
-            track_id: &TrackId,
-        ) -> Result<Option<StoredTrackSnapshot>> {
-            Ok(self.snapshots.get(track_id.as_str()).cloned())
-        }
-
         async fn list_recent_track_events(
             &self,
             track_id: &TrackId,
@@ -318,11 +394,25 @@ mod tests {
                 .unwrap_or_default())
         }
 
-        async fn load_track_persistent_state(
+        async fn load_track_control_state(
             &self,
             _track_id: &TrackId,
-        ) -> Result<Option<crate::TrackPersistentState>> {
+        ) -> Result<Option<crate::TrackControlState>> {
             Ok(None)
+        }
+
+        async fn load_track_ledger_state(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<poise_engine::ledger::TrackLedgerState>> {
+            Ok(self.ledger_states.get(track_id.as_str()).cloned())
+        }
+
+        async fn load_track_updated_at(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<chrono::DateTime<Utc>>> {
+            Ok(self.updated_at.get(track_id.as_str()).copied())
         }
     }
 

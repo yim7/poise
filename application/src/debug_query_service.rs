@@ -57,17 +57,20 @@ mod tests {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::SubmitRecoveryToken;
-    use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::{AutoState, ControlState, ExecutorState, RiskState, TrackState};
+    use poise_engine::snapshot::TrackRestoreRevision;
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
 
+    use crate::mutation_executor::test_support::{
+        MemoryRepository, seeded_manager, track_write_services,
+    };
     use crate::{
         ConfiguredTrackDefinition, ConfiguredTrackInput, DiagnosticSeverity, EffectStatus,
-        PersistedTrackEffect, PreparedTrackRegistry, StoredTrackEvent, StoredTrackSnapshot,
-        TrackQueryStore, TrackReadServices,
+        PersistedTrackEffect, PreparedTrackRegistry, StoredTrackEvent, TrackQueryStore,
+        TrackReadServices,
     };
 
     fn test_track_config() -> TrackConfig {
@@ -86,7 +89,13 @@ mod tests {
     #[tokio::test]
     async fn load_track_diagnostics_projects_only_diagnostic_events_in_order() {
         let repository = Arc::new(FakeReadRepository::new());
-        let read_services = TrackReadServices::new(repository, test_prepared_registry());
+        let live_repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), live_repository);
+        let read_services = TrackReadServices::new(
+            repository,
+            test_prepared_registry(),
+            Arc::new(services.observation),
+        );
         let service = read_services.debug_query_service();
 
         let diagnostics = service
@@ -112,7 +121,13 @@ mod tests {
     #[tokio::test]
     async fn load_track_diagnostics_does_not_require_prepared_registry_or_effects() {
         let repository = Arc::new(FakeReadRepository::new());
-        let read_services = TrackReadServices::new(repository.clone(), Arc::default());
+        let live_repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), live_repository);
+        let read_services = TrackReadServices::new(
+            repository.clone(),
+            Arc::default(),
+            Arc::new(services.observation),
+        );
         let service = read_services.debug_query_service();
 
         let diagnostics = service
@@ -152,7 +167,7 @@ mod tests {
     }
 
     struct FakeReadRepository {
-        snapshot: StoredTrackSnapshot,
+        updated_at: chrono::DateTime<Utc>,
         events: Vec<StoredTrackEvent>,
         effects: Vec<PersistedTrackEffect>,
         effect_query_count: std::sync::Mutex<usize>,
@@ -164,10 +179,7 @@ mod tests {
             let track_id = snapshot.track_id.clone();
 
             Self {
-                snapshot: StoredTrackSnapshot {
-                    snapshot,
-                    updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
-                },
+                updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
                 events: vec![
                     StoredTrackEvent {
                         id: 1,
@@ -223,17 +235,6 @@ mod tests {
 
     #[async_trait]
     impl TrackQueryStore for FakeReadRepository {
-        async fn list_track_snapshots(&self) -> Result<Vec<StoredTrackSnapshot>> {
-            Ok(vec![self.snapshot.clone()])
-        }
-
-        async fn load_track_snapshot(
-            &self,
-            track_id: &TrackId,
-        ) -> Result<Option<StoredTrackSnapshot>> {
-            Ok((track_id.as_str() == "btc-core").then_some(self.snapshot.clone()))
-        }
-
         async fn list_recent_track_events(
             &self,
             track_id: &TrackId,
@@ -259,11 +260,25 @@ mod tests {
             })
         }
 
-        async fn load_track_persistent_state(
+        async fn load_track_control_state(
             &self,
             _track_id: &TrackId,
-        ) -> Result<Option<crate::TrackPersistentState>> {
+        ) -> Result<Option<crate::TrackControlState>> {
             Ok(None)
+        }
+
+        async fn load_track_ledger_state(
+            &self,
+            _track_id: &TrackId,
+        ) -> Result<Option<poise_engine::ledger::TrackLedgerState>> {
+            Ok(None)
+        }
+
+        async fn load_track_updated_at(
+            &self,
+            track_id: &TrackId,
+        ) -> Result<Option<chrono::DateTime<Utc>>> {
+            Ok((track_id.as_str() == "btc-core").then_some(self.updated_at))
         }
     }
 

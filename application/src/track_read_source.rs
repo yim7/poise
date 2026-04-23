@@ -30,10 +30,6 @@ pub struct TrackRuntimeReadState {
 }
 
 impl TrackRuntimeReadState {
-    pub fn from_snapshot(snapshot: TrackRuntimeSnapshot) -> Self {
-        Self::from_parts(snapshot, TrackLiveView::default())
-    }
-
     pub fn from_parts(snapshot: TrackRuntimeSnapshot, live: TrackLiveView) -> Self {
         let TrackRuntimeSnapshot {
             runtime_state,
@@ -88,10 +84,10 @@ mod tests {
     use chrono::Utc;
     use poise_core::strategy::{BandBoundary, BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::Exposure;
-    use poise_engine::persisted_runtime::TrackRestoreRevision;
     use poise_engine::runtime::{
-        AutoState, ControlState, ExecutorState, ManualState, RiskState, TrackState,
+        AutoState, ControlState, ExecutorState, ManualState, RiskState, TrackLiveView, TrackState,
     };
+    use poise_engine::snapshot::TrackRestoreRevision;
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
 
@@ -103,7 +99,7 @@ mod tests {
             ManualState::Flattened,
         )));
 
-        let source = TrackRuntimeReadState::from_snapshot(snapshot);
+        let source = TrackRuntimeReadState::from_parts(snapshot, TrackLiveView::default());
 
         assert_eq!(
             source.status,
@@ -120,7 +116,7 @@ mod tests {
             }),
         ));
 
-        let source = TrackRuntimeReadState::from_snapshot(snapshot);
+        let source = TrackRuntimeReadState::from_parts(snapshot, TrackLiveView::default());
 
         assert_eq!(source.status, poise_engine::runtime::TrackStatus::Frozen);
     }

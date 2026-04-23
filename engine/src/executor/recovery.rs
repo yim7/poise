@@ -93,7 +93,9 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
         binding_target_for_recovery_token(input.previous_state, input.recovery_token);
 
     if let Some(live_order) = input.live_order {
-        if let SubmitBindingRecovery::Recoverable(target) = &binding_target {
+        if let SubmitBindingRecovery::Recoverable(target)
+        | SubmitBindingRecovery::Dispatchable(target) = &binding_target
+        {
             let receipt = OrderReceipt {
                 order_id: live_order.order_id.clone(),
                 client_order_id: live_order.client_order_id.clone(),
@@ -155,11 +157,15 @@ fn binding_target_for_recovery_token(
     previous_state: &ExecutorState,
     recovery_token: &SubmitRecoveryToken,
 ) -> SubmitBindingRecovery {
-    let Some(binding) = previous_state.bindings.iter().find(|binding| {
-        binding.is_active()
-            && recovery_token
-                .matches_submission_identity(&SubmitRecoveryToken::from_binding(binding))
-    }) else {
+    let Some(target) = recovery_token.decode() else {
+        return SubmitBindingRecovery::Missing;
+    };
+
+    let Some(binding) = previous_state
+        .bindings
+        .iter()
+        .find(|binding| binding.is_active() && binding.binding_id == target.binding_id)
+    else {
         return SubmitBindingRecovery::Missing;
     };
 

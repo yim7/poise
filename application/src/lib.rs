@@ -54,7 +54,7 @@ pub use track_mutation_store::TrackMutationStore;
 pub use track_observation_service::TrackObservationService;
 pub use track_persistence::{
     CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
-    PersistedTrackEffect, StoredTrackEvent, StoredTrackSnapshot, TrackPersistentState,
+    PersistedTrackEffect, StoredTrackEvent,
 };
 pub use track_query_store::TrackQueryStore;
 pub use track_read_services::TrackReadServices;

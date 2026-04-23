@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use poise_engine::snapshot::TrackRuntimeSnapshot;
 use poise_engine::track::TrackId;
 
 use crate::{
@@ -17,14 +16,14 @@ pub(crate) const DETAIL_EFFECTS_LIMIT: usize = 20;
 pub(crate) struct TrackReadSourceLoader {
     repository: Arc<dyn TrackQueryStore>,
     prepared_registry: Arc<PreparedTrackRegistry>,
-    observation: Option<Arc<TrackObservationService>>,
+    observation: Arc<TrackObservationService>,
 }
 
 impl TrackReadSourceLoader {
     pub(crate) fn new(
         repository: Arc<dyn TrackQueryStore>,
         prepared_registry: Arc<PreparedTrackRegistry>,
-        observation: Option<Arc<TrackObservationService>>,
+        observation: Arc<TrackObservationService>,
     ) -> Self {
         Self {
             repository,
@@ -34,17 +33,12 @@ impl TrackReadSourceLoader {
     }
 
     pub(crate) async fn list_track_read_models(&self) -> Result<Vec<TrackListReadModel>> {
-        let mut snapshots = self.repository.list_track_snapshots().await?;
-        snapshots.sort_by(|left, right| {
-            left.snapshot
-                .track_id
-                .as_str()
-                .cmp(right.snapshot.track_id.as_str())
-        });
-
-        let mut read_models = Vec::with_capacity(snapshots.len());
-        for snapshot in snapshots {
-            let track_id = snapshot.snapshot.track_id.clone();
+        let mut read_models = Vec::new();
+        for prepared in self.prepared_registry.iter() {
+            let track_id = prepared.track_id().clone();
+            let Some(snapshot) = self.observation.track_snapshot(track_id.as_str()).await? else {
+                continue;
+            };
             let definition = self
                 .prepared_registry
                 .get(&track_id)
@@ -55,19 +49,22 @@ impl TrackReadSourceLoader {
                     )
                 })?
                 .read_definition();
-            let runtime = runtime_read_state_loader::runtime_read_state_from_snapshot(
-                &track_id,
-                snapshot.snapshot,
-                self.observation.clone(),
-            )
-            .await?;
+            let runtime = self
+                .load_runtime_read_state(&track_id, snapshot.clone())
+                .await?;
+            let updated_at = self
+                .repository
+                .load_track_updated_at(&track_id)
+                .await?
+                .unwrap_or_else(|| infer_runtime_updated_at(&snapshot));
             read_models.push(TrackListReadModel::from_parts(
                 &definition,
                 &runtime,
-                snapshot.updated_at,
+                updated_at,
             ));
         }
 
+        read_models.sort_by(|left, right| left.track_id.cmp(&right.track_id));
         Ok(read_models)
     }
 
@@ -85,7 +82,7 @@ impl TrackReadSourceLoader {
         &self,
         track_id: &TrackId,
     ) -> Result<Option<TrackReadSource>> {
-        let Some(snapshot) = self.repository.load_track_snapshot(track_id).await? else {
+        let Some(snapshot) = self.observation.track_snapshot(track_id.as_str()).await? else {
             return Ok(None);
         };
 
@@ -97,12 +94,17 @@ impl TrackReadSourceLoader {
             .repository
             .list_recent_track_effects(track_id, DETAIL_EFFECTS_LIMIT)
             .await?;
+        let updated_at = self
+            .repository
+            .load_track_updated_at(track_id)
+            .await?
+            .unwrap_or_else(|| infer_runtime_updated_at(&snapshot));
 
         Ok(Some(
             self.read_source_from_snapshot(
                 track_id.clone(),
-                snapshot.snapshot,
-                snapshot.updated_at,
+                snapshot,
+                updated_at,
                 recent_track_events,
                 recent_effects,
             )
@@ -113,7 +115,7 @@ impl TrackReadSourceLoader {
     async fn read_source_from_snapshot(
         &self,
         track_id: TrackId,
-        snapshot: TrackRuntimeSnapshot,
+        snapshot: poise_engine::snapshot::TrackRuntimeSnapshot,
         updated_at: DateTime<Utc>,
         recent_track_events: Vec<crate::StoredTrackEvent>,
         recent_effects: Vec<crate::PersistedTrackEffect>,
@@ -128,12 +130,7 @@ impl TrackReadSourceLoader {
                 )
             })?
             .read_definition();
-        let runtime = runtime_read_state_loader::runtime_read_state_from_snapshot(
-            &track_id,
-            snapshot,
-            self.observation.clone(),
-        )
-        .await?;
+        let runtime = self.load_runtime_read_state(&track_id, snapshot).await?;
 
         Ok(TrackReadSource {
             definition,
@@ -143,4 +140,27 @@ impl TrackReadSourceLoader {
             recent_effects,
         })
     }
+
+    async fn load_runtime_read_state(
+        &self,
+        track_id: &TrackId,
+        snapshot: poise_engine::snapshot::TrackRuntimeSnapshot,
+    ) -> Result<crate::track_read_source::TrackRuntimeReadState> {
+        runtime_read_state_loader::runtime_read_state_from_snapshot(
+            track_id,
+            snapshot,
+            self.observation.as_ref(),
+        )
+        .await
+    }
+}
+
+fn infer_runtime_updated_at(
+    snapshot: &poise_engine::snapshot::TrackRuntimeSnapshot,
+) -> DateTime<Utc> {
+    snapshot
+        .observed
+        .last_tick_at
+        .or(snapshot.observed.market_data_stale_since)
+        .unwrap_or_else(Utc::now)
 }

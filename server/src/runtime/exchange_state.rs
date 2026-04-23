@@ -1,6 +1,8 @@
 use poise_application::TrackMutationError;
 use poise_engine::observation::{OrderObservation, PositionObservation};
-use poise_engine::ports::{ExchangeOrder, ExecutionPort, Position, UserDataEvent, UserDataPayload};
+use poise_engine::ports::{
+    ExchangeOrder, ExecutionPort, OrderStatus, Position, UserDataEvent, UserDataPayload,
+};
 
 use crate::exchange_freshness::ExchangeFreshnessReason;
 use crate::order_outcome::{ReconcileReason, ReconcileRequest};
@@ -30,6 +32,9 @@ pub(super) async fn apply_user_data_event(
                 .await
                 .map_err(preserve_track_mutation_error)?;
             if absorb_result == poise_engine::executor::OrderUpdateAbsorbResult::Unabsorbed {
+                if is_terminal_no_fill_unknown_order(&order) {
+                    return Ok(());
+                }
                 state
                     .exchange_freshness
                     .mark_stale(track_id, ExchangeFreshnessReason::UnabsorbedOrderUpdate)
@@ -104,4 +109,11 @@ pub(super) fn order_observation(order: &ExchangeOrder) -> OrderObservation {
         realized_pnl: order.realized_pnl,
         status: order.status,
     }
+}
+
+fn is_terminal_no_fill_unknown_order(order: &ExchangeOrder) -> bool {
+    !order.status.keeps_working_order()
+        && order.status != OrderStatus::Filled
+        && order.filled_qty.abs() <= f64::EPSILON
+        && order.realized_pnl.abs() <= f64::EPSILON
 }

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use poise_engine::ports::UserDataEvent;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -10,7 +9,6 @@ use super::{ServerRuntime, exchange_state::apply_user_data_event};
 pub(super) fn spawn_user_task(
     runtime: &ServerRuntime,
     mut receiver: mpsc::Receiver<UserDataEvent>,
-    startup_cutoff: DateTime<Utc>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     let state = runtime.state.clone();
@@ -36,10 +34,6 @@ pub(super) fn spawn_user_task(
             let Some(event) = event else {
                 break;
             };
-
-            if event.event_time <= startup_cutoff {
-                continue;
-            }
 
             let instrument = event.instrument().clone();
             let Some(track_id) = state

@@ -3,60 +3,26 @@ use rusqlite::{Connection, OptionalExtension};
 
 const ACCOUNT_MONITOR_STATE_SNAPSHOT_COMPLETENESS_CONSTRAINT: &str =
     "account_monitor_state_snapshot_completeness";
-const TRACK_SNAPSHOTS_CREATE_SQL: &str = "CREATE TABLE IF NOT EXISTS track_snapshots (
-    track_id TEXT PRIMARY KEY,
-    restore_revision TEXT,
-    runtime_state_json TEXT NOT NULL,
-    current_exposure REAL NOT NULL,
-    desired_exposure REAL,
-    executor_state_json TEXT,
-    execution_gate_state_json TEXT,
-    ledger_state_json TEXT,
-    unrealized_pnl REAL NOT NULL DEFAULT 0,
-    strategy_price REAL,
-    strategy_price_status TEXT NOT NULL,
-    mark_price REAL,
-    best_bid REAL,
-    best_ask REAL,
-    out_of_band_since TEXT,
-    last_tick_at TEXT,
-    market_data_stale_since TEXT,
-    updated_at TEXT NOT NULL
-);";
-const TRACK_SNAPSHOTS_REQUIRED_COLUMNS: &[&str] = &[
-    "track_id",
-    "restore_revision",
-    "runtime_state_json",
-    "current_exposure",
-    "desired_exposure",
-    "executor_state_json",
-    "execution_gate_state_json",
-    "ledger_state_json",
-    "unrealized_pnl",
-    "strategy_price",
-    "strategy_price_status",
-    "mark_price",
-    "best_bid",
-    "best_ask",
-    "out_of_band_since",
-    "last_tick_at",
-    "market_data_stale_since",
-    "updated_at",
-];
 
 pub fn initialize(conn: &Connection) -> Result<()> {
-    initialize_track_snapshots(conn)?;
-
     conn.execute_batch(
+        // `persisted_track_presence` is a read-model helper for listing tracks
+        // and updated-at metadata. Startup correctness must use the explicit
+        // control and ledger truth tables instead.
         "CREATE TABLE IF NOT EXISTS persisted_track_presence (
             track_id TEXT PRIMARY KEY,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS track_persistent_state (
+        CREATE TABLE IF NOT EXISTS track_control_state (
             track_id TEXT PRIMARY KEY,
             control_state_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS track_ledger_state (
+            track_id TEXT PRIMARY KEY,
             ledger_state_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -108,8 +74,6 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         );",
     )?;
 
-    ensure_columns_present(conn, "track_snapshots", TRACK_SNAPSHOTS_REQUIRED_COLUMNS)?;
-    ensure_columns_absent(conn, "track_snapshots", &["reference_price"])?;
     ensure_columns_present(conn, "track_events", &["track_id"])?;
     ensure_columns_present(
         conn,
@@ -118,13 +82,13 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     )?;
     ensure_columns_present(
         conn,
-        "track_persistent_state",
-        &[
-            "track_id",
-            "control_state_json",
-            "ledger_state_json",
-            "updated_at",
-        ],
+        "track_control_state",
+        &["track_id", "control_state_json", "updated_at"],
+    )?;
+    ensure_columns_present(
+        conn,
+        "track_ledger_state",
+        &["track_id", "ledger_state_json", "updated_at"],
     )?;
     ensure_columns_present(
         conn,
@@ -189,14 +153,6 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn initialize_track_snapshots(conn: &Connection) -> Result<()> {
-    if table_sql(conn, "track_snapshots")?.is_none() {
-        conn.execute_batch(TRACK_SNAPSHOTS_CREATE_SQL)?;
-    }
-
-    Ok(())
-}
-
 fn ensure_account_monitor_state_snapshot_completeness_constraint(conn: &Connection) -> Result<()> {
     let table_sql = table_sql(conn, "account_monitor_state")?.unwrap_or_default();
     ensure!(
@@ -213,19 +169,6 @@ fn ensure_columns_present(conn: &Connection, table: &str, required: &[&str]) -> 
         ensure!(
             columns.iter().any(|existing| existing == column),
             "legacy sqlite schema for `{table}` is missing required column `{column}`"
-        );
-    }
-
-    Ok(())
-}
-
-fn ensure_columns_absent(conn: &Connection, table: &str, forbidden: &[&str]) -> Result<()> {
-    let columns = table_columns(conn, table)?;
-
-    for column in forbidden {
-        ensure!(
-            columns.iter().all(|existing| existing != column),
-            "sqlite schema for `{table}` still contains removed column `{column}`"
         );
     }
 
@@ -260,15 +203,6 @@ mod tests {
     fn initialize_creates_tables() {
         let conn = Connection::open_in_memory().unwrap();
         initialize(&conn).unwrap();
-
-        let snapshots_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='track_snapshots'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(snapshots_count, 1);
 
         let events_count: i64 = conn
             .query_row(
@@ -306,14 +240,23 @@ mod tests {
             .unwrap();
         assert_eq!(account_monitor_state_count, 1);
 
-        let persistent_state_count: i64 = conn
+        let control_state_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='track_persistent_state'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='track_control_state'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(persistent_state_count, 1);
+        assert_eq!(control_state_count, 1);
+
+        let ledger_state_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='track_ledger_state'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(ledger_state_count, 1);
 
         let index_count: i64 = conn
             .query_row(
@@ -351,29 +294,20 @@ mod tests {
             .unwrap();
         assert_eq!(follow_up_retirements_index_count, 1);
 
-        let mut stmt = conn.prepare("PRAGMA table_info(track_snapshots)").unwrap();
-        let columns: Vec<String> = stmt
-            .query_map([], |row| row.get(1))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert!(columns.contains(&"track_id".to_string()));
-        assert!(columns.contains(&"restore_revision".to_string()));
-        assert!(columns.contains(&"desired_exposure".to_string()));
-        assert!(!columns.contains(&"venue".to_string()));
-        assert!(!columns.contains(&"symbol".to_string()));
-        assert!(!columns.contains(&"config_json".to_string()));
-        assert!(!columns.contains(&"realized_pnl_day".to_string()));
-        assert!(!columns.contains(&"realized_pnl_today".to_string()));
-        assert!(!columns.contains(&"realized_pnl_cumulative".to_string()));
-        assert!(!columns.contains(&"pending_order_json".to_string()));
-
-        let persistent_columns = table_columns(&conn, "track_persistent_state").unwrap();
+        let control_columns = table_columns(&conn, "track_control_state").unwrap();
         assert_eq!(
-            persistent_columns,
+            control_columns,
             vec![
                 "track_id".to_string(),
                 "control_state_json".to_string(),
+                "updated_at".to_string(),
+            ]
+        );
+        let ledger_columns = table_columns(&conn, "track_ledger_state").unwrap();
+        assert_eq!(
+            ledger_columns,
+            vec![
+                "track_id".to_string(),
                 "ledger_state_json".to_string(),
                 "updated_at".to_string(),
             ]
@@ -435,23 +369,19 @@ mod tests {
     }
 
     #[test]
-    fn initialize_rejects_track_snapshots_table_missing_current_columns() {
+    fn initialize_does_not_create_track_snapshots_table() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE track_snapshots (
-                track_id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                current_exposure REAL NOT NULL,
-                unrealized_pnl REAL NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL
-            );",
-        )
-        .unwrap();
 
-        let error = initialize(&conn).expect_err("schema without current columns should fail");
-        assert!(
-            error.to_string().contains("track_snapshots"),
-            "unexpected error: {error:#}"
-        );
+        initialize(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'track_snapshots'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(count, 0);
     }
 }

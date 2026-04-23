@@ -57,6 +57,13 @@ impl TrackObservationService {
         self.executor.track_live_view(id).await
     }
 
+    pub async fn track_snapshot(
+        &self,
+        id: &str,
+    ) -> Result<Option<poise_engine::snapshot::TrackRuntimeSnapshot>> {
+        self.executor.track_snapshot(id).await
+    }
+
     pub async fn quote_health_view(&self, id: &str) -> Result<QuoteHealthView> {
         self.executor.quote_health_view(id).await
     }

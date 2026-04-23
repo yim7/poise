@@ -64,9 +64,9 @@
   - 让风险评估直接消费 `LossLimits`、显式 `max_notional` 和 `TrackLedgerState` 的派生 net realized pnl
 - Modify: `engine/src/track.rs`
   - 同步新的 `TrackDefinition` 结构
-- Modify: `engine/src/persisted_runtime.rs`
-  - 不再作为 fresh-session 恢复输入
-  - 删除或降级旧 `PersistedRuntimeCodec` 的启动恢复职责
+- Delete: `engine/src/persisted_runtime.rs`
+  - 删除旧 `PersistedRuntimeCodec / PersistedRuntimeRow`
+  - `TrackRestoreRevision` 迁移到 snapshot/session 内部语义，不再作为 persisted runtime API 暴露
 - Modify: `engine/src/snapshot.rs`
   - 不再把 snapshot 作为跨重启执行语义边界
 - Modify: `application/src/runtime_lifecycle_service.rs`
@@ -107,7 +107,8 @@
   - 用私有函数表达 `InheritedOrderCleanup` 阶段
   - 引入 startup 私有 `CleanupTracker`
   - 用私有函数表达 `SteadyStateHandoff` 阶段
-  - 只在最终 cutoff drain 后 `CleanupTracker` 仍 quiesced 时允许 handoff
+  - 只在 `cancel_all(instrument)` 后重新查询当前标的 open orders 为空时允许进入 fresh-session 构建
+  - `CleanupTracker` 只过滤 startup replay 已缓冲的 cleanup 历史通知，不等待未来 user-data 终态通知
 - Modify: `server/src/runtime/user_data.rs`
   - steady-state 只接受交接边界后的事件
   - 不再保留 startup cleanup 特殊规则
@@ -143,7 +144,7 @@
 - Modify: `engine/src/ledger.rs`
 - Modify: `core/src/risk.rs`
 - Modify: `engine/src/track.rs`
-- Modify: `engine/src/persisted_runtime.rs`
+- Delete: `engine/src/persisted_runtime.rs`
 - Modify: `engine/src/snapshot.rs`
 - Modify: `application/src/runtime_lifecycle_service.rs`
 - Modify: `storage/src/sqlite.rs`
@@ -213,7 +214,7 @@ Expected:
 - runtime lifecycle 直接消费持久状态 owner，而不是从旧 snapshot 取值
 - fresh-session bootstrap 只接收已经按 UTC 标准化后的 `TrackLedgerState`
 - projector / read model 直接消费 `TrackLedgerState`，不再临时拼装另一套账本真值
-- `PersistedRuntimeCodec / TrackRuntimeSnapshot / track_snapshots` 不再作为 startup 输入
+- 旧持久化 runtime snapshot 协议与 `track_snapshots` 不再作为 startup 输入；`TrackRuntimeSnapshot` 只保留为 session 内部 snapshot
 - protocol / TUI 同步 `max_notional + loss_limits`，不保留 `budget` 作为公开边界
 
 - [x] **Step 4: 运行 Task 1 回归**
@@ -315,14 +316,15 @@ Expected:
 覆盖点：
 
 - inherited orders 只参与 cleanup
-- handoff 前 `CleanupTracker` 必须 quiesced
-- startup phase 独占 user-data receiver，handoff 前完成 cleanup quiesce、最终外部真值查询、session 构建和 cutoff drain
+- handoff 前必须确认当前标的 open-order snapshot 为空
+- startup phase 独占 user-data receiver，handoff 前完成当前缓冲区 replay、最终外部真值查询和 session 构建
 - 最终外部真值查询必须至少包含当前仓位与当前标的 `ExchangeRules`
 - 若 startup 当下没有可靠有效市场数据，fresh-session 允许显式以 `market_data = None` 进入 `WaitingMarketData`
-- 若 cutoff drain 后 cleanup 状态变化，必须回到 cleanup barrier 重新建立 handoff
 - startup replay 与 steady-state handoff 没有丢事件窗口
+- `startup_replay_floor` 只用于 startup 已缓冲事件分类，不传给 steady-state，也不是 handoff 边界
 - cleanup filter 不会泄漏到 steady-state user task
 - steady-state 只处理交接边界之后的事件
+- late cleanup terminal no-fill `OrderUpdate` 不触发 stale/reconcile
 - fresh-session 会同时作废 `Pending + Executing + follow_up_retirements`
 - 旧会话 effect 不会再阻塞新会话批次
 
@@ -336,7 +338,7 @@ Run:
 
 Expected:
 
-- 当前实现的 replay 与最终 cutoff 交接仍有空窗，且旧会话 work 还没有和 startup 边界一起作废，新测试失败。
+- 当前实现的 replay 与 steady-state handoff 仍有空窗，且旧会话 work 还没有和 startup 边界一起作废，新测试失败。
 
 - [x] **Step 3: 做最小实现，建立显式 startup 阶段**
 
@@ -345,21 +347,19 @@ Expected:
 - `InheritedOrderCleanup` 是 `startup_bootstrap.rs` 内部流程边界，优先实现为私有函数，不要求新增 public type
 - `FreshSessionBootstrap` 是调用 `TrackRuntime::fresh_start(...)` 的流程步骤，不要求新增 type
 - `SteadyStateHandoff` 是 `startup_bootstrap.rs` 内部流程边界，优先实现为私有函数，不要求新增 public type
-- `CleanupTracker` 是 startup 私有状态对象，用来持有 cleanup identity、终态解析和 quiesce 判定
+- `CleanupTracker` 是 startup 私有状态对象，用来持有 cleanup identity，并过滤 startup replay 已缓冲的 cleanup 历史通知
 - fresh-session 旧会话作废查询由 `TrackEffectStore::list_session_reset_effects_for_track` 明确拥有，不再借用 `pending` 语义
-- startup 用 `TrackRuntimeLifecycleService::fresh_start_track_runtime(...)` 重建 session runtime，若 drain 轮次命中 cleanup 事件，则先重建 fresh session 再回放同轮非 cleanup 事件，避免在重建边界丢失合法更新
+- startup 用 `TrackRuntimeLifecycleService::fresh_start_track_runtime(...)` 重建 session runtime，然后回放当前缓冲区里的非 cleanup post-startup 事件，避免在重建边界丢失合法更新
 
 三阶段边界和旧会话 work 作废必须在同一 task 里一起落地，不允许先切 startup 语义、后补旧会话清理。
 
 唯一允许的 startup 时序是：
 
 1. startup 独占 user-data receiver
-2. cleanup 当前标的 inherited orders
+2. cleanup 当前标的 inherited orders：`cancel_all(instrument)` 后重新查询 open orders，确认当前标的 snapshot 为空
 3. 清空旧会话本地 work，并先按当前外部真值构建一次 fresh session runtime
-4. 取得候选 steady-state cutoff
-5. drain 当前缓冲区里已经到达的 post-startup 事件
-6. 若本轮 drain 命中 cleanup update，先重建 fresh session，再回放同轮非 cleanup 事件，然后回到第 4 步
-7. 若本轮 drain 没有命中 cleanup update，回放同轮非 cleanup 事件，再把 receiver 移交 steady-state
+4. startup 处理当前已缓冲的 user-data 事件：cleanup identity 命中的 update 直接忽略，非 cleanup 的 post-startup 事件进入 replay 队列
+5. 回放 startup replay 队列里的非 cleanup post-startup 事件，再把 receiver 移交 steady-state
 
 - [x] **Step 4: 运行 Task 3 回归**
 
@@ -371,7 +371,7 @@ Run:
 
 Expected:
 
-- startup 清理、fresh-session 构建、cleanup quiesce 与 steady-state handoff 边界清楚，且旧会话本地 work 全部失效。
+- startup 清理、fresh-session 构建、buffered replay 与 steady-state handoff 边界清楚，且旧会话本地 work 全部失效。
 - Task 3 implementation commit: `31a6bb9`
 
 ## Task 4: 统一回写文档与 focused 验收
