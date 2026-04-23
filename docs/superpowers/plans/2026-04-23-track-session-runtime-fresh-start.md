@@ -297,16 +297,20 @@ Expected:
 **Files:**
 
 - Modify: `server/src/runtime/startup_bootstrap.rs`
-- Modify: `server/src/runtime/user_data.rs`
 - Modify: `server/src/runtime/mod.rs`
 - Modify: `application/src/mutation_executor.rs`
+- Modify: `application/src/runtime_lifecycle_service.rs`
+- Modify: `application/src/track_definition.rs`
 - Modify: `application/src/track_effect_store.rs`
+- Modify: `server/src/assembly.rs`
+- Modify: `server/src/http.rs`
+- Modify: `server/src/websocket.rs`
 - Modify: `storage/src/sqlite.rs`
 - Test: `server/src/runtime/startup_bootstrap.rs`
 - Test: `application/src/runtime_lifecycle_service.rs`
 - Test: `storage/src/sqlite.rs`
 
-- [ ] **Step 1: 先写失败测试，锁住 startup 三阶段边界**
+- [x] **Step 1: 先写失败测试，锁住 startup 三阶段边界**
 
 覆盖点：
 
@@ -321,7 +325,7 @@ Expected:
 - fresh-session 会同时作废 `Pending + Executing + follow_up_retirements`
 - 旧会话 effect 不会再阻塞新会话批次
 
-- [ ] **Step 2: 运行定向测试，确认当前实现失败**
+- [x] **Step 2: 运行定向测试，确认当前实现失败**
 
 Run:
 
@@ -333,7 +337,7 @@ Expected:
 
 - 当前实现的 replay 与最终 cutoff 交接仍有空窗，且旧会话 work 还没有和 startup 边界一起作废，新测试失败。
 
-- [ ] **Step 3: 做最小实现，建立显式 startup 阶段**
+- [x] **Step 3: 做最小实现，建立显式 startup 阶段**
 
 要求：
 
@@ -341,6 +345,8 @@ Expected:
 - `FreshSessionBootstrap` 是调用 `TrackRuntime::fresh_start(...)` 的流程步骤，不要求新增 type
 - `SteadyStateHandoff` 是 `startup_bootstrap.rs` 内部流程边界，优先实现为私有函数，不要求新增 public type
 - `CleanupTracker` 是 startup 私有状态对象，用来持有 cleanup identity、终态解析和 quiesce 判定
+- fresh-session 旧会话作废查询由 `TrackEffectStore::list_session_reset_effects_for_track` 明确拥有，不再借用 `pending` 语义
+- startup 用 `TrackRuntimeLifecycleService::fresh_start_track_runtime(...)` 重建 session runtime，若 drain 轮次命中 cleanup 事件，则先重建 fresh session 再回放同轮非 cleanup 事件，避免在重建边界丢失合法更新
 
 三阶段边界和旧会话 work 作废必须在同一 task 里一起落地，不允许先切 startup 语义、后补旧会话清理。
 
@@ -356,7 +362,7 @@ Expected:
 8. 若 drain 后 cleanup 状态变化，回到第 3 步
 9. 若 drain 后仍 quiesced，把 receiver 移交 steady-state
 
-- [ ] **Step 4: 运行 Task 3 回归**
+- [x] **Step 4: 运行 Task 3 回归**
 
 Run:
 
@@ -367,6 +373,7 @@ Run:
 Expected:
 
 - startup 清理、fresh-session 构建、cleanup quiesce 与 steady-state handoff 边界清楚，且旧会话本地 work 全部失效。
+- Task 3 implementation commit: `31a6bb9`
 
 ## Task 4: 统一回写文档与 focused 验收
 
