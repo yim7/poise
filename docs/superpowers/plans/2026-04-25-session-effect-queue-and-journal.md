@@ -1601,6 +1601,7 @@ git commit -m "refactor: make follow-up retirement session scoped"
 执行记录：
 
 - 2026-04-25：完成 follow-up retirement session queue 化，commit `d154141`。
+- 2026-04-25：收窄 queue 公共入口，batch/effect identity 由 `SessionEffectQueue` 内部生成；follow-up retirement 改为完整 open-orders snapshot 驱动，不再公开 token 协议，commit `b6a9c3e`。
 - 验收：`cargo test -p poise-application session_effect_queue -- --nocapture`
 - 验收：`cargo test -p poise-application mutation_executor::tests::record_cancel_order_success -- --nocapture`
 - 验收：`cargo test -p poise-application runtime_lifecycle_service::tests::prepare_fresh_session_for_activation_clears_old_pending_work_and_executor_state -- --nocapture`
