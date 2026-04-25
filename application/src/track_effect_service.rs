@@ -24,13 +24,11 @@ impl TrackEffectService {
         &self,
         id: &str,
         effect_id: &str,
-        batch_id: &str,
-        sequence: u32,
         order_id: &str,
         receipt: &OrderReceipt,
     ) -> Result<CancelReceiptResolution> {
         self.executor
-            .record_cancel_order_success(id, effect_id, batch_id, sequence, order_id, receipt)
+            .record_cancel_order_success(id, effect_id, order_id, receipt)
             .await
     }
 

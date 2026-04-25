@@ -950,7 +950,7 @@ pub trait TrackEffectJournal: Send + Sync {
 }
 ```
 
-`EffectJournalEntry` 放在 journal / persistence 边界，不放在 `session_effect_queue.rs`。它是诊断输入 DTO，可以由 `EffectJournalEntry::from_session_effects(...)` 从当前 session effect 转换出来，但 journal trait 不直接依赖 `SessionTrackEffect`。
+`EffectJournalEntry` 放在 journal / persistence 边界，不放在 `session_effect_queue.rs`。它是诊断输入 DTO；从当前 session effect 到 journal entry 的转换由应用层本地完成，journal trait 不直接依赖 `SessionTrackEffect`，`EffectJournalEntry` 也不反向知道 session queue 的运行类型。
 
 在 mutation 业务持久化成功后，从本次 transition 产生的 `effects` 构造 session effects。不要从 `CommittedTrackWrite` 或 `PersistedTrackEffect` 反推当前 session work：
 
@@ -965,10 +965,7 @@ let session_effects = SessionTrackEffect::from_transition_effects(
     &effects,
     self.clock.now(),
 );
-let journal_entries = EffectJournalEntry::from_session_effects(
-    self.session_id.as_str(),
-    &session_effects,
-);
+let journal_entries = effect_journal_entries_from_session_effects(&session_effects);
 
 if !session_effects.is_empty() {
     self.session_effect_queue.enqueue_batch(session_effects.clone());

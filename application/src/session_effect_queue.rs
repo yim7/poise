@@ -309,6 +309,7 @@ impl SessionEffectQueue {
                     track.paused_until = Some(until);
                     if let Some(effect) = track.front_effect_mut()
                         && effect.effect.effect_id == effect_id
+                        && effect.dispatch_state != QueuedEffectState::SubmittedAwaitingWriteback
                     {
                         effect.dispatch_state = QueuedEffectState::Queued;
                     }
@@ -465,6 +466,41 @@ impl SessionEffectQueue {
                 _ => None,
             })
             .collect()
+    }
+
+    pub fn resolve_submitted_awaiting_exchange_state_for_track(
+        &self,
+        track_id: &TrackId,
+    ) -> Vec<String> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut resolved = Vec::new();
+        {
+            let Some(track) = inner.tracks.get_mut(track_id) else {
+                return Vec::new();
+            };
+
+            for batch in &mut track.batches {
+                let mut retained = VecDeque::new();
+                while let Some(item) = batch.effects.pop_front() {
+                    if item.dispatch_state == QueuedEffectState::SubmittedAwaitingWriteback
+                        && matches!(item.effect.effect, TrackEffect::SubmitOrder { .. })
+                    {
+                        resolved.push(item.effect.effect_id.clone());
+                    } else {
+                        retained.push_back(item);
+                    }
+                }
+                batch.effects = retained;
+            }
+            SessionEffectQueueInner::prune_empty_front_batches(track);
+            track.paused_until = None;
+        }
+        for effect_id in &resolved {
+            inner.effect_index.remove(effect_id.as_str());
+        }
+        inner.remove_empty_track(track_id);
+        inner.mark_track_ready(track_id);
+        resolved
     }
 
     pub fn snapshot_for_track(&self, track_id: &TrackId) -> SessionEffectQueueSnapshot {
@@ -906,6 +942,41 @@ mod tests {
                 .len(),
             1,
             "accepted submit remains visible to exchange sync until writeback finishes"
+        );
+    }
+
+    #[test]
+    fn submitted_writeback_unknown_keeps_active_hint_until_exchange_sync() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        queue.enqueue_batch(vec![submit_effect("submit-1", "batch-1", 0)]);
+
+        assert_eq!(queue.claim_next().unwrap().effect_id, "submit-1");
+        assert!(queue.record_submit_exchange_accepted("submit-1"));
+        queue.record_outcome(
+            "submit-1",
+            SessionEffectOutcome::Deferred {
+                until: DeferredUntil::ExchangeState,
+            },
+        );
+
+        assert_eq!(
+            queue.active_submit_hints_for_track(&track_id).len(),
+            1,
+            "accepted submit must remain visible to exchange sync while writeback is unknown"
+        );
+        assert!(
+            queue.claim_next().is_none(),
+            "writeback-unknown submit should not be redispatched while waiting for exchange state"
+        );
+
+        assert_eq!(
+            queue.resolve_submitted_awaiting_exchange_state_for_track(&track_id),
+            vec!["submit-1".to_string()]
+        );
+        assert!(
+            queue.active_submit_hints_for_track(&track_id).is_empty(),
+            "complete exchange sync should retire the active submit hint"
         );
     }
 

@@ -81,7 +81,9 @@ pub(super) async fn execute_submit(
                             recovery,
                         )
                         .await?;
-                    return Err(error);
+                    return Ok(SessionEffectOutcome::Deferred {
+                        until: poise_application::DeferredUntil::ExchangeState,
+                    });
                 }
                 completion
                     .record_completion_failure(&error.to_string())
@@ -194,8 +196,6 @@ pub(super) async fn execute_cancellation(
                         .record_cancel_order_success(
                             effect.track_id.as_str(),
                             &effect.effect_id,
-                            &effect.batch_id,
-                            effect.sequence,
                             order_id,
                             receipt,
                         )

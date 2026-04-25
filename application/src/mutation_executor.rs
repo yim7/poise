@@ -714,6 +714,12 @@ impl MutationExecutor {
         .await
         .map_err(anyhow::Error::new)?;
 
+        let resolved_submit_effect_ids = self
+            .session_effect_queue
+            .resolve_submitted_awaiting_exchange_state_for_track(&track_id);
+        self.record_effects_succeeded(id, &resolved_submit_effect_ids)
+            .await?;
+
         self.session_effect_queue
             .wake_track_for(&track_id, WakeSignal::ExchangeState);
 
@@ -771,19 +777,45 @@ impl MutationExecutor {
         id: &str,
         effect_ids: &[String],
     ) -> Result<()> {
-        if effect_ids.is_empty() {
+        self.record_effect_outcomes_best_effort(
+            id,
+            effect_ids
+                .iter()
+                .cloned()
+                .map(EffectStatusUpdate::superseded)
+                .collect(),
+            "superseded",
+        )
+        .await
+    }
+
+    async fn record_effects_succeeded(&self, id: &str, effect_ids: &[String]) -> Result<()> {
+        self.record_effect_outcomes_best_effort(
+            id,
+            effect_ids
+                .iter()
+                .cloned()
+                .map(EffectStatusUpdate::succeeded)
+                .collect(),
+            "succeeded",
+        )
+        .await
+    }
+
+    async fn record_effect_outcomes_best_effort(
+        &self,
+        id: &str,
+        outcomes: Vec<EffectStatusUpdate>,
+        status_label: &str,
+    ) -> Result<()> {
+        if outcomes.is_empty() {
             return Ok(());
         }
 
-        let outcomes = effect_ids
-            .iter()
-            .cloned()
-            .map(EffectStatusUpdate::superseded)
-            .collect::<Vec<_>>();
         if let Err(error) = self.effect_journal.record_effect_outcomes(&outcomes).await {
             tracing::warn!(
                 track_id = id,
-                "failed to record superseded effect journal outcomes: {error}"
+                "failed to record {status_label} effect journal outcomes: {error}"
             );
         }
         self.emit_internal_notification(ApplicationNotification::TrackChanged {
@@ -852,13 +884,10 @@ impl MutationExecutor {
         &self,
         id: &str,
         effect_id: &str,
-        batch_id: &str,
-        sequence: u32,
         order_id: &str,
         receipt: &OrderReceipt,
     ) -> Result<CancelReceiptResolution> {
         let _mutation_guard = self.lock_track_mutation(id).await;
-        let _ = (batch_id, sequence);
         let cancel_effect_status_update = EffectStatusUpdate::succeeded(effect_id.to_string());
         let (previous_snapshot, next_snapshot, cancel_progressed) = {
             let mut manager = self.manager.write().await;
@@ -1285,7 +1314,7 @@ impl MutationExecutor {
             effect_created_at,
         );
         if !session_effects.is_empty() {
-            let journal_entries = EffectJournalEntry::from_session_effects(&session_effects);
+            let journal_entries = effect_journal_entries_from_session_effects(&session_effects);
             self.session_effect_queue.enqueue_batch(session_effects);
             if let Err(error) = self.effect_journal.append_entries(&journal_entries).await {
                 tracing::warn!(
@@ -1331,6 +1360,26 @@ fn effect_status_failed(effect_id: &str, error: &str) -> EffectStatusUpdate {
         status: EffectStatus::Failed,
         attempt_delta: 1,
         last_error: Some(error.to_string()),
+    }
+}
+
+fn effect_journal_entries_from_session_effects(
+    effects: &[SessionTrackEffect],
+) -> Vec<EffectJournalEntry> {
+    effects
+        .iter()
+        .map(effect_journal_entry_from_session_effect)
+        .collect()
+}
+
+fn effect_journal_entry_from_session_effect(effect: &SessionTrackEffect) -> EffectJournalEntry {
+    EffectJournalEntry {
+        effect_id: effect.effect_id.clone(),
+        track_id: effect.track_id.clone(),
+        batch_id: effect.batch_id.clone(),
+        sequence: effect.sequence,
+        effect: effect.effect.clone(),
+        created_at: effect.created_at,
     }
 }
 
@@ -1784,8 +1833,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::{
-        CancelReceiptResolution, EffectJournalEntry, EffectStatus, SessionEffectQueue,
-        SessionTrackEffect, TrackEffectJournal,
+        CancelReceiptResolution, EffectStatus, SessionEffectQueue, SessionTrackEffect,
+        TrackEffectJournal,
     };
     use poise_core::risk::RiskTerminationCause;
     use poise_core::types::{Exposure, Side};
@@ -2199,8 +2248,8 @@ mod tests {
             .enqueue_batch(vec![cancel_effect.clone(), downstream_submit.clone()]);
         repository
             .append_entries(&[
-                EffectJournalEntry::from_session_effect(&cancel_effect),
-                EffectJournalEntry::from_session_effect(&downstream_submit),
+                super::effect_journal_entry_from_session_effect(&cancel_effect),
+                super::effect_journal_entry_from_session_effect(&downstream_submit),
             ])
             .await
             .unwrap();
@@ -2390,8 +2439,6 @@ mod tests {
             .record_cancel_order_success(
                 "btc-core",
                 &cancel_effect.effect_id,
-                &cancel_effect.batch_id,
-                cancel_effect.sequence,
                 "closed-order",
                 &OrderReceipt {
                     order_id: "closed-order".to_string(),
@@ -2532,8 +2579,6 @@ mod tests {
             .record_cancel_order_success(
                 "btc-core",
                 &cancel_effect.effect_id,
-                &cancel_effect.batch_id,
-                cancel_effect.sequence,
                 "closed-order",
                 &OrderReceipt {
                     order_id: "closed-order".to_string(),

@@ -299,13 +299,26 @@ where
     );
     let entries = session_effects
         .iter()
-        .map(poise_application::EffectJournalEntry::from_session_effect)
+        .map(effect_journal_entry_from_session_effect)
         .collect::<Vec<_>>();
     store.append_entries(&entries).await?;
     entries
         .first()
         .map(|effect| effect.effect_id.clone())
         .ok_or_else(|| anyhow::anyhow!("seeded transition did not create an effect journal entry"))
+}
+
+fn effect_journal_entry_from_session_effect(
+    effect: &poise_application::SessionTrackEffect,
+) -> poise_application::EffectJournalEntry {
+    poise_application::EffectJournalEntry {
+        effect_id: effect.effect_id.clone(),
+        track_id: effect.track_id.clone(),
+        batch_id: effect.batch_id.clone(),
+        sequence: effect.sequence,
+        effect: effect.effect.clone(),
+        created_at: effect.created_at,
+    }
 }
 
 pub(crate) fn build_effect_worker_context_for_repository<R>(

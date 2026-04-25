@@ -55,23 +55,6 @@ pub struct EffectJournalEntry {
     pub created_at: DateTime<Utc>,
 }
 
-impl EffectJournalEntry {
-    pub fn from_session_effect(effect: &crate::SessionTrackEffect) -> Self {
-        Self {
-            effect_id: effect.effect_id.clone(),
-            track_id: effect.track_id.clone(),
-            batch_id: effect.batch_id.clone(),
-            sequence: effect.sequence,
-            effect: effect.effect.clone(),
-            created_at: effect.created_at,
-        }
-    }
-
-    pub fn from_session_effects(effects: &[crate::SessionTrackEffect]) -> Vec<Self> {
-        effects.iter().map(Self::from_session_effect).collect()
-    }
-}
-
 impl From<EffectJournalEntry> for PersistedTrackEffect {
     fn from(entry: EffectJournalEntry) -> Self {
         Self {

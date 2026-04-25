@@ -1013,7 +1013,7 @@ mod tests {
         );
         let entries = session_effects
             .iter()
-            .map(EffectJournalEntry::from_session_effect)
+            .map(effect_journal_entry_from_session_effect)
             .collect::<Vec<_>>();
         storage.append_entries(&entries).await.unwrap();
         TestCommittedTransition {
@@ -1021,6 +1021,17 @@ mod tests {
                 .into_iter()
                 .map(PersistedTrackEffect::from)
                 .collect(),
+        }
+    }
+
+    fn effect_journal_entry_from_session_effect(effect: &SessionTrackEffect) -> EffectJournalEntry {
+        EffectJournalEntry {
+            effect_id: effect.effect_id.clone(),
+            track_id: effect.track_id.clone(),
+            batch_id: effect.batch_id.clone(),
+            sequence: effect.sequence,
+            effect: effect.effect.clone(),
+            created_at: effect.created_at,
         }
     }
 
