@@ -7,6 +7,7 @@ use poise_engine::ports::OrderReceipt;
 #[cfg(any(test, feature = "server-test-support"))]
 use tokio::sync::RwLock;
 
+use crate::CancelReceiptResolution;
 use crate::mutation_executor::MutationExecutor;
 
 #[derive(Clone)]
@@ -27,7 +28,7 @@ impl TrackEffectService {
         sequence: u32,
         order_id: &str,
         receipt: &OrderReceipt,
-    ) -> Result<()> {
+    ) -> Result<CancelReceiptResolution> {
         self.executor
             .record_cancel_order_success(id, effect_id, batch_id, sequence, order_id, receipt)
             .await

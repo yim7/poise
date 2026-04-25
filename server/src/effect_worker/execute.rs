@@ -7,6 +7,7 @@ use poise_application::{
 use poise_engine::executor::SubmitRecoveryToken;
 use poise_engine::ports::{OrderReceipt, OrderRequest};
 
+use super::dispatch::SessionDispatchResult;
 use super::{Cancellation, EffectWorker, is_insufficient_margin_failure};
 use crate::exchange_freshness::FreshnessGateDecision;
 use crate::order_outcome::{
@@ -140,7 +141,7 @@ pub(super) async fn execute_cancellation(
     worker: &EffectWorker,
     effect: &SessionTrackEffect,
     cancellation: Cancellation,
-) -> Result<SessionEffectOutcome> {
+) -> Result<SessionDispatchResult> {
     let instrument = cancellation.instrument().clone();
     if matches!(
         worker
@@ -158,9 +159,11 @@ pub(super) async fn execute_cancellation(
                 crate::order_outcome::ReconcileReason::SyncBeforeSideEffect,
             )
             .await?;
-        return Ok(SessionEffectOutcome::Deferred {
-            until: poise_application::DeferredUntil::ExchangeState,
-        });
+        return Ok(SessionDispatchResult::Outcome(
+            SessionEffectOutcome::Deferred {
+                until: poise_application::DeferredUntil::ExchangeState,
+            },
+        ));
     }
     let result = match cancellation {
         Cancellation::One {
@@ -180,12 +183,12 @@ pub(super) async fn execute_cancellation(
 
     match result {
         Ok(result) => {
-            let writeback: Result<()> = match &cancellation {
+            let writeback: Result<SessionDispatchResult> = match &cancellation {
                 Cancellation::One { order_id, .. } => {
                     let CancellationResult::One(receipt) = &result else {
                         unreachable!("single cancel should produce a single cancel receipt");
                     };
-                    worker
+                    let resolution = worker
                         .state
                         .effect_service
                         .record_cancel_order_success(
@@ -196,27 +199,30 @@ pub(super) async fn execute_cancellation(
                             order_id,
                             receipt,
                         )
-                        .await
+                        .await?;
+                    Ok(SessionDispatchResult::Cancel(resolution))
                 }
-                Cancellation::All { .. } => {
+                Cancellation::All { .. } => worker
+                    .state
+                    .effect_service
+                    .record_cancel_all_success(effect.track_id.as_str(), &effect.effect_id)
+                    .await
+                    .map(|_| SessionDispatchResult::Outcome(SessionEffectOutcome::Finished)),
+            };
+            let result = match writeback {
+                Ok(result) => result,
+                Err(error) => {
                     worker
-                        .state
-                        .effect_service
-                        .record_cancel_all_success(effect.track_id.as_str(), &effect.effect_id)
-                        .await
+                        .recover_unknown_outcome(
+                            effect.track_id.as_str(),
+                            &instrument,
+                            cancel_writeback_outcome_unknown(),
+                        )
+                        .await?;
+                    return Err(error);
                 }
             };
-            if let Err(error) = writeback {
-                worker
-                    .recover_unknown_outcome(
-                        effect.track_id.as_str(),
-                        &instrument,
-                        cancel_writeback_outcome_unknown(),
-                    )
-                    .await?;
-                return Err(error);
-            }
-            Ok(SessionEffectOutcome::Finished)
+            Ok(result)
         }
         Err(error) => {
             if let OutcomeClass::OutcomeUnknown(recovery) = classify_cancel_error(&error) {

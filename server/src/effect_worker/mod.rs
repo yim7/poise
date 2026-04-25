@@ -88,7 +88,10 @@ impl EffectWorker {
         dispatch::run_once(self).await
     }
 
-    async fn process_effect(&self, effect: SessionTrackEffect) -> Result<SessionEffectOutcome> {
+    async fn process_effect(
+        &self,
+        effect: SessionTrackEffect,
+    ) -> Result<dispatch::SessionDispatchResult> {
         dispatch::process_effect(self, effect).await
     }
 
@@ -106,7 +109,7 @@ impl EffectWorker {
         &self,
         effect: &SessionTrackEffect,
         cancellation: Cancellation,
-    ) -> Result<SessionEffectOutcome> {
+    ) -> Result<dispatch::SessionDispatchResult> {
         execute::execute_cancellation(self, effect, cancellation).await
     }
 

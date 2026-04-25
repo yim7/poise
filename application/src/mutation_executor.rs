@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use crate::track_persistence::CommittedTrackWrite;
 use crate::{
-    ApplicationNotification, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
-    PersistedTrackEffect, SessionEffectQueue, SessionTrackEffect, TrackControlCommand,
-    TrackControlState, TrackEffectStore, TrackMutationStore, WakeSignal,
+    ApplicationNotification, CancelReceiptResolution, EffectStatus, EffectStatusUpdate,
+    FollowUpRetirementRequest, PersistedTrackEffect, SessionEffectQueue, SessionTrackEffect,
+    TrackControlCommand, TrackControlState, TrackEffectStore, TrackMutationStore, WakeSignal,
 };
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
@@ -808,15 +808,11 @@ impl MutationExecutor {
         sequence: u32,
         order_id: &str,
         receipt: &OrderReceipt,
-    ) -> Result<()> {
+    ) -> Result<CancelReceiptResolution> {
         let _mutation_guard = self.lock_track_mutation(id).await;
-        let downstream_submits = self
-            .pending_submit_effects_for_track_batch(id, batch_id)
-            .await
-            .map_err(anyhow::Error::new)
-            .map(|effects| pending_submit_effects_after_sequence(&effects, sequence))?;
+        let _ = (batch_id, sequence);
         let cancel_effect_status_update = EffectStatusUpdate::succeeded(effect_id.to_string());
-        let (previous_snapshot, next_snapshot, effect_status_updates) = {
+        let (previous_snapshot, next_snapshot, cancel_progressed) = {
             let mut manager = self.manager.write().await;
             let previous_snapshot = manager
                 .snapshot(id)
@@ -827,25 +823,10 @@ impl MutationExecutor {
             let cancel_progressed =
                 cancel_receipt_absorbed_exposure(&manager, id, order_id, receipt)
                     .map_err(TrackMutationError::Mutation)?;
-            let mut effect_status_updates = vec![cancel_effect_status_update.clone()];
-            if cancel_progressed {
-                for downstream_submit in &downstream_submits {
-                    retire_pending_submit_effect(&mut manager, id, downstream_submit)
-                        .map_err(TrackMutationError::Mutation)?;
-                    effect_status_updates.push(EffectStatusUpdate::superseded(
-                        downstream_submit.effect_id.clone(),
-                    ));
-                }
-            } else {
-                for downstream_submit in &downstream_submits {
-                    restore_ready_pending_submit_effect(&mut manager, id, downstream_submit)
-                        .map_err(TrackMutationError::Mutation)?;
-                }
-            }
             let next_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            (previous_snapshot, next_snapshot, effect_status_updates)
+            (previous_snapshot, next_snapshot, cancel_progressed)
         };
 
         self.commit_track_mutation_with_effect_status_updates(
@@ -853,7 +834,7 @@ impl MutationExecutor {
             &previous_snapshot,
             &next_snapshot,
             &(),
-            &effect_status_updates,
+            std::slice::from_ref(&cancel_effect_status_update),
             false,
             None,
         )
@@ -864,7 +845,10 @@ impl MutationExecutor {
         self.retry_pending_follow_up_retirements_best_effort(id, "cancel success writeback")
             .await;
 
-        Ok(())
+        Ok(classify_cancel_receipt_resolution(
+            cancel_progressed,
+            receipt,
+        ))
     }
 
     pub async fn record_cancel_all_success(&self, id: &str, effect_id: &str) -> Result<()> {
@@ -1418,61 +1402,6 @@ fn effect_status_failed(effect_id: &str, error: &str) -> EffectStatusUpdate {
     }
 }
 
-fn restore_ready_pending_submit_effect(
-    manager: &mut TrackManager,
-    id: &str,
-    submit_effect: &PersistedTrackEffect,
-) -> Result<()> {
-    let snapshot = manager
-        .snapshot(id)
-        .ok_or_else(|| anyhow!("track `{id}` not found"))?;
-    let has_active_binding = snapshot
-        .executor_state
-        .bindings
-        .iter()
-        .any(|binding| binding.is_active());
-    if has_active_binding {
-        return Ok(());
-    }
-
-    let TrackEffect::SubmitOrder {
-        request,
-        desired_exposure,
-        ..
-    } = &submit_effect.effect
-    else {
-        return Err(anyhow!(
-            "pending effect `{}` is not submit order",
-            submit_effect.effect_id
-        ));
-    };
-
-    manager.record_submit_request(&TrackId::new(id), request, desired_exposure.clone())?;
-    Ok(())
-}
-
-fn retire_pending_submit_effect(
-    manager: &mut TrackManager,
-    id: &str,
-    submit_effect: &PersistedTrackEffect,
-) -> Result<()> {
-    let TrackEffect::SubmitOrder {
-        request,
-        recovery_token,
-        ..
-    } = &submit_effect.effect
-    else {
-        return Err(anyhow!(
-            "pending effect `{}` is not submit order",
-            submit_effect.effect_id
-        ));
-    };
-
-    manager.record_submit_failure_by_recovery_token(&TrackId::new(id), recovery_token)?;
-    manager.record_submit_failure(&TrackId::new(id), &request.client_order_id)?;
-    Ok(())
-}
-
 fn cancel_receipt_absorbed_exposure(
     manager: &TrackManager,
     id: &str,
@@ -1488,6 +1417,26 @@ fn cancel_receipt_absorbed_exposure(
                 || binding.order_id.as_deref() == Some(receipt.order_id.as_str())
                 || binding.request.client_order_id == receipt.client_order_id)
     }))
+}
+
+fn classify_cancel_receipt_resolution(
+    cancel_progressed: bool,
+    receipt: &OrderReceipt,
+) -> CancelReceiptResolution {
+    if cancel_progressed || receipt.filled_qty > f64::EPSILON {
+        return CancelReceiptResolution::ClosedWithFill {
+            filled_qty: receipt.filled_qty,
+        };
+    }
+    if receipt.status.clears_working_order() {
+        return CancelReceiptResolution::ClosedWithoutFill;
+    }
+    if receipt.status.keeps_working_order() {
+        return CancelReceiptResolution::StillWorking;
+    }
+    CancelReceiptResolution::Unknown {
+        reason: format!("unexpected cancel receipt status: {:?}", receipt.status),
+    }
 }
 
 fn pending_submit_effects_after_sequence(
@@ -2096,7 +2045,9 @@ pub(crate) mod test_support {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::{EffectStatus, FollowUpRetirementRequest, SessionEffectQueue};
+    use crate::{
+        CancelReceiptResolution, EffectStatus, FollowUpRetirementRequest, SessionEffectQueue,
+    };
     use poise_core::risk::RiskTerminationCause;
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
     use poise_engine::observation::MarketObservation;
@@ -2669,7 +2620,7 @@ mod tests {
                 .restore_track_state(&snapshot)
                 .expect("updated track snapshot");
         }
-        services
+        let resolution = services
             .effect
             .record_cancel_order_success(
                 "btc-core",
@@ -2686,6 +2637,11 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            resolution,
+            CancelReceiptResolution::ClosedWithoutFill,
+            "no-fill cancel should let the session queue release downstream submits"
+        );
 
         let persisted = repository.pending_effects();
         let persisted_cancel = persisted
@@ -2727,7 +2683,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_cancel_order_success_with_fill_supersedes_downstream_submits() {
+    async fn record_cancel_order_success_with_fill_classifies_downstream_queue_action() {
         let repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
 
@@ -2807,7 +2763,7 @@ mod tests {
         let single_status_writes_before_cancel =
             repository.single_effect_status_update_call_count();
 
-        services
+        let resolution = services
             .effect
             .record_cancel_order_success(
                 "btc-core",
@@ -2824,6 +2780,11 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            resolution,
+            CancelReceiptResolution::ClosedWithFill { filled_qty: 0.05 },
+            "cancel with fill should let the session queue retire downstream submits"
+        );
 
         let persisted = repository.pending_effects();
         let persisted_cancel = persisted
@@ -2836,7 +2797,11 @@ mod tests {
                 .iter()
                 .find(|effect| effect.effect_id == *effect_id)
                 .expect("downstream submit effect should remain persisted");
-            assert_eq!(effect.status, EffectStatus::Superseded);
+            assert_eq!(
+                effect.status,
+                EffectStatus::Pending,
+                "mutation writeback only classifies the receipt; queue owns downstream retirement"
+            );
         }
         assert_eq!(
             repository.single_effect_status_update_call_count(),
@@ -2856,7 +2821,10 @@ mod tests {
                 .iter()
                 .find(|binding| binding.request.client_order_id == client_order_id)
                 .expect("downstream binding should remain in runtime history");
-            assert_eq!(binding.status, BindingStatus::Terminal);
+            assert!(
+                binding.is_active(),
+                "queue action, not cancel receipt writeback, retires downstream runtime bindings"
+            );
         }
     }
 

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use poise_application::{SessionEffectOutcome, SessionTrackEffect};
+use poise_application::{CancelReceiptResolution, SessionEffectOutcome, SessionTrackEffect};
 use poise_engine::transition::TrackEffect;
 
 use super::{Cancellation, EffectWorker};
@@ -18,40 +18,54 @@ pub(super) async fn run_once(worker: &EffectWorker) -> Result<()> {
             Ok(outcome) => outcome,
             Err(error) => {
                 tracing::warn!("failed to process session effect: {error}");
-                SessionEffectOutcome::Blocked {
+                SessionDispatchResult::Outcome(SessionEffectOutcome::Blocked {
                     reason: error.to_string(),
-                }
+                })
             }
         };
-        worker
-            .state
-            .session_effect_queue
-            .record_outcome(&effect_id, outcome);
+        match outcome {
+            SessionDispatchResult::Outcome(outcome) => {
+                worker
+                    .state
+                    .session_effect_queue
+                    .record_outcome(&effect_id, outcome);
+            }
+            SessionDispatchResult::Cancel(resolution) => {
+                worker
+                    .state
+                    .session_effect_queue
+                    .record_cancel_resolution(&effect_id, resolution);
+            }
+        }
     }
 
     Ok(())
 }
 
+pub(super) enum SessionDispatchResult {
+    Outcome(SessionEffectOutcome),
+    Cancel(CancelReceiptResolution),
+}
+
 pub(super) async fn process_effect(
     worker: &EffectWorker,
     effect: SessionTrackEffect,
-) -> Result<SessionEffectOutcome> {
+) -> Result<SessionDispatchResult> {
     match &effect.effect {
         TrackEffect::SubmitOrder {
             request,
             desired_exposure,
             recovery_token,
             ..
-        } => {
-            worker
-                .execute_submit(
-                    &effect,
-                    request.clone(),
-                    recovery_token.clone(),
-                    desired_exposure.clone(),
-                )
-                .await
-        }
+        } => worker
+            .execute_submit(
+                &effect,
+                request.clone(),
+                recovery_token.clone(),
+                desired_exposure.clone(),
+            )
+            .await
+            .map(SessionDispatchResult::Outcome),
         TrackEffect::CancelOrder {
             instrument,
             order_id,
@@ -82,7 +96,9 @@ pub(super) async fn process_effect(
                 .effect_service
                 .complete_effect_succeeded(effect.track_id.as_str(), &effect.effect_id)
                 .await?;
-            Ok(SessionEffectOutcome::Finished)
+            Ok(SessionDispatchResult::Outcome(
+                SessionEffectOutcome::Finished,
+            ))
         }
     }
 }
