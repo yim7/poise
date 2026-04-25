@@ -32,7 +32,7 @@
 
 - 旧 `Pending` effect 不应跨重启继续派发。
 - 旧 `Executing` effect 不应跨重启继续等待完成。
-- 旧 follow-up retirement 不应跨重启继续执行。
+- 旧 cancel follow-up 不应跨重启继续执行。
 - 启动正确性不依赖 `track_effects`。
 - 运行正确性不依赖任何旧 session 的本地状态。
 
@@ -43,7 +43,7 @@
 - effect worker 通过旧 `TrackEffectStore::list_dispatchable_effects()` 从数据库扫描 `Pending` effect。
 - `track_effects` 同时承担运行队列、状态机顺序控制、UI 历史和调试记录。
 - startup 还需要扫描旧 `Pending / Executing` effect 并标记为 `Superseded`。
-- follow-up retirement 被持久化成跨重启任务。
+- cancel follow-up 被持久化成跨重启任务。
 - status-only 写回需要考虑多个 status 是否同事务提交。
 
 这些复杂度来自一个已经不成立的假设：
@@ -63,7 +63,7 @@
 - 当前 session 的 effect 派发只依赖内存队列。
 - 持久 effect 数据降级为 journal，用于 UI、诊断和审计。
 - 重启后旧 effect 不派发、不恢复、不参与 startup。
-- startup 不再清理旧 pending effect，也不再删除旧 follow-up retirement 来保证运行正确性。
+- startup 不再清理旧 pending effect，也不再删除旧 cancel follow-up 来保证运行正确性。
 - 账务、交易历史、PnL、fee、funding 继续持久化，并保持业务真值地位。
 
 ## 4. 非目标
@@ -107,7 +107,7 @@ Session runtime 只存在于当前进程。
 - recovery anomaly
 - pending effect queue
 - executing effect
-- follow-up retirement
+- cancel follow-up
 - startup cleanup filter
 - submit preflight in-flight 状态
 
@@ -151,7 +151,7 @@ Effect journal 是历史记录，不是运行队列。
   - `Blocked`：当前 effect 失败并终结当前 batch 的剩余 effect，但不阻塞后续新 batch。
   - `Superseded`：当前 effect 被新 runtime 状态废弃，后续按 batch 规则继续。
 - 提供当前 session 的 active submit hints，供 exchange sync 使用；这些 hint 只描述已经进入交易所交互窗口的 submit，不包含未来 queued submit。
-- 提供当前 session 的 follow-up retirement token 和处理动作。
+- 提供当前 session 的 cancel follow-up 处理动作。
 
 不负责：
 
@@ -196,7 +196,7 @@ pub enum CancelQueueAction {
         requires_reconcile: bool,
     },
     Deferred { until: DeferredUntil },
-    AwaitingFollowUpRetirement {
+    AwaitingCancelFollowUp {
         reason: String,
     },
     Blocked { reason: String },
@@ -238,10 +238,10 @@ impl SessionEffectQueue {
         effect_id: &str,
         resolution: CancelReceiptResolution,
     ) -> CancelQueueAction;
-    pub fn resolve_follow_up_retirements_for_closed_orders(
+    pub fn resolve_cancel_follow_ups_from_open_order_snapshot(
         &self,
         track_id: &TrackId,
-        open_order_ids: &HashSet<String>,
+        open_orders: &CompleteOpenOrderSnapshot,
     ) -> Vec<FollowUpQueueAction>;
     pub fn active_submit_hints_for_track(&self, track_id: &TrackId) -> Vec<PendingSubmitHint>;
     pub fn snapshot_for_track(&self, track_id: &TrackId) -> SessionEffectQueueSnapshot;
@@ -262,7 +262,7 @@ impl SessionEffectQueue {
 
 `SessionEffectOutcome::Blocked` 的语义是“当前 batch 已不能继续”，不是“整个 queue 停止”。queue 必须终结或跳过当前 batch 的剩余 effect，并允许同 track 后续新 batch 或其他 track 的 batch 继续派发；否则一次 cancel/submit failure 会把当前 session effect worker 卡死。
 
-unknown cancel 不是普通 `Blocked`。普通 `Blocked` 表示 batch 失败并终结；unknown cancel 表示 downstream submit 暂时等待 bounded open-order sync 判断。queue 内部记录 follow-up 指针，并通过 `CancelQueueAction::AwaitingFollowUpRetirement { reason }` 通知 application 触发 open-order sync。后续 bounded open-order sync 只把完整 open-order snapshot 交给 `resolve_follow_up_retirements_for_closed_orders(...)`；queue 内部用保存的指针解释结果：如果订单已不在 open orders，废弃 downstream submit 并要求 reconcile；如果订单仍在 open orders，消费本次 follow-up，把原 cancel effect 转回 queued，并暂停到下一次 `WakeSignal::ExchangeState` 后重试。调用层不能持有 token，不能构造 batch 顺序身份，也不能查询 downstream 列表。
+unknown cancel 不是普通 `Blocked`。普通 `Blocked` 表示 batch 失败并终结；unknown cancel 表示 downstream submit 暂时等待 bounded open-order sync 判断。queue 内部记录 follow-up 指针，并通过 `CancelQueueAction::AwaitingCancelFollowUp { reason }` 通知 application 触发 open-order sync。后续 bounded open-order sync 只把完整 `CompleteOpenOrderSnapshot` 交给 `resolve_cancel_follow_ups_from_open_order_snapshot(...)`；queue 内部用保存的指针解释结果：如果订单已不在 open orders，废弃 downstream submit 并要求 reconcile；如果订单仍在 open orders，消费本次 follow-up，把原 cancel effect 转回 queued，并暂停到下一次 `WakeSignal::ExchangeState` 后重试。调用层不能持有 token，不能构造 batch 顺序身份，也不能查询 downstream 列表。
 
 `record_submit_exchange_accepted(effect_id)` 是 queue 拥有 submit dispatch progress 的领域入口。worker 在交易所 `submit_order` 返回成功后、application writeback 之前调用它，把对应 submit effect 从 `InFlight` 推进到 `SubmittedAwaitingWriteback`。这样 exchange sync 可以看到“交易所已经接受、但本地 runtime 还没完成写回”的 submit hint，而调用方不需要也不能直接改 queue 内部状态。
 
@@ -391,7 +391,7 @@ SessionEffectQueue.claim_next()
   -> for accepted submit: SessionEffectQueue.record_submit_exchange_accepted(...)
   -> write runtime result through application service
   -> application classifies cancel receipt when effect is cancel
-  -> SessionEffectQueue.record_outcome(...) / record_cancel_resolution(...) / resolve_follow_up_retirements_for_closed_orders(...)
+  -> SessionEffectQueue.record_outcome(...) / record_cancel_resolution(...) / resolve_cancel_follow_ups_from_open_order_snapshot(...)
   -> EffectJournal.record_effect_outcomes(...)
 ```
 
@@ -441,19 +441,19 @@ startup 不再处理旧 effect queue。
 
 - 查询旧 `Pending / Executing` effect。
 - 启动时把旧 effect 标为 `Superseded` 来保证 runtime 正确性。
-- 查询并删除旧 follow-up retirement 来保证 runtime 正确性。
+- 查询并删除旧 cancel follow-up 来保证 runtime 正确性。
 
 如果 UI 不希望显示旧 pending effect，可以在 journal 层用 session id 表示旧 session 已结束，而不是让 startup 以 runtime 清理的名义修改它。
 
-## 10. Follow-up retirement
+## 10. Cancel follow-up
 
-Follow-up retirement 是当前 session 中处理 unknown cancel outcome 的临时任务。
+Cancel follow-up 是当前 session 中处理 unknown cancel outcome 的临时任务。
 
 新语义：
 
-- 存放在 `SessionEffectQueue` 或独立 `SessionFollowUpRetirementQueue`。
+- 存放在 `SessionEffectQueue` 或独立 `SessionCancelFollowUpQueue`。
 - queue 内部记录 unknown cancel 的 follow-up 指针，并根据完整 open-order snapshot 解析、废弃对应 downstream submit。
-- application 只提交完整 open-order id 集合，不携带 token、`batch_id`、`sequence` 或 downstream 列表。
+- application 只提交完整 `CompleteOpenOrderSnapshot`，不携带 token、`batch_id`、`sequence` 或 downstream 列表。
 - application / worker 只处理 `FollowUpQueueAction`，不读取 batch 内部顺序。
 - 只在当前进程内有效。
 - 重启后不恢复。
@@ -494,9 +494,9 @@ TUI 可以继续显示最近 effect，但必须表达清楚：
 - 成功后 queue 不再返回该 effect。
 - journal 可查询到该 effect 的历史状态。
 
-### 12.3 follow-up retirement 不跨重启
+### 12.3 cancel follow-up 不跨重启
 
-给定当前 session 中产生 follow-up retirement：
+给定当前 session 中产生 cancel follow-up：
 
 - 它能在当前 session 内清理 downstream submit。
 - 重启后不会从持久层恢复该任务。

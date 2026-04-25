@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{
@@ -641,14 +641,9 @@ impl MutationExecutor {
     ) -> Result<TrackTransition> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let track_id = TrackId::new(id);
-        let open_order_ids = open_orders
-            .orders()
-            .iter()
-            .map(|order| order.order_id.clone())
-            .collect::<HashSet<_>>();
         let follow_up_actions = self
             .session_effect_queue
-            .resolve_follow_up_retirements_for_closed_orders(&track_id, &open_order_ids);
+            .resolve_cancel_follow_ups_from_open_order_snapshot(&track_id, &open_orders);
         let follow_up_requires_reconcile = self
             .handle_follow_up_queue_actions(id, &follow_up_actions)
             .await?;
@@ -752,7 +747,7 @@ impl MutationExecutor {
                 FollowUpQueueAction::StillWorking { .. } => {}
                 FollowUpQueueAction::Blocked { reason } => {
                     return Err(TrackMutationError::Mutation(anyhow!(
-                        "failed to resolve follow-up retirements for track `{id}`: {reason}"
+                        "failed to resolve cancel follow-ups for track `{id}`: {reason}"
                     )));
                 }
             }
@@ -766,7 +761,7 @@ impl MutationExecutor {
         {
             tracing::warn!(
                 track_id = id,
-                "failed to record follow-up retirement journal outcomes: {error}"
+                "failed to record cancel follow-up journal outcomes: {error}"
             );
         }
 
@@ -2200,7 +2195,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exchange_sync_records_follow_up_retirement_outcomes() {
+    async fn exchange_sync_records_cancel_follow_up_outcomes() {
         let repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
         let track_id = TrackId::new("btc-core");

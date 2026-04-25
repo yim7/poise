@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use poise_engine::executor::PendingSubmitHint;
+use poise_engine::observation::CompleteOpenOrderSnapshot;
 use poise_engine::track::TrackId;
 use poise_engine::transition::TrackEffect;
 
@@ -111,7 +112,7 @@ pub enum CancelQueueAction {
     Deferred {
         until: DeferredUntil,
     },
-    AwaitingFollowUpRetirement {
+    AwaitingCancelFollowUp {
         reason: String,
     },
     Blocked {
@@ -383,17 +384,22 @@ impl SessionEffectQueue {
                 if let Some((_track_id, effect)) = inner.effect_mut(effect_id) {
                     effect.dispatch_state = QueuedEffectState::AwaitingFollowUp;
                 }
-                CancelQueueAction::AwaitingFollowUpRetirement { reason }
+                CancelQueueAction::AwaitingCancelFollowUp { reason }
             }
         }
     }
 
-    pub fn resolve_follow_up_retirements_for_closed_orders(
+    pub fn resolve_cancel_follow_ups_from_open_order_snapshot(
         &self,
         track_id: &TrackId,
-        open_order_ids: &HashSet<String>,
+        open_orders: &CompleteOpenOrderSnapshot,
     ) -> Vec<FollowUpQueueAction> {
         let mut inner = self.inner.lock().unwrap();
+        let open_order_ids = open_orders
+            .orders()
+            .iter()
+            .map(|order| order.order_id.as_str())
+            .collect::<HashSet<_>>();
         let tokens = inner
             .follow_up_tokens
             .iter()
@@ -401,7 +407,7 @@ impl SessionEffectQueue {
                 if &pointer.track_id == track_id {
                     Some((
                         token.clone(),
-                        open_order_ids.contains(&pointer.closed_order_id),
+                        open_order_ids.contains(pointer.closed_order_id.as_str()),
                     ))
                 } else {
                     None
@@ -415,7 +421,7 @@ impl SessionEffectQueue {
                 if still_open {
                     inner.record_follow_up_still_working_by_token(token)
                 } else {
-                    inner.record_follow_up_retirement_by_token(token)
+                    inner.record_follow_up_closed_by_token(token)
                 }
             })
             .collect()
@@ -589,7 +595,7 @@ impl SessionEffectQueueInner {
         FollowUpQueueAction::StillWorking { order_id }
     }
 
-    fn record_follow_up_retirement_by_token(
+    fn record_follow_up_closed_by_token(
         &mut self,
         token: InternalFollowUpKey,
     ) -> FollowUpQueueAction {
@@ -791,12 +797,11 @@ impl SessionTrackEffectExt for TrackEffect {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use chrono::Utc;
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::SubmitRecoveryToken;
-    use poise_engine::ports::OrderRequest;
+    use poise_engine::observation::{CompleteOpenOrderSnapshot, OrderObservation};
+    use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::price_gate::SubmitPurpose;
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
@@ -846,6 +851,24 @@ mod tests {
             submit_purpose: SubmitPurpose::AutoReconcile,
             recovery_token: SubmitRecoveryToken::empty(),
         }
+    }
+
+    fn complete_open_orders(order_ids: &[&str]) -> CompleteOpenOrderSnapshot {
+        CompleteOpenOrderSnapshot::from_complete_exchange_query(
+            order_ids
+                .iter()
+                .map(|order_id| OrderObservation {
+                    order_id: (*order_id).to_string(),
+                    client_order_id: format!("{order_id}-client"),
+                    side: Side::Buy,
+                    price: 100.0,
+                    quantity: 0.1,
+                    filled_qty: 0.0,
+                    realized_pnl: 0.0,
+                    status: OrderStatus::New,
+                })
+                .collect(),
+        )
     }
 
     #[test]
@@ -1081,7 +1104,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_up_retirement_is_resolved_from_complete_open_order_snapshot() {
+    fn cancel_follow_up_is_resolved_from_complete_open_order_snapshot() {
         let queue = SessionEffectQueue::default();
         let enqueued = enqueue_effects(
             &queue,
@@ -1103,14 +1126,14 @@ mod tests {
         );
         assert_eq!(
             action,
-            CancelQueueAction::AwaitingFollowUpRetirement {
+            CancelQueueAction::AwaitingCancelFollowUp {
                 reason: "exchange returned unknown order".into(),
             }
         );
 
-        let actions = queue.resolve_follow_up_retirements_for_closed_orders(
+        let actions = queue.resolve_cancel_follow_ups_from_open_order_snapshot(
             &TrackId::new("btc-core"),
-            &HashSet::new(),
+            &complete_open_orders(&[]),
         );
 
         assert_eq!(
@@ -1141,9 +1164,9 @@ mod tests {
             },
         );
 
-        let actions = queue.resolve_follow_up_retirements_for_closed_orders(
+        let actions = queue.resolve_cancel_follow_ups_from_open_order_snapshot(
             &track_id,
-            &HashSet::from(["order-1".to_string()]),
+            &complete_open_orders(&["order-1"]),
         );
 
         assert_eq!(

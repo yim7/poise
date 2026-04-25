@@ -17,7 +17,7 @@
 - 持久化保留账务、交易历史、控制状态和诊断 journal。
 - effect worker 不再调用旧 effect store/journal 的 `list_dispatchable_effects()`。
 - startup 不再扫描旧 `Pending / Executing` effect 来保证 runtime 正确性。
-- follow-up retirement 是当前 session 临时任务，不跨重启。
+- cancel follow-up 是当前 session 临时任务，不跨重启。
 
 ## 文件与责任
 
@@ -25,7 +25,7 @@
   - owner 当前进程内 effect batch 队列
   - owner per-track dispatch claim、defer、wake、finish、block 语义
   - owner cancel receipt 对同 batch downstream submit 的解锁/废弃规则
-  - owner 当前 session active submit hints 和基于不透明 token 的 follow-up retirement 领域动作
+  - owner 当前 session active submit hints 和 cancel follow-up 领域动作
 - Modify: `application/src/lib.rs`
   - 导出 `SessionEffectQueue`、`SessionTrackEffect`、`SessionEffectOutcome`
 - Modify: `application/src/track_persistence.rs`
@@ -43,8 +43,8 @@
   - mutation 持久化成功后 enqueue 当前 session effects
   - exchange sync active submit hints 改从 queue 读取
   - cancel receipt 分类后由 queue 统一处理 downstream submit
-  - follow-up retirement 通过 queue action 处理，不直接读取或构造 batch/sequence downstream 身份
-  - follow-up retirement 改为 session 内存状态
+  - cancel follow-up 通过 queue action 处理，不直接读取或构造 batch/sequence downstream 身份
+  - cancel follow-up 改为 session 内存状态
   - `prepare_fresh_session_for_activation` 不再清旧 DB effect
 - Modify: `application/src/runtime_lifecycle_service.rs`
   - fresh-session activation 只清当前 session queue/runtime，不清 DB pending effect
@@ -64,7 +64,7 @@
 - Modify: `server/src/assembly.rs`
   - 创建并注入单例 `SessionEffectQueue`
 - Modify: `server/src/runtime/startup_bootstrap.rs`
-  - 删除 startup 对旧 effect/follow-up retirement 的清理依赖
+  - 删除 startup 对旧 effect/cancel follow-up 的清理依赖
 - Modify: `storage/src/sqlite.rs`
   - `track_effects` 只作为 journal 查询和记录
   - 删除或停止使用 dispatchable/pending runtime 查询
@@ -638,7 +638,7 @@ pub enum CancelQueueAction {
         requires_reconcile: bool,
     },
     Deferred { until: DeferredUntil },
-    AwaitingFollowUpRetirement {
+    AwaitingCancelFollowUp {
         reason: String,
     },
     Blocked { reason: String },
@@ -717,8 +717,8 @@ struct FollowUpPointer {
 - `record_submit_exchange_accepted(...)` 只接受当前 session queue 中已 claim 的 `SubmitOrder` effect。找不到 effect、effect 类型不是 submit、或状态不是 `InFlight` 时返回 `false`，worker 记录诊断日志并按异常路径处理；调用方不能绕过 queue 直接改 `dispatch_state`。
 - `SessionEffectOutcome::Deferred { until }` 只把该 effect 所在 track 标记为 `paused_until = Some(until)`，不重新放入 ready ring；直到 `wake_track_for(track_id, matching_signal)` 被调用才允许重试。错误类型的 wake signal 必须保持 paused。
 - `SessionEffectOutcome::Blocked` 只 retire 当前 batch 剩余 effect，并让同 track 后续 batch 和其他 track 继续参与调度。
-- `CancelReceiptResolution::Unknown` 在 queue 内部创建 follow-up 指针，并返回 `CancelQueueAction::AwaitingFollowUpRetirement { reason }`。调用方不能持有 token，也不能构造或读取 `batch_id` / `sequence`。
-- `resolve_follow_up_retirements_for_closed_orders(...)` 是 follow-up retirement 的 public 入口。bounded open-order sync 完成后把完整 open-order id 集合交给 queue，由 queue 内部根据 follow-up 指针找到 downstream submit 并返回 action。
+- `CancelReceiptResolution::Unknown` 在 queue 内部创建 follow-up 指针，并返回 `CancelQueueAction::AwaitingCancelFollowUp { reason }`。调用方不能持有 token，也不能构造或读取 `batch_id` / `sequence`。
+- `resolve_cancel_follow_ups_from_open_order_snapshot(...)` 是 cancel follow-up 的 public 入口。bounded open-order sync 完成后把完整 `CompleteOpenOrderSnapshot` 交给 queue，由 queue 内部根据 follow-up 指针解释订单已关闭或仍在 open orders 的结果，并返回 action。
 - `active_submit_hints_for_track(...)` 只返回 `InFlight` / `SubmittedAwaitingWriteback` 的 submit effect；尚未 claim 的 queued downstream submit 不能进入 exchange sync hint。
 - `snapshot_for_track(...)` 返回 `SessionEffectQueueSnapshot` 展示 DTO，只包含 `effect_id`、kind、state、created_at 等稳定展示字段；不能返回 `SessionTrackEffect`，也不能暴露 `batch_id` / `sequence`。
 
@@ -740,10 +740,10 @@ impl SessionEffectQueue {
         effect_id: &str,
         resolution: CancelReceiptResolution,
     ) -> CancelQueueAction;
-    pub fn resolve_follow_up_retirements_for_closed_orders(
+    pub fn resolve_cancel_follow_ups_from_open_order_snapshot(
         &self,
         track_id: &TrackId,
-        open_order_ids: &HashSet<String>,
+        open_orders: &CompleteOpenOrderSnapshot,
     ) -> Vec<FollowUpQueueAction>;
     pub fn wake_track_for(&self, track_id: &TrackId, signal: WakeSignal);
     pub fn active_submit_hints_for_track(&self, track_id: &TrackId) -> Vec<PendingSubmitHint>;
@@ -1165,7 +1165,7 @@ pub(super) async fn process_effect(
 - `ClosedWithoutFill` 通过 `SessionEffectQueue::record_cancel_resolution(...)` 释放同 batch downstream submit。
 - `ClosedWithFill` 通过 `SessionEffectQueue::record_cancel_resolution(...)` 废弃同 batch downstream submit，并触发 immediate reconcile。
 - `StillWorking` 通过 queue 返回 `CancelQueueAction::Deferred { until: DeferredUntil::ExchangeState }`，保留 cancel effect，不释放 downstream submit；对应 track 只能由 exchange reconcile / open-order sync 的 `WakeSignal::ExchangeState` 唤醒。
-- `Unknown` 通过 queue 返回 `AwaitingFollowUpRetirement { reason }`，并触发 bounded open-order sync；sync 完成后由 `resolve_follow_up_retirements_for_closed_orders(...)` 根据完整 open-order snapshot 在 queue 内部解析 downstream submit。订单已不在 open orders 时废弃 downstream submit 并触发 reconcile；订单仍在 open orders 时消费本次 follow-up，把原 cancel effect 转回 queued，并暂停到下一次 `WakeSignal::ExchangeState` 后重试。
+- `Unknown` 通过 queue 返回 `AwaitingCancelFollowUp { reason }`，并触发 bounded open-order sync；sync 完成后由 `resolve_cancel_follow_ups_from_open_order_snapshot(...)` 根据完整 `CompleteOpenOrderSnapshot` 在 queue 内部解析 downstream submit。订单已不在 open orders 时废弃 downstream submit 并触发 reconcile；订单仍在 open orders 时消费本次 follow-up，把原 cancel effect 转回 queued，并暂停到下一次 `WakeSignal::ExchangeState` 后重试。
 
 - [ ] **Step 6: 明确并测试 wake owner**
 
@@ -1395,7 +1395,7 @@ if receipt.filled_qty > 0.0 || cancel_receipt_absorbed_exposure(...) {
 }
 ```
 
-在 bounded open-order sync 完成后的 follow-up 路径中，不再查询 downstream submit 列表，也不构造 `FollowUpRetirementRequest`。该路径只把完整 open-order id 集合提交给 `resolve_follow_up_retirements_for_closed_orders(...)`；queue 内部根据之前保存的 follow-up 指针判断“哪些 downstream submit 需要废弃”。
+在 bounded open-order sync 完成后的 follow-up 路径中，不再查询 downstream submit 列表，也不构造 `FollowUpRetirementRequest`。该路径只把完整 `CompleteOpenOrderSnapshot` 提交给 `resolve_cancel_follow_ups_from_open_order_snapshot(...)`；queue 内部根据之前保存的 follow-up 指针判断 unknown cancel 对应订单是仍在 open orders 还是已经关闭。
 
 `record_cancel_order_success` 不再直接调用 `pending_submit_effects_after(...)`；同 batch downstream 的释放/废弃由 worker 调用 `SessionEffectQueue::record_cancel_resolution(...)` 完成。
 
@@ -1433,7 +1433,7 @@ git add application/src/session_effect_queue.rs application/src/mutation_executo
 git commit -m "refactor: source pending session effects from queue"
 ```
 
-## Task 3: follow-up retirement 改为 queue-owned session 状态
+## Task 3: cancel follow-up 改为 queue-owned session 状态
 
 **Files:**
 
@@ -1444,13 +1444,13 @@ git commit -m "refactor: source pending session effects from queue"
 - Test: `application/src/session_effect_queue.rs`
 - Test: `application/src/mutation_executor.rs`
 
-- [x] **Step 1: 写 queue 测试：follow-up retirement 由完整 exchange snapshot 解释**
+- [x] **Step 1: 写 queue 测试：cancel follow-up 由完整 exchange snapshot 解释**
 
 在 `application/src/session_effect_queue.rs` tests 中新增：
 
 ```rust
 #[test]
-fn follow_up_retirement_is_resolved_from_complete_open_order_snapshot() {
+fn cancel_follow_up_is_resolved_from_complete_open_order_snapshot() {
     let queue = SessionEffectQueue::default();
     let enqueued = queue.enqueue_transition_effects(
         &TrackId::new("btc-core"),
@@ -1466,11 +1466,11 @@ fn follow_up_retirement_is_resolved_from_complete_open_order_snapshot() {
             reason: "exchange returned unknown order".into(),
         },
     );
-    assert!(matches!(action, CancelQueueAction::AwaitingFollowUpRetirement { .. }));
+    assert!(matches!(action, CancelQueueAction::AwaitingCancelFollowUp { .. }));
 
-    let actions = queue.resolve_follow_up_retirements_for_closed_orders(
+    let actions = queue.resolve_cancel_follow_ups_from_open_order_snapshot(
         &TrackId::new("btc-core"),
-        &HashSet::new(),
+        &complete_open_orders(&[]),
     );
 
     assert_eq!(
@@ -1509,24 +1509,24 @@ async fn fresh_session_clears_session_queue_without_store_cleanup() {
 Run:
 
 ```bash
-cargo test -p poise-application follow_up_retirement_is_resolved_from_complete_open_order_snapshot fresh_session_clears_session_queue_without_store_cleanup -- --nocapture
+cargo test -p poise-application cancel_follow_up_is_resolved_from_complete_open_order_snapshot fresh_session_clears_session_queue_without_store_cleanup -- --nocapture
 ```
 
-Expected: FAIL，因为 queue 还没有实现 follow-up retirement 领域动作。
+Expected: FAIL，因为 queue 还没有实现 cancel follow-up 领域动作。
 
-- [x] **Step 3: 将 follow-up retirement 放入 session queue**
+- [x] **Step 3: 将 cancel follow-up 放入 session queue**
 
 在 `SessionEffectQueue` 增加：
 
 ```rust
-pub fn resolve_follow_up_retirements_for_closed_orders(
+pub fn resolve_cancel_follow_ups_from_open_order_snapshot(
     &self,
     track_id: &TrackId,
-    open_order_ids: &HashSet<String>,
+    open_orders: &CompleteOpenOrderSnapshot,
 ) -> Vec<FollowUpQueueAction>;
 ```
 
-`resolve_follow_up_retirements_for_closed_orders(...)` 是单一领域动作。bounded open-order sync 完成后，调用方只提交完整 open-order id 集合；queue 内部根据之前保存的 follow-up 指针解释结果。订单已不在 open orders 时，返回 `FollowUpQueueAction::SupersededDownstream` 并把这些 submit 从 queue 中移除。订单仍在 open orders 时，queue 消费 follow-up 指针，把原 cancel effect 转回 queued，暂停到下一次 `WakeSignal::ExchangeState`，并且不释放 downstream submit。调用方不保存 token 生命周期，也不直接读取或构造 `batch_id + sequence`。
+`resolve_cancel_follow_ups_from_open_order_snapshot(...)` 是单一领域动作。bounded open-order sync 完成后，调用方只提交完整 `CompleteOpenOrderSnapshot`；queue 内部根据之前保存的 follow-up 指针解释结果。订单已不在 open orders 时，返回 `FollowUpQueueAction::SupersededDownstream` 并把这些 submit 从 queue 中移除。订单仍在 open orders 时，queue 消费 follow-up 指针，把原 cancel effect 转回 queued，暂停到下一次 `WakeSignal::ExchangeState`，并且不释放 downstream submit。调用方不保存 token 生命周期，也不直接读取或构造 `batch_id + sequence`。
 
 在 `MutationExecutor` 中处理 unknown cancel 时：
 
@@ -1534,24 +1534,24 @@ pub fn resolve_follow_up_retirements_for_closed_orders(
 let cancel_action = self
     .session_effect_queue
     .record_cancel_resolution(effect_id, CancelReceiptResolution::Unknown { order_id, reason });
-if let CancelQueueAction::AwaitingFollowUpRetirement { .. } = cancel_action {
+if let CancelQueueAction::AwaitingCancelFollowUp { .. } = cancel_action {
     self.request_bounded_open_order_sync(id).await?;
 }
 Ok(())
 ```
 
-bounded open-order sync 完成后，只把完整 open-order id 集合交给 queue：
+bounded open-order sync 完成后，只把完整 `CompleteOpenOrderSnapshot` 交给 queue：
 
 ```rust
 let actions = self
     .session_effect_queue
-    .resolve_follow_up_retirements_for_closed_orders(&TrackId::new(id), &open_order_ids);
+    .resolve_cancel_follow_ups_from_open_order_snapshot(&TrackId::new(id), &open_orders);
 for action in actions {
     self.handle_follow_up_queue_action(id, action).await?;
 }
 ```
 
-删除 `retry_pending_follow_up_retirements_best_effort`。follow-up retirement 不再有 pending retry 概念；如果本次 request 没有匹配到当前 session queue 中的 downstream submit，queue 返回 `NothingToRetire` 或 `Blocked`，后续由新的 reconcile / exchange sync 重新规划。
+删除 `retry_pending_follow_up_retirements_best_effort`。cancel follow-up 不再有 pending retry 概念；如果本次 request 没有匹配到当前 session queue 中的 downstream submit，queue 返回 `NothingToRetire` 或 `Blocked`，后续由新的 reconcile / exchange sync 重新规划。
 
 如果当前代码没有独立 `handle_follow_up_queue_action(...)`，本 task 新增一个私有 helper。它只根据 `FollowUpQueueAction` 做两类事：
 

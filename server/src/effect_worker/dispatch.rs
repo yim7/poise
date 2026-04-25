@@ -108,7 +108,7 @@ async fn handle_cancel_queue_action(
         } => {
             record_superseded_effects(worker, track_id, &effect_ids).await?;
         }
-        CancelQueueAction::AwaitingFollowUpRetirement { .. } => {
+        CancelQueueAction::AwaitingCancelFollowUp { .. } => {
             if let Some(instrument) = instrument {
                 worker
                     .recover_unknown_outcome(
