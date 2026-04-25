@@ -563,11 +563,14 @@ use poise_engine::transition::TrackEffect;
 pub struct SessionTrackEffect {
     pub effect_id: String,
     pub track_id: TrackId,
-    pub batch_id: String,
-    pub sequence: u32,
     pub effect: TrackEffect,
     pub created_at: DateTime<Utc>,
+    pub(crate) batch_id: String,
+    pub(crate) sequence: u32,
 }
+
+// batch_id / sequence 是 queue 内部诊断身份，只能由 SessionEffectQueue 生成。
+// 调用方不能构造或依赖这些字段。
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionEffectQueueSnapshot {
