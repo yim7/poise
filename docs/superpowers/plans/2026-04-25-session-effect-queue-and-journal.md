@@ -1789,7 +1789,7 @@ git commit -m "refactor: remove startup persisted effect cleanup"
 - Test: `storage/src/sqlite.rs`
 - Test: `application/src/query_service.rs`
 
-- [ ] **Step 1: 确认 journal 接口没有运行队列语义**
+- [x] **Step 1: 确认 journal 接口没有运行队列语义**
 
 `application/src/track_effect_store.rs` 中最终只保留 Task 1 引入的 journal 接口：
 
@@ -1817,7 +1817,7 @@ effect outcome 写入只通过 `TrackEffectJournal::record_effect_outcomes(...)`
 
 同步更新 Task 1 的 `seed_persisted_pending_submit_effect(...)` test helper：最终代码里它应通过 `TrackEffectJournal::append_entries(...)` seed 旧 journal row，不再通过 `TrackMutationStore::commit_track_transition(...)` 写 effect。
 
-- [ ] **Step 2: 删除 dispatch/pending 查询实现**
+- [x] **Step 2: 删除 dispatch/pending 查询实现**
 
 从 SQLite 删除或停止公开：
 
@@ -1834,7 +1834,7 @@ list_all_pending_effects_for_track_blocking
 list_recent_track_effects_blocking
 ```
 
-- [ ] **Step 3: 调整 schema 索引**
+- [x] **Step 3: 调整 schema 索引**
 
 在 `storage/src/schema.rs` 删除 dispatch 专用索引：
 
@@ -1850,7 +1850,7 @@ CREATE INDEX IF NOT EXISTS idx_track_effects_recent
 ON track_effects(track_id, updated_at DESC, created_at DESC, batch_id DESC, sequence DESC, effect_id DESC);
 ```
 
-- [ ] **Step 4: 调整测试**
+- [x] **Step 4: 调整测试**
 
 删除这些 storage 测试或改成 queue 测试：
 
@@ -1871,7 +1871,7 @@ list_recent_track_effects_orders_results_by_updated_at
 record_effect_outcomes_updates_recent_journal_without_dispatch_semantics
 ```
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 Run:
 
@@ -1882,12 +1882,24 @@ cargo check -p poise-application -p poise-storage -p poise-server
 
 Expected: PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add application/src/track_effect_store.rs application/src/track_query_store.rs application/src/read_model.rs application/src/query_service.rs application/src/debug_query_service.rs storage/src/sqlite.rs storage/src/schema.rs server/src/projector.rs
 git commit -m "refactor: make track effects a journal"
 ```
+
+执行记录：
+
+- 2026-04-25：删除旧 effect store 的 dispatch/pending/status 运行边界，把 effect 持久化降级为诊断 journal，commit `6f196de`。
+- 验收：`cargo test -p poise-application mutation_executor::tests:: -- --nocapture`
+- 验收：`cargo test -p poise-application session_effect_queue::tests:: -- --nocapture`
+- 验收：`cargo test -p poise-storage schema::tests::initialize_creates_tables -- --nocapture`
+- 验收：`cargo test -p poise-storage list_recent_track_effects -- --nocapture`
+- 验收：`cargo test -p poise-storage save_transition_persists_events_and_effect_journal_entries_atomically -- --nocapture`
+- 验收：`cargo test -p poise-server runtime::submit_preflight::tests::reconcile_ignores_persisted_effects_from_previous_session -- --nocapture`
+- 验收：`cargo test -p poise-server effect_worker:: -- --nocapture`
+- 验收：`cargo check -p poise-application -p poise-storage -p poise-server`
 
 ## Task 6: 更新 TUI/HTTP 展示语义
 
