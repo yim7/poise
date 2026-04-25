@@ -80,7 +80,6 @@ impl TrackMutationGuards {
 pub(crate) struct MutationExecutor {
     manager: SharedManager,
     mutation_store: Arc<dyn TrackMutationStore>,
-    effect_store: Arc<dyn TrackEffectStore>,
     session_effect_queue: SessionEffectQueue,
     mutation_guards: Arc<TrackMutationGuards>,
     notifications: broadcast::Sender<ApplicationNotification>,
@@ -254,7 +253,6 @@ impl MutationExecutor {
     pub(crate) fn new(
         manager: TrackManager,
         mutation_store: Arc<dyn TrackMutationStore>,
-        effect_store: Arc<dyn TrackEffectStore>,
         session_effect_queue: SessionEffectQueue,
         notifications: broadcast::Sender<ApplicationNotification>,
         account_margin_guard: Arc<dyn AccountCapacityGuard>,
@@ -263,7 +261,6 @@ impl MutationExecutor {
         Self {
             manager: Arc::new(RwLock::new(manager)),
             mutation_store,
-            effect_store,
             session_effect_queue,
             mutation_guards: Arc::new(TrackMutationGuards::default()),
             notifications,
@@ -279,26 +276,13 @@ impl MutationExecutor {
 
     pub(crate) async fn prepare_fresh_session_for_activation(&self, id: &str) -> Result<()> {
         let _mutation_guard = self.lock_track_mutation(id).await;
-        let session_reset_effect_ids = self
-            .effect_store
-            .list_session_reset_effects_for_track(&TrackId::new(id))
-            .await
-            .map_err(TrackMutationError::Persistence)?
-            .into_iter()
-            .map(|effect| effect.effect_id)
-            .collect::<Vec<_>>();
-        for effect_id in &session_reset_effect_ids {
-            self.mutation_store
-                .update_effect_status(id, &EffectStatusUpdate::superseded(effect_id.clone()))
-                .await
-                .map_err(TrackMutationError::Persistence)?;
-        }
+        let track_id = TrackId::new(id);
+        self.session_effect_queue.clear_track(&track_id);
 
         let mut manager = self.manager.write().await;
         manager
-            .reset_executor_for_activation(&TrackId::new(id))
+            .reset_executor_for_activation(&track_id)
             .map_err(TrackMutationError::Mutation)?;
-        self.session_effect_queue.clear_track(&TrackId::new(id));
         Ok(())
     }
 
@@ -376,7 +360,7 @@ impl TrackServiceSet {
         manager: TrackManager,
         mutation_store: Arc<dyn TrackMutationStore>,
         query_store: Arc<dyn crate::TrackQueryStore>,
-        effect_store: Arc<dyn TrackEffectStore>,
+        _effect_store: Arc<dyn TrackEffectStore>,
         notifications: broadcast::Sender<ApplicationNotification>,
         account_margin_guard: Arc<dyn AccountCapacityGuard>,
         recovery_anomaly_observer: Arc<dyn RecoveryAnomalyObserver>,
@@ -385,7 +369,6 @@ impl TrackServiceSet {
         let executor = Arc::new(MutationExecutor::new(
             manager,
             mutation_store,
-            effect_store,
             session_effect_queue.clone(),
             notifications,
             account_margin_guard,
@@ -1709,26 +1692,6 @@ pub(crate) mod test_support {
                 .collect())
         }
 
-        async fn list_session_reset_effects_for_track(
-            &self,
-            track_id: &TrackId,
-        ) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(self
-                .effects
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|effect| {
-                    effect.track_id == *track_id
-                        && matches!(
-                            effect.status,
-                            EffectStatus::Pending | EffectStatus::Executing
-                        )
-                })
-                .cloned()
-                .collect())
-        }
-
         async fn list_pending_submit_effects_for_track(
             &self,
             track_id: &TrackId,
@@ -1886,7 +1849,6 @@ mod tests {
         MutationExecutor::new(
             seeded_manager(),
             repository.clone(),
-            repository,
             SessionEffectQueue::default(),
             notifications,
             Arc::new(NoopGuard),
@@ -1991,7 +1953,6 @@ mod tests {
         let (notifications, _) = broadcast::channel(16);
         let executor = MutationExecutor::new(
             seeded_manager(),
-            repository.clone(),
             repository.clone(),
             SessionEffectQueue::default(),
             notifications.clone(),

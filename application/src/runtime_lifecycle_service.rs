@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_fresh_session_for_activation_clears_old_pending_work_and_executor_state() {
+    async fn prepare_fresh_session_for_activation_does_not_mutate_old_persisted_effects() {
         let repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
         repository.seed_pending_mixed_effect_batch("btc-core", "btc-core:batch-1");
@@ -398,24 +398,6 @@ mod tests {
             .await
             .snapshot("btc-core")
             .unwrap();
-        let executing_effect_id = repository
-            .pending_effects()
-            .into_iter()
-            .find(|effect| effect.sequence == 0)
-            .map(|effect| effect.effect_id)
-            .unwrap();
-        crate::TrackMutationStore::update_effect_status(
-            repository.as_ref(),
-            "btc-core",
-            &crate::EffectStatusUpdate {
-                effect_id: executing_effect_id,
-                status: EffectStatus::Executing,
-                attempt_delta: 0,
-                last_error: None,
-            },
-        )
-        .await
-        .unwrap();
         services
             .observation
             .observe_market(
@@ -469,13 +451,13 @@ mod tests {
         let btc_statuses = effects
             .iter()
             .filter(|effect| effect.track_id == TrackId::new("btc-core"))
+            .filter(|effect| effect.batch_id == "btc-core:batch-1")
             .map(|effect| effect.status)
             .collect::<Vec<_>>();
-        assert!(!btc_statuses.is_empty());
-        assert!(
-            btc_statuses
-                .iter()
-                .all(|status| *status == EffectStatus::Superseded)
+        assert_eq!(
+            btc_statuses,
+            vec![EffectStatus::Pending, EffectStatus::Pending],
+            "old persisted effects are journal history, not startup work"
         );
     }
 

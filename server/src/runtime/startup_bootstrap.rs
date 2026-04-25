@@ -478,30 +478,16 @@ mod tests {
                 .has_tracked_submit_effects()
                 .await
         );
-        assert!(
-            repository
-                .list_all_pending_submit_effects()
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            repository
-                .list_dispatchable_effects()
-                .await
-                .unwrap()
-                .is_empty()
-        );
         let effects = repository
             .list_recent_track_effects(&TrackId::new("btc-core"), 8)
             .await
             .unwrap();
-        assert_eq!(
+        assert!(!effects.is_empty());
+        assert!(
             effects
                 .iter()
-                .filter(|effect| effect.status == EffectStatus::Superseded)
-                .count(),
-            2
+                .all(|effect| effect.status == EffectStatus::Pending),
+            "startup should leave previous-session persisted effects as diagnostic journal rows"
         );
 
         let snapshot = services
