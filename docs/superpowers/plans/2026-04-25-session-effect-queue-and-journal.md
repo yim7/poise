@@ -1274,6 +1274,12 @@ git commit -m "feat: run effects from session queue"
 - Modify: `application/src/mutation_executor.rs`
 - Test: `application/src/mutation_executor.rs`
 
+执行记录：
+
+- 2026-04-25：完成 exchange sync active submit hint 切换与 cancel receipt 分类，commit `45cd9aa`。
+- 验收：`cargo test -p poise-application mutation_executor::tests:: -- --nocapture`
+- 验收：`cargo test -p poise-server effect_worker:: -- --nocapture`
+
 - [ ] **Step 1: 扩展 queue 测试**
 
 在 `application/src/session_effect_queue.rs` tests 中新增：
