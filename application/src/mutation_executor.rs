@@ -647,18 +647,14 @@ impl MutationExecutor {
     ) -> Result<TrackTransition> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let track_id = TrackId::new(id);
-        let follow_up_actions = self
+        let follow_up_requires_reconcile = self
             .session_effect_queue
-            .resolve_cancel_follow_ups_from_open_order_snapshot(&track_id, &open_orders);
-        let follow_up_handling = self
-            .handle_follow_up_queue_actions(id, &follow_up_actions)
-            .await?;
-        let effective_mode =
-            if follow_up_handling.requires_reconcile && mode.allows_follow_up_reconcile() {
-                ExchangeSyncMode::RecoverAndReconcile
-            } else {
-                mode
-            };
+            .cancel_follow_up_requires_reconcile_from_open_order_snapshot(&track_id, &open_orders);
+        let effective_mode = if follow_up_requires_reconcile {
+            ExchangeSyncMode::RecoverAndReconcile
+        } else {
+            mode
+        };
         let pending_submit_hints = self
             .session_effect_queue
             .active_submit_hints_for_track(&track_id);
@@ -674,7 +670,7 @@ impl MutationExecutor {
                     .sync_exchange_state(
                         &TrackId::new(id),
                         position,
-                        open_orders,
+                        open_orders.clone(),
                         pending_submit_hints,
                     )
                     .map_err(|error| {
@@ -688,7 +684,7 @@ impl MutationExecutor {
                     .sync_exchange_state_without_reconcile(
                         &TrackId::new(id),
                         position,
-                        open_orders,
+                        open_orders.clone(),
                         pending_submit_hints,
                     )
                     .map_err(|error| {
@@ -715,6 +711,13 @@ impl MutationExecutor {
         )
         .await
         .map_err(anyhow::Error::new)?;
+
+        let follow_up_actions = self
+            .session_effect_queue
+            .resolve_cancel_follow_ups_from_open_order_snapshot(&track_id, &open_orders);
+        let follow_up_handling = self
+            .handle_follow_up_queue_actions(id, &follow_up_actions)
+            .await?;
 
         let resolved_submit_effect_ids = self
             .session_effect_queue
@@ -1841,7 +1844,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::{
-        CancelReceiptResolution, EffectStatus, SessionEffectQueue, TrackEffectJournal, WakeSignal,
+        CancelReceiptResolution, EffectStatus, SessionEffectQueue, SessionPendingEffectState,
+        TrackEffectJournal, WakeSignal,
     };
     use poise_core::risk::RiskTerminationCause;
     use poise_core::types::{Exposure, Side};
@@ -2294,6 +2298,123 @@ mod tests {
             .find(|effect| effect.effect_id == enqueued[1].effect_id)
             .expect("downstream journal row should exist");
         assert_eq!(downstream.status, EffectStatus::Superseded);
+    }
+
+    #[tokio::test]
+    async fn cancel_follow_up_resolution_waits_for_successful_exchange_sync_commit() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository);
+        let track_id = TrackId::new("ghost-core");
+        let enqueued = services.session_effect_queue.enqueue_transition_effects(
+            &track_id,
+            &[
+                TrackEffect::CancelOrder {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    order_id: "closed-order".into(),
+                },
+                TrackEffect::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                        side: Side::Buy,
+                        price: 95.0,
+                        quantity: 0.1,
+                        client_order_id: "downstream-submit".into(),
+                        reduce_only: false,
+                    },
+                    desired_exposure: Exposure(4.0),
+                    submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                    recovery_token: poise_engine::executor::SubmitRecoveryToken::empty(),
+                },
+            ],
+            chrono::Utc::now(),
+        );
+        let cancel_effect_id = enqueued[0].effect_id.clone();
+        services.session_effect_queue.claim_next().unwrap();
+        services.session_effect_queue.record_cancel_resolution(
+            &cancel_effect_id,
+            CancelReceiptResolution::Unknown {
+                order_id: "closed-order".into(),
+                reason: "exchange timeout".into(),
+            },
+        );
+
+        let result = services
+            .observation
+            .sync_exchange_state_without_reconcile(
+                track_id.as_str(),
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+                CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let snapshot = services.session_effect_queue.snapshot_for_track(&track_id);
+        assert_eq!(snapshot.pending_effects.len(), 2);
+        assert_eq!(
+            snapshot.pending_effects[0].state,
+            SessionPendingEffectState::AwaitingFollowUp,
+            "failed exchange sync must not consume the pending cancel follow-up"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_cancel_follow_up_forces_reconcile_even_from_recover_only_sync() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository.clone());
+        let track_id = TrackId::new("btc-core");
+        services
+            .observation
+            .observe_market(
+                track_id.as_str(),
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 94.9,
+                        best_ask: 95.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        services.session_effect_queue.clear_track(&track_id);
+
+        let enqueued = services.session_effect_queue.enqueue_transition_effects(
+            &track_id,
+            &[TrackEffect::CancelOrder {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                order_id: "closed-order".into(),
+            }],
+            chrono::Utc::now(),
+        );
+        let cancel_effect_id = enqueued[0].effect_id.clone();
+        services.session_effect_queue.claim_next().unwrap();
+        services.session_effect_queue.record_cancel_resolution(
+            &cancel_effect_id,
+            CancelReceiptResolution::Unknown {
+                order_id: "closed-order".into(),
+                reason: "exchange timeout".into(),
+            },
+        );
+
+        let transition = services
+            .observation
+            .sync_exchange_state_without_reconcile(
+                track_id.as_str(),
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+                CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !transition.effects.is_empty(),
+            "closed cancel follow-up should force reconcile even through recover-only exchange sync"
+        );
     }
 
     #[tokio::test]

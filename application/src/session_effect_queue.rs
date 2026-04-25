@@ -428,6 +428,24 @@ impl SessionEffectQueue {
             .collect()
     }
 
+    pub fn cancel_follow_up_requires_reconcile_from_open_order_snapshot(
+        &self,
+        track_id: &TrackId,
+        open_orders: &CompleteOpenOrderSnapshot,
+    ) -> bool {
+        let inner = self.inner.lock().unwrap();
+        let open_order_ids = open_orders
+            .orders()
+            .iter()
+            .map(|order| order.order_id.as_str())
+            .collect::<HashSet<_>>();
+
+        inner.follow_up_tokens.values().any(|pointer| {
+            &pointer.track_id == track_id
+                && !open_order_ids.contains(pointer.closed_order_id.as_str())
+        })
+    }
+
     pub fn active_submit_effect_ids(&self) -> HashSet<String> {
         let inner = self.inner.lock().unwrap();
         inner
@@ -567,6 +585,9 @@ impl SessionEffectQueue {
             }
         }
         inner.ready_tracks.retain(|ready| ready != track_id);
+        inner
+            .follow_up_tokens
+            .retain(|_, pointer| &pointer.track_id != track_id);
     }
 }
 
@@ -1218,5 +1239,38 @@ mod tests {
             "the original cancel should be retried before downstream submit"
         );
         assert!(queue.active_submit_hints_for_track(&track_id).is_empty());
+    }
+
+    #[test]
+    fn clear_track_removes_pending_cancel_follow_up_tokens() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = enqueue_effects(
+            &queue,
+            track_id.as_str(),
+            &[cancel_effect(), submit_effect("client-1")],
+        );
+
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        queue.record_cancel_resolution(
+            &enqueued[0],
+            CancelReceiptResolution::Unknown {
+                order_id: "order-from-old-session".into(),
+                reason: "cancel outcome unknown".into(),
+            },
+        );
+
+        queue.clear_track(&track_id);
+        let fresh = enqueue_effects(&queue, track_id.as_str(), &[cancel_effect()]);
+        let actions = queue.resolve_cancel_follow_ups_from_open_order_snapshot(
+            &track_id,
+            &complete_open_orders(&["order-from-old-session"]),
+        );
+
+        assert!(
+            actions.is_empty(),
+            "fresh session queue cleanup must also remove stale cancel follow-up pointers"
+        );
+        assert_eq!(queue.claim_next().unwrap().effect_id, fresh[0]);
     }
 }
