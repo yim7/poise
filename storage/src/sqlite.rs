@@ -952,7 +952,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use poise_application::{
-        EffectStatus, SessionTrackEffect, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
+        EffectStatus, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
     };
     use poise_core::events::DomainEvent;
     use poise_core::strategy::BandBoundary;
@@ -1005,15 +1005,23 @@ mod tests {
             .await
             .unwrap();
         let created_at = Utc::now();
-        let session_effects = SessionTrackEffect::from_transition_effects(
-            &TrackId::new(track_id),
-            &format!("{}:batch:{}", track_id, created_at.timestamp_micros()),
-            effects,
-            created_at,
-        );
-        let entries = session_effects
+        let batch_id = format!("{}:batch:{}", track_id, created_at.timestamp_micros());
+        let entries = effects
             .iter()
-            .map(effect_journal_entry_from_session_effect)
+            .enumerate()
+            .filter_map(|(sequence, effect)| {
+                if matches!(effect, TrackEffect::NoOp) {
+                    return None;
+                }
+                Some(EffectJournalEntry {
+                    effect_id: format!("{}:{}:{}", track_id, batch_id, sequence),
+                    track_id: TrackId::new(track_id),
+                    batch_id: batch_id.clone(),
+                    sequence: sequence as u32,
+                    effect: effect.clone(),
+                    created_at,
+                })
+            })
             .collect::<Vec<_>>();
         storage.append_entries(&entries).await.unwrap();
         TestCommittedTransition {
@@ -1021,17 +1029,6 @@ mod tests {
                 .into_iter()
                 .map(PersistedTrackEffect::from)
                 .collect(),
-        }
-    }
-
-    fn effect_journal_entry_from_session_effect(effect: &SessionTrackEffect) -> EffectJournalEntry {
-        EffectJournalEntry {
-            effect_id: effect.effect_id.clone(),
-            track_id: effect.track_id.clone(),
-            batch_id: effect.batch_id.clone(),
-            sequence: effect.sequence,
-            effect: effect.effect.clone(),
-            created_at: effect.created_at,
         }
     }
 

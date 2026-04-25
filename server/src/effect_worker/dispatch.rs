@@ -230,7 +230,6 @@ mod tests {
 
     use anyhow::Result;
     use chrono::Utc;
-    use poise_application::SessionTrackEffect;
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::ports::{
@@ -277,19 +276,17 @@ mod tests {
     async fn worker_dispatches_current_session_queue_effect() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let effect_worker_context = build_effect_worker_context_for_repository(repository);
+        let track_id = TrackId::new("btc-core");
         effect_worker_context
             .effect_worker_state
             .session_effect_queue
-            .enqueue_batch(vec![SessionTrackEffect {
-                effect_id: "session-effect-1".to_string(),
-                track_id: TrackId::new("btc-core"),
-                batch_id: "session-batch-1".to_string(),
-                sequence: 0,
-                effect: TrackEffect::CancelAll {
+            .enqueue_transition_effects(
+                &track_id,
+                &[TrackEffect::CancelAll {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                },
-                created_at: Utc::now(),
-            }]);
+                }],
+                Utc::now(),
+            );
 
         let execution = Arc::new(RecordingExecutionPort::default());
         let account = Arc::new(NoopAccountPort);
@@ -313,20 +310,17 @@ mod tests {
         effect_worker_context
             .effect_worker_state
             .session_effect_queue
-            .enqueue_batch(vec![
-                SessionTrackEffect {
-                    effect_id: "cancel-unknown".to_string(),
-                    track_id: track_id.clone(),
-                    batch_id: "batch-1".to_string(),
-                    sequence: 0,
-                    effect: TrackEffect::CancelOrder {
+            .enqueue_transition_effects(
+                &track_id,
+                &[
+                    TrackEffect::CancelOrder {
                         instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                         order_id: "missing-order".into(),
                     },
-                    created_at: Utc::now(),
-                },
-                submit_effect("downstream-submit", 1),
-            ]);
+                    submit_effect("downstream-submit"),
+                ],
+                Utc::now(),
+            );
 
         let execution = Arc::new(UnknownCancelExecutionPort);
         let account = Arc::new(NoopAccountPort);
@@ -350,26 +344,19 @@ mod tests {
         );
     }
 
-    fn submit_effect(effect_id: &str, sequence: u32) -> SessionTrackEffect {
-        SessionTrackEffect {
-            effect_id: effect_id.to_string(),
-            track_id: TrackId::new("btc-core"),
-            batch_id: "batch-1".to_string(),
-            sequence,
-            effect: TrackEffect::SubmitOrder {
-                request: OrderRequest {
-                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    side: Side::Buy,
-                    price: 100.0,
-                    quantity: 0.1,
-                    client_order_id: format!("{effect_id}-client"),
-                    reduce_only: false,
-                },
-                desired_exposure: Exposure(4.0),
-                submit_purpose: SubmitPurpose::AutoReconcile,
-                recovery_token: SubmitRecoveryToken::empty(),
+    fn submit_effect(effect_id: &str) -> TrackEffect {
+        TrackEffect::SubmitOrder {
+            request: OrderRequest {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                side: Side::Buy,
+                price: 100.0,
+                quantity: 0.1,
+                client_order_id: format!("{effect_id}-client"),
+                reduce_only: false,
             },
-            created_at: Utc::now(),
+            desired_exposure: Exposure(4.0),
+            submit_purpose: SubmitPurpose::AutoReconcile,
+            recovery_token: SubmitRecoveryToken::empty(),
         }
     }
 

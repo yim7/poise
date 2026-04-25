@@ -1304,18 +1304,13 @@ impl MutationExecutor {
         }
 
         let effect_created_at = chrono::Utc::now();
-        let batch_nonce = effect_created_at
-            .timestamp_nanos_opt()
-            .unwrap_or(effect_created_at.timestamp_micros() * 1_000);
-        let session_effects = SessionTrackEffect::from_transition_effects(
+        let session_effects = self.session_effect_queue.enqueue_transition_effects(
             &TrackId::new(id),
-            &batch_nonce.to_string(),
             result.effects(),
             effect_created_at,
         );
         if !session_effects.is_empty() {
             let journal_entries = effect_journal_entries_from_session_effects(&session_effects);
-            self.session_effect_queue.enqueue_batch(session_effects);
             if let Err(error) = self.effect_journal.append_entries(&journal_entries).await {
                 tracing::warn!(
                     track_id = id,
@@ -1832,10 +1827,7 @@ pub(crate) mod test_support {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::{
-        CancelReceiptResolution, EffectStatus, SessionEffectQueue, SessionTrackEffect,
-        TrackEffectJournal,
-    };
+    use crate::{CancelReceiptResolution, EffectStatus, SessionEffectQueue, TrackEffectJournal};
     use poise_core::risk::RiskTerminationCause;
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
@@ -2212,49 +2204,38 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
         let track_id = TrackId::new("btc-core");
         let now = chrono::Utc::now();
-        let cancel_effect = SessionTrackEffect {
-            effect_id: "cancel-effect".into(),
-            track_id: track_id.clone(),
-            batch_id: "batch-unknown-cancel".into(),
-            sequence: 0,
-            effect: TrackEffect::CancelOrder {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                order_id: "closed-order".into(),
-            },
-            created_at: now,
-        };
-        let downstream_submit = SessionTrackEffect {
-            effect_id: "downstream-submit".into(),
-            track_id: track_id.clone(),
-            batch_id: "batch-unknown-cancel".into(),
-            sequence: 1,
-            effect: TrackEffect::SubmitOrder {
-                request: OrderRequest {
+        let enqueued = services.session_effect_queue.enqueue_transition_effects(
+            &track_id,
+            &[
+                TrackEffect::CancelOrder {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    side: Side::Buy,
-                    price: 95.0,
-                    quantity: 0.1,
-                    client_order_id: "downstream-submit".into(),
-                    reduce_only: false,
+                    order_id: "closed-order".into(),
                 },
-                desired_exposure: Exposure(4.0),
-                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
-                recovery_token: poise_engine::executor::SubmitRecoveryToken::empty(),
-            },
-            created_at: now,
-        };
-        services
-            .session_effect_queue
-            .enqueue_batch(vec![cancel_effect.clone(), downstream_submit.clone()]);
+                TrackEffect::SubmitOrder {
+                    request: OrderRequest {
+                        instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                        side: Side::Buy,
+                        price: 95.0,
+                        quantity: 0.1,
+                        client_order_id: "downstream-submit".into(),
+                        reduce_only: false,
+                    },
+                    desired_exposure: Exposure(4.0),
+                    submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                    recovery_token: poise_engine::executor::SubmitRecoveryToken::empty(),
+                },
+            ],
+            now,
+        );
+        let cancel_effect_id = enqueued[0].effect_id.clone();
         repository
-            .append_entries(&[
-                super::effect_journal_entry_from_session_effect(&cancel_effect),
-                super::effect_journal_entry_from_session_effect(&downstream_submit),
-            ])
+            .append_entries(&super::effect_journal_entries_from_session_effects(
+                &enqueued,
+            ))
             .await
             .unwrap();
         services.session_effect_queue.record_cancel_resolution(
-            &cancel_effect.effect_id,
+            &cancel_effect_id,
             CancelReceiptResolution::Unknown {
                 order_id: "closed-order".into(),
                 reason: "exchange timeout".into(),
@@ -2277,7 +2258,7 @@ mod tests {
         let effects = repository.pending_effects();
         let downstream = effects
             .iter()
-            .find(|effect| effect.effect_id == downstream_submit.effect_id)
+            .find(|effect| effect.effect_id == enqueued[1].effect_id)
             .expect("downstream journal row should exist");
         assert_eq!(downstream.status, EffectStatus::Superseded);
     }

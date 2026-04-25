@@ -10,14 +10,14 @@ use poise_engine::transition::TrackEffect;
 pub struct SessionTrackEffect {
     pub effect_id: String,
     pub track_id: TrackId,
-    pub batch_id: String,
-    pub sequence: u32,
     pub effect: TrackEffect,
     pub created_at: DateTime<Utc>,
+    pub(crate) batch_id: String,
+    pub(crate) sequence: u32,
 }
 
 impl SessionTrackEffect {
-    pub fn from_transition_effects(
+    fn prepare_transition_effects(
         track_id: &TrackId,
         batch_id: &str,
         effects: &[TrackEffect],
@@ -113,7 +113,6 @@ pub enum CancelQueueAction {
     },
     AwaitingFollowUpRetirement {
         reason: String,
-        token: FollowUpRetirementToken,
     },
     Blocked {
         reason: String,
@@ -121,13 +120,7 @@ pub enum CancelQueueAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FollowUpRetirementToken(String);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FollowUpRetirementResolution {
-    pub token: FollowUpRetirementToken,
-    pub closed_order_id: String,
-}
+struct InternalFollowUpKey(String);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FollowUpQueueAction {
@@ -160,8 +153,9 @@ struct SessionEffectQueueInner {
     tracks: HashMap<TrackId, TrackQueue>,
     ready_tracks: VecDeque<TrackId>,
     effect_index: HashMap<String, TrackId>,
-    follow_up_tokens: HashMap<FollowUpRetirementToken, FollowUpPointer>,
+    follow_up_tokens: HashMap<InternalFollowUpKey, FollowUpPointer>,
     next_follow_up_token: u64,
+    next_batch_id: u64,
 }
 
 #[derive(Default)]
@@ -196,7 +190,24 @@ struct FollowUpPointer {
 }
 
 impl SessionEffectQueue {
-    pub fn enqueue_batch(&self, effects: Vec<SessionTrackEffect>) {
+    pub fn enqueue_transition_effects(
+        &self,
+        track_id: &TrackId,
+        effects: &[TrackEffect],
+        created_at: DateTime<Utc>,
+    ) -> Vec<SessionTrackEffect> {
+        let batch_id = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.next_batch_id_for(track_id)
+        };
+        let session_effects = SessionTrackEffect::prepare_transition_effects(
+            track_id, &batch_id, effects, created_at,
+        );
+        self.enqueue_prepared_effects(session_effects.clone());
+        session_effects
+    }
+
+    fn enqueue_prepared_effects(&self, effects: Vec<SessionTrackEffect>) {
         let mut inner = self.inner.lock().unwrap();
         let mut grouped: HashMap<TrackId, Vec<SessionTrackEffect>> = HashMap::new();
         for effect in effects {
@@ -365,11 +376,11 @@ impl SessionEffectQueue {
                 }
             }
             CancelReceiptResolution::Unknown { order_id, reason } => {
-                let token = inner.next_follow_up_token(&track_id, effect_id, &order_id);
+                inner.next_follow_up_token(&track_id, effect_id, &order_id);
                 if let Some((_track_id, effect)) = inner.effect_mut(effect_id) {
                     effect.dispatch_state = QueuedEffectState::AwaitingFollowUp;
                 }
-                CancelQueueAction::AwaitingFollowUpRetirement { reason, token }
+                CancelQueueAction::AwaitingFollowUpRetirement { reason }
             }
         }
     }
@@ -398,25 +409,6 @@ impl SessionEffectQueue {
             .into_iter()
             .map(|token| inner.record_follow_up_retirement_by_token(token))
             .collect()
-    }
-
-    pub fn record_follow_up_retirement(
-        &self,
-        resolution: FollowUpRetirementResolution,
-    ) -> FollowUpQueueAction {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(pointer) = inner.follow_up_tokens.get(&resolution.token) else {
-            return FollowUpQueueAction::NothingToRetire;
-        };
-        if pointer.closed_order_id != resolution.closed_order_id {
-            return FollowUpQueueAction::Blocked {
-                reason: format!(
-                    "follow-up token order mismatch: expected `{}`, got `{}`",
-                    pointer.closed_order_id, resolution.closed_order_id
-                ),
-            };
-        }
-        inner.record_follow_up_retirement_by_token(resolution.token)
     }
 
     pub fn active_submit_effect_ids(&self) -> HashSet<String> {
@@ -561,7 +553,7 @@ impl SessionEffectQueue {
 impl SessionEffectQueueInner {
     fn record_follow_up_retirement_by_token(
         &mut self,
-        token: FollowUpRetirementToken,
+        token: InternalFollowUpKey,
     ) -> FollowUpQueueAction {
         let Some(pointer) = self.follow_up_tokens.remove(&token) else {
             return FollowUpQueueAction::NothingToRetire;
@@ -680,9 +672,9 @@ impl SessionEffectQueueInner {
         track_id: &TrackId,
         effect_id: &str,
         closed_order_id: &str,
-    ) -> FollowUpRetirementToken {
+    ) -> InternalFollowUpKey {
         self.next_follow_up_token += 1;
-        let token = FollowUpRetirementToken(format!(
+        let token = InternalFollowUpKey(format!(
             "{}:{}:{}",
             track_id.as_str(),
             effect_id,
@@ -697,6 +689,11 @@ impl SessionEffectQueueInner {
             },
         );
         token
+    }
+
+    fn next_batch_id_for(&mut self, track_id: &TrackId) -> String {
+        self.next_batch_id += 1;
+        format!("{}:batch:{}", track_id.as_str(), self.next_batch_id)
     }
 }
 
@@ -756,6 +753,8 @@ impl SessionTrackEffectExt for TrackEffect {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use chrono::Utc;
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::SubmitRecoveryToken;
@@ -766,94 +765,94 @@ mod tests {
 
     use super::{
         CancelQueueAction, CancelReceiptResolution, DeferredUntil, FollowUpQueueAction,
-        FollowUpRetirementResolution, SessionEffectOutcome, SessionEffectQueue,
-        SessionPendingEffectState, SessionQueueAction, SessionTrackEffect, WakeSignal,
+        SessionEffectOutcome, SessionEffectQueue, SessionPendingEffectState, SessionQueueAction,
+        WakeSignal,
     };
 
-    fn cancel_effect(effect_id: &str, batch_id: &str, sequence: u32) -> SessionTrackEffect {
-        SessionTrackEffect {
-            effect_id: effect_id.to_string(),
-            track_id: TrackId::new("btc-core"),
-            batch_id: batch_id.to_string(),
-            sequence,
-            effect: TrackEffect::CancelOrder {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                order_id: "order-1".into(),
-            },
-            created_at: Utc::now(),
-        }
-    }
-
-    fn effect(effect_id: &str, batch_id: &str, sequence: u32) -> SessionTrackEffect {
-        effect_for_track("btc-core", effect_id, batch_id, sequence)
-    }
-
-    fn effect_for_track(
+    fn enqueue_effects(
+        queue: &SessionEffectQueue,
         track_id: &str,
-        effect_id: &str,
-        batch_id: &str,
-        sequence: u32,
-    ) -> SessionTrackEffect {
-        SessionTrackEffect {
-            effect_id: effect_id.to_string(),
-            track_id: TrackId::new(track_id),
-            batch_id: batch_id.to_string(),
-            sequence,
-            effect: TrackEffect::CancelAll {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            },
-            created_at: Utc::now(),
+        effects: &[TrackEffect],
+    ) -> Vec<String> {
+        queue
+            .enqueue_transition_effects(&TrackId::new(track_id), effects, Utc::now())
+            .into_iter()
+            .map(|effect| effect.effect_id)
+            .collect()
+    }
+
+    fn cancel_effect() -> TrackEffect {
+        TrackEffect::CancelOrder {
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            order_id: "order-1".into(),
         }
     }
 
-    fn submit_effect(effect_id: &str, batch_id: &str, sequence: u32) -> SessionTrackEffect {
-        SessionTrackEffect {
-            effect_id: effect_id.to_string(),
-            track_id: TrackId::new("btc-core"),
-            batch_id: batch_id.to_string(),
-            sequence,
-            effect: TrackEffect::SubmitOrder {
-                request: OrderRequest {
-                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    side: Side::Buy,
-                    price: 100.0,
-                    quantity: 0.1,
-                    client_order_id: "client-1".into(),
-                    reduce_only: false,
-                },
-                desired_exposure: Exposure(4.0),
-                submit_purpose: SubmitPurpose::AutoReconcile,
-                recovery_token: SubmitRecoveryToken::empty(),
-            },
-            created_at: Utc::now(),
+    fn cancel_all_effect() -> TrackEffect {
+        TrackEffect::CancelAll {
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
         }
+    }
+
+    fn submit_effect(client_order_id: &str) -> TrackEffect {
+        TrackEffect::SubmitOrder {
+            request: OrderRequest {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                side: Side::Buy,
+                price: 100.0,
+                quantity: 0.1,
+                client_order_id: client_order_id.into(),
+                reduce_only: false,
+            },
+            desired_exposure: Exposure(4.0),
+            submit_purpose: SubmitPurpose::AutoReconcile,
+            recovery_token: SubmitRecoveryToken::empty(),
+        }
+    }
+
+    #[test]
+    fn enqueue_transition_effects_generates_batch_identity_inside_queue() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = queue.enqueue_transition_effects(
+            &track_id,
+            &[cancel_all_effect(), cancel_all_effect()],
+            Utc::now(),
+        );
+
+        assert_eq!(enqueued.len(), 2);
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0].effect_id);
+        queue.record_outcome(&enqueued[0].effect_id, SessionEffectOutcome::Finished);
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[1].effect_id);
     }
 
     #[test]
     fn queue_dispatches_batch_in_sequence_order() {
         let queue = SessionEffectQueue::default();
-        queue.enqueue_batch(vec![
-            effect("effect-2", "batch-1", 2),
-            effect("effect-1", "batch-1", 1),
-        ]);
+        let enqueued = enqueue_effects(
+            &queue,
+            "btc-core",
+            &[cancel_all_effect(), cancel_all_effect()],
+        );
 
-        assert_eq!(queue.claim_next().unwrap().effect_id, "effect-1");
-        queue.record_outcome("effect-1", SessionEffectOutcome::Finished);
-        assert_eq!(queue.claim_next().unwrap().effect_id, "effect-2");
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        queue.record_outcome(&enqueued[0], SessionEffectOutcome::Finished);
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[1]);
     }
 
     #[test]
     fn blocked_effect_retires_current_batch_and_allows_next_batch() {
         let queue = SessionEffectQueue::default();
-        queue.enqueue_batch(vec![
-            effect("effect-1", "batch-1", 1),
-            effect("effect-2", "batch-1", 2),
-        ]);
-        queue.enqueue_batch(vec![effect("effect-3", "batch-2", 1)]);
+        let first_batch = enqueue_effects(
+            &queue,
+            "btc-core",
+            &[cancel_all_effect(), cancel_all_effect()],
+        );
+        let second_batch = enqueue_effects(&queue, "btc-core", &[cancel_all_effect()]);
 
-        assert_eq!(queue.claim_next().unwrap().effect_id, "effect-1");
+        assert_eq!(queue.claim_next().unwrap().effect_id, first_batch[0]);
         let action = queue.record_outcome(
-            "effect-1",
+            &first_batch[0],
             SessionEffectOutcome::Blocked {
                 reason: "cancel failed".to_string(),
             },
@@ -861,38 +860,28 @@ mod tests {
         assert_eq!(
             action,
             SessionQueueAction::RetiredBatch {
-                effect_ids: vec!["effect-2".into()],
+                effect_ids: vec![first_batch[1].clone()],
                 requires_reconcile: true,
             }
         );
-        assert_eq!(queue.claim_next().unwrap().effect_id, "effect-3");
+        assert_eq!(queue.claim_next().unwrap().effect_id, second_batch[0]);
     }
 
     #[test]
     fn deferred_effect_blocks_only_its_track_until_matching_wake() {
         let queue = SessionEffectQueue::default();
-        queue.enqueue_batch(vec![effect_for_track(
-            "btc-core",
-            "btc-effect-1",
-            "btc-batch",
-            1,
-        )]);
-        queue.enqueue_batch(vec![effect_for_track(
-            "eth-core",
-            "eth-effect-1",
-            "eth-batch",
-            1,
-        )]);
+        let btc_effect = enqueue_effects(&queue, "btc-core", &[cancel_all_effect()]);
+        let eth_effect = enqueue_effects(&queue, "eth-core", &[cancel_all_effect()]);
 
-        assert_eq!(queue.claim_next().unwrap().effect_id, "btc-effect-1");
+        assert_eq!(queue.claim_next().unwrap().effect_id, btc_effect[0]);
         queue.record_outcome(
-            "btc-effect-1",
+            &btc_effect[0],
             SessionEffectOutcome::Deferred {
                 until: DeferredUntil::ExchangeState,
             },
         );
-        assert_eq!(queue.claim_next().unwrap().effect_id, "eth-effect-1");
-        queue.record_outcome("eth-effect-1", SessionEffectOutcome::Finished);
+        assert_eq!(queue.claim_next().unwrap().effect_id, eth_effect[0]);
+        queue.record_outcome(&eth_effect[0], SessionEffectOutcome::Finished);
         assert!(queue.claim_next().is_none());
 
         queue.wake_track_for(&TrackId::new("btc-core"), WakeSignal::FreshMarket);
@@ -902,18 +891,18 @@ mod tests {
         );
 
         queue.wake_track_for(&TrackId::new("btc-core"), WakeSignal::ExchangeState);
-        assert_eq!(queue.claim_next().unwrap().effect_id, "btc-effect-1");
+        assert_eq!(queue.claim_next().unwrap().effect_id, btc_effect[0]);
     }
 
     #[test]
     fn queue_snapshot_exposes_display_dto_without_batch_ordering() {
         let queue = SessionEffectQueue::default();
-        queue.enqueue_batch(vec![effect("effect-1", "batch-1", 0)]);
+        let enqueued = enqueue_effects(&queue, "btc-core", &[cancel_all_effect()]);
 
         let snapshot = queue.snapshot_for_track(&TrackId::new("btc-core"));
 
         assert_eq!(snapshot.pending_effects.len(), 1);
-        assert_eq!(snapshot.pending_effects[0].effect_id, "effect-1");
+        assert_eq!(snapshot.pending_effects[0].effect_id, enqueued[0]);
         assert_eq!(
             snapshot.pending_effects[0].state,
             SessionPendingEffectState::Queued
@@ -923,11 +912,11 @@ mod tests {
     #[test]
     fn submit_exchange_accepted_records_writeback_window() {
         let queue = SessionEffectQueue::default();
-        queue.enqueue_batch(vec![submit_effect("submit-1", "batch-1", 0)]);
+        let enqueued = enqueue_effects(&queue, "btc-core", &[submit_effect("client-1")]);
 
-        assert_eq!(queue.claim_next().unwrap().effect_id, "submit-1");
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
         assert!(
-            queue.record_submit_exchange_accepted("submit-1"),
+            queue.record_submit_exchange_accepted(&enqueued[0]),
             "queue should own submit dispatch progress"
         );
 
@@ -949,12 +938,12 @@ mod tests {
     fn submitted_writeback_unknown_keeps_active_hint_until_exchange_sync() {
         let queue = SessionEffectQueue::default();
         let track_id = TrackId::new("btc-core");
-        queue.enqueue_batch(vec![submit_effect("submit-1", "batch-1", 0)]);
+        let enqueued = enqueue_effects(&queue, "btc-core", &[submit_effect("client-1")]);
 
-        assert_eq!(queue.claim_next().unwrap().effect_id, "submit-1");
-        assert!(queue.record_submit_exchange_accepted("submit-1"));
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        assert!(queue.record_submit_exchange_accepted(&enqueued[0]));
         queue.record_outcome(
-            "submit-1",
+            &enqueued[0],
             SessionEffectOutcome::Deferred {
                 until: DeferredUntil::ExchangeState,
             },
@@ -972,7 +961,7 @@ mod tests {
 
         assert_eq!(
             queue.resolve_submitted_awaiting_exchange_state_for_track(&track_id),
-            vec!["submit-1".to_string()]
+            vec![enqueued[0].clone()]
         );
         assert!(
             queue.active_submit_hints_for_track(&track_id).is_empty(),
@@ -983,7 +972,7 @@ mod tests {
     #[test]
     fn active_submit_hints_exclude_future_queued_submit() {
         let queue = SessionEffectQueue::default();
-        queue.enqueue_batch(vec![submit_effect("submit-1", "batch-1", 0)]);
+        let enqueued = enqueue_effects(&queue, "btc-core", &[submit_effect("client-1")]);
 
         assert!(
             queue
@@ -992,7 +981,7 @@ mod tests {
             "queued submit that was never claimed is not an exchange fact"
         );
 
-        assert_eq!(queue.claim_next().unwrap().effect_id, "submit-1");
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
         assert_eq!(
             queue
                 .active_submit_hints_for_track(&TrackId::new("btc-core"))
@@ -1004,41 +993,49 @@ mod tests {
     #[test]
     fn cancel_without_fill_unblocks_downstream_submit_effects() {
         let queue = SessionEffectQueue::default();
-        queue.enqueue_batch(vec![
-            cancel_effect("cancel-1", "batch-1", 0),
-            submit_effect("submit-1", "batch-1", 1),
-            submit_effect("submit-2", "batch-1", 2),
-        ]);
+        let enqueued = enqueue_effects(
+            &queue,
+            "btc-core",
+            &[
+                cancel_effect(),
+                submit_effect("client-1"),
+                submit_effect("client-2"),
+            ],
+        );
 
-        assert_eq!(queue.claim_next().unwrap().effect_id, "cancel-1");
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
 
-        let action =
-            queue.record_cancel_resolution("cancel-1", CancelReceiptResolution::ClosedWithoutFill);
+        let action = queue
+            .record_cancel_resolution(&enqueued[0], CancelReceiptResolution::ClosedWithoutFill);
 
         assert_eq!(action, CancelQueueAction::UnblockedDownstream);
-        assert_eq!(queue.claim_next().unwrap().effect_id, "submit-1");
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[1]);
     }
 
     #[test]
     fn cancel_with_fill_supersedes_downstream_submit_effects() {
         let queue = SessionEffectQueue::default();
-        queue.enqueue_batch(vec![
-            cancel_effect("cancel-1", "batch-1", 0),
-            submit_effect("submit-1", "batch-1", 1),
-            submit_effect("submit-2", "batch-1", 2),
-        ]);
+        let enqueued = enqueue_effects(
+            &queue,
+            "btc-core",
+            &[
+                cancel_effect(),
+                submit_effect("client-1"),
+                submit_effect("client-2"),
+            ],
+        );
 
-        assert_eq!(queue.claim_next().unwrap().effect_id, "cancel-1");
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
 
         let action = queue.record_cancel_resolution(
-            "cancel-1",
+            &enqueued[0],
             CancelReceiptResolution::ClosedWithFill { filled_qty: 0.4 },
         );
 
         assert_eq!(
             action,
             CancelQueueAction::SupersededDownstream {
-                effect_ids: vec!["submit-1".into(), "submit-2".into()],
+                effect_ids: vec![enqueued[1].clone(), enqueued[2].clone()],
                 requires_reconcile: true,
             }
         );
@@ -1046,38 +1043,44 @@ mod tests {
     }
 
     #[test]
-    fn follow_up_retirement_token_is_resolved_by_queue() {
+    fn follow_up_retirement_is_resolved_from_complete_open_order_snapshot() {
         let queue = SessionEffectQueue::default();
-        queue.enqueue_batch(vec![
-            cancel_effect("cancel-1", "batch-1", 0),
-            submit_effect("submit-1", "batch-1", 1),
-            submit_effect("submit-2", "batch-1", 2),
-        ]);
+        let enqueued = enqueue_effects(
+            &queue,
+            "btc-core",
+            &[
+                cancel_effect(),
+                submit_effect("client-1"),
+                submit_effect("client-2"),
+            ],
+        );
 
-        assert_eq!(queue.claim_next().unwrap().effect_id, "cancel-1");
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
         let action = queue.record_cancel_resolution(
-            "cancel-1",
+            &enqueued[0],
             CancelReceiptResolution::Unknown {
                 order_id: "closed-order".into(),
                 reason: "exchange returned unknown order".into(),
             },
         );
-        let token = match action {
-            CancelQueueAction::AwaitingFollowUpRetirement { token, .. } => token,
-            other => panic!("expected follow-up token, got {other:?}"),
-        };
-
-        let action = queue.record_follow_up_retirement(FollowUpRetirementResolution {
-            token,
-            closed_order_id: "closed-order".into(),
-        });
-
         assert_eq!(
             action,
-            FollowUpQueueAction::SupersededDownstream {
-                effect_ids: vec!["submit-1".into(), "submit-2".into()],
-                requires_reconcile: true,
+            CancelQueueAction::AwaitingFollowUpRetirement {
+                reason: "exchange returned unknown order".into(),
             }
+        );
+
+        let actions = queue.resolve_follow_up_retirements_for_closed_orders(
+            &TrackId::new("btc-core"),
+            &HashSet::new(),
+        );
+
+        assert_eq!(
+            actions,
+            vec![FollowUpQueueAction::SupersededDownstream {
+                effect_ids: vec![enqueued[1].clone(), enqueued[2].clone()],
+                requires_reconcile: true,
+            }]
         );
     }
 }
