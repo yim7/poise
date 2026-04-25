@@ -5,8 +5,9 @@ use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use poise_application::{
-    self as app, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, PersistedTrackEffect,
-    StoredTrackEvent, TrackControlState, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
+    self as app, CommittedTrackWrite, EffectJournalEntry, EffectStatus, EffectStatusUpdate,
+    PersistedTrackEffect, StoredTrackEvent, TrackControlState, TrackEffectJournal,
+    TrackMutationStore, TrackQueryStore,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -369,10 +370,7 @@ impl SqliteStorage {
             control_state
         };
 
-        if control_state.is_some()
-            || ledger_state_for_persistence.is_some()
-            || !events.is_empty()
-        {
+        if control_state.is_some() || ledger_state_for_persistence.is_some() || !events.is_empty() {
             tx.execute(
                 "INSERT INTO persisted_track_presence (track_id, created_at, updated_at)
                  VALUES (?1, ?2, ?3)
@@ -438,7 +436,7 @@ impl SqliteStorage {
 
     fn append_effect_journal_entries_blocking(
         conn: Arc<Mutex<Connection>>,
-        entries: Vec<PersistedTrackEffect>,
+        entries: Vec<EffectJournalEntry>,
     ) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
@@ -449,7 +447,8 @@ impl SqliteStorage {
             .transaction()
             .context("failed to start sqlite effect journal append transaction")?;
         for entry in entries {
-            let effect_json = serde_json::to_string(&entry.effect)
+            let effect = PersistedTrackEffect::from(entry);
+            let effect_json = serde_json::to_string(&effect.effect)
                 .context("failed to serialize effect journal entry")?;
             tx.execute(
                 "INSERT INTO track_effects (
@@ -466,16 +465,16 @@ impl SqliteStorage {
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                 ON CONFLICT(effect_id) DO NOTHING",
                 params![
-                    entry.effect_id,
-                    entry.track_id.as_str(),
-                    entry.batch_id,
-                    i64::from(entry.sequence),
+                    effect.effect_id,
+                    effect.track_id.as_str(),
+                    effect.batch_id,
+                    i64::from(effect.sequence),
                     effect_json,
-                    entry.status.as_str(),
-                    i64::from(entry.attempt_count),
-                    entry.last_error,
-                    entry.created_at.to_rfc3339(),
-                    entry.updated_at.to_rfc3339(),
+                    effect.status.as_str(),
+                    i64::from(effect.attempt_count),
+                    effect.last_error,
+                    effect.created_at.to_rfc3339(),
+                    effect.updated_at.to_rfc3339(),
                 ],
             )
             .context("failed to append effect journal entry")?;
@@ -811,7 +810,7 @@ impl TrackMutationStore for SqliteStorage {
 
 #[async_trait]
 impl TrackEffectJournal for SqliteStorage {
-    async fn append_entries(&self, entries: &[PersistedTrackEffect]) -> Result<()> {
+    async fn append_entries(&self, entries: &[EffectJournalEntry]) -> Result<()> {
         let conn = Arc::clone(&self.conn);
         let entries = entries.to_vec();
 
@@ -1014,10 +1013,15 @@ mod tests {
         );
         let entries = session_effects
             .iter()
-            .map(SessionTrackEffect::to_pending_journal_entry)
+            .map(EffectJournalEntry::from_session_effect)
             .collect::<Vec<_>>();
         storage.append_entries(&entries).await.unwrap();
-        TestCommittedTransition { effects: entries }
+        TestCommittedTransition {
+            effects: entries
+                .into_iter()
+                .map(PersistedTrackEffect::from)
+                .collect(),
+        }
     }
 
     async fn persist_two_events_for(track_id: &str, storage: &SqliteStorage) -> [DomainEvent; 2] {

@@ -6,8 +6,6 @@ use poise_engine::executor::PendingSubmitHint;
 use poise_engine::track::TrackId;
 use poise_engine::transition::TrackEffect;
 
-use crate::{EffectStatus, PersistedTrackEffect};
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionTrackEffect {
     pub effect_id: String,
@@ -42,34 +40,6 @@ impl SessionTrackEffect {
                 })
             })
             .collect()
-    }
-
-    pub fn to_pending_journal_entry(&self) -> PersistedTrackEffect {
-        PersistedTrackEffect {
-            effect_id: self.effect_id.clone(),
-            track_id: self.track_id.clone(),
-            batch_id: self.batch_id.clone(),
-            sequence: self.sequence,
-            effect: self.effect.clone(),
-            status: EffectStatus::Pending,
-            attempt_count: 0,
-            last_error: None,
-            created_at: self.created_at,
-            updated_at: self.created_at,
-        }
-    }
-}
-
-impl From<&PersistedTrackEffect> for SessionTrackEffect {
-    fn from(value: &PersistedTrackEffect) -> Self {
-        Self {
-            effect_id: value.effect_id.clone(),
-            track_id: value.track_id.clone(),
-            batch_id: value.batch_id.clone(),
-            sequence: value.sequence,
-            effect: value.effect.clone(),
-            created_at: value.created_at,
-        }
     }
 }
 

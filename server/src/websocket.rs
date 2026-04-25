@@ -711,8 +711,9 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use futures_util::{SinkExt, StreamExt};
     use poise_application::{
-        CommittedTrackWrite, EffectStatus, EffectStatusUpdate, PersistedTrackEffect,
-        StoredTrackEvent, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
+        CommittedTrackWrite, EffectJournalEntry, EffectStatus, EffectStatusUpdate,
+        PersistedTrackEffect, StoredTrackEvent, TrackEffectJournal, TrackMutationStore,
+        TrackQueryStore,
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
@@ -1706,8 +1707,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackEffectJournal for TestRepository {
-        async fn append_entries(&self, entries: &[PersistedTrackEffect]) -> Result<()> {
-            self.effects.lock().unwrap().extend(entries.iter().cloned());
+        async fn append_entries(&self, entries: &[EffectJournalEntry]) -> Result<()> {
+            self.effects
+                .lock()
+                .unwrap()
+                .extend(entries.iter().cloned().map(PersistedTrackEffect::from));
             Ok(())
         }
 

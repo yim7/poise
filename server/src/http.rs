@@ -230,8 +230,8 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use chrono::{TimeZone, Utc};
     use poise_application::{
-        CommittedTrackWrite, EffectStatusUpdate, PersistedTrackEffect, StoredTrackEvent,
-        TrackEffectJournal, TrackMutationStore, TrackQueryStore,
+        CommittedTrackWrite, EffectJournalEntry, EffectStatusUpdate, PersistedTrackEffect,
+        StoredTrackEvent, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
@@ -1173,7 +1173,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackEffectJournal for FailingRepository {
-        async fn append_entries(&self, _entries: &[PersistedTrackEffect]) -> anyhow::Result<()> {
+        async fn append_entries(&self, _entries: &[EffectJournalEntry]) -> anyhow::Result<()> {
             Err(anyhow!("persistence unavailable"))
         }
 

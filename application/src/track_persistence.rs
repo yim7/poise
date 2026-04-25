@@ -46,6 +46,50 @@ impl EffectStatusUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectJournalEntry {
+    pub effect_id: String,
+    pub track_id: TrackId,
+    pub batch_id: String,
+    pub sequence: u32,
+    pub effect: TrackEffect,
+    pub created_at: DateTime<Utc>,
+}
+
+impl EffectJournalEntry {
+    pub fn from_session_effect(effect: &crate::SessionTrackEffect) -> Self {
+        Self {
+            effect_id: effect.effect_id.clone(),
+            track_id: effect.track_id.clone(),
+            batch_id: effect.batch_id.clone(),
+            sequence: effect.sequence,
+            effect: effect.effect.clone(),
+            created_at: effect.created_at,
+        }
+    }
+
+    pub fn from_session_effects(effects: &[crate::SessionTrackEffect]) -> Vec<Self> {
+        effects.iter().map(Self::from_session_effect).collect()
+    }
+}
+
+impl From<EffectJournalEntry> for PersistedTrackEffect {
+    fn from(entry: EffectJournalEntry) -> Self {
+        Self {
+            effect_id: entry.effect_id,
+            track_id: entry.track_id,
+            batch_id: entry.batch_id,
+            sequence: entry.sequence,
+            effect: entry.effect,
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: entry.created_at,
+            updated_at: entry.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedTrackEffect {
     pub effect_id: String,
     pub track_id: TrackId,

@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{
-    ApplicationNotification, CancelReceiptResolution, EffectStatus, EffectStatusUpdate,
-    SessionEffectQueue, SessionTrackEffect, TrackControlCommand, TrackControlState,
-    TrackEffectJournal, TrackMutationStore, WakeSignal,
+    ApplicationNotification, CancelReceiptResolution, EffectJournalEntry, EffectStatus,
+    EffectStatusUpdate, FollowUpQueueAction, SessionEffectQueue, SessionTrackEffect,
+    TrackControlCommand, TrackControlState, TrackEffectJournal, TrackMutationStore, WakeSignal,
 };
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
@@ -646,6 +646,17 @@ impl MutationExecutor {
             .iter()
             .map(|order| order.order_id.clone())
             .collect::<HashSet<_>>();
+        let follow_up_actions = self
+            .session_effect_queue
+            .resolve_follow_up_retirements_for_closed_orders(&track_id, &open_order_ids);
+        let follow_up_requires_reconcile = self
+            .handle_follow_up_queue_actions(id, &follow_up_actions)
+            .await?;
+        let effective_mode = if follow_up_requires_reconcile && mode.allows_follow_up_reconcile() {
+            ExchangeSyncMode::RecoverAndReconcile
+        } else {
+            mode
+        };
         let pending_submit_hints = self
             .session_effect_queue
             .active_submit_hints_for_track(&track_id);
@@ -656,7 +667,7 @@ impl MutationExecutor {
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
             self.sync_account_capacity_gate_state(&mut manager, id)
                 .map_err(TrackMutationError::Mutation)?;
-            let transition = if mode.allows_follow_up_reconcile() {
+            let transition = if effective_mode.allows_follow_up_reconcile() {
                 manager
                     .sync_exchange_state(
                         &TrackId::new(id),
@@ -704,11 +715,81 @@ impl MutationExecutor {
         .map_err(anyhow::Error::new)?;
 
         self.session_effect_queue
-            .resolve_follow_up_retirements_for_closed_orders(&track_id, &open_order_ids);
-        self.session_effect_queue
             .wake_track_for(&track_id, WakeSignal::ExchangeState);
 
         Ok(transition)
+    }
+
+    async fn handle_follow_up_queue_actions(
+        &self,
+        id: &str,
+        actions: &[FollowUpQueueAction],
+    ) -> std::result::Result<bool, TrackMutationError> {
+        let mut requires_reconcile = false;
+        let mut journal_outcomes = Vec::new();
+
+        for action in actions {
+            match action {
+                FollowUpQueueAction::SupersededDownstream {
+                    effect_ids,
+                    requires_reconcile: action_requires_reconcile,
+                } => {
+                    requires_reconcile |= *action_requires_reconcile;
+                    journal_outcomes.extend(
+                        effect_ids
+                            .iter()
+                            .cloned()
+                            .map(EffectStatusUpdate::superseded),
+                    );
+                }
+                FollowUpQueueAction::NothingToRetire => {}
+                FollowUpQueueAction::Blocked { reason } => {
+                    return Err(TrackMutationError::Mutation(anyhow!(
+                        "failed to resolve follow-up retirements for track `{id}`: {reason}"
+                    )));
+                }
+            }
+        }
+
+        if !journal_outcomes.is_empty()
+            && let Err(error) = self
+                .effect_journal
+                .record_effect_outcomes(&journal_outcomes)
+                .await
+        {
+            tracing::warn!(
+                track_id = id,
+                "failed to record follow-up retirement journal outcomes: {error}"
+            );
+        }
+
+        Ok(requires_reconcile)
+    }
+
+    pub(crate) async fn record_effects_superseded(
+        &self,
+        id: &str,
+        effect_ids: &[String],
+    ) -> Result<()> {
+        if effect_ids.is_empty() {
+            return Ok(());
+        }
+
+        let outcomes = effect_ids
+            .iter()
+            .cloned()
+            .map(EffectStatusUpdate::superseded)
+            .collect::<Vec<_>>();
+        if let Err(error) = self.effect_journal.record_effect_outcomes(&outcomes).await {
+            tracing::warn!(
+                track_id = id,
+                "failed to record superseded effect journal outcomes: {error}"
+            );
+        }
+        self.emit_internal_notification(ApplicationNotification::TrackChanged {
+            track_id: TrackId::new(id),
+        });
+        Ok(())
     }
 
     pub(crate) async fn complete_submit_execution(
@@ -1155,13 +1236,16 @@ impl MutationExecutor {
             &next_snapshot.runtime_state,
             control_state_override,
         );
+        let has_session_effects = result
+            .effects()
+            .iter()
+            .any(|effect| !matches!(effect, TrackEffect::NoOp));
         let has_track_write = control_state_update.is_some()
             || previous_snapshot.ledger_state != next_snapshot.ledger_state
-            || !result.domain_events().is_empty()
-            || !result.effects().is_empty();
+            || !result.domain_events().is_empty();
         let has_effect_status_update = !effect_status_updates.is_empty();
-        let has_persistence_work = has_track_write || has_effect_status_update;
-        if skip_when_noop && !has_persistence_work {
+        let has_work = has_track_write || has_effect_status_update || has_session_effects;
+        if skip_when_noop && !has_work {
             return Ok(());
         }
 
@@ -1201,13 +1285,13 @@ impl MutationExecutor {
             effect_created_at,
         );
         if !session_effects.is_empty() {
-            let journal_entries = session_effects
-                .iter()
-                .map(SessionTrackEffect::to_pending_journal_entry)
-                .collect::<Vec<_>>();
+            let journal_entries = EffectJournalEntry::from_session_effects(&session_effects);
             self.session_effect_queue.enqueue_batch(session_effects);
             if let Err(error) = self.effect_journal.append_entries(&journal_entries).await {
-                tracing::warn!(track_id = id, "failed to append effect journal entries: {error}");
+                tracing::warn!(
+                    track_id = id,
+                    "failed to append effect journal entries: {error}"
+                );
             }
         }
 
@@ -1217,7 +1301,10 @@ impl MutationExecutor {
                 .record_effect_outcomes(effect_status_updates)
                 .await
         {
-            tracing::warn!(track_id = id, "failed to record effect journal outcomes: {error}");
+            tracing::warn!(
+                track_id = id,
+                "failed to record effect journal outcomes: {error}"
+            );
         }
 
         let previous_recovery_anomaly_active =
@@ -1228,7 +1315,7 @@ impl MutationExecutor {
                 .observe_recovery_anomaly_change(&TrackId::new(id), next_recovery_anomaly_active);
         }
 
-        if has_track_write || has_effect_status_update {
+        if has_track_write || has_effect_status_update || has_session_effects {
             self.emit_internal_notification(ApplicationNotification::TrackChanged {
                 track_id: TrackId::new(id),
             });
@@ -1306,8 +1393,9 @@ pub(crate) mod test_support {
     use tokio::sync::broadcast;
 
     use crate::{
-        ApplicationNotification, CommittedTrackWrite, EffectStatus, EffectStatusUpdate,
-        PersistedTrackEffect, TrackControlState, TrackEffectJournal, TrackMutationStore,
+        ApplicationNotification, CommittedTrackWrite, EffectJournalEntry, EffectStatus,
+        EffectStatusUpdate, PersistedTrackEffect, TrackControlState, TrackEffectJournal,
+        TrackMutationStore,
     };
 
     use super::{AccountCapacityGuard, TrackServiceSet};
@@ -1335,6 +1423,7 @@ pub(crate) mod test_support {
         ledger_states: Mutex<HashMap<String, poise_engine::ledger::TrackLedgerState>>,
         events: Mutex<HashMap<String, Vec<DomainEvent>>>,
         effects: Mutex<Vec<PersistedTrackEffect>>,
+        business_write_calls: Mutex<usize>,
         effect_outcome_write_calls: Mutex<usize>,
     }
 
@@ -1345,6 +1434,10 @@ pub(crate) mod test_support {
 
         pub(crate) fn effect_outcome_write_call_count(&self) -> usize {
             *self.effect_outcome_write_calls.lock().unwrap()
+        }
+
+        pub(crate) fn business_write_call_count(&self) -> usize {
+            *self.business_write_calls.lock().unwrap()
         }
 
         pub(crate) fn seed_pending_submit_effect(&self) {
@@ -1522,6 +1615,7 @@ pub(crate) mod test_support {
             ledger_state: &poise_engine::ledger::TrackLedgerState,
             events: &[DomainEvent],
         ) -> Result<CommittedTrackWrite> {
+            *self.business_write_calls.lock().unwrap() += 1;
             self.events
                 .lock()
                 .unwrap()
@@ -1586,8 +1680,11 @@ pub(crate) mod test_support {
 
     #[async_trait]
     impl TrackEffectJournal for MemoryRepository {
-        async fn append_entries(&self, entries: &[PersistedTrackEffect]) -> Result<()> {
-            self.effects.lock().unwrap().extend(entries.iter().cloned());
+        async fn append_entries(&self, entries: &[EffectJournalEntry]) -> Result<()> {
+            self.effects
+                .lock()
+                .unwrap()
+                .extend(entries.iter().cloned().map(PersistedTrackEffect::from));
             Ok(())
         }
 
@@ -1686,15 +1783,21 @@ pub(crate) mod test_support {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::{CancelReceiptResolution, EffectStatus, SessionEffectQueue};
+    use crate::{
+        CancelReceiptResolution, EffectJournalEntry, EffectStatus, SessionEffectQueue,
+        SessionTrackEffect, TrackEffectJournal,
+    };
     use poise_core::risk::RiskTerminationCause;
+    use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
-    use poise_engine::observation::MarketObservation;
-    use poise_engine::ports::{ExecutionQuote, OrderReceipt};
+    use poise_engine::observation::{
+        CompleteOpenOrderSnapshot, MarketObservation, PositionObservation,
+    };
+    use poise_engine::ports::{ExecutionQuote, OrderReceipt, OrderRequest};
     use poise_engine::runtime::{AutoState, ControlState, TerminationCause, TrackState};
     use poise_engine::snapshot::TrackRuntimeSnapshot;
-    use poise_engine::track::TrackId;
-    use poise_engine::transition::TrackEffect;
+    use poise_engine::track::{Instrument, TrackId, Venue};
+    use poise_engine::transition::{TrackEffect, TrackTransition};
     use tokio::sync::broadcast;
     use tokio::sync::broadcast::error::TryRecvError;
 
@@ -1997,6 +2100,137 @@ mod tests {
             .expect("current session effect should be enqueued");
 
         assert_eq!(next.track_id, TrackId::new("btc-core"));
+    }
+
+    #[tokio::test]
+    async fn effect_only_transition_enqueues_effect_without_business_write() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository.clone(), observer);
+        let snapshot = executor
+            .manager()
+            .read()
+            .await
+            .snapshot("btc-core")
+            .expect("seeded track should exist");
+        let effect = TrackEffect::SubmitOrder {
+            request: OrderRequest {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                side: Side::Buy,
+                price: 95.0,
+                quantity: 0.1,
+                client_order_id: "effect-only-submit".into(),
+                reduce_only: false,
+            },
+            desired_exposure: Exposure(4.0),
+            submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+            recovery_token: poise_engine::executor::SubmitRecoveryToken::empty(),
+        };
+        let transition = TrackTransition {
+            snapshot: snapshot.clone(),
+            events: Vec::new(),
+            effects: vec![effect],
+        };
+
+        executor
+            .commit_track_mutation(
+                "btc-core",
+                &snapshot,
+                &snapshot,
+                &transition,
+                None,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repository.business_write_call_count(),
+            0,
+            "session effect enqueue should not create a durable business write"
+        );
+        assert_eq!(repository.pending_effects().len(), 1);
+        assert!(
+            executor.session_effect_queue.claim_next().is_some(),
+            "effect should still enter the current session queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_sync_records_follow_up_retirement_outcomes() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository.clone());
+        let track_id = TrackId::new("btc-core");
+        let now = chrono::Utc::now();
+        let cancel_effect = SessionTrackEffect {
+            effect_id: "cancel-effect".into(),
+            track_id: track_id.clone(),
+            batch_id: "batch-unknown-cancel".into(),
+            sequence: 0,
+            effect: TrackEffect::CancelOrder {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                order_id: "closed-order".into(),
+            },
+            created_at: now,
+        };
+        let downstream_submit = SessionTrackEffect {
+            effect_id: "downstream-submit".into(),
+            track_id: track_id.clone(),
+            batch_id: "batch-unknown-cancel".into(),
+            sequence: 1,
+            effect: TrackEffect::SubmitOrder {
+                request: OrderRequest {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    side: Side::Buy,
+                    price: 95.0,
+                    quantity: 0.1,
+                    client_order_id: "downstream-submit".into(),
+                    reduce_only: false,
+                },
+                desired_exposure: Exposure(4.0),
+                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                recovery_token: poise_engine::executor::SubmitRecoveryToken::empty(),
+            },
+            created_at: now,
+        };
+        services
+            .session_effect_queue
+            .enqueue_batch(vec![cancel_effect.clone(), downstream_submit.clone()]);
+        repository
+            .append_entries(&[
+                EffectJournalEntry::from_session_effect(&cancel_effect),
+                EffectJournalEntry::from_session_effect(&downstream_submit),
+            ])
+            .await
+            .unwrap();
+        services.session_effect_queue.record_cancel_resolution(
+            &cancel_effect.effect_id,
+            CancelReceiptResolution::Unknown {
+                order_id: "closed-order".into(),
+                reason: "exchange timeout".into(),
+            },
+        );
+
+        services
+            .observation
+            .sync_exchange_state_without_reconcile(
+                "btc-core",
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+                CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
+            )
+            .await
+            .unwrap();
+
+        let effects = repository.pending_effects();
+        let downstream = effects
+            .iter()
+            .find(|effect| effect.effect_id == downstream_submit.effect_id)
+            .expect("downstream journal row should exist");
+        assert_eq!(downstream.status, EffectStatus::Superseded);
     }
 
     #[tokio::test]

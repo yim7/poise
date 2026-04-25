@@ -563,8 +563,9 @@ mod tests {
     use anyhow::{Result, anyhow};
     use futures_util::StreamExt;
     use poise_application::{
-        CommittedTrackWrite, EffectStatusUpdate, PersistedControlMode, PersistedTrackEffect,
-        StoredTrackEvent, TrackControlState, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
+        CommittedTrackWrite, EffectJournalEntry, EffectStatusUpdate, PersistedControlMode,
+        PersistedTrackEffect, StoredTrackEvent, TrackControlState, TrackEffectJournal,
+        TrackMutationStore, TrackQueryStore,
     };
     use poise_core::events::DomainEvent as EngineDomainEvent;
     use poise_engine::manager::TrackManager;
@@ -1638,7 +1639,7 @@ total_loss_limit = 600.0
 
     #[async_trait::async_trait]
     impl TrackEffectJournal for BlockingPersistence {
-        async fn append_entries(&self, _entries: &[PersistedTrackEffect]) -> Result<()> {
+        async fn append_entries(&self, _entries: &[EffectJournalEntry]) -> Result<()> {
             Ok(())
         }
 

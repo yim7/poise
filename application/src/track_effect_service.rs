@@ -53,6 +53,12 @@ impl TrackEffectService {
             .await
     }
 
+    pub async fn record_effects_superseded(&self, id: &str, effect_ids: &[String]) -> Result<()> {
+        self.executor
+            .record_effects_superseded(id, effect_ids)
+            .await
+    }
+
     #[cfg(any(test, feature = "server-test-support"))]
     pub fn manager(&self) -> Arc<RwLock<TrackManager>> {
         self.executor.manager()

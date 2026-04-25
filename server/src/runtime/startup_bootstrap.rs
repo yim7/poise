@@ -376,7 +376,9 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
-    use poise_application::{EffectStatus, TrackEffectJournal, TrackMutationStore, TrackQueryStore};
+    use poise_application::{
+        EffectStatus, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
+    };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};

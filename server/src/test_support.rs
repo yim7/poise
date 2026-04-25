@@ -4,8 +4,8 @@ use anyhow::Result;
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountCapacityGuard, AccountMonitor, ApplicationNotification, ConfiguredTrackDefinition,
-    ConfiguredTrackInput, PreparedTrackRegistry, TrackCommandService, TrackEffectService,
-    TrackEffectJournal, TrackMutationStore, TrackObservationService, TrackQueryStore,
+    ConfiguredTrackInput, PreparedTrackRegistry, TrackCommandService, TrackEffectJournal,
+    TrackEffectService, TrackMutationStore, TrackObservationService, TrackQueryStore,
     TrackRuntimeLifecycleService, TrackServiceSet,
 };
 use poise_core::risk::LossLimits;
@@ -299,7 +299,7 @@ where
     );
     let entries = session_effects
         .iter()
-        .map(poise_application::SessionTrackEffect::to_pending_journal_entry)
+        .map(poise_application::EffectJournalEntry::from_session_effect)
         .collect::<Vec<_>>();
     store.append_entries(&entries).await?;
     entries

@@ -59,9 +59,10 @@ async fn handle_session_queue_action(
 ) -> Result<()> {
     match action {
         SessionQueueAction::RetiredBatch {
+            effect_ids,
             requires_reconcile: true,
-            ..
         } => {
+            record_superseded_effects(worker, track_id, &effect_ids).await?;
             trigger_queue_reconcile(
                 worker,
                 track_id,
@@ -70,11 +71,13 @@ async fn handle_session_queue_action(
             )
             .await?
         }
-        SessionQueueAction::Continue
-        | SessionQueueAction::RetiredBatch {
+        SessionQueueAction::RetiredBatch {
+            effect_ids,
             requires_reconcile: false,
-            ..
-        } => {}
+        } => {
+            record_superseded_effects(worker, track_id, &effect_ids).await?;
+        }
+        SessionQueueAction::Continue => {}
     }
     Ok(())
 }
@@ -87,9 +90,10 @@ async fn handle_cancel_queue_action(
 ) -> Result<()> {
     match action {
         CancelQueueAction::SupersededDownstream {
+            effect_ids,
             requires_reconcile: true,
-            ..
         } => {
+            record_superseded_effects(worker, track_id, &effect_ids).await?;
             trigger_queue_reconcile(
                 worker,
                 track_id,
@@ -97,6 +101,12 @@ async fn handle_cancel_queue_action(
                 ReconcileReason::ManualRecovery,
             )
             .await?
+        }
+        CancelQueueAction::SupersededDownstream {
+            effect_ids,
+            requires_reconcile: false,
+        } => {
+            record_superseded_effects(worker, track_id, &effect_ids).await?;
         }
         CancelQueueAction::AwaitingFollowUpRetirement { .. } => {
             if let Some(instrument) = instrument {
@@ -110,14 +120,22 @@ async fn handle_cancel_queue_action(
             }
         }
         CancelQueueAction::UnblockedDownstream
-        | CancelQueueAction::SupersededDownstream {
-            requires_reconcile: false,
-            ..
-        }
         | CancelQueueAction::Deferred { .. }
         | CancelQueueAction::Blocked { .. } => {}
     }
     Ok(())
+}
+
+async fn record_superseded_effects(
+    worker: &EffectWorker,
+    track_id: &TrackId,
+    effect_ids: &[String],
+) -> Result<()> {
+    worker
+        .state
+        .effect_service
+        .record_effects_superseded(track_id.as_str(), effect_ids)
+        .await
 }
 
 async fn trigger_queue_reconcile(
