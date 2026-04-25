@@ -6,7 +6,7 @@ use poise_engine::executor::PendingSubmitHint;
 use poise_engine::track::TrackId;
 use poise_engine::transition::TrackEffect;
 
-use crate::PersistedTrackEffect;
+use crate::{EffectStatus, PersistedTrackEffect};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionTrackEffect {
@@ -28,15 +28,35 @@ impl SessionTrackEffect {
         effects
             .iter()
             .enumerate()
-            .map(|(sequence, effect)| Self {
-                effect_id: format!("{}:{batch_id}:{sequence}", track_id.as_str()),
-                track_id: track_id.clone(),
-                batch_id: batch_id.to_string(),
-                sequence: sequence as u32,
-                effect: effect.clone(),
-                created_at,
+            .filter_map(|(sequence, effect)| {
+                if matches!(effect, TrackEffect::NoOp) {
+                    return None;
+                }
+                Some(Self {
+                    effect_id: format!("{}:{batch_id}:{sequence}", track_id.as_str()),
+                    track_id: track_id.clone(),
+                    batch_id: batch_id.to_string(),
+                    sequence: sequence as u32,
+                    effect: effect.clone(),
+                    created_at,
+                })
             })
             .collect()
+    }
+
+    pub fn to_pending_journal_entry(&self) -> PersistedTrackEffect {
+        PersistedTrackEffect {
+            effect_id: self.effect_id.clone(),
+            track_id: self.track_id.clone(),
+            batch_id: self.batch_id.clone(),
+            sequence: self.sequence,
+            effect: self.effect.clone(),
+            status: EffectStatus::Pending,
+            attempt_count: 0,
+            last_error: None,
+            created_at: self.created_at,
+            updated_at: self.created_at,
+        }
     }
 }
 

@@ -102,7 +102,6 @@ pub(super) async fn reconcile_submit_preflight_state(
 mod tests {
     use std::sync::Arc;
 
-    use poise_application::TrackEffectStore;
     use poise_storage::sqlite::SqliteStorage;
 
     use crate::submit_preflight::SubmitPreflightDecision;
@@ -115,17 +114,9 @@ mod tests {
     #[tokio::test]
     async fn reconcile_ignores_persisted_effects_from_previous_session() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        seed_persisted_pending_submit_effect(repository.as_ref(), "btc-core")
+        let stale_effect_id = seed_persisted_pending_submit_effect(repository.as_ref(), "btc-core")
             .await
             .unwrap();
-        let stale_effect_id = repository
-            .list_all_pending_submit_effects()
-            .await
-            .unwrap()
-            .into_iter()
-            .next()
-            .expect("seeded pending effect")
-            .effect_id;
         let context = build_effect_worker_context_for_repository(repository);
 
         context

@@ -712,7 +712,7 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use poise_application::{
         CommittedTrackWrite, EffectStatus, EffectStatusUpdate, PersistedTrackEffect,
-        StoredTrackEvent, TrackEffectStore, TrackMutationStore, TrackQueryStore,
+        StoredTrackEvent, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
@@ -789,7 +789,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(notification_capacity);
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
-        let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
+        let effect_store = repository.clone() as Arc<dyn TrackEffectJournal>;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(
             test_manager(),
@@ -837,7 +837,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
-        let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
+        let effect_store = repository.clone() as Arc<dyn TrackEffectJournal>;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(
             test_manager(),
@@ -890,7 +890,7 @@ mod tests {
         let (notifications, _) = tokio::sync::broadcast::channel(notification_capacity);
         let (diagnostics_tx, diagnostics_rx) = tokio::sync::mpsc::unbounded_channel();
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
-        let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
+        let effect_store = repository.clone() as Arc<dyn TrackEffectJournal>;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(
             test_manager(),
@@ -937,7 +937,7 @@ mod tests {
         notifications: tokio::sync::broadcast::Sender<ApplicationNotification>,
     ) -> crate::server_context::EffectWorkerState {
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
-        let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
+        let effect_store = repository.clone() as Arc<dyn TrackEffectJournal>;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(
             test_manager(),
@@ -1635,8 +1635,6 @@ mod tests {
             control_state: Option<&poise_application::TrackControlState>,
             ledger_state: &poise_engine::ledger::TrackLedgerState,
             events: &[poise_core::events::DomainEvent],
-            effects: &[TrackEffect],
-            effect_status_updates: &[EffectStatusUpdate],
         ) -> Result<CommittedTrackWrite> {
             let now = Utc::now();
             if !events.is_empty() {
@@ -1654,41 +1652,6 @@ mod tests {
                 }
             }
 
-            let persisted_effects: Vec<_> = effects
-                .iter()
-                .enumerate()
-                .map(|(index, effect)| PersistedTrackEffect {
-                    effect_id: format!("{id}:effect:{index}"),
-                    track_id: TrackId::new(id),
-                    batch_id: format!("{id}:batch"),
-                    sequence: index as u32,
-                    effect: effect.clone(),
-                    status: EffectStatus::Pending,
-                    attempt_count: 0,
-                    last_error: None,
-                    created_at: now,
-                    updated_at: now,
-                })
-                .collect();
-            self.effects
-                .lock()
-                .unwrap()
-                .extend(persisted_effects.iter().cloned());
-            for effect_status_update in effect_status_updates {
-                if let Some(effect) = self
-                    .effects
-                    .lock()
-                    .unwrap()
-                    .iter_mut()
-                    .find(|effect| effect.effect_id == effect_status_update.effect_id)
-                {
-                    effect.status = effect_status_update.status;
-                    effect.attempt_count += effect_status_update.attempt_delta;
-                    effect.last_error = effect_status_update.last_error.clone();
-                    effect.updated_at = now;
-                }
-            }
-
             let track_id = TrackId::new(id);
             if let Some(control_state) = control_state {
                 self.save_track_control_state(&track_id, control_state)
@@ -1697,43 +1660,7 @@ mod tests {
             self.save_track_ledger_state(&track_id, ledger_state)
                 .await?;
 
-            Ok(CommittedTrackWrite {
-                track_id,
-                effects: persisted_effects,
-            })
-        }
-
-        async fn update_effect_status(
-            &self,
-            id: &str,
-            effect_status_update: &EffectStatusUpdate,
-        ) -> Result<CommittedTrackWrite> {
-            self.update_effect_statuses(id, std::slice::from_ref(effect_status_update))
-                .await
-        }
-
-        async fn update_effect_statuses(
-            &self,
-            id: &str,
-            effect_status_updates: &[EffectStatusUpdate],
-        ) -> Result<CommittedTrackWrite> {
-            let now = Utc::now();
-            let mut effects = self.effects.lock().unwrap();
-            for effect_status_update in effect_status_updates {
-                if let Some(effect) = effects
-                    .iter_mut()
-                    .find(|effect| effect.effect_id == effect_status_update.effect_id)
-                {
-                    effect.status = effect_status_update.status;
-                    effect.attempt_count += effect_status_update.attempt_delta;
-                    effect.last_error = effect_status_update.last_error.clone();
-                    effect.updated_at = now;
-                }
-            }
-            Ok(CommittedTrackWrite {
-                track_id: TrackId::new(id),
-                effects: Vec::new(),
-            })
+            Ok(CommittedTrackWrite { track_id })
         }
 
         async fn list_track_events(
@@ -1778,77 +1705,27 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl TrackEffectStore for TestRepository {
-        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(self
-                .effects
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|effect| effect.status == EffectStatus::Pending)
-                .cloned()
-                .collect())
+    impl TrackEffectJournal for TestRepository {
+        async fn append_entries(&self, entries: &[PersistedTrackEffect]) -> Result<()> {
+            self.effects.lock().unwrap().extend(entries.iter().cloned());
+            Ok(())
         }
 
-        async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(self
-                .effects
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|effect| effect.status == EffectStatus::Pending)
-                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
-                .cloned()
-                .collect())
-        }
-
-        async fn list_all_pending_effects_for_track(
-            &self,
-            track_id: &TrackId,
-        ) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(self
-                .effects
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|effect| effect.track_id == *track_id)
-                .filter(|effect| effect.status == EffectStatus::Pending)
-                .cloned()
-                .collect())
-        }
-
-        async fn list_pending_submit_effects_for_track(
-            &self,
-            track_id: &TrackId,
-        ) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(self
-                .effects
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|effect| effect.track_id == *track_id)
-                .filter(|effect| effect.status == EffectStatus::Pending)
-                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
-                .cloned()
-                .collect())
-        }
-
-        async fn list_pending_submit_effects_for_track_batch(
-            &self,
-            track_id: &TrackId,
-            batch_id: &str,
-        ) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(self
-                .effects
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|effect| effect.track_id == *track_id)
-                .filter(|effect| effect.batch_id == batch_id)
-                .filter(|effect| effect.status == EffectStatus::Pending)
-                .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
-                .cloned()
-                .collect())
+        async fn record_effect_outcomes(&self, outcomes: &[EffectStatusUpdate]) -> Result<()> {
+            let now = chrono::Utc::now();
+            let mut effects = self.effects.lock().unwrap();
+            for outcome in outcomes {
+                if let Some(effect) = effects
+                    .iter_mut()
+                    .find(|effect| effect.effect_id == outcome.effect_id)
+                {
+                    effect.status = outcome.status;
+                    effect.attempt_count += outcome.attempt_delta;
+                    effect.last_error = outcome.last_error.clone();
+                    effect.updated_at = now;
+                }
+            }
+            Ok(())
         }
     }
 

@@ -114,7 +114,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use anyhow::{Result, anyhow};
-    use poise_application::{TrackEffectStore, TrackMutationStore, TrackQueryStore};
+    use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
     use poise_engine::ports::{
         ExchangeOpenOrderSnapshot, ExchangeOrder, ExecutionPort, OrderReceipt, OrderRequest,
         OrderStatus, Position, UserDataEvent, UserDataPayload,
@@ -138,7 +138,7 @@ mod tests {
             test_manager(),
             repository.clone() as Arc<dyn TrackMutationStore>,
             repository.clone() as Arc<dyn TrackQueryStore>,
-            repository.clone() as Arc<dyn TrackEffectStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
             notifications.clone(),
             account_margin_guard,
         );
@@ -147,7 +147,7 @@ mod tests {
             build_runtime_and_effect_worker_test_contexts(
                 &services,
                 repository.clone() as Arc<dyn TrackQueryStore>,
-                repository.clone() as Arc<dyn TrackEffectStore>,
+                repository.clone() as Arc<dyn TrackEffectJournal>,
                 account_monitor,
             );
 

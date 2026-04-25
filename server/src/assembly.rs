@@ -564,7 +564,7 @@ mod tests {
     use futures_util::StreamExt;
     use poise_application::{
         CommittedTrackWrite, EffectStatusUpdate, PersistedControlMode, PersistedTrackEffect,
-        StoredTrackEvent, TrackControlState, TrackEffectStore, TrackMutationStore, TrackQueryStore,
+        StoredTrackEvent, TrackControlState, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
     };
     use poise_core::events::DomainEvent as EngineDomainEvent;
     use poise_engine::manager::TrackManager;
@@ -1129,8 +1129,6 @@ total_loss_limit = 600.0
             None,
             &snapshot.ledger_state,
             &[],
-            &[],
-            &[],
         )
         .await
         .unwrap();
@@ -1345,7 +1343,7 @@ total_loss_limit = 600.0
         repository: Arc<R>,
     ) -> (ServerPlatform, mpsc::Sender<MarketDataTick>)
     where
-        R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
+        R: TrackMutationStore + TrackEffectJournal + TrackQueryStore + 'static,
     {
         let (btc_sender, btc_receiver) = mpsc::channel(8);
         let mut receivers = HashMap::new();
@@ -1380,7 +1378,7 @@ total_loss_limit = 600.0
             .unwrap();
         let (events, _) = broadcast::channel(16);
         let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
-        let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
+        let effect_store: Arc<dyn TrackEffectJournal> = repository.clone();
         let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
         let services = build_test_application_services(
             manager,
@@ -1589,8 +1587,6 @@ total_loss_limit = 600.0
             control_state: Option<&TrackControlState>,
             ledger_state: &poise_engine::ledger::TrackLedgerState,
             _events: &[EngineDomainEvent],
-            _effects: &[poise_engine::transition::TrackEffect],
-            _effect_status_updates: &[EffectStatusUpdate],
         ) -> Result<CommittedTrackWrite> {
             let save_index = self.started_saves.fetch_add(1, Ordering::SeqCst);
             self.first_save_started.notify_waiters();
@@ -1608,30 +1604,7 @@ total_loss_limit = 600.0
 
             self.completed_saves.fetch_add(1, Ordering::SeqCst);
             self.completed_save.notify_waiters();
-            Ok(CommittedTrackWrite {
-                track_id,
-                effects: Vec::new(),
-            })
-        }
-
-        async fn update_effect_status(
-            &self,
-            id: &str,
-            effect_status_update: &EffectStatusUpdate,
-        ) -> Result<CommittedTrackWrite> {
-            self.update_effect_statuses(id, std::slice::from_ref(effect_status_update))
-                .await
-        }
-
-        async fn update_effect_statuses(
-            &self,
-            id: &str,
-            _effect_status_updates: &[EffectStatusUpdate],
-        ) -> Result<CommittedTrackWrite> {
-            Ok(CommittedTrackWrite {
-                track_id: TrackId::new(id),
-                effects: Vec::new(),
-            })
+            Ok(CommittedTrackWrite { track_id })
         }
 
         async fn list_track_events(&self, _id: &str) -> Result<Vec<EngineDomainEvent>> {
@@ -1664,35 +1637,13 @@ total_loss_limit = 600.0
     }
 
     #[async_trait::async_trait]
-    impl TrackEffectStore for BlockingPersistence {
-        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(Vec::new())
+    impl TrackEffectJournal for BlockingPersistence {
+        async fn append_entries(&self, _entries: &[PersistedTrackEffect]) -> Result<()> {
+            Ok(())
         }
 
-        async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(Vec::new())
-        }
-
-        async fn list_all_pending_effects_for_track(
-            &self,
-            _track_id: &TrackId,
-        ) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(Vec::new())
-        }
-
-        async fn list_pending_submit_effects_for_track(
-            &self,
-            _track_id: &TrackId,
-        ) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(Vec::new())
-        }
-
-        async fn list_pending_submit_effects_for_track_batch(
-            &self,
-            _track_id: &TrackId,
-            _batch_id: &str,
-        ) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(Vec::new())
+        async fn record_effect_outcomes(&self, _outcomes: &[EffectStatusUpdate]) -> Result<()> {
+            Ok(())
         }
     }
 

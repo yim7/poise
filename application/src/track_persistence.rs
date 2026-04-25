@@ -15,7 +15,6 @@ pub struct StoredTrackEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommittedTrackWrite {
     pub track_id: TrackId,
-    pub effects: Vec<PersistedTrackEffect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

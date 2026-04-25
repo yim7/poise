@@ -1,11 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::track_persistence::CommittedTrackWrite;
 use crate::{
     ApplicationNotification, CancelReceiptResolution, EffectStatus, EffectStatusUpdate,
     SessionEffectQueue, SessionTrackEffect, TrackControlCommand, TrackControlState,
-    TrackEffectStore, TrackMutationStore, WakeSignal,
+    TrackEffectJournal, TrackMutationStore, WakeSignal,
 };
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
@@ -80,6 +79,7 @@ impl TrackMutationGuards {
 pub(crate) struct MutationExecutor {
     manager: SharedManager,
     mutation_store: Arc<dyn TrackMutationStore>,
+    effect_journal: Arc<dyn TrackEffectJournal>,
     session_effect_queue: SessionEffectQueue,
     mutation_guards: Arc<TrackMutationGuards>,
     notifications: broadcast::Sender<ApplicationNotification>,
@@ -253,6 +253,7 @@ impl MutationExecutor {
     pub(crate) fn new(
         manager: TrackManager,
         mutation_store: Arc<dyn TrackMutationStore>,
+        effect_journal: Arc<dyn TrackEffectJournal>,
         session_effect_queue: SessionEffectQueue,
         notifications: broadcast::Sender<ApplicationNotification>,
         account_margin_guard: Arc<dyn AccountCapacityGuard>,
@@ -261,6 +262,7 @@ impl MutationExecutor {
         Self {
             manager: Arc::new(RwLock::new(manager)),
             mutation_store,
+            effect_journal,
             session_effect_queue,
             mutation_guards: Arc::new(TrackMutationGuards::default()),
             notifications,
@@ -341,7 +343,7 @@ impl TrackServiceSet {
         manager: TrackManager,
         mutation_store: Arc<dyn TrackMutationStore>,
         query_store: Arc<dyn crate::TrackQueryStore>,
-        effect_store: Arc<dyn TrackEffectStore>,
+        effect_store: Arc<dyn TrackEffectJournal>,
         notifications: broadcast::Sender<ApplicationNotification>,
         account_margin_guard: Arc<dyn AccountCapacityGuard>,
     ) -> Self {
@@ -360,7 +362,7 @@ impl TrackServiceSet {
         manager: TrackManager,
         mutation_store: Arc<dyn TrackMutationStore>,
         query_store: Arc<dyn crate::TrackQueryStore>,
-        _effect_store: Arc<dyn TrackEffectStore>,
+        effect_store: Arc<dyn TrackEffectJournal>,
         notifications: broadcast::Sender<ApplicationNotification>,
         account_margin_guard: Arc<dyn AccountCapacityGuard>,
         recovery_anomaly_observer: Arc<dyn RecoveryAnomalyObserver>,
@@ -369,6 +371,7 @@ impl TrackServiceSet {
         let executor = Arc::new(MutationExecutor::new(
             manager,
             mutation_store,
+            effect_store,
             session_effect_queue.clone(),
             notifications,
             account_margin_guard,
@@ -1162,31 +1165,18 @@ impl MutationExecutor {
             return Ok(());
         }
 
-        let persistence_result = if has_track_write {
-            self.mutation_store
+        if has_track_write {
+            let persistence_result = self
+                .mutation_store
                 .commit_track_transition(
                     id,
                     control_state_update.as_ref(),
                     &next_snapshot.ledger_state,
                     result.domain_events(),
-                    result.effects(),
-                    effect_status_updates,
                 )
-                .await
-        } else if !effect_status_updates.is_empty() {
-            self.mutation_store
-                .update_effect_statuses(id, effect_status_updates)
-                .await
-        } else {
-            Ok(CommittedTrackWrite {
-                track_id: TrackId::new(id),
-                effects: Vec::new(),
-            })
-        };
+                .await;
 
-        let committed_write = match persistence_result {
-            Ok(write) => write,
-            Err(error) => {
+            if let Err(error) = persistence_result {
                 let rollback_result = {
                     let mut manager = self.manager.write().await;
                     manager.restore_track_state(previous_snapshot)
@@ -1198,15 +1188,36 @@ impl MutationExecutor {
                 }
                 return Err(TrackMutationError::Persistence(error));
             }
-        };
+        }
 
-        if !committed_write.effects.is_empty() {
-            let session_effects = committed_write
-                .effects
+        let effect_created_at = chrono::Utc::now();
+        let batch_nonce = effect_created_at
+            .timestamp_nanos_opt()
+            .unwrap_or(effect_created_at.timestamp_micros() * 1_000);
+        let session_effects = SessionTrackEffect::from_transition_effects(
+            &TrackId::new(id),
+            &batch_nonce.to_string(),
+            result.effects(),
+            effect_created_at,
+        );
+        if !session_effects.is_empty() {
+            let journal_entries = session_effects
                 .iter()
-                .map(SessionTrackEffect::from)
+                .map(SessionTrackEffect::to_pending_journal_entry)
                 .collect::<Vec<_>>();
             self.session_effect_queue.enqueue_batch(session_effects);
+            if let Err(error) = self.effect_journal.append_entries(&journal_entries).await {
+                tracing::warn!(track_id = id, "failed to append effect journal entries: {error}");
+            }
+        }
+
+        if has_effect_status_update
+            && let Err(error) = self
+                .effect_journal
+                .record_effect_outcomes(effect_status_updates)
+                .await
+        {
+            tracing::warn!(track_id = id, "failed to record effect journal outcomes: {error}");
         }
 
         let previous_recovery_anomaly_active =
@@ -1296,7 +1307,7 @@ pub(crate) mod test_support {
 
     use crate::{
         ApplicationNotification, CommittedTrackWrite, EffectStatus, EffectStatusUpdate,
-        PersistedTrackEffect, TrackControlState, TrackEffectStore, TrackMutationStore,
+        PersistedTrackEffect, TrackControlState, TrackEffectJournal, TrackMutationStore,
     };
 
     use super::{AccountCapacityGuard, TrackServiceSet};
@@ -1324,7 +1335,7 @@ pub(crate) mod test_support {
         ledger_states: Mutex<HashMap<String, poise_engine::ledger::TrackLedgerState>>,
         events: Mutex<HashMap<String, Vec<DomainEvent>>>,
         effects: Mutex<Vec<PersistedTrackEffect>>,
-        single_effect_status_update_calls: Mutex<usize>,
+        effect_outcome_write_calls: Mutex<usize>,
     }
 
     impl MemoryRepository {
@@ -1332,8 +1343,8 @@ pub(crate) mod test_support {
             self.effects.lock().unwrap().clone()
         }
 
-        pub(crate) fn single_effect_status_update_call_count(&self) -> usize {
-            *self.single_effect_status_update_calls.lock().unwrap()
+        pub(crate) fn effect_outcome_write_call_count(&self) -> usize {
+            *self.effect_outcome_write_calls.lock().unwrap()
         }
 
         pub(crate) fn seed_pending_submit_effect(&self) {
@@ -1510,50 +1521,11 @@ pub(crate) mod test_support {
             control_state: Option<&TrackControlState>,
             ledger_state: &poise_engine::ledger::TrackLedgerState,
             events: &[DomainEvent],
-            effects: &[TrackEffect],
-            effect_status_updates: &[EffectStatusUpdate],
         ) -> Result<CommittedTrackWrite> {
             self.events
                 .lock()
                 .unwrap()
                 .insert(id.to_string(), events.to_vec());
-
-            let now = Utc::now();
-            let committed_effects = {
-                let mut stored_effects = self.effects.lock().unwrap();
-                let mut committed_effects = Vec::new();
-                for (sequence, effect) in effects.iter().enumerate() {
-                    let batch_id = format!("{id}:batch");
-                    let effect_id = format!("{batch_id}:{sequence}");
-                    let persisted = PersistedTrackEffect {
-                        effect_id: effect_id.clone(),
-                        track_id: TrackId::new(id),
-                        batch_id,
-                        sequence: sequence as u32,
-                        effect: effect.clone(),
-                        status: EffectStatus::Pending,
-                        attempt_count: 0,
-                        last_error: None,
-                        created_at: now,
-                        updated_at: now,
-                    };
-                    stored_effects.push(persisted.clone());
-                    committed_effects.push(persisted);
-                }
-
-                for update in effect_status_updates {
-                    if let Some(effect) = stored_effects
-                        .iter_mut()
-                        .find(|effect| effect.effect_id == update.effect_id)
-                    {
-                        effect.status = update.status;
-                        effect.attempt_count += update.attempt_delta;
-                        effect.last_error = update.last_error.clone();
-                        effect.updated_at = now;
-                    }
-                }
-                committed_effects
-            };
 
             let track_id = TrackId::new(id);
             let persisted_control_state = if control_state.is_none() {
@@ -1574,44 +1546,7 @@ pub(crate) mod test_support {
             self.save_track_ledger_state(&track_id, ledger_state)
                 .await?;
 
-            Ok(CommittedTrackWrite {
-                track_id,
-                effects: committed_effects,
-            })
-        }
-
-        async fn update_effect_status(
-            &self,
-            id: &str,
-            effect_status_update: &EffectStatusUpdate,
-        ) -> Result<CommittedTrackWrite> {
-            *self.single_effect_status_update_calls.lock().unwrap() += 1;
-            self.update_effect_statuses(id, std::slice::from_ref(effect_status_update))
-                .await
-        }
-
-        async fn update_effect_statuses(
-            &self,
-            id: &str,
-            effect_status_updates: &[EffectStatusUpdate],
-        ) -> Result<CommittedTrackWrite> {
-            let now = Utc::now();
-            let mut stored_effects = self.effects.lock().unwrap();
-            for effect_status_update in effect_status_updates {
-                if let Some(effect) = stored_effects
-                    .iter_mut()
-                    .find(|effect| effect.effect_id == effect_status_update.effect_id)
-                {
-                    effect.status = effect_status_update.status;
-                    effect.attempt_count += effect_status_update.attempt_delta;
-                    effect.last_error = effect_status_update.last_error.clone();
-                    effect.updated_at = now;
-                }
-            }
-            Ok(CommittedTrackWrite {
-                track_id: TrackId::new(id),
-                effects: Vec::new(),
-            })
+            Ok(CommittedTrackWrite { track_id })
         }
 
         async fn list_track_events(&self, id: &str) -> Result<Vec<DomainEvent>> {
@@ -1650,84 +1585,30 @@ pub(crate) mod test_support {
     }
 
     #[async_trait]
-    impl TrackEffectStore for MemoryRepository {
-        async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(self
-                .effects
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|effect| matches!(effect.status, EffectStatus::Pending))
-                .cloned()
-                .collect())
+    impl TrackEffectJournal for MemoryRepository {
+        async fn append_entries(&self, entries: &[PersistedTrackEffect]) -> Result<()> {
+            self.effects.lock().unwrap().extend(entries.iter().cloned());
+            Ok(())
         }
 
-        async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(self
-                .effects
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|effect| {
-                    matches!(effect.status, EffectStatus::Pending)
-                        && matches!(effect.effect, TrackEffect::SubmitOrder { .. })
-                })
-                .cloned()
-                .collect())
-        }
-
-        async fn list_all_pending_effects_for_track(
-            &self,
-            track_id: &TrackId,
-        ) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(self
-                .effects
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|effect| {
-                    effect.track_id == *track_id && matches!(effect.status, EffectStatus::Pending)
-                })
-                .cloned()
-                .collect())
-        }
-
-        async fn list_pending_submit_effects_for_track(
-            &self,
-            track_id: &TrackId,
-        ) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(self
-                .effects
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|effect| {
-                    effect.track_id == *track_id
-                        && matches!(effect.status, EffectStatus::Pending)
-                        && matches!(effect.effect, TrackEffect::SubmitOrder { .. })
-                })
-                .cloned()
-                .collect())
-        }
-
-        async fn list_pending_submit_effects_for_track_batch(
-            &self,
-            track_id: &TrackId,
-            batch_id: &str,
-        ) -> Result<Vec<PersistedTrackEffect>> {
-            Ok(self
-                .effects
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|effect| {
-                    effect.track_id == *track_id
-                        && effect.batch_id == batch_id
-                        && matches!(effect.status, EffectStatus::Pending)
-                        && matches!(effect.effect, TrackEffect::SubmitOrder { .. })
-                })
-                .cloned()
-                .collect())
+        async fn record_effect_outcomes(&self, outcomes: &[EffectStatusUpdate]) -> Result<()> {
+            if !outcomes.is_empty() {
+                *self.effect_outcome_write_calls.lock().unwrap() += 1;
+            }
+            let now = Utc::now();
+            let mut stored_effects = self.effects.lock().unwrap();
+            for outcome in outcomes {
+                if let Some(effect) = stored_effects
+                    .iter_mut()
+                    .find(|effect| effect.effect_id == outcome.effect_id)
+                {
+                    effect.status = outcome.status;
+                    effect.attempt_count += outcome.attempt_delta;
+                    effect.last_error = outcome.last_error.clone();
+                    effect.updated_at = now;
+                }
+            }
+            Ok(())
         }
     }
 
@@ -1849,6 +1730,7 @@ mod tests {
         MutationExecutor::new(
             seeded_manager(),
             repository.clone(),
+            repository,
             SessionEffectQueue::default(),
             notifications,
             Arc::new(NoopGuard),
@@ -1953,6 +1835,7 @@ mod tests {
         let (notifications, _) = broadcast::channel(16);
         let executor = MutationExecutor::new(
             seeded_manager(),
+            repository.clone(),
             repository.clone(),
             SessionEffectQueue::default(),
             notifications.clone(),
@@ -2124,8 +2007,6 @@ mod tests {
                 "btc-core",
                 None,
                 &poise_engine::ledger::TrackLedgerState::default(),
-                &[],
-                &[],
                 &[],
             )
             .await
@@ -2410,8 +2291,7 @@ mod tests {
                 .restore_track_state(&snapshot)
                 .expect("updated track snapshot");
         }
-        let single_status_writes_before_cancel =
-            repository.single_effect_status_update_call_count();
+        let outcome_writes_before_cancel = repository.effect_outcome_write_call_count();
 
         let resolution = services
             .effect
@@ -2454,9 +2334,9 @@ mod tests {
             );
         }
         assert_eq!(
-            repository.single_effect_status_update_call_count(),
-            single_status_writes_before_cancel,
-            "cancel-with-fill must not split cancel/downstream statuses into individual writes"
+            repository.effect_outcome_write_call_count(),
+            outcome_writes_before_cancel + 1,
+            "cancel-with-fill should record one diagnostic outcome batch for the cancel receipt"
         );
 
         let snapshot = manager

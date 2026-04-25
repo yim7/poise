@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use poise_application::{
-    AccountMonitorStore, ConfiguredTrackDefinition, PreparedTrackRegistry, TrackEffectStore,
+    AccountMonitorStore, ConfiguredTrackDefinition, PreparedTrackRegistry, TrackEffectJournal,
     TrackMutationStore, TrackQueryStore,
 };
 use poise_storage::sqlite::SqliteStorage;
@@ -55,7 +55,7 @@ pub struct StateRepositories {
     account_monitor_store: Option<Arc<dyn AccountMonitorStore>>,
     mutation_store: Arc<dyn TrackMutationStore>,
     query_store: Arc<dyn TrackQueryStore>,
-    effect_store: Arc<dyn TrackEffectStore>,
+    effect_store: Arc<dyn TrackEffectJournal>,
 }
 
 pub struct PreparedStateStore {
@@ -86,7 +86,7 @@ impl StateRepositories {
     #[cfg(test)]
     pub(crate) fn new<R>(repository: Arc<R>) -> Self
     where
-        R: TrackMutationStore + TrackQueryStore + TrackEffectStore + 'static,
+        R: TrackMutationStore + TrackQueryStore + TrackEffectJournal + 'static,
     {
         Self {
             account_monitor_store: None,
@@ -117,7 +117,7 @@ impl StateRepositories {
         Arc::clone(&self.query_store)
     }
 
-    pub fn effect_store(&self) -> Arc<dyn TrackEffectStore> {
+    pub fn effect_store(&self) -> Arc<dyn TrackEffectJournal> {
         Arc::clone(&self.effect_store)
     }
 }

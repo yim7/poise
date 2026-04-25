@@ -376,7 +376,7 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
-    use poise_application::{EffectStatus, TrackEffectStore, TrackMutationStore, TrackQueryStore};
+    use poise_application::{EffectStatus, TrackEffectJournal, TrackMutationStore, TrackQueryStore};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
@@ -386,10 +386,8 @@ mod tests {
         MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, OrderStatus, Position,
         UserDataEvent, UserDataPayload,
     };
-    use poise_engine::price_gate::SubmitPurpose;
     use poise_engine::runtime::{TerminationCause, TrackStatus};
     use poise_engine::track::{Instrument, TrackId, Venue};
-    use poise_engine::transition::TrackEffect;
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
@@ -412,13 +410,6 @@ mod tests {
                 None,
                 &poise_engine::ledger::TrackLedgerState::default(),
                 &[],
-                &[
-                    pending_submit_effect("BTCUSDT", "boundary-catch-up-legacy"),
-                    TrackEffect::CancelAll {
-                        instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    },
-                ],
-                &[],
             )
             .await
             .unwrap();
@@ -428,7 +419,7 @@ mod tests {
             manager,
             repository.clone() as Arc<dyn TrackMutationStore>,
             repository.clone() as Arc<dyn TrackQueryStore>,
-            repository.clone() as Arc<dyn TrackEffectStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
             notifications.clone(),
             account_margin_guard,
         );
@@ -437,7 +428,7 @@ mod tests {
             build_runtime_and_effect_worker_test_contexts(
                 &services,
                 repository.clone() as Arc<dyn TrackQueryStore>,
-                repository.clone() as Arc<dyn TrackEffectStore>,
+                repository.clone() as Arc<dyn TrackEffectJournal>,
                 account_monitor,
             );
         let exchange = Arc::new(StartupExchange::with_inherited_order("BTCUSDT"));
@@ -533,7 +524,7 @@ mod tests {
             manager,
             repository.clone() as Arc<dyn TrackMutationStore>,
             repository.clone() as Arc<dyn TrackQueryStore>,
-            repository.clone() as Arc<dyn TrackEffectStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
             notifications.clone(),
             account_margin_guard,
         );
@@ -556,7 +547,7 @@ mod tests {
             build_runtime_and_effect_worker_test_contexts(
                 &services,
                 repository.clone() as Arc<dyn TrackQueryStore>,
-                repository.clone() as Arc<dyn TrackEffectStore>,
+                repository.clone() as Arc<dyn TrackEffectJournal>,
                 account_monitor,
             );
         let exchange = Arc::new(StartupExchange::with_inherited_order("BTCUSDT"));
@@ -615,8 +606,6 @@ mod tests {
                 None,
                 &poise_engine::ledger::TrackLedgerState::default(),
                 &[],
-                &[],
-                &[],
             )
             .await
             .unwrap();
@@ -627,7 +616,7 @@ mod tests {
             manager,
             repository.clone() as Arc<dyn TrackMutationStore>,
             repository.clone() as Arc<dyn TrackQueryStore>,
-            repository.clone() as Arc<dyn TrackEffectStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
             notifications.clone(),
             account_margin_guard,
         );
@@ -636,7 +625,7 @@ mod tests {
             build_runtime_and_effect_worker_test_contexts(
                 &services,
                 repository.clone() as Arc<dyn TrackQueryStore>,
-                repository.clone() as Arc<dyn TrackEffectStore>,
+                repository.clone() as Arc<dyn TrackEffectJournal>,
                 account_monitor,
             );
         let exchange = Arc::new(StartupExchange::with_inherited_order("BTCUSDT"));
@@ -713,8 +702,6 @@ mod tests {
                 None,
                 &poise_engine::ledger::TrackLedgerState::default(),
                 &[],
-                &[],
-                &[],
             )
             .await
             .unwrap();
@@ -725,7 +712,7 @@ mod tests {
             manager,
             repository.clone() as Arc<dyn TrackMutationStore>,
             repository.clone() as Arc<dyn TrackQueryStore>,
-            repository.clone() as Arc<dyn TrackEffectStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
             notifications.clone(),
             account_margin_guard,
         );
@@ -734,7 +721,7 @@ mod tests {
             build_runtime_and_effect_worker_test_contexts(
                 &services,
                 repository.clone() as Arc<dyn TrackQueryStore>,
-                repository.clone() as Arc<dyn TrackEffectStore>,
+                repository.clone() as Arc<dyn TrackEffectJournal>,
                 account_monitor,
             );
         let exchange = Arc::new(StartupExchange::with_inherited_order("BTCUSDT"));
@@ -785,8 +772,6 @@ mod tests {
                 None,
                 &poise_engine::ledger::TrackLedgerState::default(),
                 &[],
-                &[],
-                &[],
             )
             .await
             .unwrap();
@@ -797,7 +782,7 @@ mod tests {
             manager,
             repository.clone() as Arc<dyn TrackMutationStore>,
             repository.clone() as Arc<dyn TrackQueryStore>,
-            repository.clone() as Arc<dyn TrackEffectStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
             notifications.clone(),
             account_margin_guard,
         );
@@ -806,7 +791,7 @@ mod tests {
             build_runtime_and_effect_worker_test_contexts(
                 &services,
                 repository.clone() as Arc<dyn TrackQueryStore>,
-                repository.clone() as Arc<dyn TrackEffectStore>,
+                repository.clone() as Arc<dyn TrackEffectJournal>,
                 account_monitor,
             );
         let exchange = Arc::new(StartupExchange::with_inherited_order("BTCUSDT"));
@@ -933,22 +918,6 @@ mod tests {
             )
             .unwrap();
         manager
-    }
-
-    fn pending_submit_effect(symbol: &str, client_order_id: &str) -> TrackEffect {
-        TrackEffect::SubmitOrder {
-            request: OrderRequest {
-                instrument: Instrument::new(Venue::Binance, symbol),
-                side: Side::Buy,
-                price: 100.0,
-                quantity: 0.1,
-                client_order_id: client_order_id.to_string(),
-                reduce_only: false,
-            },
-            desired_exposure: Exposure(4.0),
-            submit_purpose: SubmitPurpose::AutoReconcile,
-            recovery_token: poise_engine::executor::SubmitRecoveryToken::empty(),
-        }
     }
 
     fn cleanup_canceled_event(

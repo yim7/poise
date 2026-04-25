@@ -116,12 +116,6 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_track_events_created_at
          ON track_events(track_id, created_at);
 
-         CREATE INDEX IF NOT EXISTS idx_track_effects_pending
-         ON track_effects(status, created_at, batch_id, sequence, effect_id);
-
-         CREATE INDEX IF NOT EXISTS idx_track_effects_batch_sequence
-         ON track_effects(track_id, batch_id, sequence, status);
-
          CREATE INDEX IF NOT EXISTS idx_track_effects_recent
          ON track_effects(track_id, updated_at DESC, created_at DESC, batch_id DESC, sequence DESC, effect_id DESC);",
     )?;
@@ -233,23 +227,32 @@ mod tests {
             .unwrap();
         assert_eq!(index_count, 1);
 
-        let effects_index_count: i64 = conn
+        let pending_effects_index_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_track_effects_pending'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(effects_index_count, 1);
+        assert_eq!(pending_effects_index_count, 0);
 
-        let effects_batch_index_count: i64 = conn
+        let effects_batch_sequence_index_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_track_effects_batch_sequence'",
                 [],
                 |row| row.get(0),
         )
         .unwrap();
-        assert_eq!(effects_batch_index_count, 1);
+        assert_eq!(effects_batch_sequence_index_count, 0);
+
+        let recent_effects_index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_track_effects_recent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recent_effects_index_count, 1);
 
         let control_columns = table_columns(&conn, "track_control_state").unwrap();
         assert_eq!(

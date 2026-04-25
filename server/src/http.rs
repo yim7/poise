@@ -231,7 +231,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use poise_application::{
         CommittedTrackWrite, EffectStatusUpdate, PersistedTrackEffect, StoredTrackEvent,
-        TrackEffectStore, TrackMutationStore, TrackQueryStore,
+        TrackEffectJournal, TrackMutationStore, TrackQueryStore,
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
@@ -310,7 +310,7 @@ mod tests {
 
     async fn build_test_state<R>(repository: Arc<R>) -> HttpTestState
     where
-        R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
+        R: TrackMutationStore + TrackEffectJournal + TrackQueryStore + 'static,
     {
         let mut manager = test_manager();
         let mut snapshot = manager
@@ -328,8 +328,6 @@ mod tests {
                     from: Exposure(3.5),
                     to: Exposure(4.0),
                 }],
-                &[],
-                &[],
             )
             .await
             .unwrap();
@@ -339,7 +337,7 @@ mod tests {
             .unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
         let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
-        let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
+        let effect_store: Arc<dyn TrackEffectJournal> = repository.clone();
         let query_store: Arc<dyn TrackQueryStore> = repository.clone();
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(
@@ -401,8 +399,6 @@ mod tests {
                     from: Exposure(3.5),
                     to: Exposure(4.0),
                 }],
-                &[],
-                &[],
             )
             .await
             .unwrap();
@@ -413,7 +409,7 @@ mod tests {
 
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
         let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
-        let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
+        let effect_store: Arc<dyn TrackEffectJournal> = repository.clone();
         let query_store: Arc<dyn TrackQueryStore> = repository.clone();
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(
@@ -620,7 +616,7 @@ mod tests {
         let state = {
             let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
             let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
-            let effect_store: Arc<dyn TrackEffectStore> = repository.clone();
+            let effect_store: Arc<dyn TrackEffectJournal> = repository.clone();
             let query_store: Arc<dyn TrackQueryStore> = repository.clone();
             let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
             let services = build_test_application_services(
@@ -918,7 +914,7 @@ mod tests {
         );
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
-        let effect_store = repository.clone() as Arc<dyn TrackEffectStore>;
+        let effect_store = repository.clone() as Arc<dyn TrackEffectJournal>;
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(
             manager,
@@ -1147,24 +1143,6 @@ mod tests {
             _control_state: Option<&poise_application::TrackControlState>,
             _ledger_state: &poise_engine::ledger::TrackLedgerState,
             _events: &[poise_core::events::DomainEvent],
-            _effects: &[poise_engine::transition::TrackEffect],
-            _effect_status_updates: &[EffectStatusUpdate],
-        ) -> anyhow::Result<CommittedTrackWrite> {
-            Err(anyhow!("persistence unavailable"))
-        }
-
-        async fn update_effect_status(
-            &self,
-            _id: &str,
-            _effect_status_update: &EffectStatusUpdate,
-        ) -> anyhow::Result<CommittedTrackWrite> {
-            Err(anyhow!("persistence unavailable"))
-        }
-
-        async fn update_effect_statuses(
-            &self,
-            _id: &str,
-            _effect_status_updates: &[EffectStatusUpdate],
         ) -> anyhow::Result<CommittedTrackWrite> {
             Err(anyhow!("persistence unavailable"))
         }
@@ -1194,37 +1172,16 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl TrackEffectStore for FailingRepository {
-        async fn list_dispatchable_effects(&self) -> anyhow::Result<Vec<PersistedTrackEffect>> {
-            Ok(Vec::new())
+    impl TrackEffectJournal for FailingRepository {
+        async fn append_entries(&self, _entries: &[PersistedTrackEffect]) -> anyhow::Result<()> {
+            Err(anyhow!("persistence unavailable"))
         }
 
-        async fn list_all_pending_submit_effects(
+        async fn record_effect_outcomes(
             &self,
-        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
-            Ok(Vec::new())
-        }
-
-        async fn list_all_pending_effects_for_track(
-            &self,
-            _track_id: &TrackId,
-        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
-            Ok(Vec::new())
-        }
-
-        async fn list_pending_submit_effects_for_track(
-            &self,
-            _track_id: &TrackId,
-        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
-            Ok(Vec::new())
-        }
-
-        async fn list_pending_submit_effects_for_track_batch(
-            &self,
-            _track_id: &TrackId,
-            _batch_id: &str,
-        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
-            Ok(Vec::new())
+            _outcomes: &[EffectStatusUpdate],
+        ) -> anyhow::Result<()> {
+            Err(anyhow!("persistence unavailable"))
         }
     }
 

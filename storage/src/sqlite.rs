@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use poise_application::{
     self as app, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, PersistedTrackEffect,
-    StoredTrackEvent, TrackControlState, TrackEffectStore, TrackMutationStore, TrackQueryStore,
+    StoredTrackEvent, TrackControlState, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -341,24 +341,14 @@ impl SqliteStorage {
         control_state: Option<TrackControlState>,
         ledger_state_for_persistence: Option<TrackLedgerState>,
         events: Vec<DomainEvent>,
-        effects: Vec<TrackEffect>,
-        effect_status_updates: Vec<EffectStatusUpdate>,
     ) -> Result<CommittedTrackWrite> {
         let updated_at = Utc::now();
         let updated_at_text = updated_at.to_rfc3339();
-        let batch_nonce = updated_at
-            .timestamp_nanos_opt()
-            .unwrap_or(updated_at.timestamp_micros() * 1_000);
-        let batch_id = batch_nonce.to_string();
 
         let mut conn = Self::lock_connection(&conn)?;
         let tx = conn
             .transaction()
             .context("failed to start sqlite transition transaction")?;
-        let has_event_or_effect_write = !events.is_empty()
-            || effects
-                .iter()
-                .any(|effect| !matches!(effect, TrackEffect::NoOp));
 
         let control_state = if control_state.is_none() && ledger_state_for_persistence.is_some() {
             let has_persisted_control_truth = tx
@@ -381,7 +371,7 @@ impl SqliteStorage {
 
         if control_state.is_some()
             || ledger_state_for_persistence.is_some()
-            || has_event_or_effect_write
+            || !events.is_empty()
         {
             tx.execute(
                 "INSERT INTO persisted_track_presence (track_id, created_at, updated_at)
@@ -439,16 +429,28 @@ impl SqliteStorage {
         }
 
         let track_id = TrackId::new(id.clone());
-        let mut persisted_effects = Vec::new();
-        for (index, effect) in effects.into_iter().enumerate() {
-            if matches!(effect, TrackEffect::NoOp) {
-                continue;
-            }
 
-            let effect_id = format!("{id}:{batch_nonce}:{index}");
-            let sequence = u32::try_from(index).context("effect sequence overflow")?;
-            let effect_json =
-                serde_json::to_string(&effect).context("failed to serialize track effect")?;
+        tx.commit()
+            .context("failed to commit sqlite transition transaction")?;
+
+        Ok(CommittedTrackWrite { track_id })
+    }
+
+    fn append_effect_journal_entries_blocking(
+        conn: Arc<Mutex<Connection>>,
+        entries: Vec<PersistedTrackEffect>,
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = Self::lock_connection(&conn)?;
+        let tx = conn
+            .transaction()
+            .context("failed to start sqlite effect journal append transaction")?;
+        for entry in entries {
+            let effect_json = serde_json::to_string(&entry.effect)
+                .context("failed to serialize effect journal entry")?;
             tx.execute(
                 "INSERT INTO track_effects (
                     effect_id,
@@ -461,37 +463,42 @@ impl SqliteStorage {
                     last_error,
                     created_at,
                     updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                ON CONFLICT(effect_id) DO NOTHING",
                 params![
-                    effect_id,
-                    id,
-                    batch_id.as_str(),
-                    i64::from(sequence),
+                    entry.effect_id,
+                    entry.track_id.as_str(),
+                    entry.batch_id,
+                    i64::from(entry.sequence),
                     effect_json,
-                    EffectStatus::Pending.as_str(),
-                    0_i64,
-                    Option::<String>::None,
-                    updated_at_text,
-                    updated_at_text
+                    entry.status.as_str(),
+                    i64::from(entry.attempt_count),
+                    entry.last_error,
+                    entry.created_at.to_rfc3339(),
+                    entry.updated_at.to_rfc3339(),
                 ],
             )
-            .context("failed to save track effect")?;
+            .context("failed to append effect journal entry")?;
+        }
+        tx.commit()
+            .context("failed to commit sqlite effect journal append transaction")?;
+        Ok(())
+    }
 
-            persisted_effects.push(PersistedTrackEffect {
-                effect_id,
-                track_id: track_id.clone(),
-                batch_id: batch_id.clone(),
-                sequence,
-                effect,
-                status: EffectStatus::Pending,
-                attempt_count: 0,
-                last_error: None,
-                created_at: updated_at,
-                updated_at,
-            });
+    fn record_effect_journal_outcomes_blocking(
+        conn: Arc<Mutex<Connection>>,
+        outcomes: Vec<EffectStatusUpdate>,
+    ) -> Result<()> {
+        if outcomes.is_empty() {
+            return Ok(());
         }
 
-        for effect_status_update in effect_status_updates {
+        let updated_at = Utc::now().to_rfc3339();
+        let mut conn = Self::lock_connection(&conn)?;
+        let tx = conn
+            .transaction()
+            .context("failed to start sqlite effect journal outcome transaction")?;
+        for outcome in outcomes {
             let changed = tx
                 .execute(
                     "UPDATE track_effects
@@ -501,27 +508,22 @@ impl SqliteStorage {
                          updated_at = ?4
                      WHERE effect_id = ?5",
                     params![
-                        effect_status_update.status.as_str(),
-                        i64::from(effect_status_update.attempt_delta),
-                        effect_status_update.last_error,
-                        updated_at_text,
-                        effect_status_update.effect_id
+                        outcome.status.as_str(),
+                        i64::from(outcome.attempt_delta),
+                        outcome.last_error,
+                        updated_at,
+                        outcome.effect_id
                     ],
                 )
-                .context("failed to update track effect status in transition transaction")?;
+                .context("failed to record effect journal outcome")?;
             ensure!(
-                changed == 1,
-                "effect status update affected {changed} rows in transition transaction"
+                changed <= 1,
+                "effect journal outcome affected {changed} rows"
             );
         }
-
         tx.commit()
-            .context("failed to commit sqlite transition transaction")?;
-
-        Ok(CommittedTrackWrite {
-            track_id,
-            effects: persisted_effects,
-        })
+            .context("failed to commit sqlite effect journal outcome transaction")?;
+        Ok(())
     }
 
     fn list_events_blocking(conn: Arc<Mutex<Connection>>, id: String) -> Result<Vec<DomainEvent>> {
@@ -616,173 +618,6 @@ impl SqliteStorage {
             .context("failed to deserialize recent track effects")?;
         effects.reverse();
         Ok(effects)
-    }
-
-    fn list_dispatchable_effects_blocking(
-        conn: Arc<Mutex<Connection>>,
-    ) -> Result<Vec<PersistedTrackEffect>> {
-        let conn = Self::lock_connection(&conn)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT effect_id, track_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
-                 FROM track_effects ge
-                 WHERE ge.status = ?1
-                   AND NOT EXISTS (
-                       SELECT 1
-                       FROM track_effects prior
-                       WHERE prior.track_id = ge.track_id
-                         AND prior.batch_id = ge.batch_id
-                         AND prior.sequence < ge.sequence
-                         AND prior.status NOT IN (?2, ?3)
-                   )
-                 ORDER BY ge.created_at ASC, ge.batch_id ASC, ge.sequence ASC, ge.effect_id ASC",
-            )
-            .context("failed to prepare pending effect query")?;
-
-        let effects = stmt
-            .query_map(
-                params![
-                    EffectStatus::Pending.as_str(),
-                    EffectStatus::Succeeded.as_str(),
-                    EffectStatus::Superseded.as_str()
-                ],
-                Self::persisted_effect_from_row,
-            )
-            .context("failed to query pending effects")?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to deserialize pending effects")?;
-
-        Ok(effects)
-    }
-
-    fn list_pending_submit_effects_for_track_blocking(
-        conn: Arc<Mutex<Connection>>,
-        track_id: TrackId,
-    ) -> Result<Vec<PersistedTrackEffect>> {
-        let conn = Self::lock_connection(&conn)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT effect_id, track_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
-                 FROM track_effects ge
-                 WHERE ge.track_id = ?1
-                   AND ge.status = ?2
-                   AND NOT EXISTS (
-                       SELECT 1
-                       FROM track_effects prior
-                       WHERE prior.track_id = ge.track_id
-                         AND prior.batch_id = ge.batch_id
-                         AND prior.sequence < ge.sequence
-                         AND prior.status NOT IN (?3, ?4)
-                   )
-                 ORDER BY ge.created_at ASC, ge.batch_id ASC, ge.sequence ASC, ge.effect_id ASC",
-            )
-            .context("failed to prepare track-scoped pending submit effect query")?;
-
-        let effects = stmt
-            .query_map(
-                params![
-                    track_id.as_str(),
-                    EffectStatus::Pending.as_str(),
-                    EffectStatus::Succeeded.as_str(),
-                    EffectStatus::Superseded.as_str()
-                ],
-                Self::persisted_effect_from_row,
-            )
-            .context("failed to query track-scoped pending submit effects")?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to deserialize track-scoped pending submit effects")?;
-
-        Ok(effects
-            .into_iter()
-            .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
-            .collect())
-    }
-
-    fn list_all_pending_effects_for_track_blocking(
-        conn: Arc<Mutex<Connection>>,
-        track_id: TrackId,
-    ) -> Result<Vec<PersistedTrackEffect>> {
-        let conn = Self::lock_connection(&conn)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT effect_id, track_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
-                 FROM track_effects
-                 WHERE track_id = ?1
-                   AND status = ?2
-                 ORDER BY created_at ASC, batch_id ASC, sequence ASC, effect_id ASC",
-            )
-            .context("failed to prepare track-scoped all pending effect query")?;
-
-        let effects = stmt
-            .query_map(
-                params![track_id.as_str(), EffectStatus::Pending.as_str()],
-                Self::persisted_effect_from_row,
-            )
-            .context("failed to query track-scoped all pending effects")?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to deserialize track-scoped all pending effects")?;
-
-        Ok(effects)
-    }
-
-    fn list_all_pending_submit_effects_blocking(
-        conn: Arc<Mutex<Connection>>,
-    ) -> Result<Vec<PersistedTrackEffect>> {
-        let conn = Self::lock_connection(&conn)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT effect_id, track_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
-                 FROM track_effects
-                 WHERE status = ?1
-                 ORDER BY created_at ASC, batch_id ASC, sequence ASC, effect_id ASC",
-            )
-            .context("failed to prepare all pending submit effect query")?;
-
-        let effects = stmt
-            .query_map(
-                params![EffectStatus::Pending.as_str()],
-                Self::persisted_effect_from_row,
-            )
-            .context("failed to query all pending submit effects")?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to deserialize all pending submit effects")?;
-
-        Ok(effects
-            .into_iter()
-            .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
-            .collect())
-    }
-
-    fn list_pending_submit_effects_for_track_batch_blocking(
-        conn: Arc<Mutex<Connection>>,
-        track_id: TrackId,
-        batch_id: String,
-    ) -> Result<Vec<PersistedTrackEffect>> {
-        let conn = Self::lock_connection(&conn)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT effect_id, track_id, batch_id, sequence, effect_json, status, attempt_count, last_error, created_at, updated_at
-                 FROM track_effects
-                 WHERE track_id = ?1
-                   AND batch_id = ?2
-                   AND status = ?3
-                 ORDER BY sequence ASC, effect_id ASC",
-            )
-            .context("failed to prepare batch-scoped pending submit effect query")?;
-
-        let effects = stmt
-            .query_map(
-                params![track_id.as_str(), batch_id, EffectStatus::Pending.as_str()],
-                Self::persisted_effect_from_row,
-            )
-            .context("failed to query batch-scoped pending submit effects")?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to deserialize batch-scoped pending submit effects")?;
-
-        Ok(effects
-            .into_iter()
-            .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
-            .collect())
     }
 
     fn save_track_control_state_blocking(
@@ -918,63 +753,18 @@ impl TrackMutationStore for SqliteStorage {
         control_state: Option<&TrackControlState>,
         ledger_state: &TrackLedgerState,
         events: &[DomainEvent],
-        effects: &[TrackEffect],
-        effect_status_updates: &[EffectStatusUpdate],
     ) -> Result<CommittedTrackWrite> {
         let conn = Arc::clone(&self.conn);
         let id = id.to_owned();
         let control_state = control_state.cloned();
         let ledger_state = ledger_state.clone();
         let events = events.to_vec();
-        let effects = effects.to_vec();
-        let effect_status_updates = effect_status_updates.to_vec();
 
         tokio::task::spawn_blocking(move || {
-            Self::save_transition_blocking(
-                conn,
-                id,
-                control_state,
-                Some(ledger_state),
-                events,
-                effects,
-                effect_status_updates,
-            )
+            Self::save_transition_blocking(conn, id, control_state, Some(ledger_state), events)
         })
         .await
         .context("failed to join commit_track_transition blocking task")?
-    }
-
-    async fn update_effect_status(
-        &self,
-        id: &str,
-        effect_status_update: &EffectStatusUpdate,
-    ) -> Result<CommittedTrackWrite> {
-        self.update_effect_statuses(id, std::slice::from_ref(effect_status_update))
-            .await
-    }
-
-    async fn update_effect_statuses(
-        &self,
-        id: &str,
-        effect_status_updates: &[EffectStatusUpdate],
-    ) -> Result<CommittedTrackWrite> {
-        let conn = Arc::clone(&self.conn);
-        let id = id.to_owned();
-        let effect_status_updates = effect_status_updates.to_vec();
-
-        tokio::task::spawn_blocking(move || {
-            Self::save_transition_blocking(
-                conn,
-                id,
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                effect_status_updates,
-            )
-        })
-        .await
-        .context("failed to join update_effect_statuses blocking task")?
     }
 
     async fn list_track_events(&self, id: &str) -> Result<Vec<DomainEvent>> {
@@ -1020,65 +810,27 @@ impl TrackMutationStore for SqliteStorage {
 }
 
 #[async_trait]
-impl TrackEffectStore for SqliteStorage {
-    async fn list_dispatchable_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
+impl TrackEffectJournal for SqliteStorage {
+    async fn append_entries(&self, entries: &[PersistedTrackEffect]) -> Result<()> {
         let conn = Arc::clone(&self.conn);
-
-        tokio::task::spawn_blocking(move || Self::list_dispatchable_effects_blocking(conn))
-            .await
-            .context("failed to join list_dispatchable_effects blocking task")?
-    }
-
-    async fn list_all_pending_submit_effects(&self) -> Result<Vec<PersistedTrackEffect>> {
-        let conn = Arc::clone(&self.conn);
-
-        tokio::task::spawn_blocking(move || Self::list_all_pending_submit_effects_blocking(conn))
-            .await
-            .context("failed to join list_all_pending_submit_effects blocking task")?
-    }
-
-    async fn list_all_pending_effects_for_track(
-        &self,
-        track_id: &TrackId,
-    ) -> Result<Vec<PersistedTrackEffect>> {
-        let conn = Arc::clone(&self.conn);
-        let track_id = track_id.clone();
+        let entries = entries.to_vec();
 
         tokio::task::spawn_blocking(move || {
-            Self::list_all_pending_effects_for_track_blocking(conn, track_id)
+            Self::append_effect_journal_entries_blocking(conn, entries)
         })
         .await
-        .context("failed to join list_all_pending_effects_for_track blocking task")?
+        .context("failed to join append_effect_journal_entries blocking task")?
     }
 
-    async fn list_pending_submit_effects_for_track(
-        &self,
-        track_id: &TrackId,
-    ) -> Result<Vec<PersistedTrackEffect>> {
+    async fn record_effect_outcomes(&self, outcomes: &[EffectStatusUpdate]) -> Result<()> {
         let conn = Arc::clone(&self.conn);
-        let track_id = track_id.clone();
+        let outcomes = outcomes.to_vec();
 
         tokio::task::spawn_blocking(move || {
-            Self::list_pending_submit_effects_for_track_blocking(conn, track_id)
+            Self::record_effect_journal_outcomes_blocking(conn, outcomes)
         })
         .await
-        .context("failed to join list_pending_submit_effects_for_track blocking task")?
-    }
-
-    async fn list_pending_submit_effects_for_track_batch(
-        &self,
-        track_id: &TrackId,
-        batch_id: &str,
-    ) -> Result<Vec<PersistedTrackEffect>> {
-        let conn = Arc::clone(&self.conn);
-        let track_id = track_id.clone();
-        let batch_id = batch_id.to_string();
-
-        tokio::task::spawn_blocking(move || {
-            Self::list_pending_submit_effects_for_track_batch_blocking(conn, track_id, batch_id)
-        })
-        .await
-        .context("failed to join list_pending_submit_effects_for_track_batch blocking task")?
+        .context("failed to join record_effect_journal_outcomes blocking task")?
     }
 }
 
@@ -1200,7 +952,9 @@ mod tests {
     use std::time::{Duration, Instant};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use poise_application::{EffectStatus, TrackEffectStore, TrackMutationStore, TrackQueryStore};
+    use poise_application::{
+        EffectStatus, SessionTrackEffect, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
+    };
     use poise_core::events::DomainEvent;
     use poise_core::strategy::BandBoundary;
     use poise_core::types::{Exposure, Side};
@@ -1237,23 +991,33 @@ mod tests {
         }
     }
 
+    struct TestCommittedTransition {
+        effects: Vec<PersistedTrackEffect>,
+    }
+
     async fn commit_test_transition(
         storage: &SqliteStorage,
         track_id: &str,
         events: &[DomainEvent],
         effects: &[TrackEffect],
-    ) -> CommittedTrackWrite {
+    ) -> TestCommittedTransition {
         storage
-            .commit_track_transition(
-                track_id,
-                None,
-                &TrackLedgerState::default(),
-                events,
-                effects,
-                &[],
-            )
+            .commit_track_transition(track_id, None, &TrackLedgerState::default(), events)
             .await
-            .unwrap()
+            .unwrap();
+        let created_at = Utc::now();
+        let session_effects = SessionTrackEffect::from_transition_effects(
+            &TrackId::new(track_id),
+            &format!("{}:batch:{}", track_id, created_at.timestamp_micros()),
+            effects,
+            created_at,
+        );
+        let entries = session_effects
+            .iter()
+            .map(SessionTrackEffect::to_pending_journal_entry)
+            .collect::<Vec<_>>();
+        storage.append_entries(&entries).await.unwrap();
+        TestCommittedTransition { effects: entries }
     }
 
     async fn persist_two_events_for(track_id: &str, storage: &SqliteStorage) -> [DomainEvent; 2] {
@@ -1280,8 +1044,9 @@ mod tests {
         track_id: &str,
         effect_status_update: EffectStatusUpdate,
     ) {
+        let _ = track_id;
         storage
-            .update_effect_status(track_id, &effect_status_update)
+            .record_effect_outcomes(&[effect_status_update])
             .await
             .unwrap();
     }
@@ -1629,7 +1394,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         insert_effect_without_presence(&storage, "test-1", "effect-1");
         storage
-            .update_effect_status("test-1", &EffectStatusUpdate::succeeded("effect-1"))
+            .record_effect_outcomes(&[EffectStatusUpdate::succeeded("effect-1")])
             .await
             .unwrap();
 
@@ -1696,7 +1461,7 @@ mod tests {
         let ledger_state = TrackLedgerState::default();
 
         storage
-            .commit_track_transition("test-1", None, &ledger_state, &[], &[], &[])
+            .commit_track_transition("test-1", None, &ledger_state, &[])
             .await
             .unwrap();
 
@@ -1717,7 +1482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_transition_persists_events_and_effects_atomically() {
+    async fn save_transition_persists_events_and_effect_journal_entries_atomically() {
         let storage = SqliteStorage::in_memory().unwrap();
         let effects = vec![TrackEffect::SubmitOrder {
             request: test_order_request(),
@@ -1729,16 +1494,19 @@ mod tests {
         let persisted = commit_test_transition(&storage, "test-1", &[test_event()], &effects).await;
 
         let events = storage.list_track_events("test-1").await.unwrap();
-        let pending = storage.list_dispatchable_effects().await.unwrap();
+        let recent = storage
+            .list_recent_track_effects(&TrackId::new("test-1"), 10)
+            .await
+            .unwrap();
 
         assert_eq!(events, vec![test_event()]);
-        assert_eq!(persisted.effects, pending);
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].track_id.as_str(), "test-1");
-        assert_eq!(pending[0].effect, effects[0]);
-        assert_eq!(pending[0].status, EffectStatus::Pending);
-        assert_eq!(pending[0].attempt_count, 0);
-        assert_eq!(pending[0].last_error, None);
+        assert_eq!(persisted.effects, recent);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].track_id.as_str(), "test-1");
+        assert_eq!(recent[0].effect, effects[0]);
+        assert_eq!(recent[0].status, EffectStatus::Pending);
+        assert_eq!(recent[0].attempt_count, 0);
+        assert_eq!(recent[0].last_error, None);
     }
 
     #[tokio::test]
@@ -1811,268 +1579,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated_at, fixed_updated_at);
-    }
-
-    #[tokio::test]
-    async fn list_pending_effects_only_returns_batch_head_until_prior_effect_succeeds() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let effects = vec![
-            TrackEffect::CancelAll {
-                instrument: test_instrument("BTCUSDT"),
-            },
-            TrackEffect::SubmitOrder {
-                request: test_order_request(),
-                desired_exposure: Exposure(6.0),
-                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
-                recovery_token: SubmitRecoveryToken::empty(),
-            },
-        ];
-
-        let persisted = commit_test_transition(&storage, "test-1", &[], &effects).await;
-
-        let pending = storage.list_dispatchable_effects().await.unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].effect_id, persisted.effects[0].effect_id);
-
-        save_effect_status_update(
-            &storage,
-            "test-1",
-            EffectStatusUpdate::succeeded(persisted.effects[0].effect_id.clone()),
-        )
-        .await;
-
-        let pending = storage.list_dispatchable_effects().await.unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].effect_id, persisted.effects[1].effect_id);
-    }
-
-    #[tokio::test]
-    async fn list_pending_effects_advances_after_prior_effect_is_superseded() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let effects = vec![
-            TrackEffect::CancelAll {
-                instrument: test_instrument("BTCUSDT"),
-            },
-            TrackEffect::SubmitOrder {
-                request: test_order_request(),
-                desired_exposure: Exposure(6.0),
-                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
-                recovery_token: SubmitRecoveryToken::empty(),
-            },
-        ];
-
-        let persisted = commit_test_transition(&storage, "test-1", &[], &effects).await;
-
-        save_effect_status_update(
-            &storage,
-            "test-1",
-            EffectStatusUpdate::superseded(persisted.effects[0].effect_id.clone()),
-        )
-        .await;
-
-        let pending = storage.list_dispatchable_effects().await.unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].effect_id, persisted.effects[1].effect_id);
-    }
-
-    #[tokio::test]
-    async fn list_pending_effects_keeps_follow_up_blocked_after_prior_failure() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let effects = vec![
-            TrackEffect::CancelAll {
-                instrument: test_instrument("BTCUSDT"),
-            },
-            TrackEffect::SubmitOrder {
-                request: test_order_request(),
-                desired_exposure: Exposure(6.0),
-                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
-                recovery_token: SubmitRecoveryToken::empty(),
-            },
-        ];
-
-        let persisted = commit_test_transition(&storage, "test-1", &[], &effects).await;
-
-        save_effect_status_update(
-            &storage,
-            "test-1",
-            EffectStatusUpdate {
-                effect_id: persisted.effects[0].effect_id.clone(),
-                status: EffectStatus::Failed,
-                attempt_delta: 1,
-                last_error: Some("cancel rejected".into()),
-            },
-        )
-        .await;
-
-        let pending = storage.list_dispatchable_effects().await.unwrap();
-        assert!(pending.is_empty());
-    }
-
-    #[tokio::test]
-    async fn list_pending_submit_effects_for_track_returns_only_dispatchable_submit_effects() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let btc_effects = vec![
-            TrackEffect::CancelAll {
-                instrument: test_instrument("BTCUSDT"),
-            },
-            TrackEffect::SubmitOrder {
-                request: test_order_request_for_symbol("BTCUSDT"),
-                desired_exposure: Exposure(6.0),
-                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
-                recovery_token: SubmitRecoveryToken::empty(),
-            },
-        ];
-        let eth_effects = vec![TrackEffect::SubmitOrder {
-            request: test_order_request_for_symbol("ETHUSDT"),
-            desired_exposure: Exposure(3.0),
-            submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
-            recovery_token: SubmitRecoveryToken::empty(),
-        }];
-
-        let btc_persisted = commit_test_transition(&storage, "btc-core", &[], &btc_effects).await;
-        commit_test_transition(&storage, "eth-core", &[], &eth_effects).await;
-
-        assert!(
-            storage
-                .list_pending_submit_effects_for_track(&TrackId::new("btc-core"))
-                .await
-                .unwrap()
-                .is_empty()
-        );
-
-        save_effect_status_update(
-            &storage,
-            "btc-core",
-            EffectStatusUpdate::succeeded(btc_persisted.effects[0].effect_id.clone()),
-        )
-        .await;
-
-        let btc_submit_hints = storage
-            .list_pending_submit_effects_for_track(&TrackId::new("btc-core"))
-            .await
-            .unwrap();
-        assert_eq!(btc_submit_hints.len(), 1);
-        assert_eq!(btc_submit_hints[0].track_id.as_str(), "btc-core");
-        assert!(matches!(
-            btc_submit_hints[0].effect,
-            TrackEffect::SubmitOrder { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn list_all_pending_submit_effects_returns_non_dispatchable_pending_submits() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let effects = vec![
-            TrackEffect::CancelAll {
-                instrument: test_instrument("BTCUSDT"),
-            },
-            TrackEffect::SubmitOrder {
-                request: test_order_request_for_symbol("BTCUSDT"),
-                desired_exposure: Exposure(6.0),
-                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
-                recovery_token: SubmitRecoveryToken::empty(),
-            },
-        ];
-
-        let persisted = commit_test_transition(&storage, "btc-core", &[], &effects).await;
-
-        let pending = storage.list_all_pending_submit_effects().await.unwrap();
-
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].effect_id, persisted.effects[1].effect_id);
-        assert!(matches!(pending[0].effect, TrackEffect::SubmitOrder { .. }));
-    }
-
-    #[tokio::test]
-    async fn list_all_pending_effects_for_track_returns_all_pending_effects() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let btc_effects = vec![
-            TrackEffect::CancelAll {
-                instrument: test_instrument("BTCUSDT"),
-            },
-            TrackEffect::SubmitOrder {
-                request: test_order_request_for_symbol("BTCUSDT"),
-                desired_exposure: Exposure(6.0),
-                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
-                recovery_token: SubmitRecoveryToken::empty(),
-            },
-        ];
-        let eth_effects = vec![TrackEffect::SubmitOrder {
-            request: test_order_request_for_symbol("ETHUSDT"),
-            desired_exposure: Exposure(3.0),
-            submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
-            recovery_token: SubmitRecoveryToken::empty(),
-        }];
-
-        let btc_persisted = commit_test_transition(&storage, "btc-core", &[], &btc_effects).await;
-        commit_test_transition(&storage, "eth-core", &[], &eth_effects).await;
-
-        let pending = storage
-            .list_all_pending_effects_for_track(&TrackId::new("btc-core"))
-            .await
-            .unwrap();
-
-        assert_eq!(pending.len(), 2);
-        assert_eq!(pending[0].effect_id, btc_persisted.effects[0].effect_id);
-        assert_eq!(pending[1].effect_id, btc_persisted.effects[1].effect_id);
-        assert!(
-            pending
-                .iter()
-                .all(|effect| effect.track_id.as_str() == "btc-core")
-        );
-    }
-
-    #[tokio::test]
-    async fn list_pending_submit_effects_for_track_batch_returns_same_batch_submit_without_ready_filter()
-     {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let replacement_effects = vec![
-            TrackEffect::CancelOrder {
-                instrument: test_instrument("BTCUSDT"),
-                order_id: "old-order-1".into(),
-            },
-            TrackEffect::SubmitOrder {
-                request: test_order_request_for_symbol("BTCUSDT"),
-                desired_exposure: Exposure(4.0),
-                submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
-                recovery_token: SubmitRecoveryToken::empty(),
-            },
-        ];
-        let unrelated_effects = vec![TrackEffect::SubmitOrder {
-            request: OrderRequest {
-                client_order_id: "other-batch".into(),
-                ..test_order_request_for_symbol("BTCUSDT")
-            },
-            desired_exposure: Exposure(2.0),
-            submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
-            recovery_token: SubmitRecoveryToken::empty(),
-        }];
-
-        let replacement_persisted =
-            commit_test_transition(&storage, "btc-core", &[], &replacement_effects).await;
-        commit_test_transition(&storage, "btc-core", &[], &unrelated_effects).await;
-
-        let batch_effects = storage
-            .list_pending_submit_effects_for_track_batch(
-                &TrackId::new("btc-core"),
-                &replacement_persisted.effects[0].batch_id,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(batch_effects.len(), 1);
-        assert_eq!(
-            batch_effects[0].effect_id,
-            replacement_persisted.effects[1].effect_id
-        );
-        assert_eq!(
-            batch_effects[0].batch_id,
-            replacement_persisted.effects[0].batch_id
-        );
-        assert!(matches!(
-            batch_effects[0].effect,
-            TrackEffect::SubmitOrder { .. }
-        ));
     }
 
     #[tokio::test]
@@ -2234,7 +1740,7 @@ mod tests {
         let save_storage = Arc::clone(&storage);
         let save_task = tokio::spawn(async move {
             save_storage
-                .update_effect_status("test-1", &EffectStatusUpdate::succeeded("effect-1"))
+                .record_effect_outcomes(&[EffectStatusUpdate::succeeded("effect-1")])
                 .await
                 .unwrap();
         });

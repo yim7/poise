@@ -40,7 +40,7 @@
 
 当前实现还保留了旧持久 outbox 模型：
 
-- effect worker 通过 `TrackEffectStore::list_dispatchable_effects()` 从数据库扫描 `Pending` effect。
+- effect worker 通过旧 `TrackEffectStore::list_dispatchable_effects()` 从数据库扫描 `Pending` effect。
 - `track_effects` 同时承担运行队列、状态机顺序控制、UI 历史和调试记录。
 - startup 还需要扫描旧 `Pending / Executing` effect 并标记为 `Superseded`。
 - follow-up retirement 被持久化成跨重启任务。

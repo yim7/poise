@@ -3,10 +3,9 @@ use async_trait::async_trait;
 use poise_core::events::DomainEvent;
 use poise_engine::ledger::TrackLedgerState;
 use poise_engine::track::TrackId;
-use poise_engine::transition::TrackEffect;
 
 use crate::TrackControlState;
-use crate::track_persistence::{CommittedTrackWrite, EffectStatusUpdate};
+use crate::track_persistence::CommittedTrackWrite;
 
 #[async_trait]
 pub trait TrackMutationStore: Send + Sync {
@@ -20,22 +19,6 @@ pub trait TrackMutationStore: Send + Sync {
         control_state: Option<&TrackControlState>,
         ledger_state: &TrackLedgerState,
         events: &[DomainEvent],
-        effects: &[TrackEffect],
-        effect_status_updates: &[EffectStatusUpdate],
-    ) -> Result<CommittedTrackWrite>;
-
-    /// 只回写已经持久化 effect 的执行状态，不推进 durable business truth。
-    async fn update_effect_status(
-        &self,
-        id: &str,
-        effect_status_update: &EffectStatusUpdate,
-    ) -> Result<CommittedTrackWrite>;
-
-    /// 原子回写一批已经持久化 effect 的执行状态，不推进 durable business truth。
-    async fn update_effect_statuses(
-        &self,
-        id: &str,
-        effect_status_updates: &[EffectStatusUpdate],
     ) -> Result<CommittedTrackWrite>;
 
     async fn list_track_events(&self, id: &str) -> Result<Vec<DomainEvent>>;

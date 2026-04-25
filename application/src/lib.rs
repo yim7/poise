@@ -57,7 +57,7 @@ pub use track_definition::{
     TrackPreparedDefinition, TrackReadDefinition, TrackStartupDefinition,
 };
 pub use track_effect_service::TrackEffectService;
-pub use track_effect_store::TrackEffectStore;
+pub use track_effect_store::TrackEffectJournal;
 pub use track_mutation_store::TrackMutationStore;
 pub use track_observation_service::TrackObservationService;
 pub use track_persistence::{

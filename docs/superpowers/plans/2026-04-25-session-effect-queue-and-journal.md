@@ -15,7 +15,7 @@
 - 重启后不 replay 旧 effect。
 - 运行环境不依赖 `track_effects`。
 - 持久化保留账务、交易历史、控制状态和诊断 journal。
-- effect worker 不再调用 `TrackEffectStore::list_dispatchable_effects()`。
+- effect worker 不再调用旧 effect store/journal 的 `list_dispatchable_effects()`。
 - startup 不再扫描旧 `Pending / Executing` effect 来保证 runtime 正确性。
 - follow-up retirement 是当前 session 临时任务，不跨重启。
 
@@ -935,7 +935,7 @@ async fn commit_track_transition(
 
 `CommittedTrackWrite` 不再返回 `effects`。本次 transition 的 `effects` 由 `MutationExecutor` 从内存里的 `TrackTransition` 直接构造 `SessionTrackEffect`，并转换成独立的 `EffectJournalEntry` 写入 journal。
 
-同时把 `TrackEffectStore` 改名为 `TrackEffectJournal` 的最小接口，并让 `MutationExecutor` 只依赖这个 journal 接口写 effect 历史：
+同时把旧 `TrackEffectStore` 边界改成最小 `TrackEffectJournal` 接口，并让 `MutationExecutor` 只依赖这个 journal 接口写 effect 历史：
 
 ```rust
 #[async_trait]
@@ -1622,7 +1622,7 @@ self.session_effect_queue.clear_track(&TrackId::new(id));
 
 - [x] **Step 5: 删除 durable follow-up retirement store 接口**
 
-从 `TrackEffectJournal` / 旧 `TrackEffectStore` 和 SQLite 删除：
+从旧 effect store/journal 边界和 SQLite 删除：
 
 ```rust
 async fn save_follow_up_retirement_request(...)
@@ -1731,7 +1731,7 @@ pub(crate) async fn prepare_fresh_session_for_activation(&self, id: &str) -> Res
 
 - [x] **Step 4: 删除不再使用的 store 方法**
 
-从 `TrackEffectStore` 删除：
+从旧 effect store/journal 边界删除：
 
 ```rust
 async fn list_session_reset_effects_for_track(...)

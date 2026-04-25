@@ -5,7 +5,7 @@ use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountCapacityGuard, AccountMonitor, ApplicationNotification, ConfiguredTrackDefinition,
     ConfiguredTrackInput, PreparedTrackRegistry, TrackCommandService, TrackEffectService,
-    TrackEffectStore, TrackMutationStore, TrackObservationService, TrackQueryStore,
+    TrackEffectJournal, TrackMutationStore, TrackObservationService, TrackQueryStore,
     TrackRuntimeLifecycleService, TrackServiceSet,
 };
 use poise_core::risk::LossLimits;
@@ -108,7 +108,7 @@ pub(crate) fn build_test_application_services(
     manager: TrackManager,
     mutation_store: Arc<dyn TrackMutationStore>,
     query_store: Arc<dyn TrackQueryStore>,
-    effect_store: Arc<dyn TrackEffectStore>,
+    effect_store: Arc<dyn TrackEffectJournal>,
     notifications: broadcast::Sender<ApplicationNotification>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
 ) -> TestApplicationServices {
@@ -128,7 +128,7 @@ pub(crate) fn build_test_application_services_with_recovery_dirty_state(
     manager: TrackManager,
     mutation_store: Arc<dyn TrackMutationStore>,
     query_store: Arc<dyn TrackQueryStore>,
-    effect_store: Arc<dyn TrackEffectStore>,
+    effect_store: Arc<dyn TrackEffectJournal>,
     notifications: broadcast::Sender<ApplicationNotification>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
     recovery_dirty_state: Arc<RecoveryDirtyState>,
@@ -275,34 +275,50 @@ pub(crate) fn test_submit_effect(track_id: &str) -> TrackEffect {
     }
 }
 
-pub(crate) async fn seed_persisted_pending_submit_effect(
-    store: &dyn TrackMutationStore,
+pub(crate) async fn seed_persisted_pending_submit_effect<R>(
+    store: &R,
     track_id: &str,
-) -> Result<()> {
+) -> Result<String>
+where
+    R: TrackMutationStore + TrackEffectJournal + ?Sized,
+{
     store
         .commit_track_transition(
             track_id,
             None,
             &poise_engine::ledger::TrackLedgerState::default(),
             &[],
-            &[test_submit_effect(track_id)],
-            &[],
         )
         .await?;
-    Ok(())
+    let created_at = chrono::Utc::now();
+    let session_effects = poise_application::SessionTrackEffect::from_transition_effects(
+        &TrackId::new(track_id),
+        &format!("{}:batch:{}", track_id, created_at.timestamp_micros()),
+        &[test_submit_effect(track_id)],
+        created_at,
+    );
+    let entries = session_effects
+        .iter()
+        .map(poise_application::SessionTrackEffect::to_pending_journal_entry)
+        .collect::<Vec<_>>();
+    store.append_entries(&entries).await?;
+    entries
+        .first()
+        .map(|effect| effect.effect_id.clone())
+        .ok_or_else(|| anyhow::anyhow!("seeded transition did not create an effect journal entry"))
 }
 
 pub(crate) fn build_effect_worker_context_for_repository<R>(
     repository: Arc<R>,
 ) -> EffectWorkerTestContext
 where
-    R: TrackMutationStore + TrackQueryStore + TrackEffectStore + 'static,
+    R: TrackMutationStore + TrackQueryStore + TrackEffectJournal + 'static,
 {
     let (notifications, _) = broadcast::channel(16);
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
     let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
     let query_store = repository.clone() as Arc<dyn TrackQueryStore>;
-    let effect_store = repository as Arc<dyn TrackEffectStore>;
+    let effect_store = repository as Arc<dyn TrackEffectJournal>;
     let services = build_test_application_services(
         test_manager("btc-core"),
         mutation_store,
@@ -440,7 +456,7 @@ pub(crate) fn build_websocket_state(
 pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     services: &TestApplicationServices,
     _query_store: Arc<dyn TrackQueryStore>,
-    _effect_store: Arc<dyn TrackEffectStore>,
+    _effect_store: Arc<dyn TrackEffectJournal>,
     account_monitor: Arc<AccountMonitor>,
 ) -> (RuntimeTestContext, EffectWorkerTestContext) {
     let exchange_freshness = Arc::new(ExchangeFreshness::default());
@@ -514,7 +530,7 @@ pub(crate) fn build_test_contexts_from_runtime_states(
 pub(crate) fn build_effect_worker_test_context(
     services: &TestApplicationServices,
     _query_store: Arc<dyn TrackQueryStore>,
-    _effect_store: Arc<dyn TrackEffectStore>,
+    _effect_store: Arc<dyn TrackEffectJournal>,
 ) -> EffectWorkerTestContext {
     let exchange_freshness = Arc::new(ExchangeFreshness::default());
     let submit_preflight = Arc::new(SubmitPreflight::new());
