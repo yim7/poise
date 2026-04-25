@@ -4,8 +4,8 @@ use std::sync::Arc;
 use crate::track_persistence::CommittedTrackWrite;
 use crate::{
     ApplicationNotification, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
-    PersistedTrackEffect, TrackControlCommand, TrackControlState, TrackEffectStore,
-    TrackMutationStore,
+    PersistedTrackEffect, SessionEffectQueue, SessionTrackEffect, TrackControlCommand,
+    TrackControlState, TrackEffectStore, TrackMutationStore, WakeSignal,
 };
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
@@ -37,6 +37,7 @@ pub struct TrackServiceSet {
     pub effect: crate::TrackEffectService,
     pub submit_effect: crate::submit_effect_service::SubmitEffectService,
     pub runtime_lifecycle: crate::TrackRuntimeLifecycleService,
+    pub session_effect_queue: SessionEffectQueue,
 }
 
 pub trait AccountCapacityGuard: Send + Sync {
@@ -80,6 +81,7 @@ pub(crate) struct MutationExecutor {
     manager: SharedManager,
     mutation_store: Arc<dyn TrackMutationStore>,
     effect_store: Arc<dyn TrackEffectStore>,
+    session_effect_queue: SessionEffectQueue,
     mutation_guards: Arc<TrackMutationGuards>,
     notifications: broadcast::Sender<ApplicationNotification>,
     account_margin_guard: Arc<dyn AccountCapacityGuard>,
@@ -253,6 +255,7 @@ impl MutationExecutor {
         manager: TrackManager,
         mutation_store: Arc<dyn TrackMutationStore>,
         effect_store: Arc<dyn TrackEffectStore>,
+        session_effect_queue: SessionEffectQueue,
         notifications: broadcast::Sender<ApplicationNotification>,
         account_margin_guard: Arc<dyn AccountCapacityGuard>,
         recovery_anomaly_observer: Arc<dyn RecoveryAnomalyObserver>,
@@ -261,6 +264,7 @@ impl MutationExecutor {
             manager: Arc::new(RwLock::new(manager)),
             mutation_store,
             effect_store,
+            session_effect_queue,
             mutation_guards: Arc::new(TrackMutationGuards::default()),
             notifications,
             account_margin_guard,
@@ -307,6 +311,7 @@ impl MutationExecutor {
         manager
             .reset_executor_for_activation(&TrackId::new(id))
             .map_err(TrackMutationError::Mutation)?;
+        self.session_effect_queue.clear_track(&TrackId::new(id));
         Ok(())
     }
 
@@ -389,10 +394,12 @@ impl TrackServiceSet {
         account_margin_guard: Arc<dyn AccountCapacityGuard>,
         recovery_anomaly_observer: Arc<dyn RecoveryAnomalyObserver>,
     ) -> Self {
+        let session_effect_queue = SessionEffectQueue::default();
         let executor = Arc::new(MutationExecutor::new(
             manager,
             mutation_store,
             effect_store,
+            session_effect_queue.clone(),
             notifications,
             account_margin_guard,
             recovery_anomaly_observer,
@@ -412,6 +419,7 @@ impl TrackServiceSet {
                 query_store,
                 observation,
             ),
+            session_effect_queue,
         }
     }
 }
@@ -444,6 +452,8 @@ impl MutationExecutor {
                         .snapshot(id)
                         .ok_or_else(|| anyhow!("track `{id}` not found"))?
                 };
+                self.session_effect_queue
+                    .wake_track_for(&TrackId::new(id), WakeSignal::FreshMarket);
 
                 Ok(TrackTransition {
                     snapshot: next_snapshot,
@@ -463,6 +473,8 @@ impl MutationExecutor {
                 )
                 .await
                 .map_err(anyhow::Error::new)?;
+                self.session_effect_queue
+                    .wake_track_for(&TrackId::new(id), WakeSignal::FreshMarket);
                 Ok(transition)
             }
         }
@@ -666,26 +678,8 @@ impl MutationExecutor {
     ) -> Result<TrackTransition> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let pending_submit_hints = self
-            .effect_store
-            .list_pending_submit_effects_for_track(&TrackId::new(id))
-            .await
-            .map_err(TrackMutationError::Persistence)?
-            .into_iter()
-            .filter_map(|effect| match effect.effect {
-                TrackEffect::SubmitOrder {
-                    request,
-                    desired_exposure,
-                    submit_purpose,
-                    recovery_token,
-                } => Some(poise_engine::executor::PendingSubmitHint {
-                    request,
-                    desired_exposure,
-                    submit_purpose,
-                    recovery_token,
-                }),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+            .session_effect_queue
+            .active_submit_hints_for_track(&TrackId::new(id));
         let (previous_snapshot, transition, next_snapshot) = {
             let mut manager = self.manager.write().await;
             let previous_snapshot = manager
@@ -739,6 +733,9 @@ impl MutationExecutor {
         )
         .await
         .map_err(anyhow::Error::new)?;
+
+        self.session_effect_queue
+            .wake_track_for(&TrackId::new(id), WakeSignal::ExchangeState);
 
         drop(_mutation_guard);
         self.retry_pending_follow_up_retirements_best_effort(id, "exchange state sync writeback")
@@ -1369,17 +1366,29 @@ impl MutationExecutor {
             })
         };
 
-        if let Err(error) = persistence_result {
-            let rollback_result = {
-                let mut manager = self.manager.write().await;
-                manager.restore_track_state(previous_snapshot)
-            };
-            if let Err(rollback_error) = rollback_result {
-                return Err(TrackMutationError::Persistence(anyhow!(
-                    "failed to persist track `{id}`: {error}; rollback failed: {rollback_error}"
-                )));
+        let committed_write = match persistence_result {
+            Ok(write) => write,
+            Err(error) => {
+                let rollback_result = {
+                    let mut manager = self.manager.write().await;
+                    manager.restore_track_state(previous_snapshot)
+                };
+                if let Err(rollback_error) = rollback_result {
+                    return Err(TrackMutationError::Persistence(anyhow!(
+                        "failed to persist track `{id}`: {error}; rollback failed: {rollback_error}"
+                    )));
+                }
+                return Err(TrackMutationError::Persistence(error));
             }
-            return Err(TrackMutationError::Persistence(error));
+        };
+
+        if !committed_write.effects.is_empty() {
+            let session_effects = committed_write
+                .effects
+                .iter()
+                .map(SessionTrackEffect::from)
+                .collect::<Vec<_>>();
+            self.session_effect_queue.enqueue_batch(session_effects);
         }
 
         let previous_recovery_anomaly_active =
@@ -2087,7 +2096,7 @@ pub(crate) mod test_support {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::{EffectStatus, FollowUpRetirementRequest};
+    use crate::{EffectStatus, FollowUpRetirementRequest, SessionEffectQueue};
     use poise_core::risk::RiskTerminationCause;
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
     use poise_engine::observation::MarketObservation;
@@ -2132,6 +2141,7 @@ mod tests {
             seeded_manager(),
             repository.clone(),
             repository,
+            SessionEffectQueue::default(),
             notifications,
             Arc::new(NoopGuard),
             observer,
@@ -2237,6 +2247,7 @@ mod tests {
             seeded_manager(),
             repository.clone(),
             repository.clone(),
+            SessionEffectQueue::default(),
             notifications.clone(),
             Arc::new(NoopGuard),
             observer,
@@ -2365,6 +2376,37 @@ mod tests {
                 .is_some(),
             "first durable write should also establish ledger truth"
         );
+    }
+
+    #[tokio::test]
+    async fn observe_market_enqueues_current_session_effects() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository);
+
+        let transition = services
+            .observation
+            .observe_market(
+                "btc-core",
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 94.9,
+                        best_ask: 95.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !transition.effects.is_empty(),
+            "test requires market observation to generate executable effects"
+        );
+        let next = services
+            .session_effect_queue
+            .claim_next()
+            .expect("current session effect should be enqueued");
+
+        assert_eq!(next.track_id, TrackId::new("btc-core"));
     }
 
     #[tokio::test]

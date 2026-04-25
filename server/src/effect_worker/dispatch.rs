@@ -1,35 +1,32 @@
-use std::collections::HashSet;
-
 use anyhow::Result;
-use poise_application::PersistedTrackEffect;
+use poise_application::{SessionEffectOutcome, SessionTrackEffect};
 use poise_engine::transition::TrackEffect;
 
 use super::{Cancellation, EffectWorker};
 
 pub(super) async fn run_once(worker: &EffectWorker) -> Result<()> {
-    let mut seen_effects = HashSet::new();
-
     loop {
         if *worker.shutdown_rx.borrow() {
             break;
         }
 
-        let Some(effect) = worker
-            .state
-            .reconcile
-            .effect_store
-            .list_dispatchable_effects()
-            .await?
-            .into_iter()
-            .find(|effect| !seen_effects.contains(&effect.effect_id))
-        else {
+        let Some(effect) = worker.state.session_effect_queue.claim_next() else {
             break;
         };
         let effect_id = effect.effect_id.clone();
-        if let Err(error) = worker.process_effect(effect).await {
-            tracing::warn!("failed to process persisted effect: {error}");
-        }
-        seen_effects.insert(effect_id);
+        let outcome = match worker.process_effect(effect).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                tracing::warn!("failed to process session effect: {error}");
+                SessionEffectOutcome::Blocked {
+                    reason: error.to_string(),
+                }
+            }
+        };
+        worker
+            .state
+            .session_effect_queue
+            .record_outcome(&effect_id, outcome);
     }
 
     Ok(())
@@ -37,18 +34,18 @@ pub(super) async fn run_once(worker: &EffectWorker) -> Result<()> {
 
 pub(super) async fn process_effect(
     worker: &EffectWorker,
-    persisted: PersistedTrackEffect,
-) -> Result<()> {
-    match persisted.effect {
+    effect: SessionTrackEffect,
+) -> Result<SessionEffectOutcome> {
+    match &effect.effect {
         TrackEffect::SubmitOrder {
-            ref request,
-            ref desired_exposure,
-            ref recovery_token,
+            request,
+            desired_exposure,
+            recovery_token,
             ..
         } => {
             worker
                 .execute_submit(
-                    &persisted,
+                    &effect,
                     request.clone(),
                     recovery_token.clone(),
                     desired_exposure.clone(),
@@ -56,12 +53,12 @@ pub(super) async fn process_effect(
                 .await
         }
         TrackEffect::CancelOrder {
-            ref instrument,
-            ref order_id,
+            instrument,
+            order_id,
         } => {
             worker
                 .execute_cancellation(
-                    &persisted,
+                    &effect,
                     Cancellation::One {
                         instrument: instrument.clone(),
                         order_id: order_id.clone(),
@@ -69,10 +66,10 @@ pub(super) async fn process_effect(
                 )
                 .await
         }
-        TrackEffect::CancelAll { ref instrument } => {
+        TrackEffect::CancelAll { instrument } => {
             worker
                 .execute_cancellation(
-                    &persisted,
+                    &effect,
                     Cancellation::All {
                         instrument: instrument.clone(),
                     },
@@ -83,9 +80,85 @@ pub(super) async fn process_effect(
             worker
                 .state
                 .effect_service
-                .complete_effect_succeeded(persisted.track_id.as_str(), &persisted.effect_id)
+                .complete_effect_succeeded(effect.track_id.as_str(), &effect.effect_id)
                 .await?;
-            Ok(())
+            Ok(SessionEffectOutcome::Finished)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use chrono::Utc;
+    use poise_application::SessionTrackEffect;
+    use poise_engine::track::{Instrument, TrackId, Venue};
+    use poise_engine::transition::TrackEffect;
+    use poise_storage::sqlite::SqliteStorage;
+
+    use crate::effect_worker::EffectWorker;
+    use crate::test_support::{
+        NoopAccountPort, RecordingExecutionPort, build_effect_worker_context_for_repository,
+        seed_persisted_pending_submit_effect,
+    };
+
+    #[tokio::test]
+    async fn worker_does_not_dispatch_persisted_effects_from_previous_session() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        seed_persisted_pending_submit_effect(repository.as_ref(), "btc-core")
+            .await
+            .unwrap();
+
+        let effect_worker_context = build_effect_worker_context_for_repository(repository);
+        let execution = Arc::new(RecordingExecutionPort::default());
+        let account = Arc::new(NoopAccountPort);
+        let worker = EffectWorker::new(
+            effect_worker_context,
+            execution.clone(),
+            account,
+            Duration::from_millis(1),
+        );
+
+        worker.run_once().await.unwrap();
+
+        assert_eq!(
+            execution.submit_order_call_count(),
+            0,
+            "effect worker must not dispatch persisted pending effects from a previous session"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_dispatches_current_session_queue_effect() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let effect_worker_context = build_effect_worker_context_for_repository(repository);
+        effect_worker_context
+            .effect_worker_state
+            .session_effect_queue
+            .enqueue_batch(vec![SessionTrackEffect {
+                effect_id: "session-effect-1".to_string(),
+                track_id: TrackId::new("btc-core"),
+                batch_id: "session-batch-1".to_string(),
+                sequence: 0,
+                effect: TrackEffect::CancelAll {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                },
+                created_at: Utc::now(),
+            }]);
+
+        let execution = Arc::new(RecordingExecutionPort::default());
+        let account = Arc::new(NoopAccountPort);
+        let worker = EffectWorker::new(
+            effect_worker_context,
+            execution.clone(),
+            account,
+            Duration::from_millis(1),
+        );
+
+        worker.run_once().await.unwrap();
+
+        assert_eq!(execution.cancel_all_call_count(), 1);
     }
 }

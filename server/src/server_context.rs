@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
-    AccountMonitor, ApplicationNotification, TrackCommandService, TrackDebugQueryService,
-    TrackEffectService, TrackEffectStore, TrackObservationService, TrackQueryService,
-    TrackRuntimeLifecycleService,
+    AccountMonitor, ApplicationNotification, SessionEffectQueue, TrackCommandService,
+    TrackDebugQueryService, TrackEffectService, TrackEffectStore, TrackObservationService,
+    TrackQueryService, TrackRuntimeLifecycleService,
 };
 use tokio::sync::broadcast;
 
@@ -64,4 +64,5 @@ pub struct EffectWorkerState {
     pub effect_service: Arc<TrackEffectService>,
     pub submit_effect_service: Arc<SubmitEffectService>,
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
+    pub session_effect_queue: SessionEffectQueue,
 }

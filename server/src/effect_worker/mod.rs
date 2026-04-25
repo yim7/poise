@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use poise_application::PersistedTrackEffect;
+use poise_application::{SessionEffectOutcome, SessionTrackEffect};
 use poise_engine::executor::SubmitRecoveryToken;
 use poise_engine::ports::{AccountPort, ExecutionPort, OrderRequest};
 use poise_engine::track::Instrument;
@@ -88,26 +88,26 @@ impl EffectWorker {
         dispatch::run_once(self).await
     }
 
-    async fn process_effect(&self, persisted: PersistedTrackEffect) -> Result<()> {
-        dispatch::process_effect(self, persisted).await
+    async fn process_effect(&self, effect: SessionTrackEffect) -> Result<SessionEffectOutcome> {
+        dispatch::process_effect(self, effect).await
     }
 
     async fn execute_submit(
         &self,
-        persisted: &PersistedTrackEffect,
+        effect: &SessionTrackEffect,
         request: OrderRequest,
         recovery_token: SubmitRecoveryToken,
         desired_exposure: poise_core::types::Exposure,
-    ) -> Result<()> {
-        execute::execute_submit(self, persisted, request, recovery_token, desired_exposure).await
+    ) -> Result<SessionEffectOutcome> {
+        execute::execute_submit(self, effect, request, recovery_token, desired_exposure).await
     }
 
     async fn execute_cancellation(
         &self,
-        persisted: &PersistedTrackEffect,
+        effect: &SessionTrackEffect,
         cancellation: Cancellation,
-    ) -> Result<()> {
-        execute::execute_cancellation(self, persisted, cancellation).await
+    ) -> Result<SessionEffectOutcome> {
+        execute::execute_cancellation(self, effect, cancellation).await
     }
 
     async fn trigger_immediate_reconcile(

@@ -1,7 +1,8 @@
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use poise_application::{
-    FollowUpRetirementRequest, PersistedTrackEffect, is_loaded_track_invariant_violation,
+    FollowUpRetirementRequest, SessionEffectOutcome, SessionTrackEffect,
+    is_loaded_track_invariant_violation,
 };
 use poise_engine::executor::SubmitRecoveryToken;
 use poise_engine::ports::{OrderReceipt, OrderRequest};
@@ -16,11 +17,11 @@ use crate::submit_coordinator::SubmitCoordinator;
 
 pub(super) async fn execute_submit(
     worker: &EffectWorker,
-    persisted: &PersistedTrackEffect,
+    effect: &SessionTrackEffect,
     request: OrderRequest,
     recovery_token: SubmitRecoveryToken,
     _desired_exposure: poise_core::types::Exposure,
-) -> Result<()> {
+) -> Result<SessionEffectOutcome> {
     let submit = SubmitCoordinator::new(
         worker.execution.clone(),
         worker.state.submit_effect_service.clone(),
@@ -32,27 +33,41 @@ pub(super) async fn execute_submit(
             .state
             .reconcile
             .exchange_freshness
-            .decide_effect(persisted.track_id.as_str(), &persisted.effect)
+            .decide_effect(effect.track_id.as_str(), &effect.effect)
             .await,
         FreshnessGateDecision::ReconcileFirst
     ) {
         worker
             .trigger_immediate_reconcile(
-                persisted.track_id.as_str(),
+                effect.track_id.as_str(),
                 &request.instrument,
                 crate::order_outcome::ReconcileReason::SyncBeforeSideEffect,
             )
             .await?;
-        return Ok(());
+        return Ok(SessionEffectOutcome::Deferred {
+            until: poise_application::DeferredUntil::ExchangeState,
+        });
     }
 
-    let Some(flight) = submit.prepare(persisted, request, recovery_token).await? else {
-        return Ok(());
+    let Some(flight) = submit.prepare(effect, request, recovery_token).await? else {
+        return Ok(SessionEffectOutcome::Finished);
     };
     let (request, completion) = flight.into_parts();
 
     match worker.execution.submit_order(request.clone()).await {
         Ok(receipt) => {
+            if !worker
+                .state
+                .session_effect_queue
+                .record_submit_exchange_accepted(&effect.effect_id)
+            {
+                return Ok(SessionEffectOutcome::Blocked {
+                    reason: format!(
+                        "submit effect `{}` was not in an in-flight queue state",
+                        effect.effect_id
+                    ),
+                });
+            }
             if let Err(writeback_failure) = completion.record_receipt(&receipt).await {
                 let (error, completion) = writeback_failure.into_parts();
                 if let OutcomeClass::OutcomeUnknown(recovery) =
@@ -60,7 +75,7 @@ pub(super) async fn execute_submit(
                 {
                     worker
                         .recover_unknown_outcome(
-                            persisted.track_id.as_str(),
+                            effect.track_id.as_str(),
                             &request.instrument,
                             recovery,
                         )
@@ -72,7 +87,7 @@ pub(super) async fn execute_submit(
                     .await?;
                 return Err(error);
             }
-            Ok(())
+            Ok(SessionEffectOutcome::Finished)
         }
         Err(error) => {
             let failure_message = error.to_string();
@@ -106,41 +121,46 @@ pub(super) async fn execute_submit(
                 }
             }
             match completion.record_failure(&failure_message).await {
-                Ok(()) => Err(anyhow!(failure_message)),
+                Ok(()) => Ok(()),
                 Err(clear_error) if is_loaded_track_invariant_violation(&clear_error) => {
                     Err(clear_error)
                 }
                 Err(clear_error) => Err(anyhow!(
                     "submit order failed: {error}; failed to record submit failure: {clear_error}"
                 )),
-            }
+            }?;
+            Ok(SessionEffectOutcome::Blocked {
+                reason: failure_message,
+            })
         }
     }
 }
 
 pub(super) async fn execute_cancellation(
     worker: &EffectWorker,
-    persisted: &PersistedTrackEffect,
+    effect: &SessionTrackEffect,
     cancellation: Cancellation,
-) -> Result<()> {
+) -> Result<SessionEffectOutcome> {
     let instrument = cancellation.instrument().clone();
     if matches!(
         worker
             .state
             .reconcile
             .exchange_freshness
-            .decide_effect(persisted.track_id.as_str(), &persisted.effect)
+            .decide_effect(effect.track_id.as_str(), &effect.effect)
             .await,
         FreshnessGateDecision::ReconcileFirst
     ) {
         worker
             .trigger_immediate_reconcile(
-                persisted.track_id.as_str(),
+                effect.track_id.as_str(),
                 &instrument,
                 crate::order_outcome::ReconcileReason::SyncBeforeSideEffect,
             )
             .await?;
-        return Ok(());
+        return Ok(SessionEffectOutcome::Deferred {
+            until: poise_application::DeferredUntil::ExchangeState,
+        });
     }
     let result = match cancellation {
         Cancellation::One {
@@ -169,10 +189,10 @@ pub(super) async fn execute_cancellation(
                         .state
                         .effect_service
                         .record_cancel_order_success(
-                            persisted.track_id.as_str(),
-                            &persisted.effect_id,
-                            &persisted.batch_id,
-                            persisted.sequence,
+                            effect.track_id.as_str(),
+                            &effect.effect_id,
+                            &effect.batch_id,
+                            effect.sequence,
                             order_id,
                             receipt,
                         )
@@ -182,46 +202,43 @@ pub(super) async fn execute_cancellation(
                     worker
                         .state
                         .effect_service
-                        .record_cancel_all_success(
-                            persisted.track_id.as_str(),
-                            &persisted.effect_id,
-                        )
+                        .record_cancel_all_success(effect.track_id.as_str(), &effect.effect_id)
                         .await
                 }
             };
             if let Err(error) = writeback {
                 worker
                     .recover_unknown_outcome(
-                        persisted.track_id.as_str(),
+                        effect.track_id.as_str(),
                         &instrument,
                         cancel_writeback_outcome_unknown(),
                     )
                     .await?;
                 return Err(error);
             }
-            Ok(())
+            Ok(SessionEffectOutcome::Finished)
         }
         Err(error) => {
             if let OutcomeClass::OutcomeUnknown(recovery) = classify_cancel_error(&error) {
                 worker
-                    .recover_unknown_outcome(persisted.track_id.as_str(), &instrument, recovery)
+                    .recover_unknown_outcome(effect.track_id.as_str(), &instrument, recovery)
                     .await?;
                 if let Cancellation::One { order_id, .. } = &cancellation
                     && let Err(retirement_error) = worker
                         .state
                         .effect_service
                         .request_follow_up_retirement(
-                            persisted.track_id.as_str(),
+                            effect.track_id.as_str(),
                             FollowUpRetirementRequest {
-                                batch_id: persisted.batch_id.clone(),
-                                blocked_sequence: persisted.sequence,
+                                batch_id: effect.batch_id.clone(),
+                                blocked_sequence: effect.sequence,
                                 closed_order_id: order_id.clone(),
                             },
                         )
                         .await
                 {
                     tracing::warn!(
-                        track_id = %persisted.track_id.as_str(),
+                        track_id = %effect.track_id.as_str(),
                         order_id = %order_id,
                         "failed to request follow-up retirement after unknown cancel outcome: {retirement_error}"
                     );
@@ -231,8 +248,8 @@ pub(super) async fn execute_cancellation(
                 .state
                 .effect_service
                 .complete_effect_failed(
-                    persisted.track_id.as_str(),
-                    &persisted.effect_id,
+                    effect.track_id.as_str(),
+                    &effect.effect_id,
                     &error.to_string(),
                 )
                 .await?;

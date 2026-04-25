@@ -286,6 +286,7 @@ async fn assemble_with_state_store(
             recovery_dirty_state.clone(),
         )),
     );
+    let session_effect_queue = write_services.session_effect_queue.clone();
     let command_service = Arc::new(write_services.command);
     let observation_service = Arc::new(write_services.observation);
     let effect_service = Arc::new(write_services.effect);
@@ -359,6 +360,7 @@ async fn assemble_with_state_store(
         effect_service.clone(),
         submit_effect_service.clone(),
         account_margin_guard.clone(),
+        session_effect_queue,
     );
     #[cfg(test)]
     let (runtime_test_context, effect_worker_test_context) =
@@ -540,12 +542,14 @@ pub(crate) fn build_effect_worker_state(
     effect_service: Arc<TrackEffectService>,
     submit_effect_service: Arc<SubmitEffectService>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
+    session_effect_queue: poise_application::SessionEffectQueue,
 ) -> EffectWorkerState {
     EffectWorkerState {
         reconcile,
         effect_service,
         submit_effect_service,
         account_margin_guard,
+        session_effect_queue,
     }
 }
 

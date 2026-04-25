@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::Result;
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountCapacityGuard, AccountMonitor, ApplicationNotification, ConfiguredTrackDefinition,
@@ -9,12 +10,20 @@ use poise_application::{
 };
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
+use poise_core::types::{ExchangeRules, Exposure, Side};
+use poise_engine::executor::SubmitRecoveryToken;
 use poise_engine::manager::TrackManager;
 use poise_engine::observation::MarketObservation;
-use poise_engine::ports::ExecutionQuote;
+use poise_engine::ports::{
+    AccountCapacitySnapshot, AccountPort, ExchangeOpenOrderSnapshot, ExecutionPort, ExecutionQuote,
+    OrderReceipt, OrderRequest, OrderStatus, Position, UserDataEvent,
+};
+use poise_engine::price_gate::SubmitPurpose;
 use poise_engine::track::{TrackId, Venue};
+use poise_engine::transition::TrackEffect;
 use poise_engine::transition::TrackTransition;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
@@ -31,6 +40,7 @@ pub(crate) struct TestApplicationServices {
     pub(crate) effect_service: Arc<TrackEffectService>,
     pub(crate) submit_effect_service: Arc<SubmitEffectService>,
     pub(crate) runtime_lifecycle_service: Arc<TrackRuntimeLifecycleService>,
+    pub(crate) session_effect_queue: poise_application::SessionEffectQueue,
     pub(crate) notifications: broadcast::Sender<ApplicationNotification>,
     pub(crate) account_margin_guard: Arc<AccountMarginGuardStore>,
     pub(crate) recovery_dirty_state: Arc<RecoveryDirtyState>,
@@ -140,6 +150,7 @@ pub(crate) fn build_test_application_services_with_recovery_dirty_state(
         effect_service: Arc::new(services.effect),
         submit_effect_service: Arc::new(services.submit_effect),
         runtime_lifecycle_service: Arc::new(services.runtime_lifecycle),
+        session_effect_queue: services.session_effect_queue,
         notifications,
         account_margin_guard,
         recovery_dirty_state,
@@ -214,6 +225,182 @@ fn default_symbol_for(track_id: &str) -> &str {
     }
 }
 
+pub(crate) fn test_manager(track_id: &str) -> TrackManager {
+    let mut manager = TrackManager::new(Arc::new(crate::assembly::SystemClock));
+    manager
+        .add_track(
+            TrackId::new(track_id),
+            poise_engine::track::Instrument::new(Venue::Binance, default_symbol_for(track_id)),
+            poise_core::strategy::TrackConfig {
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: 0.5,
+                shape_family: ShapeFamily::Linear,
+                out_of_band_policy: BandProtectionPolicy::Freeze,
+            },
+            test_max_notional(),
+            test_loss_limits(),
+            ExchangeRules {
+                price_tick: 0.1,
+                quantity_step: 0.1,
+                min_qty: 0.0,
+                min_notional: 0.0,
+                maker_fee_rate: 0.0,
+                taker_fee_rate: 0.0,
+            },
+        )
+        .unwrap();
+    manager
+}
+
+pub(crate) fn test_submit_effect(track_id: &str) -> TrackEffect {
+    TrackEffect::SubmitOrder {
+        request: OrderRequest {
+            instrument: poise_engine::track::Instrument::new(
+                Venue::Binance,
+                default_symbol_for(track_id),
+            ),
+            side: Side::Buy,
+            price: 100.0,
+            quantity: 0.1,
+            client_order_id: format!("{track_id}-old-session-submit"),
+            reduce_only: false,
+        },
+        desired_exposure: Exposure(4.0),
+        submit_purpose: SubmitPurpose::AutoReconcile,
+        recovery_token: SubmitRecoveryToken::empty(),
+    }
+}
+
+pub(crate) async fn seed_persisted_pending_submit_effect(
+    store: &dyn TrackMutationStore,
+    track_id: &str,
+) -> Result<()> {
+    store
+        .commit_track_transition(
+            track_id,
+            None,
+            &poise_engine::ledger::TrackLedgerState::default(),
+            &[],
+            &[test_submit_effect(track_id)],
+            &[],
+        )
+        .await?;
+    Ok(())
+}
+
+pub(crate) fn build_effect_worker_context_for_repository<R>(
+    repository: Arc<R>,
+) -> EffectWorkerTestContext
+where
+    R: TrackMutationStore + TrackQueryStore + TrackEffectStore + 'static,
+{
+    let (notifications, _) = broadcast::channel(16);
+    let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
+    let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
+    let query_store = repository.clone() as Arc<dyn TrackQueryStore>;
+    let effect_store = repository as Arc<dyn TrackEffectStore>;
+    let services = build_test_application_services(
+        test_manager("btc-core"),
+        mutation_store,
+        query_store.clone(),
+        effect_store.clone(),
+        notifications,
+        account_margin_guard,
+    );
+    build_effect_worker_test_context(&services, query_store, effect_store)
+}
+
+#[derive(Default)]
+pub(crate) struct RecordingExecutionPort {
+    submitted: std::sync::Mutex<Vec<OrderRequest>>,
+    cancel_all_count: std::sync::atomic::AtomicUsize,
+}
+
+impl RecordingExecutionPort {
+    pub(crate) fn submit_order_call_count(&self) -> usize {
+        self.submitted.lock().unwrap().len()
+    }
+
+    pub(crate) fn cancel_all_call_count(&self) -> usize {
+        self.cancel_all_count
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl ExecutionPort for RecordingExecutionPort {
+    async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
+        self.submitted.lock().unwrap().push(req.clone());
+        Ok(OrderReceipt {
+            order_id: "test-order".into(),
+            client_order_id: req.client_order_id,
+            filled_qty: 0.0,
+            status: OrderStatus::New,
+        })
+    }
+
+    async fn cancel_order(
+        &self,
+        _instrument: &poise_engine::track::Instrument,
+        order_id: &str,
+    ) -> Result<OrderReceipt> {
+        Ok(OrderReceipt {
+            order_id: order_id.to_string(),
+            client_order_id: String::new(),
+            filled_qty: 0.0,
+            status: OrderStatus::Canceled,
+        })
+    }
+
+    async fn cancel_all(&self, _instrument: &poise_engine::track::Instrument) -> Result<()> {
+        self.cancel_all_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn get_position(&self, instrument: &poise_engine::track::Instrument) -> Result<Position> {
+        Ok(Position {
+            instrument: instrument.clone(),
+            qty: 0.0,
+            avg_price: 0.0,
+            unrealized_pnl: 0.0,
+        })
+    }
+
+    async fn get_open_orders(
+        &self,
+        _instrument: &poise_engine::track::Instrument,
+    ) -> Result<ExchangeOpenOrderSnapshot> {
+        Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+            Vec::new(),
+        ))
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct NoopAccountPort;
+
+#[async_trait::async_trait]
+impl AccountPort for NoopAccountPort {
+    async fn get_account_capacity_snapshot(
+        &self,
+        _instrument: &poise_engine::track::Instrument,
+    ) -> Result<AccountCapacitySnapshot> {
+        Ok(AccountCapacitySnapshot {
+            max_increase_notional: 1_000_000.0,
+        })
+    }
+
+    async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
+        let (_sender, receiver) = mpsc::channel(1);
+        Ok(receiver)
+    }
+}
+
 pub(crate) fn build_http_state(
     services: &TestApplicationServices,
     query_service: Arc<poise_application::TrackQueryService>,
@@ -280,6 +467,7 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
         Arc::clone(&services.effect_service),
         Arc::clone(&services.submit_effect_service),
         Arc::clone(&services.account_margin_guard),
+        services.session_effect_queue.clone(),
     );
     build_test_contexts_from_runtime_states(
         runtime_state,
@@ -345,6 +533,7 @@ pub(crate) fn build_effect_worker_test_context(
             Arc::clone(&services.effect_service),
             Arc::clone(&services.submit_effect_service),
             Arc::clone(&services.account_margin_guard),
+            services.session_effect_queue.clone(),
         ),
         exchange_freshness,
         submit_preflight,

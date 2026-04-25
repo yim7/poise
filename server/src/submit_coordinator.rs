@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Error, Result};
-use poise_application::PersistedTrackEffect;
+use poise_application::SessionTrackEffect;
 use poise_application::submit_effect_service::{
     SubmitAttempt, SubmitAttemptResult, SubmitDispatch, SubmitEffectService,
 };
@@ -32,13 +32,13 @@ impl SubmitCoordinator {
 
     pub async fn prepare(
         &self,
-        persisted: &PersistedTrackEffect,
+        effect: &SessionTrackEffect,
         request: OrderRequest,
         recovery_token: SubmitRecoveryToken,
     ) -> Result<Option<SubmitFlight>> {
         let preflight_decision = self
             .submit_preflight
-            .decide(&persisted.effect_id, &request.client_order_id)
+            .decide(&effect.effect_id, &request.client_order_id)
             .await;
         let live_order = match preflight_decision {
             SubmitPreflightDecision::Direct => None,
@@ -56,8 +56,8 @@ impl SubmitCoordinator {
         let attempt = self
             .submit_effect_service
             .recover_or_dispatch(
-                persisted.track_id.as_str(),
-                &persisted.effect_id,
+                effect.track_id.as_str(),
+                &effect.effect_id,
                 recovery_token,
                 live_order.as_ref(),
             )
@@ -66,7 +66,7 @@ impl SubmitCoordinator {
         Ok(match attempt {
             SubmitAttempt::Dispatch(dispatch) => {
                 self.submit_preflight
-                    .mark_submit_started(&persisted.effect_id)
+                    .mark_submit_started(&effect.effect_id)
                     .await;
                 Some(SubmitFlight::new(
                     dispatch,
