@@ -15,7 +15,7 @@ use tokio_tungstenite::{
     tungstenite::{Error as WebSocketError, error::ProtocolError},
 };
 
-use poise_engine::ports::{PriceTick, UserDataEvent};
+use poise_engine::ports::{MarketDataTick, UserDataEvent};
 use poise_engine::track::Instrument;
 
 use crate::rest::BinanceRestClient;
@@ -53,7 +53,7 @@ impl BinanceWsClient {
     pub async fn subscribe_prices(
         &self,
         instrument: &Instrument,
-    ) -> Result<mpsc::Receiver<PriceTick>> {
+    ) -> Result<mpsc::Receiver<MarketDataTick>> {
         let (sender, receiver) = mpsc::channel(128);
         let url = format!(
             "{}/stream?streams={}@markPrice/{}@bookTicker",

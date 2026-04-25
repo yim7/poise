@@ -329,7 +329,7 @@ mod tests {
                     to: Exposure(4.0),
                 }],
                 &[],
-                None,
+                &[],
             )
             .await
             .unwrap();
@@ -402,7 +402,7 @@ mod tests {
                     to: Exposure(4.0),
                 }],
                 &[],
-                None,
+                &[],
             )
             .await
             .unwrap();
@@ -511,12 +511,11 @@ mod tests {
             .observe(
                 &TrackId::new("btc-core"),
                 poise_engine::observation::TrackObservation::Market(
-                    poise_engine::observation::MarketObservation {
-                        mark_price: 95.0,
-                        execution_quote: Some(poise_engine::ports::ExecutionQuote {
+                    poise_engine::observation::MarketObservation::ExecutionQuote {
+                        execution_quote: poise_engine::ports::ExecutionQuote {
                             best_bid: 95.0,
                             best_ask: 95.0,
-                        }),
+                        },
                     },
                 ),
             )
@@ -1149,7 +1148,7 @@ mod tests {
             _ledger_state: &poise_engine::ledger::TrackLedgerState,
             _events: &[poise_core::events::DomainEvent],
             _effects: &[poise_engine::transition::TrackEffect],
-            _effect_status_update: Option<&EffectStatusUpdate>,
+            _effect_status_updates: &[EffectStatusUpdate],
         ) -> anyhow::Result<CommittedTrackWrite> {
             Err(anyhow!("persistence unavailable"))
         }
@@ -1158,6 +1157,14 @@ mod tests {
             &self,
             _id: &str,
             _effect_status_update: &EffectStatusUpdate,
+        ) -> anyhow::Result<CommittedTrackWrite> {
+            Err(anyhow!("persistence unavailable"))
+        }
+
+        async fn update_effect_statuses(
+            &self,
+            _id: &str,
+            _effect_status_updates: &[EffectStatusUpdate],
         ) -> anyhow::Result<CommittedTrackWrite> {
             Err(anyhow!("persistence unavailable"))
         }

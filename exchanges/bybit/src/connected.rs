@@ -6,8 +6,8 @@ use tokio::sync::mpsc;
 
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
-    ExchangeOrder, ExecutionPort, MarketDataPort, MetadataPort, OrderReceipt, OrderRequest,
-    Position, PriceTick, UserDataEvent,
+    ExchangeOpenOrderSnapshot, ExecutionPort, MarketDataPort, MarketDataTick, MetadataPort,
+    OrderReceipt, OrderRequest, Position, UserDataEvent,
 };
 use poise_engine::track::Instrument;
 
@@ -143,7 +143,7 @@ impl ExecutionPort for BybitExecution {
         self._rest.submit_order(req).await
     }
 
-    async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<()> {
+    async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<OrderReceipt> {
         self._rest.cancel_order(&instrument.symbol, order_id).await
     }
 
@@ -155,14 +155,20 @@ impl ExecutionPort for BybitExecution {
         self._rest.get_position(&instrument.symbol).await
     }
 
-    async fn get_open_orders(&self, instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
-        self._rest.get_open_orders(&instrument.symbol).await
+    async fn get_open_orders(&self, instrument: &Instrument) -> Result<ExchangeOpenOrderSnapshot> {
+        self._rest
+            .get_open_orders(&instrument.symbol)
+            .await
+            .map(ExchangeOpenOrderSnapshot::from_complete_exchange_query)
     }
 }
 
 #[async_trait]
 impl MarketDataPort for BybitMarketData {
-    async fn subscribe_prices(&self, instrument: &Instrument) -> Result<mpsc::Receiver<PriceTick>> {
+    async fn subscribe_prices(
+        &self,
+        instrument: &Instrument,
+    ) -> Result<mpsc::Receiver<MarketDataTick>> {
         self._ws.subscribe_prices(instrument).await
     }
 }
@@ -405,7 +411,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(tick.mark_price, 64000.10);
+        match tick {
+            MarketDataTick::MarkPrice(tick) => assert_eq!(tick.mark_price, 64000.10),
+            MarketDataTick::ExecutionQuote(_) => panic!("expected mark price tick"),
+        }
         assert_eq!(event.event_time.timestamp_millis(), 1_700_000_000_000);
         assert!(matches!(
             event.payload,
@@ -430,7 +439,10 @@ mod tests {
                 200,
                 r#"{"retCode":0,"retMsg":"OK","result":{"orderId":"12345","orderLinkId":"client-1"}}"#,
             ),
-            MockResponse::json(200, r#"{"retCode":0,"retMsg":"OK","result":{}}"#),
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"orderId":"12345","orderLinkId":"client-1"}}"#,
+            ),
             MockResponse::json(
                 200,
                 r#"{"retCode":0,"retMsg":"OK","result":{"list":[],"success":"1"}}"#,
@@ -484,11 +496,12 @@ mod tests {
             })
             .await
             .unwrap();
-        connected
+        let cancel_receipt = connected
             .execution()
             .cancel_order(&instrument, "12345")
             .await
             .unwrap();
+        assert_eq!(cancel_receipt.status, OrderStatus::Canceled);
         connected.execution().cancel_all(&instrument).await.unwrap();
         let position = connected
             .execution()
@@ -503,8 +516,8 @@ mod tests {
 
         assert_eq!(receipt.status, OrderStatus::Submitting);
         assert_eq!(position.qty, 0.010);
-        assert_eq!(open_orders.len(), 1);
-        assert_eq!(open_orders[0].client_order_id, "client-1");
+        assert_eq!(open_orders.orders().len(), 1);
+        assert_eq!(open_orders.orders()[0].client_order_id, "client-1");
 
         let requests = server.requests();
         assert_eq!(requests.len(), 5);

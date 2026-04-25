@@ -11,7 +11,7 @@ use tokio_tungstenite::{
     tungstenite::{Error as WebSocketError, error::ProtocolError},
 };
 
-use poise_engine::ports::{PriceTick, UserDataEvent};
+use poise_engine::ports::{MarketDataTick, UserDataEvent};
 use poise_engine::track::Instrument;
 
 type WebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -64,7 +64,7 @@ impl BybitWsClient {
     pub async fn subscribe_prices(
         &self,
         instrument: &Instrument,
-    ) -> Result<mpsc::Receiver<PriceTick>> {
+    ) -> Result<mpsc::Receiver<MarketDataTick>> {
         let (sender, receiver) = mpsc::channel(128);
         let url = self.public_ws_base_url.clone();
         let symbol = instrument.symbol.clone();

@@ -7,6 +7,7 @@ use poise_application::{
     RecoveryAnomalyObserver, TrackInstrument, TrackMutationError, TrackRecoveryIssue,
 };
 use poise_engine::manager::ExchangeSyncMode;
+use poise_engine::observation::CompleteOpenOrderSnapshot;
 use poise_engine::ports::ExecutionPort;
 use poise_engine::track::TrackId;
 use tokio::sync::{Notify, watch};
@@ -231,7 +232,7 @@ pub(super) async fn sync_exchange_state_from_exchange(
         view.issue == Some(TrackRecoveryIssue::UnknownLiveOrder) && !view.has_working_orders
     }) && !open_orders.is_empty()
     {
-        for order in &open_orders {
+        for order in open_orders.orders() {
             execution
                 .cancel_order(instrument, &order.order_id)
                 .await
@@ -253,16 +254,21 @@ pub(super) async fn sync_exchange_state_from_exchange(
             .map_err(TrackMutationError::Persistence)?;
     }
 
+    let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(
+        open_orders
+            .orders()
+            .iter()
+            .map(exchange_state::order_observation)
+            .collect(),
+    );
+
     if matches!(mode, ExchangeSyncMode::RecoverAndReconcile) {
         let _ = state
             .observation_service
             .sync_exchange_state(
                 track_id,
                 exchange_state::position_observation(&position),
-                open_orders
-                    .iter()
-                    .map(exchange_state::order_observation)
-                    .collect(),
+                open_orders,
             )
             .await
             .map_err(preserve_track_mutation_error)?;
@@ -272,10 +278,7 @@ pub(super) async fn sync_exchange_state_from_exchange(
             .sync_exchange_state_without_reconcile(
                 track_id,
                 exchange_state::position_observation(&position),
-                open_orders
-                    .iter()
-                    .map(exchange_state::order_observation)
-                    .collect(),
+                open_orders,
             )
             .await
             .map_err(preserve_track_mutation_error)?;

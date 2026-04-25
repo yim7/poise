@@ -5,7 +5,6 @@ use poise_engine::transition::TrackEffect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExchangeFreshnessReason {
-    FilledAwaitingSync,
     UnabsorbedOrderUpdate,
     SubmitOutcomeUnknown,
     CancelOutcomeUnknown,
@@ -164,7 +163,7 @@ mod tests {
         let freshness = ExchangeFreshness::default();
 
         freshness
-            .mark_stale("btc-core", ExchangeFreshnessReason::FilledAwaitingSync)
+            .mark_stale("btc-core", ExchangeFreshnessReason::UnabsorbedOrderUpdate)
             .await;
 
         let token = freshness.prepare_sync("btc-core").await;
@@ -220,7 +219,7 @@ mod tests {
     async fn clear_if_current_does_not_erase_newer_stale_fact() {
         let freshness = ExchangeFreshness::default();
         freshness
-            .mark_stale("btc-core", ExchangeFreshnessReason::FilledAwaitingSync)
+            .mark_stale("btc-core", ExchangeFreshnessReason::UnabsorbedOrderUpdate)
             .await;
         let token = freshness.prepare_sync("btc-core").await;
 
@@ -236,7 +235,7 @@ mod tests {
     async fn mark_stale_replaces_reason_with_newer_fact() {
         let freshness = ExchangeFreshness::default();
         freshness
-            .mark_stale("btc-core", ExchangeFreshnessReason::FilledAwaitingSync)
+            .mark_stale("btc-core", ExchangeFreshnessReason::UnabsorbedOrderUpdate)
             .await;
         freshness
             .mark_stale("btc-core", ExchangeFreshnessReason::CancelOutcomeUnknown)
@@ -255,7 +254,7 @@ mod tests {
     async fn stale_track_returns_explicit_reconcile_decision_for_side_effects() {
         let freshness = ExchangeFreshness::default();
         freshness
-            .mark_stale("btc-core", ExchangeFreshnessReason::FilledAwaitingSync)
+            .mark_stale("btc-core", ExchangeFreshnessReason::UnabsorbedOrderUpdate)
             .await;
 
         assert_eq!(

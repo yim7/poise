@@ -46,6 +46,7 @@ impl SubmitCoordinator {
                 self.execution
                     .get_open_orders(&request.instrument)
                     .await?
+                    .into_orders()
                     .into_iter()
                     .find(|order| order.client_order_id == request.client_order_id),
             )

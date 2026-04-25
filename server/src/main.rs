@@ -169,8 +169,9 @@ mod tests {
     use poise_application::{ConfiguredTrackDefinition, PreparedTrackRegistry};
     use poise_core::types::ExchangeRules;
     use poise_engine::ports::{
-        AccountPort, ClockPort, ExchangeInfo, ExchangeOrder, ExecutionPort, MetadataPort,
-        OrderReceipt, OrderRequest, OrderStatus, Position, PriceTick,
+        AccountPort, ClockPort, ExchangeInfo, ExchangeOpenOrderSnapshot, ExchangeOrder,
+        ExecutionPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, OrderStatus,
+        Position,
     };
     use poise_engine::track::{Instrument, Venue};
     use poise_storage::sqlite::SqliteStorage;
@@ -746,8 +747,17 @@ total_loss_limit = 600.0
             })
         }
 
-        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
-            Ok(())
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            order_id: &str,
+        ) -> Result<OrderReceipt> {
+            Ok(OrderReceipt {
+                order_id: order_id.to_string(),
+                client_order_id: String::new(),
+                filled_qty: 0.0,
+                status: OrderStatus::Canceled,
+            })
         }
 
         async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
@@ -763,8 +773,13 @@ total_loss_limit = 600.0
             })
         }
 
-        async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
-            Ok(Vec::new())
+        async fn get_open_orders(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<ExchangeOpenOrderSnapshot> {
+            Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                Vec::new(),
+            ))
         }
     }
 
@@ -810,7 +825,7 @@ total_loss_limit = 600.0
 
     #[derive(Default)]
     struct FakeMarketData {
-        price_receivers: Mutex<HashMap<String, mpsc::Receiver<PriceTick>>>,
+        price_receivers: Mutex<HashMap<String, mpsc::Receiver<MarketDataTick>>>,
     }
 
     #[async_trait::async_trait]
@@ -818,7 +833,7 @@ total_loss_limit = 600.0
         async fn subscribe_prices(
             &self,
             instrument: &Instrument,
-        ) -> Result<mpsc::Receiver<PriceTick>> {
+        ) -> Result<mpsc::Receiver<MarketDataTick>> {
             self.price_receivers
                 .lock()
                 .unwrap()
@@ -834,7 +849,7 @@ total_loss_limit = 600.0
         async fn subscribe_prices(
             &self,
             _instrument: &Instrument,
-        ) -> Result<mpsc::Receiver<PriceTick>> {
+        ) -> Result<mpsc::Receiver<MarketDataTick>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
         }

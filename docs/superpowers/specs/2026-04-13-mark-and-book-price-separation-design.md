@@ -56,9 +56,26 @@ pub struct ExecutionQuote {
     pub best_ask: f64,
 }
 
-pub struct MarketObservation {
+pub struct ExecutionQuoteTick {
+    pub instrument: Instrument,
+    pub execution_quote: ExecutionQuote,
+    pub timestamp: DateTime<Utc>,
+}
+
+pub struct MarkPriceTick {
+    pub instrument: Instrument,
     pub mark_price: f64,
-    pub execution_quote: Option<ExecutionQuote>,
+    pub timestamp: DateTime<Utc>,
+}
+
+pub enum MarketDataTick {
+    ExecutionQuote(ExecutionQuoteTick),
+    MarkPrice(MarkPriceTick),
+}
+
+pub enum MarketObservation {
+    ExecutionQuote { execution_quote: ExecutionQuote },
+    MarkPrice { mark_price: f64 },
 }
 ```
 
@@ -83,7 +100,8 @@ strategy_price = (best_bid + best_ask) / 2.0
 
 - 只负责提取 `mark_price`、`best_bid`、`best_ask`
 - 不负责计算 `strategy_price`
-- 如果拿不到有效盘口，输出 `execution_quote = None`
+- 如果拿不到有效盘口，不输出 `ExecutionQuoteTick`
+- `mark_price` 和 `execution_quote` 是两类独立市场事件，不在 adapter 内部强行合并成一条 tick
 
 #### engine runtime
 
@@ -229,6 +247,7 @@ enum PriceExecutionBlockReason {
 
 - `IncreaseInventory` 视为加风险单
 - `DecreaseInventory` 视为减风险单
+- 对已有 working order，风险角色以订单请求的 `reduce_only` 为准：`reduce_only = true` 是减风险单，否则是加风险单。不要从 boundary `Up / Down` 方向重新推断，因为空头减仓也是 `Up` 方向买单。
 
 对于本地仍处于 `SubmitPending`、还没有真正发到交易所的请求：
 

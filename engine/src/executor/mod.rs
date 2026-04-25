@@ -15,8 +15,8 @@ pub use planning::{OrderRole, PendingSubmitHint};
 pub use recording::OrderUpdateAbsorbResult;
 pub(crate) use recording::{
     SubmitReceiptResolution, apply_order_observation_with_result, clear_all_working_orders,
-    clear_working_order_by_order_id, record_submit_failure,
-    record_submit_failure_by_recovery_token, record_submit_receipt, record_submit_request,
+    record_cancel_order_receipt, record_submit_failure, record_submit_failure_by_recovery_token,
+    record_submit_receipt, record_submit_request,
 };
 pub use recovery::{RecoveryAnomaly, SubmitRecoveryPlan, SubmitRecoveryResolution};
 pub(crate) use recovery::{
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_pending_maker_binding_releases_boundary_operation_for_replacement() {
+    fn cancel_pending_maker_binding_holds_boundary_operation_until_cancel_resolves() {
         let config = config();
         let rules = rules();
         let instrument = instrument();
@@ -349,7 +349,7 @@ mod tests {
             })
             .expect("canceling maker binding should stay tracked");
         assert_eq!(maker.status, BindingStatus::CancelPending);
-        assert!(plan.state.bindings.iter().any(|binding| {
+        assert!(!plan.state.bindings.iter().any(|binding| {
             binding.proposal_key.policy == PolicyKind::CatchUp
                 && binding.allocations[0].operation == maker_operation
         }));

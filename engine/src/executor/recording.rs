@@ -143,16 +143,29 @@ pub fn apply_order_observation_with_result(
     }
 }
 
-pub fn clear_working_order_by_order_id(
+pub fn record_cancel_order_receipt(
     previous_state: &ExecutorState,
     order_id: &str,
+    receipt: &OrderReceipt,
 ) -> ExecutorState {
     let mut state = previous_state.clone();
-    for binding in &mut state.bindings {
-        if binding.order_id.as_deref() == Some(order_id) {
-            binding.status = BindingStatus::Terminal;
-        }
+    let Some(index) = state.bindings.iter().position(|binding| {
+        binding.order_id.as_deref() == Some(order_id)
+            || binding.order_id.as_deref() == Some(receipt.order_id.as_str())
+    }) else {
+        return state;
+    };
+
+    state.bindings[index].order_id = Some(receipt.order_id.clone());
+    absorb_binding_fill_progress(&mut state, index, receipt.filled_qty, receipt.status);
+    if receipt.status.keeps_working_order() {
+        state.bindings[index].status = BindingStatus::Working;
+    } else if receipt.status.clears_working_order() {
+        state.bindings[index].status = BindingStatus::Terminal;
+        let client_order_id = state.bindings[index].request.client_order_id.clone();
+        remember_terminal_order(&mut state, &client_order_id, &receipt.order_id);
     }
+
     state
 }
 
@@ -535,6 +548,64 @@ mod tests {
                 .abs()
                 < 1e-9
         );
+    }
+
+    #[test]
+    fn recording_applies_cancel_receipt_fill_to_boundary_progress() {
+        let config = TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 100.0,
+            min_rebalance_units: 1.0,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: BandProtectionPolicy::Freeze,
+        };
+        let rules = ExchangeRules {
+            price_tick: 0.1,
+            quantity_step: 0.01,
+            min_qty: 0.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        };
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+        let planned = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: &instrument,
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: 1.0,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(1.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            None,
+        ));
+        let mut state = planned.state.clone();
+        state.bindings[0].order_id = Some("order-1".to_string());
+        state.bindings[0].status = BindingStatus::CancelPending;
+        let receipt = OrderReceipt {
+            order_id: "order-1".to_string(),
+            client_order_id: state.bindings[0].request.client_order_id.clone(),
+            filled_qty: state.bindings[0].request.quantity * 0.25,
+            status: OrderStatus::Canceled,
+        };
+
+        let applied = record_cancel_order_receipt(&state, "order-1", &receipt);
+
+        assert_eq!(applied.bindings[0].status, BindingStatus::Terminal);
+        assert_eq!(applied.ledger_state.progress.len(), 1);
+        assert!((applied.ledger_state.progress[0].progress.cumulative_up - 0.25).abs() < 1e-9);
     }
 
     #[test]

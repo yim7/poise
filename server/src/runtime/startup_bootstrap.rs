@@ -232,7 +232,7 @@ async fn clear_inherited_open_orders(
     if open_orders.is_empty() {
         return Ok(CleanupReplayFilter::default());
     }
-    let cleanup_filter = CleanupReplayFilter::from_orders(&open_orders);
+    let cleanup_filter = CleanupReplayFilter::from_orders(open_orders.orders());
 
     retry_startup_step("cancel_all", || runtime.execution.cancel_all(instrument)).await?;
     retry_startup_step("await_open_orders_cleared", || async {
@@ -382,8 +382,9 @@ mod tests {
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
-        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort, MetadataPort,
-        OrderRequest, OrderStatus, Position, PriceTick, UserDataEvent, UserDataPayload,
+        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort,
+        MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, OrderStatus, Position,
+        UserDataEvent, UserDataPayload,
     };
     use poise_engine::price_gate::SubmitPurpose;
     use poise_engine::runtime::{TerminationCause, TrackStatus};
@@ -417,7 +418,7 @@ mod tests {
                         instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                     },
                 ],
-                None,
+                &[],
             )
             .await
             .unwrap();
@@ -649,7 +650,7 @@ mod tests {
                 &poise_engine::ledger::TrackLedgerState::default(),
                 &[],
                 &[],
-                None,
+                &[],
             )
             .await
             .unwrap();
@@ -747,7 +748,7 @@ mod tests {
                 &poise_engine::ledger::TrackLedgerState::default(),
                 &[],
                 &[],
-                None,
+                &[],
             )
             .await
             .unwrap();
@@ -819,7 +820,7 @@ mod tests {
                 &poise_engine::ledger::TrackLedgerState::default(),
                 &[],
                 &[],
-                None,
+                &[],
             )
             .await
             .unwrap();
@@ -1035,7 +1036,11 @@ mod tests {
             ))
         }
 
-        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            _order_id: &str,
+        ) -> Result<OrderReceipt> {
             Err(anyhow!(
                 "cancel_order is not used during startup bootstrap tests"
             ))
@@ -1059,24 +1064,35 @@ mod tests {
             })
         }
 
-        async fn get_open_orders(&self, instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
+        async fn get_open_orders(
+            &self,
+            instrument: &Instrument,
+        ) -> Result<poise_engine::ports::ExchangeOpenOrderSnapshot> {
             assert_eq!(instrument, &self.instrument);
             self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
             if !self.inherited_order_present.load(Ordering::SeqCst) {
-                return Ok(Vec::new());
+                return Ok(
+                    poise_engine::ports::ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                        Vec::new(),
+                    ),
+                );
             }
 
-            Ok(vec![ExchangeOrder {
-                instrument: instrument.clone(),
-                order_id: "legacy-order".into(),
-                client_order_id: "legacy-client-order".into(),
-                side: Side::Buy,
-                price: 99.0,
-                qty: 0.1,
-                filled_qty: 0.0,
-                realized_pnl: 0.0,
-                status: OrderStatus::New,
-            }])
+            Ok(
+                poise_engine::ports::ExchangeOpenOrderSnapshot::from_complete_exchange_query(vec![
+                    ExchangeOrder {
+                        instrument: instrument.clone(),
+                        order_id: "legacy-order".into(),
+                        client_order_id: "legacy-client-order".into(),
+                        side: Side::Buy,
+                        price: 99.0,
+                        qty: 0.1,
+                        filled_qty: 0.0,
+                        realized_pnl: 0.0,
+                        status: OrderStatus::New,
+                    },
+                ]),
+            )
         }
     }
 
@@ -1139,7 +1155,7 @@ mod tests {
         async fn subscribe_prices(
             &self,
             _instrument: &Instrument,
-        ) -> Result<mpsc::Receiver<PriceTick>> {
+        ) -> Result<mpsc::Receiver<MarketDataTick>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
         }

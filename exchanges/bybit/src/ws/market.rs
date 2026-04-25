@@ -7,7 +7,7 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
-use poise_engine::ports::{ExecutionQuote, PriceTick};
+use poise_engine::ports::{ExecutionQuote, ExecutionQuoteTick, MarkPriceTick, MarketDataTick};
 use poise_engine::track::{Instrument, Venue};
 
 use super::{backoff_delay, connect_websocket, models::PublicTickerMessage};
@@ -15,7 +15,7 @@ use super::{backoff_delay, connect_websocket, models::PublicTickerMessage};
 pub(super) async fn run_market_stream(
     url: String,
     symbol: String,
-    sender: mpsc::Sender<PriceTick>,
+    sender: mpsc::Sender<MarketDataTick>,
     reconnect_delay: Duration,
 ) {
     let mut attempt = 0_u32;
@@ -32,12 +32,13 @@ pub(super) async fn run_market_stream(
                         match message {
                             Ok(Message::Text(text)) => {
                                 match ticker_state.parse_linear_ticker_message(&text) {
-                                    Ok(Some(tick)) => {
-                                        if sender.send(tick).await.is_err() {
-                                            return;
+                                    Ok(ticks) => {
+                                        for tick in ticks {
+                                            if sender.send(tick).await.is_err() {
+                                                return;
+                                            }
                                         }
                                     }
-                                    Ok(None) => {}
                                     Err(error) => {
                                         tracing::warn!(
                                             "failed to parse market data message: {error}"
@@ -84,7 +85,6 @@ async fn subscribe(websocket: &mut super::WebSocket, symbol: &str) -> Result<()>
 #[derive(Debug)]
 struct TickerState {
     expected_symbol: String,
-    last_mark_price: Option<f64>,
     last_quote: Option<ExecutionQuote>,
 }
 
@@ -92,22 +92,21 @@ impl TickerState {
     fn new(expected_symbol: impl Into<String>) -> Self {
         Self {
             expected_symbol: expected_symbol.into(),
-            last_mark_price: None,
             last_quote: None,
         }
     }
 
-    fn parse_linear_ticker_message(&mut self, payload: &str) -> Result<Option<PriceTick>> {
+    fn parse_linear_ticker_message(&mut self, payload: &str) -> Result<Vec<MarketDataTick>> {
         let value: serde_json::Value = serde_json::from_str(payload)?;
         let Some(topic) = value.get("topic").and_then(|topic| topic.as_str()) else {
-            return Ok(None);
+            return Ok(vec![]);
         };
         if !topic.starts_with("tickers.") {
-            return Ok(None);
+            return Ok(vec![]);
         }
         let message: PublicTickerMessage = serde_json::from_value(value)?;
         let Some(symbol) = message.topic.strip_prefix("tickers.") else {
-            return Ok(None);
+            return Ok(vec![]);
         };
         if symbol != self.expected_symbol {
             return Err(anyhow!(
@@ -117,16 +116,7 @@ impl TickerState {
             ));
         }
 
-        let mark_price = match message.data.mark_price {
-            Some(mark_price) => {
-                self.last_mark_price = Some(mark_price);
-                mark_price
-            }
-            None => match self.last_mark_price {
-                Some(mark_price) => mark_price,
-                None => return Ok(None),
-            },
-        };
+        let mark_price = message.data.mark_price;
         let execution_quote =
             self.merge_execution_quote(message.data.bid1_price, message.data.ask1_price);
         let timestamp = Utc
@@ -134,12 +124,24 @@ impl TickerState {
             .single()
             .context("invalid ticker timestamp")?;
 
-        Ok(Some(PriceTick {
-            instrument: Instrument::new(Venue::Bybit, &self.expected_symbol),
-            mark_price,
-            execution_quote,
-            timestamp,
-        }))
+        let mut ticks = vec![];
+        let instrument = Instrument::new(Venue::Bybit, &self.expected_symbol);
+        if let Some(mark_price) = mark_price {
+            ticks.push(MarketDataTick::MarkPrice(MarkPriceTick {
+                instrument: instrument.clone(),
+                mark_price,
+                timestamp,
+            }));
+        }
+        if let Some(execution_quote) = execution_quote {
+            ticks.push(MarketDataTick::ExecutionQuote(ExecutionQuoteTick {
+                instrument,
+                execution_quote,
+                timestamp,
+            }));
+        }
+
+        Ok(ticks)
     }
 
     fn merge_execution_quote(
@@ -157,7 +159,6 @@ impl TickerState {
                 best_bid: previous.best_bid,
                 best_ask,
             }),
-            (None, None, Some(previous)) => Some(previous.clone()),
             _ => None,
         };
 
@@ -188,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_bybit_ticker_mark_and_top_of_book_into_price_tick() {
+    fn parses_bybit_ticker_mark_and_top_of_book_into_market_ticks() {
         let mut state = btc_ticker_state();
         let payload = r#"{
             "topic": "tickers.BTCUSDT",
@@ -201,19 +202,25 @@ mod tests {
             }
         }"#;
 
-        let tick = state.parse_linear_ticker_message(payload).unwrap().unwrap();
+        let ticks = state.parse_linear_ticker_message(payload).unwrap();
 
         assert_eq!(
-            tick,
-            PriceTick {
-                instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
-                mark_price: 64000.10,
-                execution_quote: Some(ExecutionQuote {
-                    best_bid: 63999.50,
-                    best_ask: 64000.50,
+            ticks,
+            vec![
+                MarketDataTick::MarkPrice(MarkPriceTick {
+                    instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+                    mark_price: 64000.10,
+                    timestamp: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
                 }),
-                timestamp: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-            }
+                MarketDataTick::ExecutionQuote(ExecutionQuoteTick {
+                    instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+                    execution_quote: ExecutionQuote {
+                        best_bid: 63999.50,
+                        best_ask: 64000.50,
+                    },
+                    timestamp: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                })
+            ]
         );
     }
 
@@ -226,13 +233,13 @@ mod tests {
             "conn_id": "test"
         }"#;
 
-        let tick = state.parse_linear_ticker_message(payload).unwrap();
+        let ticks = state.parse_linear_ticker_message(payload).unwrap();
 
-        assert!(tick.is_none());
+        assert!(ticks.is_empty());
     }
 
     #[test]
-    fn ticker_state_ignores_delta_without_cached_mark_price() {
+    fn ticker_state_ignores_delta_without_mark_or_quote() {
         let mut state = btc_ticker_state();
         let payload = r#"{
             "topic": "tickers.BTCUSDT",
@@ -244,13 +251,13 @@ mod tests {
             }
         }"#;
 
-        let tick = state.parse_linear_ticker_message(payload).unwrap();
+        let ticks = state.parse_linear_ticker_message(payload).unwrap();
 
-        assert!(tick.is_none());
+        assert!(ticks.is_empty());
     }
 
     #[test]
-    fn ticker_state_ignores_delta_without_symbol_or_cached_mark_price() {
+    fn ticker_state_ignores_delta_without_symbol_mark_or_quote() {
         let mut state = btc_ticker_state();
         let payload = r#"{
             "topic": "tickers.BTCUSDT",
@@ -261,13 +268,13 @@ mod tests {
             }
         }"#;
 
-        let tick = state.parse_linear_ticker_message(payload).unwrap();
+        let ticks = state.parse_linear_ticker_message(payload).unwrap();
 
-        assert!(tick.is_none());
+        assert!(ticks.is_empty());
     }
 
     #[test]
-    fn emits_bybit_tick_with_none_quote_when_bid_or_ask_is_missing_without_cached_opposite_side() {
+    fn emits_bybit_mark_price_tick_when_bid_or_ask_is_missing_without_cached_opposite_side() {
         let mut state = btc_ticker_state();
         let payload = r#"{
             "topic": "tickers.BTCUSDT",
@@ -278,16 +285,15 @@ mod tests {
             }
         }"#;
 
-        let tick = state.parse_linear_ticker_message(payload).unwrap().unwrap();
+        let ticks = state.parse_linear_ticker_message(payload).unwrap();
 
         assert_eq!(
-            tick,
-            PriceTick {
+            ticks,
+            vec![MarketDataTick::MarkPrice(MarkPriceTick {
                 instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
                 mark_price: 64010.20,
-                execution_quote: None,
                 timestamp: Utc.timestamp_millis_opt(1_700_000_005_000).unwrap(),
-            }
+            })]
         );
     }
 
@@ -313,23 +319,61 @@ mod tests {
             }
         }"#;
 
-        state
-            .parse_linear_ticker_message(snapshot)
-            .unwrap()
-            .unwrap();
-        let tick = state.parse_linear_ticker_message(delta).unwrap().unwrap();
+        let _ = state.parse_linear_ticker_message(snapshot).unwrap();
+        let ticks = state.parse_linear_ticker_message(delta).unwrap();
 
         assert_eq!(
-            tick,
-            PriceTick {
+            ticks,
+            vec![
+                MarketDataTick::MarkPrice(MarkPriceTick {
+                    instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+                    mark_price: 64010.20,
+                    timestamp: Utc.timestamp_millis_opt(1_700_000_005_000).unwrap(),
+                }),
+                MarketDataTick::ExecutionQuote(ExecutionQuoteTick {
+                    instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+                    execution_quote: ExecutionQuote {
+                        best_bid: 64009.80,
+                        best_ask: 64000.50,
+                    },
+                    timestamp: Utc.timestamp_millis_opt(1_700_000_005_000).unwrap(),
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn ticker_state_does_not_emit_cached_quote_for_mark_only_update() {
+        let mut state = btc_ticker_state();
+        let snapshot = r#"{
+            "topic": "tickers.BTCUSDT",
+            "ts": 1700000000000,
+            "data": {
+                "symbol": "BTCUSDT",
+                "markPrice": "64000.10",
+                "bid1Price": "63999.50",
+                "ask1Price": "64000.50"
+            }
+        }"#;
+        let mark_only = r#"{
+            "topic": "tickers.BTCUSDT",
+            "type": "delta",
+            "ts": 1700000005000,
+            "data": {
+                "markPrice": "64010.20"
+            }
+        }"#;
+
+        let _ = state.parse_linear_ticker_message(snapshot).unwrap();
+        let ticks = state.parse_linear_ticker_message(mark_only).unwrap();
+
+        assert_eq!(
+            ticks,
+            vec![MarketDataTick::MarkPrice(MarkPriceTick {
                 instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
                 mark_price: 64010.20,
-                execution_quote: Some(ExecutionQuote {
-                    best_bid: 64009.80,
-                    best_ask: 64000.50,
-                }),
                 timestamp: Utc.timestamp_millis_opt(1_700_000_005_000).unwrap(),
-            }
+            })]
         );
     }
 
@@ -345,21 +389,20 @@ mod tests {
             }
         }"#;
 
-        let tick = state.parse_linear_ticker_message(payload).unwrap().unwrap();
+        let ticks = state.parse_linear_ticker_message(payload).unwrap();
 
         assert_eq!(
-            tick,
-            PriceTick {
+            ticks,
+            vec![MarketDataTick::MarkPrice(MarkPriceTick {
                 instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
                 mark_price: 64010.20,
-                execution_quote: None,
                 timestamp: Utc.timestamp_millis_opt(1_700_000_005_000).unwrap(),
-            }
+            })]
         );
     }
 
     #[test]
-    fn ticker_state_reuses_previous_mark_price_for_delta_without_mark_price() {
+    fn ticker_state_does_not_emit_when_delta_has_no_mark_or_quote() {
         let mut state = btc_ticker_state();
         let snapshot = r#"{
             "topic": "tickers.BTCUSDT",
@@ -379,21 +422,10 @@ mod tests {
             }
         }"#;
 
-        state
-            .parse_linear_ticker_message(snapshot)
-            .unwrap()
-            .unwrap();
-        let tick = state.parse_linear_ticker_message(delta).unwrap().unwrap();
+        let _ = state.parse_linear_ticker_message(snapshot).unwrap();
+        let ticks = state.parse_linear_ticker_message(delta).unwrap();
 
-        assert_eq!(
-            tick,
-            PriceTick {
-                instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
-                mark_price: 64000.10,
-                execution_quote: None,
-                timestamp: Utc.timestamp_millis_opt(1_700_000_005_000).unwrap(),
-            }
-        );
+        assert!(ticks.is_empty());
     }
 
     #[test]
@@ -466,7 +498,13 @@ mod tests {
         let messages = observed.lock().unwrap();
         assert_eq!(messages.len(), 2);
         assert!(messages[0].contains("\"op\":\"subscribe\""));
-        assert_eq!(first.mark_price, 64000.10);
-        assert_eq!(second.mark_price, 64010.20);
+        match first {
+            MarketDataTick::MarkPrice(tick) => assert_eq!(tick.mark_price, 64000.10),
+            MarketDataTick::ExecutionQuote(_) => panic!("expected mark price tick"),
+        }
+        match second {
+            MarketDataTick::MarkPrice(tick) => assert_eq!(tick.mark_price, 64010.20),
+            MarketDataTick::ExecutionQuote(_) => panic!("expected mark price tick"),
+        }
     }
 }

@@ -1523,12 +1523,11 @@ mod tests {
             .observe(
                 &TrackId::new("btc-core"),
                 poise_engine::observation::TrackObservation::Market(
-                    poise_engine::observation::MarketObservation {
-                        mark_price: 95.0,
-                        execution_quote: Some(poise_engine::ports::ExecutionQuote {
+                    poise_engine::observation::MarketObservation::ExecutionQuote {
+                        execution_quote: poise_engine::ports::ExecutionQuote {
                             best_bid: 95.0,
                             best_ask: 95.0,
-                        }),
+                        },
                     },
                 ),
             )
@@ -1638,7 +1637,7 @@ mod tests {
             ledger_state: &poise_engine::ledger::TrackLedgerState,
             events: &[poise_core::events::DomainEvent],
             effects: &[TrackEffect],
-            effect_status_update: Option<&EffectStatusUpdate>,
+            effect_status_updates: &[EffectStatusUpdate],
         ) -> Result<CommittedTrackWrite> {
             let now = Utc::now();
             if !events.is_empty() {
@@ -1676,18 +1675,19 @@ mod tests {
                 .lock()
                 .unwrap()
                 .extend(persisted_effects.iter().cloned());
-            if let Some(effect_status_update) = effect_status_update
-                && let Some(effect) = self
+            for effect_status_update in effect_status_updates {
+                if let Some(effect) = self
                     .effects
                     .lock()
                     .unwrap()
                     .iter_mut()
                     .find(|effect| effect.effect_id == effect_status_update.effect_id)
-            {
-                effect.status = effect_status_update.status;
-                effect.attempt_count += effect_status_update.attempt_delta;
-                effect.last_error = effect_status_update.last_error.clone();
-                effect.updated_at = now;
+                {
+                    effect.status = effect_status_update.status;
+                    effect.attempt_count += effect_status_update.attempt_delta;
+                    effect.last_error = effect_status_update.last_error.clone();
+                    effect.updated_at = now;
+                }
             }
 
             let track_id = TrackId::new(id);
@@ -1709,18 +1709,27 @@ mod tests {
             id: &str,
             effect_status_update: &EffectStatusUpdate,
         ) -> Result<CommittedTrackWrite> {
+            self.update_effect_statuses(id, std::slice::from_ref(effect_status_update))
+                .await
+        }
+
+        async fn update_effect_statuses(
+            &self,
+            id: &str,
+            effect_status_updates: &[EffectStatusUpdate],
+        ) -> Result<CommittedTrackWrite> {
             let now = Utc::now();
-            if let Some(effect) = self
-                .effects
-                .lock()
-                .unwrap()
-                .iter_mut()
-                .find(|effect| effect.effect_id == effect_status_update.effect_id)
-            {
-                effect.status = effect_status_update.status;
-                effect.attempt_count += effect_status_update.attempt_delta;
-                effect.last_error = effect_status_update.last_error.clone();
-                effect.updated_at = now;
+            let mut effects = self.effects.lock().unwrap();
+            for effect_status_update in effect_status_updates {
+                if let Some(effect) = effects
+                    .iter_mut()
+                    .find(|effect| effect.effect_id == effect_status_update.effect_id)
+                {
+                    effect.status = effect_status_update.status;
+                    effect.attempt_count += effect_status_update.attempt_delta;
+                    effect.last_error = effect_status_update.last_error.clone();
+                    effect.updated_at = now;
+                }
             }
             Ok(CommittedTrackWrite {
                 track_id: TrackId::new(id),
@@ -2002,9 +2011,14 @@ mod tests {
         async fn cancel_order(
             &self,
             _instrument: &poise_engine::track::Instrument,
-            _order_id: &str,
-        ) -> Result<()> {
-            Ok(())
+            order_id: &str,
+        ) -> Result<poise_engine::ports::OrderReceipt> {
+            Ok(poise_engine::ports::OrderReceipt {
+                order_id: order_id.to_string(),
+                client_order_id: String::new(),
+                filled_qty: 0.0,
+                status: poise_engine::ports::OrderStatus::Canceled,
+            })
         }
 
         async fn cancel_all(&self, _instrument: &poise_engine::track::Instrument) -> Result<()> {
@@ -2026,8 +2040,12 @@ mod tests {
         async fn get_open_orders(
             &self,
             _instrument: &poise_engine::track::Instrument,
-        ) -> Result<Vec<poise_engine::ports::ExchangeOrder>> {
-            Ok(Vec::new())
+        ) -> Result<poise_engine::ports::ExchangeOpenOrderSnapshot> {
+            Ok(
+                poise_engine::ports::ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                    Vec::new(),
+                ),
+            )
         }
     }
 

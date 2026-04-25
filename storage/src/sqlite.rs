@@ -343,7 +343,7 @@ impl SqliteStorage {
         ledger_state_for_persistence: Option<TrackLedgerState>,
         events: Vec<DomainEvent>,
         effects: Vec<TrackEffect>,
-        effect_status_update: Option<EffectStatusUpdate>,
+        effect_status_updates: Vec<EffectStatusUpdate>,
     ) -> Result<CommittedTrackWrite> {
         let updated_at = Utc::now();
         let updated_at_text = updated_at.to_rfc3339();
@@ -492,7 +492,7 @@ impl SqliteStorage {
             });
         }
 
-        if let Some(effect_status_update) = effect_status_update {
+        for effect_status_update in effect_status_updates {
             let changed = tx
                 .execute(
                     "UPDATE track_effects
@@ -1026,7 +1026,7 @@ impl TrackMutationStore for SqliteStorage {
         ledger_state: &TrackLedgerState,
         events: &[DomainEvent],
         effects: &[TrackEffect],
-        effect_status_update: Option<&EffectStatusUpdate>,
+        effect_status_updates: &[EffectStatusUpdate],
     ) -> Result<CommittedTrackWrite> {
         let conn = Arc::clone(&self.conn);
         let id = id.to_owned();
@@ -1034,7 +1034,7 @@ impl TrackMutationStore for SqliteStorage {
         let ledger_state = ledger_state.clone();
         let events = events.to_vec();
         let effects = effects.to_vec();
-        let effect_status_update = effect_status_update.cloned();
+        let effect_status_updates = effect_status_updates.to_vec();
 
         tokio::task::spawn_blocking(move || {
             Self::save_transition_blocking(
@@ -1044,7 +1044,7 @@ impl TrackMutationStore for SqliteStorage {
                 Some(ledger_state),
                 events,
                 effects,
-                effect_status_update,
+                effect_status_updates,
             )
         })
         .await
@@ -1056,9 +1056,18 @@ impl TrackMutationStore for SqliteStorage {
         id: &str,
         effect_status_update: &EffectStatusUpdate,
     ) -> Result<CommittedTrackWrite> {
+        self.update_effect_statuses(id, std::slice::from_ref(effect_status_update))
+            .await
+    }
+
+    async fn update_effect_statuses(
+        &self,
+        id: &str,
+        effect_status_updates: &[EffectStatusUpdate],
+    ) -> Result<CommittedTrackWrite> {
         let conn = Arc::clone(&self.conn);
         let id = id.to_owned();
-        let effect_status_update = effect_status_update.clone();
+        let effect_status_updates = effect_status_updates.to_vec();
 
         tokio::task::spawn_blocking(move || {
             Self::save_transition_blocking(
@@ -1068,11 +1077,11 @@ impl TrackMutationStore for SqliteStorage {
                 None,
                 Vec::new(),
                 Vec::new(),
-                Some(effect_status_update),
+                effect_status_updates,
             )
         })
         .await
-        .context("failed to join update_effect_status blocking task")?
+        .context("failed to join update_effect_statuses blocking task")?
     }
 
     async fn list_track_events(&self, id: &str) -> Result<Vec<DomainEvent>> {
@@ -1411,7 +1420,7 @@ mod tests {
                 &TrackLedgerState::default(),
                 events,
                 effects,
-                None,
+                &[],
             )
             .await
             .unwrap()
@@ -1857,7 +1866,7 @@ mod tests {
         let ledger_state = TrackLedgerState::default();
 
         storage
-            .commit_track_transition("test-1", None, &ledger_state, &[], &[], None)
+            .commit_track_transition("test-1", None, &ledger_state, &[], &[], &[])
             .await
             .unwrap();
 

@@ -15,7 +15,7 @@
 - Create: `engine/src/price_gate.rs`
   单点拥有 `PriceExecutionGate`、`PriceExecutionBlockReason`、`SubmitPurpose`、`mark-book divergence` 常量，以及 submit 权限矩阵、自动改价权限和 working order 处置规则。
 - Modify: `engine/src/ports.rs`
-  定义共享 `ExecutionQuote` 和新的 `PriceTick`。
+  定义共享 `ExecutionQuote` 和新的 `ExecutionQuoteTick`。
 - Modify: `engine/src/observation.rs`
   定义新的 `MarketObservation` 输入结构。
 - Modify: `application/src/track_observation_service.rs`
@@ -23,11 +23,11 @@
 - Modify: `application/src/mutation_executor.rs`
   把 observation、submit recovery 和 effect preparation 边界切到新的价格模型与 `SubmitPurpose`。
 - Modify: `server/src/runtime/market_data.rs`
-  市场任务把完整 `PriceTick` 映射成新的 `MarketObservation`。
+  市场任务把完整 `ExecutionQuoteTick` 映射成新的 `MarketObservation`。
 - Modify: `exchanges/binance/src/ws/mod.rs`
-  订阅 Binance 的 mark + book 组合市场流。
+  分别订阅 Binance 的 mark 流和 book ticker 流。
 - Modify: `exchanges/binance/src/ws/market.rs`
-  合并 mark / book 消息，产出完整 `PriceTick`。
+  分别解析 mark / book 消息，分别产出 `MarkPriceTick` / `ExecutionQuoteTick`，不在 adapter 内部合并。
 - Modify: `exchanges/binance/src/ws/models.rs`
   定义 Binance mark / book stream payload 模型。
 - Modify: `exchanges/bybit/src/ws/market.rs`
@@ -51,13 +51,7 @@
 - Modify: `engine/src/executor/mod.rs`
   补 executor 级回归测试，锁住 bid/ask 定价和 gate 行为。
 - Modify: `engine/src/snapshot.rs`
-  扩展 runtime snapshot 的 observed state。
-- Modify: `engine/src/persisted_runtime.rs`
-  对齐新的 snapshot 编解码。
-- Modify: `storage/src/schema.rs`
-  重建 `track_snapshots` 价格列，删除旧 `reference_price` 列。
-- Modify: `storage/src/sqlite.rs`
-  迁移 `track_snapshots` 数据并读写新字段。
+  仅维护 session 内部 read/rollback snapshot 的 observed state；旧持久化 runtime snapshot 协议不再参与本计划。
 - Modify: `application/src/track_read_source.rs`
   把 runtime 观测态映射成 read source。
 - Modify: `application/src/read_model.rs`
@@ -101,7 +95,7 @@
 - Test: `exchanges/bybit/src/ws/market.rs`
 - Test: `application/src/track_observation_service.rs`
 
-- [x] **Step 1: 先写失败测试，锁住新的 `PriceTick` 和 `MarketObservation` 入口**
+- [x] **Step 1: 先写失败测试，锁住新的 `ExecutionQuoteTick` 和 `MarketObservation` 入口**
 
 在 `exchanges/binance/src/ws/market.rs`、`exchanges/bybit/src/ws/market.rs`、`application/src/track_observation_service.rs` 增加至少这些测试：
 
@@ -139,11 +133,11 @@ Run:
 
 Expected:
 
-- 当前实现失败，因为 `PriceTick` 还没有 `ExecutionQuote`
+- 当前实现失败，因为 `ExecutionQuoteTick` 还没有 `ExecutionQuote`
 - 当前 `MarketObservation` 仍只有 `reference_price`
 - observation service 仍然只接受 `f64`
 
-- [x] **Step 3: 做最小实现，统一 `PriceTick` / `MarketObservation` 结构**
+- [x] **Step 3: 做最小实现，统一 `ExecutionQuoteTick` / `MarketObservation` 结构**
 
 先在 `engine/src/ports.rs` 和 `engine/src/observation.rs` 引入共享价格模型：
 
@@ -155,17 +149,29 @@ pub struct ExecutionQuote {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PriceTick {
+pub struct ExecutionQuoteTick {
     pub instrument: Instrument,
-    pub mark_price: f64,
-    pub execution_quote: Option<ExecutionQuote>,
+    pub execution_quote: ExecutionQuote,
     pub timestamp: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MarketObservation {
+pub struct MarkPriceTick {
+    pub instrument: Instrument,
     pub mark_price: f64,
-    pub execution_quote: Option<ExecutionQuote>,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MarketDataTick {
+    ExecutionQuote(ExecutionQuoteTick),
+    MarkPrice(MarkPriceTick),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MarketObservation {
+    ExecutionQuote { execution_quote: ExecutionQuote },
+    MarkPrice { mark_price: f64 },
 }
 ```
 
@@ -184,29 +190,36 @@ pub async fn observe_market(
 `server/src/runtime/market_data.rs` 要改成：
 
 ```rust
-.observe_market(
-    &track.id,
-    poise_engine::observation::MarketObservation {
-        mark_price: tick.mark_price,
-        execution_quote: tick.execution_quote,
-    },
-)
+match tick {
+    MarketDataTick::ExecutionQuote(tick) => observe_market(
+        &track.id,
+        MarketObservation::ExecutionQuote {
+            execution_quote: tick.execution_quote,
+        },
+    ),
+    MarketDataTick::MarkPrice(tick) => observe_market(
+        &track.id,
+        MarketObservation::MarkPrice {
+            mark_price: tick.mark_price,
+        },
+    ),
+}
 ```
 
 - [x] **Step 4: 实现 Binance / Bybit 适配层的完整价格输出**
 
 Binance：
 
-- `exchanges/binance/src/ws/mod.rs` 把单一 `@markPrice` 订阅改成 mark + book 组合流
+- `exchanges/binance/src/ws/mod.rs` 把单一 `@markPrice` 订阅改成 mark / book ticker 分别订阅
 - `exchanges/binance/src/ws/models.rs` 增加 `BookTickerMessage`
-- `exchanges/binance/src/ws/market.rs` 增加组合状态，直到有有效 bid/ask 才填充 `ExecutionQuote`
+- `exchanges/binance/src/ws/market.rs` 不缓存 mark price；mark stream 产出 `MarkPriceTick`，book stream 在有有效 bid/ask 时产出 `ExecutionQuoteTick`
 
 最小结构：
 
 ```rust
-struct BinanceMarketState {
-    last_mark_price: Option<f64>,
-    last_quote: Option<ExecutionQuote>,
+enum MarketDataTick {
+    ExecutionQuote(ExecutionQuoteTick),
+    MarkPrice(MarkPriceTick),
 }
 ```
 
@@ -222,7 +235,7 @@ pub(crate) struct PublicTickerData {
 }
 ```
 
-- `exchanges/bybit/src/ws/market.rs` 在 ticker state 里同时缓存 `mark_price` 和 `ExecutionQuote`
+- `exchanges/bybit/src/ws/market.rs` 不缓存 mark price；ticker 消息带 mark 时产出 `MarkPriceTick`，带可合成盘口时产出 `ExecutionQuoteTick`
 
 - [x] **Step 5: 跑 Task 1 回归**
 
@@ -252,13 +265,9 @@ git commit -m "feat(market): carry mark price and execution quote through observ
 **Files:**
 - Modify: `engine/src/runtime.rs`
 - Modify: `engine/src/snapshot.rs`
-- Modify: `engine/src/persisted_runtime.rs`
-- Modify: `storage/src/schema.rs`
-- Modify: `storage/src/sqlite.rs`
 - Modify: `application/src/track_read_source.rs`
 - Modify: `application/src/read_model.rs`
 - Test: `engine/src/snapshot.rs`
-- Test: `storage/src/sqlite.rs`
 - Test: `application/src/read_model.rs`
 
 - [x] **Step 1: 先写失败测试，锁住 observed state 和持久化字段**
@@ -269,17 +278,14 @@ git commit -m "feat(market): carry mark price and execution quote through observ
 #[test]
 fn snapshot_round_trips_strategy_price_mark_price_and_quote() {}
 
-#[test]
-fn sqlite_migrates_legacy_reference_price_into_stale_price_state() {}
-
-#[test]
-fn read_model_exposes_strategy_price_status_and_best_bid_ask() {}
+    #[test]
+    fn read_model_exposes_strategy_price_status_and_best_bid_ask() {}
 ```
 
 覆盖点：
 
 - runtime snapshot 不再使用 `observed.reference_price`
-- storage 会持久化 `strategy_price / strategy_price_status / mark_price / best_bid / best_ask`
+- session 内部 snapshot 能表达 `strategy_price / strategy_price_status / mark_price / best_bid / best_ask`
 - read model 不再暴露 `reference_price`
 
 - [x] **Step 2: 运行定向测试，确认当前实现失败**
@@ -287,12 +293,11 @@ fn read_model_exposes_strategy_price_status_and_best_bid_ask() {}
 Run:
 
 - `cargo test -p poise-engine snapshot::tests::snapshot_round_trips_strategy_price_mark_price_and_quote -- --exact`
-- `cargo test -p poise-storage sqlite::tests::sqlite_migrates_legacy_reference_price_into_stale_price_state -- --exact`
 - `cargo test -p poise-application read_model::tests::read_model_exposes_strategy_price_status_and_best_bid_ask -- --exact`
 
 Expected:
 
-- 当前 snapshot / sqlite / read model 仍只有 `reference_price`
+- 当前 session snapshot / read model 仍只有 `reference_price`
 
 - [x] **Step 3: 做最小实现，替换 runtime 观测字段**
 
@@ -327,33 +332,15 @@ pub struct ObservedState {
 }
 ```
 
-- [x] **Step 4: 重建 `track_snapshots` 价格列，并迁移旧数据**
+- [x] **Step 4: 明确旧持久化 runtime snapshot 不参与本设计**
 
-在 `storage/src/schema.rs` 和 `storage/src/sqlite.rs` 中重建 `track_snapshots` 表，删除旧 `reference_price` 列，引入新列：
-
-```sql
-strategy_price REAL,
-strategy_price_status TEXT NOT NULL,
-mark_price REAL,
-best_bid REAL,
-best_ask REAL
-```
-
-迁移时不要伪造新语义里的 live 价格字段，而是明确写成 stale 空值：
-
-```sql
-strategy_price = NULL
-strategy_price_status = 'stale'
-mark_price = NULL
-best_bid = NULL
-best_ask = NULL
-```
+当前分支已经删除旧跨重启 runtime snapshot 恢复边界。本任务只更新 session 内部 snapshot / read model 语义，不再新增或迁移 `track_snapshots` 价格列。
 
 要求：
 
-- 迁移后 schema 里不再保留 `reference_price`
-- 历史 snapshot 不伪装成 live `strategy_price` 或 live `mark_price`
-- SQLite 读写层与 `PersistedRuntimeCodec` 都只认新字段
+- 不重新引入 `engine/src/persisted_runtime.rs`
+- 不把 `track_snapshots` 恢复成 startup 或 fresh-session 输入
+- `TrackRuntimeSnapshot` 只作为 session 内部 read / rollback snapshot 使用
 
 - [x] **Step 5: 更新 read source / read model 命名**
 
@@ -383,14 +370,13 @@ Run:
 
 Expected:
 
-- runtime / snapshot / storage / read model 已全部切到 `strategy_price`
-- 历史 `reference_price` 已迁移成显式 `stale/null` 价格状态
+- runtime / session snapshot / read model 已全部切到 `strategy_price`
 - 旧 `reference_price` 已从这些层删除
 
 - [x] **Step 7: Commit**
 
 ```bash
-git add engine/src/runtime.rs engine/src/snapshot.rs engine/src/persisted_runtime.rs storage/src/schema.rs storage/src/sqlite.rs application/src/track_read_source.rs application/src/read_model.rs
+git add engine/src/runtime.rs engine/src/snapshot.rs application/src/track_read_source.rs application/src/read_model.rs
 git commit -m "refactor(runtime): replace reference price with strategy and market fields"
 ```
 
@@ -641,6 +627,7 @@ async fn effect_worker_does_not_dispatch_pending_auto_submit_when_price_gate_is_
 - planner 不再从 `strategy_price` 直接定价
 - `ExecutionAction::SubmitOrder` 必须显式带 `submit_purpose`
 - 已存在的 working order 也会按 gate 统一处理
+- 已存在 working order 的加/减风险角色以 `request.reduce_only` 为准，避免把空头减仓的 `Up` 方向买单误判成加风险单
 - `gate != Open` 时不会继续自动改价或自动 replacement
 - 被 gate 挡住的 pending submit 由 recovery 单点判定为 supersede，并等待恢复后的新 reconcile
 - effect worker 不再自己判断 gate 下的 pending submit 生命周期
@@ -879,19 +866,16 @@ git add protocol/src/lib.rs server/src/projector.rs tui/src/views/instance.rs tu
 git commit -m "feat(ui): expose strategy price and execution quote semantics"
 ```
 
-### Review 后修正：恢复兼容与 gate 迁移保真
+### Review 后修正：session restore 的 gate 语义保真
 
 实现提交：`49bf7fd`
 
 **Files:**
 - Modify: `engine/src/price_gate.rs`
 - Modify: `engine/src/runtime.rs`
-- Modify: `storage/src/schema.rs`
-- Modify: `storage/src/sqlite.rs`
 - Test: `engine/src/runtime.rs`
-- Test: `storage/src/sqlite.rs`
 
-- [x] **Step 1: 先写失败测试，锁住 review 指出的两个兼容场景**
+- [x] **Step 1: 先写失败测试，锁住 session restore 兼容场景**
 
 增加并跑红至少这些测试：
 
@@ -901,23 +885,18 @@ fn restore_from_legacy_snapshot_recomputes_divergence_gate_from_observed_prices(
 
 #[test]
 fn restore_from_legacy_snapshot_recomputes_missing_quote_gate_when_observed_quote_is_absent() {}
-
-#[tokio::test]
-async fn sqlite_migration_preserves_existing_price_execution_block_reason() {}
 ```
 
 覆盖点：
 
-- 旧 runtime snapshot 缺少 `price_execution_block_reason` 时，不能把 gate 错误恢复成 `Open`
-- 半升级 SQLite 表已经有 `price_execution_block_reason` 时，迁移不能把它覆盖成重新推导的值
+- session 内部 snapshot 缺少 `price_execution_block_reason` 时，不能把 gate 错误恢复成 `Open`
 
-- [x] **Step 2: 做最小实现，只修 restore / migration 边界**
+- [x] **Step 2: 做最小实现，只修 session restore 边界**
 
 要求：
 
 - `engine/src/runtime.rs` 的 restore 路径在 `price_execution_block_reason` 缺失时，改为根据 `mark_price / best_bid / best_ask` 推导 gate
 - 这条兼容逻辑集中放在 `engine/src/price_gate.rs`
-- `storage/src/schema.rs` 迁移 `track_snapshots` 时，如果历史表已经有 `price_execution_block_reason`，优先原样搬运
 - 不重新引入 `reference_price`
 - 不让 projector 或 read model 重新解释 gate
 
@@ -927,18 +906,16 @@ Run:
 
 - `cargo test -p poise-engine runtime::tests::restore_from_legacy_snapshot_recomputes_divergence_gate_from_observed_prices -- --exact --nocapture`
 - `cargo test -p poise-engine runtime::tests::restore_from_legacy_snapshot_recomputes_missing_quote_gate_when_observed_quote_is_absent -- --exact --nocapture`
-- `cargo test -p poise-storage sqlite::tests::sqlite_migration_preserves_existing_price_execution_block_reason -- --exact --nocapture`
 - `cargo test --workspace`
 
 Expected:
 
-- 旧 snapshot 缺少 gate reason 时，恢复后的 gate 仍与 observed 价格一致
-- 迁移已有 `price_execution_block_reason` 的历史表时，不覆盖已有值
+- session snapshot 缺少 gate reason 时，恢复后的 gate 仍与 observed 价格一致
 - 全 workspace 通过
 
 - [x] **Step 4: Commit**
 
 ```bash
-git add application/src engine/src server/src storage/src
+git add application/src engine/src server/src
 git commit -m "fix(runtime): preserve price gate semantics across restore"
 ```

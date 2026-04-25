@@ -6,8 +6,8 @@ use tokio::sync::mpsc;
 
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
-    ExchangeOrder, ExecutionPort, ExecutionPortError, MarketDataPort, MetadataPort, OrderReceipt,
-    OrderRequest, Position, PriceTick, UserDataEvent,
+    ExchangeOpenOrderSnapshot, ExecutionPort, ExecutionPortError, MarketDataPort, MarketDataTick,
+    MetadataPort, OrderReceipt, OrderRequest, Position, UserDataEvent,
 };
 use poise_engine::track::Instrument;
 
@@ -154,9 +154,9 @@ impl ExecutionPort for BinanceExecution {
         self.rest.new_order(&req).await
     }
 
-    async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<()> {
+    async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<OrderReceipt> {
         match self.rest.cancel_order(&instrument.symbol, order_id).await {
-            Ok(_) => Ok(()),
+            Ok(receipt) => Ok(receipt),
             Err(error)
                 if error
                     .downcast_ref::<BinanceRestError>()
@@ -177,8 +177,11 @@ impl ExecutionPort for BinanceExecution {
         self.rest.get_position(&instrument.symbol).await
     }
 
-    async fn get_open_orders(&self, instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
-        self.rest.get_open_orders(&instrument.symbol).await
+    async fn get_open_orders(&self, instrument: &Instrument) -> Result<ExchangeOpenOrderSnapshot> {
+        self.rest
+            .get_open_orders(&instrument.symbol)
+            .await
+            .map(ExchangeOpenOrderSnapshot::from_complete_exchange_query)
     }
 }
 
@@ -211,7 +214,10 @@ impl MetadataPort for BinanceMetadata {
 
 #[async_trait]
 impl MarketDataPort for BinanceMarketData {
-    async fn subscribe_prices(&self, instrument: &Instrument) -> Result<mpsc::Receiver<PriceTick>> {
+    async fn subscribe_prices(
+        &self,
+        instrument: &Instrument,
+    ) -> Result<mpsc::Receiver<MarketDataTick>> {
         self.ws.subscribe_prices(instrument).await
     }
 }
@@ -249,7 +255,11 @@ mod tests {
             unreachable!("not used in test")
         }
 
-        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            _order_id: &str,
+        ) -> Result<OrderReceipt> {
             unreachable!("not used in test")
         }
 
@@ -261,7 +271,10 @@ mod tests {
             unreachable!("not used in test")
         }
 
-        async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
+        async fn get_open_orders(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<ExchangeOpenOrderSnapshot> {
             unreachable!("not used in test")
         }
     }
@@ -271,7 +284,7 @@ mod tests {
         async fn subscribe_prices(
             &self,
             _instrument: &Instrument,
-        ) -> Result<mpsc::Receiver<PriceTick>> {
+        ) -> Result<mpsc::Receiver<MarketDataTick>> {
             unreachable!("not used in test")
         }
     }
@@ -608,8 +621,13 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(tick.instrument.symbol, "BTCUSDT");
-        assert_eq!(tick.mark_price, 64000.10);
+        match tick {
+            MarketDataTick::MarkPrice(tick) => {
+                assert_eq!(tick.instrument.symbol, "BTCUSDT");
+                assert_eq!(tick.mark_price, 64000.10);
+            }
+            MarketDataTick::ExecutionQuote(_) => panic!("expected mark price tick"),
+        }
     }
 
     #[derive(Debug, Clone)]

@@ -62,12 +62,19 @@ impl RuntimeTestContext {
         self.observation_service
             .observe_market(
                 id,
-                MarketObservation {
+                MarketObservation::MarkPrice {
                     mark_price: reference_price,
-                    execution_quote: Some(ExecutionQuote {
+                },
+            )
+            .await?;
+        self.observation_service
+            .observe_market(
+                id,
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
                         best_bid: reference_price,
                         best_ask: reference_price,
-                    }),
+                    },
                 },
             )
             .await

@@ -4,7 +4,7 @@ use poise_application::{
     FollowUpRetirementRequest, PersistedTrackEffect, is_loaded_track_invariant_violation,
 };
 use poise_engine::executor::SubmitRecoveryToken;
-use poise_engine::ports::OrderRequest;
+use poise_engine::ports::{OrderReceipt, OrderRequest};
 
 use super::{Cancellation, EffectWorker, is_insufficient_margin_failure};
 use crate::exchange_freshness::FreshnessGateDecision;
@@ -146,14 +146,25 @@ pub(super) async fn execute_cancellation(
         Cancellation::One {
             ref instrument,
             ref order_id,
-        } => worker.execution.cancel_order(instrument, order_id).await,
-        Cancellation::All { ref instrument } => worker.execution.cancel_all(instrument).await,
+        } => worker
+            .execution
+            .cancel_order(instrument, order_id)
+            .await
+            .map(CancellationResult::One),
+        Cancellation::All { ref instrument } => worker
+            .execution
+            .cancel_all(instrument)
+            .await
+            .map(|_| CancellationResult::All),
     };
 
     match result {
-        Ok(()) => {
+        Ok(result) => {
             let writeback: Result<()> = match &cancellation {
                 Cancellation::One { order_id, .. } => {
+                    let CancellationResult::One(receipt) = &result else {
+                        unreachable!("single cancel should produce a single cancel receipt");
+                    };
                     worker
                         .state
                         .effect_service
@@ -163,6 +174,7 @@ pub(super) async fn execute_cancellation(
                             &persisted.batch_id,
                             persisted.sequence,
                             order_id,
+                            receipt,
                         )
                         .await
                 }
@@ -227,4 +239,9 @@ pub(super) async fn execute_cancellation(
             Err(error)
         }
     }
+}
+
+enum CancellationResult {
+    One(OrderReceipt),
+    All,
 }

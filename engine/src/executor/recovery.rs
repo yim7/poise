@@ -4,13 +4,14 @@ use poise_core::types::{ExchangeRules, Exposure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-use crate::observation::OrderObservation;
+use crate::observation::{CompleteOpenOrderSnapshot, OrderObservation};
 use crate::ports::{OrderReceipt, OrderRequest};
 use crate::runtime::ExecutorState;
 
 use super::binding::SubmitRecoveryToken;
-use super::binding::{BindingStatus, LiveOrderBinding, active_binding_exposure_budget};
-use super::boundary::{discretize_boundaries, profile_revision_for_config};
+use super::binding::{BindingStatus, LiveOrderBinding};
+use super::boundary::profile_revision_for_config;
+use super::ledger::BoundaryLedgerState;
 use super::recording;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,13 +27,11 @@ pub enum RecoveryAnomaly {
 pub struct RecoveryInput<'a> {
     pub config: &'a TrackConfig,
     pub current_exposure: &'a Exposure,
-    pub base_qty_per_unit: f64,
     #[allow(dead_code)]
     pub desired_exposure: Option<&'a Exposure>,
-    pub min_rebalance_units: f64,
     pub exchange_rules: &'a ExchangeRules,
     pub previous_state: Option<&'a ExecutorState>,
-    pub live_orders: &'a [OrderObservation],
+    pub open_orders: &'a CompleteOpenOrderSnapshot,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -164,7 +163,7 @@ fn binding_target_for_recovery_token(
     let Some(binding) = previous_state
         .bindings
         .iter()
-        .find(|binding| binding.is_active() && binding.binding_id == target.binding_id)
+        .find(|binding| binding.binding_id == target.binding_id)
     else {
         return SubmitBindingRecovery::Missing;
     };
@@ -187,13 +186,13 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
         .cloned()
         .unwrap_or_else(|| ExecutorState::empty(input.observed_at));
 
-    if input.live_orders.is_empty() {
+    if input.open_orders.is_empty() {
         state
             .bindings
             .retain(|binding| binding.status == BindingStatus::SubmitPending);
     } else {
-        let mut claimed_binding_ids = BTreeSet::new();
-        for live_order in input.live_orders {
+        let mut claimed_binding_indexes = BTreeSet::new();
+        for live_order in input.open_orders.orders() {
             let matches =
                 binding_candidates_for_live_order(&state, live_order, input.exchange_rules);
             let candidate = match matches.as_slice() {
@@ -201,7 +200,7 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
                 [candidate] => candidate.clone(),
                 _ => return recovery_anomaly(state, RecoveryAnomaly::AmbiguousLiveOrder),
             };
-            if !claimed_binding_ids.insert(candidate.binding_id()) {
+            if !claimed_binding_indexes.insert(candidate.index()) {
                 return recovery_anomaly(state, RecoveryAnomaly::DuplicateLiveOrders);
             }
             match candidate {
@@ -214,32 +213,10 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
                 }
             }
         }
+        terminalize_exchange_absent_bindings(&mut state, &claimed_binding_indexes);
     }
 
-    let exposure_epsilon = recovery_exposure_epsilon(
-        input.min_rebalance_units,
-        input.base_qty_per_unit,
-        input.exchange_rules,
-    );
-    let boundaries = discretize_boundaries(input.config, profile_revision_for_config(input.config));
-    if super::ledger::BoundaryLedgerView::try_from_boundaries(
-        &boundaries,
-        &state.ledger_state,
-        input.current_exposure.clone(),
-        exposure_epsilon,
-    )
-    .is_err()
-    {
-        return recovery_anomaly(state, RecoveryAnomaly::BoundaryProgressOutOfRange);
-    }
-    if state.ledger_state.has_unexplained_exposure_drift(
-        input.current_exposure,
-        active_binding_exposure_budget(&state.bindings),
-        exposure_epsilon,
-    ) {
-        return recovery_anomaly(state, RecoveryAnomaly::ExpectedExposureMismatch);
-    }
-
+    reanchor_executor_ledger(&mut state, input.config, input.current_exposure.clone());
     state.recovery_anomaly = None;
     RecoveryResolution::Rebuilt { state }
 }
@@ -250,11 +227,40 @@ enum RecoveryBindingCandidate {
 }
 
 impl RecoveryBindingCandidate {
-    fn binding_id(&self) -> String {
+    fn index(&self) -> usize {
         match self {
-            Self::Existing { index } => format!("existing:{index}"),
+            Self::Existing { index } => *index,
         }
     }
+}
+
+fn terminalize_exchange_absent_bindings(
+    state: &mut ExecutorState,
+    claimed_binding_indexes: &BTreeSet<usize>,
+) {
+    for (index, binding) in state.bindings.iter_mut().enumerate() {
+        if claimed_binding_indexes.contains(&index) {
+            continue;
+        }
+        if matches!(
+            binding.status,
+            BindingStatus::Working | BindingStatus::CancelPending
+        ) {
+            binding.status = BindingStatus::Terminal;
+        }
+    }
+}
+
+fn reanchor_executor_ledger(
+    state: &mut ExecutorState,
+    config: &TrackConfig,
+    current_exposure: Exposure,
+) {
+    state.ledger_state = BoundaryLedgerState {
+        profile_revision: profile_revision_for_config(config),
+        ledger_anchor_exposure: current_exposure,
+        progress: Vec::new(),
+    };
 }
 
 fn binding_candidates_for_live_order(
@@ -340,19 +346,6 @@ fn structural_matches_for_live_order(
 fn values_match(expected: f64, observed: f64, tolerance: f64) -> bool {
     let tolerance = tolerance.max(f64::EPSILON);
     (expected - observed).abs() <= tolerance + f64::EPSILON
-}
-
-fn recovery_exposure_epsilon(
-    min_rebalance_units: f64,
-    base_qty_per_unit: f64,
-    rules: &ExchangeRules,
-) -> f64 {
-    let quantity_step_as_exposure = if base_qty_per_unit <= f64::EPSILON {
-        0.0
-    } else {
-        rules.quantity_step / base_qty_per_unit
-    };
-    (min_rebalance_units * 0.01).max(quantity_step_as_exposure)
 }
 
 fn recovery_anomaly(mut state: ExecutorState, anomaly: RecoveryAnomaly) -> RecoveryResolution {
@@ -470,15 +463,15 @@ mod tests {
         live_orders: &[OrderObservation],
     ) -> RecoveryResolution {
         let rules = rules();
+        let open_orders =
+            CompleteOpenOrderSnapshot::from_complete_exchange_query(live_orders.to_vec());
         recover_working_orders(RecoveryInput {
             config: config(),
             current_exposure: &Exposure(0.0),
-            base_qty_per_unit: 1.0,
             desired_exposure: None,
-            min_rebalance_units: 1.0,
             exchange_rules: &rules,
             previous_state: Some(previous_state),
-            live_orders,
+            open_orders: &open_orders,
             observed_at: Utc::now(),
         })
     }
@@ -549,15 +542,14 @@ mod tests {
     #[test]
     fn recovery_does_not_fabricate_boundary_progress_from_live_order_alone() {
         let rules = rules();
+        let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new());
         let recovery = recover_working_orders(RecoveryInput {
             config: config(),
             current_exposure: &Exposure(0.0),
-            base_qty_per_unit: 1.0,
             desired_exposure: None,
-            min_rebalance_units: 1.0,
             exchange_rules: &rules,
             previous_state: Some(&ExecutorState::empty(Utc::now())),
-            live_orders: &[],
+            open_orders: &open_orders,
             observed_at: Utc::now(),
         });
 
@@ -573,16 +565,15 @@ mod tests {
         let rules = rules();
         let previous_state = ExecutorState::empty(Utc::now());
         let live_orders = vec![live_order("exchange-client", Side::Buy, 100.04, 1.004)];
+        let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(live_orders);
 
         let recovery = recover_working_orders(RecoveryInput {
             config: config(),
             current_exposure: &Exposure(0.0),
-            base_qty_per_unit: 1.0,
             desired_exposure: None,
-            min_rebalance_units: 1.0,
             exchange_rules: &rules,
             previous_state: Some(&previous_state),
-            live_orders: &live_orders,
+            open_orders: &open_orders,
             observed_at: Utc::now(),
         });
 
@@ -603,16 +594,15 @@ mod tests {
         let mut previous_state = ExecutorState::empty(Utc::now());
         previous_state.bindings.push(previous_binding.clone());
         let live_orders = vec![live_order("expected-client", Side::Buy, 100.0, 1.0)];
+        let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(live_orders);
 
         let recovery = recover_working_orders(RecoveryInput {
             config: config(),
             current_exposure: &Exposure(0.0),
-            base_qty_per_unit: 1.0,
             desired_exposure: None,
-            min_rebalance_units: 1.0,
             exchange_rules: &rules,
             previous_state: Some(&previous_state),
-            live_orders: &live_orders,
+            open_orders: &open_orders,
             observed_at: Utc::now(),
         });
 
@@ -625,6 +615,39 @@ mod tests {
     }
 
     #[test]
+    fn recovery_terminalizes_cancel_pending_binding_missing_from_exchange_open_orders() {
+        let rules = rules();
+        let mut missing_binding = binding("missing-client", Side::Sell, 99.0, 1.0);
+        missing_binding.status = BindingStatus::CancelPending;
+        missing_binding.order_id = Some("missing-order".to_string());
+        let mut live_binding = binding("live-client", Side::Buy, 100.0, 1.0);
+        live_binding.status = BindingStatus::Working;
+        live_binding.order_id = Some("stale-live-order".to_string());
+        let mut previous_state = ExecutorState::empty(Utc::now());
+        previous_state.bindings.push(missing_binding);
+        previous_state.bindings.push(live_binding);
+        let live_orders = vec![live_order("live-client", Side::Buy, 100.0, 1.0)];
+        let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(live_orders);
+
+        let recovery = recover_working_orders(RecoveryInput {
+            config: config(),
+            current_exposure: &Exposure(0.0),
+            desired_exposure: None,
+            exchange_rules: &rules,
+            previous_state: Some(&previous_state),
+            open_orders: &open_orders,
+            observed_at: Utc::now(),
+        });
+
+        let RecoveryResolution::Rebuilt { state } = recovery else {
+            panic!("expected recovery to rebuild from exchange open orders");
+        };
+        assert_eq!(state.bindings[0].status, BindingStatus::Terminal);
+        assert_eq!(state.bindings[1].status, BindingStatus::Working);
+        assert_eq!(state.bindings[1].order_id.as_deref(), Some("live-order-1"));
+    }
+
+    #[test]
     fn recovery_absorbs_partial_live_order_progress_into_existing_binding() {
         let rules = rules();
         let previous_binding = binding("expected-client", Side::Buy, 100.0, 1.0);
@@ -634,16 +657,15 @@ mod tests {
         let mut live_order = live_order("expected-client", Side::Buy, 100.0, 1.0);
         live_order.status = OrderStatus::PartiallyFilled;
         live_order.filled_qty = 0.4;
+        let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(vec![live_order]);
 
         let recovery = recover_working_orders(RecoveryInput {
             config: config(),
             current_exposure: &Exposure(0.4),
-            base_qty_per_unit: 1.0,
             desired_exposure: None,
-            min_rebalance_units: 1.0,
             exchange_rules: &rules,
             previous_state: Some(&previous_state),
-            live_orders: &[live_order],
+            open_orders: &open_orders,
             observed_at: Utc::now(),
         });
 
@@ -651,12 +673,12 @@ mod tests {
             panic!("expected recovery to rebuild partial live order progress");
         };
         assert!((state.bindings[0].absorbed_exposure_qty - 0.4).abs() < 1e-9);
-        assert_eq!(state.ledger_state.progress.len(), 1);
-        assert!((state.ledger_state.progress[0].progress.cumulative_up - 0.4).abs() < 1e-9);
+        assert_eq!(state.ledger_state.ledger_anchor_exposure, Exposure(0.4));
+        assert!(state.ledger_state.progress.is_empty());
     }
 
     #[test]
-    fn recovery_marks_expected_exposure_mismatch_when_drift_is_unexplained() {
+    fn recovery_reanchors_exposure_mismatch_after_complete_exchange_snapshot() {
         let rules = rules();
         let mut previous_state = ExecutorState::empty(Utc::now());
         previous_state.ledger_state.profile_revision = ProfileRevision("rev-1".to_string());
@@ -675,30 +697,59 @@ mod tests {
                 },
             });
 
+        let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new());
         let recovery = recover_working_orders(RecoveryInput {
             config: config(),
-            current_exposure: &Exposure(0.0),
-            base_qty_per_unit: 1.0,
+            current_exposure: &Exposure(-1.1),
             desired_exposure: None,
-            min_rebalance_units: 1.0,
             exchange_rules: &rules,
             previous_state: Some(&previous_state),
-            live_orders: &[],
+            open_orders: &open_orders,
             observed_at: Utc::now(),
         });
 
-        let RecoveryResolution::Anomaly { state, anomaly } = recovery else {
-            panic!("expected expected exposure mismatch anomaly");
+        let RecoveryResolution::Rebuilt { state } = recovery else {
+            panic!("expected complete exchange snapshot to reanchor executor ledger");
         };
-        assert_eq!(anomaly, RecoveryAnomaly::ExpectedExposureMismatch);
-        assert_eq!(
-            state.recovery_anomaly,
-            Some(RecoveryAnomaly::ExpectedExposureMismatch)
-        );
+        assert_eq!(state.recovery_anomaly, None);
+        assert_eq!(state.ledger_state.ledger_anchor_exposure, Exposure(-1.1));
+        assert!(state.ledger_state.progress.is_empty());
     }
 
     #[test]
-    fn recovery_marks_boundary_progress_out_of_range_when_ledger_invariant_is_broken() {
+    fn recovery_reanchors_exposure_drift_after_complete_exchange_snapshot() {
+        let rules = rules();
+        let current_exposure = Exposure(-4.2);
+        let mut previous_state =
+            ExecutorState::empty(Utc::now()).ensure_revision(config(), Exposure(2.0));
+        previous_state.recovery_anomaly = Some(RecoveryAnomaly::ExpectedExposureMismatch);
+        previous_state
+            .bindings
+            .push(binding("expected-client", Side::Buy, 100.0, 1.0));
+        let live_orders = vec![live_order("expected-client", Side::Buy, 100.0, 1.0)];
+        let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(live_orders);
+
+        let recovery = recover_working_orders(RecoveryInput {
+            config: config(),
+            current_exposure: &current_exposure,
+            desired_exposure: None,
+            exchange_rules: &rules,
+            previous_state: Some(&previous_state),
+            open_orders: &open_orders,
+            observed_at: Utc::now(),
+        });
+
+        let RecoveryResolution::Rebuilt { state } = recovery else {
+            panic!("expected complete exchange snapshot to reanchor executor ledger");
+        };
+        assert_eq!(state.recovery_anomaly, None);
+        assert_eq!(state.ledger_state.ledger_anchor_exposure, current_exposure);
+        assert!(state.ledger_state.progress.is_empty());
+        assert_eq!(state.bindings[0].status, BindingStatus::Working);
+    }
+
+    #[test]
+    fn recovery_discards_invalid_boundary_progress_after_complete_exchange_snapshot() {
         let rules = rules();
         let mut previous_state =
             ExecutorState::empty(Utc::now()).ensure_revision(config(), Exposure(0.0));
@@ -717,26 +768,23 @@ mod tests {
                 },
             });
 
+        let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new());
         let recovery = recover_working_orders(RecoveryInput {
             config: config(),
             current_exposure: &Exposure(1.2),
-            base_qty_per_unit: 1.0,
             desired_exposure: None,
-            min_rebalance_units: 1.0,
             exchange_rules: &rules,
             previous_state: Some(&previous_state),
-            live_orders: &[],
+            open_orders: &open_orders,
             observed_at: Utc::now(),
         });
 
-        let RecoveryResolution::Anomaly { state, anomaly } = recovery else {
-            panic!("expected boundary progress out of range anomaly");
+        let RecoveryResolution::Rebuilt { state } = recovery else {
+            panic!("expected complete exchange snapshot to discard invalid boundary progress");
         };
-        assert_eq!(anomaly, RecoveryAnomaly::BoundaryProgressOutOfRange);
-        assert_eq!(
-            state.recovery_anomaly,
-            Some(RecoveryAnomaly::BoundaryProgressOutOfRange)
-        );
+        assert_eq!(state.recovery_anomaly, None);
+        assert_eq!(state.ledger_state.ledger_anchor_exposure, Exposure(1.2));
+        assert!(state.ledger_state.progress.is_empty());
     }
 
     #[test]
@@ -799,6 +847,29 @@ mod tests {
         let rules = rules();
         let mut existing_binding = binding("stale-client", Side::Buy, 100.0, 1.0);
         existing_binding.status = BindingStatus::CancelPending;
+        let recovery_token = SubmitRecoveryToken::from_binding(&existing_binding);
+        let mut previous_state = ExecutorState::empty(Utc::now());
+        previous_state.bindings.push(existing_binding);
+
+        let recovery = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &previous_state,
+            recovery_token: &recovery_token,
+            current_exposure: &Exposure(0.0),
+            live_order: None,
+        });
+
+        assert!(matches!(
+            recovery.resolution,
+            SubmitRecoveryResolution::Superseded { .. }
+        ));
+    }
+
+    #[test]
+    fn submit_recovery_supersedes_terminal_binding_even_when_token_matches() {
+        let rules = rules();
+        let mut existing_binding = binding("stale-client", Side::Buy, 100.0, 1.0);
+        existing_binding.status = BindingStatus::Terminal;
         let recovery_token = SubmitRecoveryToken::from_binding(&existing_binding);
         let mut previous_state = ExecutorState::empty(Utc::now());
         previous_state.bindings.push(existing_binding);

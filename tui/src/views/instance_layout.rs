@@ -31,8 +31,10 @@ pub struct TraceSectionLayout {
 }
 
 const MIN_TRACE_SECTION_HEIGHT: u16 = 4;
+const STANDARD_EXECUTION_MIN_HEIGHT: u16 = 4;
+const STANDARD_EXECUTION_MAX_HEIGHT: u16 = 14;
 
-pub fn resolve_detail_layout(area: Rect) -> DetailSections {
+pub fn resolve_detail_layout(area: Rect, execution_body_lines: usize) -> DetailSections {
     let mode = if area.height >= 30 {
         DetailLayoutMode::Standard
     } else if area.height >= 23 {
@@ -43,6 +45,7 @@ pub fn resolve_detail_layout(area: Rect) -> DetailSections {
 
     match mode {
         DetailLayoutMode::Standard => {
+            let execution_height = standard_execution_height(area.height, execution_body_lines);
             let sections = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -50,7 +53,7 @@ pub fn resolve_detail_layout(area: Rect) -> DetailSections {
                     Constraint::Length(3),
                     Constraint::Length(4),
                     Constraint::Length(5),
-                    Constraint::Length(5),
+                    Constraint::Length(execution_height),
                     Constraint::Min(0),
                 ])
                 .split(area);
@@ -113,6 +116,18 @@ pub fn resolve_detail_layout(area: Rect) -> DetailSections {
     }
 }
 
+fn standard_execution_height(area_height: u16, execution_body_lines: usize) -> u16 {
+    let requested = (execution_body_lines as u16)
+        .saturating_add(2)
+        .clamp(STANDARD_EXECUTION_MIN_HEIGHT, STANDARD_EXECUTION_MAX_HEIGHT);
+    let fixed_height = 5 + 3 + 4 + 5;
+    let available_after_fixed = area_height.saturating_sub(fixed_height);
+    let max_without_hiding_trace = available_after_fixed.saturating_sub(MIN_TRACE_SECTION_HEIGHT);
+    requested
+        .min(max_without_hiding_trace.max(STANDARD_EXECUTION_MIN_HEIGHT))
+        .max(STANDARD_EXECUTION_MIN_HEIGHT)
+}
+
 fn trace_panel_area(area: Rect) -> Option<Rect> {
     (area.height >= MIN_TRACE_SECTION_HEIGHT).then_some(area)
 }
@@ -156,7 +171,7 @@ mod tests {
 
     #[test]
     fn selects_standard_layout_for_tall_body() {
-        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 36));
+        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 36), 6);
 
         assert_eq!(layout.mode, DetailLayoutMode::Standard);
         assert_eq!(layout.track.height, 5);
@@ -166,21 +181,21 @@ mod tests {
 
     #[test]
     fn selects_compact_layout_for_medium_body() {
-        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 24));
+        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 24), 6);
 
         assert_eq!(layout.mode, DetailLayoutMode::Compact);
     }
 
     #[test]
     fn keeps_compact_layout_off_until_fixed_sections_fit() {
-        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 22));
+        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 22), 6);
 
         assert_eq!(layout.mode, DetailLayoutMode::Minimal);
     }
 
     #[test]
     fn enters_compact_layout_once_boundary_height_is_available() {
-        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 23));
+        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 23), 6);
 
         assert_eq!(layout.mode, DetailLayoutMode::Compact);
         assert!(layout.trace.is_none());
@@ -188,8 +203,8 @@ mod tests {
 
     #[test]
     fn keeps_compact_trace_hidden_until_panel_body_fits() {
-        let hidden = resolve_detail_layout(Rect::new(0, 0, 100, 26));
-        let visible = resolve_detail_layout(Rect::new(0, 0, 100, 27));
+        let hidden = resolve_detail_layout(Rect::new(0, 0, 100, 23), 6);
+        let visible = resolve_detail_layout(Rect::new(0, 0, 100, 24), 6);
 
         assert_eq!(hidden.mode, DetailLayoutMode::Compact);
         assert!(hidden.trace.is_none());
@@ -199,7 +214,7 @@ mod tests {
 
     #[test]
     fn selects_minimal_layout_for_short_body_and_hides_secondary_sections() {
-        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 16));
+        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 16), 6);
 
         assert_eq!(layout.mode, DetailLayoutMode::Minimal);
         assert!(layout.pnl.is_some());
@@ -209,10 +224,20 @@ mod tests {
 
     #[test]
     fn preserves_execution_body_at_minimal_height_boundary() {
-        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 15));
+        let layout = resolve_detail_layout(Rect::new(0, 0, 100, 15), 6);
 
         assert_eq!(layout.mode, DetailLayoutMode::Minimal);
         assert!(layout.execution.height >= 3);
+    }
+
+    #[test]
+    fn sizes_standard_execution_panel_from_runtime_line_count() {
+        let compact_execution = resolve_detail_layout(Rect::new(0, 0, 100, 36), 2);
+        let expanded_execution = resolve_detail_layout(Rect::new(0, 0, 100, 36), 10);
+
+        assert!(expanded_execution.execution.height > compact_execution.execution.height);
+        assert!(expanded_execution.trace.is_some());
+        assert!(expanded_execution.execution.height <= 12);
     }
 
     #[test]

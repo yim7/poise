@@ -97,8 +97,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     use poise_engine::ports::{
-        AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
-        OrderRequest, Position, PriceTick, UserDataEvent,
+        AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOpenOrderSnapshot,
+        ExchangeOrder, MarketDataTick, OrderReceipt, OrderRequest, Position, UserDataEvent,
     };
     use poise_engine::track::Instrument;
 
@@ -113,7 +113,11 @@ mod tests {
             unreachable!("not used in tests")
         }
 
-        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            _order_id: &str,
+        ) -> Result<OrderReceipt> {
             unreachable!("not used in tests")
         }
 
@@ -125,7 +129,10 @@ mod tests {
             unreachable!("not used in tests")
         }
 
-        async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
+        async fn get_open_orders(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<ExchangeOpenOrderSnapshot> {
             unreachable!("not used in tests")
         }
     }
@@ -138,7 +145,7 @@ mod tests {
         async fn subscribe_prices(
             &self,
             _instrument: &Instrument,
-        ) -> Result<mpsc::Receiver<PriceTick>> {
+        ) -> Result<mpsc::Receiver<MarketDataTick>> {
             unreachable!("not used in tests")
         }
     }

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use poise_engine::observation::MarketObservation;
+use poise_engine::ports::MarketDataTick;
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -20,6 +21,7 @@ pub(super) fn spawn_market_task(
             .observation_service
             .track_instruments()
             .await;
+        tracing::info!("starting market data task for {} tracks", tracks.len());
         let mut workers = JoinSet::new();
 
         for track in tracks {
@@ -30,6 +32,11 @@ pub(super) fn spawn_market_task(
             let instrument = track.instrument.clone();
             match market_data.subscribe_prices(&instrument).await {
                 Ok(mut receiver) => {
+                    tracing::info!(
+                        "subscribed market data for track {} ({})",
+                        track.id,
+                        instrument.symbol
+                    );
                     let state = state.clone();
                     let market_data_health_state = Arc::clone(&market_data_health_state);
                     let mut worker_shutdown_rx = shutdown_rx.clone();
@@ -48,19 +55,31 @@ pub(super) fn spawn_market_task(
                                 }
                                 tick = receiver.recv() => {
                                     let Some(tick) = tick else {
+                                        tracing::warn!(
+                                            "market data receiver closed for track {} ({})",
+                                            track.id,
+                                            instrument.symbol
+                                        );
                                         break;
+                                    };
+
+                                    let observation = match tick {
+                                        MarketDataTick::ExecutionQuote(tick) => {
+                                            MarketObservation::ExecutionQuote {
+                                                execution_quote: tick.execution_quote,
+                                            }
+                                        }
+                                        MarketDataTick::MarkPrice(tick) => {
+                                            MarketObservation::MarkPrice {
+                                                mark_price: tick.mark_price,
+                                            }
+                                        }
                                     };
 
                                     match state
                                         .reconcile
                                         .observation_service
-                                        .observe_market(
-                                            &track.id,
-                                            MarketObservation {
-                                                mark_price: tick.mark_price,
-                                                execution_quote: tick.execution_quote,
-                                            },
-                                        )
+                                        .observe_market(&track.id, observation)
                                         .await
                                     {
                                         Ok(_) => {

@@ -17,7 +17,8 @@ use poise_engine::ledger::TrackLedgerEvent;
 use poise_engine::manager::MarketMutationOutcome;
 use poise_engine::manager::{ExchangeSyncMode, TrackManager};
 use poise_engine::observation::{
-    MarketObservation, OrderObservation, PositionObservation, TrackObservation,
+    CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
+    TrackObservation,
 };
 use poise_engine::ports::{ExchangeOrder, OrderReceipt, OrderRequest};
 use poise_engine::runtime::{
@@ -635,7 +636,7 @@ impl MutationExecutor {
         &self,
         id: &str,
         position: PositionObservation,
-        open_orders: Vec<OrderObservation>,
+        open_orders: CompleteOpenOrderSnapshot,
     ) -> Result<TrackTransition> {
         self.sync_exchange_state_inner(
             id,
@@ -650,7 +651,7 @@ impl MutationExecutor {
         &self,
         id: &str,
         position: PositionObservation,
-        open_orders: Vec<OrderObservation>,
+        open_orders: CompleteOpenOrderSnapshot,
     ) -> Result<TrackTransition> {
         self.sync_exchange_state_inner(id, position, open_orders, ExchangeSyncMode::RecoverOnly)
             .await
@@ -660,7 +661,7 @@ impl MutationExecutor {
         &self,
         id: &str,
         position: PositionObservation,
-        open_orders: Vec<OrderObservation>,
+        open_orders: CompleteOpenOrderSnapshot,
         mode: ExchangeSyncMode,
     ) -> Result<TrackTransition> {
         let _mutation_guard = self.lock_track_mutation(id).await;
@@ -809,38 +810,53 @@ impl MutationExecutor {
         batch_id: &str,
         sequence: u32,
         order_id: &str,
+        receipt: &OrderReceipt,
     ) -> Result<()> {
         let _mutation_guard = self.lock_track_mutation(id).await;
-        let replacement_submit = self
+        let downstream_submits = self
             .pending_submit_effects_for_track_batch(id, batch_id)
             .await
             .map_err(anyhow::Error::new)
-            .and_then(|effects| select_replacement_submit_effect(&effects, sequence))?;
-        let effect_status_update = EffectStatusUpdate::succeeded(effect_id.to_string());
-        let (previous_snapshot, next_snapshot) = {
+            .map(|effects| pending_submit_effects_after_sequence(&effects, sequence))?;
+        let cancel_effect_status_update = EffectStatusUpdate::succeeded(effect_id.to_string());
+        let (previous_snapshot, next_snapshot, effect_status_updates) = {
             let mut manager = self.manager.write().await;
             let previous_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
             manager
-                .record_cancel_order_success(&TrackId::new(id), order_id)
+                .record_cancel_order_success(&TrackId::new(id), order_id, receipt)
                 .map_err(TrackMutationError::Mutation)?;
-            if let Some(replacement_submit) = replacement_submit.as_ref() {
-                restore_ready_pending_submit_effect(&mut manager, id, replacement_submit)
+            let cancel_progressed =
+                cancel_receipt_absorbed_exposure(&manager, id, order_id, receipt)
                     .map_err(TrackMutationError::Mutation)?;
+            let mut effect_status_updates = vec![cancel_effect_status_update.clone()];
+            if cancel_progressed {
+                for downstream_submit in &downstream_submits {
+                    retire_pending_submit_effect(&mut manager, id, downstream_submit)
+                        .map_err(TrackMutationError::Mutation)?;
+                    effect_status_updates.push(EffectStatusUpdate::superseded(
+                        downstream_submit.effect_id.clone(),
+                    ));
+                }
+            } else {
+                for downstream_submit in &downstream_submits {
+                    restore_ready_pending_submit_effect(&mut manager, id, downstream_submit)
+                        .map_err(TrackMutationError::Mutation)?;
+                }
             }
             let next_snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            (previous_snapshot, next_snapshot)
+            (previous_snapshot, next_snapshot, effect_status_updates)
         };
 
-        self.commit_track_mutation(
+        self.commit_track_mutation_with_effect_status_updates(
             id,
             &previous_snapshot,
             &next_snapshot,
             &(),
-            Some(&effect_status_update),
+            &effect_status_updates,
             false,
             None,
         )
@@ -901,62 +917,71 @@ impl MutationExecutor {
         request: &FollowUpRetirementRequest,
     ) -> Result<bool> {
         let _mutation_guard = self.lock_track_mutation(id).await;
-        let replacement_submit = self
+        let downstream_submits = self
             .pending_submit_effects_for_track_batch(id, &request.batch_id)
             .await
             .map_err(anyhow::Error::new)
-            .and_then(|effects| {
-                select_replacement_submit_effect(&effects, request.blocked_sequence)
+            .map(|effects| {
+                pending_submit_effects_after_sequence(&effects, request.blocked_sequence)
             })?;
-        let Some(replacement_submit) = replacement_submit else {
+        if downstream_submits.is_empty() {
             return Ok(true);
-        };
+        }
 
-        let TrackEffect::SubmitOrder { recovery_token, .. } = &replacement_submit.effect else {
-            return Err(anyhow!(
-                "replacement effect `{}` is not submit order",
-                replacement_submit.effect_id
-            ));
-        };
-
-        let (previous_snapshot, next_snapshot) = {
-            let mut manager = self.manager.write().await;
-            let previous_snapshot = manager
+        let lifecycle_closed = {
+            let manager = self.manager.read().await;
+            let snapshot = manager
                 .snapshot(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            let lifecycle_closed = previous_snapshot
+            snapshot
                 .executor_state
                 .bindings
                 .iter()
                 .filter(|binding| binding.is_active())
                 .all(|binding| {
                     binding.order_id.as_deref() != Some(request.closed_order_id.as_str())
-                });
-            if !lifecycle_closed {
-                return Ok(false);
-            }
-            manager
-                .record_submit_failure_by_recovery_token(&TrackId::new(id), recovery_token)
-                .map_err(TrackMutationError::Mutation)?;
-            let next_snapshot = manager
-                .snapshot(id)
-                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            (previous_snapshot, next_snapshot)
+                })
         };
+        if !lifecycle_closed {
+            return Ok(false);
+        }
 
-        self.commit_track_mutation(
-            id,
-            &previous_snapshot,
-            &next_snapshot,
-            &(),
-            Some(&EffectStatusUpdate::superseded(
-                replacement_submit.effect_id.clone(),
-            )),
-            false,
-            None,
-        )
-        .await
-        .map_err(anyhow::Error::new)?;
+        for downstream_submit in downstream_submits {
+            let TrackEffect::SubmitOrder { recovery_token, .. } = &downstream_submit.effect else {
+                return Err(anyhow!(
+                    "downstream effect `{}` is not submit order",
+                    downstream_submit.effect_id
+                ));
+            };
+
+            let (previous_snapshot, next_snapshot) = {
+                let mut manager = self.manager.write().await;
+                let previous_snapshot = manager
+                    .snapshot(id)
+                    .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
+                manager
+                    .record_submit_failure_by_recovery_token(&TrackId::new(id), recovery_token)
+                    .map_err(TrackMutationError::Mutation)?;
+                let next_snapshot = manager
+                    .snapshot(id)
+                    .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
+                (previous_snapshot, next_snapshot)
+            };
+
+            self.commit_track_mutation(
+                id,
+                &previous_snapshot,
+                &next_snapshot,
+                &(),
+                Some(&EffectStatusUpdate::superseded(
+                    downstream_submit.effect_id.clone(),
+                )),
+                false,
+                None,
+            )
+            .await
+            .map_err(anyhow::Error::new)?;
+        }
 
         Ok(true)
     }
@@ -1278,6 +1303,35 @@ impl MutationExecutor {
     where
         R: TransitionResult,
     {
+        let effect_status_updates = match effect_status_update {
+            Some(update) => std::slice::from_ref(update),
+            None => &[],
+        };
+        self.commit_track_mutation_with_effect_status_updates(
+            id,
+            previous_snapshot,
+            next_snapshot,
+            result,
+            effect_status_updates,
+            skip_when_noop,
+            control_state_override,
+        )
+        .await
+    }
+
+    async fn commit_track_mutation_with_effect_status_updates<R>(
+        &self,
+        id: &str,
+        previous_snapshot: &poise_engine::snapshot::TrackRuntimeSnapshot,
+        next_snapshot: &poise_engine::snapshot::TrackRuntimeSnapshot,
+        result: &R,
+        effect_status_updates: &[EffectStatusUpdate],
+        skip_when_noop: bool,
+        control_state_override: Option<&TrackControlState>,
+    ) -> std::result::Result<(), TrackMutationError>
+    where
+        R: TransitionResult,
+    {
         let control_state_update = persisted_control_state_after_transition(
             &previous_snapshot.runtime_state,
             &next_snapshot.runtime_state,
@@ -1287,7 +1341,7 @@ impl MutationExecutor {
             || previous_snapshot.ledger_state != next_snapshot.ledger_state
             || !result.domain_events().is_empty()
             || !result.effects().is_empty();
-        let has_effect_status_update = effect_status_update.is_some();
+        let has_effect_status_update = !effect_status_updates.is_empty();
         let has_persistence_work = has_track_write || has_effect_status_update;
         if skip_when_noop && !has_persistence_work {
             return Ok(());
@@ -1301,12 +1355,12 @@ impl MutationExecutor {
                     &next_snapshot.ledger_state,
                     result.domain_events(),
                     result.effects(),
-                    effect_status_update,
+                    effect_status_updates,
                 )
                 .await
-        } else if let Some(effect_status_update) = effect_status_update {
+        } else if !effect_status_updates.is_empty() {
             self.mutation_store
-                .update_effect_status(id, effect_status_update)
+                .update_effect_statuses(id, effect_status_updates)
                 .await
         } else {
             Ok(CommittedTrackWrite {
@@ -1358,7 +1412,7 @@ fn effect_status_failed(effect_id: &str, error: &str) -> EffectStatusUpdate {
 fn restore_ready_pending_submit_effect(
     manager: &mut TrackManager,
     id: &str,
-    replacement_submit: &PersistedTrackEffect,
+    submit_effect: &PersistedTrackEffect,
 ) -> Result<()> {
     let snapshot = manager
         .snapshot(id)
@@ -1376,11 +1430,11 @@ fn restore_ready_pending_submit_effect(
         request,
         desired_exposure,
         ..
-    } = &replacement_submit.effect
+    } = &submit_effect.effect
     else {
         return Err(anyhow!(
-            "replacement effect `{}` is not submit order",
-            replacement_submit.effect_id
+            "pending effect `{}` is not submit order",
+            submit_effect.effect_id
         ));
     };
 
@@ -1388,22 +1442,54 @@ fn restore_ready_pending_submit_effect(
     Ok(())
 }
 
-fn select_replacement_submit_effect(
+fn retire_pending_submit_effect(
+    manager: &mut TrackManager,
+    id: &str,
+    submit_effect: &PersistedTrackEffect,
+) -> Result<()> {
+    let TrackEffect::SubmitOrder {
+        request,
+        recovery_token,
+        ..
+    } = &submit_effect.effect
+    else {
+        return Err(anyhow!(
+            "pending effect `{}` is not submit order",
+            submit_effect.effect_id
+        ));
+    };
+
+    manager.record_submit_failure_by_recovery_token(&TrackId::new(id), recovery_token)?;
+    manager.record_submit_failure(&TrackId::new(id), &request.client_order_id)?;
+    Ok(())
+}
+
+fn cancel_receipt_absorbed_exposure(
+    manager: &TrackManager,
+    id: &str,
+    order_id: &str,
+    receipt: &OrderReceipt,
+) -> Result<bool> {
+    let snapshot = manager
+        .snapshot(id)
+        .ok_or_else(|| anyhow!("track `{id}` not found"))?;
+    Ok(snapshot.executor_state.bindings.iter().any(|binding| {
+        binding.absorbed_exposure_qty > f64::EPSILON
+            && (binding.order_id.as_deref() == Some(order_id)
+                || binding.order_id.as_deref() == Some(receipt.order_id.as_str())
+                || binding.request.client_order_id == receipt.client_order_id)
+    }))
+}
+
+fn pending_submit_effects_after_sequence(
     effects: &[PersistedTrackEffect],
     after_sequence: u32,
-) -> Result<Option<PersistedTrackEffect>> {
-    let matching = effects
+) -> Vec<PersistedTrackEffect> {
+    effects
         .iter()
         .filter(|effect| effect.sequence > after_sequence)
         .cloned()
-        .collect::<Vec<_>>();
-    match matching.as_slice() {
-        [] => Ok(None),
-        [effect] => Ok(Some(effect.clone())),
-        _ => Err(anyhow!(
-            "multiple replacement submit effects found after sequence {after_sequence}"
-        )),
-    }
+        .collect::<Vec<_>>()
 }
 
 #[cfg(test)]
@@ -1457,11 +1543,16 @@ pub(crate) mod test_support {
         events: Mutex<HashMap<String, Vec<DomainEvent>>>,
         effects: Mutex<Vec<PersistedTrackEffect>>,
         retirement_requests: Mutex<HashMap<String, Vec<FollowUpRetirementRequest>>>,
+        single_effect_status_update_calls: Mutex<usize>,
     }
 
     impl MemoryRepository {
         pub(crate) fn pending_effects(&self) -> Vec<PersistedTrackEffect> {
             self.effects.lock().unwrap().clone()
+        }
+
+        pub(crate) fn single_effect_status_update_call_count(&self) -> usize {
+            *self.single_effect_status_update_calls.lock().unwrap()
         }
 
         pub(crate) fn seed_pending_submit_effect(&self) {
@@ -1534,6 +1625,26 @@ pub(crate) mod test_support {
                 },
             ];
             self.effects.lock().unwrap().extend(effects);
+        }
+
+        pub(crate) fn replace_submit_effect_with_cancel_order(
+            &self,
+            effect_id: &str,
+            order_id: &str,
+        ) -> PersistedTrackEffect {
+            let mut effects = self.effects.lock().unwrap();
+            let effect = effects
+                .iter_mut()
+                .find(|effect| effect.effect_id == effect_id)
+                .expect("effect should exist");
+            let TrackEffect::SubmitOrder { request, .. } = &effect.effect else {
+                panic!("effect should be submit order");
+            };
+            effect.effect = TrackEffect::CancelOrder {
+                instrument: request.instrument.clone(),
+                order_id: order_id.into(),
+            };
+            effect.clone()
         }
     }
 
@@ -1619,7 +1730,7 @@ pub(crate) mod test_support {
             ledger_state: &poise_engine::ledger::TrackLedgerState,
             events: &[DomainEvent],
             effects: &[TrackEffect],
-            effect_status_update: Option<&EffectStatusUpdate>,
+            effect_status_updates: &[EffectStatusUpdate],
         ) -> Result<CommittedTrackWrite> {
             self.events
                 .lock()
@@ -1649,15 +1760,16 @@ pub(crate) mod test_support {
                     committed_effects.push(persisted);
                 }
 
-                if let Some(update) = effect_status_update
-                    && let Some(effect) = stored_effects
+                for update in effect_status_updates {
+                    if let Some(effect) = stored_effects
                         .iter_mut()
                         .find(|effect| effect.effect_id == update.effect_id)
-                {
-                    effect.status = update.status;
-                    effect.attempt_count += update.attempt_delta;
-                    effect.last_error = update.last_error.clone();
-                    effect.updated_at = now;
+                    {
+                        effect.status = update.status;
+                        effect.attempt_count += update.attempt_delta;
+                        effect.last_error = update.last_error.clone();
+                        effect.updated_at = now;
+                    }
                 }
                 committed_effects
             };
@@ -1692,16 +1804,28 @@ pub(crate) mod test_support {
             id: &str,
             effect_status_update: &EffectStatusUpdate,
         ) -> Result<CommittedTrackWrite> {
+            *self.single_effect_status_update_calls.lock().unwrap() += 1;
+            self.update_effect_statuses(id, std::slice::from_ref(effect_status_update))
+                .await
+        }
+
+        async fn update_effect_statuses(
+            &self,
+            id: &str,
+            effect_status_updates: &[EffectStatusUpdate],
+        ) -> Result<CommittedTrackWrite> {
             let now = Utc::now();
             let mut stored_effects = self.effects.lock().unwrap();
-            if let Some(effect) = stored_effects
-                .iter_mut()
-                .find(|effect| effect.effect_id == effect_status_update.effect_id)
-            {
-                effect.status = effect_status_update.status;
-                effect.attempt_count += effect_status_update.attempt_delta;
-                effect.last_error = effect_status_update.last_error.clone();
-                effect.updated_at = now;
+            for effect_status_update in effect_status_updates {
+                if let Some(effect) = stored_effects
+                    .iter_mut()
+                    .find(|effect| effect.effect_id == effect_status_update.effect_id)
+                {
+                    effect.status = effect_status_update.status;
+                    effect.attempt_count += effect_status_update.attempt_delta;
+                    effect.last_error = effect_status_update.last_error.clone();
+                    effect.updated_at = now;
+                }
             }
             Ok(CommittedTrackWrite {
                 track_id: TrackId::new(id),
@@ -1967,7 +2091,7 @@ mod tests {
     use poise_core::risk::RiskTerminationCause;
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
     use poise_engine::observation::MarketObservation;
-    use poise_engine::ports::ExecutionQuote;
+    use poise_engine::ports::{ExecutionQuote, OrderReceipt};
     use poise_engine::runtime::{AutoState, ControlState, TerminationCause, TrackState};
     use poise_engine::snapshot::TrackRuntimeSnapshot;
     use poise_engine::track::TrackId;
@@ -2139,12 +2263,11 @@ mod tests {
         let transition = executor
             .observe_market(
                 "btc-core",
-                MarketObservation {
-                    mark_price: 97.0,
-                    execution_quote: Some(ExecutionQuote {
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
                         best_bid: 97.0,
                         best_ask: 97.0,
-                    }),
+                    },
                 },
             )
             .await
@@ -2213,12 +2336,11 @@ mod tests {
         let transition = executor
             .observe_market(
                 "btc-core",
-                MarketObservation {
-                    mark_price: 95.0,
-                    execution_quote: Some(ExecutionQuote {
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
                         best_bid: 94.9,
                         best_ask: 95.1,
-                    }),
+                    },
                 },
             )
             .await
@@ -2255,7 +2377,7 @@ mod tests {
                 &poise_engine::ledger::TrackLedgerState::default(),
                 &[],
                 &[],
-                None,
+                &[],
             )
             .await
             .expect("store owner should complete durable truth on first business write");
@@ -2296,12 +2418,11 @@ mod tests {
         let transition = executor
             .observe_market(
                 "btc-core",
-                MarketObservation {
-                    mark_price: 95.0,
-                    execution_quote: Some(ExecutionQuote {
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
                         best_bid: 95.0,
                         best_ask: 95.0,
-                    }),
+                    },
                 },
             )
             .await
@@ -2333,12 +2454,11 @@ mod tests {
             .observation
             .observe_market(
                 "btc-core",
-                MarketObservation {
-                    mark_price: 105.0,
-                    execution_quote: Some(ExecutionQuote {
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
                         best_bid: 104.9,
                         best_ask: 105.1,
-                    }),
+                    },
                 },
             )
             .await
@@ -2429,5 +2549,341 @@ mod tests {
             panic!("expected persisted submit effect");
         };
         assert_eq!(persisted_recovery_token, recovery_token);
+    }
+
+    #[tokio::test]
+    async fn record_cancel_order_success_clears_cancel_binding_and_preserves_downstream_submits() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository.clone());
+
+        services
+            .observation
+            .observe_market(
+                "btc-core",
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 104.9,
+                        best_ask: 105.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut pending_submits = repository
+            .pending_effects()
+            .into_iter()
+            .filter_map(|effect| match effect.effect {
+                TrackEffect::SubmitOrder { .. } => Some(effect),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        pending_submits.sort_by_key(|effect| effect.sequence);
+        assert!(
+            pending_submits.len() > 2,
+            "test requires multiple downstream submit effects"
+        );
+        let blocked_submit = pending_submits[0].clone();
+        let TrackEffect::SubmitOrder {
+            request: blocked_request,
+            ..
+        } = &blocked_submit.effect
+        else {
+            panic!("blocked effect should be submit order");
+        };
+        let blocked_client_order_id = blocked_request.client_order_id.clone();
+        let downstream_client_order_ids = pending_submits
+            .iter()
+            .filter(|effect| {
+                effect.batch_id == blocked_submit.batch_id
+                    && effect.sequence > blocked_submit.sequence
+            })
+            .filter_map(|effect| match &effect.effect {
+                TrackEffect::SubmitOrder { request, .. } => Some(request.client_order_id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            downstream_client_order_ids.len() > 1,
+            "test requires more than one downstream submit after the cancel effect"
+        );
+        let closed_order_id = "closed-order";
+        let cancel_effect = repository
+            .replace_submit_effect_with_cancel_order(&blocked_submit.effect_id, closed_order_id);
+
+        let manager = services.effect.manager();
+        {
+            let mut manager = manager.write().await;
+            let mut snapshot = manager.snapshot("btc-core").expect("track snapshot");
+            let binding = snapshot
+                .executor_state
+                .bindings
+                .iter_mut()
+                .find(|binding| binding.request.client_order_id == blocked_client_order_id)
+                .expect("blocked submit binding should exist");
+            binding.order_id = Some(closed_order_id.into());
+            binding.status = BindingStatus::CancelPending;
+            manager
+                .restore_track_state(&snapshot)
+                .expect("updated track snapshot");
+        }
+        services
+            .effect
+            .record_cancel_order_success(
+                "btc-core",
+                &cancel_effect.effect_id,
+                &cancel_effect.batch_id,
+                cancel_effect.sequence,
+                "closed-order",
+                &OrderReceipt {
+                    order_id: "closed-order".to_string(),
+                    client_order_id: blocked_client_order_id.clone(),
+                    filled_qty: 0.0,
+                    status: poise_engine::ports::OrderStatus::Canceled,
+                },
+            )
+            .await
+            .unwrap();
+
+        let persisted = repository.pending_effects();
+        let persisted_cancel = persisted
+            .iter()
+            .find(|effect| effect.effect_id == cancel_effect.effect_id)
+            .expect("cancel effect should remain persisted");
+        assert_eq!(persisted_cancel.status, EffectStatus::Succeeded);
+
+        let snapshot = manager
+            .read()
+            .await
+            .snapshot("btc-core")
+            .expect("track snapshot");
+        let blocked_binding = snapshot
+            .executor_state
+            .bindings
+            .iter()
+            .find(|binding| binding.request.client_order_id == blocked_client_order_id)
+            .expect("blocked binding should remain in runtime history");
+        assert_eq!(blocked_binding.status, BindingStatus::Terminal);
+        assert!(
+            snapshot
+                .executor_state
+                .bindings
+                .iter()
+                .filter(|binding| binding.is_active())
+                .all(|binding| binding.order_id.as_deref() != Some(closed_order_id)),
+            "closed order should no longer have an active runtime binding"
+        );
+        for client_order_id in downstream_client_order_ids {
+            let binding = snapshot
+                .executor_state
+                .bindings
+                .iter()
+                .find(|binding| binding.request.client_order_id == client_order_id)
+                .expect("downstream binding should remain in runtime state");
+            assert!(binding.is_active());
+        }
+    }
+
+    #[tokio::test]
+    async fn record_cancel_order_success_with_fill_supersedes_downstream_submits() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository.clone());
+
+        services
+            .observation
+            .observe_market(
+                "btc-core",
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 104.9,
+                        best_ask: 105.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut pending_submits = repository
+            .pending_effects()
+            .into_iter()
+            .filter_map(|effect| match effect.effect {
+                TrackEffect::SubmitOrder { .. } => Some(effect),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        pending_submits.sort_by_key(|effect| effect.sequence);
+        assert!(
+            pending_submits.len() > 2,
+            "test requires multiple downstream submit effects"
+        );
+        let blocked_submit = pending_submits[0].clone();
+        let TrackEffect::SubmitOrder {
+            request: blocked_request,
+            ..
+        } = &blocked_submit.effect
+        else {
+            panic!("blocked effect should be submit order");
+        };
+        let blocked_client_order_id = blocked_request.client_order_id.clone();
+        let downstream = pending_submits
+            .iter()
+            .filter(|effect| {
+                effect.batch_id == blocked_submit.batch_id
+                    && effect.sequence > blocked_submit.sequence
+            })
+            .filter_map(|effect| match &effect.effect {
+                TrackEffect::SubmitOrder { request, .. } => {
+                    Some((effect.effect_id.clone(), request.client_order_id.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            downstream.len() > 1,
+            "test requires more than one downstream submit after the cancel effect"
+        );
+        let closed_order_id = "closed-order";
+        let cancel_effect = repository
+            .replace_submit_effect_with_cancel_order(&blocked_submit.effect_id, closed_order_id);
+
+        let manager = services.effect.manager();
+        {
+            let mut manager = manager.write().await;
+            let mut snapshot = manager.snapshot("btc-core").expect("track snapshot");
+            let binding = snapshot
+                .executor_state
+                .bindings
+                .iter_mut()
+                .find(|binding| binding.request.client_order_id == blocked_client_order_id)
+                .expect("blocked submit binding should exist");
+            binding.order_id = Some(closed_order_id.into());
+            binding.status = BindingStatus::CancelPending;
+            manager
+                .restore_track_state(&snapshot)
+                .expect("updated track snapshot");
+        }
+        let single_status_writes_before_cancel =
+            repository.single_effect_status_update_call_count();
+
+        services
+            .effect
+            .record_cancel_order_success(
+                "btc-core",
+                &cancel_effect.effect_id,
+                &cancel_effect.batch_id,
+                cancel_effect.sequence,
+                "closed-order",
+                &OrderReceipt {
+                    order_id: "closed-order".to_string(),
+                    client_order_id: blocked_client_order_id.clone(),
+                    filled_qty: 0.05,
+                    status: poise_engine::ports::OrderStatus::Canceled,
+                },
+            )
+            .await
+            .unwrap();
+
+        let persisted = repository.pending_effects();
+        let persisted_cancel = persisted
+            .iter()
+            .find(|effect| effect.effect_id == cancel_effect.effect_id)
+            .expect("cancel effect should remain persisted");
+        assert_eq!(persisted_cancel.status, EffectStatus::Succeeded);
+        for (effect_id, _) in &downstream {
+            let effect = persisted
+                .iter()
+                .find(|effect| effect.effect_id == *effect_id)
+                .expect("downstream submit effect should remain persisted");
+            assert_eq!(effect.status, EffectStatus::Superseded);
+        }
+        assert_eq!(
+            repository.single_effect_status_update_call_count(),
+            single_status_writes_before_cancel,
+            "cancel-with-fill must not split cancel/downstream statuses into individual writes"
+        );
+
+        let snapshot = manager
+            .read()
+            .await
+            .snapshot("btc-core")
+            .expect("track snapshot");
+        for (_, client_order_id) in downstream {
+            let binding = snapshot
+                .executor_state
+                .bindings
+                .iter()
+                .find(|binding| binding.request.client_order_id == client_order_id)
+                .expect("downstream binding should remain in runtime history");
+            assert_eq!(binding.status, BindingStatus::Terminal);
+        }
+    }
+
+    #[tokio::test]
+    async fn retire_stale_follow_up_submit_clears_downstream_submits_after_blocking_cancel() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository.clone());
+
+        services
+            .observation
+            .observe_market(
+                "btc-core",
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 104.9,
+                        best_ask: 105.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut pending_submits = repository
+            .pending_effects()
+            .into_iter()
+            .filter_map(|effect| match effect.effect {
+                TrackEffect::SubmitOrder { .. } => Some(effect),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        pending_submits.sort_by_key(|effect| effect.sequence);
+        assert!(
+            pending_submits.len() > 2,
+            "test requires multiple downstream submit effects"
+        );
+
+        let batch_id = pending_submits[0].batch_id.clone();
+        let blocked_sequence = pending_submits[0].sequence;
+        let expected_retired_effect_ids = pending_submits
+            .iter()
+            .filter(|effect| effect.sequence > blocked_sequence)
+            .map(|effect| effect.effect_id.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            expected_retired_effect_ids.len() > 1,
+            "test requires more than one downstream submit after the blocked sequence"
+        );
+
+        let retired = services
+            .effect
+            .retire_stale_follow_up_submit(
+                "btc-core",
+                &FollowUpRetirementRequest {
+                    batch_id,
+                    blocked_sequence,
+                    closed_order_id: "closed-order".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(retired);
+        let persisted = repository.pending_effects();
+        for effect_id in expected_retired_effect_ids {
+            let effect = persisted
+                .iter()
+                .find(|effect| effect.effect_id == effect_id)
+                .expect("downstream submit effect should remain persisted");
+            assert_eq!(effect.status, EffectStatus::Superseded);
+        }
     }
 }

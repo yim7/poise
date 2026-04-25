@@ -21,7 +21,7 @@ pub trait TrackMutationStore: Send + Sync {
         ledger_state: &TrackLedgerState,
         events: &[DomainEvent],
         effects: &[TrackEffect],
-        effect_status_update: Option<&EffectStatusUpdate>,
+        effect_status_updates: &[EffectStatusUpdate],
     ) -> Result<CommittedTrackWrite>;
 
     /// 只回写已经持久化 effect 的执行状态，不推进 durable business truth。
@@ -29,6 +29,13 @@ pub trait TrackMutationStore: Send + Sync {
         &self,
         id: &str,
         effect_status_update: &EffectStatusUpdate,
+    ) -> Result<CommittedTrackWrite>;
+
+    /// 原子回写一批已经持久化 effect 的执行状态，不推进 durable business truth。
+    async fn update_effect_statuses(
+        &self,
+        id: &str,
+        effect_status_updates: &[EffectStatusUpdate],
     ) -> Result<CommittedTrackWrite>;
 
     async fn list_track_events(&self, id: &str) -> Result<Vec<DomainEvent>>;

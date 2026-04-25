@@ -3,7 +3,9 @@ use std::sync::Arc;
 use anyhow::Result;
 #[cfg(any(test, feature = "server-test-support"))]
 use poise_engine::manager::TrackManager;
-use poise_engine::observation::{MarketObservation, OrderObservation, PositionObservation};
+use poise_engine::observation::{
+    CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
+};
 use poise_engine::runtime::{QuoteHealthView, StrategyTargetView, TrackLiveView};
 #[cfg(any(test, feature = "server-test-support"))]
 use tokio::sync::RwLock;
@@ -105,7 +107,7 @@ impl TrackObservationService {
         &self,
         id: &str,
         position: PositionObservation,
-        open_orders: Vec<OrderObservation>,
+        open_orders: CompleteOpenOrderSnapshot,
     ) -> Result<poise_engine::transition::TrackTransition> {
         self.executor
             .sync_exchange_state(id, position, open_orders)
@@ -116,7 +118,7 @@ impl TrackObservationService {
         &self,
         id: &str,
         position: PositionObservation,
-        open_orders: Vec<OrderObservation>,
+        open_orders: CompleteOpenOrderSnapshot,
     ) -> Result<poise_engine::transition::TrackTransition> {
         self.executor
             .sync_exchange_state_without_reconcile(id, position, open_orders)
@@ -153,12 +155,11 @@ mod tests {
             .0
             .observe_market(
                 "btc-core",
-                MarketObservation {
-                    mark_price: 95.0,
-                    execution_quote: Some(ExecutionQuote {
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
                         best_bid: 94.5,
                         best_ask: 95.5,
-                    }),
+                    },
                 },
             )
             .await

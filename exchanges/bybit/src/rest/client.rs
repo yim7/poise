@@ -13,7 +13,7 @@ use url::{Host, Url};
 
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
-    OrderRequest, Position,
+    OrderRequest, OrderStatus, Position,
 };
 
 use super::auth::sign_v5_payload;
@@ -134,14 +134,14 @@ impl BybitRestClient {
         response.try_into()
     }
 
-    pub async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<()> {
+    pub async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<OrderReceipt> {
         let body = CancelOrderRequestBody {
             category: "linear",
             symbol: symbol.to_string(),
             order_id: Some(order_id.to_string()),
             order_link_id: None,
         };
-        let _: serde_json::Value = self
+        let response: CreateOrderResult = self
             .send_request(
                 Method::POST,
                 "/v5/order/cancel",
@@ -153,7 +153,12 @@ impl BybitRestClient {
                 AuthMode::Signed,
             )
             .await?;
-        Ok(())
+        Ok(OrderReceipt {
+            order_id: response.order_id,
+            client_order_id: response.order_link_id.unwrap_or_default(),
+            filled_qty: 0.0,
+            status: OrderStatus::Canceled,
+        })
     }
 
     pub async fn cancel_all(&self, symbol: &str) -> Result<()> {

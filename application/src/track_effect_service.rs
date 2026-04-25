@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 #[cfg(any(test, feature = "server-test-support"))]
 use poise_engine::manager::TrackManager;
+use poise_engine::ports::OrderReceipt;
 #[cfg(any(test, feature = "server-test-support"))]
 use tokio::sync::RwLock;
 
@@ -25,9 +26,10 @@ impl TrackEffectService {
         batch_id: &str,
         sequence: u32,
         order_id: &str,
+        receipt: &OrderReceipt,
     ) -> Result<()> {
         self.executor
-            .record_cancel_order_success(id, effect_id, batch_id, sequence, order_id)
+            .record_cancel_order_success(id, effect_id, batch_id, sequence, order_id, receipt)
             .await
     }
 

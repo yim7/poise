@@ -567,8 +567,9 @@ mod tests {
     use poise_engine::manager::TrackManager;
     use poise_engine::observation::{MarketObservation, TrackObservation};
     use poise_engine::ports::{
-        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort,
-        MarketDataPort, MetadataPort, OrderReceipt, OrderRequest, Position, PriceTick,
+        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOpenOrderSnapshot, ExchangeOrder,
+        ExecutionPort, ExecutionQuoteTick, MarketDataPort, MarketDataTick, MetadataPort,
+        OrderReceipt, OrderRequest, Position,
     };
     use poise_engine::runtime::{AutoState, ControlState, TrackState};
     use poise_engine::track::{Instrument, TrackId, Venue};
@@ -961,15 +962,14 @@ total_loss_limit = 600.0
         let (_, mut stream) = client.split();
 
         btc_sender
-            .send(PriceTick {
+            .send(MarketDataTick::ExecutionQuote(ExecutionQuoteTick {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                mark_price: 95.0,
-                execution_quote: Some(poise_engine::ports::ExecutionQuote {
+                execution_quote: poise_engine::ports::ExecutionQuote {
                     best_bid: 95.0,
                     best_ask: 95.0,
-                }),
+                },
                 timestamp: chrono::Utc::now(),
-            })
+            }))
             .await
             .unwrap();
 
@@ -1127,7 +1127,7 @@ total_loss_limit = 600.0
             &snapshot.ledger_state,
             &[],
             &[],
-            None,
+            &[],
         )
         .await
         .unwrap();
@@ -1214,19 +1214,17 @@ total_loss_limit = 600.0
         {
             let manager_handle = platform.manager();
             let mut manager = manager_handle.write().await;
-            let tick = PriceTick {
+            let tick = ExecutionQuoteTick {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                mark_price: 95.0,
-                execution_quote: Some(poise_engine::ports::ExecutionQuote {
+                execution_quote: poise_engine::ports::ExecutionQuote {
                     best_bid: 95.0,
                     best_ask: 95.0,
-                }),
+                },
                 timestamp: chrono::Utc::now(),
             };
             let _ = manager.observe(
                 &TrackId::new("btc-core"),
-                TrackObservation::Market(MarketObservation {
-                    mark_price: tick.mark_price,
+                TrackObservation::Market(MarketObservation::ExecutionQuote {
                     execution_quote: tick.execution_quote,
                 }),
             );
@@ -1253,17 +1251,16 @@ total_loss_limit = 600.0
 
         let tick_state = platform.runtime_test_context();
         let tick_request = tokio::spawn(async move {
-            let tick = PriceTick {
+            let tick = ExecutionQuoteTick {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                mark_price: 85.0,
-                execution_quote: Some(poise_engine::ports::ExecutionQuote {
+                execution_quote: poise_engine::ports::ExecutionQuote {
                     best_bid: 85.0,
                     best_ask: 85.0,
-                }),
+                },
                 timestamp: chrono::Utc::now(),
             };
             tick_state
-                .observe_market("btc-core", tick.mark_price)
+                .observe_market("btc-core", tick.execution_quote.best_bid)
                 .await
                 .map(|_| ())
         });
@@ -1320,7 +1317,7 @@ total_loss_limit = 600.0
         ));
     }
 
-    fn test_platform() -> (ServerPlatform, mpsc::Sender<PriceTick>) {
+    fn test_platform() -> (ServerPlatform, mpsc::Sender<MarketDataTick>) {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         test_platform_with_repository(storage)
     }
@@ -1351,7 +1348,7 @@ total_loss_limit = 600.0
 
     fn test_platform_with_repository<R>(
         repository: Arc<R>,
-    ) -> (ServerPlatform, mpsc::Sender<PriceTick>)
+    ) -> (ServerPlatform, mpsc::Sender<MarketDataTick>)
     where
         R: TrackMutationStore + TrackEffectStore + TrackQueryStore + 'static,
     {
@@ -1490,7 +1487,11 @@ total_loss_limit = 600.0
             Err(anyhow!("not used in tests"))
         }
 
-        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            _order_id: &str,
+        ) -> Result<OrderReceipt> {
             Err(anyhow!("not used in tests"))
         }
 
@@ -1507,8 +1508,13 @@ total_loss_limit = 600.0
             })
         }
 
-        async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
-            Ok(Vec::new())
+        async fn get_open_orders(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<ExchangeOpenOrderSnapshot> {
+            Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                Vec::new(),
+            ))
         }
     }
 
@@ -1589,7 +1595,7 @@ total_loss_limit = 600.0
             ledger_state: &poise_engine::ledger::TrackLedgerState,
             _events: &[EngineDomainEvent],
             _effects: &[poise_engine::transition::TrackEffect],
-            _effect_status_update: Option<&EffectStatusUpdate>,
+            _effect_status_updates: &[EffectStatusUpdate],
         ) -> Result<CommittedTrackWrite> {
             let save_index = self.started_saves.fetch_add(1, Ordering::SeqCst);
             self.first_save_started.notify_waiters();
@@ -1616,7 +1622,16 @@ total_loss_limit = 600.0
         async fn update_effect_status(
             &self,
             id: &str,
-            _effect_status_update: &EffectStatusUpdate,
+            effect_status_update: &EffectStatusUpdate,
+        ) -> Result<CommittedTrackWrite> {
+            self.update_effect_statuses(id, std::slice::from_ref(effect_status_update))
+                .await
+        }
+
+        async fn update_effect_statuses(
+            &self,
+            id: &str,
+            _effect_status_updates: &[EffectStatusUpdate],
         ) -> Result<CommittedTrackWrite> {
             Ok(CommittedTrackWrite {
                 track_id: TrackId::new(id),
@@ -1767,7 +1782,7 @@ total_loss_limit = 600.0
     }
 
     struct FakeMarketData {
-        receivers: Mutex<HashMap<String, mpsc::Receiver<PriceTick>>>,
+        receivers: Mutex<HashMap<String, mpsc::Receiver<MarketDataTick>>>,
     }
 
     impl FakeMarketData {
@@ -1783,7 +1798,7 @@ total_loss_limit = 600.0
         async fn subscribe_prices(
             &self,
             instrument: &Instrument,
-        ) -> Result<mpsc::Receiver<PriceTick>> {
+        ) -> Result<mpsc::Receiver<MarketDataTick>> {
             self.receivers
                 .lock()
                 .unwrap()
@@ -1798,7 +1813,11 @@ total_loss_limit = 600.0
             Err(anyhow!("not used in tests"))
         }
 
-        async fn cancel_order(&self, _instrument: &Instrument, _order_id: &str) -> Result<()> {
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            _order_id: &str,
+        ) -> Result<OrderReceipt> {
             Err(anyhow!("not used in tests"))
         }
 
@@ -1815,8 +1834,13 @@ total_loss_limit = 600.0
             })
         }
 
-        async fn get_open_orders(&self, _instrument: &Instrument) -> Result<Vec<ExchangeOrder>> {
-            Ok(Vec::new())
+        async fn get_open_orders(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<ExchangeOpenOrderSnapshot> {
+            Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                Vec::new(),
+            ))
         }
     }
 
@@ -1870,7 +1894,7 @@ total_loss_limit = 600.0
         async fn subscribe_prices(
             &self,
             _instrument: &Instrument,
-        ) -> Result<mpsc::Receiver<PriceTick>> {
+        ) -> Result<mpsc::Receiver<MarketDataTick>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
         }

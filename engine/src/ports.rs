@@ -88,6 +88,31 @@ pub struct ExchangeOrder {
     pub status: OrderStatus,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExchangeOpenOrderSnapshot {
+    orders: Vec<ExchangeOrder>,
+}
+
+impl ExchangeOpenOrderSnapshot {
+    /// Build only from a complete exchange open-orders query result.
+    /// Missing orders are interpreted as absent from the exchange.
+    pub fn from_complete_exchange_query(orders: Vec<ExchangeOrder>) -> Self {
+        Self { orders }
+    }
+
+    pub fn orders(&self) -> &[ExchangeOrder] {
+        &self.orders
+    }
+
+    pub fn into_orders(self) -> Vec<ExchangeOrder> {
+        self.orders
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.orders.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderStatus {
@@ -128,11 +153,23 @@ pub struct ExecutionQuote {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PriceTick {
+pub struct ExecutionQuoteTick {
+    pub instrument: Instrument,
+    pub execution_quote: ExecutionQuote,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MarkPriceTick {
     pub instrument: Instrument,
     pub mark_price: f64,
-    pub execution_quote: Option<ExecutionQuote>,
     pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MarketDataTick {
+    ExecutionQuote(ExecutionQuoteTick),
+    MarkPrice(MarkPriceTick),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -193,10 +230,10 @@ pub trait AccountSummaryPort: Send + Sync {
 #[async_trait]
 pub trait ExecutionPort: Send + Sync {
     async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt>;
-    async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<()>;
+    async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<OrderReceipt>;
     async fn cancel_all(&self, instrument: &Instrument) -> Result<()>;
     async fn get_position(&self, instrument: &Instrument) -> Result<Position>;
-    async fn get_open_orders(&self, instrument: &Instrument) -> Result<Vec<ExchangeOrder>>;
+    async fn get_open_orders(&self, instrument: &Instrument) -> Result<ExchangeOpenOrderSnapshot>;
 }
 
 #[async_trait]
@@ -216,7 +253,10 @@ pub trait MetadataPort: Send + Sync {
 
 #[async_trait]
 pub trait MarketDataPort: Send + Sync {
-    async fn subscribe_prices(&self, instrument: &Instrument) -> Result<mpsc::Receiver<PriceTick>>;
+    async fn subscribe_prices(
+        &self,
+        instrument: &Instrument,
+    ) -> Result<mpsc::Receiver<MarketDataTick>>;
 }
 
 pub trait ClockPort: Send + Sync {

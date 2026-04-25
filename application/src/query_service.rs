@@ -146,12 +146,19 @@ mod tests {
             .observation
             .observe_market(
                 "btc-core",
-                MarketObservation {
-                    mark_price: 95.0,
-                    execution_quote: Some(ExecutionQuote {
+                MarketObservation::MarkPrice { mark_price: 95.0 },
+            )
+            .await
+            .unwrap();
+        services
+            .observation
+            .observe_market(
+                "btc-core",
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
                         best_bid: 94.5,
                         best_ask: 95.5,
-                    }),
+                    },
                 },
             )
             .await

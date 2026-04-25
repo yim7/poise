@@ -83,7 +83,6 @@ Expected:
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExchangeFreshnessReason {
-    FilledAwaitingSync,
     UnabsorbedOrderUpdate,
     SubmitOutcomeUnknown,
     CancelOutcomeUnknown,
@@ -186,7 +185,7 @@ Expected:
 要求：
 
 - `apply_user_data_event(...)` 中：
-  - `Filled` -> `exchange_freshness.mark_stale(track_id, FilledAwaitingSync)`
+  - 已吸收的 `Filled` 不标记 stale，仓位变化由 `ACCOUNT_UPDATE -> PositionUpdate` 推进
   - `UnabsorbedOrderUpdate` -> `mark_stale(..., UnabsorbedOrderUpdate)` 后立即 `enqueue_reconcile_request(...)`
 - `sync_exchange_state_from_exchange(...)` 开始前调用 `let sync_token = exchange_freshness.prepare_sync(track_id)`
 - `sync_exchange_state_from_exchange(...)` 成功完成 writeback 后调用 `exchange_freshness.clear_if_current(sync_token)`

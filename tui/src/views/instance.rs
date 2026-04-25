@@ -23,7 +23,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         frame.render_widget(empty, area);
         return;
     };
-    let sections = resolve_detail_layout(area);
+    let execution_body_line_count = execution_body_line_count(&detail.execution);
+    let sections = resolve_detail_layout(area, execution_body_line_count);
 
     let track = Paragraph::new(track_lines(detail, sections.mode))
         .block(Block::default().title("Track").borders(Borders::ALL));
@@ -45,8 +46,13 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         frame.render_widget(strategy, strategy_area);
     }
 
-    let execution = Paragraph::new(execution_lines(&detail.execution, sections.mode))
-        .block(Block::default().title("Execution").borders(Borders::ALL));
+    let execution_body_height = sections.execution.height.saturating_sub(2) as usize;
+    let execution = Paragraph::new(execution_lines(
+        &detail.execution,
+        sections.mode,
+        execution_body_height,
+    ))
+    .block(Block::default().title("Execution").borders(Borders::ALL));
     frame.render_widget(execution, sections.execution);
 
     if let Some(trace_area) = sections.trace {
@@ -336,7 +342,25 @@ fn attention_summary(attention_reasons: &[String]) -> String {
     }
 }
 
-fn execution_lines(execution: &TrackExecutionView, mode: DetailLayoutMode) -> Vec<Line<'static>> {
+fn execution_body_line_count(execution: &TrackExecutionView) -> usize {
+    let alert_lines = usize::from(matches!(
+        execution.execution_status,
+        ExecutionStatusView::AttentionRequired
+    ));
+    let binding_lines = execution.bindings.len();
+
+    match (alert_lines, binding_lines) {
+        (0, 0) => 1,
+        (alerts, 0) => alerts + 1,
+        (alerts, bindings) => alerts + bindings,
+    }
+}
+
+fn execution_lines(
+    execution: &TrackExecutionView,
+    mode: DetailLayoutMode,
+    max_lines: usize,
+) -> Vec<Line<'static>> {
     let binding_details = execution
         .bindings
         .iter()
@@ -344,7 +368,10 @@ fn execution_lines(execution: &TrackExecutionView, mode: DetailLayoutMode) -> Ve
         .collect::<Vec<_>>();
 
     if matches!(mode, DetailLayoutMode::Minimal) {
-        return minimal_execution_lines(execution, &binding_details);
+        return limit_execution_lines(
+            minimal_execution_lines(execution, &binding_details),
+            max_lines,
+        );
     }
 
     let mut lines = Vec::new();
@@ -364,7 +391,7 @@ fn execution_lines(execution: &TrackExecutionView, mode: DetailLayoutMode) -> Ve
     }
 
     if lines.is_empty() && binding_details.is_empty() {
-        return vec![Line::from("no active bindings")];
+        return limit_execution_lines(vec![Line::from("no active bindings")], max_lines);
     }
 
     if matches!(mode, DetailLayoutMode::Compact) {
@@ -374,15 +401,26 @@ fn execution_lines(execution: &TrackExecutionView, mode: DetailLayoutMode) -> Ve
         }
     } else {
         if !binding_details.is_empty() {
-            lines.push(Line::from(format!(
-                "bindings: {}",
-                binding_details.join(" | ")
-            )));
+            lines.extend(binding_details.into_iter().map(Line::from));
         } else if !lines.is_empty() {
             lines.push(Line::from("bindings: none"));
         }
     }
 
+    limit_execution_lines(lines, max_lines)
+}
+
+fn limit_execution_lines(mut lines: Vec<Line<'static>>, max_lines: usize) -> Vec<Line<'static>> {
+    if max_lines == 0 || lines.len() <= max_lines {
+        return lines;
+    }
+    if max_lines == 1 {
+        return vec![Line::from(format!("+{} more execution lines", lines.len()))];
+    }
+
+    let hidden = lines.len() - max_lines + 1;
+    lines.truncate(max_lines - 1);
+    lines.push(Line::from(format!("+{hidden} more execution lines")));
     lines
 }
 
@@ -593,8 +631,9 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::{pnl_lines, render};
+    use super::{execution_lines, pnl_lines, render};
     use crate::timestamp_display::format_local_timestamp_for_display;
+    use crate::views::instance_layout::DetailLayoutMode;
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
         terminal
@@ -833,6 +872,64 @@ mod tests {
         assert!(!text.contains("replacement gate"));
         assert!(!text.contains("Diagnostics"));
         assert!(!text.contains("client-1"));
+    }
+
+    #[test]
+    fn renders_each_execution_binding_on_its_own_detail_line() {
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        let template = detail.execution.bindings[0].clone();
+        detail.execution.bindings = (1..=6)
+            .map(|index| {
+                let mut binding = template.clone();
+                binding.label = format!("maker {index}");
+                binding
+            })
+            .collect();
+
+        let lines = execution_lines(&detail.execution, DetailLayoutMode::Standard, 6)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with("maker "))
+                .count(),
+            6
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains(" | maker ")),
+            "bindings should not be packed into one horizontally truncated line"
+        );
+
+        let text = render_text_with_size(detail, 160, 36);
+        assert!(text.contains("maker 6 submit_pending increase_inventory buy 0.0100 @ 100.5000"));
+    }
+
+    #[test]
+    fn execution_lines_reports_hidden_bindings_when_panel_is_bounded() {
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        let template = detail.execution.bindings[0].clone();
+        detail.execution.bindings = (1..=8)
+            .map(|index| {
+                let mut binding = template.clone();
+                binding.label = format!("maker {index}");
+                binding
+            })
+            .collect();
+
+        let lines = execution_lines(&detail.execution, DetailLayoutMode::Standard, 5)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 5);
+        assert!(lines[4].contains("+4 more execution lines"));
     }
 
     #[test]

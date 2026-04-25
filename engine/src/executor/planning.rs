@@ -9,7 +9,10 @@ use uuid::Uuid;
 use crate::execution_plan::ExecutionAction;
 use crate::execution_plan::{is_meetable_minimum, round_to_step};
 use crate::ports::{ExecutionQuote, OrderRequest};
-use crate::price_gate::{PriceExecutionGate, SubmitPurpose, allows_submit};
+use crate::price_gate::{
+    PriceExecutionGate, SubmitPurpose, WorkingOrderGateAction, allows_submit,
+    working_order_gate_action,
+};
 use crate::runtime::ExecutorState;
 use crate::track::Instrument;
 
@@ -88,6 +91,16 @@ struct DesiredBinding {
     policy_state: BindingPolicyState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BindingReconciliationDecision {
+    CoveredByExisting { indexes: Vec<usize> },
+    ReuseExisting { index: usize },
+    ReplaceReusable { index: usize },
+    ReplaceActiveOwners { indexes: Vec<usize> },
+    BlockedByActiveOwner,
+    SubmitNew,
+}
+
 const CURVE_MAKER_LEVELS_PER_SIDE: usize = 3;
 const CURVE_MAKER_GRACE_MS: i64 = 60_000;
 static BINDING_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -114,12 +127,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         .unwrap_or_else(|| ExecutorState::empty(submit_intent.observed_at))
         .ensure_revision(submit_intent.config, submit_intent.current_exposure.clone());
 
-    if state.recovery_anomaly.is_some()
-        || !allows_submit(
-            submit_intent.price_execution_gate,
-            submit_intent.submit_purpose,
-        )
-    {
+    if state.recovery_anomaly.is_some() {
         return noop_plan(state);
     }
 
@@ -148,16 +156,34 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         state.recovery_anomaly = Some(RecoveryAnomaly::ExpectedExposureMismatch);
         return noop_plan(state);
     }
-    let mut effects = if submit_intent.policy_context == PolicyContext::Normal {
-        update_curve_maker_due_grace(
+
+    let preexisting_cancel_pending_operations = cancel_pending_operations(&state.bindings);
+    let mut effects =
+        apply_price_gate_to_existing_bindings(&mut state, submit_intent.price_execution_gate);
+
+    if !allows_submit(
+        submit_intent.price_execution_gate,
+        submit_intent.submit_purpose,
+    ) {
+        return if effects.is_empty() {
+            noop_plan(state)
+        } else {
+            ExecutorPlan {
+                state,
+                desired_bindings: Vec::new(),
+                effects,
+            }
+        };
+    }
+
+    if submit_intent.policy_context == PolicyContext::Normal {
+        effects.extend(update_curve_maker_due_grace(
             &mut state,
             &view,
             submit_intent.observed_at,
             CURVE_MAKER_GRACE_MS,
-        )
-    } else {
-        Vec::new()
-    };
+        ));
+    }
     let mut desired_bindings = Vec::new();
     let mut desired_coverage = CoverageReservation::default();
 
@@ -196,6 +222,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         &mut state,
         &desired_bindings,
         submit_intent.exchange_rules,
+        &preexisting_cancel_pending_operations,
     ));
 
     if effects.is_empty() {
@@ -484,6 +511,34 @@ fn update_curve_maker_due_grace(
     effects
 }
 
+fn apply_price_gate_to_existing_bindings(
+    state: &mut ExecutorState,
+    gate: PriceExecutionGate,
+) -> Vec<ExecutionAction> {
+    let mut effects = Vec::new();
+    for binding in &mut state.bindings {
+        if !matches!(
+            binding.status,
+            BindingStatus::SubmitPending | BindingStatus::Working
+        ) {
+            continue;
+        }
+        match working_order_gate_action(gate, order_role_for_binding(binding)) {
+            WorkingOrderGateAction::Keep => {}
+            WorkingOrderGateAction::Cancel => cancel_binding(binding, &mut effects),
+        }
+    }
+    effects
+}
+
+fn order_role_for_binding(binding: &LiveOrderBinding) -> OrderRole {
+    if binding.request.reduce_only {
+        OrderRole::DecreaseInventory
+    } else {
+        OrderRole::IncreaseInventory
+    }
+}
+
 fn proposal_for_allocations(
     policy: PolicyKind,
     allocations: &[BindingOperationAllocation],
@@ -501,48 +556,43 @@ fn reconcile_bindings(
     state: &mut ExecutorState,
     desired_bindings: &[DesiredBinding],
     exchange_rules: &ExchangeRules,
+    preexisting_cancel_pending_operations: &BTreeSet<BoundaryOperation>,
 ) -> Vec<ExecutionAction> {
     let mut effects = Vec::new();
     let existing_count = state.bindings.len();
     let mut matched_existing = BTreeSet::new();
 
     for desired in desired_bindings {
-        if let Some(index) = find_reusable_binding_by_proposal_key(
+        match classify_binding_reconciliation(
             &state.bindings[..existing_count],
-            &desired.proposal.proposal_key(),
+            &state.bindings,
+            desired,
+            exchange_rules,
+            preexisting_cancel_pending_operations,
         ) {
-            matched_existing.insert(index);
-            let binding = &mut state.bindings[index];
-            if binding_request_matches_desired(binding, desired, exchange_rules) {
-                binding.desired_exposure = desired.desired_exposure.clone();
-                binding.submit_purpose = desired.submit_purpose;
-                continue;
+            BindingReconciliationDecision::CoveredByExisting { indexes } => {
+                matched_existing.extend(indexes);
             }
-            cancel_binding(binding, &mut effects);
-            let replacement = desired_binding_from_spec(desired);
-            effects.push(ExecutionAction::SubmitOrder {
-                request: replacement.request.clone(),
-                desired_exposure: replacement.desired_exposure.clone(),
-                submit_purpose: replacement.submit_purpose,
-                recovery_token: submit_recovery_token(&replacement),
-            });
-            state.bindings.push(replacement);
-            continue;
+            BindingReconciliationDecision::ReuseExisting { index } => {
+                matched_existing.insert(index);
+                update_existing_binding_from_desired(&mut state.bindings[index], desired);
+            }
+            BindingReconciliationDecision::ReplaceReusable { index } => {
+                matched_existing.insert(index);
+                cancel_binding(&mut state.bindings[index], &mut effects);
+                submit_desired_binding(state, desired, &mut effects);
+            }
+            BindingReconciliationDecision::ReplaceActiveOwners { indexes } => {
+                for index in indexes {
+                    cancel_binding(&mut state.bindings[index], &mut effects);
+                }
+                submit_desired_binding(state, desired, &mut effects);
+            }
+            BindingReconciliationDecision::BlockedByActiveOwner => {}
+            BindingReconciliationDecision::SubmitNew => {
+                submit_desired_binding(state, desired, &mut effects);
+            }
         }
-
-        if has_active_owner(&state.bindings, &desired.allocations) {
-            continue;
-        }
-
-        let binding = desired_binding_from_spec(desired);
-        let effect = ExecutionAction::SubmitOrder {
-            request: binding.request.clone(),
-            desired_exposure: binding.desired_exposure.clone(),
-            submit_purpose: binding.submit_purpose,
-            recovery_token: submit_recovery_token(&binding),
-        };
-        state.bindings.push(binding);
-        effects.push(effect);
     }
 
     for index in 0..existing_count {
@@ -557,6 +607,144 @@ fn reconcile_bindings(
     }
 
     effects
+}
+
+fn classify_binding_reconciliation(
+    bindings: &[LiveOrderBinding],
+    active_bindings: &[LiveOrderBinding],
+    desired: &DesiredBinding,
+    exchange_rules: &ExchangeRules,
+    cancel_pending_operations: &BTreeSet<BoundaryOperation>,
+) -> BindingReconciliationDecision {
+    if has_cancel_pending_owner(cancel_pending_operations, &desired.allocations) {
+        return BindingReconciliationDecision::CoveredByExisting {
+            indexes: active_owner_indexes_for_allocations(bindings, &desired.allocations),
+        };
+    }
+
+    if desired.proposal.policy == PolicyKind::CatchUp {
+        let indexes = effective_maker_owner_indexes(bindings, desired, exchange_rules);
+        if !indexes.is_empty() {
+            return BindingReconciliationDecision::CoveredByExisting { indexes };
+        }
+    }
+
+    if let Some(index) =
+        find_reusable_binding_by_proposal_key(bindings, &desired.proposal.proposal_key())
+    {
+        return if binding_request_matches_desired(&bindings[index], desired, exchange_rules) {
+            BindingReconciliationDecision::ReuseExisting { index }
+        } else {
+            BindingReconciliationDecision::ReplaceReusable { index }
+        };
+    }
+
+    if desired.proposal.policy == PolicyKind::CatchUp {
+        let indexes = replaceable_active_owner_indexes(active_bindings, &desired.allocations);
+        if !indexes.is_empty() {
+            return BindingReconciliationDecision::ReplaceActiveOwners { indexes };
+        }
+    }
+
+    if has_active_owner(active_bindings, &desired.allocations) {
+        return BindingReconciliationDecision::BlockedByActiveOwner;
+    }
+
+    BindingReconciliationDecision::SubmitNew
+}
+
+fn cancel_pending_operations(bindings: &[LiveOrderBinding]) -> BTreeSet<BoundaryOperation> {
+    bindings
+        .iter()
+        .filter(|binding| binding.status == BindingStatus::CancelPending)
+        .flat_map(|binding| {
+            binding
+                .allocations
+                .iter()
+                .map(|allocation| allocation.operation.clone())
+        })
+        .collect()
+}
+
+fn active_owner_indexes_for_allocations(
+    bindings: &[LiveOrderBinding],
+    allocations: &[BindingOperationAllocation],
+) -> Vec<usize> {
+    bindings
+        .iter()
+        .enumerate()
+        .filter(|(_index, binding)| {
+            binding_is_active(binding)
+                && binding.status != BindingStatus::CancelPending
+                && allocations_overlap(&binding.allocations, allocations)
+        })
+        .map(|(index, _binding)| index)
+        .collect()
+}
+
+fn has_cancel_pending_owner(
+    cancel_pending_operations: &BTreeSet<BoundaryOperation>,
+    allocations: &[BindingOperationAllocation],
+) -> bool {
+    allocations
+        .iter()
+        .any(|allocation| cancel_pending_operations.contains(&allocation.operation))
+}
+
+fn effective_maker_owner_indexes(
+    bindings: &[LiveOrderBinding],
+    desired: &DesiredBinding,
+    exchange_rules: &ExchangeRules,
+) -> Vec<usize> {
+    let mut matched_indexes = BTreeSet::new();
+    for desired_allocation in &desired.allocations {
+        let Some((index, _binding)) = bindings.iter().enumerate().find(|(_index, binding)| {
+            binding_is_effective_maker_owner(binding, desired, desired_allocation, exchange_rules)
+        }) else {
+            return Vec::new();
+        };
+        matched_indexes.insert(index);
+    }
+    matched_indexes.into_iter().collect()
+}
+
+fn binding_is_effective_maker_owner(
+    binding: &LiveOrderBinding,
+    desired: &DesiredBinding,
+    desired_allocation: &BindingOperationAllocation,
+    exchange_rules: &ExchangeRules,
+) -> bool {
+    if binding.proposal_key.policy != PolicyKind::CurveMaker
+        || !binding_is_active(binding)
+        || binding.status == BindingStatus::CancelPending
+        || binding.request.side != desired.request.side
+        || binding.request.reduce_only != desired.request.reduce_only
+        || !values_match(
+            binding.request.price,
+            desired.request.price,
+            exchange_rules.price_tick,
+        )
+    {
+        return false;
+    }
+
+    binding.allocations.iter().any(|allocation| {
+        allocation.operation == desired_allocation.operation
+            && (allocation.exposure_qty - binding.absorbed_exposure_qty).max(0.0)
+                + exposure_quantity_epsilon()
+                >= desired_allocation.exposure_qty
+    })
+}
+
+fn allocations_overlap(
+    left: &[BindingOperationAllocation],
+    right: &[BindingOperationAllocation],
+) -> bool {
+    left.iter().any(|left_allocation| {
+        right
+            .iter()
+            .any(|right_allocation| left_allocation.operation == right_allocation.operation)
+    })
 }
 
 fn desired_binding_from_spec(desired: &DesiredBinding) -> LiveOrderBinding {
@@ -614,6 +802,26 @@ fn has_active_owner(
     })
 }
 
+fn replaceable_active_owner_indexes(
+    bindings: &[LiveOrderBinding],
+    allocations: &[BindingOperationAllocation],
+) -> Vec<usize> {
+    bindings
+        .iter()
+        .enumerate()
+        .filter_map(|(index, binding)| {
+            if binding.proposal_key.policy == PolicyKind::CatchUp
+                || !binding_is_active(binding)
+                || binding.status == BindingStatus::CancelPending
+                || !allocations_overlap(&binding.allocations, allocations)
+            {
+                return None;
+            }
+            Some(index)
+        })
+        .collect()
+}
+
 fn binding_request_matches_desired(
     binding: &LiveOrderBinding,
     desired: &DesiredBinding,
@@ -639,6 +847,10 @@ fn values_match(left: f64, right: f64, tolerance: f64) -> bool {
     (left - right).abs() <= tolerance + f64::EPSILON
 }
 
+fn exposure_quantity_epsilon() -> f64 {
+    1e-9
+}
+
 fn cancel_binding(binding: &mut LiveOrderBinding, effects: &mut Vec<ExecutionAction>) {
     if binding.status == BindingStatus::CancelPending {
         return;
@@ -652,6 +864,27 @@ fn cancel_binding(binding: &mut LiveOrderBinding, effects: &mut Vec<ExecutionAct
     } else {
         binding.status = BindingStatus::Terminal;
     }
+}
+
+fn update_existing_binding_from_desired(binding: &mut LiveOrderBinding, desired: &DesiredBinding) {
+    binding.desired_exposure = desired.desired_exposure.clone();
+    binding.submit_purpose = desired.submit_purpose;
+}
+
+fn submit_desired_binding(
+    state: &mut ExecutorState,
+    desired: &DesiredBinding,
+    effects: &mut Vec<ExecutionAction>,
+) {
+    let binding = desired_binding_from_spec(desired);
+    let effect = ExecutionAction::SubmitOrder {
+        request: binding.request.clone(),
+        desired_exposure: binding.desired_exposure.clone(),
+        submit_purpose: binding.submit_purpose,
+        recovery_token: submit_recovery_token(&binding),
+    };
+    state.bindings.push(binding);
+    effects.push(effect);
 }
 
 fn submit_recovery_token(binding: &LiveOrderBinding) -> SubmitRecoveryToken {
@@ -779,12 +1012,12 @@ fn role_for_target_change(current_exposure: &Exposure, desired_exposure: &Exposu
 }
 
 fn next_client_order_id(policy: PolicyKind) -> String {
-    let instance_id = Uuid::new_v4();
+    let instance_id = Uuid::new_v4().simple();
     match policy {
-        PolicyKind::ManualOverride => format!("boundary-manual-{instance_id}"),
-        PolicyKind::Flatten => format!("boundary-flatten-{instance_id}"),
-        PolicyKind::CatchUp => format!("boundary-catch-up-{instance_id}"),
-        PolicyKind::CurveMaker => format!("boundary-maker-{instance_id}"),
+        PolicyKind::ManualOverride => format!("bo-{instance_id}"),
+        PolicyKind::Flatten => format!("bf-{instance_id}"),
+        PolicyKind::CatchUp => format!("bc-{instance_id}"),
+        PolicyKind::CurveMaker => format!("bk-{instance_id}"),
     }
 }
 
@@ -821,29 +1054,6 @@ mod tests {
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
         }
-    }
-
-    fn looks_like_uuid(value: &str) -> bool {
-        let bytes = value.as_bytes();
-        if bytes.len() != 36 {
-            return false;
-        }
-
-        for (index, byte) in bytes.iter().enumerate() {
-            let is_hyphen = matches!(index, 8 | 13 | 18 | 23);
-            if is_hyphen {
-                if *byte != b'-' {
-                    return false;
-                }
-                continue;
-            }
-
-            if !byte.is_ascii_hexdigit() {
-                return false;
-            }
-        }
-
-        true
     }
 
     fn looks_like_u64(value: &str) -> bool {
@@ -887,6 +1097,37 @@ mod tests {
                 observed_at: Utc::now(),
             },
             None,
+        )
+    }
+
+    fn input_with_gate<'a>(
+        config: &'a TrackConfig,
+        rules: &'a ExchangeRules,
+        current_exposure: Exposure,
+        desired_exposure: Exposure,
+        price_execution_gate: PriceExecutionGate,
+        previous_state: &'a ExecutorState,
+    ) -> ExecutorInput<'a> {
+        let instrument = Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT")));
+        ExecutorInput::new(
+            SubmitIntentInput {
+                instrument,
+                config,
+                exchange_rules: rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: config.min_rebalance_units,
+                current_exposure,
+                desired_exposure,
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            Some(previous_state),
         )
     }
 
@@ -989,6 +1230,230 @@ mod tests {
     }
 
     #[test]
+    fn cancel_pending_owner_blocks_later_replacement_submit() {
+        let config = config();
+        let rules = rules();
+        let mut previous = plan(input(&config, &rules, Exposure(0.0), Exposure(2.0))).state;
+        previous.bindings[0].status = BindingStatus::Working;
+        previous.bindings[0].order_id = Some("existing-order".to_string());
+        previous.bindings[0].request.price = 100.3;
+
+        let replacing = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT"))),
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: config.min_rebalance_units,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(2.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            Some(&previous),
+        ));
+
+        assert!(replacing.state.bindings.iter().any(|binding| {
+            binding.status == BindingStatus::CancelPending
+                && binding.order_id.as_deref() == Some("existing-order")
+        }));
+        let replacing_catch_up_key = replacing
+            .state
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.status == BindingStatus::SubmitPending
+                    && binding.order_id.is_none()
+                    && binding.proposal_key.policy == PolicyKind::CatchUp
+            })
+            .expect("replacement catch-up binding should be submit pending")
+            .proposal_key
+            .clone();
+
+        let next = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT"))),
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: config.min_rebalance_units,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(2.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 100.0,
+                    best_ask: 100.2,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            Some(&replacing.state),
+        ));
+
+        assert!(
+            !next
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. })),
+            "cancel-pending owner must block additional replacement submits"
+        );
+        assert_eq!(
+            next.state
+                .bindings
+                .iter()
+                .filter(|binding| {
+                    binding.status == BindingStatus::SubmitPending
+                        && binding.proposal_key == replacing_catch_up_key
+                })
+                .count(),
+            1,
+            "existing downstream replacement should stay as the only submit pending"
+        );
+    }
+
+    #[test]
+    fn gate_cancels_existing_increase_inventory_working_order() {
+        let config = config();
+        let rules = rules();
+        let mut previous = plan(input(&config, &rules, Exposure(0.0), Exposure(2.0))).state;
+        previous.bindings[0].status = BindingStatus::Working;
+        previous.bindings[0].order_id = Some("increase-order".to_string());
+
+        let plan = plan(input_with_gate(
+            &config,
+            &rules,
+            Exposure(0.0),
+            Exposure(2.0),
+            PriceExecutionGate::ManualRiskReductionOnly {
+                reason: crate::price_gate::PriceExecutionBlockReason::MarkBookDivergence,
+            },
+            &previous,
+        ));
+
+        assert!(plan.effects.iter().any(|effect| matches!(
+            effect,
+            ExecutionAction::CancelOrder { order_id, .. } if order_id == "increase-order"
+        )));
+        assert!(
+            !plan
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. }))
+        );
+        assert_eq!(plan.state.bindings[0].status, BindingStatus::CancelPending);
+    }
+
+    #[test]
+    fn gate_keeps_existing_decrease_inventory_working_order_without_replacement() {
+        let config = config();
+        let rules = rules();
+        let mut previous = plan(input(&config, &rules, Exposure(2.0), Exposure(0.0))).state;
+        previous.bindings[0].status = BindingStatus::Working;
+        previous.bindings[0].order_id = Some("decrease-order".to_string());
+        previous.bindings[0].request.price = 99.7;
+
+        let plan = plan(input_with_gate(
+            &config,
+            &rules,
+            Exposure(2.0),
+            Exposure(0.0),
+            PriceExecutionGate::ManualRiskReductionOnly {
+                reason: crate::price_gate::PriceExecutionBlockReason::MarkBookDivergence,
+            },
+            &previous,
+        ));
+
+        assert!(
+            !plan
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, ExecutionAction::CancelOrder { .. }))
+        );
+        assert!(
+            !plan
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. }))
+        );
+        assert_eq!(plan.state.bindings[0].status, BindingStatus::Working);
+        assert_eq!(plan.state.bindings[0].request.price, 99.7);
+    }
+
+    #[test]
+    fn gate_does_not_mutate_working_order_when_ledger_invariant_fails() {
+        let config = config();
+        let rules = rules();
+        let mut previous = plan(input(&config, &rules, Exposure(0.0), Exposure(2.0))).state;
+        previous.bindings[0].status = BindingStatus::Working;
+        previous.bindings[0].order_id = Some("increase-order".to_string());
+        previous.ledger_state.progress.push(BoundaryProgressEntry {
+            boundary_id: BoundaryId {
+                profile_revision: ProfileRevision(previous.ledger_state.profile_revision.0.clone()),
+                lower_exposure_bp: 0,
+                upper_exposure_bp: 10_000,
+            },
+            progress: BoundaryProgress {
+                cumulative_up: 1.2,
+                cumulative_down: 0.0,
+            },
+        });
+
+        let plan = plan(input_with_gate(
+            &config,
+            &rules,
+            Exposure(1.2),
+            Exposure(1.0),
+            PriceExecutionGate::ManualRiskReductionOnly {
+                reason: crate::price_gate::PriceExecutionBlockReason::MarkBookDivergence,
+            },
+            &previous,
+        ));
+
+        assert_eq!(
+            plan.state.recovery_anomaly,
+            Some(crate::executor::RecoveryAnomaly::BoundaryProgressOutOfRange)
+        );
+        assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
+        assert_eq!(plan.state.bindings[0].status, BindingStatus::Working);
+    }
+
+    #[test]
+    fn gate_keeps_existing_short_reduce_only_working_order() {
+        let config = config();
+        let rules = rules();
+        let mut previous = plan(input(&config, &rules, Exposure(-2.0), Exposure(0.0))).state;
+        previous.bindings[0].status = BindingStatus::Working;
+        previous.bindings[0].order_id = Some("short-reduce-order".to_string());
+        assert!(previous.bindings[0].request.reduce_only);
+
+        let plan = plan(input_with_gate(
+            &config,
+            &rules,
+            Exposure(-2.0),
+            Exposure(0.0),
+            PriceExecutionGate::ManualRiskReductionOnly {
+                reason: crate::price_gate::PriceExecutionBlockReason::MarkBookDivergence,
+            },
+            &previous,
+        ));
+
+        assert!(
+            !plan
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, ExecutionAction::CancelOrder { .. }))
+        );
+        assert_eq!(plan.state.bindings[0].status, BindingStatus::Working);
+    }
+
+    #[test]
     fn catch_up_policy_takes_over_due_curve_maker_in_same_round() {
         let config = config();
         let rules = rules();
@@ -1045,6 +1510,121 @@ mod tests {
     }
 
     #[test]
+    fn catch_up_takes_over_far_due_curve_maker_at_threshold() {
+        let config = config();
+        let rules = rules();
+        let initial = plan(input(&config, &rules, Exposure(0.0), Exposure(0.0))).state;
+        let mut previous = initial.clone();
+        let maker = previous
+            .bindings
+            .iter_mut()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CurveMaker)
+            .expect("maker binding should exist");
+        maker.status = BindingStatus::Working;
+        maker.order_id = Some("maker-order".to_string());
+        maker.policy_state = BindingPolicyState::CurveMaker {
+            due_grace_started_at: None,
+        };
+
+        let plan = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT"))),
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: config.min_rebalance_units,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(1.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            Some(&previous),
+        ));
+
+        assert!(plan.effects.iter().any(|effect| matches!(
+            effect,
+            ExecutionAction::CancelOrder { order_id, .. } if order_id == "maker-order"
+        )));
+        assert!(plan.effects.iter().any(|effect| matches!(
+            effect,
+            ExecutionAction::SubmitOrder { request, .. } if request.side == Side::Buy
+        )));
+        assert!(plan.state.bindings.iter().any(|binding| {
+            binding.proposal_key.policy == PolicyKind::CurveMaker
+                && binding.status == BindingStatus::CancelPending
+        }));
+        assert!(plan.state.bindings.iter().any(|binding| {
+            binding.proposal_key.policy == PolicyKind::CatchUp
+                && binding.status == BindingStatus::SubmitPending
+        }));
+    }
+
+    #[test]
+    fn catch_up_keeps_nearby_working_curve_maker_that_can_cover_gap() {
+        let config = config();
+        let rules = rules();
+        let initial = plan(input(&config, &rules, Exposure(0.0), Exposure(0.0))).state;
+        let mut previous = initial.clone();
+        let maker = previous
+            .bindings
+            .iter_mut()
+            .find(|binding| {
+                binding.proposal_key.policy == PolicyKind::CurveMaker
+                    && binding.request.side == Side::Buy
+            })
+            .expect("buy maker binding should exist");
+        maker.status = BindingStatus::Working;
+        maker.order_id = Some("near-maker-order".to_string());
+        maker.request.price = 100.1;
+        maker.policy_state = BindingPolicyState::CurveMaker {
+            due_grace_started_at: None,
+        };
+
+        let plan = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT"))),
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: config.min_rebalance_units,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(1.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            Some(&previous),
+        ));
+
+        assert!(
+            !plan.effects
+                .iter()
+                .any(|effect| matches!(effect, ExecutionAction::CancelOrder { order_id, .. } if order_id == "near-maker-order"))
+        );
+        assert!(
+            !plan
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { request, .. } if request.client_order_id.starts_with("bc-")))
+        );
+        assert!(plan.state.bindings.iter().any(|binding| {
+            binding.order_id.as_deref() == Some("near-maker-order")
+                && binding.status == BindingStatus::Working
+        }));
+    }
+
+    #[test]
     fn planning_no_longer_depends_on_active_round_or_slots() {
         let config = config();
         let rules = rules();
@@ -1059,38 +1639,31 @@ mod tests {
     }
 
     #[test]
-    fn planning_uses_process_local_binding_ids_and_globally_unique_client_order_ids() {
-        let config = config();
-        let rules = rules();
-
-        let plan = plan(input(&config, &rules, Exposure(0.0), Exposure(2.0)));
-
-        let binding = plan
-            .state
-            .bindings
-            .iter()
-            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
-            .expect("catch-up binding should exist");
-
-        let binding_suffix = binding
-            .binding_id
+    fn planning_uses_process_local_binding_ids_and_exchange_safe_client_order_ids() {
+        let binding_id = next_binding_id(PolicyKind::CatchUp);
+        let binding_suffix = binding_id
             .strip_prefix("binding-catch-up-")
             .expect("binding id should keep the catch-up prefix");
         assert!(looks_like_u64(binding_suffix));
 
-        let submit_request = plan
-            .effects
-            .iter()
-            .find_map(|effect| match effect {
-                ExecutionAction::SubmitOrder { request, .. } => Some(request),
-                _ => None,
-            })
-            .expect("submit effect should exist");
-        let client_order_suffix = submit_request
-            .client_order_id
-            .strip_prefix("boundary-catch-up-")
-            .expect("client order id should keep the catch-up prefix");
-        assert!(looks_like_uuid(client_order_suffix));
+        for (policy, expected_prefix) in [
+            (PolicyKind::ManualOverride, "bo-"),
+            (PolicyKind::Flatten, "bf-"),
+            (PolicyKind::CatchUp, "bc-"),
+            (PolicyKind::CurveMaker, "bk-"),
+        ] {
+            let client_order_id = next_client_order_id(policy);
+            assert!(
+                client_order_id.len() < 36,
+                "Binance requires client order ids shorter than 36 chars, got `{}` with len {}",
+                client_order_id,
+                client_order_id.len()
+            );
+            assert!(
+                client_order_id.starts_with(expected_prefix),
+                "client order id should keep a compact policy prefix"
+            );
+        }
     }
 
     #[test]

@@ -13,7 +13,8 @@ use crate::execution_gate::ExecutionGateDecision;
 use crate::executor;
 use crate::ledger::{LedgerDelta, LedgerGapRecord};
 use crate::observation::{
-    MarketObservation, OrderObservation, PositionObservation, TrackObservation,
+    CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
+    TrackObservation,
 };
 use crate::ports::{ClockPort, ExchangeOrder, ExecutionQuote, OrderReceipt, OrderRequest};
 use crate::price_gate::{SubmitPurpose, evaluate_price_execution_gate};
@@ -285,7 +286,7 @@ impl TrackManager {
         &mut self,
         id: &TrackId,
         position: PositionObservation,
-        open_orders: Vec<OrderObservation>,
+        open_orders: CompleteOpenOrderSnapshot,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
     ) -> Result<TrackTransition> {
         let (events, effects) = self.apply_exchange_state_sync(
@@ -302,7 +303,7 @@ impl TrackManager {
         &mut self,
         id: &TrackId,
         position: PositionObservation,
-        open_orders: Vec<OrderObservation>,
+        open_orders: CompleteOpenOrderSnapshot,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
     ) -> Result<TrackTransition> {
         let (events, effects) = self.apply_exchange_state_sync(
@@ -663,20 +664,22 @@ impl TrackManager {
         Ok(())
     }
 
-    fn clear_working_order_by_order_id(&mut self, id: &TrackId, order_id: &str) -> Result<()> {
+    pub fn record_cancel_order_success(
+        &mut self,
+        id: &TrackId,
+        order_id: &str,
+        receipt: &OrderReceipt,
+    ) -> Result<()> {
         let track = self
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        let next_state = executor::clear_working_order_by_order_id(&track.executor_state, order_id);
+        let next_state =
+            executor::record_cancel_order_receipt(&track.executor_state, order_id, receipt);
         if next_state != track.executor_state {
             track.executor_state = next_state;
         }
         Ok(())
-    }
-
-    pub fn record_cancel_order_success(&mut self, id: &TrackId, order_id: &str) -> Result<()> {
-        self.clear_working_order_by_order_id(id, order_id)
     }
 
     fn clear_all_working_orders(&mut self, id: &TrackId) -> Result<()> {
@@ -813,35 +816,41 @@ impl TrackManager {
         observation: MarketObservation,
     ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
         let now = self.clock.now();
-        let track = self
-            .tracks
-            .get_mut(id)
-            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        track.last_tick_at = Some(now);
-        track.market_data_stale_since = None;
-        track.mark_price = Some(observation.mark_price);
-        track.best_bid = observation.execution_quote.map(|quote| quote.best_bid);
-        track.best_ask = observation.execution_quote.map(|quote| quote.best_ask);
-        track.price_execution_gate = evaluate_price_execution_gate(
-            track.price_execution_gate,
-            track.mark_price,
-            observation.execution_quote,
-        );
+        let strategy_price = {
+            let track = self
+                .tracks
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
 
-        let strategy_price = observation
-            .execution_quote
-            .map(|quote| (quote.best_bid + quote.best_ask) / 2.0);
+            match observation {
+                MarketObservation::MarkPrice { mark_price } => {
+                    track.mark_price = Some(mark_price);
+                }
+                MarketObservation::ExecutionQuote { execution_quote } => {
+                    track.last_tick_at = Some(now);
+                    track.market_data_stale_since = None;
+                    track.best_bid = Some(execution_quote.best_bid);
+                    track.best_ask = Some(execution_quote.best_ask);
+                    let strategy_price =
+                        (execution_quote.best_bid + execution_quote.best_ask) / 2.0;
+                    track.strategy_price = Some(strategy_price);
+                    track.strategy_price_status = StrategyPriceStatus::Live;
+                }
+            }
+
+            let execution_quote = Self::execution_quote_for_track(track);
+            track.price_execution_gate = evaluate_price_execution_gate(
+                track.price_execution_gate,
+                track.mark_price,
+                execution_quote,
+            );
+
+            Self::live_strategy_price_for(track)
+        };
 
         match strategy_price {
-            Some(strategy_price) => {
-                track.strategy_price = Some(strategy_price);
-                track.strategy_price_status = StrategyPriceStatus::Live;
-                self.reconcile_track(id, strategy_price)
-            }
-            None => {
-                track.strategy_price_status = StrategyPriceStatus::Stale;
-                Ok((vec![], vec![]))
-            }
+            Some(strategy_price) => self.reconcile_track(id, strategy_price),
+            None => Ok((vec![], vec![])),
         }
     }
 
@@ -893,7 +902,7 @@ impl TrackManager {
         &mut self,
         id: &TrackId,
         position: PositionObservation,
-        open_orders: Vec<OrderObservation>,
+        open_orders: CompleteOpenOrderSnapshot,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
         mode: ExchangeSyncMode,
     ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
@@ -908,12 +917,10 @@ impl TrackManager {
         let recovery = executor::recover_working_orders(executor::RecoveryInput {
             config: &track.config,
             current_exposure: &track.current_exposure,
-            base_qty_per_unit: track.config.base_qty_per_unit(),
             desired_exposure: track.desired_exposure.as_ref(),
-            min_rebalance_units: track.config.min_rebalance_units,
             exchange_rules: &track.exchange_rules,
             previous_state: Some(&previous_state),
-            live_orders: &open_orders,
+            open_orders: &open_orders,
             observed_at,
         });
 
@@ -1293,12 +1300,11 @@ mod tests {
     }
 
     fn market(price: f64) -> TrackObservation {
-        TrackObservation::Market(MarketObservation {
-            mark_price: price,
-            execution_quote: Some(ExecutionQuote {
+        TrackObservation::Market(MarketObservation::ExecutionQuote {
+            execution_quote: ExecutionQuote {
                 best_bid: price - 0.1,
                 best_ask: price + 0.1,
-            }),
+            },
         })
     }
 

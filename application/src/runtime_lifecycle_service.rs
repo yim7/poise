@@ -330,12 +330,19 @@ mod tests {
             .observation
             .observe_market(
                 "btc-core",
-                poise_engine::observation::MarketObservation {
-                    mark_price: 95.0,
-                    execution_quote: Some(poise_engine::ports::ExecutionQuote {
+                poise_engine::observation::MarketObservation::MarkPrice { mark_price: 95.0 },
+            )
+            .await
+            .unwrap();
+        services
+            .observation
+            .observe_market(
+                "btc-core",
+                poise_engine::observation::MarketObservation::ExecutionQuote {
+                    execution_quote: poise_engine::ports::ExecutionQuote {
                         best_bid: 94.5,
                         best_ask: 95.5,
-                    }),
+                    },
                 },
             )
             .await
@@ -424,12 +431,19 @@ mod tests {
             .observation
             .observe_market(
                 "btc-core",
-                poise_engine::observation::MarketObservation {
-                    mark_price: 95.0,
-                    execution_quote: Some(ExecutionQuote {
+                poise_engine::observation::MarketObservation::MarkPrice { mark_price: 95.0 },
+            )
+            .await
+            .unwrap();
+        services
+            .observation
+            .observe_market(
+                "btc-core",
+                poise_engine::observation::MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
                         best_bid: 94.9,
                         best_ask: 95.1,
-                    }),
+                    },
                 },
             )
             .await

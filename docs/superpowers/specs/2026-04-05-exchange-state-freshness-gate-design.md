@@ -242,7 +242,7 @@
 - `ExchangeFreshnessReason`
   - 表达“为什么这个 track 现在处于 stale”
   - 只能使用可观察事实命名
-  - 例如：`FilledAwaitingSync`、`UnabsorbedOrderUpdate`、`SubmitOutcomeUnknown`、`CancelOutcomeUnknown`
+  - 例如：`UnabsorbedOrderUpdate`、`SubmitOutcomeUnknown`、`CancelOutcomeUnknown`
 
 - `ReconcileReason`
   - 表达“为什么现在要入队一次 reconcile”

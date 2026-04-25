@@ -7,7 +7,7 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
-use poise_engine::ports::{ExecutionQuote, PriceTick};
+use poise_engine::ports::{ExecutionQuote, ExecutionQuoteTick, MarkPriceTick, MarketDataTick};
 use poise_engine::track::{Instrument, Venue};
 
 use super::{
@@ -19,26 +19,51 @@ use super::{
 pub(super) async fn run_market_stream(
     url: String,
     symbol: String,
-    sender: mpsc::Sender<PriceTick>,
+    sender: mpsc::Sender<MarketDataTick>,
     reconnect_delay: Duration,
 ) {
     let mut attempt = 0_u32;
     let mut market_state = BinanceMarketState::new(symbol);
+    let mut logged_first_message = false;
+    let mut logged_first_tick = false;
 
     loop {
+        tracing::info!(
+            "connecting market data websocket for {}",
+            market_state.expected_symbol
+        );
         match connect_websocket(&url).await {
             Ok((mut websocket, _)) => {
+                tracing::info!(
+                    "connected market data websocket for {}",
+                    market_state.expected_symbol
+                );
                 attempt = 0;
 
                 while let Some(message) = websocket.next().await {
                     match message {
                         Ok(Message::Text(text)) => match market_state.parse_message(&text) {
                             Ok(Some(tick)) => {
+                                if !logged_first_tick {
+                                    tracing::info!(
+                                        "first market data tick emitted for {}",
+                                        market_state.expected_symbol
+                                    );
+                                    logged_first_tick = true;
+                                }
                                 if sender.send(tick).await.is_err() {
                                     return;
                                 }
                             }
-                            Ok(None) => {}
+                            Ok(None) => {
+                                if !logged_first_message {
+                                    tracing::info!(
+                                        "first market data message received for {}",
+                                        market_state.expected_symbol
+                                    );
+                                    logged_first_message = true;
+                                }
+                            }
                             Err(error) => {
                                 tracing::warn!("failed to parse market data message: {error}");
                             }
@@ -69,20 +94,16 @@ pub(super) async fn run_market_stream(
 #[derive(Debug)]
 pub(super) struct BinanceMarketState {
     expected_symbol: String,
-    last_mark_price: Option<f64>,
-    last_quote: Option<ExecutionQuote>,
 }
 
 impl BinanceMarketState {
     pub(super) fn new(expected_symbol: impl Into<String>) -> Self {
         Self {
             expected_symbol: expected_symbol.into(),
-            last_mark_price: None,
-            last_quote: None,
         }
     }
 
-    pub(super) fn parse_message(&mut self, payload: &str) -> Result<Option<PriceTick>> {
+    pub(super) fn parse_message(&mut self, payload: &str) -> Result<Option<MarketDataTick>> {
         let envelope: MarketStreamEnvelope = serde_json::from_str(payload)?;
         let event = match envelope {
             MarketStreamEnvelope::Combined { data } => data,
@@ -95,42 +116,32 @@ impl BinanceMarketState {
         }
     }
 
-    fn parse_mark_price(&mut self, message: MarkPriceMessage) -> Result<Option<PriceTick>> {
+    fn parse_mark_price(&mut self, message: MarkPriceMessage) -> Result<Option<MarketDataTick>> {
         self.ensure_symbol(&message.symbol)?;
         let mark_price = parse_decimal("p", &message.mark_price)?;
-        self.last_mark_price = Some(mark_price);
 
-        Ok(Some(PriceTick {
+        Ok(Some(MarketDataTick::MarkPrice(MarkPriceTick {
             instrument: Instrument::new(Venue::Binance, &self.expected_symbol),
             mark_price,
-            execution_quote: self.last_quote.clone(),
             timestamp: parse_timestamp(message.event_time)?,
-        }))
+        })))
     }
 
-    fn parse_book_ticker(&mut self, message: BookTickerMessage) -> Result<Option<PriceTick>> {
+    fn parse_book_ticker(&mut self, message: BookTickerMessage) -> Result<Option<MarketDataTick>> {
         self.ensure_symbol(&message.symbol)?;
         let quote = match (message.best_bid.as_deref(), message.best_ask.as_deref()) {
-            (Some(best_bid), Some(best_ask)) => {
-                let quote = ExecutionQuote {
-                    best_bid: parse_decimal("b", best_bid)?,
-                    best_ask: parse_decimal("a", best_ask)?,
-                };
-                self.last_quote = Some(quote.clone());
-                quote
-            }
+            (Some(best_bid), Some(best_ask)) => ExecutionQuote {
+                best_bid: parse_decimal("b", best_bid)?,
+                best_ask: parse_decimal("a", best_ask)?,
+            },
             _ => return Ok(None),
         };
-        let Some(mark_price) = self.last_mark_price else {
-            return Ok(None);
-        };
 
-        Ok(Some(PriceTick {
+        Ok(Some(MarketDataTick::ExecutionQuote(ExecutionQuoteTick {
             instrument: Instrument::new(Venue::Binance, &self.expected_symbol),
-            mark_price,
-            execution_quote: Some(quote),
+            execution_quote: quote,
             timestamp: parse_timestamp(message.event_time)?,
-        }))
+        })))
     }
 
     fn ensure_symbol(&self, actual_symbol: &str) -> Result<()> {
@@ -169,7 +180,7 @@ mod tests {
     use poise_engine::ports::ExecutionQuote;
 
     #[test]
-    fn parses_binance_mark_and_book_into_price_tick() {
+    fn parses_binance_mark_and_book_into_separate_market_ticks() {
         let mark_payload = r#"{
             "e": "markPriceUpdate",
             "E": 1700000000000,
@@ -193,24 +204,22 @@ mod tests {
 
         assert_eq!(
             first,
-            PriceTick {
+            MarketDataTick::MarkPrice(MarkPriceTick {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 mark_price: 64000.10,
-                execution_quote: None,
                 timestamp: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-            }
+            })
         );
         assert_eq!(
             second,
-            PriceTick {
+            MarketDataTick::ExecutionQuote(ExecutionQuoteTick {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                mark_price: 64000.10,
-                execution_quote: Some(ExecutionQuote {
+                execution_quote: ExecutionQuote {
                     best_bid: 63999.50,
                     best_ask: 64000.50,
-                }),
+                },
                 timestamp: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-            }
+            })
         );
     }
 
@@ -228,6 +237,34 @@ mod tests {
         let tick = state.parse_message(payload).unwrap();
 
         assert!(tick.is_none());
+    }
+
+    #[test]
+    fn book_ticker_emits_execution_quote_without_cached_mark_price() {
+        let payload = r#"{
+            "e": "bookTicker",
+            "E": 1700000000000,
+            "s": "BTCUSDT",
+            "b": "63999.50",
+            "B": "2.000",
+            "a": "64000.50",
+            "A": "3.000"
+        }"#;
+        let mut state = BinanceMarketState::new("BTCUSDT");
+
+        let tick = state.parse_message(payload).unwrap().unwrap();
+
+        assert_eq!(
+            tick,
+            MarketDataTick::ExecutionQuote(ExecutionQuoteTick {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                execution_quote: ExecutionQuote {
+                    best_bid: 63999.50,
+                    best_ask: 64000.50,
+                },
+                timestamp: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+            })
+        );
     }
 
     #[tokio::test]
@@ -274,7 +311,13 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(first.mark_price, 64000.10);
-        assert_eq!(second.mark_price, 64010.20);
+        match first {
+            MarketDataTick::MarkPrice(tick) => assert_eq!(tick.mark_price, 64000.10),
+            MarketDataTick::ExecutionQuote(_) => panic!("expected mark price tick"),
+        }
+        match second {
+            MarketDataTick::MarkPrice(tick) => assert_eq!(tick.mark_price, 64010.20),
+            MarketDataTick::ExecutionQuote(_) => panic!("expected mark price tick"),
+        }
     }
 }
