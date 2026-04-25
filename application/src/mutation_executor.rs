@@ -749,6 +749,7 @@ impl MutationExecutor {
                     );
                 }
                 FollowUpQueueAction::NothingToRetire => {}
+                FollowUpQueueAction::StillWorking { .. } => {}
                 FollowUpQueueAction::Blocked { reason } => {
                     return Err(TrackMutationError::Mutation(anyhow!(
                         "failed to resolve follow-up retirements for track `{id}`: {reason}"

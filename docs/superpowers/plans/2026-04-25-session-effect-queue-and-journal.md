@@ -650,6 +650,9 @@ pub enum FollowUpQueueAction {
         effect_ids: Vec<String>,
         requires_reconcile: bool,
     },
+    StillWorking {
+        order_id: String,
+    },
     NothingToRetire,
     Blocked { reason: String },
 }
@@ -1162,7 +1165,7 @@ pub(super) async fn process_effect(
 - `ClosedWithoutFill` 通过 `SessionEffectQueue::record_cancel_resolution(...)` 释放同 batch downstream submit。
 - `ClosedWithFill` 通过 `SessionEffectQueue::record_cancel_resolution(...)` 废弃同 batch downstream submit，并触发 immediate reconcile。
 - `StillWorking` 通过 queue 返回 `CancelQueueAction::Deferred { until: DeferredUntil::ExchangeState }`，保留 cancel effect，不释放 downstream submit；对应 track 只能由 exchange reconcile / open-order sync 的 `WakeSignal::ExchangeState` 唤醒。
-- `Unknown` 通过 queue 返回 `AwaitingFollowUpRetirement { reason }`，并触发 bounded open-order sync；sync 完成后由 `resolve_follow_up_retirements_for_closed_orders(...)` 根据完整 open-order snapshot 在 queue 内部解析 downstream submit。
+- `Unknown` 通过 queue 返回 `AwaitingFollowUpRetirement { reason }`，并触发 bounded open-order sync；sync 完成后由 `resolve_follow_up_retirements_for_closed_orders(...)` 根据完整 open-order snapshot 在 queue 内部解析 downstream submit。订单已不在 open orders 时废弃 downstream submit 并触发 reconcile；订单仍在 open orders 时消费本次 follow-up，把原 cancel effect 转回 queued，并暂停到下一次 `WakeSignal::ExchangeState` 后重试。
 
 - [ ] **Step 6: 明确并测试 wake owner**
 
@@ -1523,7 +1526,7 @@ pub fn resolve_follow_up_retirements_for_closed_orders(
 ) -> Vec<FollowUpQueueAction>;
 ```
 
-`resolve_follow_up_retirements_for_closed_orders(...)` 是单一领域动作。bounded open-order sync 完成后，调用方只提交完整 open-order id 集合；queue 内部根据之前保存的 follow-up 指针找到同 track、同 batch 的 downstream submit，返回 `FollowUpQueueAction::SupersededDownstream` 并把这些 submit 从 queue 中移除。调用方不保存 token 生命周期，也不直接读取或构造 `batch_id + sequence`。
+`resolve_follow_up_retirements_for_closed_orders(...)` 是单一领域动作。bounded open-order sync 完成后，调用方只提交完整 open-order id 集合；queue 内部根据之前保存的 follow-up 指针解释结果。订单已不在 open orders 时，返回 `FollowUpQueueAction::SupersededDownstream` 并把这些 submit 从 queue 中移除。订单仍在 open orders 时，queue 消费 follow-up 指针，把原 cancel effect 转回 queued，暂停到下一次 `WakeSignal::ExchangeState`，并且不释放 downstream submit。调用方不保存 token 生命周期，也不直接读取或构造 `batch_id + sequence`。
 
 在 `MutationExecutor` 中处理 unknown cancel 时：
 
@@ -1553,6 +1556,7 @@ for action in actions {
 如果当前代码没有独立 `handle_follow_up_queue_action(...)`，本 task 新增一个私有 helper。它只根据 `FollowUpQueueAction` 做两类事：
 
 - `SupersededDownstream`：best-effort 写 journal outcomes，并触发 fresh reconcile。
+- `StillWorking`：记录诊断即可；queue 已经把原 cancel effect 放回 queued 并暂停到下一次 exchange-state wake。
 - `NothingToRetire` / `Blocked`：记录日志或指标，不释放任何 submit。
 
 - [x] **Step 4: 删除 startup durable retirement 清理**

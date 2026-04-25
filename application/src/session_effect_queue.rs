@@ -128,6 +128,9 @@ pub enum FollowUpQueueAction {
         effect_ids: Vec<String>,
         requires_reconcile: bool,
     },
+    StillWorking {
+        order_id: String,
+    },
     NothingToRetire,
     Blocked {
         reason: String,
@@ -395,10 +398,11 @@ impl SessionEffectQueue {
             .follow_up_tokens
             .iter()
             .filter_map(|(token, pointer)| {
-                if &pointer.track_id == track_id
-                    && !open_order_ids.contains(&pointer.closed_order_id)
-                {
-                    Some(token.clone())
+                if &pointer.track_id == track_id {
+                    Some((
+                        token.clone(),
+                        open_order_ids.contains(&pointer.closed_order_id),
+                    ))
                 } else {
                     None
                 }
@@ -407,7 +411,13 @@ impl SessionEffectQueue {
 
         tokens
             .into_iter()
-            .map(|token| inner.record_follow_up_retirement_by_token(token))
+            .map(|(token, still_open)| {
+                if still_open {
+                    inner.record_follow_up_still_working_by_token(token)
+                } else {
+                    inner.record_follow_up_retirement_by_token(token)
+                }
+            })
             .collect()
     }
 
@@ -551,6 +561,34 @@ impl SessionEffectQueue {
 }
 
 impl SessionEffectQueueInner {
+    fn record_follow_up_still_working_by_token(
+        &mut self,
+        token: InternalFollowUpKey,
+    ) -> FollowUpQueueAction {
+        let Some(pointer) = self.follow_up_tokens.remove(&token) else {
+            return FollowUpQueueAction::NothingToRetire;
+        };
+        let order_id = pointer.closed_order_id.clone();
+        let Some(track) = self.tracks.get_mut(&pointer.track_id) else {
+            return FollowUpQueueAction::NothingToRetire;
+        };
+        let Some(effect) = track.front_effect_mut() else {
+            return FollowUpQueueAction::NothingToRetire;
+        };
+        if effect.effect.effect_id != pointer.cancel_effect_id {
+            return FollowUpQueueAction::Blocked {
+                reason: format!(
+                    "follow-up cancel effect `{}` is no longer at the front of track `{}`",
+                    pointer.cancel_effect_id,
+                    pointer.track_id.as_str()
+                ),
+            };
+        }
+        effect.dispatch_state = QueuedEffectState::Queued;
+        track.paused_until = Some(DeferredUntil::ExchangeState);
+        FollowUpQueueAction::StillWorking { order_id }
+    }
+
     fn record_follow_up_retirement_by_token(
         &mut self,
         token: InternalFollowUpKey,
@@ -1082,5 +1120,48 @@ mod tests {
                 requires_reconcile: true,
             }]
         );
+    }
+
+    #[test]
+    fn follow_up_snapshot_with_still_open_order_retries_cancel_after_exchange_wake() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = enqueue_effects(
+            &queue,
+            track_id.as_str(),
+            &[cancel_effect(), submit_effect("client-1")],
+        );
+
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        queue.record_cancel_resolution(
+            &enqueued[0],
+            CancelReceiptResolution::Unknown {
+                order_id: "order-1".into(),
+                reason: "cancel outcome unknown".into(),
+            },
+        );
+
+        let actions = queue.resolve_follow_up_retirements_for_closed_orders(
+            &track_id,
+            &HashSet::from(["order-1".to_string()]),
+        );
+
+        assert_eq!(
+            actions,
+            vec![FollowUpQueueAction::StillWorking {
+                order_id: "order-1".into()
+            }]
+        );
+        assert!(
+            queue.claim_next().is_none(),
+            "still-open order should not immediately release downstream submit"
+        );
+        queue.wake_track_for(&track_id, WakeSignal::ExchangeState);
+        assert_eq!(
+            queue.claim_next().unwrap().effect_id,
+            enqueued[0],
+            "the original cancel should be retried before downstream submit"
+        );
+        assert!(queue.active_submit_hints_for_track(&track_id).is_empty());
     }
 }
