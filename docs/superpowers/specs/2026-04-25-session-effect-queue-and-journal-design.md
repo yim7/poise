@@ -186,7 +186,7 @@ pub enum CancelReceiptResolution {
     ClosedWithoutFill,
     ClosedWithFill { filled_qty: f64 },
     StillWorking,
-    Unknown { reason: String },
+    Unknown { order_id: String, reason: String },
 }
 
 pub enum CancelQueueAction {
@@ -203,14 +203,15 @@ pub enum CancelQueueAction {
 }
 
 pub enum FollowUpQueueAction {
-    SupersededDownstream {
-        effect_ids: Vec<String>,
+    Closed {
+        cancel_effect_id: String,
+        superseded_downstream_effect_ids: Vec<String>,
         requires_reconcile: bool,
     },
-    StillWorking {
+    StillOpen {
         order_id: String,
     },
-    NothingToRetire,
+    NoMatchingFollowUp,
     Blocked { reason: String },
 }
 
@@ -262,7 +263,7 @@ impl SessionEffectQueue {
 
 `SessionEffectOutcome::Blocked` 的语义是“当前 batch 已不能继续”，不是“整个 queue 停止”。queue 必须终结或跳过当前 batch 的剩余 effect，并允许同 track 后续新 batch 或其他 track 的 batch 继续派发；否则一次 cancel/submit failure 会把当前 session effect worker 卡死。
 
-unknown cancel 不是普通 `Blocked`。普通 `Blocked` 表示 batch 失败并终结；unknown cancel 表示 downstream submit 暂时等待 bounded open-order sync 判断。queue 内部记录 follow-up 指针，并通过 `CancelQueueAction::AwaitingCancelFollowUp { reason }` 通知 application 触发 open-order sync。后续 bounded open-order sync 只把完整 `CompleteOpenOrderSnapshot` 交给 `resolve_cancel_follow_ups_from_open_order_snapshot(...)`；queue 内部用保存的指针解释结果：如果订单已不在 open orders，废弃 downstream submit 并要求 reconcile；如果订单仍在 open orders，消费本次 follow-up，把原 cancel effect 转回 queued，并暂停到下一次 `WakeSignal::ExchangeState` 后重试。调用层不能持有 token，不能构造 batch 顺序身份，也不能查询 downstream 列表。
+unknown cancel 不是普通 `Blocked`。普通 `Blocked` 表示 batch 失败并终结；unknown cancel 表示 downstream submit 暂时等待 bounded open-order sync 判断。queue 内部记录 follow-up 指针，并通过 `CancelQueueAction::AwaitingCancelFollowUp { reason }` 通知 application 触发 open-order sync。后续 bounded open-order sync 只把完整 `CompleteOpenOrderSnapshot` 交给 `resolve_cancel_follow_ups_from_open_order_snapshot(...)`；queue 内部用保存的指针解释结果：如果订单已不在 open orders，返回 `FollowUpQueueAction::Closed`，明确原 cancel effect 已终结、需要 reconcile，并废弃 downstream submit，即使没有 downstream 也不能退化成 no-op；如果订单仍在 open orders，消费本次 follow-up，把原 cancel effect 转回 queued，并暂停到下一次 `WakeSignal::ExchangeState` 后重试，本次 sync 末尾不能再用同一个 exchange-state 输入立刻唤醒它。调用层不能持有 token，不能构造 batch 顺序身份，也不能查询 downstream 列表。
 
 `record_submit_exchange_accepted(effect_id)` 是 queue 拥有 submit dispatch progress 的领域入口。worker 在交易所 `submit_order` 返回成功后、application writeback 之前调用它，把对应 submit effect 从 `InFlight` 推进到 `SubmittedAwaitingWriteback`。这样 exchange sync 可以看到“交易所已经接受、但本地 runtime 还没完成写回”的 submit hint，而调用方不需要也不能直接改 queue 内部状态。
 

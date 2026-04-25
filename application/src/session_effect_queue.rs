@@ -125,14 +125,15 @@ struct InternalFollowUpKey(String);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FollowUpQueueAction {
-    SupersededDownstream {
-        effect_ids: Vec<String>,
+    Closed {
+        cancel_effect_id: String,
+        superseded_downstream_effect_ids: Vec<String>,
         requires_reconcile: bool,
     },
-    StillWorking {
+    StillOpen {
         order_id: String,
     },
-    NothingToRetire,
+    NoMatchingFollowUp,
     Blocked {
         reason: String,
     },
@@ -501,6 +502,9 @@ impl SessionEffectQueue {
                 batch.effects = retained;
             }
             SessionEffectQueueInner::prune_empty_front_batches(track);
+            if resolved.is_empty() {
+                return resolved;
+            }
             track.paused_until = None;
         }
         for effect_id in &resolved {
@@ -572,14 +576,14 @@ impl SessionEffectQueueInner {
         token: InternalFollowUpKey,
     ) -> FollowUpQueueAction {
         let Some(pointer) = self.follow_up_tokens.remove(&token) else {
-            return FollowUpQueueAction::NothingToRetire;
+            return FollowUpQueueAction::NoMatchingFollowUp;
         };
         let order_id = pointer.closed_order_id.clone();
         let Some(track) = self.tracks.get_mut(&pointer.track_id) else {
-            return FollowUpQueueAction::NothingToRetire;
+            return FollowUpQueueAction::NoMatchingFollowUp;
         };
         let Some(effect) = track.front_effect_mut() else {
-            return FollowUpQueueAction::NothingToRetire;
+            return FollowUpQueueAction::NoMatchingFollowUp;
         };
         if effect.effect.effect_id != pointer.cancel_effect_id {
             return FollowUpQueueAction::Blocked {
@@ -592,7 +596,7 @@ impl SessionEffectQueueInner {
         }
         effect.dispatch_state = QueuedEffectState::Queued;
         track.paused_until = Some(DeferredUntil::ExchangeState);
-        FollowUpQueueAction::StillWorking { order_id }
+        FollowUpQueueAction::StillOpen { order_id }
     }
 
     fn record_follow_up_closed_by_token(
@@ -600,25 +604,22 @@ impl SessionEffectQueueInner {
         token: InternalFollowUpKey,
     ) -> FollowUpQueueAction {
         let Some(pointer) = self.follow_up_tokens.remove(&token) else {
-            return FollowUpQueueAction::NothingToRetire;
+            return FollowUpQueueAction::NoMatchingFollowUp;
         };
         if !self
             .effect_index
             .contains_key(pointer.cancel_effect_id.as_str())
         {
-            return FollowUpQueueAction::NothingToRetire;
+            return FollowUpQueueAction::NoMatchingFollowUp;
         }
 
         let effect_ids =
             self.retire_current_batch_after(&pointer.track_id, &pointer.cancel_effect_id);
         self.mark_track_ready(&pointer.track_id);
-        if effect_ids.is_empty() {
-            FollowUpQueueAction::NothingToRetire
-        } else {
-            FollowUpQueueAction::SupersededDownstream {
-                effect_ids,
-                requires_reconcile: true,
-            }
+        FollowUpQueueAction::Closed {
+            cancel_effect_id: pointer.cancel_effect_id,
+            superseded_downstream_effect_ids: effect_ids,
+            requires_reconcile: true,
         }
     }
     fn mark_track_ready(&mut self, track_id: &TrackId) {
@@ -1138,8 +1139,39 @@ mod tests {
 
         assert_eq!(
             actions,
-            vec![FollowUpQueueAction::SupersededDownstream {
-                effect_ids: vec![enqueued[1].clone(), enqueued[2].clone()],
+            vec![FollowUpQueueAction::Closed {
+                cancel_effect_id: enqueued[0].clone(),
+                superseded_downstream_effect_ids: vec![enqueued[1].clone(), enqueued[2].clone()],
+                requires_reconcile: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn closed_cancel_follow_up_requires_reconcile_even_without_downstream_submit() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = enqueue_effects(&queue, track_id.as_str(), &[cancel_effect()]);
+
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        queue.record_cancel_resolution(
+            &enqueued[0],
+            CancelReceiptResolution::Unknown {
+                order_id: "closed-order".into(),
+                reason: "cancel outcome unknown".into(),
+            },
+        );
+
+        let actions = queue.resolve_cancel_follow_ups_from_open_order_snapshot(
+            &track_id,
+            &complete_open_orders(&[]),
+        );
+
+        assert_eq!(
+            actions,
+            vec![FollowUpQueueAction::Closed {
+                cancel_effect_id: enqueued[0].clone(),
+                superseded_downstream_effect_ids: vec![],
                 requires_reconcile: true,
             }]
         );
@@ -1171,7 +1203,7 @@ mod tests {
 
         assert_eq!(
             actions,
-            vec![FollowUpQueueAction::StillWorking {
+            vec![FollowUpQueueAction::StillOpen {
                 order_id: "order-1".into()
             }]
         );
