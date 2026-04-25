@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::session_effect_queue::EnqueuedEffectJournalEntry;
 use crate::{
     ApplicationNotification, CancelReceiptResolution, EffectJournalEntry, EffectStatus,
-    EffectStatusUpdate, FollowUpQueueAction, SessionEffectQueue, SessionTrackEffect,
-    TrackControlCommand, TrackControlState, TrackEffectJournal, TrackMutationStore, WakeSignal,
+    EffectStatusUpdate, FollowUpQueueAction, SessionEffectQueue, TrackControlCommand,
+    TrackControlState, TrackEffectJournal, TrackMutationStore, WakeSignal,
 };
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
@@ -47,6 +48,22 @@ pub trait AccountCapacityGuard: Send + Sync {
 struct FollowUpQueueHandling {
     requires_reconcile: bool,
     exchange_state_wake_consumed: bool,
+}
+
+fn effect_journal_entries_from_enqueued(
+    entries: Vec<EnqueuedEffectJournalEntry>,
+) -> Vec<EffectJournalEntry> {
+    entries
+        .into_iter()
+        .map(|entry| EffectJournalEntry {
+            effect_id: entry.effect_id,
+            track_id: entry.track_id,
+            batch_id: entry.batch_id,
+            sequence: entry.sequence,
+            effect: entry.effect,
+            created_at: entry.created_at,
+        })
+        .collect()
 }
 
 pub trait RecoveryAnomalyObserver: Send + Sync {
@@ -647,10 +664,10 @@ impl MutationExecutor {
     ) -> Result<TrackTransition> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let track_id = TrackId::new(id);
-        let follow_up_requires_reconcile = self
+        let follow_up_plan = self
             .session_effect_queue
-            .cancel_follow_up_requires_reconcile_from_open_order_snapshot(&track_id, &open_orders);
-        let effective_mode = if follow_up_requires_reconcile {
+            .plan_cancel_follow_ups_from_open_order_snapshot(&track_id, &open_orders);
+        let effective_mode = if follow_up_plan.requires_reconcile() {
             ExchangeSyncMode::RecoverAndReconcile
         } else {
             mode
@@ -714,7 +731,7 @@ impl MutationExecutor {
 
         let follow_up_actions = self
             .session_effect_queue
-            .resolve_cancel_follow_ups_from_open_order_snapshot(&track_id, &open_orders);
+            .commit_cancel_follow_up_resolution(follow_up_plan);
         let follow_up_handling = self
             .handle_follow_up_queue_actions(id, &follow_up_actions)
             .await?;
@@ -758,7 +775,6 @@ impl MutationExecutor {
                             .map(EffectStatusUpdate::superseded),
                     );
                 }
-                FollowUpQueueAction::NoMatchingFollowUp => {}
                 FollowUpQueueAction::StillOpen { .. } => {
                     exchange_state_wake_consumed = true;
                 }
@@ -1320,13 +1336,14 @@ impl MutationExecutor {
         }
 
         let effect_created_at = chrono::Utc::now();
-        let session_effects = self.session_effect_queue.enqueue_transition_effects(
+        let enqueued_effects = self.session_effect_queue.enqueue_transition_effects(
             &TrackId::new(id),
             result.effects(),
             effect_created_at,
         );
-        if !session_effects.is_empty() {
-            let journal_entries = effect_journal_entries_from_session_effects(&session_effects);
+        if !enqueued_effects.is_empty() {
+            let journal_entries =
+                effect_journal_entries_from_enqueued(enqueued_effects.journal_projection_entries());
             if let Err(error) = self.effect_journal.append_entries(&journal_entries).await {
                 tracing::warn!(
                     track_id = id,
@@ -1371,26 +1388,6 @@ fn effect_status_failed(effect_id: &str, error: &str) -> EffectStatusUpdate {
         status: EffectStatus::Failed,
         attempt_delta: 1,
         last_error: Some(error.to_string()),
-    }
-}
-
-fn effect_journal_entries_from_session_effects(
-    effects: &[SessionTrackEffect],
-) -> Vec<EffectJournalEntry> {
-    effects
-        .iter()
-        .map(effect_journal_entry_from_session_effect)
-        .collect()
-}
-
-fn effect_journal_entry_from_session_effect(effect: &SessionTrackEffect) -> EffectJournalEntry {
-    EffectJournalEntry {
-        effect_id: effect.effect_id.clone(),
-        track_id: effect.track_id.clone(),
-        batch_id: effect.batch_id.clone(),
-        sequence: effect.sequence,
-        effect: effect.effect.clone(),
-        created_at: effect.created_at,
     }
 }
 
@@ -1862,7 +1859,7 @@ mod tests {
     use tokio::sync::broadcast::error::TryRecvError;
 
     use super::test_support::{MemoryRepository, NoopGuard, seeded_manager, track_write_services};
-    use super::{MutationExecutor, RecoveryAnomalyObserver};
+    use super::{MutationExecutor, RecoveryAnomalyObserver, effect_journal_entries_from_enqueued};
     use crate::{TrackControlState, TrackMutationStore, TrackQueryStore};
 
     #[derive(Default)]
@@ -2264,13 +2261,11 @@ mod tests {
             ],
             now,
         );
-        let cancel_effect_id = enqueued[0].effect_id.clone();
-        repository
-            .append_entries(&super::effect_journal_entries_from_session_effects(
-                &enqueued,
-            ))
-            .await
-            .unwrap();
+        let effect_ids = enqueued.effect_ids();
+        let cancel_effect_id = effect_ids[0].clone();
+        let journal_entries =
+            effect_journal_entries_from_enqueued(enqueued.journal_projection_entries());
+        repository.append_entries(&journal_entries).await.unwrap();
         services.session_effect_queue.record_cancel_resolution(
             &cancel_effect_id,
             CancelReceiptResolution::Unknown {
@@ -2295,7 +2290,7 @@ mod tests {
         let effects = repository.pending_effects();
         let downstream = effects
             .iter()
-            .find(|effect| effect.effect_id == enqueued[1].effect_id)
+            .find(|effect| effect.effect_id == effect_ids[1])
             .expect("downstream journal row should exist");
         assert_eq!(downstream.status, EffectStatus::Superseded);
     }
@@ -2328,7 +2323,7 @@ mod tests {
             ],
             chrono::Utc::now(),
         );
-        let cancel_effect_id = enqueued[0].effect_id.clone();
+        let cancel_effect_id = enqueued.effect_ids()[0].clone();
         services.session_effect_queue.claim_next().unwrap();
         services.session_effect_queue.record_cancel_resolution(
             &cancel_effect_id,
@@ -2388,7 +2383,7 @@ mod tests {
             }],
             chrono::Utc::now(),
         );
-        let cancel_effect_id = enqueued[0].effect_id.clone();
+        let cancel_effect_id = enqueued.effect_ids()[0].clone();
         services.session_effect_queue.claim_next().unwrap();
         services.session_effect_queue.record_cancel_resolution(
             &cancel_effect_id,
@@ -2445,7 +2440,7 @@ mod tests {
             ],
             chrono::Utc::now(),
         );
-        let cancel_effect_id = enqueued[0].effect_id.clone();
+        let cancel_effect_id = enqueued.effect_ids()[0].clone();
         assert_eq!(
             services
                 .session_effect_queue

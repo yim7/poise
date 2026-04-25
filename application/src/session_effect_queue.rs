@@ -44,6 +44,52 @@ impl SessionTrackEffect {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EnqueuedTransitionEffects {
+    effects: Vec<SessionTrackEffect>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EnqueuedEffectJournalEntry {
+    pub(crate) effect_id: String,
+    pub(crate) track_id: TrackId,
+    pub(crate) batch_id: String,
+    pub(crate) sequence: u32,
+    pub(crate) effect: TrackEffect,
+    pub(crate) created_at: DateTime<Utc>,
+}
+
+impl EnqueuedTransitionEffects {
+    fn new(effects: Vec<SessionTrackEffect>) -> Self {
+        Self { effects }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.effects.is_empty()
+    }
+
+    pub fn effect_ids(&self) -> Vec<String> {
+        self.effects
+            .iter()
+            .map(|effect| effect.effect_id.clone())
+            .collect()
+    }
+
+    pub(crate) fn journal_projection_entries(&self) -> Vec<EnqueuedEffectJournalEntry> {
+        self.effects
+            .iter()
+            .map(|effect| EnqueuedEffectJournalEntry {
+                effect_id: effect.effect_id.clone(),
+                track_id: effect.track_id.clone(),
+                batch_id: effect.batch_id.clone(),
+                sequence: effect.sequence,
+                effect: effect.effect.clone(),
+                created_at: effect.created_at,
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionEffectQueueSnapshot {
     pub track_id: TrackId,
@@ -133,10 +179,38 @@ pub enum FollowUpQueueAction {
     StillOpen {
         order_id: String,
     },
-    NoMatchingFollowUp,
     Blocked {
         reason: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CancelFollowUpResolutionPlan {
+    resolutions: Vec<PlannedCancelFollowUpResolution>,
+}
+
+impl CancelFollowUpResolutionPlan {
+    pub fn requires_reconcile(&self) -> bool {
+        self.resolutions
+            .iter()
+            .any(|resolution| matches!(resolution.result, PlannedCancelFollowUpResult::Closed))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.resolutions.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PlannedCancelFollowUpResolution {
+    token: InternalFollowUpKey,
+    result: PlannedCancelFollowUpResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum PlannedCancelFollowUpResult {
+    Closed,
+    StillOpen { order_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -200,7 +274,7 @@ impl SessionEffectQueue {
         track_id: &TrackId,
         effects: &[TrackEffect],
         created_at: DateTime<Utc>,
-    ) -> Vec<SessionTrackEffect> {
+    ) -> EnqueuedTransitionEffects {
         let batch_id = {
             let mut inner = self.inner.lock().unwrap();
             inner.next_batch_id_for(track_id)
@@ -209,7 +283,7 @@ impl SessionEffectQueue {
             track_id, &batch_id, effects, created_at,
         );
         self.enqueue_prepared_effects(session_effects.clone());
-        session_effects
+        EnqueuedTransitionEffects::new(session_effects)
     }
 
     fn enqueue_prepared_effects(&self, effects: Vec<SessionTrackEffect>) {
@@ -390,60 +464,60 @@ impl SessionEffectQueue {
         }
     }
 
-    pub fn resolve_cancel_follow_ups_from_open_order_snapshot(
+    pub fn plan_cancel_follow_ups_from_open_order_snapshot(
         &self,
         track_id: &TrackId,
         open_orders: &CompleteOpenOrderSnapshot,
-    ) -> Vec<FollowUpQueueAction> {
-        let mut inner = self.inner.lock().unwrap();
-        let open_order_ids = open_orders
-            .orders()
-            .iter()
-            .map(|order| order.order_id.as_str())
-            .collect::<HashSet<_>>();
-        let tokens = inner
-            .follow_up_tokens
-            .iter()
-            .filter_map(|(token, pointer)| {
-                if &pointer.track_id == track_id {
-                    Some((
-                        token.clone(),
-                        open_order_ids.contains(pointer.closed_order_id.as_str()),
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-
-        tokens
-            .into_iter()
-            .map(|(token, still_open)| {
-                if still_open {
-                    inner.record_follow_up_still_working_by_token(token)
-                } else {
-                    inner.record_follow_up_closed_by_token(token)
-                }
-            })
-            .collect()
-    }
-
-    pub fn cancel_follow_up_requires_reconcile_from_open_order_snapshot(
-        &self,
-        track_id: &TrackId,
-        open_orders: &CompleteOpenOrderSnapshot,
-    ) -> bool {
+    ) -> CancelFollowUpResolutionPlan {
         let inner = self.inner.lock().unwrap();
         let open_order_ids = open_orders
             .orders()
             .iter()
             .map(|order| order.order_id.as_str())
             .collect::<HashSet<_>>();
+        let resolutions = inner
+            .follow_up_tokens
+            .iter()
+            .filter_map(|(token, pointer)| {
+                if &pointer.track_id == track_id {
+                    let result = if open_order_ids.contains(pointer.closed_order_id.as_str()) {
+                        PlannedCancelFollowUpResult::StillOpen {
+                            order_id: pointer.closed_order_id.clone(),
+                        }
+                    } else {
+                        PlannedCancelFollowUpResult::Closed
+                    };
+                    Some(PlannedCancelFollowUpResolution {
+                        token: token.clone(),
+                        result,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        CancelFollowUpResolutionPlan { resolutions }
+    }
 
-        inner.follow_up_tokens.values().any(|pointer| {
-            &pointer.track_id == track_id
-                && !open_order_ids.contains(pointer.closed_order_id.as_str())
-        })
+    pub fn commit_cancel_follow_up_resolution(
+        &self,
+        plan: CancelFollowUpResolutionPlan,
+    ) -> Vec<FollowUpQueueAction> {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(blocked) = inner.validate_cancel_follow_up_plan(&plan) {
+            return vec![blocked];
+        }
+        plan.resolutions
+            .into_iter()
+            .map(|resolution| match resolution.result {
+                PlannedCancelFollowUpResult::StillOpen { .. } => {
+                    inner.record_follow_up_still_working_by_token(resolution.token)
+                }
+                PlannedCancelFollowUpResult::Closed => {
+                    inner.record_follow_up_closed_by_token(resolution.token)
+                }
+            })
+            .collect()
     }
 
     pub fn active_submit_effect_ids(&self) -> HashSet<String> {
@@ -592,19 +666,69 @@ impl SessionEffectQueue {
 }
 
 impl SessionEffectQueueInner {
+    fn validate_cancel_follow_up_plan(
+        &self,
+        plan: &CancelFollowUpResolutionPlan,
+    ) -> Option<FollowUpQueueAction> {
+        let mut seen_cancel_effects = HashSet::new();
+        for resolution in &plan.resolutions {
+            let Some(pointer) = self.follow_up_tokens.get(&resolution.token) else {
+                return Some(Self::stale_follow_up_plan(
+                    "follow-up token no longer exists",
+                ));
+            };
+            if !seen_cancel_effects.insert(pointer.cancel_effect_id.as_str()) {
+                return Some(FollowUpQueueAction::Blocked {
+                    reason: format!(
+                        "cancel follow-up resolution plan contains duplicate cancel effect `{}`",
+                        pointer.cancel_effect_id
+                    ),
+                });
+            }
+            let Some(track) = self.tracks.get(&pointer.track_id) else {
+                return Some(Self::stale_follow_up_plan(format!(
+                    "track `{}` no longer exists",
+                    pointer.track_id.as_str()
+                )));
+            };
+            let Some(effect) = track.front_effect() else {
+                return Some(Self::stale_follow_up_plan(format!(
+                    "track `{}` no longer has a front effect",
+                    pointer.track_id.as_str()
+                )));
+            };
+            if effect.effect.effect_id != pointer.cancel_effect_id {
+                return Some(FollowUpQueueAction::Blocked {
+                    reason: format!(
+                        "follow-up cancel effect `{}` is no longer at the front of track `{}`",
+                        pointer.cancel_effect_id,
+                        pointer.track_id.as_str()
+                    ),
+                });
+            }
+        }
+        None
+    }
+
     fn record_follow_up_still_working_by_token(
         &mut self,
         token: InternalFollowUpKey,
     ) -> FollowUpQueueAction {
         let Some(pointer) = self.follow_up_tokens.remove(&token) else {
-            return FollowUpQueueAction::NoMatchingFollowUp;
+            return Self::stale_follow_up_plan("follow-up token no longer exists");
         };
         let order_id = pointer.closed_order_id.clone();
         let Some(track) = self.tracks.get_mut(&pointer.track_id) else {
-            return FollowUpQueueAction::NoMatchingFollowUp;
+            return Self::stale_follow_up_plan(format!(
+                "track `{}` no longer exists",
+                pointer.track_id.as_str()
+            ));
         };
         let Some(effect) = track.front_effect_mut() else {
-            return FollowUpQueueAction::NoMatchingFollowUp;
+            return Self::stale_follow_up_plan(format!(
+                "track `{}` no longer has a front effect",
+                pointer.track_id.as_str()
+            ));
         };
         if effect.effect.effect_id != pointer.cancel_effect_id {
             return FollowUpQueueAction::Blocked {
@@ -625,13 +749,16 @@ impl SessionEffectQueueInner {
         token: InternalFollowUpKey,
     ) -> FollowUpQueueAction {
         let Some(pointer) = self.follow_up_tokens.remove(&token) else {
-            return FollowUpQueueAction::NoMatchingFollowUp;
+            return Self::stale_follow_up_plan("follow-up token no longer exists");
         };
         if !self
             .effect_index
             .contains_key(pointer.cancel_effect_id.as_str())
         {
-            return FollowUpQueueAction::NoMatchingFollowUp;
+            return Self::stale_follow_up_plan(format!(
+                "cancel effect `{}` no longer exists",
+                pointer.cancel_effect_id
+            ));
         }
 
         let effect_ids =
@@ -643,6 +770,13 @@ impl SessionEffectQueueInner {
             requires_reconcile: true,
         }
     }
+
+    fn stale_follow_up_plan(reason: impl Into<String>) -> FollowUpQueueAction {
+        FollowUpQueueAction::Blocked {
+            reason: format!("stale cancel follow-up resolution plan: {}", reason.into()),
+        }
+    }
+
     fn mark_track_ready(&mut self, track_id: &TrackId) {
         let Some(track) = self.tracks.get_mut(track_id) else {
             return;
@@ -830,6 +964,7 @@ mod tests {
 
     use super::{
         CancelQueueAction, CancelReceiptResolution, DeferredUntil, FollowUpQueueAction,
+        InternalFollowUpKey, PlannedCancelFollowUpResolution, PlannedCancelFollowUpResult,
         SessionEffectOutcome, SessionEffectQueue, SessionPendingEffectState, SessionQueueAction,
         WakeSignal,
     };
@@ -841,9 +976,7 @@ mod tests {
     ) -> Vec<String> {
         queue
             .enqueue_transition_effects(&TrackId::new(track_id), effects, Utc::now())
-            .into_iter()
-            .map(|effect| effect.effect_id)
-            .collect()
+            .effect_ids()
     }
 
     fn cancel_effect() -> TrackEffect {
@@ -903,10 +1036,20 @@ mod tests {
             Utc::now(),
         );
 
-        assert_eq!(enqueued.len(), 2);
-        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0].effect_id);
-        queue.record_outcome(&enqueued[0].effect_id, SessionEffectOutcome::Finished);
-        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[1].effect_id);
+        assert_eq!(enqueued.effect_ids().len(), 2);
+        assert_eq!(
+            queue.claim_next().unwrap().effect_id,
+            enqueued.effect_ids()[0]
+        );
+        queue.record_outcome(&enqueued.effect_ids()[0], SessionEffectOutcome::Finished);
+        assert_eq!(
+            queue.claim_next().unwrap().effect_id,
+            enqueued.effect_ids()[1]
+        );
+        let journal_entries = enqueued.journal_projection_entries();
+        assert_eq!(journal_entries.len(), 2);
+        assert_eq!(journal_entries[0].effect_id, enqueued.effect_ids()[0]);
+        assert_eq!(journal_entries[1].sequence, 1);
     }
 
     #[test]
@@ -1153,10 +1296,15 @@ mod tests {
             }
         );
 
-        let actions = queue.resolve_cancel_follow_ups_from_open_order_snapshot(
+        let plan = queue.plan_cancel_follow_ups_from_open_order_snapshot(
             &TrackId::new("btc-core"),
             &complete_open_orders(&[]),
         );
+        assert!(
+            plan.requires_reconcile(),
+            "closed unknown cancel should request reconcile before queue state is committed"
+        );
+        let actions = queue.commit_cancel_follow_up_resolution(plan);
 
         assert_eq!(
             actions,
@@ -1183,10 +1331,13 @@ mod tests {
             },
         );
 
-        let actions = queue.resolve_cancel_follow_ups_from_open_order_snapshot(
-            &track_id,
-            &complete_open_orders(&[]),
+        let plan = queue
+            .plan_cancel_follow_ups_from_open_order_snapshot(&track_id, &complete_open_orders(&[]));
+        assert!(
+            plan.requires_reconcile(),
+            "closed unknown cancel without downstream still changes cancel outcome"
         );
+        let actions = queue.commit_cancel_follow_up_resolution(plan);
 
         assert_eq!(
             actions,
@@ -1196,6 +1347,168 @@ mod tests {
                 requires_reconcile: true,
             }]
         );
+    }
+
+    #[test]
+    fn cancel_follow_up_plan_does_not_mutate_queue_before_commit() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = enqueue_effects(
+            &queue,
+            track_id.as_str(),
+            &[cancel_effect(), submit_effect("client-1")],
+        );
+
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        queue.record_cancel_resolution(
+            &enqueued[0],
+            CancelReceiptResolution::Unknown {
+                order_id: "closed-order".into(),
+                reason: "cancel outcome unknown".into(),
+            },
+        );
+
+        let plan = queue
+            .plan_cancel_follow_ups_from_open_order_snapshot(&track_id, &complete_open_orders(&[]));
+        assert!(plan.requires_reconcile());
+        assert!(
+            queue.claim_next().is_none(),
+            "planning follow-up resolution must not mutate the awaiting queue state"
+        );
+
+        let actions = queue.commit_cancel_follow_up_resolution(plan);
+        assert_eq!(
+            actions,
+            vec![FollowUpQueueAction::Closed {
+                cancel_effect_id: enqueued[0].clone(),
+                superseded_downstream_effect_ids: vec![enqueued[1].clone()],
+                requires_reconcile: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn stale_cancel_follow_up_plan_reports_blocked_action() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = enqueue_effects(&queue, track_id.as_str(), &[cancel_effect()]);
+
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        queue.record_cancel_resolution(
+            &enqueued[0],
+            CancelReceiptResolution::Unknown {
+                order_id: "closed-order".into(),
+                reason: "cancel outcome unknown".into(),
+            },
+        );
+
+        let plan = queue
+            .plan_cancel_follow_ups_from_open_order_snapshot(&track_id, &complete_open_orders(&[]));
+        assert!(!plan.is_empty());
+        queue.clear_track(&track_id);
+
+        let actions = queue.commit_cancel_follow_up_resolution(plan);
+
+        assert!(matches!(
+            actions.as_slice(),
+            [FollowUpQueueAction::Blocked { reason }]
+                if reason.contains("stale cancel follow-up resolution plan")
+        ));
+    }
+
+    #[test]
+    fn cancel_follow_up_plan_commit_is_atomic_when_later_resolution_is_stale() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = enqueue_effects(
+            &queue,
+            track_id.as_str(),
+            &[cancel_effect(), submit_effect("client-1")],
+        );
+
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        queue.record_cancel_resolution(
+            &enqueued[0],
+            CancelReceiptResolution::Unknown {
+                order_id: "closed-order".into(),
+                reason: "cancel outcome unknown".into(),
+            },
+        );
+
+        let valid_token = InternalFollowUpKey(format!("{}:{}:1", track_id.as_str(), enqueued[0]));
+        let stale_token = InternalFollowUpKey("missing-token".into());
+        let mixed_plan = super::CancelFollowUpResolutionPlan {
+            resolutions: vec![
+                PlannedCancelFollowUpResolution {
+                    token: valid_token,
+                    result: PlannedCancelFollowUpResult::Closed,
+                },
+                PlannedCancelFollowUpResolution {
+                    token: stale_token,
+                    result: PlannedCancelFollowUpResult::Closed,
+                },
+            ],
+        };
+
+        let actions = queue.commit_cancel_follow_up_resolution(mixed_plan);
+
+        assert!(matches!(
+            actions.as_slice(),
+            [FollowUpQueueAction::Blocked { reason }]
+                if reason.contains("stale cancel follow-up resolution plan")
+        ));
+        assert!(
+            queue.claim_next().is_none(),
+            "failed plan commit must not partially retire the awaiting cancel"
+        );
+
+        let valid_plan = queue
+            .plan_cancel_follow_ups_from_open_order_snapshot(&track_id, &complete_open_orders(&[]));
+        let actions = queue.commit_cancel_follow_up_resolution(valid_plan);
+        assert_eq!(
+            actions,
+            vec![FollowUpQueueAction::Closed {
+                cancel_effect_id: enqueued[0].clone(),
+                superseded_downstream_effect_ids: vec![enqueued[1].clone()],
+                requires_reconcile: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn committed_still_open_follow_up_requeues_cancel_after_later_exchange_wake() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = enqueue_effects(
+            &queue,
+            track_id.as_str(),
+            &[cancel_effect(), submit_effect("client-1")],
+        );
+
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        queue.record_cancel_resolution(
+            &enqueued[0],
+            CancelReceiptResolution::Unknown {
+                order_id: "order-1".into(),
+                reason: "cancel outcome unknown".into(),
+            },
+        );
+        let plan = queue.plan_cancel_follow_ups_from_open_order_snapshot(
+            &track_id,
+            &complete_open_orders(&["order-1"]),
+        );
+        assert!(!plan.requires_reconcile());
+        let actions = queue.commit_cancel_follow_up_resolution(plan);
+
+        assert_eq!(
+            actions,
+            vec![FollowUpQueueAction::StillOpen {
+                order_id: "order-1".into()
+            }]
+        );
+        assert!(queue.claim_next().is_none());
+        queue.wake_track_for(&track_id, WakeSignal::ExchangeState);
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
     }
 
     #[test]
@@ -1217,10 +1530,11 @@ mod tests {
             },
         );
 
-        let actions = queue.resolve_cancel_follow_ups_from_open_order_snapshot(
+        let plan = queue.plan_cancel_follow_ups_from_open_order_snapshot(
             &track_id,
             &complete_open_orders(&["order-1"]),
         );
+        let actions = queue.commit_cancel_follow_up_resolution(plan);
 
         assert_eq!(
             actions,
@@ -1262,10 +1576,11 @@ mod tests {
 
         queue.clear_track(&track_id);
         let fresh = enqueue_effects(&queue, track_id.as_str(), &[cancel_effect()]);
-        let actions = queue.resolve_cancel_follow_ups_from_open_order_snapshot(
+        let plan = queue.plan_cancel_follow_ups_from_open_order_snapshot(
             &track_id,
             &complete_open_orders(&["order-from-old-session"]),
         );
+        let actions = queue.commit_cancel_follow_up_resolution(plan);
 
         assert!(
             actions.is_empty(),

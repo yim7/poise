@@ -123,7 +123,7 @@ Effect journal 是历史记录，不是运行队列。
 - exchange 调用结果。
 - 失败原因。
 - superseded / abandoned / succeeded / failed 等历史状态。
-- 创建时间、更新时间、session id。
+- 创建时间、更新时间。
 
 它不能提供：
 
@@ -211,7 +211,6 @@ pub enum FollowUpQueueAction {
     StillOpen {
         order_id: String,
     },
-    NoMatchingFollowUp,
     Blocked { reason: String },
 }
 
@@ -229,7 +228,7 @@ impl SessionEffectQueue {
         track_id: &TrackId,
         effects: &[TrackEffect],
         created_at: DateTime<Utc>,
-    ) -> Vec<SessionTrackEffect>;
+    ) -> EnqueuedTransitionEffects;
     pub fn claim_next(&self) -> Option<SessionTrackEffect>;
     pub fn record_submit_exchange_accepted(&self, effect_id: &str) -> bool;
     pub fn wake_track_for(&self, track_id: &TrackId, signal: WakeSignal);
@@ -239,10 +238,14 @@ impl SessionEffectQueue {
         effect_id: &str,
         resolution: CancelReceiptResolution,
     ) -> CancelQueueAction;
-    pub fn resolve_cancel_follow_ups_from_open_order_snapshot(
+    pub fn plan_cancel_follow_ups_from_open_order_snapshot(
         &self,
         track_id: &TrackId,
         open_orders: &CompleteOpenOrderSnapshot,
+    ) -> CancelFollowUpResolutionPlan;
+    pub fn commit_cancel_follow_up_resolution(
+        &self,
+        plan: CancelFollowUpResolutionPlan,
     ) -> Vec<FollowUpQueueAction>;
     pub fn active_submit_hints_for_track(&self, track_id: &TrackId) -> Vec<PendingSubmitHint>;
     pub fn snapshot_for_track(&self, track_id: &TrackId) -> SessionEffectQueueSnapshot;
@@ -263,26 +266,28 @@ impl SessionEffectQueue {
 
 `SessionEffectOutcome::Blocked` 的语义是“当前 batch 已不能继续”，不是“整个 queue 停止”。queue 必须终结或跳过当前 batch 的剩余 effect，并允许同 track 后续新 batch 或其他 track 的 batch 继续派发；否则一次 cancel/submit failure 会把当前 session effect worker 卡死。
 
-unknown cancel 不是普通 `Blocked`。普通 `Blocked` 表示 batch 失败并终结；unknown cancel 表示 downstream submit 暂时等待 bounded open-order sync 判断。queue 内部记录 follow-up 指针，并通过 `CancelQueueAction::AwaitingCancelFollowUp { reason }` 通知 application 触发 open-order sync。后续 bounded open-order sync 只把完整 `CompleteOpenOrderSnapshot` 交给 `resolve_cancel_follow_ups_from_open_order_snapshot(...)`；queue 内部用保存的指针解释结果：如果订单已不在 open orders，返回 `FollowUpQueueAction::Closed`，明确原 cancel effect 已终结、需要 reconcile，并废弃 downstream submit，即使没有 downstream 也不能退化成 no-op；如果订单仍在 open orders，消费本次 follow-up，把原 cancel effect 转回 queued，并暂停到下一次 `WakeSignal::ExchangeState` 后重试，本次 sync 末尾不能再用同一个 exchange-state 输入立刻唤醒它。调用层不能持有 token，不能构造 batch 顺序身份，也不能查询 downstream 列表。
+unknown cancel 不是普通 `Blocked`。普通 `Blocked` 表示 batch 失败并终结；unknown cancel 表示 downstream submit 暂时等待 bounded open-order sync 判断。queue 内部记录 follow-up 指针，并通过 `CancelQueueAction::AwaitingCancelFollowUp { reason }` 通知 application 触发 open-order sync。后续 bounded open-order sync 先把完整 `CompleteOpenOrderSnapshot` 交给 `plan_cancel_follow_ups_from_open_order_snapshot(...)` 得到不可由调用方解释内部 token 的 `CancelFollowUpResolutionPlan`；application 只读取 plan 是否要求把本次 sync 升级为 reconcile。durable commit 成功后，再把同一个 plan 交给 `commit_cancel_follow_up_resolution(...)` 修改 queue。订单已不在 open orders 时，返回 `FollowUpQueueAction::Closed`，明确原 cancel effect 已终结、需要 reconcile，并废弃 downstream submit，即使没有 downstream 也不能退化成 no-op；如果订单仍在 open orders，消费本次 follow-up，把原 cancel effect 转回 queued，并暂停到下一次 `WakeSignal::ExchangeState` 后重试，本次 sync 末尾不能再用同一个 exchange-state 输入立刻唤醒它。空 plan 可以没有 action；非空 plan 在 commit 时必须先整体校验再整体修改 queue，如果任一 follow-up 指针已经失效或 plan 内部自相冲突，返回 `Blocked` 且不做部分提交。调用层不能持有 token，不能构造 batch 顺序身份，也不能查询 downstream 列表。
 
 `record_submit_exchange_accepted(effect_id)` 是 queue 拥有 submit dispatch progress 的领域入口。worker 在交易所 `submit_order` 返回成功后、application writeback 之前调用它，把对应 submit effect 从 `InFlight` 推进到 `SubmittedAwaitingWriteback`。这样 exchange sync 可以看到“交易所已经接受、但本地 runtime 还没完成写回”的 submit hint，而调用方不需要也不能直接改 queue 内部状态。
 
 `active_submit_hints_for_track(...)` 只暴露已经进入交易所交互窗口的 submit hint，例如 `InFlight` 或 `SubmittedAwaitingWriteback` 的 submit effect。它不能返回仍在 queue 中等待前置 cancel 释放、尚未 claim、尚未发往交易所的 downstream submit。未派发的 queued submit 是 queue 的计划状态，不是 exchange sync 的事实输入。
 
-`SessionEffectQueue` 可以复用 `TrackEffect`，但不应叫 `PersistedTrackEffect`。第一阶段可引入：
+`SessionEffectQueue` 可以复用 `TrackEffect`，但不应叫 `PersistedTrackEffect`。enqueue 返回专用 `EnqueuedTransitionEffects`，用于暴露 effect ids 和 queue-owned journal projection；worker 执行只通过 `claim_next()` 得到 `SessionTrackEffect`。第一阶段可引入：
 
 ```rust
 pub struct SessionTrackEffect {
+    // 暴露给 worker 的执行字段。
     pub effect_id: String,
     pub track_id: TrackId,
     pub effect: TrackEffect,
     pub created_at: DateTime<Utc>,
+    // queue 拥有的诊断身份，不是调用方构造协议。
     pub(crate) batch_id: String,
     pub(crate) sequence: u32,
 }
 ```
 
-`SessionTrackEffect` 是 queue 的运行表示，不应作为 journal 的公开输入类型。`batch_id` / `sequence` 是 queue 内部诊断身份，只能由 queue 内部生成，并通过应用层 journal adapter 转换成 `EffectJournalEntry`；调用方不能构造或依赖这两个字段。
+`SessionTrackEffect` 是 queue 的运行表示，不应作为 journal 的公开输入类型。`batch_id` / `sequence` 是 queue 内部诊断身份，只能由 queue 内部生成，并通过 crate-internal `EnqueuedEffectJournalEntry` 这种 queue-owned projection 交给应用层 journal adapter 转换成 `EffectJournalEntry`；调用方不能构造或依赖这两个字段。crate 外部只能看到执行所需字段，不能把 batch 顺序当成公共协议。
 
 UI / read model 也不应直接消费 `SessionTrackEffect`。如果需要展示当前 session queue，queue 提供独立只读 DTO：
 
@@ -339,16 +344,11 @@ pub enum SessionPendingEffectState {
 #[async_trait]
 pub trait TrackEffectJournal: Send + Sync {
     async fn append_entries(&self, entries: &[EffectJournalEntry]) -> Result<()>;
-    async fn record_effect_outcomes(&self, outcomes: &[EffectJournalOutcome]) -> Result<()>;
-    async fn list_recent_track_effects(
-        &self,
-        track_id: &TrackId,
-        limit: usize,
-    ) -> Result<Vec<PersistedTrackEffect>>;
+    async fn record_effect_outcomes(&self, outcomes: &[EffectStatusUpdate]) -> Result<()>;
 }
 ```
 
-`EffectJournalEntry` 是 journal 自己的诊断输入类型。它可以包含 `effect_id`、`track_id`、`session_id`、`batch_id`、`sequence`、`TrackEffect`、创建时间等调试字段，但不应复用 `SessionTrackEffect`。如果 queue 的内部顺序模型未来改变，只需要修改一次从 queue effect 到 journal entry 的转换，不需要改 journal trait 和所有测试 fixture。
+`EffectJournalEntry` 是 journal 自己的诊断输入类型。它包含 `effect_id`、`track_id`、`batch_id`、`sequence`、`TrackEffect`、创建时间等调试字段，但不应复用 `SessionTrackEffect`。如果 queue 的内部顺序模型未来改变，只需要修改一次从 queue-owned projection 到 journal entry 的转换，不需要改 journal trait 和所有测试 fixture。recent history 查询不属于 journal 写接口，由 read/query source 暴露。
 
 第一阶段可以保留 `track_effects` 表作为 journal 表，但要改名语义：
 
@@ -392,7 +392,8 @@ SessionEffectQueue.claim_next()
   -> for accepted submit: SessionEffectQueue.record_submit_exchange_accepted(...)
   -> write runtime result through application service
   -> application classifies cancel receipt when effect is cancel
-  -> SessionEffectQueue.record_outcome(...) / record_cancel_resolution(...) / resolve_cancel_follow_ups_from_open_order_snapshot(...)
+  -> SessionEffectQueue.record_outcome(...) / record_cancel_resolution(...)
+  -> plan_cancel_follow_ups_from_open_order_snapshot(...) / commit_cancel_follow_up_resolution(...)
   -> EffectJournal.record_effect_outcomes(...)
 ```
 
@@ -444,7 +445,7 @@ startup 不再处理旧 effect queue。
 - 启动时把旧 effect 标为 `Superseded` 来保证 runtime 正确性。
 - 查询并删除旧 cancel follow-up 来保证 runtime 正确性。
 
-如果 UI 不希望显示旧 pending effect，可以在 journal 层用 session id 表示旧 session 已结束，而不是让 startup 以 runtime 清理的名义修改它。
+如果 UI 不希望显示旧 pending effect，应通过 read/query 层的展示规则处理，而不是让 startup 以 runtime 清理的名义修改 journal 历史。
 
 ## 10. Cancel follow-up
 

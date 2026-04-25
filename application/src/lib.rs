@@ -44,10 +44,10 @@ pub use read_model::{
 };
 pub use runtime_lifecycle_service::{TrackRecoverySummary, TrackRuntimeLifecycleService};
 pub use session_effect_queue::{
-    CancelQueueAction, CancelReceiptResolution, DeferredUntil, FollowUpQueueAction,
-    SessionEffectOutcome, SessionEffectQueue, SessionEffectQueueSnapshot, SessionPendingEffectKind,
-    SessionPendingEffectState, SessionPendingEffectView, SessionQueueAction, SessionTrackEffect,
-    WakeSignal,
+    CancelFollowUpResolutionPlan, CancelQueueAction, CancelReceiptResolution, DeferredUntil,
+    EnqueuedTransitionEffects, FollowUpQueueAction, SessionEffectOutcome, SessionEffectQueue,
+    SessionEffectQueueSnapshot, SessionPendingEffectKind, SessionPendingEffectState,
+    SessionPendingEffectView, SessionQueueAction, SessionTrackEffect, WakeSignal,
 };
 pub use track_command_service::TrackCommandService;
 pub use track_control_state::{PersistedControlMode, TrackControlCommand, TrackControlState};

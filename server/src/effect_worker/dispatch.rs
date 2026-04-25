@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use poise_application::{
     CancelQueueAction, CancelReceiptResolution, SessionEffectOutcome, SessionQueueAction,
     SessionTrackEffect,
@@ -119,9 +119,13 @@ async fn handle_cancel_queue_action(
                     .await?;
             }
         }
-        CancelQueueAction::UnblockedDownstream
-        | CancelQueueAction::Deferred { .. }
-        | CancelQueueAction::Blocked { .. } => {}
+        CancelQueueAction::UnblockedDownstream | CancelQueueAction::Deferred { .. } => {}
+        CancelQueueAction::Blocked { reason } => {
+            return Err(anyhow!(
+                "cancel queue action blocked for track `{}`: {reason}",
+                track_id.as_str()
+            ));
+        }
     }
     Ok(())
 }
@@ -341,6 +345,35 @@ mod tests {
                 .pending_effects
                 .is_empty(),
             "complete open-order sync should resolve the queue token and retire downstream session effects"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_queue_blocked_action_is_reported_as_error() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let effect_worker_context = build_effect_worker_context_for_repository(repository);
+        let execution = Arc::new(RecordingExecutionPort::default());
+        let account = Arc::new(NoopAccountPort);
+        let worker = EffectWorker::new(
+            effect_worker_context,
+            execution,
+            account,
+            Duration::from_millis(1),
+        );
+
+        let result = super::handle_cancel_queue_action(
+            &worker,
+            &TrackId::new("btc-core"),
+            None,
+            poise_application::CancelQueueAction::Blocked {
+                reason: "queue invariant failed".into(),
+            },
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "blocked cancel queue actions must not be silently ignored"
         );
     }
 
