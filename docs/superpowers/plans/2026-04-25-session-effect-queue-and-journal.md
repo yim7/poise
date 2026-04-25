@@ -1671,7 +1671,7 @@ git commit -m "refactor: make follow-up retirement session scoped"
 - Modify: `server/src/runtime/startup_bootstrap.rs`
 - Test: `application/src/runtime_lifecycle_service.rs`
 
-- [ ] **Step 1: 写测试：fresh activation 不 supersede 旧 DB effects**
+- [x] **Step 1: 写测试：fresh activation 不 supersede 旧 DB effects**
 
 在 `application/src/runtime_lifecycle_service.rs` tests 中替换旧测试 `prepare_fresh_session_for_activation_clears_old_pending_work_and_executor_state`，新测试为：
 
@@ -1701,7 +1701,7 @@ async fn prepare_fresh_session_for_activation_does_not_mutate_old_persisted_effe
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run:
 
@@ -1711,7 +1711,7 @@ cargo test -p poise-application prepare_fresh_session_for_activation_does_not_mu
 
 Expected: FAIL，因为当前 activation 会 supersede 旧 effect。
 
-- [ ] **Step 3: 简化 activation**
+- [x] **Step 3: 简化 activation**
 
 把 `MutationExecutor::prepare_fresh_session_for_activation` 改成：
 
@@ -1729,7 +1729,7 @@ pub(crate) async fn prepare_fresh_session_for_activation(&self, id: &str) -> Res
 }
 ```
 
-- [ ] **Step 4: 删除不再使用的 store 方法**
+- [x] **Step 4: 删除不再使用的 store 方法**
 
 从 `TrackEffectStore` 删除：
 
@@ -1747,7 +1747,7 @@ async fn save_follow_up_retirement_request(...)
 
 同步删除 SQLite 和 test repository 实现。
 
-- [ ] **Step 5: 运行测试**
+- [x] **Step 5: 运行测试**
 
 Run:
 
@@ -1758,12 +1758,21 @@ cargo check -p poise-application -p poise-storage -p poise-server
 
 Expected: PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add application/src/mutation_executor.rs application/src/runtime_lifecycle_service.rs application/src/track_effect_store.rs storage/src/sqlite.rs server/src/runtime/startup_bootstrap.rs
 git commit -m "refactor: remove startup persisted effect cleanup"
 ```
+
+执行记录：
+
+- 2026-04-25：删除 startup 对旧 persisted effect cleanup 的依赖，commit `11d8031`。
+- 验收：`cargo test -p poise-application prepare_fresh_session_for_activation_does_not_mutate_old_persisted_effects -- --nocapture` 先失败，确认旧实现会 supersede 旧 DB effects。
+- 验收：`cargo test -p poise-application runtime_lifecycle_service::tests:: -- --nocapture`
+- 验收：`cargo test -p poise-server runtime::startup_bootstrap::tests::complete_startup_cancels_inherited_orders_and_rebuilds_fresh_executor_state -- --nocapture`
+- 验收：`cargo test -p poise-storage list_pending_submit_effects_for_track_batch_returns_same_batch_submit_without_ready_filter -- --nocapture`
+- 验收：`cargo check -p poise-application -p poise-storage -p poise-server`
 
 ## Task 5: 删除旧 effect store 的 dispatch/pending 残留
 
