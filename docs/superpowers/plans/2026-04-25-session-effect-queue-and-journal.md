@@ -1486,7 +1486,7 @@ git commit -m "refactor: source pending session effects from queue"
 - Test: `application/src/session_effect_queue.rs`
 - Test: `application/src/mutation_executor.rs`
 
-- [ ] **Step 1: 写 queue 测试：follow-up retirement 由 queue token 解释**
+- [x] **Step 1: 写 queue 测试：follow-up retirement 由 queue token 解释**
 
 在 `application/src/session_effect_queue.rs` tests 中新增：
 
@@ -1504,6 +1504,7 @@ fn follow_up_retirement_token_is_resolved_by_queue() {
     let action = queue.record_cancel_resolution(
         "cancel-1",
         CancelReceiptResolution::Unknown {
+            order_id: "closed-order".into(),
             reason: "exchange returned unknown order".into(),
         },
     );
@@ -1548,7 +1549,7 @@ async fn fresh_session_clears_session_queue_without_store_cleanup() {
 
 这个测试不 seed repository，也不检查 deleted count。它验证的是新共识：fresh session 只清当前 session queue，不读取或清理 durable follow-up retirement。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run:
 
@@ -1558,7 +1559,7 @@ cargo test -p poise-application follow_up_retirement_token_is_resolved_by_queue 
 
 Expected: FAIL，因为 queue 还没有实现 follow-up retirement 领域动作。
 
-- [ ] **Step 3: 将 follow-up retirement 放入 session queue**
+- [x] **Step 3: 将 follow-up retirement 放入 session queue**
 
 在 `SessionEffectQueue` 增加：
 
@@ -1576,7 +1577,7 @@ pub fn record_follow_up_retirement(
 ```rust
 let cancel_action = self
     .session_effect_queue
-    .record_cancel_resolution(effect_id, CancelReceiptResolution::Unknown { reason });
+    .record_cancel_resolution(effect_id, CancelReceiptResolution::Unknown { order_id, reason });
 if let CancelQueueAction::AwaitingFollowUpRetirement { token, .. } = cancel_action {
     self.request_bounded_open_order_sync(id, token).await?;
 }
@@ -1602,7 +1603,7 @@ self.handle_follow_up_queue_action(id, action).await?;
 - `SupersededDownstream`：best-effort 写 journal outcomes，并触发 fresh reconcile。
 - `NothingToRetire` / `Blocked`：记录日志或指标，不释放任何 submit。
 
-- [ ] **Step 4: 删除 startup durable retirement 清理**
+- [x] **Step 4: 删除 startup durable retirement 清理**
 
 从 `prepare_fresh_session_for_activation` 删除：
 
@@ -1619,7 +1620,7 @@ for request in &follow_up_retirements {
 self.session_effect_queue.clear_track(&TrackId::new(id));
 ```
 
-- [ ] **Step 5: 删除 durable follow-up retirement store 接口**
+- [x] **Step 5: 删除 durable follow-up retirement store 接口**
 
 从 `TrackEffectJournal` / 旧 `TrackEffectStore` 和 SQLite 删除：
 
@@ -1631,7 +1632,7 @@ async fn delete_follow_up_retirement_request(...)
 
 这一步应让“重启后恢复旧 follow-up retirement”在类型层面无法发生。
 
-- [ ] **Step 6: 运行测试**
+- [x] **Step 6: 运行测试**
 
 Run:
 
@@ -1641,12 +1642,23 @@ cargo test -p poise-application mutation_executor::tests:: runtime_lifecycle_ser
 
 Expected: PASS。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add application/src/session_effect_queue.rs application/src/mutation_executor.rs application/src/track_effect_store.rs storage/src/sqlite.rs
 git commit -m "refactor: make follow-up retirement session scoped"
 ```
+
+执行记录：
+
+- 2026-04-25：完成 follow-up retirement session queue 化，commit `d154141`。
+- 验收：`cargo test -p poise-application session_effect_queue -- --nocapture`
+- 验收：`cargo test -p poise-application mutation_executor::tests::record_cancel_order_success -- --nocapture`
+- 验收：`cargo test -p poise-application runtime_lifecycle_service::tests::prepare_fresh_session_for_activation_clears_old_pending_work_and_executor_state -- --nocapture`
+- 验收：`cargo test -p poise-storage schema -- --nocapture`
+- 验收：`cargo test -p poise-server effect_worker:: -- --nocapture`
+- 验收：`cargo test -p poise-server runtime::submit_preflight::tests::reconcile_ignores_persisted_effects_from_previous_session -- --nocapture`
+- 验收：`cargo test -p poise-server runtime::startup_bootstrap::tests::complete_startup_cancels_inherited_orders_and_rebuilds_fresh_executor_state -- --nocapture`
 
 ## Task 4: startup 删除旧 effect 清理依赖
 
