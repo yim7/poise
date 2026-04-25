@@ -89,6 +89,13 @@
 
 这四件事是一个任务边界，不能拆成多个提交。否则会出现“旧持久 outbox 已删除、新 session queue 还没接上”的运行空窗。
 
+执行记录：
+
+- 2026-04-25：完成第一个可运行切片，commit `3edc094`。
+- 验收：`cargo test -p poise-application session_effect_queue -- --nocapture`
+- 验收：`cargo test -p poise-application mutation_executor::tests:: -- --nocapture`
+- 验收：`cargo test -p poise-server effect_worker:: -- --nocapture`
+
 ### Task 1A: 建立 journal 边界，并锁住“旧 DB pending effect 不会被派发”
 
 **Files:**
