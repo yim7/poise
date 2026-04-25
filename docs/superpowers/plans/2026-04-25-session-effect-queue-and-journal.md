@@ -1619,9 +1619,12 @@ git commit -m "refactor: make follow-up retirement session scoped"
 - 2026-04-26：补齐 unknown cancel follow-up 的 still-open 分支，完整 open-orders 证明原订单仍 open 时重试原 cancel 且不释放 downstream submit，commit `25b6620`。
 - 2026-04-26：将 cancel follow-up public API 改为接收完整 `CompleteOpenOrderSnapshot`，queue 内部解释 closed/still-open 结果，commit `72053ae`。
 - 2026-04-26：将 cancel follow-up action 改为 `Closed` / `StillOpen` 领域结果，避免 still-open 被同次 exchange sync 立刻唤醒，并让 closed/no-downstream 仍触发 reconcile，commit `2416128`。
+- 2026-04-26：延后 cancel follow-up queue mutation 到 exchange sync 和 durable commit 成功之后，fresh session 清理同 track follow-up 指针，并让 closed follow-up 在 recover-only 入口也强制 reconcile，commit `40a3894`。
 - 验收：`cargo test -p poise-application session_effect_queue -- --nocapture`
 - 验收：`cargo test -p poise-application closed_cancel_follow_up_requires_reconcile_even_without_downstream_submit -- --nocapture`
 - 验收：`cargo test -p poise-application still_open_cancel_follow_up_consumes_current_exchange_state_wake -- --nocapture`
+- 验收：`cargo test -p poise-application cancel_follow_up_resolution_waits_for_successful_exchange_sync_commit -- --nocapture`
+- 验收：`cargo test -p poise-application closed_cancel_follow_up_forces_reconcile_even_from_recover_only_sync -- --nocapture`
 - 验收：`cargo test -p poise-application mutation_executor::tests::record_cancel_order_success -- --nocapture`
 - 验收：`cargo test -p poise-application cancel_follow_up_is_resolved_from_complete_open_order_snapshot -- --nocapture`
 - 验收：`cargo test -p poise-application exchange_sync_records_cancel_follow_up_outcomes -- --nocapture`
