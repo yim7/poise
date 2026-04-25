@@ -1890,6 +1890,7 @@ git commit -m "refactor: make track effects a journal"
 
 - 2026-04-25：删除旧 effect store 的 dispatch/pending/status 运行边界，把 effect 持久化降级为诊断 journal，commit `6f196de`。
 - 2026-04-25：补齐 current-session queue 与 journal 边界，effect-only transition 不再写业务真值，follow-up retirement / retired batch 只通过 queue 动作退休 session effect 并 best-effort 更新诊断 journal，commit `3929a10`。
+- 2026-04-25：补齐 submit writeback unknown 的 active hint 保留与 exchange sync 退休路径，移除 cancel writeback API 的 batch/sequence 泄漏，并让 `EffectJournalEntry` 不再依赖 session queue 运行类型，commit `0e9177a`。
 - 验收：`cargo test -p poise-application mutation_executor::tests:: -- --nocapture`
 - 验收：`cargo test -p poise-application session_effect_queue::tests:: -- --nocapture`
 - 验收：`cargo test -p poise-storage schema::tests::initialize_creates_tables -- --nocapture`
