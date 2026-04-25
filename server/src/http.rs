@@ -230,8 +230,8 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use chrono::{TimeZone, Utc};
     use poise_application::{
-        CommittedTrackWrite, EffectStatusUpdate, FollowUpRetirementRequest, PersistedTrackEffect,
-        StoredTrackEvent, TrackEffectStore, TrackMutationStore, TrackQueryStore,
+        CommittedTrackWrite, EffectStatusUpdate, PersistedTrackEffect, StoredTrackEvent,
+        TrackEffectStore, TrackMutationStore, TrackQueryStore,
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
@@ -1232,29 +1232,6 @@ mod tests {
             _batch_id: &str,
         ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
-        }
-
-        async fn save_follow_up_retirement_request(
-            &self,
-            _track_id: &TrackId,
-            _request: &FollowUpRetirementRequest,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn list_follow_up_retirement_requests(
-            &self,
-            _track_id: &TrackId,
-        ) -> anyhow::Result<Vec<FollowUpRetirementRequest>> {
-            Ok(Vec::new())
-        }
-
-        async fn delete_follow_up_retirement_request(
-            &self,
-            _track_id: &TrackId,
-            _request: &FollowUpRetirementRequest,
-        ) -> anyhow::Result<()> {
-            Ok(())
         }
     }
 

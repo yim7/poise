@@ -440,7 +440,7 @@ pub(crate) fn build_websocket_state(
 pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     services: &TestApplicationServices,
     _query_store: Arc<dyn TrackQueryStore>,
-    effect_store: Arc<dyn TrackEffectStore>,
+    _effect_store: Arc<dyn TrackEffectStore>,
     account_monitor: Arc<AccountMonitor>,
 ) -> (RuntimeTestContext, EffectWorkerTestContext) {
     let exchange_freshness = Arc::new(ExchangeFreshness::default());
@@ -449,7 +449,7 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     let reconcile = crate::assembly::build_reconcile_state(
         Arc::clone(&services.observation_service),
         Arc::clone(&services.runtime_lifecycle_service),
-        effect_store,
+        services.session_effect_queue.clone(),
         exchange_freshness.clone(),
         reconcile_guards,
         submit_preflight.clone(),
@@ -514,14 +514,14 @@ pub(crate) fn build_test_contexts_from_runtime_states(
 pub(crate) fn build_effect_worker_test_context(
     services: &TestApplicationServices,
     _query_store: Arc<dyn TrackQueryStore>,
-    effect_store: Arc<dyn TrackEffectStore>,
+    _effect_store: Arc<dyn TrackEffectStore>,
 ) -> EffectWorkerTestContext {
     let exchange_freshness = Arc::new(ExchangeFreshness::default());
     let submit_preflight = Arc::new(SubmitPreflight::new());
     let reconcile = crate::assembly::build_reconcile_state(
         Arc::clone(&services.observation_service),
         Arc::clone(&services.runtime_lifecycle_service),
-        effect_store,
+        services.session_effect_queue.clone(),
         exchange_freshness.clone(),
         Arc::new(TrackReconcileGuards::default()),
         submit_preflight.clone(),

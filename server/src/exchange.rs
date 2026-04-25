@@ -98,7 +98,7 @@ mod tests {
 
     use poise_engine::ports::{
         AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOpenOrderSnapshot,
-        ExchangeOrder, MarketDataTick, OrderReceipt, OrderRequest, Position, UserDataEvent,
+        MarketDataTick, OrderReceipt, OrderRequest, Position, UserDataEvent,
     };
     use poise_engine::track::Instrument;
 

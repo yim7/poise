@@ -711,9 +711,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use futures_util::{SinkExt, StreamExt};
     use poise_application::{
-        CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
-        PersistedTrackEffect, StoredTrackEvent, TrackEffectStore, TrackMutationStore,
-        TrackQueryStore,
+        CommittedTrackWrite, EffectStatus, EffectStatusUpdate, PersistedTrackEffect,
+        StoredTrackEvent, TrackEffectStore, TrackMutationStore, TrackQueryStore,
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
@@ -1870,29 +1869,6 @@ mod tests {
                 .filter(|effect| matches!(effect.effect, TrackEffect::SubmitOrder { .. }))
                 .cloned()
                 .collect())
-        }
-
-        async fn save_follow_up_retirement_request(
-            &self,
-            _track_id: &TrackId,
-            _request: &FollowUpRetirementRequest,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        async fn list_follow_up_retirement_requests(
-            &self,
-            _track_id: &TrackId,
-        ) -> Result<Vec<FollowUpRetirementRequest>> {
-            Ok(Vec::new())
-        }
-
-        async fn delete_follow_up_retirement_request(
-            &self,
-            _track_id: &TrackId,
-            _request: &FollowUpRetirementRequest,
-        ) -> Result<()> {
-            Ok(())
         }
     }
 

@@ -1,5 +1,4 @@
 use poise_application::ApplicationNotification;
-use std::collections::HashSet;
 use std::time::Duration;
 
 use poise_application::TrackMutationError;
@@ -91,17 +90,59 @@ pub(super) async fn reconcile_submit_preflight_state(
     state: &impl ReconcileStateAccess,
 ) -> std::result::Result<(), TrackMutationError> {
     let state = state.reconcile_state_view();
-    let current_pending_submit_effect_ids: HashSet<String> = state
-        .effect_store
-        .list_all_pending_submit_effects()
-        .await
-        .map_err(TrackMutationError::Persistence)?
-        .into_iter()
-        .map(|effect| effect.effect_id)
-        .collect();
+    let current_pending_submit_effect_ids = state.session_effect_queue.active_submit_effect_ids();
     state
         .submit_preflight
         .reconcile_pending_submit_effects(&current_pending_submit_effect_ids)
         .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use poise_application::TrackEffectStore;
+    use poise_storage::sqlite::SqliteStorage;
+
+    use crate::submit_preflight::SubmitPreflightDecision;
+    use crate::test_support::{
+        build_effect_worker_context_for_repository, seed_persisted_pending_submit_effect,
+    };
+
+    use super::reconcile_submit_preflight_state;
+
+    #[tokio::test]
+    async fn reconcile_ignores_persisted_effects_from_previous_session() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        seed_persisted_pending_submit_effect(repository.as_ref(), "btc-core")
+            .await
+            .unwrap();
+        let stale_effect_id = repository
+            .list_all_pending_submit_effects()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("seeded pending effect")
+            .effect_id;
+        let context = build_effect_worker_context_for_repository(repository);
+
+        context
+            .submit_preflight
+            .mark_submit_started(&stale_effect_id)
+            .await;
+        reconcile_submit_preflight_state(&context.effect_worker_state.reconcile)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            context
+                .submit_preflight
+                .decide(&stale_effect_id, "old-session-client")
+                .await,
+            SubmitPreflightDecision::Direct,
+            "previous-session persisted pending effects must not keep current-session preflight state alive"
+        );
+    }
 }

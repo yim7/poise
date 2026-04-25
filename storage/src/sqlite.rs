@@ -5,9 +5,8 @@ use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use poise_application::{
-    self as app, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, FollowUpRetirementRequest,
-    PersistedTrackEffect, StoredTrackEvent, TrackControlState, TrackEffectStore,
-    TrackMutationStore, TrackQueryStore,
+    self as app, CommittedTrackWrite, EffectStatus, EffectStatusUpdate, PersistedTrackEffect,
+    StoredTrackEvent, TrackControlState, TrackEffectStore, TrackMutationStore, TrackQueryStore,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -817,81 +816,6 @@ impl SqliteStorage {
             .collect())
     }
 
-    fn save_follow_up_retirement_request_blocking(
-        conn: Arc<Mutex<Connection>>,
-        track_id: TrackId,
-        request: FollowUpRetirementRequest,
-    ) -> Result<()> {
-        let conn = Self::lock_connection(&conn)?;
-        let now = Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO follow_up_retirements (
-                 track_id, batch_id, blocked_sequence, closed_order_id, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(track_id, batch_id, blocked_sequence, closed_order_id)
-             DO UPDATE SET updated_at = excluded.updated_at",
-            params![
-                track_id.as_str(),
-                request.batch_id,
-                request.blocked_sequence,
-                request.closed_order_id,
-                now,
-                now
-            ],
-        )
-        .context("failed to upsert follow-up retirement request")?;
-        Ok(())
-    }
-
-    fn list_follow_up_retirement_requests_blocking(
-        conn: Arc<Mutex<Connection>>,
-        track_id: TrackId,
-    ) -> Result<Vec<FollowUpRetirementRequest>> {
-        let conn = Self::lock_connection(&conn)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT batch_id, blocked_sequence, closed_order_id
-                 FROM follow_up_retirements
-                 WHERE track_id = ?1
-                 ORDER BY updated_at ASC, batch_id ASC, blocked_sequence ASC, closed_order_id ASC",
-            )
-            .context("failed to prepare follow-up retirement request query")?;
-
-        stmt.query_map(params![track_id.as_str()], |row| {
-            Ok(FollowUpRetirementRequest {
-                batch_id: row.get(0)?,
-                blocked_sequence: row.get(1)?,
-                closed_order_id: row.get(2)?,
-            })
-        })
-        .context("failed to query follow-up retirement requests")?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .context("failed to deserialize follow-up retirement requests")
-    }
-
-    fn delete_follow_up_retirement_request_blocking(
-        conn: Arc<Mutex<Connection>>,
-        track_id: TrackId,
-        request: FollowUpRetirementRequest,
-    ) -> Result<()> {
-        let conn = Self::lock_connection(&conn)?;
-        conn.execute(
-            "DELETE FROM follow_up_retirements
-             WHERE track_id = ?1
-               AND batch_id = ?2
-               AND blocked_sequence = ?3
-               AND closed_order_id = ?4",
-            params![
-                track_id.as_str(),
-                request.batch_id,
-                request.blocked_sequence,
-                request.closed_order_id
-            ],
-        )
-        .context("failed to delete follow-up retirement request")?;
-        Ok(())
-    }
-
     fn save_track_control_state_blocking(
         conn: Arc<Mutex<Connection>>,
         track_id: TrackId,
@@ -1201,52 +1125,6 @@ impl TrackEffectStore for SqliteStorage {
         .await
         .context("failed to join list_pending_submit_effects_for_track_batch blocking task")?
     }
-
-    async fn save_follow_up_retirement_request(
-        &self,
-        track_id: &TrackId,
-        request: &FollowUpRetirementRequest,
-    ) -> Result<()> {
-        let conn = Arc::clone(&self.conn);
-        let track_id = track_id.clone();
-        let request = request.clone();
-
-        tokio::task::spawn_blocking(move || {
-            Self::save_follow_up_retirement_request_blocking(conn, track_id, request)
-        })
-        .await
-        .context("failed to join save_follow_up_retirement_request blocking task")?
-    }
-
-    async fn list_follow_up_retirement_requests(
-        &self,
-        track_id: &TrackId,
-    ) -> Result<Vec<FollowUpRetirementRequest>> {
-        let conn = Arc::clone(&self.conn);
-        let track_id = track_id.clone();
-
-        tokio::task::spawn_blocking(move || {
-            Self::list_follow_up_retirement_requests_blocking(conn, track_id)
-        })
-        .await
-        .context("failed to join list_follow_up_retirement_requests blocking task")?
-    }
-
-    async fn delete_follow_up_retirement_request(
-        &self,
-        track_id: &TrackId,
-        request: &FollowUpRetirementRequest,
-    ) -> Result<()> {
-        let conn = Arc::clone(&self.conn);
-        let track_id = track_id.clone();
-        let request = request.clone();
-
-        tokio::task::spawn_blocking(move || {
-            Self::delete_follow_up_retirement_request_blocking(conn, track_id, request)
-        })
-        .await
-        .context("failed to join delete_follow_up_retirement_request blocking task")?
-    }
 }
 
 #[async_trait]
@@ -1367,10 +1245,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use poise_application::{
-        EffectStatus, FollowUpRetirementRequest, TrackEffectStore, TrackMutationStore,
-        TrackQueryStore,
-    };
+    use poise_application::{EffectStatus, TrackEffectStore, TrackMutationStore, TrackQueryStore};
     use poise_core::events::DomainEvent;
     use poise_core::strategy::BandBoundary;
     use poise_core::types::{Exposure, Side};
@@ -2287,45 +2162,6 @@ mod tests {
             batch_effects[0].effect,
             TrackEffect::SubmitOrder { .. }
         ));
-    }
-
-    #[tokio::test]
-    async fn follow_up_retirement_requests_roundtrip_and_dedupe() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let track_id = TrackId::new("btc-core");
-        let request = FollowUpRetirementRequest {
-            batch_id: "replacement".into(),
-            blocked_sequence: 0,
-            closed_order_id: "old-order-1".into(),
-        };
-
-        storage
-            .save_follow_up_retirement_request(&track_id, &request)
-            .await
-            .unwrap();
-        storage
-            .save_follow_up_retirement_request(&track_id, &request)
-            .await
-            .unwrap();
-
-        let stored = storage
-            .list_follow_up_retirement_requests(&track_id)
-            .await
-            .unwrap();
-        assert_eq!(stored, vec![request.clone()]);
-
-        storage
-            .delete_follow_up_retirement_request(&track_id, &request)
-            .await
-            .unwrap();
-
-        assert!(
-            storage
-                .list_follow_up_retirement_requests(&track_id)
-                .await
-                .unwrap()
-                .is_empty()
-        );
     }
 
     #[tokio::test]

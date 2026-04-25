@@ -1,8 +1,13 @@
 use anyhow::Result;
-use poise_application::{CancelReceiptResolution, SessionEffectOutcome, SessionTrackEffect};
+use poise_application::{
+    CancelQueueAction, CancelReceiptResolution, SessionEffectOutcome, SessionQueueAction,
+    SessionTrackEffect,
+};
+use poise_engine::track::{Instrument, TrackId};
 use poise_engine::transition::TrackEffect;
 
 use super::{Cancellation, EffectWorker};
+use crate::order_outcome::{ReconcileReason, cancel_writeback_outcome_unknown};
 
 pub(super) async fn run_once(worker: &EffectWorker) -> Result<()> {
     loop {
@@ -14,6 +19,8 @@ pub(super) async fn run_once(worker: &EffectWorker) -> Result<()> {
             break;
         };
         let effect_id = effect.effect_id.clone();
+        let track_id = effect.track_id.clone();
+        let instrument = effect_instrument(&effect.effect).cloned();
         let outcome = match worker.process_effect(effect).await {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -25,21 +32,116 @@ pub(super) async fn run_once(worker: &EffectWorker) -> Result<()> {
         };
         match outcome {
             SessionDispatchResult::Outcome(outcome) => {
-                worker
+                let action = worker
                     .state
                     .session_effect_queue
                     .record_outcome(&effect_id, outcome);
+                handle_session_queue_action(worker, &track_id, instrument.as_ref(), action).await?;
             }
             SessionDispatchResult::Cancel(resolution) => {
-                worker
+                let action = worker
                     .state
                     .session_effect_queue
                     .record_cancel_resolution(&effect_id, resolution);
+                handle_cancel_queue_action(worker, &track_id, instrument.as_ref(), action).await?;
             }
         }
     }
 
     Ok(())
+}
+
+async fn handle_session_queue_action(
+    worker: &EffectWorker,
+    track_id: &TrackId,
+    instrument: Option<&Instrument>,
+    action: SessionQueueAction,
+) -> Result<()> {
+    match action {
+        SessionQueueAction::RetiredBatch {
+            requires_reconcile: true,
+            ..
+        } => {
+            trigger_queue_reconcile(
+                worker,
+                track_id,
+                instrument,
+                ReconcileReason::ManualRecovery,
+            )
+            .await?
+        }
+        SessionQueueAction::Continue
+        | SessionQueueAction::RetiredBatch {
+            requires_reconcile: false,
+            ..
+        } => {}
+    }
+    Ok(())
+}
+
+async fn handle_cancel_queue_action(
+    worker: &EffectWorker,
+    track_id: &TrackId,
+    instrument: Option<&Instrument>,
+    action: CancelQueueAction,
+) -> Result<()> {
+    match action {
+        CancelQueueAction::SupersededDownstream {
+            requires_reconcile: true,
+            ..
+        } => {
+            trigger_queue_reconcile(
+                worker,
+                track_id,
+                instrument,
+                ReconcileReason::ManualRecovery,
+            )
+            .await?
+        }
+        CancelQueueAction::AwaitingFollowUpRetirement { .. } => {
+            if let Some(instrument) = instrument {
+                worker
+                    .recover_unknown_outcome(
+                        track_id.as_str(),
+                        instrument,
+                        cancel_writeback_outcome_unknown(),
+                    )
+                    .await?;
+            }
+        }
+        CancelQueueAction::UnblockedDownstream
+        | CancelQueueAction::SupersededDownstream {
+            requires_reconcile: false,
+            ..
+        }
+        | CancelQueueAction::Deferred { .. }
+        | CancelQueueAction::Blocked { .. } => {}
+    }
+    Ok(())
+}
+
+async fn trigger_queue_reconcile(
+    worker: &EffectWorker,
+    track_id: &TrackId,
+    instrument: Option<&Instrument>,
+    reason: ReconcileReason,
+) -> Result<()> {
+    if let Some(instrument) = instrument {
+        worker
+            .trigger_immediate_reconcile(track_id.as_str(), instrument, reason)
+            .await?;
+    }
+    Ok(())
+}
+
+fn effect_instrument(effect: &TrackEffect) -> Option<&Instrument> {
+    match effect {
+        TrackEffect::SubmitOrder { request, .. } => Some(&request.instrument),
+        TrackEffect::CancelOrder { instrument, .. } | TrackEffect::CancelAll { instrument } => {
+            Some(instrument)
+        }
+        TrackEffect::NoOp => None,
+    }
 }
 
 pub(super) enum SessionDispatchResult {
@@ -108,8 +210,15 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use anyhow::Result;
     use chrono::Utc;
     use poise_application::SessionTrackEffect;
+    use poise_core::types::{Exposure, Side};
+    use poise_engine::executor::SubmitRecoveryToken;
+    use poise_engine::ports::{
+        ExchangeOpenOrderSnapshot, ExecutionPort, OrderReceipt, OrderRequest, Position,
+    };
+    use poise_engine::price_gate::SubmitPurpose;
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
     use poise_storage::sqlite::SqliteStorage;
@@ -176,5 +285,121 @@ mod tests {
         worker.run_once().await.unwrap();
 
         assert_eq!(execution.cancel_all_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn unknown_cancel_uses_session_queue_follow_up_not_persisted_request() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let effect_worker_context = build_effect_worker_context_for_repository(repository.clone());
+        let track_id = TrackId::new("btc-core");
+        effect_worker_context
+            .effect_worker_state
+            .session_effect_queue
+            .enqueue_batch(vec![
+                SessionTrackEffect {
+                    effect_id: "cancel-unknown".to_string(),
+                    track_id: track_id.clone(),
+                    batch_id: "batch-1".to_string(),
+                    sequence: 0,
+                    effect: TrackEffect::CancelOrder {
+                        instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                        order_id: "missing-order".into(),
+                    },
+                    created_at: Utc::now(),
+                },
+                submit_effect("downstream-submit", 1),
+            ]);
+
+        let execution = Arc::new(UnknownCancelExecutionPort);
+        let account = Arc::new(NoopAccountPort);
+        let worker = EffectWorker::new(
+            effect_worker_context,
+            execution,
+            account,
+            Duration::from_millis(1),
+        );
+
+        worker.run_once().await.unwrap();
+
+        assert!(
+            worker
+                .state
+                .session_effect_queue
+                .snapshot_for_track(&track_id)
+                .pending_effects
+                .is_empty(),
+            "complete open-order sync should resolve the queue token and retire downstream session effects"
+        );
+    }
+
+    fn submit_effect(effect_id: &str, sequence: u32) -> SessionTrackEffect {
+        SessionTrackEffect {
+            effect_id: effect_id.to_string(),
+            track_id: TrackId::new("btc-core"),
+            batch_id: "batch-1".to_string(),
+            sequence,
+            effect: TrackEffect::SubmitOrder {
+                request: OrderRequest {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    side: Side::Buy,
+                    price: 100.0,
+                    quantity: 0.1,
+                    client_order_id: format!("{effect_id}-client"),
+                    reduce_only: false,
+                },
+                desired_exposure: Exposure(4.0),
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                recovery_token: SubmitRecoveryToken::empty(),
+            },
+            created_at: Utc::now(),
+        }
+    }
+
+    struct UnknownCancelExecutionPort;
+
+    #[async_trait::async_trait]
+    impl ExecutionPort for UnknownCancelExecutionPort {
+        async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
+            Ok(OrderReceipt {
+                order_id: "test-order".into(),
+                client_order_id: req.client_order_id,
+                filled_qty: 0.0,
+                status: poise_engine::ports::OrderStatus::New,
+            })
+        }
+
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            _order_id: &str,
+        ) -> Result<OrderReceipt> {
+            Err(anyhow::Error::new(
+                poise_engine::ports::ExecutionPortError::cancel_outcome_unknown(
+                    "Unknown order sent.",
+                ),
+            ))
+        }
+
+        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_position(&self, instrument: &Instrument) -> Result<Position> {
+            Ok(Position {
+                instrument: instrument.clone(),
+                qty: 0.0,
+                avg_price: 0.0,
+                unrealized_pnl: 0.0,
+            })
+        }
+
+        async fn get_open_orders(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<ExchangeOpenOrderSnapshot> {
+            Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                Vec::new(),
+            ))
+        }
     }
 }

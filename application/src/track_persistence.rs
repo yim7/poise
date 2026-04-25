@@ -60,13 +60,6 @@ pub struct PersistedTrackEffect {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FollowUpRetirementRequest {
-    pub batch_id: String,
-    pub blocked_sequence: u32,
-    pub closed_order_id: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectStatus {

@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use poise_engine::track::TrackId;
 
-use crate::track_persistence::{FollowUpRetirementRequest, PersistedTrackEffect};
+use crate::track_persistence::PersistedTrackEffect;
 
 #[async_trait]
 pub trait TrackEffectStore: Send + Sync {
@@ -25,18 +25,4 @@ pub trait TrackEffectStore: Send + Sync {
         track_id: &TrackId,
         batch_id: &str,
     ) -> Result<Vec<PersistedTrackEffect>>;
-    async fn save_follow_up_retirement_request(
-        &self,
-        track_id: &TrackId,
-        request: &FollowUpRetirementRequest,
-    ) -> Result<()>;
-    async fn list_follow_up_retirement_requests(
-        &self,
-        track_id: &TrackId,
-    ) -> Result<Vec<FollowUpRetirementRequest>>;
-    async fn delete_follow_up_retirement_request(
-        &self,
-        track_id: &TrackId,
-        request: &FollowUpRetirementRequest,
-    ) -> Result<()>;
 }

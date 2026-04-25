@@ -47,16 +47,6 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS follow_up_retirements (
-            track_id TEXT NOT NULL,
-            batch_id TEXT NOT NULL,
-            blocked_sequence INTEGER NOT NULL,
-            closed_order_id TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY (track_id, batch_id, blocked_sequence, closed_order_id)
-        );
-
         CREATE TABLE IF NOT EXISTS account_monitor_state (
             singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
             trading_day TEXT NOT NULL,
@@ -108,18 +98,6 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     )?;
     ensure_columns_present(
         conn,
-        "follow_up_retirements",
-        &[
-            "track_id",
-            "batch_id",
-            "blocked_sequence",
-            "closed_order_id",
-            "created_at",
-            "updated_at",
-        ],
-    )?;
-    ensure_columns_present(
-        conn,
         "account_monitor_state",
         &[
             "singleton_key",
@@ -145,10 +123,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
          ON track_effects(track_id, batch_id, sequence, status);
 
          CREATE INDEX IF NOT EXISTS idx_track_effects_recent
-         ON track_effects(track_id, updated_at DESC, created_at DESC, batch_id DESC, sequence DESC, effect_id DESC);
-
-         CREATE INDEX IF NOT EXISTS idx_follow_up_retirements_track
-         ON follow_up_retirements(track_id, updated_at, batch_id, blocked_sequence, closed_order_id);",
+         ON track_effects(track_id, updated_at DESC, created_at DESC, batch_id DESC, sequence DESC, effect_id DESC);",
     )?;
     Ok(())
 }
@@ -222,15 +197,6 @@ mod tests {
             .unwrap();
         assert_eq!(effects_count, 1);
 
-        let follow_up_retirements_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='follow_up_retirements'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(follow_up_retirements_count, 1);
-
         let account_monitor_state_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='account_monitor_state'",
@@ -284,15 +250,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(effects_batch_index_count, 1);
-
-        let follow_up_retirements_index_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_follow_up_retirements_track'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(follow_up_retirements_index_count, 1);
 
         let control_columns = table_columns(&conn, "track_control_state").unwrap();
         assert_eq!(

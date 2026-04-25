@@ -149,8 +149,8 @@ mod tests {
         MemoryRepository, seeded_manager, track_write_services,
     };
     use crate::{
-        EffectStatus, PersistedControlMode, TrackControlState, TrackEffectStore,
-        TrackMutationStore, TrackRecoveryIssue, runtime_read_state_loader,
+        EffectStatus, PersistedControlMode, TrackControlState, TrackMutationStore,
+        TrackRecoveryIssue, runtime_read_state_loader,
     };
 
     #[tokio::test]
@@ -416,17 +416,6 @@ mod tests {
         )
         .await
         .unwrap();
-        repository
-            .save_follow_up_retirement_request(
-                &TrackId::new("btc-core"),
-                &crate::FollowUpRetirementRequest {
-                    batch_id: "btc-core:batch-1".into(),
-                    blocked_sequence: 0,
-                    closed_order_id: "closed-order".into(),
-                },
-            )
-            .await
-            .unwrap();
         services
             .observation
             .observe_market(
@@ -487,13 +476,6 @@ mod tests {
             btc_statuses
                 .iter()
                 .all(|status| *status == EffectStatus::Superseded)
-        );
-        assert!(
-            repository
-                .list_follow_up_retirement_requests(&TrackId::new("btc-core"))
-                .await
-                .unwrap()
-                .is_empty()
         );
     }
 

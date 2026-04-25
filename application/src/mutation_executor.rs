@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::track_persistence::CommittedTrackWrite;
 use crate::{
     ApplicationNotification, CancelReceiptResolution, EffectStatus, EffectStatusUpdate,
-    FollowUpRetirementRequest, PersistedTrackEffect, SessionEffectQueue, SessionTrackEffect,
-    TrackControlCommand, TrackControlState, TrackEffectStore, TrackMutationStore, WakeSignal,
+    SessionEffectQueue, SessionTrackEffect, TrackControlCommand, TrackControlState,
+    TrackEffectStore, TrackMutationStore, WakeSignal,
 };
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
@@ -287,22 +287,9 @@ impl MutationExecutor {
             .into_iter()
             .map(|effect| effect.effect_id)
             .collect::<Vec<_>>();
-        let follow_up_retirements = self
-            .effect_store
-            .list_follow_up_retirement_requests(&TrackId::new(id))
-            .await
-            .map_err(TrackMutationError::Persistence)?;
-
         for effect_id in &session_reset_effect_ids {
             self.mutation_store
                 .update_effect_status(id, &EffectStatusUpdate::superseded(effect_id.clone()))
-                .await
-                .map_err(TrackMutationError::Persistence)?;
-        }
-
-        for request in &follow_up_retirements {
-            self.effect_store
-                .delete_follow_up_retirement_request(&TrackId::new(id), request)
                 .await
                 .map_err(TrackMutationError::Persistence)?;
         }
@@ -590,16 +577,6 @@ impl MutationExecutor {
             .await
             .map_err(anyhow::Error::new)?;
 
-        if observation.status.clears_working_order()
-            && result.1 != OrderUpdateAbsorbResult::Unabsorbed
-        {
-            self.retry_pending_follow_up_retirements_best_effort(
-                id,
-                "terminal order observation writeback",
-            )
-            .await;
-        }
-
         Ok(result)
     }
 
@@ -677,9 +654,15 @@ impl MutationExecutor {
         mode: ExchangeSyncMode,
     ) -> Result<TrackTransition> {
         let _mutation_guard = self.lock_track_mutation(id).await;
+        let track_id = TrackId::new(id);
+        let open_order_ids = open_orders
+            .orders()
+            .iter()
+            .map(|order| order.order_id.clone())
+            .collect::<HashSet<_>>();
         let pending_submit_hints = self
             .session_effect_queue
-            .active_submit_hints_for_track(&TrackId::new(id));
+            .active_submit_hints_for_track(&track_id);
         let (previous_snapshot, transition, next_snapshot) = {
             let mut manager = self.manager.write().await;
             let previous_snapshot = manager
@@ -735,11 +718,9 @@ impl MutationExecutor {
         .map_err(anyhow::Error::new)?;
 
         self.session_effect_queue
-            .wake_track_for(&TrackId::new(id), WakeSignal::ExchangeState);
-
-        drop(_mutation_guard);
-        self.retry_pending_follow_up_retirements_best_effort(id, "exchange state sync writeback")
-            .await;
+            .resolve_follow_up_retirements_for_closed_orders(&track_id, &open_order_ids);
+        self.session_effect_queue
+            .wake_track_for(&track_id, WakeSignal::ExchangeState);
 
         Ok(transition)
     }
@@ -841,11 +822,8 @@ impl MutationExecutor {
         .await
         .map_err(anyhow::Error::new)?;
 
-        drop(_mutation_guard);
-        self.retry_pending_follow_up_retirements_best_effort(id, "cancel success writeback")
-            .await;
-
         Ok(classify_cancel_receipt_resolution(
+            order_id,
             cancel_progressed,
             receipt,
         ))
@@ -890,122 +868,6 @@ impl MutationExecutor {
         .await
         .map(|_| ())
         .map_err(anyhow::Error::new)
-    }
-
-    pub async fn retire_stale_follow_up_submit(
-        &self,
-        id: &str,
-        request: &FollowUpRetirementRequest,
-    ) -> Result<bool> {
-        let _mutation_guard = self.lock_track_mutation(id).await;
-        let downstream_submits = self
-            .pending_submit_effects_for_track_batch(id, &request.batch_id)
-            .await
-            .map_err(anyhow::Error::new)
-            .map(|effects| {
-                pending_submit_effects_after_sequence(&effects, request.blocked_sequence)
-            })?;
-        if downstream_submits.is_empty() {
-            return Ok(true);
-        }
-
-        let lifecycle_closed = {
-            let manager = self.manager.read().await;
-            let snapshot = manager
-                .snapshot(id)
-                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            snapshot
-                .executor_state
-                .bindings
-                .iter()
-                .filter(|binding| binding.is_active())
-                .all(|binding| {
-                    binding.order_id.as_deref() != Some(request.closed_order_id.as_str())
-                })
-        };
-        if !lifecycle_closed {
-            return Ok(false);
-        }
-
-        for downstream_submit in downstream_submits {
-            let TrackEffect::SubmitOrder { recovery_token, .. } = &downstream_submit.effect else {
-                return Err(anyhow!(
-                    "downstream effect `{}` is not submit order",
-                    downstream_submit.effect_id
-                ));
-            };
-
-            let (previous_snapshot, next_snapshot) = {
-                let mut manager = self.manager.write().await;
-                let previous_snapshot = manager
-                    .snapshot(id)
-                    .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-                manager
-                    .record_submit_failure_by_recovery_token(&TrackId::new(id), recovery_token)
-                    .map_err(TrackMutationError::Mutation)?;
-                let next_snapshot = manager
-                    .snapshot(id)
-                    .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-                (previous_snapshot, next_snapshot)
-            };
-
-            self.commit_track_mutation(
-                id,
-                &previous_snapshot,
-                &next_snapshot,
-                &(),
-                Some(&EffectStatusUpdate::superseded(
-                    downstream_submit.effect_id.clone(),
-                )),
-                false,
-                None,
-            )
-            .await
-            .map_err(anyhow::Error::new)?;
-        }
-
-        Ok(true)
-    }
-
-    pub async fn request_follow_up_retirement(
-        &self,
-        id: &str,
-        request: FollowUpRetirementRequest,
-    ) -> Result<()> {
-        self.effect_store
-            .save_follow_up_retirement_request(&TrackId::new(id), &request)
-            .await?;
-        self.retry_pending_follow_up_retirements(id).await?;
-        Ok(())
-    }
-
-    pub(crate) async fn retry_pending_follow_up_retirements_best_effort(
-        &self,
-        id: &str,
-        context: &str,
-    ) {
-        if let Err(error) = self.retry_pending_follow_up_retirements(id).await {
-            tracing::warn!(
-                track_id = %id,
-                "failed to retry pending follow-up retirements after {context}: {error}"
-            );
-        }
-    }
-
-    async fn retry_pending_follow_up_retirements(&self, id: &str) -> Result<()> {
-        for request in self
-            .effect_store
-            .list_follow_up_retirement_requests(&TrackId::new(id))
-            .await?
-        {
-            if self.retire_stale_follow_up_submit(id, &request).await? {
-                self.effect_store
-                    .delete_follow_up_retirement_request(&TrackId::new(id), &request)
-                    .await?;
-            }
-        }
-
-        Ok(())
     }
 
     pub(crate) async fn recover_submit_execution(
@@ -1260,17 +1122,6 @@ impl MutationExecutor {
         manager.restore_track_state(&snapshot)
     }
 
-    async fn pending_submit_effects_for_track_batch(
-        &self,
-        id: &str,
-        batch_id: &str,
-    ) -> std::result::Result<Vec<PersistedTrackEffect>, TrackMutationError> {
-        self.effect_store
-            .list_pending_submit_effects_for_track_batch(&TrackId::new(id), batch_id)
-            .await
-            .map_err(TrackMutationError::Persistence)
-    }
-
     async fn commit_track_mutation<R>(
         &self,
         id: &str,
@@ -1420,6 +1271,7 @@ fn cancel_receipt_absorbed_exposure(
 }
 
 fn classify_cancel_receipt_resolution(
+    order_id: &str,
     cancel_progressed: bool,
     receipt: &OrderReceipt,
 ) -> CancelReceiptResolution {
@@ -1435,19 +1287,9 @@ fn classify_cancel_receipt_resolution(
         return CancelReceiptResolution::StillWorking;
     }
     CancelReceiptResolution::Unknown {
+        order_id: order_id.to_string(),
         reason: format!("unexpected cancel receipt status: {:?}", receipt.status),
     }
-}
-
-fn pending_submit_effects_after_sequence(
-    effects: &[PersistedTrackEffect],
-    after_sequence: u32,
-) -> Vec<PersistedTrackEffect> {
-    effects
-        .iter()
-        .filter(|effect| effect.sequence > after_sequence)
-        .cloned()
-        .collect::<Vec<_>>()
 }
 
 #[cfg(test)]
@@ -1471,8 +1313,7 @@ pub(crate) mod test_support {
 
     use crate::{
         ApplicationNotification, CommittedTrackWrite, EffectStatus, EffectStatusUpdate,
-        FollowUpRetirementRequest, PersistedTrackEffect, TrackControlState, TrackEffectStore,
-        TrackMutationStore,
+        PersistedTrackEffect, TrackControlState, TrackEffectStore, TrackMutationStore,
     };
 
     use super::{AccountCapacityGuard, TrackServiceSet};
@@ -1500,7 +1341,6 @@ pub(crate) mod test_support {
         ledger_states: Mutex<HashMap<String, poise_engine::ledger::TrackLedgerState>>,
         events: Mutex<HashMap<String, Vec<DomainEvent>>>,
         effects: Mutex<Vec<PersistedTrackEffect>>,
-        retirement_requests: Mutex<HashMap<String, Vec<FollowUpRetirementRequest>>>,
         single_effect_status_update_calls: Mutex<usize>,
     }
 
@@ -1926,49 +1766,6 @@ pub(crate) mod test_support {
                 .cloned()
                 .collect())
         }
-
-        async fn save_follow_up_retirement_request(
-            &self,
-            track_id: &TrackId,
-            request: &FollowUpRetirementRequest,
-        ) -> Result<()> {
-            self.retirement_requests
-                .lock()
-                .unwrap()
-                .entry(track_id.as_str().to_string())
-                .or_default()
-                .push(request.clone());
-            Ok(())
-        }
-
-        async fn list_follow_up_retirement_requests(
-            &self,
-            track_id: &TrackId,
-        ) -> Result<Vec<FollowUpRetirementRequest>> {
-            Ok(self
-                .retirement_requests
-                .lock()
-                .unwrap()
-                .get(track_id.as_str())
-                .cloned()
-                .unwrap_or_default())
-        }
-
-        async fn delete_follow_up_retirement_request(
-            &self,
-            track_id: &TrackId,
-            request: &FollowUpRetirementRequest,
-        ) -> Result<()> {
-            if let Some(requests) = self
-                .retirement_requests
-                .lock()
-                .unwrap()
-                .get_mut(track_id.as_str())
-            {
-                requests.retain(|existing| existing != request);
-            }
-            Ok(())
-        }
     }
 
     pub(crate) fn track_write_services(
@@ -2045,9 +1842,7 @@ pub(crate) mod test_support {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::{
-        CancelReceiptResolution, EffectStatus, FollowUpRetirementRequest, SessionEffectQueue,
-    };
+    use crate::{CancelReceiptResolution, EffectStatus, SessionEffectQueue};
     use poise_core::risk::RiskTerminationCause;
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
     use poise_engine::observation::MarketObservation;
@@ -2439,112 +2234,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retire_stale_follow_up_submit_clears_current_binding_selected_by_recovery_token() {
-        let repository = Arc::new(MemoryRepository::default());
-        let (services, _) = track_write_services(seeded_manager(), repository.clone());
-
-        services
-            .observation
-            .observe_market(
-                "btc-core",
-                MarketObservation::ExecutionQuote {
-                    execution_quote: ExecutionQuote {
-                        best_bid: 104.9,
-                        best_ask: 105.1,
-                    },
-                },
-            )
-            .await
-            .unwrap();
-
-        let mut pending_submits = repository
-            .pending_effects()
-            .into_iter()
-            .filter_map(|effect| match effect.effect {
-                TrackEffect::SubmitOrder {
-                    request,
-                    recovery_token,
-                    ..
-                } => Some((
-                    effect.effect_id,
-                    effect.batch_id,
-                    effect.sequence,
-                    request,
-                    recovery_token,
-                )),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        pending_submits.sort_by_key(|(_, _, sequence, _, _)| *sequence);
-        assert!(
-            pending_submits.len() > 1,
-            "test requires multiple pending submit effects"
-        );
-
-        let (effect_id, batch_id, sequence, stale_request, recovery_token) =
-            pending_submits.last().unwrap().clone();
-        let current_client_order_id = "current-client".to_string();
-        let manager = services.effect.manager();
-        {
-            let mut manager = manager.write().await;
-            let mut snapshot = manager.snapshot("btc-core").expect("track snapshot");
-            let binding = snapshot
-                .executor_state
-                .bindings
-                .iter_mut()
-                .find(|binding| binding.request.client_order_id == stale_request.client_order_id)
-                .expect("replacement submit should still map to a current binding");
-            binding.request.client_order_id = current_client_order_id.clone();
-            manager
-                .restore_track_state(&snapshot)
-                .expect("updated track snapshot");
-        }
-
-        let retired = services
-            .effect
-            .retire_stale_follow_up_submit(
-                "btc-core",
-                &FollowUpRetirementRequest {
-                    batch_id: batch_id.clone(),
-                    blocked_sequence: sequence.checked_sub(1).expect("replacement effect"),
-                    closed_order_id: "closed-order".into(),
-                },
-            )
-            .await
-            .unwrap();
-        assert!(retired);
-
-        let snapshot = manager
-            .read()
-            .await
-            .snapshot("btc-core")
-            .expect("track snapshot");
-        let binding = snapshot
-            .executor_state
-            .bindings
-            .iter()
-            .find(|binding| binding.request.client_order_id == current_client_order_id)
-            .expect("current binding should still exist");
-        assert_eq!(binding.status, BindingStatus::Terminal);
-
-        let persisted = repository
-            .pending_effects()
-            .into_iter()
-            .find(|effect| effect.effect_id == effect_id)
-            .expect("replacement submit effect should remain persisted");
-        assert_eq!(persisted.status, EffectStatus::Superseded);
-
-        let TrackEffect::SubmitOrder {
-            recovery_token: persisted_recovery_token,
-            ..
-        } = persisted.effect
-        else {
-            panic!("expected persisted submit effect");
-        };
-        assert_eq!(persisted_recovery_token, recovery_token);
-    }
-
-    #[tokio::test]
     async fn record_cancel_order_success_clears_cancel_binding_and_preserves_downstream_submits() {
         let repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
@@ -2825,75 +2514,6 @@ mod tests {
                 binding.is_active(),
                 "queue action, not cancel receipt writeback, retires downstream runtime bindings"
             );
-        }
-    }
-
-    #[tokio::test]
-    async fn retire_stale_follow_up_submit_clears_downstream_submits_after_blocking_cancel() {
-        let repository = Arc::new(MemoryRepository::default());
-        let (services, _) = track_write_services(seeded_manager(), repository.clone());
-
-        services
-            .observation
-            .observe_market(
-                "btc-core",
-                MarketObservation::ExecutionQuote {
-                    execution_quote: ExecutionQuote {
-                        best_bid: 104.9,
-                        best_ask: 105.1,
-                    },
-                },
-            )
-            .await
-            .unwrap();
-
-        let mut pending_submits = repository
-            .pending_effects()
-            .into_iter()
-            .filter_map(|effect| match effect.effect {
-                TrackEffect::SubmitOrder { .. } => Some(effect),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        pending_submits.sort_by_key(|effect| effect.sequence);
-        assert!(
-            pending_submits.len() > 2,
-            "test requires multiple downstream submit effects"
-        );
-
-        let batch_id = pending_submits[0].batch_id.clone();
-        let blocked_sequence = pending_submits[0].sequence;
-        let expected_retired_effect_ids = pending_submits
-            .iter()
-            .filter(|effect| effect.sequence > blocked_sequence)
-            .map(|effect| effect.effect_id.clone())
-            .collect::<Vec<_>>();
-        assert!(
-            expected_retired_effect_ids.len() > 1,
-            "test requires more than one downstream submit after the blocked sequence"
-        );
-
-        let retired = services
-            .effect
-            .retire_stale_follow_up_submit(
-                "btc-core",
-                &FollowUpRetirementRequest {
-                    batch_id,
-                    blocked_sequence,
-                    closed_order_id: "closed-order".into(),
-                },
-            )
-            .await
-            .unwrap();
-
-        assert!(retired);
-        let persisted = repository.pending_effects();
-        for effect_id in expected_retired_effect_ids {
-            let effect = persisted
-                .iter()
-                .find(|effect| effect.effect_id == effect_id)
-                .expect("downstream submit effect should remain persisted");
-            assert_eq!(effect.status, EffectStatus::Superseded);
         }
     }
 }

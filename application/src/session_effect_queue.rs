@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -108,7 +108,7 @@ pub enum CancelReceiptResolution {
     ClosedWithoutFill,
     ClosedWithFill { filled_qty: f64 },
     StillWorking,
-    Unknown { reason: String },
+    Unknown { order_id: String, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,6 +202,7 @@ enum QueuedEffectState {
 struct FollowUpPointer {
     track_id: TrackId,
     cancel_effect_id: String,
+    closed_order_id: String,
 }
 
 impl SessionEffectQueue {
@@ -282,6 +283,21 @@ impl SessionEffectQueue {
         true
     }
 
+    pub fn wake_track_for(&self, track_id: &TrackId, signal: WakeSignal) {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(track) = inner.tracks.get_mut(track_id) else {
+            return;
+        };
+        let Some(paused_until) = track.paused_until else {
+            inner.mark_track_ready(track_id);
+            return;
+        };
+        if paused_until.matches(signal) {
+            track.paused_until = None;
+            inner.mark_track_ready(track_id);
+        }
+    }
+
     pub fn record_outcome(
         &self,
         effect_id: &str,
@@ -357,8 +373,8 @@ impl SessionEffectQueue {
                     until: DeferredUntil::ExchangeState,
                 }
             }
-            CancelReceiptResolution::Unknown { reason } => {
-                let token = inner.next_follow_up_token(&track_id, effect_id);
+            CancelReceiptResolution::Unknown { order_id, reason } => {
+                let token = inner.next_follow_up_token(&track_id, effect_id, &order_id);
                 if let Some((_track_id, effect)) = inner.effect_mut(effect_id) {
                     effect.dispatch_state = QueuedEffectState::AwaitingFollowUp;
                 }
@@ -367,47 +383,66 @@ impl SessionEffectQueue {
         }
     }
 
+    pub fn resolve_follow_up_retirements_for_closed_orders(
+        &self,
+        track_id: &TrackId,
+        open_order_ids: &HashSet<String>,
+    ) -> Vec<FollowUpQueueAction> {
+        let mut inner = self.inner.lock().unwrap();
+        let tokens = inner
+            .follow_up_tokens
+            .iter()
+            .filter_map(|(token, pointer)| {
+                if &pointer.track_id == track_id
+                    && !open_order_ids.contains(&pointer.closed_order_id)
+                {
+                    Some(token.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        tokens
+            .into_iter()
+            .map(|token| inner.record_follow_up_retirement_by_token(token))
+            .collect()
+    }
+
     pub fn record_follow_up_retirement(
         &self,
         resolution: FollowUpRetirementResolution,
     ) -> FollowUpQueueAction {
         let mut inner = self.inner.lock().unwrap();
-        let Some(pointer) = inner.follow_up_tokens.remove(&resolution.token) else {
+        let Some(pointer) = inner.follow_up_tokens.get(&resolution.token) else {
             return FollowUpQueueAction::NothingToRetire;
         };
-        if !inner
-            .effect_index
-            .contains_key(pointer.cancel_effect_id.as_str())
-        {
-            return FollowUpQueueAction::NothingToRetire;
+        if pointer.closed_order_id != resolution.closed_order_id {
+            return FollowUpQueueAction::Blocked {
+                reason: format!(
+                    "follow-up token order mismatch: expected `{}`, got `{}`",
+                    pointer.closed_order_id, resolution.closed_order_id
+                ),
+            };
         }
-
-        let effect_ids =
-            inner.retire_current_batch_after(&pointer.track_id, &pointer.cancel_effect_id);
-        inner.mark_track_ready(&pointer.track_id);
-        if effect_ids.is_empty() {
-            FollowUpQueueAction::NothingToRetire
-        } else {
-            FollowUpQueueAction::SupersededDownstream {
-                effect_ids,
-                requires_reconcile: true,
-            }
-        }
+        inner.record_follow_up_retirement_by_token(resolution.token)
     }
 
-    pub fn wake_track_for(&self, track_id: &TrackId, signal: WakeSignal) {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(track) = inner.tracks.get_mut(track_id) else {
-            return;
-        };
-        let Some(paused_until) = track.paused_until else {
-            inner.mark_track_ready(track_id);
-            return;
-        };
-        if paused_until.matches(signal) {
-            track.paused_until = None;
-            inner.mark_track_ready(track_id);
-        }
+    pub fn active_submit_effect_ids(&self) -> HashSet<String> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .tracks
+            .values()
+            .flat_map(|track| track.batches.iter())
+            .flat_map(|batch| batch.effects.iter())
+            .filter(|item| {
+                matches!(
+                    item.dispatch_state,
+                    QueuedEffectState::InFlight | QueuedEffectState::SubmittedAwaitingWriteback
+                ) && matches!(item.effect.effect, TrackEffect::SubmitOrder { .. })
+            })
+            .map(|item| item.effect.effect_id.clone())
+            .collect()
     }
 
     pub fn active_submit_hints_for_track(&self, track_id: &TrackId) -> Vec<PendingSubmitHint> {
@@ -498,6 +533,32 @@ impl SessionEffectQueue {
 }
 
 impl SessionEffectQueueInner {
+    fn record_follow_up_retirement_by_token(
+        &mut self,
+        token: FollowUpRetirementToken,
+    ) -> FollowUpQueueAction {
+        let Some(pointer) = self.follow_up_tokens.remove(&token) else {
+            return FollowUpQueueAction::NothingToRetire;
+        };
+        if !self
+            .effect_index
+            .contains_key(pointer.cancel_effect_id.as_str())
+        {
+            return FollowUpQueueAction::NothingToRetire;
+        }
+
+        let effect_ids =
+            self.retire_current_batch_after(&pointer.track_id, &pointer.cancel_effect_id);
+        self.mark_track_ready(&pointer.track_id);
+        if effect_ids.is_empty() {
+            FollowUpQueueAction::NothingToRetire
+        } else {
+            FollowUpQueueAction::SupersededDownstream {
+                effect_ids,
+                requires_reconcile: true,
+            }
+        }
+    }
     fn mark_track_ready(&mut self, track_id: &TrackId) {
         let Some(track) = self.tracks.get_mut(track_id) else {
             return;
@@ -592,6 +653,7 @@ impl SessionEffectQueueInner {
         &mut self,
         track_id: &TrackId,
         effect_id: &str,
+        closed_order_id: &str,
     ) -> FollowUpRetirementToken {
         self.next_follow_up_token += 1;
         let token = FollowUpRetirementToken(format!(
@@ -605,6 +667,7 @@ impl SessionEffectQueueInner {
             FollowUpPointer {
                 track_id: track_id.clone(),
                 cancel_effect_id: effect_id.to_string(),
+                closed_order_id: closed_order_id.to_string(),
             },
         );
         token
@@ -934,6 +997,7 @@ mod tests {
         let action = queue.record_cancel_resolution(
             "cancel-1",
             CancelReceiptResolution::Unknown {
+                order_id: "closed-order".into(),
                 reason: "exchange returned unknown order".into(),
             },
         );

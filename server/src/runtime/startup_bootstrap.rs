@@ -422,18 +422,6 @@ mod tests {
             )
             .await
             .unwrap();
-        repository
-            .save_follow_up_retirement_request(
-                &TrackId::new("btc-core"),
-                &poise_application::FollowUpRetirementRequest {
-                    batch_id: "btc-core:batch".into(),
-                    blocked_sequence: 0,
-                    closed_order_id: "legacy-order".into(),
-                },
-            )
-            .await
-            .unwrap();
-
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(
@@ -504,14 +492,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(
-            repository
-                .list_follow_up_retirement_requests(&TrackId::new("btc-core"))
-                .await
-                .unwrap()
-                .is_empty()
-        );
-
         let effects = repository
             .list_recent_track_effects(&TrackId::new("btc-core"), 8)
             .await

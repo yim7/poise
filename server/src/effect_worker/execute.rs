@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use poise_application::{
-    FollowUpRetirementRequest, SessionEffectOutcome, SessionTrackEffect,
+    CancelReceiptResolution, SessionEffectOutcome, SessionTrackEffect,
     is_loaded_track_invariant_violation,
 };
 use poise_engine::executor::SubmitRecoveryToken;
@@ -225,29 +225,14 @@ pub(super) async fn execute_cancellation(
             Ok(result)
         }
         Err(error) => {
-            if let OutcomeClass::OutcomeUnknown(recovery) = classify_cancel_error(&error) {
-                worker
-                    .recover_unknown_outcome(effect.track_id.as_str(), &instrument, recovery)
-                    .await?;
-                if let Cancellation::One { order_id, .. } = &cancellation
-                    && let Err(retirement_error) = worker
-                        .state
-                        .effect_service
-                        .request_follow_up_retirement(
-                            effect.track_id.as_str(),
-                            FollowUpRetirementRequest {
-                                batch_id: effect.batch_id.clone(),
-                                blocked_sequence: effect.sequence,
-                                closed_order_id: order_id.clone(),
-                            },
-                        )
-                        .await
-                {
-                    tracing::warn!(
-                        track_id = %effect.track_id.as_str(),
-                        order_id = %order_id,
-                        "failed to request follow-up retirement after unknown cancel outcome: {retirement_error}"
-                    );
+            if let OutcomeClass::OutcomeUnknown(_recovery) = classify_cancel_error(&error) {
+                if let Cancellation::One { order_id, .. } = &cancellation {
+                    return Ok(SessionDispatchResult::Cancel(
+                        CancelReceiptResolution::Unknown {
+                            order_id: order_id.clone(),
+                            reason: error.to_string(),
+                        },
+                    ));
                 }
             }
             worker

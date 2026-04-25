@@ -53,26 +53,6 @@ impl TrackEffectService {
             .await
     }
 
-    pub async fn retire_stale_follow_up_submit(
-        &self,
-        id: &str,
-        request: &crate::FollowUpRetirementRequest,
-    ) -> Result<bool> {
-        self.executor
-            .retire_stale_follow_up_submit(id, request)
-            .await
-    }
-
-    pub async fn request_follow_up_retirement(
-        &self,
-        id: &str,
-        request: crate::FollowUpRetirementRequest,
-    ) -> Result<()> {
-        self.executor
-            .request_follow_up_retirement(id, request)
-            .await
-    }
-
     #[cfg(any(test, feature = "server-test-support"))]
     pub fn manager(&self) -> Arc<RwLock<TrackManager>> {
         self.executor.manager()

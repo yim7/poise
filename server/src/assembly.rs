@@ -10,8 +10,8 @@ use chrono::Utc;
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountMonitor, ApplicationNotification, PreparedTrackRegistry, TrackCommandService,
-    TrackDebugQueryService, TrackEffectService, TrackEffectStore, TrackObservationService,
-    TrackQueryService, TrackReadServices, TrackRuntimeLifecycleService, TrackServiceSet,
+    TrackDebugQueryService, TrackEffectService, TrackObservationService, TrackQueryService,
+    TrackReadServices, TrackRuntimeLifecycleService, TrackServiceSet,
 };
 use poise_binance::connect as connect_binance;
 use poise_bybit::connect as connect_bybit;
@@ -325,7 +325,7 @@ async fn assemble_with_state_store(
     let reconcile_state = build_reconcile_state(
         observation_service.clone(),
         runtime_lifecycle_service.clone(),
-        effect_store.clone(),
+        session_effect_queue.clone(),
         exchange_freshness.clone(),
         reconcile_guards.clone(),
         submit_preflight.clone(),
@@ -504,7 +504,7 @@ pub(crate) fn build_websocket_state(
 pub(crate) fn build_reconcile_state(
     observation_service: Arc<TrackObservationService>,
     runtime_lifecycle_service: Arc<TrackRuntimeLifecycleService>,
-    effect_store: Arc<dyn TrackEffectStore>,
+    session_effect_queue: poise_application::SessionEffectQueue,
     exchange_freshness: Arc<ExchangeFreshness>,
     reconcile_guards: Arc<TrackReconcileGuards>,
     submit_preflight: Arc<SubmitPreflight>,
@@ -513,7 +513,7 @@ pub(crate) fn build_reconcile_state(
     ReconcileState {
         observation_service,
         runtime_lifecycle_service,
-        effect_store,
+        session_effect_queue,
         exchange_freshness,
         reconcile_guards,
         submit_preflight,
@@ -563,17 +563,16 @@ mod tests {
     use anyhow::{Result, anyhow};
     use futures_util::StreamExt;
     use poise_application::{
-        CommittedTrackWrite, EffectStatusUpdate, FollowUpRetirementRequest, PersistedControlMode,
-        PersistedTrackEffect, StoredTrackEvent, TrackControlState, TrackEffectStore,
-        TrackMutationStore, TrackQueryStore,
+        CommittedTrackWrite, EffectStatusUpdate, PersistedControlMode, PersistedTrackEffect,
+        StoredTrackEvent, TrackControlState, TrackEffectStore, TrackMutationStore, TrackQueryStore,
     };
     use poise_core::events::DomainEvent as EngineDomainEvent;
     use poise_engine::manager::TrackManager;
     use poise_engine::observation::{MarketObservation, TrackObservation};
     use poise_engine::ports::{
-        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOpenOrderSnapshot, ExchangeOrder,
-        ExecutionPort, ExecutionQuoteTick, MarketDataPort, MarketDataTick, MetadataPort,
-        OrderReceipt, OrderRequest, Position,
+        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOpenOrderSnapshot, ExecutionPort,
+        ExecutionQuoteTick, MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt,
+        OrderRequest, Position,
     };
     use poise_engine::runtime::{AutoState, ControlState, TrackState};
     use poise_engine::track::{Instrument, TrackId, Venue};
@@ -1195,15 +1194,7 @@ total_loss_limit = 600.0
         let (platform, _) = test_platform();
         let state = platform.effect_worker_test_context().effect_worker_state;
 
-        assert!(
-            state
-                .reconcile
-                .effect_store
-                .list_dispatchable_effects()
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(state.session_effect_queue.claim_next().is_none());
         let _ = state
             .account_margin_guard
             .constraint_for(&Instrument::new(Venue::Binance, "BTCUSDT"));
@@ -1709,29 +1700,6 @@ total_loss_limit = 600.0
             _batch_id: &str,
         ) -> Result<Vec<PersistedTrackEffect>> {
             Ok(Vec::new())
-        }
-
-        async fn save_follow_up_retirement_request(
-            &self,
-            _track_id: &TrackId,
-            _request: &FollowUpRetirementRequest,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        async fn list_follow_up_retirement_requests(
-            &self,
-            _track_id: &TrackId,
-        ) -> Result<Vec<FollowUpRetirementRequest>> {
-            Ok(Vec::new())
-        }
-
-        async fn delete_follow_up_retirement_request(
-            &self,
-            _track_id: &TrackId,
-            _request: &FollowUpRetirementRequest,
-        ) -> Result<()> {
-            Ok(())
         }
     }
 
