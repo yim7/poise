@@ -163,15 +163,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         submit_intent.price_execution_gate,
         submit_intent.submit_purpose,
     ) {
-        return if effects.is_empty() {
-            noop_plan(state)
-        } else {
-            ExecutorPlan {
-                state,
-                desired_bindings: Vec::new(),
-                effects,
-            }
-        };
+        return finish_plan(state, Vec::new(), effects);
     }
 
     if submit_intent.policy_context == PolicyContext::Normal {
@@ -231,24 +223,14 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         CURVE_MAKER_GRACE_MS,
     ));
 
-    if effects.is_empty() {
-        effects.push(ExecutionAction::NoOp);
-    }
-
-    // Clean up terminal bindings to prevent unbounded growth of the bindings Vec.
-    // This must happen AFTER reconcile_bindings, which may reference just-terminated bindings.
-    state
-        .bindings
-        .retain(|binding| binding.status != BindingStatus::Terminal);
-
-    ExecutorPlan {
+    finish_plan(
         state,
-        desired_bindings: desired_bindings
+        desired_bindings
             .iter()
             .map(|binding| binding.proposal.clone())
             .collect(),
         effects,
-    }
+    )
 }
 
 pub fn refresh_state(
@@ -263,10 +245,26 @@ pub fn refresh_state(
 }
 
 fn noop_plan(state: ExecutorState) -> ExecutorPlan {
+    finish_plan(state, Vec::new(), vec![ExecutionAction::NoOp])
+}
+
+fn finish_plan(
+    mut state: ExecutorState,
+    desired_bindings: Vec<BindingProposal>,
+    mut effects: Vec<ExecutionAction>,
+) -> ExecutorPlan {
+    if effects.is_empty() {
+        effects.push(ExecutionAction::NoOp);
+    }
+    // Make terminal binding cleanup an ExecutorPlan output invariant, including early returns.
+    state
+        .bindings
+        .retain(|binding| binding.status != BindingStatus::Terminal);
+
     ExecutorPlan {
         state,
-        desired_bindings: Vec::new(),
-        effects: vec![ExecutionAction::NoOp],
+        desired_bindings,
+        effects,
     }
 }
 
@@ -1577,6 +1575,43 @@ mod tests {
         let rules = rules();
         let mut previous = plan(input(&config, &rules, Exposure(0.0), Exposure(1.0))).state;
         previous.bindings[0].status = BindingStatus::Terminal;
+
+        let next = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: instrument(),
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: config.min_rebalance_units,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(0.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            Some(&previous),
+        ));
+
+        assert!(
+            next.state
+                .bindings
+                .iter()
+                .all(|binding| binding.status != BindingStatus::Terminal)
+        );
+    }
+
+    #[test]
+    fn planning_removes_terminal_bindings_on_recovery_anomaly_return() {
+        let config = config();
+        let rules = rules();
+        let mut previous = plan(input(&config, &rules, Exposure(0.0), Exposure(1.0))).state;
+        previous.bindings[0].status = BindingStatus::Terminal;
+        previous.recovery_anomaly = Some(crate::executor::RecoveryAnomaly::ExpectedExposureMismatch);
 
         let next = plan(ExecutorInput::new(
             SubmitIntentInput {
