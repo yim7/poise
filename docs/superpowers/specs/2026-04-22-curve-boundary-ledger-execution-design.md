@@ -639,8 +639,8 @@ binding 进入 `CancelPending` 或 `Terminal`，不会回滚已经写入 boundar
 
 这样：
 
-- `CurveMakerPolicy` 可以选择一条边界操作一张单
-- `CatchUpPolicy` 可以把多条 overdue 操作聚合成一张 aggressive 单
+- `CurveMaker` 执行形态可以选择一条边界操作一张 passive 单
+- `CatchUp` 执行形态可以把多条 overdue 操作聚合成一张 aggressive 单
 
 而不需要改变边界本身的语义。
 
@@ -660,7 +660,21 @@ policy 不直接改账本，只做两件事：
 
 ### 9.2 第一阶段 policy 集合
 
-#### `CurveMakerPolicy`
+#### Normal `BoundaryPolicy`
+
+Normal 模式不再由调用层串行运行 `CatchUpPolicy` / `CurveMakerPolicy`。它由一个统一 `BoundaryPolicy` 解释 ledger view，并在内部保留两种执行形态：
+
+- `CurveMaker`：当前价格附近的 future boundary，每个 operation 一张 passive 单。
+- `CatchUp`：已经 due 的 boundary，可以把多个同方向 operation 聚合为一张 aggressive 单。
+
+`BoundaryPolicy` 拥有 Normal 模式下的覆盖选择知识：
+
+- 先选择 gap 方向的 due operations 作为 `CatchUp` operations。
+- 再把这些 due operations 视为已预留，选择每侧最近的 future operations 作为 `CurveMaker` operations。
+- 调用层不再维护 `CoverageReservation`。
+- 调用层不再拍摄 `preexisting_cancel_pending_operations` 快照。
+
+#### `CurveMaker` 执行形态
 
 职责：
 
@@ -675,7 +689,7 @@ policy 不直接改账本，只做两件事：
 
 但这个集合只属于 maker policy，不再是系统真值。
 
-#### `CatchUpPolicy`
+#### `CatchUp` 执行形态
 
 职责：
 
@@ -693,10 +707,10 @@ curve_maker_grace_ms = 60_000
 
 - 操作已 `due`
 - 操作仍有 `remaining`
-- 当前只被 `CurveMakerPolicy` 的 maker binding 覆盖
-- 且该 binding 的 `BindingPolicyState::CurveMaker { due_grace_started_at }` 已持续超过 `curve_maker_grace_ms`
+- 当前由 maker binding 覆盖，且该 maker 价格已经不能等价覆盖 aggressive 请求；或
+- 当前由 maker binding 覆盖，maker 仍可等价覆盖 aggressive 请求，但 `BindingPolicyState::CurveMaker { due_grace_started_at }` 已持续超过 `curve_maker_grace_ms`
 
-满足这四条时，`CatchUpPolicy` 才会抢占 `CurveMakerPolicy`。
+满足这些条件时，reconciliation 可以在同一轮取消原 maker binding 并提交新的 aggressive binding。若旧 owner 已经是上一轮遗留的 `CancelPending`，则本轮不重复提交。
 
 #### `ManualOverridePolicy`
 
@@ -719,27 +733,27 @@ curve_maker_grace_ms = 60_000
 ManualOverride > Flatten > CatchUp > CurveMaker
 ```
 
-高优 policy 可以抢占低优 policy 对同一边界操作的覆盖权。
+`ManualOverride` / `Flatten` 是外层独占上下文；Normal 模式内部由统一 `BoundaryPolicy` 保证 `CatchUp` operation 先于 `CurveMaker` future operation 被选择。
 
 ### 9.4 Policy 仲裁机制
 
-policy 不是并行各算各的，再做合并；第一阶段采用**按优先级串行仲裁**：
+policy 不是并行各算各的，再由调用层合并。第一阶段采用两个层次：
 
-1. 先构建一份 `LedgerView`
-2. 再构建一份临时的 `CoverageReservation`
-3. 按优先级依次运行 policy
-4. 每个 policy 只能选择当前尚未被更高优 policy 预留的边界操作
-5. policy 产出 proposal 后，立即写入 `CoverageReservation`
+1. 外层 `PolicyContext` 决定 `ManualOverride` / `Flatten` / `Normal` 哪个上下文运行。
+2. Normal 上下文内由 `BoundaryPolicy` 一次性选择 due catch-up operations 和 future maker operations。
+3. planning 根据 policy 输出构造 desired bindings。
+4. reconciliation 负责把 desired bindings 与 active bindings 做 diff、取消旧 owner、复用等价 owner 或提交新 binding。
 
 特殊规则：
 
 - `ManualOverridePolicy` 一旦激活，直接独占本轮执行，后续 policy 全部跳过
-- `FlattenPolicy` 和 `CatchUpPolicy` 可以抢占已有的 `CurveMakerPolicy` 覆盖
-- `CurveMakerPolicy` 只能选择仍未被覆盖的 future 操作，不会反向抢占高优 policy
+- `FlattenPolicy` 可以抢占已有 Normal binding
+- Normal 内部的 `CatchUp` 可以抢占已有 maker binding
+- `CurveMaker` 只能选择仍未被 due catch-up 预留的 future 操作
 
 第一阶段明确支持这种抢占路径：
 
-> 若某个边界操作当前由 `CurveMakerPolicy` 的 maker binding 覆盖，但本轮已变成 overdue 并被 `CatchUpPolicy` 选中，则本轮先撤掉原 maker binding；只有等原 binding 真正离开 active 状态后，后续轮次才允许新的 catch-up binding 接管。
+> 若某个边界操作当前由 maker binding 覆盖，但本轮已变成 overdue 并被 `CatchUp` 选中，则本轮可以同时撤掉原 maker binding 并提交新的 aggressive binding。若原 binding 已经处于上一轮遗留的 `CancelPending`，则该 operation 继续由 cancel-pending owner 持有，本轮不重复提交。
 
 这里的 `overdue` 第一阶段正式定义为：
 

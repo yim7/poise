@@ -111,10 +111,10 @@
 
 **步骤：**
 
-- [ ] 更新旧 boundary ledger spec 中关于 `CoverageReservation` / 串行 policy runner 的描述。
-- [ ] 确认新 spec 与实现命名一致。
-- [ ] 回写 Task 1-3 的 commit SHA。
-- [ ] 运行必要的最终验收测试。
+- [x] 更新旧 boundary ledger spec 中关于 `CoverageReservation` / 串行 policy runner 的描述。
+- [x] 确认新 spec 与实现命名一致。
+- [x] 回写 Task 1-3 的 commit SHA。
+- [x] 运行必要的最终验收测试。
 
 **建议最终验收命令：**
 
