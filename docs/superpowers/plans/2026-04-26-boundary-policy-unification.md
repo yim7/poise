@@ -97,7 +97,7 @@
 - `cargo test -p poise-engine executor::planning::tests:: -- --nocapture`
 - `cargo test -p poise-engine executor::policy::tests:: -- --nocapture`
 
-**Commit SHA：** _待填写_
+**Commit SHA：** `af71238`
 
 ## Task 4：文档同步和最终验收
 
