@@ -46,7 +46,7 @@
 - `cargo test -p poise-engine executor::recording::tests:: -- --nocapture`
 - `cargo test -p poise-engine executor::planning::tests:: -- --nocapture`
 
-**Commit SHA：** _待填写_
+**Commit SHA：** `93914ea`
 
 ## Task 2：锁住统一 BoundaryPolicy 前的 Normal 行为
 
