@@ -70,7 +70,7 @@
 - `cargo test -p poise-engine executor::planning::tests:: -- --nocapture`
 - `cargo test -p poise-engine executor::policy::tests:: -- --nocapture`
 
-**Commit SHA：** _待填写_
+**Commit SHA：** `90ab247`
 
 ## Task 3：引入统一 BoundaryPolicy
 
