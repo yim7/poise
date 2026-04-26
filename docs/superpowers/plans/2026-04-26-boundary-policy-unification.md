@@ -59,11 +59,11 @@
 
 **步骤：**
 
-- [ ] 测试 due maker grace 后，同轮可以 cancel maker 并 submit aggressive replacement。
-- [ ] 测试上一轮遗留的 cancel-pending owner 会阻止同 operation 重复 submit。
-- [ ] 测试 active maker 在未过 grace 时仍可覆盖 future operation。
-- [ ] 测试 aggressive due binding 保持聚合多个 due operations。
-- [ ] 测试 passive maker 仍保持每 operation 一张单。
+- [x] 测试 due maker grace 后，同轮可以 cancel maker 并 submit aggressive replacement。
+- [x] 测试上一轮遗留的 cancel-pending owner 会阻止同 operation 重复 submit。
+- [x] 测试 active maker 在未过 grace 时仍可覆盖 future operation。
+- [x] 测试 aggressive due binding 保持聚合多个 due operations。
+- [x] 测试 passive maker 仍保持每 operation 一张单。
 
 **最小验收命令：**
 

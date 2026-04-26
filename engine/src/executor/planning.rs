@@ -1052,6 +1052,7 @@ fn next_binding_id(policy: PolicyKind) -> String {
 mod tests {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::ExchangeRules;
+    use std::collections::BTreeSet;
     use std::sync::LazyLock;
 
     use super::*;
@@ -1182,6 +1183,62 @@ mod tests {
         assert_eq!(request.price, 100.1);
         assert!((request.quantity - 2.0).abs() < 1e-9);
         assert_eq!(catch_up_binding.allocations.len(), 2);
+    }
+
+    #[test]
+    fn catch_up_policy_aggregates_due_operations_into_single_binding() {
+        let config = config();
+        let rules = rules();
+
+        let plan = plan(input(&config, &rules, Exposure(0.0), Exposure(3.0)));
+
+        let catch_up_bindings = plan
+            .state
+            .bindings
+            .iter()
+            .filter(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .collect::<Vec<_>>();
+        assert_eq!(catch_up_bindings.len(), 1);
+        assert_eq!(catch_up_bindings[0].allocations.len(), 3);
+        assert!((catch_up_bindings[0].request.quantity - 3.0).abs() < 1e-9);
+        assert_eq!(
+            plan.effects
+                .iter()
+                .filter(|effect| matches!(effect, ExecutionAction::SubmitOrder { request, .. } if request.client_order_id.starts_with("bc-")))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn curve_maker_policy_keeps_one_passive_binding_per_operation() {
+        let config = config();
+        let rules = rules();
+
+        let plan = plan(input(&config, &rules, Exposure(0.0), Exposure(0.0)));
+
+        let maker_bindings = plan
+            .state
+            .bindings
+            .iter()
+            .filter(|binding| binding.proposal_key.policy == PolicyKind::CurveMaker)
+            .collect::<Vec<_>>();
+        let operations = maker_bindings
+            .iter()
+            .flat_map(|binding| {
+                binding
+                    .allocations
+                    .iter()
+                    .map(|allocation| allocation.operation.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(maker_bindings.len(), 6);
+        assert_eq!(operations.len(), 6);
+        assert!(
+            maker_bindings
+                .iter()
+                .all(|binding| binding.allocations.len() == 1)
+        );
     }
 
     #[test]
