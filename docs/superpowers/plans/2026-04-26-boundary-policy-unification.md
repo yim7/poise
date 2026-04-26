@@ -84,13 +84,13 @@
 
 **步骤：**
 
-- [ ] 引入 `BoundaryPolicyInput` / `BoundaryPolicyOutput`，把 Normal 模式 desired binding 生成移入 `policy.rs`。
-- [ ] 将 due aggressive 聚合和 passive maker per-operation 两种执行形态保留为 policy 输出。
-- [ ] 将 maker grace 解释移动到统一 policy/reconciliation 内部。
-- [ ] 删除 `CoverageReservation` 对调用层的暴露。
-- [ ] 删除 `preexisting_cancel_pending_operations` 快照。
-- [ ] 删除 `effective_maker_owner_indexes` 和 `replaceable_active_owner_indexes`，或将等价逻辑内聚到新的 policy/reconciliation 私有函数中。
-- [ ] 保持 ManualOverride / Flatten 路径不变。
+- [x] 引入 `BoundaryPolicyInput` / `BoundaryPolicyOutput`，把 Normal 模式 operation selection 移入 `policy.rs`。
+- [x] 将 due aggressive 聚合和 passive maker per-operation 两种执行形态保留为 policy 输出。
+- [x] 将 maker grace 解释移动到统一 policy/reconciliation 内部。
+- [x] 删除 `CoverageReservation` 对调用层的暴露。
+- [x] 删除 `preexisting_cancel_pending_operations` 快照。
+- [x] 删除 `effective_maker_owner_indexes` 和 `replaceable_active_owner_indexes`，或将等价逻辑内聚到新的 policy/reconciliation 私有函数中。
+- [x] 保持 ManualOverride / Flatten 路径不变。
 
 **最小验收命令：**
 

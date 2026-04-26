@@ -14,47 +14,69 @@ pub enum PolicyKind {
     CurveMaker,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CoverageReservation {
-    operations: BTreeSet<BoundaryOperation>,
+pub struct BoundaryPolicyInput<'a> {
+    pub view: &'a BoundaryLedgerView,
+    pub gap_direction: Option<BoundaryDirection>,
+    pub exposure_epsilon: f64,
+    pub curve_maker_levels_per_side: usize,
 }
 
-impl CoverageReservation {
-    pub fn reserve(&mut self, operation: BoundaryOperation) {
-        self.operations.insert(operation);
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryPolicyOutput {
+    pub catch_up_operations: Vec<BoundaryOperation>,
+    pub curve_maker_operations: Vec<BoundaryOperation>,
+}
 
-    pub fn is_reserved(&self, operation: &BoundaryOperation) -> bool {
-        self.operations.contains(operation)
+pub fn plan_boundary_policy(input: BoundaryPolicyInput<'_>) -> BoundaryPolicyOutput {
+    let mut covered_operations = BTreeSet::new();
+    let catch_up_operations = select_catch_up_operations(
+        input.view,
+        &covered_operations,
+        input.exposure_epsilon,
+        input.gap_direction,
+    );
+    covered_operations.extend(catch_up_operations.iter().cloned());
+    let curve_maker_operations = select_curve_maker_operations(
+        input.view,
+        &covered_operations,
+        input.exposure_epsilon,
+        input.curve_maker_levels_per_side,
+    );
+
+    BoundaryPolicyOutput {
+        catch_up_operations,
+        curve_maker_operations,
     }
 }
 
-pub fn select_catch_up_operations(
+fn select_catch_up_operations(
     view: &BoundaryLedgerView,
-    coverage: &CoverageReservation,
+    covered_operations: &BTreeSet<BoundaryOperation>,
     exposure_epsilon: f64,
+    gap_direction: Option<BoundaryDirection>,
 ) -> Vec<BoundaryOperation> {
     let mut up = select_target_operations(
         view,
-        coverage,
+        covered_operations,
         BoundaryDirection::Up,
         exposure_epsilon,
         true,
     );
     let down = select_target_operations(
         view,
-        coverage,
+        covered_operations,
         BoundaryDirection::Down,
         exposure_epsilon,
         true,
     );
     up.extend(down);
+    up.retain(|operation| Some(operation.direction) == gap_direction);
     up
 }
 
-pub fn select_curve_maker_operations(
+fn select_curve_maker_operations(
     view: &BoundaryLedgerView,
-    coverage: &CoverageReservation,
+    covered_operations: &BTreeSet<BoundaryOperation>,
     exposure_epsilon: f64,
     levels_per_side: usize,
 ) -> Vec<BoundaryOperation> {
@@ -66,7 +88,7 @@ pub fn select_curve_maker_operations(
         .filter(|operation| {
             operation.operation.direction == crate::executor::boundary::BoundaryDirection::Up
         })
-        .filter(|operation| !coverage.is_reserved(&operation.operation))
+        .filter(|operation| !covered_operations.contains(&operation.operation))
         .map(|operation| operation.operation.clone())
         .take(levels_per_side)
         .collect::<Vec<_>>();
@@ -79,7 +101,7 @@ pub fn select_curve_maker_operations(
         .filter(|operation| {
             operation.operation.direction == crate::executor::boundary::BoundaryDirection::Down
         })
-        .filter(|operation| !coverage.is_reserved(&operation.operation))
+        .filter(|operation| !covered_operations.contains(&operation.operation))
         .map(|operation| operation.operation.clone())
         .take(levels_per_side)
         .collect::<Vec<_>>();
@@ -90,7 +112,7 @@ pub fn select_curve_maker_operations(
 
 pub fn select_target_operations(
     view: &BoundaryLedgerView,
-    coverage: &CoverageReservation,
+    covered_operations: &BTreeSet<BoundaryOperation>,
     direction: BoundaryDirection,
     exposure_epsilon: f64,
     require_due: bool,
@@ -101,7 +123,7 @@ pub fn select_target_operations(
         .filter(|operation| operation.operation.direction == direction)
         .filter(|operation| !require_due || operation.due)
         .filter(|operation| operation.remaining > exposure_epsilon)
-        .filter(|operation| !coverage.is_reserved(&operation.operation))
+        .filter(|operation| !covered_operations.contains(&operation.operation))
         .map(|operation| operation.operation.clone())
         .collect::<Vec<_>>();
     if direction == BoundaryDirection::Down {
@@ -154,10 +176,10 @@ mod tests {
                 },
             ],
         };
-        let mut coverage = CoverageReservation::default();
-        coverage.reserve(covered);
+        let coverage = BTreeSet::from([covered]);
 
-        let selected = select_catch_up_operations(&view, &coverage, 1e-9);
+        let selected =
+            select_catch_up_operations(&view, &coverage, 1e-9, Some(BoundaryDirection::Up));
 
         assert_eq!(selected, vec![due]);
     }
@@ -183,7 +205,7 @@ mod tests {
 
         let selected = select_target_operations(
             &view,
-            &CoverageReservation::default(),
+            &BTreeSet::new(),
             BoundaryDirection::Down,
             1e-9,
             false,
@@ -229,9 +251,44 @@ mod tests {
             ],
         };
 
-        let selected =
-            select_curve_maker_operations(&view, &CoverageReservation::default(), 1e-9, 1);
+        let selected = select_curve_maker_operations(&view, &BTreeSet::new(), 1e-9, 1);
 
         assert_eq!(selected, vec![future_up_near, future_down_near]);
+    }
+
+    #[test]
+    fn boundary_policy_reserves_catch_up_operations_before_curve_maker_selection() {
+        let due_up = operation(0, 10_000, BoundaryDirection::Up);
+        let future_up = operation(10_000, 20_000, BoundaryDirection::Up);
+        let future_down = operation(-10_000, 0, BoundaryDirection::Down);
+        let view = BoundaryLedgerView {
+            operations: vec![
+                BoundaryOperationView {
+                    operation: due_up.clone(),
+                    remaining: 1.0,
+                    due: true,
+                },
+                BoundaryOperationView {
+                    operation: future_up.clone(),
+                    remaining: 1.0,
+                    due: false,
+                },
+                BoundaryOperationView {
+                    operation: future_down.clone(),
+                    remaining: 1.0,
+                    due: false,
+                },
+            ],
+        };
+
+        let output = plan_boundary_policy(BoundaryPolicyInput {
+            view: &view,
+            gap_direction: Some(BoundaryDirection::Up),
+            exposure_epsilon: 1e-9,
+            curve_maker_levels_per_side: 1,
+        });
+
+        assert_eq!(output.catch_up_operations, vec![due_up]);
+        assert_eq!(output.curve_maker_operations, vec![future_up, future_down]);
     }
 }
