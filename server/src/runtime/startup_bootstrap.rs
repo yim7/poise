@@ -385,8 +385,8 @@ mod tests {
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
         AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort,
-        MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, OrderStatus, Position,
-        UserDataEvent, UserDataPayload,
+        MarketDataTick, MetadataPort, OrderReceipt, OrderStatus, Position, UserDataEvent,
+        UserDataPayload,
     };
     use poise_engine::runtime::{TerminationCause, TrackStatus};
     use poise_engine::track::{Instrument, TrackId, Venue};
@@ -397,7 +397,7 @@ mod tests {
     use crate::runtime::{RuntimePorts, RuntimeStartupCapacityMode, RuntimeStartupDefinition};
     use crate::test_support::{
         build_runtime_and_effect_worker_test_contexts, build_test_application_services,
-        test_prepared_registry, unavailable_account_monitor,
+        seed_persisted_pending_submit_effect, test_prepared_registry, unavailable_account_monitor,
     };
 
     use super::complete_startup;
@@ -405,14 +405,8 @@ mod tests {
     #[tokio::test]
     async fn complete_startup_cancels_inherited_orders_and_rebuilds_fresh_executor_state() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let manager = seeded_manager_with_active_binding();
-        repository
-            .commit_track_transition(
-                "btc-core",
-                None,
-                &poise_engine::ledger::TrackLedgerState::default(),
-                &[],
-            )
+        let manager = seeded_manager();
+        seed_persisted_pending_submit_effect(repository.as_ref(), "btc-core")
             .await
             .unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(16);
@@ -499,7 +493,7 @@ mod tests {
     async fn complete_startup_rebuilds_from_persisted_control_and_ledger_not_dirty_manager_runtime()
     {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let manager = seeded_manager_with_active_binding();
+        let manager = seeded_manager();
         repository
             .save_track_control_state(
                 &TrackId::new("btc-core"),
@@ -601,7 +595,7 @@ mod tests {
     #[tokio::test]
     async fn complete_startup_ignores_cleanup_order_updates_but_replays_new_session_events() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let manager = seeded_manager_with_active_binding();
+        let manager = seeded_manager();
         repository
             .commit_track_transition(
                 "btc-core",
@@ -697,7 +691,7 @@ mod tests {
     #[tokio::test]
     async fn complete_startup_uses_rest_open_orders_barrier_without_waiting_for_cleanup_update() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let manager = seeded_manager_with_active_binding();
+        let manager = seeded_manager();
         repository
             .commit_track_transition(
                 "btc-core",
@@ -767,7 +761,7 @@ mod tests {
     #[tokio::test]
     async fn user_task_processes_late_events_after_startup_handoff_even_when_event_time_is_old() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let manager = seeded_manager_with_active_binding();
+        let manager = seeded_manager();
         repository
             .commit_track_transition(
                 "btc-core",
@@ -874,7 +868,7 @@ mod tests {
         user_task.await.unwrap();
     }
 
-    fn seeded_manager_with_active_binding() -> TrackManager {
+    fn seeded_manager() -> TrackManager {
         let mut manager = TrackManager::new(Arc::new(SystemClock));
         manager
             .add_track(
@@ -903,20 +897,6 @@ mod tests {
                     maker_fee_rate: 0.0,
                     taker_fee_rate: 0.0,
                 },
-            )
-            .unwrap();
-        manager
-            .record_submit_request(
-                &TrackId::new("btc-core"),
-                &OrderRequest {
-                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    side: Side::Buy,
-                    price: 100.0,
-                    quantity: 0.1,
-                    client_order_id: "legacy-binding".into(),
-                    reduce_only: false,
-                },
-                Exposure(4.0),
             )
             .unwrap();
         manager

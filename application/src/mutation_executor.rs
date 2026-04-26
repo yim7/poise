@@ -1817,22 +1817,7 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn manager_with_pending_submit() -> TrackManager {
-        let mut manager = seeded_manager();
-        manager
-            .record_submit_request(
-                &TrackId::new("btc-core"),
-                &OrderRequest {
-                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    side: Side::Buy,
-                    price: 100.0,
-                    quantity: 0.1,
-                    client_order_id: "client-1".into(),
-                    reduce_only: false,
-                },
-                Exposure(4.0),
-            )
-            .unwrap();
-        manager
+        seeded_manager()
     }
 }
 

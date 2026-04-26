@@ -157,6 +157,10 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         return noop_plan(state);
     }
 
+    // IMPORTANT: Capture cancel-pending set BEFORE update_curve_maker_due_grace.
+    // Grace-triggered cancels must NOT appear in this set, otherwise CatchUp bindings
+    // would be blocked from submitting in the same reconcile round as the maker cancel.
+    // See test: catch_up_policy_takes_over_due_curve_maker_in_same_round
     let preexisting_cancel_pending_operations = cancel_pending_operations(&state.bindings);
     let mut effects =
         apply_price_gate_to_existing_bindings(&mut state, submit_intent.price_execution_gate);
@@ -187,6 +191,13 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     let mut desired_bindings = Vec::new();
     let mut desired_coverage = CoverageReservation::default();
 
+    // Policy priority is enforced in two layers:
+    //   1. Outer layer (manager.rs): PolicyContext decides ManualOverride/Flatten vs Normal.
+    //      When the track is in Manual or Flatten state, only that policy runs.
+    //   2. Inner layer (here): Within Normal, CatchUp runs before CurveMaker.
+    //      CatchUp reserves its operations via CoverageReservation, so CurveMaker
+    //      skips already-claimed operations.
+    // Effective priority: ManualOverride > Flatten > CatchUp > CurveMaker.
     match submit_intent.policy_context {
         PolicyContext::Normal => {
             if let Some(desired) = plan_catch_up_binding(&submit_intent, &view, &desired_coverage) {
@@ -228,6 +239,12 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     if effects.is_empty() {
         effects.push(ExecutionAction::NoOp);
     }
+
+    // Clean up terminal bindings to prevent unbounded growth of the bindings Vec.
+    // This must happen AFTER reconcile_bindings, which may reference just-terminated bindings.
+    state
+        .bindings
+        .retain(|binding| binding.status != BindingStatus::Terminal);
 
     ExecutorPlan {
         state,
@@ -1035,6 +1052,7 @@ fn next_binding_id(policy: PolicyKind) -> String {
 mod tests {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::ExchangeRules;
+    use std::sync::LazyLock;
 
     use super::*;
     use crate::executor::boundary::{BoundaryId, ProfileRevision};
@@ -1071,16 +1089,21 @@ mod tests {
         }
     }
 
+    fn instrument() -> &'static Instrument {
+        static INSTRUMENT: LazyLock<Instrument> =
+            LazyLock::new(|| Instrument::new(Venue::Binance, "BTCUSDT"));
+        &INSTRUMENT
+    }
+
     fn input<'a>(
         config: &'a TrackConfig,
         rules: &'a ExchangeRules,
         current_exposure: Exposure,
         desired_exposure: Exposure,
     ) -> ExecutorInput<'a> {
-        let instrument = Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT")));
         ExecutorInput::new(
             SubmitIntentInput {
-                instrument,
+                instrument: instrument(),
                 config,
                 exchange_rules: rules,
                 base_qty_per_unit: 1.0,
@@ -1108,10 +1131,9 @@ mod tests {
         price_execution_gate: PriceExecutionGate,
         previous_state: &'a ExecutorState,
     ) -> ExecutorInput<'a> {
-        let instrument = Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT")));
         ExecutorInput::new(
             SubmitIntentInput {
-                instrument,
+                instrument: instrument(),
                 config,
                 exchange_rules: rules,
                 base_qty_per_unit: 1.0,
@@ -1174,7 +1196,7 @@ mod tests {
 
         let plan = plan(ExecutorInput::new(
             SubmitIntentInput {
-                instrument: Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT"))),
+                instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
                 base_qty_per_unit: 1.0,
@@ -1240,7 +1262,7 @@ mod tests {
 
         let replacing = plan(ExecutorInput::new(
             SubmitIntentInput {
-                instrument: Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT"))),
+                instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
                 base_qty_per_unit: 1.0,
@@ -1278,7 +1300,7 @@ mod tests {
 
         let next = plan(ExecutorInput::new(
             SubmitIntentInput {
-                instrument: Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT"))),
+                instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
                 base_qty_per_unit: 1.0,
@@ -1472,7 +1494,7 @@ mod tests {
 
         let plan = plan(ExecutorInput::new(
             SubmitIntentInput {
-                instrument: Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT"))),
+                instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
                 base_qty_per_unit: 1.0,
@@ -1510,6 +1532,63 @@ mod tests {
     }
 
     #[test]
+    fn planning_removes_terminal_bindings_before_returning_state() {
+        let config = config();
+        let rules = rules();
+        let mut previous = plan(input(&config, &rules, Exposure(0.0), Exposure(1.0))).state;
+        previous.bindings[0].status = BindingStatus::Terminal;
+
+        let next = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: instrument(),
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: config.min_rebalance_units,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(0.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            Some(&previous),
+        ));
+
+        assert!(
+            next.state
+                .bindings
+                .iter()
+                .all(|binding| binding.status != BindingStatus::Terminal)
+        );
+    }
+
+    #[test]
+    fn curve_maker_policy_emits_sell_side_reduce_only_binding() {
+        let config = config();
+        let rules = rules();
+
+        let plan = plan(input(&config, &rules, Exposure(1.0), Exposure(1.0)));
+
+        let sell_maker = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.proposal_key.policy == PolicyKind::CurveMaker
+                    && binding.request.side == Side::Sell
+                    && binding.request.reduce_only
+            })
+            .expect("sell-side reduce-only maker binding should be planned");
+        assert_eq!(sell_maker.request.price, 100.0);
+        assert_eq!(sell_maker.allocations.len(), 1);
+    }
+
+    #[test]
     fn catch_up_takes_over_far_due_curve_maker_at_threshold() {
         let config = config();
         let rules = rules();
@@ -1528,7 +1607,7 @@ mod tests {
 
         let plan = plan(ExecutorInput::new(
             SubmitIntentInput {
-                instrument: Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT"))),
+                instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
                 base_qty_per_unit: 1.0,
@@ -1588,7 +1667,7 @@ mod tests {
 
         let plan = plan(ExecutorInput::new(
             SubmitIntentInput {
-                instrument: Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT"))),
+                instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
                 base_qty_per_unit: 1.0,
@@ -1685,7 +1764,7 @@ mod tests {
 
         let plan = plan(ExecutorInput::new(
             SubmitIntentInput {
-                instrument: Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT"))),
+                instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
                 base_qty_per_unit: 1.0,
@@ -1712,6 +1791,36 @@ mod tests {
     }
 
     #[test]
+    fn planning_allows_expected_exposure_drift_within_active_binding_budget() {
+        let config = config();
+        let rules = rules();
+        let previous = plan(input(&config, &rules, Exposure(0.0), Exposure(1.0))).state;
+
+        let plan = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: instrument(),
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: 1.0,
+                current_exposure: Exposure(0.6),
+                desired_exposure: Exposure(1.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            Some(&previous),
+        ));
+
+        assert_eq!(plan.state.recovery_anomaly, None);
+    }
+
+    #[test]
     fn planning_reports_boundary_progress_out_of_range_before_using_ledger_view() {
         let config = config();
         let rules = rules();
@@ -1730,7 +1839,7 @@ mod tests {
 
         let plan = plan(ExecutorInput::new(
             SubmitIntentInput {
-                instrument: Box::leak(Box::new(Instrument::new(Venue::Binance, "BTCUSDT"))),
+                instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
                 base_qty_per_unit: 1.0,

@@ -230,6 +230,28 @@ mod tests {
     }
 
     #[test]
+    fn boundary_progress_includes_anchor_when_anchor_starts_inside_boundary() {
+        let boundary = boundary(1.0, 2.0);
+        let state = BoundaryLedgerState {
+            profile_revision: ProfileRevision("rev-1".to_string()),
+            ledger_anchor_exposure: Exposure(1.4),
+            progress: vec![BoundaryProgressEntry {
+                boundary_id: boundary.id.clone(),
+                progress: BoundaryProgress {
+                    cumulative_up: 0.2,
+                    cumulative_down: 0.1,
+                },
+            }],
+        };
+
+        let progress = state.try_progress_for(&boundary, 1e-9).unwrap();
+
+        assert!((progress.effective_crossed_qty - 0.5).abs() < 1e-9);
+        assert!((progress.up_remaining - 0.5).abs() < 1e-9);
+        assert!((progress.down_remaining - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
     fn boundary_progress_rejects_out_of_range_net_progress() {
         let boundary = boundary(1.0, 2.0);
         let state = BoundaryLedgerState {

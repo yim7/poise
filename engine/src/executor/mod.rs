@@ -16,7 +16,7 @@ pub use recording::OrderUpdateAbsorbResult;
 pub(crate) use recording::{
     SubmitReceiptResolution, apply_order_observation_with_result, clear_all_working_orders,
     record_cancel_order_receipt, record_submit_failure, record_submit_failure_by_recovery_token,
-    record_submit_receipt, record_submit_request,
+    record_submit_receipt,
 };
 pub use recovery::{RecoveryAnomaly, SubmitRecoveryPlan, SubmitRecoveryResolution};
 pub(crate) use recovery::{

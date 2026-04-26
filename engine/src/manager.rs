@@ -582,24 +582,6 @@ impl TrackManager {
         Ok(())
     }
 
-    pub fn record_submit_request(
-        &mut self,
-        id: &TrackId,
-        request: &OrderRequest,
-        desired_exposure: poise_core::types::Exposure,
-    ) -> Result<()> {
-        let track = self
-            .tracks
-            .get_mut(id)
-            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        let next_state =
-            executor::record_submit_request(&track.executor_state, request, desired_exposure);
-        if next_state != track.executor_state {
-            track.executor_state = next_state;
-        }
-        Ok(())
-    }
-
     pub fn record_submit_receipt(
         &mut self,
         id: &TrackId,

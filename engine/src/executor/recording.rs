@@ -24,14 +24,6 @@ pub struct OrderObservationApplication {
     pub absorb_result: OrderUpdateAbsorbResult,
 }
 
-pub fn record_submit_request(
-    previous_state: &ExecutorState,
-    _request: &OrderRequest,
-    _desired_exposure: Exposure,
-) -> ExecutorState {
-    previous_state.clone()
-}
-
 pub fn record_submit_receipt(
     previous_state: &ExecutorState,
     request: &OrderRequest,
@@ -343,6 +335,7 @@ mod tests {
     use poise_core::types::{ExchangeRules, Exposure};
 
     use super::*;
+    use crate::execution_plan::ExecutionAction;
     use crate::executor::planning::{ExecutorInput, PolicyContext, SubmitIntentInput, plan};
     use crate::ports::ExecutionQuote;
     use crate::price_gate::{PriceExecutionGate, SubmitPurpose};
@@ -480,6 +473,92 @@ mod tests {
         assert_eq!(first.state.ledger_state.progress.len(), 1);
         assert!((first.state.ledger_state.progress[0].progress.cumulative_up - 0.4).abs() < 1e-9);
         assert!((replay.state.ledger_state.progress[0].progress.cumulative_up - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn partial_fill_then_cancel_plans_only_remaining_boundary_qty() {
+        let config = TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 100.0,
+            min_rebalance_units: 1.0,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: BandProtectionPolicy::Freeze,
+        };
+        let rules = ExchangeRules {
+            price_tick: 0.1,
+            quantity_step: 0.01,
+            min_qty: 0.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        };
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+        let planned = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: &instrument,
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: 1.0,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(1.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            None,
+        ));
+        let binding = &planned.state.bindings[0];
+        let canceled = OrderObservation {
+            order_id: "order-1".to_string(),
+            client_order_id: binding.request.client_order_id.clone(),
+            side: binding.request.side,
+            price: binding.request.price,
+            quantity: binding.request.quantity,
+            filled_qty: binding.request.quantity * 0.4,
+            realized_pnl: 0.0,
+            status: OrderStatus::Canceled,
+        };
+        let applied = apply_order_observation_with_result(&planned.state, &canceled);
+
+        let next = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: &instrument,
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: 1.0,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(1.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            Some(&applied.state),
+        ));
+
+        let replacement = next
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                ExecutionAction::SubmitOrder { request, .. } => Some(request),
+                _ => None,
+            })
+            .expect("remaining boundary qty should be submitted");
+        assert!((replacement.quantity - 0.6).abs() < 1e-9);
     }
 
     #[test]

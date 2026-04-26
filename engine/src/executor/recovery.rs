@@ -358,6 +358,7 @@ mod tests {
     use chrono::Utc;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Side};
+    use std::sync::LazyLock;
 
     use super::*;
     use crate::executor::binding::{
@@ -385,7 +386,7 @@ mod tests {
     }
 
     fn config() -> &'static TrackConfig {
-        Box::leak(Box::new(TrackConfig {
+        static CONFIG: LazyLock<TrackConfig> = LazyLock::new(|| TrackConfig {
             lower_price: 90.0,
             upper_price: 110.0,
             long_exposure_units: 8.0,
@@ -394,7 +395,8 @@ mod tests {
             min_rebalance_units: 1.0,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
-        }))
+        });
+        &CONFIG
     }
 
     fn operation() -> BoundaryOperation {
