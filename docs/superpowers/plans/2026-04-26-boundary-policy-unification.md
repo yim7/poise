@@ -123,4 +123,4 @@
 - `cargo test -p poise-engine executor::recording::tests:: -- --nocapture`
 - `cargo test -p poise-engine executor::ledger::tests:: -- --nocapture`
 
-**Commit SHA：** _待填写_
+**Commit SHA：** `5f07fce`
