@@ -4,7 +4,7 @@ use poise_core::types::Exposure;
 use poise_engine::execution_gate::ExecutionGateDecision;
 use poise_engine::ledger::TrackLedgerState;
 use poise_engine::price_gate::PriceExecutionBlockReason;
-use poise_engine::runtime::{ExecutorState, StrategyPriceStatus, TrackLiveView, TrackStatus};
+use poise_engine::runtime::{ExecutorReadView, StrategyPriceStatus, TrackLiveView, TrackStatus};
 use poise_engine::snapshot::TrackRuntimeSnapshot;
 
 use crate::track_definition::TrackReadDefinition;
@@ -16,7 +16,7 @@ pub struct TrackRuntimeReadState {
     pub current_exposure: Exposure,
     pub desired_exposure: Option<Exposure>,
     pub manual_target_override: Option<Exposure>,
-    pub executor_state: ExecutorState,
+    pub executor: ExecutorReadView,
     pub ledger_state: TrackLedgerState,
     pub unrealized_pnl: f64,
     pub has_account_margin_guard: bool,
@@ -48,7 +48,7 @@ impl TrackRuntimeReadState {
             current_exposure,
             desired_exposure: live.desired_exposure.map(Exposure).or(desired_exposure),
             manual_target_override: runtime_state.manual_target_override(),
-            executor_state,
+            executor: executor_state.read_view(),
             ledger_state,
             unrealized_pnl: risk.unrealized_pnl,
             has_account_margin_guard: matches!(
@@ -85,7 +85,8 @@ mod tests {
     use poise_core::strategy::{BandBoundary, BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::Exposure;
     use poise_engine::runtime::{
-        AutoState, ControlState, ExecutorState, ManualState, RiskState, TrackLiveView, TrackState,
+        AutoState, ControlState, ExecutorReadView, ExecutorState, ManualState, RiskState,
+        TrackLiveView, TrackState,
     };
     use poise_engine::snapshot::TrackRestoreRevision;
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
@@ -119,6 +120,15 @@ mod tests {
         let source = TrackRuntimeReadState::from_parts(snapshot, TrackLiveView::default());
 
         assert_eq!(source.status, poise_engine::runtime::TrackStatus::Frozen);
+    }
+
+    #[test]
+    fn read_source_exposes_executor_read_view_not_runtime_state() {
+        let snapshot = test_snapshot_with_runtime_state(TrackState::WaitingMarketData);
+
+        let source = TrackRuntimeReadState::from_parts(snapshot, TrackLiveView::default());
+
+        let _: &ExecutorReadView = &source.executor;
     }
 
     fn test_snapshot_with_runtime_state(runtime_state: TrackState) -> TrackRuntimeSnapshot {

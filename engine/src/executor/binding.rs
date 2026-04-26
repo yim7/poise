@@ -23,29 +23,6 @@ pub struct LiveOrderBinding {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BindingExecutionClass {
-    Passive,
-    CatchUp,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BindingInventoryIntent {
-    IncreaseInventory,
-    DecreaseInventory,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BindingPolicyKind {
-    CurveMaker,
-    CatchUp,
-    ManualOverride,
-    Flatten,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum BindingStatus {
     SubmitPending,
     Working,
@@ -174,25 +151,15 @@ impl LiveOrderBinding {
         self.status == BindingStatus::SubmitPending
     }
 
-    pub fn execution_class(&self) -> BindingExecutionClass {
-        match self.proposal_key.policy {
-            PolicyKind::CurveMaker => BindingExecutionClass::Passive,
-            PolicyKind::ManualOverride | PolicyKind::Flatten | PolicyKind::CatchUp => {
-                BindingExecutionClass::CatchUp
-            }
-        }
+    pub fn policy(&self) -> PolicyKind {
+        self.proposal_key.policy
     }
 
-    pub fn policy_kind(&self) -> BindingPolicyKind {
-        match self.proposal_key.policy {
-            PolicyKind::CurveMaker => BindingPolicyKind::CurveMaker,
-            PolicyKind::CatchUp => BindingPolicyKind::CatchUp,
-            PolicyKind::ManualOverride => BindingPolicyKind::ManualOverride,
-            PolicyKind::Flatten => BindingPolicyKind::Flatten,
-        }
+    pub fn is_passive_execution(&self) -> bool {
+        self.proposal_key.policy == PolicyKind::CurveMaker
     }
 
-    pub fn inventory_intent(&self) -> BindingInventoryIntent {
+    pub fn increases_inventory(&self) -> bool {
         let signed_exposure = self
             .allocations
             .iter()
@@ -201,11 +168,7 @@ impl LiveOrderBinding {
                 BoundaryDirection::Down => -allocation.exposure_qty,
             })
             .sum::<f64>();
-        if signed_exposure >= 0.0 {
-            BindingInventoryIntent::IncreaseInventory
-        } else {
-            BindingInventoryIntent::DecreaseInventory
-        }
+        signed_exposure >= 0.0
     }
 }
 

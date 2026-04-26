@@ -455,28 +455,47 @@ target_is_upper = spot_target >= upper - exposure_epsilon
 - `Up`：当前价格已经穿过这条 boundary 的触发价格并应停留在上侧
 - `Down`：当前价格已经回穿这条 boundary 的触发价格并应停留在下侧
 
-### 7.5 持久化状态
+### 7.5 当前会话运行状态
 
 ```rust
 pub struct BoundaryLedgerState {
     pub profile_revision: ProfileRevision,
     pub ledger_anchor_exposure: Exposure,
-    pub progress: Vec<BoundaryProgressEntry>,
+    pub progress: BTreeMap<BoundaryId, BoundaryProgress>,
 }
 
-pub struct BoundaryProgressEntry {
-    pub boundary_id: BoundaryId,
-    pub progress: BoundaryProgress,
+pub struct BoundaryLedgerAnchorSnapshot {
+    profile_revision: ProfileRevision,
+    ledger_anchor_exposure: Exposure,
+}
+
+pub struct ExecutorStateDocument {
+    ledger_state: BoundaryLedgerAnchorSnapshot,
+    bindings: Vec<LiveOrderBinding>,
+    recent_terminal_orders: Vec<RecentTerminalOrder>,
+    recovery_anomaly: Option<RecoveryAnomaly>,
 }
 ```
 
-这里只持久化最小非派生事实：
+这里只把最小的非派生运行事实保存在当前 executor state 中：
 
 - `profile_revision`
 - `ledger_anchor_exposure`
-- 每条边界自锚点以来的双向累计成交
+- 当前会话内，每条边界自锚点以来由成交事件吸收的双向累计进度
 
-以下信息不持久化，由当前价格、当前 bindings 和 blueprint 派生：
+`progress` 不是重启真相，也不进入持久化 JSON。`BoundaryLedgerState` / `ExecutorState` / `TrackRuntimeSnapshot` 是内存运行态，不直接实现持久化 serde；需要 JSON 时必须通过显式 document 投影，例如 `BoundaryLedgerAnchorSnapshot` / `ExecutorStateDocument` / `TrackRuntimeSnapshotDocument`。
+
+document 的边界按层区分：
+
+- `BoundaryLedgerAnchorSnapshot` 只保存 ledger anchor 信息，不保存 `progress`。
+- `ExecutorStateDocument` 可以保存 bindings / recent terminal orders / recovery anomaly，作为诊断和当前 session 恢复提示。
+- fresh activation / 进程重启的执行真相仍然来自交易所 open orders、当前仓位、当前价格和 track 配置；旧 binding id、cancel-pending 和 `progress` 不能作为恢复真相。
+
+`progress` 只解决运行中的时序窗口：Binance 的成交事件和仓位事件是两条独立 user-data 消息，成交先到、仓位后到时，executor 需要先把 fill 吸收到 boundary progress，避免在仓位更新到达前重复覆盖同一段 boundary。
+
+重启后的执行状态由交易所 open orders、当前仓位、当前价格和 track 配置重新构建。旧的 `progress` 不能恢复；旧 binding 只能作为和完整交易所快照匹配时的恢复提示。
+
+以下信息不保存为重启协议，由当前价格、当前 bindings 和 blueprint 派生：
 
 - 每条边界两个方向的 `due / future`
 - 当前是否已被覆盖

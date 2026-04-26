@@ -3,10 +3,7 @@ use poise_core::events::{DomainEvent, ExecutionGateReason};
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
 use poise_core::types::Side;
-use poise_engine::executor::{
-    BindingExecutionClass, BindingInventoryIntent, BindingPolicyKind, BindingStatus,
-    RecoveryAnomaly,
-};
+use poise_engine::executor::{BindingStatus, PolicyKind, RecoveryAnomaly};
 use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
 use poise_engine::price_gate::PriceExecutionBlockReason;
 use poise_engine::runtime::{StrategyPriceStatus, TrackStatus};
@@ -355,7 +352,7 @@ impl TrackListReadModel {
             ledger_state: TrackReadLedgerState::from(runtime.ledger_state.clone()),
             unrealized_pnl: runtime.unrealized_pnl,
             recovery_issue: runtime
-                .executor_state
+                .executor
                 .recovery_anomaly
                 .clone()
                 .map(TrackRecoveryIssue::from),
@@ -364,12 +361,7 @@ impl TrackListReadModel {
             price_execution_block_reason: runtime
                 .price_execution_block_reason
                 .map(TrackPriceExecutionBlockReason::from),
-            active_binding_count: runtime
-                .executor_state
-                .bindings
-                .iter()
-                .filter(|binding| binding.is_active())
-                .count() as u32,
+            active_binding_count: runtime.executor.bindings.len() as u32,
         }
     }
 }
@@ -504,37 +496,37 @@ fn project_effect_level(status: EffectStatus) -> TrackActivityLevel {
 
 fn project_bindings(runtime: &TrackRuntimeReadState) -> Vec<ReadModelBinding> {
     runtime
-        .executor_state
+        .executor
         .bindings
         .iter()
-        .filter(|binding| binding.is_active())
         .enumerate()
         .map(|(index, binding)| ReadModelBinding {
-            id: binding.binding_id.clone(),
-            policy: project_binding_policy(binding.policy_kind()),
-            label: project_binding_label(index, binding.execution_class()),
+            id: binding.id.clone(),
+            policy: project_binding_policy(binding.policy),
+            label: project_binding_label(index, binding.is_passive_execution),
             status: project_binding_status(binding.status),
-            side: binding.request.side,
-            price: binding.request.price,
-            quantity: binding.request.quantity,
-            intent: project_binding_intent(binding.inventory_intent()),
+            side: binding.side,
+            price: binding.price,
+            quantity: binding.quantity,
+            intent: project_binding_intent(binding.increases_inventory),
         })
         .collect()
 }
 
-fn project_binding_intent(intent: BindingInventoryIntent) -> TrackReadBindingIntent {
-    match intent {
-        BindingInventoryIntent::IncreaseInventory => TrackReadBindingIntent::IncreaseInventory,
-        BindingInventoryIntent::DecreaseInventory => TrackReadBindingIntent::DecreaseInventory,
+fn project_binding_intent(increases_inventory: bool) -> TrackReadBindingIntent {
+    if increases_inventory {
+        TrackReadBindingIntent::IncreaseInventory
+    } else {
+        TrackReadBindingIntent::DecreaseInventory
     }
 }
 
-fn project_binding_policy(policy: BindingPolicyKind) -> TrackReadBindingPolicy {
+fn project_binding_policy(policy: PolicyKind) -> TrackReadBindingPolicy {
     match policy {
-        BindingPolicyKind::CurveMaker => TrackReadBindingPolicy::CurveMaker,
-        BindingPolicyKind::CatchUp => TrackReadBindingPolicy::CatchUp,
-        BindingPolicyKind::ManualOverride => TrackReadBindingPolicy::ManualOverride,
-        BindingPolicyKind::Flatten => TrackReadBindingPolicy::Flatten,
+        PolicyKind::CurveMaker => TrackReadBindingPolicy::CurveMaker,
+        PolicyKind::CatchUp => TrackReadBindingPolicy::CatchUp,
+        PolicyKind::ManualOverride => TrackReadBindingPolicy::ManualOverride,
+        PolicyKind::Flatten => TrackReadBindingPolicy::Flatten,
     }
 }
 
@@ -549,10 +541,11 @@ fn project_binding_status(status: BindingStatus) -> TrackReadBindingStatus {
     }
 }
 
-fn project_binding_label(index: usize, execution_class: BindingExecutionClass) -> String {
-    match execution_class {
-        BindingExecutionClass::Passive => format!("maker {}", index + 1),
-        BindingExecutionClass::CatchUp => format!("target {}", index + 1),
+fn project_binding_label(index: usize, is_passive_execution: bool) -> String {
+    if is_passive_execution {
+        format!("maker {}", index + 1)
+    } else {
+        format!("target {}", index + 1)
     }
 }
 
@@ -563,11 +556,11 @@ mod tests {
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
-    use poise_engine::executor::SubmitRecoveryToken;
+    use poise_engine::executor::{BindingStatus, PolicyKind, SubmitRecoveryToken};
     use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::{
-        AutoState, ControlState, ExecutorState, RiskState, StrategyPriceStatus, TrackLiveView,
-        TrackState, TrackStatus,
+        AutoState, BindingReadView, ControlState, ExecutorReadView, ExecutorState, RiskState,
+        StrategyPriceStatus, TrackLiveView, TrackState, TrackStatus,
     };
     use poise_engine::snapshot::TrackRestoreRevision;
     use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
@@ -716,9 +709,7 @@ mod tests {
                 current_exposure: Exposure(1.0),
                 desired_exposure: Some(Exposure(2.0)),
                 manual_target_override: None,
-                executor_state: ExecutorState::empty(
-                    Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                ),
+                executor: ExecutorReadView::default(),
                 ledger_state: Default::default(),
                 unrealized_pnl: 0.0,
                 has_account_margin_guard: false,
@@ -829,61 +820,24 @@ mod tests {
 
     #[test]
     fn read_model_derives_binding_intent_from_boundary_direction_not_reduce_only() {
-        let executor_state = serde_json::from_value::<ExecutorState>(serde_json::json!({
-            "ledger_state": {
-                "profile_revision": "rev-1",
-                "ledger_anchor_exposure": 0.0,
-                "progress": []
-            },
-            "bindings": [{
-                "binding_id": "curve-maker:positive-retrace",
-                "proposal_key": {
-                    "policy": "curve_maker",
-                    "operations": [{
-                        "boundary_id": {
-                            "profile_revision": "rev-1",
-                            "lower_exposure_bp": 0,
-                            "upper_exposure_bp": 10000
-                        },
-                        "direction": "down"
-                    }]
-                },
-                "allocations": [{
-                    "operation": {
-                        "boundary_id": {
-                            "profile_revision": "rev-1",
-                            "lower_exposure_bp": 0,
-                            "upper_exposure_bp": 10000
-                        },
-                        "direction": "down"
-                    },
-                    "exposure_qty": 1.0
-                }],
-                "absorbed_exposure_qty": 0.0,
-                "request": {
-                    "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
-                    "side": "sell",
-                    "price": 101.0,
-                    "quantity": 1.0,
-                    "client_order_id": "submit-1",
-                    "reduce_only": false
-                },
-                "desired_exposure": 0.0,
-                "submit_purpose": "auto_reconcile",
-                "order_id": "order-1",
-                "status": "working",
-                "policy_state": "stateless"
-            }],
-            "recent_terminal_orders": [],
-            "recovery_anomaly": null
-        }))
-        .unwrap();
         let runtime = TrackRuntimeReadState {
             status: TrackStatus::Active,
             current_exposure: Exposure(1.0),
             desired_exposure: Some(Exposure(0.0)),
             manual_target_override: None,
-            executor_state,
+            executor: ExecutorReadView {
+                bindings: vec![BindingReadView {
+                    id: "curve-maker:positive-retrace".into(),
+                    policy: PolicyKind::CurveMaker,
+                    is_passive_execution: true,
+                    status: BindingStatus::Working,
+                    side: Side::Sell,
+                    price: 101.0,
+                    quantity: 1.0,
+                    increases_inventory: false,
+                }],
+                recovery_anomaly: None,
+            },
             ledger_state: Default::default(),
             unrealized_pnl: 0.0,
             has_account_margin_guard: false,

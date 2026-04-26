@@ -109,15 +109,11 @@ impl TrackRuntimeLifecycleService {
 
         Ok(Some(TrackRecoverySummary {
             issue: runtime
-                .executor_state
+                .executor
                 .recovery_anomaly
                 .clone()
                 .map(TrackRecoveryIssue::from),
-            has_working_orders: runtime
-                .executor_state
-                .bindings
-                .iter()
-                .any(|binding| binding.is_active()),
+            has_working_orders: !runtime.executor.bindings.is_empty(),
         }))
     }
 

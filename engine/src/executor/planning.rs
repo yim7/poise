@@ -3,7 +3,6 @@ use poise_core::strategy::TrackConfig;
 use poise_core::types::{ExchangeRules, Exposure, Side};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 
 use crate::execution_plan::ExecutionAction;
@@ -102,7 +101,6 @@ enum BindingReconciliationDecision {
 
 const CURVE_MAKER_LEVELS_PER_SIDE: usize = 3;
 const CURVE_MAKER_GRACE_MS: i64 = 60_000;
-static BINDING_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 impl<'a> ExecutorInput<'a> {
     pub fn new(
@@ -167,15 +165,15 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     }
 
     if submit_intent.policy_context == PolicyContext::Normal {
-        refresh_curve_maker_due_grace(&mut state, &view, submit_intent.observed_at);
+        // This only starts or clears the due grace timer. Reconciliation owns
+        // the later choice to keep, cancel, or replace an existing maker.
+        refresh_curve_maker_due_grace_start(&mut state, &view, submit_intent.observed_at);
     }
     let mut desired_bindings = Vec::new();
 
-    // Policy priority is enforced in two layers:
-    //   1. Outer layer (manager.rs): PolicyContext decides ManualOverride/Flatten vs Normal.
-    //      When the track is in Manual or Flatten state, only that policy runs.
-    //   2. Inner layer (policy.rs): BoundaryPolicy plans CatchUp and CurveMaker together.
-    //      It reserves due CatchUp operations before selecting future maker operations.
+    // Policy priority is intentionally split at two ownership boundaries:
+    // manager/runtime selects the broad operating context, then this planner
+    // delegates Normal-mode CatchUp/CurveMaker ordering to policy.rs.
     // Effective priority: ManualOverride > Flatten > CatchUp > CurveMaker.
     match submit_intent.policy_context {
         PolicyContext::Normal => {
@@ -256,7 +254,7 @@ fn finish_plan(
     if effects.is_empty() {
         effects.push(ExecutionAction::NoOp);
     }
-    // Make terminal binding cleanup an ExecutorPlan output invariant, including early returns.
+    // Terminal bindings are an ExecutorPlan output invariant, including early returns.
     state
         .bindings
         .retain(|binding| binding.status != BindingStatus::Terminal);
@@ -450,7 +448,7 @@ fn plan_curve_maker_bindings(
         .collect()
 }
 
-fn refresh_curve_maker_due_grace(
+fn refresh_curve_maker_due_grace_start(
     state: &mut ExecutorState,
     view: &BoundaryLedgerView,
     observed_at: DateTime<Utc>,
@@ -593,12 +591,15 @@ fn classify_binding_reconciliation(
 ) -> BindingReconciliationDecision {
     if has_cancel_pending_owner(active_bindings, &desired.allocations) {
         return BindingReconciliationDecision::CoveredByExisting {
-            indexes: active_owner_indexes_for_allocations(bindings, &desired.allocations),
+            indexes: non_cancel_pending_owner_indexes_for_allocations(
+                bindings,
+                &desired.allocations,
+            ),
         };
     }
 
     if desired.proposal.policy == PolicyKind::CatchUp {
-        let indexes = maker_indexes_covering_catch_up(
+        let indexes = existing_passive_covering_indexes(
             bindings,
             desired,
             exchange_rules,
@@ -621,7 +622,7 @@ fn classify_binding_reconciliation(
     }
 
     if desired.proposal.policy == PolicyKind::CatchUp {
-        let indexes = owner_indexes_replaced_by_catch_up(active_bindings, &desired.allocations);
+        let indexes = replaceable_owner_indexes(active_bindings, &desired.allocations);
         if !indexes.is_empty() {
             return BindingReconciliationDecision::ReplaceActiveOwners { indexes };
         }
@@ -634,7 +635,17 @@ fn classify_binding_reconciliation(
     BindingReconciliationDecision::SubmitNew
 }
 
-fn active_owner_indexes_for_allocations(
+fn has_cancel_pending_owner(
+    bindings: &[LiveOrderBinding],
+    allocations: &[BindingOperationAllocation],
+) -> bool {
+    bindings
+        .iter()
+        .filter(|binding| binding.status == BindingStatus::CancelPending)
+        .any(|binding| allocations_overlap(&binding.allocations, allocations))
+}
+
+fn non_cancel_pending_owner_indexes_for_allocations(
     bindings: &[LiveOrderBinding],
     allocations: &[BindingOperationAllocation],
 ) -> Vec<usize> {
@@ -650,17 +661,7 @@ fn active_owner_indexes_for_allocations(
         .collect()
 }
 
-fn has_cancel_pending_owner(
-    bindings: &[LiveOrderBinding],
-    allocations: &[BindingOperationAllocation],
-) -> bool {
-    bindings
-        .iter()
-        .filter(|binding| binding.status == BindingStatus::CancelPending)
-        .any(|binding| allocations_overlap(&binding.allocations, allocations))
-}
-
-fn maker_indexes_covering_catch_up(
+fn existing_passive_covering_indexes(
     bindings: &[LiveOrderBinding],
     desired: &DesiredBinding,
     exchange_rules: &ExchangeRules,
@@ -670,7 +671,7 @@ fn maker_indexes_covering_catch_up(
     let mut matched_indexes = BTreeSet::new();
     for desired_allocation in &desired.allocations {
         let Some((index, _binding)) = bindings.iter().enumerate().find(|(_index, binding)| {
-            maker_covers_catch_up_allocation(
+            binding_is_passive_covering_owner(
                 binding,
                 desired,
                 desired_allocation,
@@ -686,7 +687,7 @@ fn maker_indexes_covering_catch_up(
     matched_indexes.into_iter().collect()
 }
 
-fn maker_covers_catch_up_allocation(
+fn binding_is_passive_covering_owner(
     binding: &LiveOrderBinding,
     desired: &DesiredBinding,
     desired_allocation: &BindingOperationAllocation,
@@ -697,6 +698,7 @@ fn maker_covers_catch_up_allocation(
     if binding.proposal_key.policy != PolicyKind::CurveMaker
         || !binding_is_active(binding)
         || binding.status == BindingStatus::CancelPending
+        || curve_maker_grace_expired(binding, observed_at, curve_maker_grace_ms)
         || binding.request.side != desired.request.side
         || binding.request.reduce_only != desired.request.reduce_only
         || !values_match(
@@ -704,7 +706,6 @@ fn maker_covers_catch_up_allocation(
             desired.request.price,
             exchange_rules.price_tick,
         )
-        || curve_maker_grace_expired(binding, observed_at, curve_maker_grace_ms)
     {
         return false;
     }
@@ -724,12 +725,12 @@ fn curve_maker_grace_expired(
 ) -> bool {
     let BindingPolicyState::CurveMaker {
         due_grace_started_at: Some(started_at),
-    } = &binding.policy_state
+    } = binding.policy_state
     else {
         return false;
     };
     observed_at
-        .signed_duration_since(*started_at)
+        .signed_duration_since(started_at)
         .num_milliseconds()
         >= grace_ms
 }
@@ -800,7 +801,7 @@ fn has_active_owner(
     })
 }
 
-fn owner_indexes_replaced_by_catch_up(
+fn replaceable_owner_indexes(
     bindings: &[LiveOrderBinding],
     allocations: &[BindingOperationAllocation],
 ) -> Vec<usize> {
@@ -1020,7 +1021,7 @@ fn next_client_order_id(policy: PolicyKind) -> String {
 }
 
 fn next_binding_id(policy: PolicyKind) -> String {
-    let instance_id = BINDING_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
+    let instance_id = Uuid::new_v4().simple();
     match policy {
         PolicyKind::ManualOverride => format!("binding-manual-{instance_id}"),
         PolicyKind::Flatten => format!("binding-flatten-{instance_id}"),
@@ -1038,7 +1039,7 @@ mod tests {
 
     use super::*;
     use crate::executor::boundary::{BoundaryId, ProfileRevision};
-    use crate::executor::ledger::{BoundaryProgress, BoundaryProgressEntry};
+    use crate::executor::ledger::BoundaryProgress;
     use crate::ports::ExecutionQuote;
     use crate::price_gate::PriceExecutionGate;
     use crate::track::{Instrument, Venue};
@@ -1054,10 +1055,6 @@ mod tests {
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
         }
-    }
-
-    fn looks_like_u64(value: &str) -> bool {
-        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
     }
 
     fn rules() -> ExchangeRules {
@@ -1453,17 +1450,18 @@ mod tests {
         let mut previous = plan(input(&config, &rules, Exposure(0.0), Exposure(2.0))).state;
         previous.bindings[0].status = BindingStatus::Working;
         previous.bindings[0].order_id = Some("increase-order".to_string());
-        previous.ledger_state.progress.push(BoundaryProgressEntry {
-            boundary_id: BoundaryId {
-                profile_revision: ProfileRevision(previous.ledger_state.profile_revision.0.clone()),
-                lower_exposure_bp: 0,
-                upper_exposure_bp: 10_000,
-            },
-            progress: BoundaryProgress {
+        let boundary_id = BoundaryId {
+            profile_revision: ProfileRevision(previous.ledger_state.profile_revision.0.clone()),
+            lower_exposure_bp: 0,
+            upper_exposure_bp: 10_000,
+        };
+        previous.ledger_state.progress.insert(
+            boundary_id,
+            BoundaryProgress {
                 cumulative_up: 1.2,
                 cumulative_down: 0.0,
             },
-        });
+        );
 
         let plan = plan(input_with_gate(
             &config,
@@ -1567,100 +1565,6 @@ mod tests {
             binding.proposal_key.policy == PolicyKind::CatchUp
                 && binding.status == BindingStatus::SubmitPending
         }));
-    }
-
-    #[test]
-    fn planning_removes_terminal_bindings_before_returning_state() {
-        let config = config();
-        let rules = rules();
-        let mut previous = plan(input(&config, &rules, Exposure(0.0), Exposure(1.0))).state;
-        previous.bindings[0].status = BindingStatus::Terminal;
-
-        let next = plan(ExecutorInput::new(
-            SubmitIntentInput {
-                instrument: instrument(),
-                config: &config,
-                exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
-                min_rebalance_units: config.min_rebalance_units,
-                current_exposure: Exposure(0.0),
-                desired_exposure: Exposure(0.0),
-                execution_quote: Some(ExecutionQuote {
-                    best_bid: 99.9,
-                    best_ask: 100.1,
-                }),
-                policy_context: PolicyContext::Normal,
-                price_execution_gate: PriceExecutionGate::Open,
-                submit_purpose: SubmitPurpose::AutoReconcile,
-                observed_at: Utc::now(),
-            },
-            Some(&previous),
-        ));
-
-        assert!(
-            next.state
-                .bindings
-                .iter()
-                .all(|binding| binding.status != BindingStatus::Terminal)
-        );
-    }
-
-    #[test]
-    fn planning_removes_terminal_bindings_on_recovery_anomaly_return() {
-        let config = config();
-        let rules = rules();
-        let mut previous = plan(input(&config, &rules, Exposure(0.0), Exposure(1.0))).state;
-        previous.bindings[0].status = BindingStatus::Terminal;
-        previous.recovery_anomaly = Some(crate::executor::RecoveryAnomaly::ExpectedExposureMismatch);
-
-        let next = plan(ExecutorInput::new(
-            SubmitIntentInput {
-                instrument: instrument(),
-                config: &config,
-                exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
-                min_rebalance_units: config.min_rebalance_units,
-                current_exposure: Exposure(0.0),
-                desired_exposure: Exposure(0.0),
-                execution_quote: Some(ExecutionQuote {
-                    best_bid: 99.9,
-                    best_ask: 100.1,
-                }),
-                policy_context: PolicyContext::Normal,
-                price_execution_gate: PriceExecutionGate::Open,
-                submit_purpose: SubmitPurpose::AutoReconcile,
-                observed_at: Utc::now(),
-            },
-            Some(&previous),
-        ));
-
-        assert!(
-            next.state
-                .bindings
-                .iter()
-                .all(|binding| binding.status != BindingStatus::Terminal)
-        );
-    }
-
-    #[test]
-    fn curve_maker_policy_emits_sell_side_reduce_only_binding() {
-        let config = config();
-        let rules = rules();
-
-        let plan = plan(input(&config, &rules, Exposure(1.0), Exposure(1.0)));
-
-        let sell_maker = plan
-            .state
-            .bindings
-            .iter()
-            .find(|binding| {
-                binding.proposal_key.policy == PolicyKind::CurveMaker
-                    && binding.request.side == Side::Sell
-                    && binding.request.reduce_only
-            })
-            .expect("sell-side reduce-only maker binding should be planned");
-        assert_eq!(sell_maker.request.price, 100.0);
-        assert_eq!(sell_maker.allocations.len(), 1);
     }
 
     #[test]
@@ -1784,7 +1688,7 @@ mod tests {
         let rules = rules();
 
         let plan = plan(input(&config, &rules, Exposure(0.0), Exposure(2.0)));
-        let state_json = serde_json::to_value(&plan.state).unwrap();
+        let state_json = serde_json::to_value(plan.state.to_document()).unwrap();
 
         assert!(state_json.get("active_round").is_none());
         assert!(state_json.get("slots").is_none());
@@ -1793,12 +1697,107 @@ mod tests {
     }
 
     #[test]
+    fn planning_removes_terminal_bindings_before_returning_state() {
+        let config = config();
+        let rules = rules();
+        let mut previous = plan(input(&config, &rules, Exposure(0.0), Exposure(1.0))).state;
+        previous.bindings[0].status = BindingStatus::Terminal;
+
+        let next = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: instrument(),
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: config.min_rebalance_units,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(0.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            Some(&previous),
+        ));
+
+        assert!(
+            next.state
+                .bindings
+                .iter()
+                .all(|binding| binding.status != BindingStatus::Terminal)
+        );
+    }
+
+    #[test]
+    fn planning_removes_terminal_bindings_on_recovery_anomaly_return() {
+        let config = config();
+        let rules = rules();
+        let mut previous = plan(input(&config, &rules, Exposure(0.0), Exposure(1.0))).state;
+        previous.bindings[0].status = BindingStatus::Terminal;
+        previous.recovery_anomaly =
+            Some(crate::executor::RecoveryAnomaly::ExpectedExposureMismatch);
+
+        let next = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: instrument(),
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: config.min_rebalance_units,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(0.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            Some(&previous),
+        ));
+
+        assert!(
+            next.state
+                .bindings
+                .iter()
+                .all(|binding| binding.status != BindingStatus::Terminal)
+        );
+    }
+
+    #[test]
+    fn curve_maker_policy_emits_sell_side_reduce_only_binding() {
+        let config = config();
+        let rules = rules();
+
+        let plan = plan(input(&config, &rules, Exposure(1.0), Exposure(1.0)));
+
+        let sell_maker = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.proposal_key.policy == PolicyKind::CurveMaker
+                    && binding.request.side == Side::Sell
+                    && binding.request.reduce_only
+            })
+            .expect("sell-side reduce-only maker binding should be planned");
+        assert_eq!(sell_maker.request.price, 100.0);
+        assert_eq!(sell_maker.allocations.len(), 1);
+    }
+
+    #[test]
     fn planning_uses_process_local_binding_ids_and_exchange_safe_client_order_ids() {
         let binding_id = next_binding_id(PolicyKind::CatchUp);
         let binding_suffix = binding_id
             .strip_prefix("binding-catch-up-")
             .expect("binding id should keep the catch-up prefix");
-        assert!(looks_like_u64(binding_suffix));
+        uuid::Uuid::parse_str(binding_suffix).expect("binding id suffix should be a UUID");
 
         for (policy, expected_prefix) in [
             (PolicyKind::ManualOverride, "bo-"),
@@ -1825,17 +1824,18 @@ mod tests {
         let config = config();
         let rules = rules();
         let mut state = ExecutorState::empty(Utc::now()).ensure_revision(&config, Exposure(0.0));
-        state.ledger_state.progress.push(BoundaryProgressEntry {
-            boundary_id: BoundaryId {
-                profile_revision: ProfileRevision(state.ledger_state.profile_revision.0.clone()),
-                lower_exposure_bp: 0,
-                upper_exposure_bp: 10_000,
-            },
-            progress: BoundaryProgress {
+        let boundary_id = BoundaryId {
+            profile_revision: ProfileRevision(state.ledger_state.profile_revision.0.clone()),
+            lower_exposure_bp: 0,
+            upper_exposure_bp: 10_000,
+        };
+        state.ledger_state.progress.insert(
+            boundary_id,
+            BoundaryProgress {
                 cumulative_up: 1.0,
                 cumulative_down: 0.0,
             },
-        });
+        );
 
         let plan = plan(ExecutorInput::new(
             SubmitIntentInput {
@@ -1900,17 +1900,18 @@ mod tests {
         let config = config();
         let rules = rules();
         let mut state = ExecutorState::empty(Utc::now()).ensure_revision(&config, Exposure(0.0));
-        state.ledger_state.progress.push(BoundaryProgressEntry {
-            boundary_id: BoundaryId {
-                profile_revision: ProfileRevision(state.ledger_state.profile_revision.0.clone()),
-                lower_exposure_bp: 0,
-                upper_exposure_bp: 10_000,
-            },
-            progress: BoundaryProgress {
+        let boundary_id = BoundaryId {
+            profile_revision: ProfileRevision(state.ledger_state.profile_revision.0.clone()),
+            lower_exposure_bp: 0,
+            upper_exposure_bp: 10_000,
+        };
+        state.ledger_state.progress.insert(
+            boundary_id,
+            BoundaryProgress {
                 cumulative_up: 1.2,
                 cumulative_down: 0.0,
             },
-        });
+        );
 
         let plan = plan(ExecutorInput::new(
             SubmitIntentInput {

@@ -6,12 +6,10 @@ pub(crate) mod policy;
 mod recording;
 mod recovery;
 
-pub use binding::{
-    BindingExecutionClass, BindingInventoryIntent, BindingPolicyKind, BindingStatus,
-    SubmitRecoveryToken,
-};
+pub use binding::{BindingStatus, SubmitRecoveryToken};
 pub(crate) use planning::{ExecutorInput, PolicyContext, SubmitIntentInput, plan, refresh_state};
 pub use planning::{OrderRole, PendingSubmitHint};
+pub use policy::PolicyKind;
 pub use recording::OrderUpdateAbsorbResult;
 pub(crate) use recording::{
     SubmitReceiptResolution, apply_order_observation_with_result, clear_all_working_orders,

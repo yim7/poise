@@ -390,7 +390,11 @@ impl TrackManager {
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        track.executor_state = track.executor_state.reset_for_activation(activated_at);
+        track.executor_state = track.executor_state.reset_for_activation(
+            &track.config,
+            track.current_exposure.clone(),
+            activated_at,
+        );
         Ok(())
     }
 
@@ -459,7 +463,11 @@ impl TrackManager {
             if let Some(strategy_price) = Self::live_strategy_price_for(track) {
                 let mut resumed = track.clone();
                 resumed.track_state = TrackState::WaitingMarketData;
-                resumed.executor_state = track.executor_state.reset_for_activation(resumed_at);
+                resumed.executor_state = track.executor_state.reset_for_activation(
+                    &track.config,
+                    track.current_exposure.clone(),
+                    resumed_at,
+                );
                 let result = self.plan_inventory_execution_for_track(&resumed, strategy_price)?;
                 (
                     result.new_runtime_state.unwrap_or(TrackState::Running(
@@ -481,7 +489,11 @@ impl TrackManager {
                     TrackState::WaitingMarketData,
                     None,
                     ExecutionGateDecision::Open,
-                    track.executor_state.reset_for_activation(resumed_at),
+                    track.executor_state.reset_for_activation(
+                        &track.config,
+                        track.current_exposure.clone(),
+                        resumed_at,
+                    ),
                 )
             }
         };
@@ -1359,7 +1371,8 @@ mod tests {
 
         manager.observe(&id, market(100.0)).unwrap();
 
-        let state_json = serde_json::to_value(&manager.snapshot(id.as_str()).unwrap()).unwrap();
+        let state_json =
+            serde_json::to_value(manager.snapshot(id.as_str()).unwrap().to_document()).unwrap();
         let executor_state = state_json.get("executor_state").unwrap();
         assert!(executor_state.get("active_round").is_none());
         assert!(executor_state.get("slots").is_none());

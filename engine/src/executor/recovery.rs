@@ -259,7 +259,7 @@ fn reanchor_executor_ledger(
     state.ledger_state = BoundaryLedgerState {
         profile_revision: profile_revision_for_config(config),
         ledger_anchor_exposure: current_exposure,
-        progress: Vec::new(),
+        progress: Default::default(),
     };
 }
 
@@ -368,7 +368,7 @@ mod tests {
     use crate::executor::boundary::{
         BoundaryDirection, BoundaryId, BoundaryOperation, ProfileRevision,
     };
-    use crate::executor::ledger::{BoundaryProgress, BoundaryProgressEntry};
+    use crate::executor::ledger::BoundaryProgress;
     use crate::executor::policy::PolicyKind;
     use crate::ports::OrderStatus;
     use crate::price_gate::SubmitPurpose;
@@ -684,20 +684,18 @@ mod tests {
         let rules = rules();
         let mut previous_state = ExecutorState::empty(Utc::now());
         previous_state.ledger_state.profile_revision = ProfileRevision("rev-1".to_string());
-        previous_state
-            .ledger_state
-            .progress
-            .push(BoundaryProgressEntry {
-                boundary_id: BoundaryId {
-                    profile_revision: ProfileRevision("rev-1".to_string()),
-                    lower_exposure_bp: 0,
-                    upper_exposure_bp: 10_000,
-                },
-                progress: BoundaryProgress {
-                    cumulative_up: 1.0,
-                    cumulative_down: 0.0,
-                },
-            });
+        let boundary_id = BoundaryId {
+            profile_revision: ProfileRevision("rev-1".to_string()),
+            lower_exposure_bp: 0,
+            upper_exposure_bp: 10_000,
+        };
+        previous_state.ledger_state.progress.insert(
+            boundary_id,
+            BoundaryProgress {
+                cumulative_up: 1.0,
+                cumulative_down: 0.0,
+            },
+        );
 
         let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new());
         let recovery = recover_working_orders(RecoveryInput {
@@ -755,20 +753,18 @@ mod tests {
         let rules = rules();
         let mut previous_state =
             ExecutorState::empty(Utc::now()).ensure_revision(config(), Exposure(0.0));
-        previous_state
-            .ledger_state
-            .progress
-            .push(BoundaryProgressEntry {
-                boundary_id: BoundaryId {
-                    profile_revision: profile_revision_for_config(config()),
-                    lower_exposure_bp: 0,
-                    upper_exposure_bp: 10_000,
-                },
-                progress: BoundaryProgress {
-                    cumulative_up: 1.2,
-                    cumulative_down: 0.0,
-                },
-            });
+        let boundary_id = BoundaryId {
+            profile_revision: profile_revision_for_config(config()),
+            lower_exposure_bp: 0,
+            upper_exposure_bp: 10_000,
+        };
+        previous_state.ledger_state.progress.insert(
+            boundary_id,
+            BoundaryProgress {
+                cumulative_up: 1.2,
+                cumulative_down: 0.0,
+            },
+        );
 
         let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new());
         let recovery = recover_working_orders(RecoveryInput {

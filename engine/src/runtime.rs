@@ -4,13 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use poise_core::risk::{LossLimits, RiskTerminationCause};
 use poise_core::strategy::{BandBoundary, TrackConfig};
-use poise_core::types::{ExchangeRules, Exposure};
+use poise_core::types::{ExchangeRules, Exposure, Side};
 
 use crate::execution_gate::ExecutionGateState;
 use crate::executor::RecoveryAnomaly;
-use crate::executor::binding::LiveOrderBinding;
+use crate::executor::binding::{BindingStatus, LiveOrderBinding};
 use crate::executor::boundary::{ProfileRevision, profile_revision_for_config};
 use crate::executor::ledger::BoundaryLedgerState;
+use crate::executor::policy::PolicyKind;
 use crate::ledger::TrackLedgerState;
 use crate::ports::ExecutionQuote;
 use crate::price_gate::{
@@ -193,28 +194,66 @@ pub struct TrackLiveView {
     pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ExecutorReadView {
+    pub bindings: Vec<BindingReadView>,
+    pub recovery_anomaly: Option<RecoveryAnomaly>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BindingReadView {
+    pub id: String,
+    pub policy: PolicyKind,
+    pub is_passive_execution: bool,
+    pub status: BindingStatus,
+    pub side: Side,
+    pub price: f64,
+    pub quantity: f64,
+    pub increases_inventory: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecentTerminalOrder {
     pub client_order_id: String,
     pub order_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExecutorState {
     pub ledger_state: BoundaryLedgerState,
     pub bindings: Vec<LiveOrderBinding>,
     pub recent_terminal_orders: Vec<RecentTerminalOrder>,
-    #[serde(default)]
     pub recovery_anomaly: Option<RecoveryAnomaly>,
 }
 
 impl ExecutorState {
+    pub fn read_view(&self) -> ExecutorReadView {
+        ExecutorReadView {
+            bindings: self
+                .bindings
+                .iter()
+                .filter(|binding| binding.is_active())
+                .map(|binding| BindingReadView {
+                    id: binding.binding_id.clone(),
+                    policy: binding.policy(),
+                    is_passive_execution: binding.is_passive_execution(),
+                    status: binding.status,
+                    side: binding.request.side,
+                    price: binding.request.price,
+                    quantity: binding.request.quantity,
+                    increases_inventory: binding.increases_inventory(),
+                })
+                .collect(),
+            recovery_anomaly: self.recovery_anomaly.clone(),
+        }
+    }
+
     pub fn empty(_started_at: DateTime<Utc>) -> Self {
         Self {
             ledger_state: BoundaryLedgerState {
                 profile_revision: ProfileRevision("uninitialized".to_string()),
                 ledger_anchor_exposure: Exposure(0.0),
-                progress: Vec::new(),
+                progress: Default::default(),
             },
             bindings: Vec::new(),
             recent_terminal_orders: Vec::new(),
@@ -222,11 +261,22 @@ impl ExecutorState {
         }
     }
 
-    pub fn reset_for_activation(&self, _started_at: DateTime<Utc>) -> Self {
-        let mut reset = self.clone();
-        reset.bindings.clear();
-        reset.recovery_anomaly = None;
-        reset
+    pub fn reset_for_activation(
+        &self,
+        config: &TrackConfig,
+        current_exposure: Exposure,
+        _started_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            ledger_state: BoundaryLedgerState {
+                profile_revision: profile_revision_for_config(config),
+                ledger_anchor_exposure: current_exposure,
+                progress: Default::default(),
+            },
+            bindings: Vec::new(),
+            recent_terminal_orders: Vec::new(),
+            recovery_anomaly: None,
+        }
     }
 
     pub fn ensure_revision(&self, config: &TrackConfig, current_exposure: Exposure) -> Self {
@@ -239,7 +289,7 @@ impl ExecutorState {
             ledger_state: BoundaryLedgerState {
                 profile_revision: revision,
                 ledger_anchor_exposure: current_exposure,
-                progress: Vec::new(),
+                progress: Default::default(),
             },
             bindings: Vec::new(),
             recent_terminal_orders: self.recent_terminal_orders.clone(),
@@ -575,7 +625,7 @@ mod tests {
     use crate::track::Venue;
 
     #[test]
-    fn snapshot_round_trips_boundary_ledger_state_and_bindings() {
+    fn executor_state_document_round_trips_anchor_and_bindings() {
         let mut state = ExecutorState::empty(Utc::now());
         let boundary_id = BoundaryId {
             profile_revision: state.ledger_state.profile_revision.clone(),
@@ -609,11 +659,13 @@ mod tests {
             policy_state: BindingPolicyState::Stateless,
         });
 
-        let json = serde_json::to_string(&state).unwrap();
-        let restored: ExecutorState = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&state.to_document()).unwrap();
+        let restored = serde_json::from_str::<crate::snapshot::ExecutorStateDocument>(&json)
+            .unwrap()
+            .into_runtime_state();
 
         assert_eq!(restored, state);
-        let value = serde_json::to_value(restored).unwrap();
+        let value = serde_json::to_value(restored.to_document()).unwrap();
         assert!(value.get("active_round").is_none());
         assert!(value.get("slots").is_none());
         assert!(value.get("ledger_state").is_some());
@@ -621,8 +673,8 @@ mod tests {
     }
 
     #[test]
-    fn runtime_live_view_derives_gap_and_mode_from_boundary_ledger_without_persisting_them() {
-        let runtime = TrackRuntime::new(
+    fn runtime_snapshot_document_is_explicit_projection_not_runtime_clone() {
+        let mut runtime = TrackRuntime::new(
             "test".into(),
             Instrument::new(Venue::Binance, "BTCUSDT"),
             test_config(),
@@ -631,14 +683,39 @@ mod tests {
             test_rules(0.1),
             Utc::now(),
         );
+        runtime.executor_state = dirty_executor_state();
 
-        let snapshot_json = serde_json::to_value(runtime.snapshot()).unwrap();
+        let runtime_snapshot = runtime.snapshot();
+        assert!(
+            !runtime_snapshot
+                .executor_state
+                .ledger_state
+                .progress
+                .is_empty(),
+            "runtime clones must preserve current-session progress"
+        );
+
+        let snapshot_json = serde_json::to_value(runtime_snapshot.to_document()).unwrap();
         let executor_state = snapshot_json.get("executor_state").unwrap();
         assert!(executor_state.get("gap").is_none());
         assert!(executor_state.get("mode").is_none());
         assert!(executor_state.get("core_resting").is_none());
         assert!(executor_state.get("ledger_state").is_some());
         assert!(executor_state.get("bindings").is_some());
+        assert!(
+            executor_state
+                .get("ledger_state")
+                .and_then(|ledger| ledger.get("progress"))
+                .is_none(),
+            "serialized projection must not expose current-session progress"
+        );
+
+        let document = serde_json::from_value(snapshot_json).unwrap();
+        let restored = TrackRuntimeSnapshot::from_document(document);
+        assert!(
+            restored.executor_state.ledger_state.progress.is_empty(),
+            "explicit document restore starts a new session progress window"
+        );
     }
 
     #[test]
@@ -748,6 +825,27 @@ mod tests {
         assert_eq!(fresh.exchange_rules.price_tick, 1.0);
     }
 
+    #[test]
+    fn reset_for_activation_discards_session_execution_state_and_reanchors_boundary_ledger() {
+        let state = dirty_executor_state();
+
+        let reset = state.reset_for_activation(
+            &test_config(),
+            Exposure(2.5),
+            Utc.with_ymd_and_hms(2026, 4, 23, 8, 2, 0).unwrap(),
+        );
+
+        assert!(reset.bindings.is_empty());
+        assert!(reset.recent_terminal_orders.is_empty());
+        assert!(reset.recovery_anomaly.is_none());
+        assert!(reset.ledger_state.progress.is_empty());
+        assert_eq!(
+            reset.ledger_state.profile_revision,
+            profile_revision_for_config(&test_config())
+        );
+        assert_eq!(reset.ledger_state.ledger_anchor_exposure, Exposure(2.5));
+    }
+
     fn test_config() -> TrackConfig {
         TrackConfig {
             lower_price: 90.0,
@@ -803,16 +901,13 @@ mod tests {
             boundary_id,
             direction: BoundaryDirection::Up,
         };
-        state
-            .ledger_state
-            .progress
-            .push(crate::executor::ledger::BoundaryProgressEntry {
-                boundary_id: operation.boundary_id.clone(),
-                progress: crate::executor::ledger::BoundaryProgress {
-                    cumulative_up: 1.0,
-                    cumulative_down: 0.0,
-                },
-            });
+        state.ledger_state.progress.insert(
+            operation.boundary_id.clone(),
+            crate::executor::ledger::BoundaryProgress {
+                cumulative_up: 1.0,
+                cumulative_down: 0.0,
+            },
+        );
         state.bindings.push(LiveOrderBinding {
             binding_id: "binding-1".to_string(),
             proposal_key: BindingProposalKey {

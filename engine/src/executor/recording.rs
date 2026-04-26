@@ -4,7 +4,7 @@ use crate::runtime::{ExecutorState, RecentTerminalOrder};
 use poise_core::types::Exposure;
 
 use super::binding::{BindingStatus, LiveOrderBinding, SubmitRecoveryToken};
-use super::ledger::{BoundaryProgress, BoundaryProgressEntry};
+use super::ledger::BoundaryProgress;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SubmitReceiptResolution {
@@ -269,21 +269,14 @@ fn apply_progress_delta_for_allocation(
     allocation: &super::binding::BindingOperationAllocation,
     exposure_qty: f64,
 ) {
-    let Some(entry) = state
+    let delta = progress_delta_for_allocation(allocation, exposure_qty);
+    let progress = state
         .ledger_state
         .progress
-        .iter_mut()
-        .find(|entry| entry.boundary_id == allocation.operation.boundary_id)
-    else {
-        state.ledger_state.progress.push(BoundaryProgressEntry {
-            boundary_id: allocation.operation.boundary_id.clone(),
-            progress: progress_delta_for_allocation(allocation, exposure_qty),
-        });
-        return;
-    };
-    let delta = progress_delta_for_allocation(allocation, exposure_qty);
-    entry.progress.cumulative_up += delta.cumulative_up;
-    entry.progress.cumulative_down += delta.cumulative_down;
+        .entry(allocation.operation.boundary_id.clone())
+        .or_default();
+    progress.cumulative_up += delta.cumulative_up;
+    progress.cumulative_down += delta.cumulative_down;
 }
 
 fn progress_delta_for_allocation(
@@ -336,10 +329,19 @@ mod tests {
 
     use super::*;
     use crate::execution_plan::ExecutionAction;
+    use crate::executor::ledger::BoundaryLedgerState;
     use crate::executor::planning::{ExecutorInput, PolicyContext, SubmitIntentInput, plan};
     use crate::ports::ExecutionQuote;
     use crate::price_gate::{PriceExecutionGate, SubmitPurpose};
     use crate::track::{Instrument, Venue};
+
+    fn only_progress(ledger_state: &BoundaryLedgerState) -> &BoundaryProgress {
+        ledger_state
+            .progress
+            .values()
+            .next()
+            .expect("test ledger should contain one progress entry")
+    }
 
     #[test]
     fn recording_applies_fill_to_binding_then_updates_boundary_progress() {
@@ -398,14 +400,7 @@ mod tests {
 
         assert_eq!(applied.absorb_result, OrderUpdateAbsorbResult::Applied);
         assert_eq!(applied.state.ledger_state.progress.len(), 1);
-        assert!(
-            (applied.state.ledger_state.progress[0]
-                .progress
-                .cumulative_up
-                - 1.0)
-                .abs()
-                < 1e-9
-        );
+        assert!((only_progress(&applied.state.ledger_state).cumulative_up - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -471,8 +466,69 @@ mod tests {
         );
         assert_eq!(first.state.bindings[0].status, BindingStatus::Working);
         assert_eq!(first.state.ledger_state.progress.len(), 1);
-        assert!((first.state.ledger_state.progress[0].progress.cumulative_up - 0.4).abs() < 1e-9);
-        assert!((replay.state.ledger_state.progress[0].progress.cumulative_up - 0.4).abs() < 1e-9);
+        assert!((only_progress(&first.state.ledger_state).cumulative_up - 0.4).abs() < 1e-9);
+        assert!((only_progress(&replay.state.ledger_state).cumulative_up - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn recording_preserves_partial_progress_when_order_cancels() {
+        let config = TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 100.0,
+            min_rebalance_units: 1.0,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: BandProtectionPolicy::Freeze,
+        };
+        let rules = ExchangeRules {
+            price_tick: 0.1,
+            quantity_step: 0.01,
+            min_qty: 0.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        };
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+        let planned = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: &instrument,
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: 1.0,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(1.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            None,
+        ));
+        let binding = &planned.state.bindings[0];
+        let canceled = OrderObservation {
+            order_id: "order-1".to_string(),
+            client_order_id: binding.request.client_order_id.clone(),
+            side: binding.request.side,
+            price: binding.request.price,
+            quantity: binding.request.quantity,
+            filled_qty: binding.request.quantity * 0.25,
+            realized_pnl: 0.0,
+            status: OrderStatus::Canceled,
+        };
+
+        let applied = apply_order_observation_with_result(&planned.state, &canceled);
+
+        assert_eq!(applied.absorb_result, OrderUpdateAbsorbResult::Applied);
+        assert_eq!(applied.state.bindings[0].status, BindingStatus::Terminal);
+        assert_eq!(applied.state.ledger_state.progress.len(), 1);
+        assert!((only_progress(&applied.state.ledger_state).cumulative_up - 0.25).abs() < 1e-9);
     }
 
     #[test]
@@ -562,74 +618,6 @@ mod tests {
     }
 
     #[test]
-    fn recording_preserves_partial_progress_when_order_cancels() {
-        let config = TrackConfig {
-            lower_price: 90.0,
-            upper_price: 110.0,
-            long_exposure_units: 8.0,
-            short_exposure_units: 8.0,
-            notional_per_unit: 100.0,
-            min_rebalance_units: 1.0,
-            shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze,
-        };
-        let rules = ExchangeRules {
-            price_tick: 0.1,
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        };
-        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
-        let planned = plan(ExecutorInput::new(
-            SubmitIntentInput {
-                instrument: &instrument,
-                config: &config,
-                exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
-                min_rebalance_units: 1.0,
-                current_exposure: Exposure(0.0),
-                desired_exposure: Exposure(1.0),
-                execution_quote: Some(ExecutionQuote {
-                    best_bid: 99.9,
-                    best_ask: 100.1,
-                }),
-                policy_context: PolicyContext::Normal,
-                price_execution_gate: PriceExecutionGate::Open,
-                submit_purpose: SubmitPurpose::AutoReconcile,
-                observed_at: Utc::now(),
-            },
-            None,
-        ));
-        let binding = &planned.state.bindings[0];
-        let canceled = OrderObservation {
-            order_id: "order-1".to_string(),
-            client_order_id: binding.request.client_order_id.clone(),
-            side: binding.request.side,
-            price: binding.request.price,
-            quantity: binding.request.quantity,
-            filled_qty: binding.request.quantity * 0.25,
-            realized_pnl: 0.0,
-            status: OrderStatus::Canceled,
-        };
-
-        let applied = apply_order_observation_with_result(&planned.state, &canceled);
-
-        assert_eq!(applied.absorb_result, OrderUpdateAbsorbResult::Applied);
-        assert_eq!(applied.state.bindings[0].status, BindingStatus::Terminal);
-        assert_eq!(applied.state.ledger_state.progress.len(), 1);
-        assert!(
-            (applied.state.ledger_state.progress[0]
-                .progress
-                .cumulative_up
-                - 0.25)
-                .abs()
-                < 1e-9
-        );
-    }
-
-    #[test]
     fn recording_applies_cancel_receipt_fill_to_boundary_progress() {
         let config = TrackConfig {
             lower_price: 90.0,
@@ -684,7 +672,7 @@ mod tests {
 
         assert_eq!(applied.bindings[0].status, BindingStatus::Terminal);
         assert_eq!(applied.ledger_state.progress.len(), 1);
-        assert!((applied.ledger_state.progress[0].progress.cumulative_up - 0.25).abs() < 1e-9);
+        assert!((only_progress(&applied.ledger_state).cumulative_up - 0.25).abs() < 1e-9);
     }
 
     #[test]
@@ -747,6 +735,6 @@ mod tests {
 
         assert_eq!(state.bindings[0].status, BindingStatus::Terminal);
         assert_eq!(state.ledger_state.progress.len(), 1);
-        assert!((state.ledger_state.progress[0].progress.cumulative_up - 1.0).abs() < 1e-9);
+        assert!((only_progress(&state.ledger_state).cumulative_up - 1.0).abs() < 1e-9);
     }
 }
