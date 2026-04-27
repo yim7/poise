@@ -3,6 +3,9 @@ name = "poise-engine"
 version.workspace = true
 edition.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 poise-core = { path = "../core" }
 serde.workspace = true

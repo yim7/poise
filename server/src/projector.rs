@@ -407,7 +407,7 @@ fn project_binding_policy(policy: TrackReadBindingPolicy) -> ExecutionBindingPol
         TrackReadBindingPolicy::CurveMaker => ExecutionBindingPolicyView::CurveMaker,
         TrackReadBindingPolicy::CatchUp => ExecutionBindingPolicyView::CatchUp,
         TrackReadBindingPolicy::ManualOverride => ExecutionBindingPolicyView::ManualOverride,
-        TrackReadBindingPolicy::Flatten => ExecutionBindingPolicyView::Flatten,
+        TrackReadBindingPolicy::ReduceOnly => ExecutionBindingPolicyView::ReduceOnly,
     }
 }
 

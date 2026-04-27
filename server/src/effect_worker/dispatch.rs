@@ -284,7 +284,7 @@ mod tests {
         effect_worker_context
             .effect_worker_state
             .session_effect_queue
-            .enqueue_transition_effects(
+            .enqueue_transition_effects_for_test(
                 &track_id,
                 &[TrackEffect::CancelAll {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
@@ -314,7 +314,7 @@ mod tests {
         effect_worker_context
             .effect_worker_state
             .session_effect_queue
-            .enqueue_transition_effects(
+            .enqueue_transition_effects_for_test(
                 &track_id,
                 &[
                     TrackEffect::CancelOrder {
@@ -341,9 +341,8 @@ mod tests {
             worker
                 .state
                 .session_effect_queue
-                .snapshot_for_track(&track_id)
-                .pending_effects
-                .is_empty(),
+                .pending_effect_count_for_test(&track_id)
+                == 0,
             "complete open-order sync should resolve the queue token and retire downstream session effects"
         );
     }

@@ -264,7 +264,7 @@ pub enum ExecutionBindingPolicyView {
     CurveMaker,
     CatchUp,
     ManualOverride,
-    Flatten,
+    ReduceOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

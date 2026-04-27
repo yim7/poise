@@ -45,7 +45,7 @@ impl SessionTrackEffect {
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct EnqueuedTransitionEffects {
+pub(crate) struct EnqueuedTransitionEffects {
     effects: Vec<SessionTrackEffect>,
 }
 
@@ -64,11 +64,11 @@ impl EnqueuedTransitionEffects {
         Self { effects }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.effects.is_empty()
     }
 
-    pub fn effect_ids(&self) -> Vec<String> {
+    pub(crate) fn effect_ids(&self) -> Vec<String> {
         self.effects
             .iter()
             .map(|effect| effect.effect_id.clone())
@@ -91,28 +91,28 @@ impl EnqueuedTransitionEffects {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SessionEffectQueueSnapshot {
-    pub track_id: TrackId,
-    pub pending_effects: Vec<SessionPendingEffectView>,
+pub(crate) struct SessionEffectQueueSnapshot {
+    pub(crate) track_id: TrackId,
+    pub(crate) pending_effects: Vec<SessionPendingEffectView>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SessionPendingEffectView {
-    pub effect_id: String,
-    pub kind: SessionPendingEffectKind,
-    pub state: SessionPendingEffectState,
-    pub created_at: DateTime<Utc>,
+pub(crate) struct SessionPendingEffectView {
+    pub(crate) effect_id: String,
+    pub(crate) kind: SessionPendingEffectKind,
+    pub(crate) state: SessionPendingEffectState,
+    pub(crate) created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionPendingEffectKind {
+pub(crate) enum SessionPendingEffectKind {
     Submit,
     Cancel,
     Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionPendingEffectState {
+pub(crate) enum SessionPendingEffectState {
     Queued,
     InFlight,
     SubmittedAwaitingWriteback,
@@ -170,7 +170,7 @@ pub enum CancelQueueAction {
 struct InternalFollowUpKey(String);
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum FollowUpQueueAction {
+pub(crate) enum FollowUpQueueAction {
     Closed {
         cancel_effect_id: String,
         superseded_downstream_effect_ids: Vec<String>,
@@ -185,18 +185,19 @@ pub enum FollowUpQueueAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct CancelFollowUpResolutionPlan {
+pub(crate) struct CancelFollowUpResolutionPlan {
     resolutions: Vec<PlannedCancelFollowUpResolution>,
 }
 
 impl CancelFollowUpResolutionPlan {
-    pub fn requires_reconcile(&self) -> bool {
+    pub(crate) fn requires_reconcile(&self) -> bool {
         self.resolutions
             .iter()
             .any(|resolution| matches!(resolution.result, PlannedCancelFollowUpResult::Closed))
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
         self.resolutions.is_empty()
     }
 }
@@ -269,7 +270,7 @@ struct FollowUpPointer {
 }
 
 impl SessionEffectQueue {
-    pub fn enqueue_transition_effects(
+    pub(crate) fn enqueue_transition_effects(
         &self,
         track_id: &TrackId,
         effects: &[TrackEffect],
@@ -284,6 +285,17 @@ impl SessionEffectQueue {
         );
         self.enqueue_prepared_effects(session_effects.clone());
         EnqueuedTransitionEffects::new(session_effects)
+    }
+
+    #[cfg(feature = "server-test-support")]
+    pub fn enqueue_transition_effects_for_test(
+        &self,
+        track_id: &TrackId,
+        effects: &[TrackEffect],
+        created_at: DateTime<Utc>,
+    ) -> Vec<String> {
+        self.enqueue_transition_effects(track_id, effects, created_at)
+            .effect_ids()
     }
 
     fn enqueue_prepared_effects(&self, effects: Vec<SessionTrackEffect>) {
@@ -363,7 +375,7 @@ impl SessionEffectQueue {
         true
     }
 
-    pub fn wake_track_for(&self, track_id: &TrackId, signal: WakeSignal) {
+    pub(crate) fn wake_track_for(&self, track_id: &TrackId, signal: WakeSignal) {
         let mut inner = self.inner.lock().unwrap();
         let Some(track) = inner.tracks.get_mut(track_id) else {
             return;
@@ -464,7 +476,7 @@ impl SessionEffectQueue {
         }
     }
 
-    pub fn plan_cancel_follow_ups_from_open_order_snapshot(
+    pub(crate) fn plan_cancel_follow_ups_from_open_order_snapshot(
         &self,
         track_id: &TrackId,
         open_orders: &CompleteOpenOrderSnapshot,
@@ -499,7 +511,7 @@ impl SessionEffectQueue {
         CancelFollowUpResolutionPlan { resolutions }
     }
 
-    pub fn commit_cancel_follow_up_resolution(
+    pub(crate) fn commit_cancel_follow_up_resolution(
         &self,
         plan: CancelFollowUpResolutionPlan,
     ) -> Vec<FollowUpQueueAction> {
@@ -537,7 +549,10 @@ impl SessionEffectQueue {
             .collect()
     }
 
-    pub fn active_submit_hints_for_track(&self, track_id: &TrackId) -> Vec<PendingSubmitHint> {
+    pub(crate) fn active_submit_hints_for_track(
+        &self,
+        track_id: &TrackId,
+    ) -> Vec<PendingSubmitHint> {
         let inner = self.inner.lock().unwrap();
         let Some(track) = inner.tracks.get(track_id) else {
             return Vec::new();
@@ -569,7 +584,7 @@ impl SessionEffectQueue {
             .collect()
     }
 
-    pub fn resolve_submitted_awaiting_exchange_state_for_track(
+    pub(crate) fn resolve_submitted_awaiting_exchange_state_for_track(
         &self,
         track_id: &TrackId,
     ) -> Vec<String> {
@@ -607,7 +622,7 @@ impl SessionEffectQueue {
         resolved
     }
 
-    pub fn snapshot_for_track(&self, track_id: &TrackId) -> SessionEffectQueueSnapshot {
+    pub(crate) fn snapshot_for_track(&self, track_id: &TrackId) -> SessionEffectQueueSnapshot {
         let inner = self.inner.lock().unwrap();
         let pending_effects = inner
             .tracks
@@ -646,7 +661,12 @@ impl SessionEffectQueue {
         }
     }
 
-    pub fn clear_track(&self, track_id: &TrackId) {
+    #[cfg(feature = "server-test-support")]
+    pub fn pending_effect_count_for_test(&self, track_id: &TrackId) -> usize {
+        self.snapshot_for_track(track_id).pending_effects.len()
+    }
+
+    pub(crate) fn clear_track(&self, track_id: &TrackId) {
         let mut inner = self.inner.lock().unwrap();
         if let Some(track) = inner.tracks.remove(track_id) {
             for effect_id in track

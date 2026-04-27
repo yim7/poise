@@ -1118,7 +1118,7 @@ impl TrackManager {
                 | AutoState::FlattenPending { .. }
                 | AutoState::Flattening { .. },
             ))
-            | TrackState::Terminated { .. } => executor::PolicyContext::Flatten,
+            | TrackState::Terminated { .. } => executor::PolicyContext::ReduceOnly,
             _ => executor::PolicyContext::Normal,
         }
     }
@@ -1380,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn manager_maps_protected_track_states_to_flatten_policy_context() {
+    fn manager_maps_protected_track_states_to_reduce_only_policy_context() {
         let (manager, id) = manager();
         let base_track = manager.tracks.get(&id).unwrap().clone();
         let cases = vec![
@@ -1404,7 +1404,7 @@ mod tests {
             track.track_state = track_state;
             assert_eq!(
                 TrackManager::policy_context_for_track(&track),
-                PolicyContext::Flatten
+                PolicyContext::ReduceOnly
             );
         }
     }

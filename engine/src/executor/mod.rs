@@ -7,9 +7,9 @@ mod recording;
 mod recovery;
 
 pub use binding::{BindingStatus, SubmitRecoveryToken};
-pub(crate) use planning::{ExecutorInput, PolicyContext, SubmitIntentInput, plan, refresh_state};
+pub(crate) use planning::{ExecutorInput, SubmitIntentInput, plan, refresh_state};
 pub use planning::{OrderRole, PendingSubmitHint};
-pub use policy::PolicyKind;
+pub use policy::{PolicyContext, PolicyKind};
 pub use recording::OrderUpdateAbsorbResult;
 pub(crate) use recording::{
     SubmitReceiptResolution, apply_order_observation_with_result, clear_all_working_orders,
@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn flatten_policy_only_emits_risk_reducing_binding() {
+    fn reduce_only_policy_only_emits_risk_reducing_binding() {
         let config = config();
         let rules = rules();
         let instrument = instrument();
@@ -394,12 +394,12 @@ mod tests {
             &instrument,
             Exposure(2.0),
             Exposure(0.0),
-            PolicyContext::Flatten,
+            PolicyContext::ReduceOnly,
             None,
         ));
 
         assert!(plan.state.bindings.iter().any(|binding| {
-            binding.proposal_key.policy == PolicyKind::Flatten
+            binding.proposal_key.policy == PolicyKind::ReduceOnly
                 && binding.request.side == Side::Sell
                 && binding.request.reduce_only
                 && (binding.request.quantity - 2.0).abs() < 1e-9

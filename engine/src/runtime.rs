@@ -241,10 +241,10 @@ pub struct RecentTerminalOrder {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutorState {
-    pub ledger_state: BoundaryLedgerState,
-    pub bindings: Vec<LiveOrderBinding>,
-    pub recent_terminal_orders: Vec<RecentTerminalOrder>,
-    pub recovery_anomaly: Option<RecoveryAnomaly>,
+    pub(crate) ledger_state: BoundaryLedgerState,
+    pub(crate) bindings: Vec<LiveOrderBinding>,
+    pub(crate) recent_terminal_orders: Vec<RecentTerminalOrder>,
+    pub(crate) recovery_anomaly: Option<RecoveryAnomaly>,
 }
 
 impl ExecutorState {

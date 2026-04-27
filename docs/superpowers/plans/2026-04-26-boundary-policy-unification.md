@@ -11,7 +11,7 @@
 - 不删除 boundary progress ledger。
 - 不改变 Binance order fill / position update 的事实模型。
 - 不改变 external effect boundary。
-- 不把 ManualOverride / Flatten 合并进 Normal boundary policy。
+- 不把 ManualOverride / ReduceOnly 合并进 Normal boundary policy。
 
 ## Task 1：确定性清理和测试补齐
 
@@ -84,13 +84,13 @@
 
 **步骤：**
 
-- [x] 引入 `BoundaryPolicyInput` / `BoundaryPolicyOutput`，把 Normal 模式 operation selection 移入 `policy.rs`。
-- [x] 将 due aggressive 聚合和 passive maker per-operation 两种执行形态保留为 policy 输出。
-- [x] 将 maker grace 解释移动到统一 policy/reconciliation 内部。
+- [x] 引入 `PolicyPlanningInput` / `plan_policy_bindings`，由 `policy.rs` 根据执行姿态直接输出 desired binding。
+- [x] 将 due aggressive 聚合和 passive maker per-operation 两种执行形态收进 `policy.rs`。
+- [x] 将 maker grace、passive maker 覆盖、active owner 替换、cancel-pending 阻塞判断移动到 policy/reconciliation 私有函数中。
 - [x] 删除 `CoverageReservation` 对调用层的暴露。
 - [x] 删除 `preexisting_cancel_pending_operations` 快照。
 - [x] 删除 `effective_maker_owner_indexes` 和 `replaceable_active_owner_indexes`，或将等价逻辑内聚到新的 policy/reconciliation 私有函数中。
-- [x] 保持 ManualOverride / Flatten 路径不变。
+- [x] 保持 ManualOverride / ReduceOnly 路径不变。
 
 **最小验收命令：**
 

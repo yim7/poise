@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::session_effect_queue::EnqueuedEffectJournalEntry;
+use crate::session_effect_queue::{EnqueuedEffectJournalEntry, FollowUpQueueAction, WakeSignal};
 use crate::{
     ApplicationNotification, CancelReceiptResolution, EffectJournalEntry, EffectStatus,
-    EffectStatusUpdate, FollowUpQueueAction, SessionEffectQueue, TrackControlCommand,
-    TrackControlState, TrackEffectJournal, TrackMutationStore, WakeSignal,
+    EffectStatusUpdate, SessionEffectQueue, TrackControlCommand, TrackControlState,
+    TrackEffectJournal, TrackMutationStore,
 };
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
@@ -1808,10 +1808,8 @@ pub(crate) mod test_support {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::{
-        CancelReceiptResolution, EffectStatus, SessionEffectQueue, SessionPendingEffectState,
-        TrackEffectJournal, WakeSignal,
-    };
+    use crate::session_effect_queue::{SessionPendingEffectState, WakeSignal};
+    use crate::{CancelReceiptResolution, EffectStatus, SessionEffectQueue, TrackEffectJournal};
     use poise_core::risk::RiskTerminationCause;
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};

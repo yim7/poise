@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-server-test-support = []
+server-test-support = ["poise-engine/test-support"]
 
 [dependencies]
 anyhow.workspace = true
@@ -17,4 +17,5 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+poise-engine = { path = "../engine", features = ["test-support"] }
 serde_json.workspace = true

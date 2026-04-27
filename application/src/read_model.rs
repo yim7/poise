@@ -153,7 +153,7 @@ pub enum TrackReadBindingPolicy {
     CurveMaker,
     CatchUp,
     ManualOverride,
-    Flatten,
+    ReduceOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -526,7 +526,7 @@ fn project_binding_policy(policy: PolicyKind) -> TrackReadBindingPolicy {
         PolicyKind::CurveMaker => TrackReadBindingPolicy::CurveMaker,
         PolicyKind::CatchUp => TrackReadBindingPolicy::CatchUp,
         PolicyKind::ManualOverride => TrackReadBindingPolicy::ManualOverride,
-        PolicyKind::Flatten => TrackReadBindingPolicy::Flatten,
+        PolicyKind::ReduceOnly => TrackReadBindingPolicy::ReduceOnly,
     }
 }
 

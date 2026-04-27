@@ -330,7 +330,7 @@ mod tests {
     use super::*;
     use crate::execution_plan::ExecutionAction;
     use crate::executor::ledger::BoundaryLedgerState;
-    use crate::executor::planning::{ExecutorInput, PolicyContext, SubmitIntentInput, plan};
+    use crate::executor::{ExecutorInput, PolicyContext, SubmitIntentInput, plan};
     use crate::ports::ExecutionQuote;
     use crate::price_gate::{PriceExecutionGate, SubmitPurpose};
     use crate::track::{Instrument, Venue};

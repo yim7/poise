@@ -42,6 +42,7 @@ pub struct TrackMutationFrame {
 }
 
 impl TrackMutationFrame {
+    #[cfg(any(test, feature = "test-support"))]
     pub fn status(&self) -> crate::runtime::TrackStatus {
         self.runtime_state.status()
     }
@@ -52,18 +53,22 @@ impl TrackMutationFrame {
         &self.runtime_state
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_runtime_state(&mut self, runtime_state: TrackState) {
         self.runtime_state = runtime_state;
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn current_exposure(&self) -> &Exposure {
         &self.current_exposure
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn desired_exposure(&self) -> Option<&Exposure> {
         self.desired_exposure.as_ref()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_exposure_state(
         &mut self,
         current_exposure: Exposure,
@@ -77,6 +82,7 @@ impl TrackMutationFrame {
         &self.ledger_state
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn replace_ledger_state(&mut self, ledger_state: TrackLedgerState) {
         self.ledger_state = ledger_state;
     }
@@ -85,10 +91,12 @@ impl TrackMutationFrame {
         self.ledger_state != previous.ledger_state
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_unrealized_pnl(&mut self, unrealized_pnl: f64) {
         self.risk.unrealized_pnl = unrealized_pnl;
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn unrealized_pnl(&self) -> f64 {
         self.risk.unrealized_pnl
     }
@@ -97,18 +105,22 @@ impl TrackMutationFrame {
         self.executor_state.recovery_anomaly.is_some()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_recovery_anomaly(&mut self, recovery_anomaly: Option<RecoveryAnomaly>) {
         self.executor_state.recovery_anomaly = recovery_anomaly;
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn clear_executor_bindings(&mut self) {
         self.executor_state.bindings.clear();
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn has_executor_bindings(&self) -> bool {
         !self.executor_state.bindings.is_empty()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn executor_ledger_anchor_exposure(&self) -> &Exposure {
         &self.executor_state.ledger_state.ledger_anchor_exposure
     }
@@ -125,10 +137,12 @@ impl TrackMutationFrame {
             .available_notional
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_market_data_stale_since(&mut self, stale_since: Option<DateTime<Utc>>) {
         self.market_data_stale_since = stale_since;
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn binding_receipt_for_client_order_id(
         &self,
         client_order_id: &str,
@@ -140,6 +154,7 @@ impl TrackMutationFrame {
             .map(|binding| (binding.order_id.clone(), binding.status))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_binding_order_status_for_client_order_id(
         &mut self,
         client_order_id: &str,
@@ -159,6 +174,7 @@ impl TrackMutationFrame {
         true
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn binding_is_active_for_client_order_id(&self, client_order_id: &str) -> Option<bool> {
         self.executor_state
             .bindings
@@ -167,6 +183,7 @@ impl TrackMutationFrame {
             .map(|binding| binding.is_active())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn has_active_binding_for_order_id(&self, order_id: &str) -> bool {
         self.executor_state
             .bindings

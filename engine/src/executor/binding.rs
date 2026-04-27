@@ -147,10 +147,6 @@ impl LiveOrderBinding {
         binding_is_active(self)
     }
 
-    pub fn is_submit_pending(&self) -> bool {
-        self.status == BindingStatus::SubmitPending
-    }
-
     pub fn policy(&self) -> PolicyKind {
         self.proposal_key.policy
     }
