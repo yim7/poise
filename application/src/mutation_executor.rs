@@ -23,7 +23,7 @@ use poise_engine::observation::{
 use poise_engine::ports::{ExchangeOrder, OrderReceipt, OrderRequest};
 use poise_engine::runtime::{
     FreshSessionExternalInputs, QuoteHealthView, StrategyTargetView, TerminationCause,
-    TrackLiveView, TrackState,
+    TrackLiveView, TrackRuntimeView, TrackState,
 };
 use poise_engine::track::{Instrument, TrackId};
 use poise_engine::transition::{TrackEffect, TrackTransition};
@@ -426,10 +426,10 @@ impl MutationExecutor {
         observation: MarketObservation,
     ) -> Result<TrackTransition> {
         let _mutation_guard = self.lock_track_mutation(id).await;
-        let previous_snapshot = {
+        let previous_frame = {
             let manager = self.manager.read().await;
             manager
-                .snapshot(id)
+                .mutation_frame(id)
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?
         };
 
@@ -442,17 +442,17 @@ impl MutationExecutor {
 
         match outcome {
             MarketMutationOutcome::LiveOnly => {
-                let next_snapshot = {
+                let next_frame = {
                     let manager = self.manager.read().await;
                     manager
-                        .snapshot(id)
+                        .mutation_frame(id)
                         .ok_or_else(|| anyhow!("track `{id}` not found"))?
                 };
                 self.session_effect_queue
                     .wake_track_for(&TrackId::new(id), WakeSignal::FreshMarket);
 
                 Ok(TrackTransition {
-                    snapshot: next_snapshot,
+                    frame: next_frame,
                     events: Vec::new(),
                     effects: Vec::new(),
                 })
@@ -460,8 +460,8 @@ impl MutationExecutor {
             MarketMutationOutcome::Durable(transition) => {
                 self.commit_track_mutation(
                     id,
-                    &previous_snapshot,
-                    &transition.snapshot,
+                    &previous_frame,
+                    &transition.frame,
                     &transition,
                     None,
                     false,
@@ -478,38 +478,38 @@ impl MutationExecutor {
 
     pub async fn command(&self, id: &str, command: TrackCommand) -> Result<TrackTransition> {
         let _mutation_guard = self.lock_track_mutation(id).await;
-        let (previous_snapshot, transition, next_snapshot, control_state_override) = {
+        let (previous_frame, transition, next_frame, control_state_override) = {
             let mut manager = self.manager.write().await;
-            let previous_snapshot = manager
-                .snapshot(id)
+            let previous_frame = manager
+                .mutation_frame(id)
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
             self.sync_account_capacity_gate_state(&mut manager, id)
                 .map_err(TrackMutationError::Mutation)?;
             let control_state_override =
-                persisted_control_state_after_command(&previous_snapshot.runtime_state, &command);
+                persisted_control_state_after_command(&previous_frame.runtime_state, &command);
             let transition = manager
                 .command(&TrackId::new(id), command)
                 .map_err(|error| {
                     manager
-                        .restore_track_state(&previous_snapshot)
-                        .expect("failed to restore previous snapshot after mutation error");
+                        .rollback_track_state(&previous_frame)
+                        .expect("failed to restore previous frame after mutation error");
                     TrackMutationError::Mutation(error)
                 })?;
-            let next_snapshot = manager
-                .snapshot(id)
+            let next_frame = manager
+                .mutation_frame(id)
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
             (
-                previous_snapshot,
+                previous_frame,
                 transition,
-                next_snapshot,
+                next_frame,
                 control_state_override,
             )
         };
 
         self.commit_track_mutation(
             id,
-            &previous_snapshot,
-            &next_snapshot,
+            &previous_frame,
+            &next_frame,
             &transition,
             None,
             false,
@@ -541,12 +541,9 @@ impl MutationExecutor {
         manager.track_live_view(&TrackId::new(id))
     }
 
-    pub(crate) async fn track_snapshot(
-        &self,
-        id: &str,
-    ) -> Result<Option<poise_engine::snapshot::TrackRuntimeSnapshot>> {
+    pub(crate) async fn track_runtime_view(&self, id: &str) -> Result<Option<TrackRuntimeView>> {
         let manager = self.manager.read().await;
-        Ok(manager.snapshot(id))
+        Ok(manager.get_track(id).map(|track| track.runtime_view()))
     }
 
     pub(crate) async fn quote_health_view(&self, id: &str) -> Result<QuoteHealthView> {
@@ -675,10 +672,10 @@ impl MutationExecutor {
         let pending_submit_hints = self
             .session_effect_queue
             .active_submit_hints_for_track(&track_id);
-        let (previous_snapshot, transition, next_snapshot) = {
+        let (previous_frame, transition, next_frame) = {
             let mut manager = self.manager.write().await;
-            let previous_snapshot = manager
-                .snapshot(id)
+            let previous_frame = manager
+                .mutation_frame(id)
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
             self.sync_account_capacity_gate_state(&mut manager, id)
                 .map_err(TrackMutationError::Mutation)?;
@@ -692,8 +689,8 @@ impl MutationExecutor {
                     )
                     .map_err(|error| {
                         manager
-                            .restore_track_state(&previous_snapshot)
-                            .expect("failed to restore previous snapshot after sync_exchange_state mutation error");
+                            .rollback_track_state(&previous_frame)
+                            .expect("failed to restore previous frame after sync_exchange_state mutation error");
                         TrackMutationError::Mutation(error)
                     })?
             } else {
@@ -706,21 +703,21 @@ impl MutationExecutor {
                     )
                     .map_err(|error| {
                         manager
-                            .restore_track_state(&previous_snapshot)
-                            .expect("failed to restore previous snapshot after sync_exchange_state_without_reconcile mutation error");
+                            .rollback_track_state(&previous_frame)
+                            .expect("failed to restore previous frame after sync_exchange_state_without_reconcile mutation error");
                         TrackMutationError::Mutation(error)
                     })?
             };
-            let next_snapshot = manager
-                .snapshot(id)
+            let next_frame = manager
+                .mutation_frame(id)
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
-            (previous_snapshot, transition, next_snapshot)
+            (previous_frame, transition, next_frame)
         };
 
         self.commit_track_mutation(
             id,
-            &previous_snapshot,
-            &next_snapshot,
+            &previous_frame,
+            &next_frame,
             &transition,
             None,
             false,
@@ -921,10 +918,10 @@ impl MutationExecutor {
     ) -> Result<CancelReceiptResolution> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let cancel_effect_status_update = EffectStatusUpdate::succeeded(effect_id.to_string());
-        let (previous_snapshot, next_snapshot, cancel_progressed) = {
+        let (previous_frame, next_frame, cancel_progressed) = {
             let mut manager = self.manager.write().await;
-            let previous_snapshot = manager
-                .snapshot(id)
+            let previous_frame = manager
+                .mutation_frame(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
             manager
                 .record_cancel_order_success(&TrackId::new(id), order_id, receipt)
@@ -932,16 +929,16 @@ impl MutationExecutor {
             let cancel_progressed =
                 cancel_receipt_absorbed_exposure(&manager, id, order_id, receipt)
                     .map_err(TrackMutationError::Mutation)?;
-            let next_snapshot = manager
-                .snapshot(id)
+            let next_frame = manager
+                .mutation_frame(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            (previous_snapshot, next_snapshot, cancel_progressed)
+            (previous_frame, next_frame, cancel_progressed)
         };
 
         self.commit_track_mutation_with_effect_status_updates(
             id,
-            &previous_snapshot,
-            &next_snapshot,
+            &previous_frame,
+            &next_frame,
             &(),
             std::slice::from_ref(&cancel_effect_status_update),
             false,
@@ -1038,10 +1035,10 @@ impl MutationExecutor {
         live_order: Option<&ExchangeOrder>,
     ) -> Result<SubmitRecoveryResolution> {
         let _mutation_guard = self.lock_track_mutation(id).await;
-        let (previous_snapshot, plan, next_snapshot) = {
+        let (previous_frame, plan, next_frame) = {
             let mut manager = self.manager.write().await;
-            let previous_snapshot = manager
-                .snapshot(id)
+            let previous_frame = manager
+                .mutation_frame(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
             self.sync_account_capacity_gate_state(&mut manager, id)
                 .map_err(TrackMutationError::Mutation)?;
@@ -1053,14 +1050,14 @@ impl MutationExecutor {
                 )
                 .map_err(|error| {
                     manager
-                        .restore_track_state(&previous_snapshot)
-                        .expect("failed to restore previous snapshot after recover_submit_effect mutation error");
+                        .rollback_track_state(&previous_frame)
+                        .expect("failed to restore previous frame after recover_submit_effect mutation error");
                     TrackMutationError::Mutation(error)
                 })?;
-            let next_snapshot = manager
-                .snapshot(id)
+            let next_frame = manager
+                .mutation_frame(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            (previous_snapshot, plan, next_snapshot)
+            (previous_frame, plan, next_frame)
         };
 
         let effect_status_update = match plan.resolution {
@@ -1076,8 +1073,8 @@ impl MutationExecutor {
 
         self.commit_track_mutation(
             id,
-            &previous_snapshot,
-            &next_snapshot,
+            &previous_frame,
+            &next_frame,
             &plan,
             effect_status_update.as_ref(),
             true,
@@ -1100,29 +1097,29 @@ impl MutationExecutor {
         R: TransitionResult,
     {
         let _mutation_guard = self.lock_track_mutation(id).await;
-        let (previous_snapshot, result, next_snapshot) = {
+        let (previous_frame, result, next_frame) = {
             let mut manager = self.manager.write().await;
-            let previous_snapshot = manager
-                .snapshot(id)
+            let previous_frame = manager
+                .mutation_frame(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
             self.sync_account_capacity_gate_state(&mut manager, id)
                 .map_err(TrackMutationError::Mutation)?;
             let result = mutate(&mut manager).map_err(|error| {
                 manager
-                    .restore_track_state(&previous_snapshot)
-                    .expect("failed to restore previous snapshot after mutation error");
+                    .rollback_track_state(&previous_frame)
+                    .expect("failed to restore previous frame after mutation error");
                 TrackMutationError::Mutation(error)
             })?;
-            let next_snapshot = manager
-                .snapshot(id)
+            let next_frame = manager
+                .mutation_frame(id)
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            (previous_snapshot, result, next_snapshot)
+            (previous_frame, result, next_frame)
         };
 
         self.commit_track_mutation(
             id,
-            &previous_snapshot,
-            &next_snapshot,
+            &previous_frame,
+            &next_frame,
             &result,
             Some(&effect_status_update),
             false,
@@ -1167,29 +1164,29 @@ impl MutationExecutor {
         R: TransitionResult,
     {
         let _mutation_guard = self.lock_track_mutation(id).await;
-        let (previous_snapshot, result, next_snapshot) = {
+        let (previous_frame, result, next_frame) = {
             let mut manager = self.manager.write().await;
-            let previous_snapshot = manager
-                .snapshot(id)
+            let previous_frame = manager
+                .mutation_frame(id)
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
             self.sync_account_capacity_gate_state(&mut manager, id)
                 .map_err(TrackMutationError::Mutation)?;
             let result = mutate(&mut manager).map_err(|error| {
                 manager
-                    .restore_track_state(&previous_snapshot)
-                    .expect("failed to restore previous snapshot after mutation error");
+                    .rollback_track_state(&previous_frame)
+                    .expect("failed to restore previous frame after mutation error");
                 TrackMutationError::Mutation(error)
             })?;
-            let next_snapshot = manager
-                .snapshot(id)
+            let next_frame = manager
+                .mutation_frame(id)
                 .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
-            (previous_snapshot, result, next_snapshot)
+            (previous_frame, result, next_frame)
         };
 
         self.commit_track_mutation(
             id,
-            &previous_snapshot,
-            &next_snapshot,
+            &previous_frame,
+            &next_frame,
             &result,
             None,
             skip_when_noop,
@@ -1208,15 +1205,15 @@ impl MutationExecutor {
         F: FnOnce(&mut TrackManager) -> Result<R>,
     {
         let mut manager = self.manager.write().await;
-        let previous_snapshot = manager
-            .snapshot(id)
+        let previous_frame = manager
+            .mutation_frame(id)
             .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
         self.sync_account_capacity_gate_state(&mut manager, id)
             .map_err(TrackMutationError::Mutation)?;
         mutate(&mut manager).map_err(|error| {
             manager
-                .restore_track_state(&previous_snapshot)
-                .expect("failed to restore previous snapshot after mutation error");
+                .rollback_track_state(&previous_frame)
+                .expect("failed to restore previous frame after mutation error");
             TrackMutationError::Mutation(error)
         })
     }
@@ -1226,7 +1223,7 @@ impl MutationExecutor {
     }
 
     fn sync_account_capacity_gate_state(&self, manager: &mut TrackManager, id: &str) -> Result<()> {
-        let Some(mut snapshot) = manager.snapshot(id) else {
+        let Some(mut snapshot) = manager.mutation_frame(id) else {
             return Ok(());
         };
         let Some(track) = manager.get_track(id) else {
@@ -1247,14 +1244,14 @@ impl MutationExecutor {
             .execution_gate_state
             .account_capacity
             .available_notional = available_notional;
-        manager.restore_track_state(&snapshot)
+        manager.rollback_track_state(&snapshot)
     }
 
     async fn commit_track_mutation<R>(
         &self,
         id: &str,
-        previous_snapshot: &poise_engine::snapshot::TrackRuntimeSnapshot,
-        next_snapshot: &poise_engine::snapshot::TrackRuntimeSnapshot,
+        previous_frame: &poise_engine::mutation_frame::TrackMutationFrame,
+        next_frame: &poise_engine::mutation_frame::TrackMutationFrame,
         result: &R,
         effect_status_update: Option<&EffectStatusUpdate>,
         skip_when_noop: bool,
@@ -1269,8 +1266,8 @@ impl MutationExecutor {
         };
         self.commit_track_mutation_with_effect_status_updates(
             id,
-            previous_snapshot,
-            next_snapshot,
+            previous_frame,
+            next_frame,
             result,
             effect_status_updates,
             skip_when_noop,
@@ -1282,8 +1279,8 @@ impl MutationExecutor {
     async fn commit_track_mutation_with_effect_status_updates<R>(
         &self,
         id: &str,
-        previous_snapshot: &poise_engine::snapshot::TrackRuntimeSnapshot,
-        next_snapshot: &poise_engine::snapshot::TrackRuntimeSnapshot,
+        previous_frame: &poise_engine::mutation_frame::TrackMutationFrame,
+        next_frame: &poise_engine::mutation_frame::TrackMutationFrame,
         result: &R,
         effect_status_updates: &[EffectStatusUpdate],
         skip_when_noop: bool,
@@ -1293,8 +1290,8 @@ impl MutationExecutor {
         R: TransitionResult,
     {
         let control_state_update = persisted_control_state_after_transition(
-            &previous_snapshot.runtime_state,
-            &next_snapshot.runtime_state,
+            &previous_frame.runtime_state,
+            &next_frame.runtime_state,
             control_state_override,
         );
         let has_session_effects = result
@@ -1302,7 +1299,7 @@ impl MutationExecutor {
             .iter()
             .any(|effect| !matches!(effect, TrackEffect::NoOp));
         let has_track_write = control_state_update.is_some()
-            || previous_snapshot.ledger_state != next_snapshot.ledger_state
+            || previous_frame.ledger_state != next_frame.ledger_state
             || !result.domain_events().is_empty();
         let has_effect_status_update = !effect_status_updates.is_empty();
         let has_work = has_track_write || has_effect_status_update || has_session_effects;
@@ -1316,7 +1313,7 @@ impl MutationExecutor {
                 .commit_track_transition(
                     id,
                     control_state_update.as_ref(),
-                    &next_snapshot.ledger_state,
+                    &next_frame.ledger_state,
                     result.domain_events(),
                 )
                 .await;
@@ -1324,7 +1321,7 @@ impl MutationExecutor {
             if let Err(error) = persistence_result {
                 let rollback_result = {
                     let mut manager = self.manager.write().await;
-                    manager.restore_track_state(previous_snapshot)
+                    manager.rollback_track_state(previous_frame)
                 };
                 if let Err(rollback_error) = rollback_result {
                     return Err(TrackMutationError::Persistence(anyhow!(
@@ -1365,8 +1362,8 @@ impl MutationExecutor {
         }
 
         let previous_recovery_anomaly_active =
-            previous_snapshot.executor_state.recovery_anomaly.is_some();
-        let next_recovery_anomaly_active = next_snapshot.executor_state.recovery_anomaly.is_some();
+            previous_frame.executor_state.recovery_anomaly.is_some();
+        let next_recovery_anomaly_active = next_frame.executor_state.recovery_anomaly.is_some();
         if previous_recovery_anomaly_active != next_recovery_anomaly_active {
             self.recovery_anomaly_observer
                 .observe_recovery_anomaly_change(&TrackId::new(id), next_recovery_anomaly_active);
@@ -1398,7 +1395,7 @@ fn cancel_receipt_absorbed_exposure(
     receipt: &OrderReceipt,
 ) -> Result<bool> {
     let snapshot = manager
-        .snapshot(id)
+        .mutation_frame(id)
         .ok_or_else(|| anyhow!("track `{id}` not found"))?;
     Ok(snapshot.executor_state.bindings.iter().any(|binding| {
         binding.absorbed_exposure_qty > f64::EPSILON
@@ -1832,12 +1829,12 @@ mod tests {
     use poise_core::risk::RiskTerminationCause;
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
+    use poise_engine::mutation_frame::TrackMutationFrame;
     use poise_engine::observation::{
         CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
     };
     use poise_engine::ports::{ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus};
     use poise_engine::runtime::{AutoState, ControlState, TerminationCause, TrackState};
-    use poise_engine::snapshot::TrackRuntimeSnapshot;
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::{TrackEffect, TrackTransition};
     use tokio::sync::broadcast;
@@ -1901,9 +1898,9 @@ mod tests {
         )
     }
 
-    fn snapshot_with_recovery_anomaly(active: bool) -> TrackRuntimeSnapshot {
+    fn frame_with_recovery_anomaly(active: bool) -> TrackMutationFrame {
         let manager = seeded_manager();
-        let mut snapshot = manager.get_track("btc-core").unwrap().snapshot();
+        let mut snapshot = manager.get_track("btc-core").unwrap().mutation_frame();
         snapshot.executor_state.recovery_anomaly =
             active.then_some(RecoveryAnomaly::UnknownLiveOrder);
         snapshot
@@ -1915,15 +1912,15 @@ mod tests {
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
         let executor = test_executor(repository, observer.clone());
 
-        let previous_snapshot = snapshot_with_recovery_anomaly(false);
-        let mut next_snapshot = previous_snapshot.clone();
-        next_snapshot.current_exposure = poise_core::types::Exposure(1.0);
+        let previous_frame = frame_with_recovery_anomaly(false);
+        let mut next_frame = previous_frame.clone();
+        next_frame.current_exposure = poise_core::types::Exposure(1.0);
 
         executor
             .commit_track_mutation(
                 "btc-core",
-                &previous_snapshot,
-                &next_snapshot,
+                &previous_frame,
+                &next_frame,
                 &(),
                 None,
                 false,
@@ -1934,12 +1931,12 @@ mod tests {
 
         assert!(observer.recorded().is_empty());
 
-        let next_snapshot = snapshot_with_recovery_anomaly(true);
+        let next_frame = frame_with_recovery_anomaly(true);
         executor
             .commit_track_mutation(
                 "btc-core",
-                &previous_snapshot,
-                &next_snapshot,
+                &previous_frame,
+                &next_frame,
                 &(),
                 None,
                 false,
@@ -1957,14 +1954,14 @@ mod tests {
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
         let executor = test_executor(repository, observer.clone());
 
-        let previous_snapshot = snapshot_with_recovery_anomaly(true);
-        let next_snapshot = snapshot_with_recovery_anomaly(false);
+        let previous_frame = frame_with_recovery_anomaly(true);
+        let next_frame = frame_with_recovery_anomaly(false);
 
         executor
             .commit_track_mutation(
                 "btc-core",
-                &previous_snapshot,
-                &next_snapshot,
+                &previous_frame,
+                &next_frame,
                 &(),
                 None,
                 false,
@@ -2014,13 +2011,13 @@ mod tests {
                 .get_track("btc-core")
                 .cloned()
                 .expect("seeded track should exist");
-            let mut updated = track.snapshot();
+            let mut updated = track.mutation_frame();
             updated.runtime_state =
                 TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
             updated.current_exposure = poise_core::types::Exposure(2.4);
             updated.desired_exposure = Some(poise_core::types::Exposure(2.4));
             manager
-                .restore_track_state(&updated)
+                .rollback_track_state(&updated)
                 .expect("failed to seed active exposure state");
         }
 
@@ -2171,7 +2168,7 @@ mod tests {
             .manager()
             .read()
             .await
-            .snapshot("btc-core")
+            .mutation_frame("btc-core")
             .expect("seeded track should exist");
         let effect = TrackEffect::SubmitOrder {
             request: OrderRequest {
@@ -2187,7 +2184,7 @@ mod tests {
             recovery_token: poise_engine::executor::SubmitRecoveryToken::empty(),
         };
         let transition = TrackTransition {
-            snapshot: snapshot.clone(),
+            frame: snapshot.clone(),
             events: Vec::new(),
             effects: vec![effect],
         };
@@ -2507,7 +2504,7 @@ mod tests {
                 .get_track("btc-core")
                 .cloned()
                 .expect("seeded track should exist");
-            let mut updated = track.snapshot();
+            let mut updated = track.mutation_frame();
             updated.runtime_state =
                 TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
             updated.current_exposure = poise_core::types::Exposure(4.0);
@@ -2515,7 +2512,7 @@ mod tests {
             updated.ledger_state.gross_realized_pnl_cumulative = -290.0;
             updated.risk.unrealized_pnl = -20.0;
             manager
-                .restore_track_state(&updated)
+                .rollback_track_state(&updated)
                 .expect("failed to seed risk termination state");
         }
 
@@ -2533,7 +2530,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            transition.snapshot.runtime_state,
+            transition.frame.runtime_state,
             TrackState::Terminated {
                 cause: TerminationCause::Risk(RiskTerminationCause::DailyLossLimit),
             }
@@ -2612,7 +2609,9 @@ mod tests {
         let manager = services.effect.manager();
         {
             let mut manager = manager.write().await;
-            let mut snapshot = manager.snapshot("btc-core").expect("track snapshot");
+            let mut snapshot = manager
+                .mutation_frame("btc-core")
+                .expect("track mutation frame");
             let binding = snapshot
                 .executor_state
                 .bindings
@@ -2622,8 +2621,8 @@ mod tests {
             binding.order_id = Some(closed_order_id.into());
             binding.status = BindingStatus::CancelPending;
             manager
-                .restore_track_state(&snapshot)
-                .expect("updated track snapshot");
+                .rollback_track_state(&snapshot)
+                .expect("updated track mutation frame");
         }
         let resolution = services
             .effect
@@ -2656,8 +2655,8 @@ mod tests {
         let snapshot = manager
             .read()
             .await
-            .snapshot("btc-core")
-            .expect("track snapshot");
+            .mutation_frame("btc-core")
+            .expect("track mutation frame");
         let blocked_binding = snapshot
             .executor_state
             .bindings
@@ -2750,7 +2749,9 @@ mod tests {
         let manager = services.effect.manager();
         {
             let mut manager = manager.write().await;
-            let mut snapshot = manager.snapshot("btc-core").expect("track snapshot");
+            let mut snapshot = manager
+                .mutation_frame("btc-core")
+                .expect("track mutation frame");
             let binding = snapshot
                 .executor_state
                 .bindings
@@ -2760,8 +2761,8 @@ mod tests {
             binding.order_id = Some(closed_order_id.into());
             binding.status = BindingStatus::CancelPending;
             manager
-                .restore_track_state(&snapshot)
-                .expect("updated track snapshot");
+                .rollback_track_state(&snapshot)
+                .expect("updated track mutation frame");
         }
         let outcome_writes_before_cancel = repository.effect_outcome_write_call_count();
 
@@ -2812,8 +2813,8 @@ mod tests {
         let snapshot = manager
             .read()
             .await
-            .snapshot("btc-core")
-            .expect("track snapshot");
+            .mutation_frame("btc-core")
+            .expect("track mutation frame");
         for (_, client_order_id) in downstream {
             let binding = snapshot
                 .executor_state

@@ -482,7 +482,7 @@ mod tests {
             .manager()
             .read()
             .await
-            .snapshot("btc-core")
+            .mutation_frame("btc-core")
             .unwrap();
         assert!(snapshot.executor_state.bindings.is_empty());
         assert!(snapshot.executor_state.recovery_anomaly.is_none());
@@ -527,7 +527,7 @@ mod tests {
         {
             let manager_handle = services.observation_service.manager();
             let mut manager = manager_handle.write().await;
-            let mut snapshot = manager.snapshot("btc-core").unwrap();
+            let mut snapshot = manager.mutation_frame("btc-core").unwrap();
             snapshot.runtime_state = poise_engine::runtime::TrackState::Terminated {
                 cause: TerminationCause::ManualCommand,
             };
@@ -535,7 +535,7 @@ mod tests {
             snapshot.desired_exposure = Some(Exposure(4.0));
             snapshot.executor_state.recovery_anomaly =
                 Some(poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder);
-            manager.restore_track_state(&snapshot).unwrap();
+            manager.rollback_track_state(&snapshot).unwrap();
         }
 
         let account_monitor = unavailable_account_monitor(notifications.clone());
@@ -582,7 +582,7 @@ mod tests {
             .manager()
             .read()
             .await
-            .snapshot("btc-core")
+            .mutation_frame("btc-core")
             .unwrap();
         assert_eq!(snapshot.status(), TrackStatus::Paused);
         assert_eq!(snapshot.current_exposure, Exposure(0.0));
@@ -682,7 +682,7 @@ mod tests {
             .manager()
             .read()
             .await
-            .snapshot("btc-core")
+            .mutation_frame("btc-core")
             .unwrap();
         assert_eq!(snapshot.current_exposure, Exposure(0.3333333333333333));
         assert_eq!(snapshot.risk.unrealized_pnl, 12.0);
@@ -842,7 +842,7 @@ mod tests {
                     .manager()
                     .read()
                     .await
-                    .snapshot("btc-core")
+                    .mutation_frame("btc-core")
                     .unwrap();
                 if snapshot.current_exposure == Exposure(0.3333333333333333)
                     && snapshot.risk.unrealized_pnl == 12.0

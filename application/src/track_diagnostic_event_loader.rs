@@ -28,7 +28,11 @@ impl TrackDiagnosticEventLoader {
         &self,
         track_id: &TrackId,
     ) -> Result<Option<Vec<StoredTrackEvent>>> {
-        let Some(_) = self.observation.track_snapshot(track_id.as_str()).await? else {
+        let Some(_) = self
+            .observation
+            .track_runtime_view(track_id.as_str())
+            .await?
+        else {
             return Ok(None);
         };
 

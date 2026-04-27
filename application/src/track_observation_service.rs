@@ -6,7 +6,7 @@ use poise_engine::manager::TrackManager;
 use poise_engine::observation::{
     CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
 };
-use poise_engine::runtime::{QuoteHealthView, StrategyTargetView, TrackLiveView};
+use poise_engine::runtime::{QuoteHealthView, StrategyTargetView, TrackLiveView, TrackRuntimeView};
 #[cfg(any(test, feature = "server-test-support"))]
 use tokio::sync::RwLock;
 
@@ -59,11 +59,8 @@ impl TrackObservationService {
         self.executor.track_live_view(id).await
     }
 
-    pub async fn track_snapshot(
-        &self,
-        id: &str,
-    ) -> Result<Option<poise_engine::snapshot::TrackRuntimeSnapshot>> {
-        self.executor.track_snapshot(id).await
+    pub async fn track_runtime_view(&self, id: &str) -> Result<Option<TrackRuntimeView>> {
+        self.executor.track_runtime_view(id).await
     }
 
     pub async fn quote_health_view(&self, id: &str) -> Result<QuoteHealthView> {

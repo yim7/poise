@@ -7,10 +7,7 @@ use poise_engine::runtime::FreshSessionExternalInputs;
 use poise_engine::track::TrackId;
 
 use crate::mutation_executor::MutationExecutor;
-use crate::{
-    TrackControlState, TrackObservationService, TrackQueryStore, TrackRecoveryIssue,
-    runtime_read_state_loader,
-};
+use crate::{TrackControlState, TrackObservationService, TrackQueryStore, TrackRecoveryIssue};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackRecoverySummary {
@@ -100,9 +97,10 @@ impl TrackRuntimeLifecycleService {
         &self,
         track_id: &TrackId,
     ) -> Result<Option<TrackRecoverySummary>> {
-        let Some(runtime) =
-            runtime_read_state_loader::load_runtime_read_state(self.observation.as_ref(), track_id)
-                .await?
+        let Some(runtime) = self
+            .observation
+            .track_runtime_view(track_id.as_str())
+            .await?
         else {
             return Ok(None);
         };
@@ -132,13 +130,13 @@ mod tests {
     use poise_core::types::Exposure;
     use poise_engine::executor::RecoveryAnomaly;
     use poise_engine::ledger::TrackLedgerState;
+    use poise_engine::mutation_frame::TrackMutationFrameRevision;
+    use poise_engine::mutation_frame::{FrameObservedState, TrackMutationFrame};
     use poise_engine::ports::ExecutionQuote;
     use poise_engine::runtime::{
         AutoState, ControlState, CurrentMarketData, ExecutorState, FreshSessionExternalInputs,
         RiskState, TrackState,
     };
-    use poise_engine::snapshot::TrackRestoreRevision;
-    use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
 
     use crate::mutation_executor::test_support::{
@@ -146,7 +144,7 @@ mod tests {
     };
     use crate::{
         EffectStatus, PersistedControlMode, TrackControlState, TrackMutationStore,
-        TrackRecoveryIssue, runtime_read_state_loader,
+        TrackRecoveryIssue,
     };
 
     #[tokio::test]
@@ -156,7 +154,7 @@ mod tests {
         snapshot.executor_state.recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
         snapshot.executor_state.bindings.clear();
         let mut manager = seeded_manager();
-        manager.restore_track_state(&snapshot).unwrap();
+        manager.rollback_track_state(&snapshot).unwrap();
         let (services, _) = track_write_services(manager, write_repository);
         let service = services.runtime_lifecycle;
 
@@ -260,11 +258,11 @@ mod tests {
         {
             let manager_handle = services.runtime_lifecycle.manager();
             let mut manager = manager_handle.write().await;
-            let mut snapshot = manager.snapshot("btc-core").unwrap();
+            let mut snapshot = manager.mutation_frame("btc-core").unwrap();
             snapshot.current_exposure = Exposure(9.0);
             snapshot.desired_exposure = Some(Exposure(4.0));
             snapshot.executor_state.recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
-            manager.restore_track_state(&snapshot).unwrap();
+            manager.rollback_track_state(&snapshot).unwrap();
         }
 
         assert!(
@@ -300,7 +298,7 @@ mod tests {
 
         let manager = services.runtime_lifecycle.manager();
         let manager = manager.read().await;
-        let snapshot = manager.snapshot("btc-core").unwrap();
+        let snapshot = manager.mutation_frame("btc-core").unwrap();
         assert_eq!(
             snapshot.status(),
             poise_engine::runtime::TrackStatus::Paused
@@ -319,7 +317,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_read_state_loader_merges_snapshot_and_live_view_once() {
+    async fn track_runtime_view_includes_live_market_fields() {
         let repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
         services
@@ -344,13 +342,12 @@ mod tests {
             .await
             .unwrap();
 
-        let runtime = runtime_read_state_loader::load_runtime_read_state(
-            &services.observation,
-            &TrackId::new("btc-core"),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let runtime = services
+            .observation
+            .track_runtime_view("btc-core")
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
             runtime.strategy_price_status,
@@ -367,9 +364,9 @@ mod tests {
         {
             let manager_handle = services.runtime_lifecycle.manager();
             let mut manager = manager_handle.write().await;
-            let mut snapshot = manager.snapshot("btc-core").unwrap();
+            let mut snapshot = manager.mutation_frame("btc-core").unwrap();
             snapshot.executor_state.recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
-            manager.restore_track_state(&snapshot).unwrap();
+            manager.rollback_track_state(&snapshot).unwrap();
         }
 
         let summary = services
@@ -392,7 +389,7 @@ mod tests {
             .manager()
             .read()
             .await
-            .snapshot("btc-core")
+            .mutation_frame("btc-core")
             .unwrap();
         services
             .observation
@@ -418,10 +415,10 @@ mod tests {
         {
             let manager_handle = services.runtime_lifecycle.manager();
             let mut manager = manager_handle.write().await;
-            let mut snapshot = manager.snapshot("btc-core").unwrap();
+            let mut snapshot = manager.mutation_frame("btc-core").unwrap();
             snapshot.executor_state.recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
             assert!(!snapshot.executor_state.bindings.is_empty());
-            manager.restore_track_state(&snapshot).unwrap();
+            manager.rollback_track_state(&snapshot).unwrap();
         }
 
         services
@@ -435,7 +432,7 @@ mod tests {
             .manager()
             .read()
             .await
-            .snapshot("btc-core")
+            .mutation_frame("btc-core")
             .unwrap();
         let effects = repository.pending_effects();
         assert!(snapshot.executor_state.bindings.is_empty());
@@ -457,7 +454,7 @@ mod tests {
         );
     }
 
-    fn test_snapshot() -> TrackRuntimeSnapshot {
+    fn test_snapshot() -> TrackMutationFrame {
         let track_config = TrackConfig {
             lower_price: 90.0,
             upper_price: 110.0,
@@ -468,9 +465,9 @@ mod tests {
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
         };
-        TrackRuntimeSnapshot {
+        TrackMutationFrame {
             track_id: TrackId::new("btc-core"),
-            restore_revision: TrackRestoreRevision::for_track(
+            frame_revision: TrackMutationFrameRevision::for_track(
                 &Instrument::new(Venue::Binance, "BTCUSDT"),
                 &track_config,
             ),
@@ -486,7 +483,7 @@ mod tests {
                 unrealized_pnl: 0.0,
                 ..RiskState::default()
             },
-            observed: ObservedState::default(),
+            observed: FrameObservedState::default(),
         }
     }
 }

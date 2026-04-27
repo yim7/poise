@@ -12,6 +12,7 @@ use crate::command::TrackCommand;
 use crate::execution_gate::ExecutionGateDecision;
 use crate::executor;
 use crate::ledger::{LedgerDelta, LedgerGapRecord};
+use crate::mutation_frame::TrackMutationFrame;
 use crate::observation::{
     CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
     TrackObservation,
@@ -22,9 +23,8 @@ use crate::reconciler;
 use crate::runtime::{
     AutoState, ControlState, ExecutorState, FreshSessionExternalInputs, ManualState,
     QuoteHealthView, StrategyPriceStatus, StrategyTargetView, TerminationCause, TrackLiveView,
-    TrackRuntime, TrackState,
+    TrackRuntime, TrackRuntimeView, TrackState,
 };
-use crate::snapshot::TrackRuntimeSnapshot;
 use crate::track::{Instrument, TrackId};
 use crate::transition::{TrackEffect, TrackTransition};
 
@@ -166,11 +166,11 @@ impl TrackManager {
         id: &TrackId,
         observation: MarketObservation,
     ) -> Result<MarketMutationOutcome> {
-        let previous_snapshot = self
+        let previous_frame = self
             .tracks
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
-            .snapshot();
+            .mutation_frame();
         let previous_active_risk_cap = self
             .tracks
             .get(id)
@@ -179,20 +179,15 @@ impl TrackManager {
             .clone();
 
         let (events, effects) = self.observe_market(id, observation)?;
-        let next_snapshot = self
+        let next_frame = self
             .tracks
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
-            .snapshot();
+            .mutation_frame();
 
-        if market_mutation_requires_durable_write(
-            &previous_snapshot,
-            &next_snapshot,
-            &events,
-            &effects,
-        ) {
+        if market_mutation_requires_durable_write(&previous_frame, &next_frame, &events, &effects) {
             return Ok(MarketMutationOutcome::Durable(TrackTransition {
-                snapshot: next_snapshot,
+                frame: next_frame,
                 events,
                 effects,
             }));
@@ -226,7 +221,7 @@ impl TrackManager {
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        track.restore_from_snapshot(&previous_snapshot)?;
+        track.rollback_to_frame(&previous_frame)?;
         track.active_risk_cap = previous_active_risk_cap;
         track.strategy_price = strategy_price;
         track.strategy_price_status = strategy_price_status;
@@ -557,8 +552,8 @@ impl TrackManager {
         }
     }
 
-    pub fn snapshot(&self, id: &str) -> Option<TrackRuntimeSnapshot> {
-        self.get_track(id).map(TrackRuntime::snapshot)
+    pub fn mutation_frame(&self, id: &str) -> Option<TrackMutationFrame> {
+        self.get_track(id).map(TrackRuntime::mutation_frame)
     }
 
     pub fn track_live_view(&self, id: &TrackId) -> Result<TrackLiveView> {
@@ -567,6 +562,14 @@ impl TrackManager {
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         Ok(track.live_view())
+    }
+
+    pub fn track_runtime_view(&self, id: &TrackId) -> Result<TrackRuntimeView> {
+        let track = self
+            .tracks
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+        Ok(track.runtime_view())
     }
 
     pub fn quote_health_view(&self, id: &TrackId) -> Result<QuoteHealthView> {
@@ -585,12 +588,12 @@ impl TrackManager {
         Ok(track.strategy_target_view())
     }
 
-    pub fn restore_track_state(&mut self, snapshot: &TrackRuntimeSnapshot) -> Result<()> {
+    pub fn rollback_track_state(&mut self, frame: &TrackMutationFrame) -> Result<()> {
         let track = self
             .tracks
-            .get_mut(&snapshot.track_id)
-            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", snapshot.track_id.as_str()))?;
-        track.restore_from_snapshot(snapshot)?;
+            .get_mut(&frame.track_id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", frame.track_id.as_str()))?;
+        track.rollback_to_frame(frame)?;
         Ok(())
     }
 
@@ -755,13 +758,13 @@ impl TrackManager {
         events: Vec<DomainEvent>,
         effects: Vec<TrackEffect>,
     ) -> Result<TrackTransition> {
-        let snapshot = self
+        let frame = self
             .tracks
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
-            .snapshot();
+            .mutation_frame();
         Ok(TrackTransition {
-            snapshot,
+            frame,
             events,
             effects,
         })
@@ -1185,36 +1188,35 @@ struct PlannedInventoryExecution {
 }
 
 fn market_mutation_requires_durable_write(
-    previous_snapshot: &TrackRuntimeSnapshot,
-    next_snapshot: &TrackRuntimeSnapshot,
+    previous_frame: &TrackMutationFrame,
+    next_frame: &TrackMutationFrame,
     events: &[DomainEvent],
     effects: &[TrackEffect],
 ) -> bool {
-    let desired_exposure_changed =
-        previous_snapshot.desired_exposure != next_snapshot.desired_exposure;
+    let desired_exposure_changed = previous_frame.desired_exposure != next_frame.desired_exposure;
     let has_non_target_events = events
         .iter()
         .any(|event| !matches!(event, DomainEvent::ExposureTargetChanged { .. }));
     let has_execution_effects = !effects.is_empty() && !matches!(effects, [TrackEffect::NoOp]);
-    let snapshot_changed_without_target = {
-        let mut normalized_next = next_snapshot.clone();
-        normalized_next.desired_exposure = previous_snapshot.desired_exposure.clone();
+    let frame_changed_without_target = {
+        let mut normalized_next = next_frame.clone();
+        normalized_next.desired_exposure = previous_frame.desired_exposure.clone();
         if !has_non_target_events && !has_execution_effects {
-            normalized_next.executor_state = previous_snapshot.executor_state.clone();
+            normalized_next.executor_state = previous_frame.executor_state.clone();
         }
-        normalized_next != *previous_snapshot
+        normalized_next != *previous_frame
     };
-    let target_reached_without_new_effects = next_snapshot
+    let target_reached_without_new_effects = next_frame
         .desired_exposure
         .as_ref()
-        .is_some_and(|target| previous_snapshot.current_exposure.delta(target).is_zero());
+        .is_some_and(|target| previous_frame.current_exposure.delta(target).is_zero());
     let durable_target_change = desired_exposure_changed
         && (has_execution_effects
             || has_non_target_events
             || target_reached_without_new_effects
-            || next_snapshot.desired_exposure.is_none());
+            || next_frame.desired_exposure.is_none());
 
-    snapshot_changed_without_target
+    frame_changed_without_target
         || has_non_target_events
         || has_execution_effects
         || durable_target_change

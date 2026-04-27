@@ -6,13 +6,13 @@ use poise_core::types::Side;
 use poise_engine::executor::{BindingStatus, PolicyKind, RecoveryAnomaly};
 use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
 use poise_engine::price_gate::PriceExecutionBlockReason;
-use poise_engine::runtime::{StrategyPriceStatus, TrackStatus};
+use poise_engine::runtime::{StrategyPriceStatus, TrackRuntimeView, TrackStatus};
 use poise_engine::transition::TrackEffect;
 use serde::{Deserialize, Serialize};
 
 use crate::track_definition::TrackReadDefinition;
 use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
-use crate::track_read_source::{TrackReadSource, TrackRuntimeReadState};
+use crate::track_read_source::TrackReadSource;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackActivityEntry {
@@ -334,7 +334,7 @@ impl TrackReadModel {
 impl TrackListReadModel {
     pub(crate) fn from_parts(
         definition: &TrackReadDefinition,
-        runtime: &TrackRuntimeReadState,
+        runtime: &TrackRuntimeView,
         updated_at: DateTime<Utc>,
     ) -> Self {
         Self {
@@ -494,7 +494,7 @@ fn project_effect_level(status: EffectStatus) -> TrackActivityLevel {
     }
 }
 
-fn project_bindings(runtime: &TrackRuntimeReadState) -> Vec<ReadModelBinding> {
+fn project_bindings(runtime: &TrackRuntimeView) -> Vec<ReadModelBinding> {
     runtime
         .executor
         .bindings
@@ -559,11 +559,8 @@ mod tests {
     use poise_engine::executor::{BindingStatus, PolicyKind, SubmitRecoveryToken};
     use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::{
-        AutoState, BindingReadView, ControlState, ExecutorReadView, ExecutorState, RiskState,
-        StrategyPriceStatus, TrackLiveView, TrackState, TrackStatus,
+        BindingView, ExecutorView, StrategyPriceStatus, TrackRuntimeView, TrackStatus,
     };
-    use poise_engine::snapshot::TrackRestoreRevision;
-    use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
 
@@ -573,7 +570,7 @@ mod tests {
     };
     use crate::TrackReadDefinition;
     use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
-    use crate::track_read_source::{TrackReadSource, TrackRuntimeReadState};
+    use crate::track_read_source::TrackReadSource;
 
     fn test_track_config() -> TrackConfig {
         TrackConfig {
@@ -588,12 +585,8 @@ mod tests {
         }
     }
 
-    fn active_runtime_state() -> TrackState {
-        TrackState::Running(ControlState::Automatic(AutoState::FollowingBand))
-    }
-
     #[test]
-    fn read_model_from_snapshot_flattens_runtime_state() {
+    fn read_model_from_source_flattens_runtime_view() {
         let track_config = test_track_config();
         let read_model = TrackReadModel::from_source(TrackReadSource {
             definition: TrackReadDefinition {
@@ -606,38 +599,24 @@ mod tests {
                     total_loss_limit: 300.0,
                 },
             },
-            runtime: TrackRuntimeReadState::from_parts(
-                TrackRuntimeSnapshot {
-                    track_id: TrackId::new("btc-core"),
-                    restore_revision: TrackRestoreRevision::for_track(
-                        &Instrument::new(Venue::Binance, "BTCUSDT"),
-                        &track_config,
-                    ),
-                    runtime_state: active_runtime_state(),
-                    current_exposure: Exposure(3.5),
-                    desired_exposure: Some(Exposure(4.0)),
-                    executor_state: ExecutorState::empty(
-                        Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                    ),
-                    ledger_state: Default::default(),
-                    execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
-                    risk: RiskState {
-                        unrealized_pnl: 0.0,
-                        ..RiskState::default()
-                    },
-                    observed: ObservedState {
-                        strategy_price: Some(101.25),
-                        strategy_price_status: StrategyPriceStatus::Live,
-                        mark_price: Some(101.5),
-                        best_bid: Some(101.0),
-                        best_ask: Some(101.5),
-                        out_of_band_since: None,
-                        last_tick_at: None,
-                        market_data_stale_since: None,
-                    },
-                },
-                TrackLiveView::default(),
-            ),
+            runtime: TrackRuntimeView {
+                status: TrackStatus::Active,
+                current_exposure: Exposure(3.5),
+                desired_exposure: Some(Exposure(4.0)),
+                manual_target_override: None,
+                executor: ExecutorView::default(),
+                ledger_state: Default::default(),
+                unrealized_pnl: 0.0,
+                has_account_margin_guard: false,
+                price_execution_block_reason: None,
+                strategy_price: None,
+                strategy_price_status: StrategyPriceStatus::Stale,
+                mark_price: None,
+                best_bid: None,
+                best_ask: None,
+                last_tick_at: None,
+                market_data_stale_since: None,
+            },
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             recent_track_events: vec![StoredTrackEvent {
                 id: 1,
@@ -704,12 +683,12 @@ mod tests {
                     total_loss_limit: 300.0,
                 },
             },
-            runtime: TrackRuntimeReadState {
+            runtime: TrackRuntimeView {
                 status: TrackStatus::Active,
                 current_exposure: Exposure(1.0),
                 desired_exposure: Some(Exposure(2.0)),
                 manual_target_override: None,
-                executor: ExecutorReadView::default(),
+                executor: ExecutorView::default(),
                 ledger_state: Default::default(),
                 unrealized_pnl: 0.0,
                 has_account_margin_guard: false,
@@ -721,6 +700,7 @@ mod tests {
                 mark_price: Some(101.5),
                 best_bid: Some(101.0),
                 best_ask: Some(101.5),
+                last_tick_at: None,
                 market_data_stale_since: None,
             },
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
@@ -743,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn read_model_uses_track_live_view_for_market_and_target_fields() {
+    fn read_model_uses_runtime_view_for_market_and_target_fields() {
         let track_config = test_track_config();
         let read_model = TrackReadModel::from_source(TrackReadSource {
             definition: TrackReadDefinition {
@@ -756,48 +736,26 @@ mod tests {
                     total_loss_limit: 300.0,
                 },
             },
-            runtime: TrackRuntimeReadState::from_parts(
-                TrackRuntimeSnapshot {
-                    track_id: TrackId::new("btc-core"),
-                    restore_revision: TrackRestoreRevision::for_track(
-                        &Instrument::new(Venue::Binance, "BTCUSDT"),
-                        &track_config,
-                    ),
-                    runtime_state: active_runtime_state(),
-                    current_exposure: Exposure(1.0),
-                    desired_exposure: Some(Exposure(4.0)),
-                    executor_state: ExecutorState::empty(
-                        Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-                    ),
-                    ledger_state: Default::default(),
-                    execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
-                    risk: RiskState {
-                        unrealized_pnl: 0.0,
-                        ..RiskState::default()
-                    },
-                    observed: ObservedState {
-                        strategy_price: None,
-                        strategy_price_status: StrategyPriceStatus::Stale,
-                        mark_price: None,
-                        best_bid: None,
-                        best_ask: None,
-                        out_of_band_since: None,
-                        last_tick_at: None,
-                        market_data_stale_since: None,
-                    },
-                },
-                TrackLiveView {
-                    strategy_price: Some(101.25),
-                    strategy_price_status: StrategyPriceStatus::Live,
-                    mark_price: Some(101.5),
-                    best_bid: Some(101.0),
-                    best_ask: Some(101.5),
-                    desired_exposure: Some(2.0),
-                    price_execution_block_reason: Some(
-                        poise_engine::price_gate::PriceExecutionBlockReason::MissingExecutionQuote,
-                    ),
-                },
-            ),
+            runtime: TrackRuntimeView {
+                status: TrackStatus::Active,
+                current_exposure: Exposure(1.0),
+                desired_exposure: Some(Exposure(2.0)),
+                manual_target_override: None,
+                executor: ExecutorView::default(),
+                ledger_state: Default::default(),
+                unrealized_pnl: 0.0,
+                has_account_margin_guard: false,
+                price_execution_block_reason: Some(
+                    poise_engine::price_gate::PriceExecutionBlockReason::MissingExecutionQuote,
+                ),
+                strategy_price: Some(101.25),
+                strategy_price_status: StrategyPriceStatus::Live,
+                mark_price: Some(101.5),
+                best_bid: Some(101.0),
+                best_ask: Some(101.5),
+                last_tick_at: None,
+                market_data_stale_since: None,
+            },
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             recent_track_events: Vec::new(),
             recent_effects: Vec::new(),
@@ -820,13 +778,13 @@ mod tests {
 
     #[test]
     fn read_model_derives_binding_intent_from_boundary_direction_not_reduce_only() {
-        let runtime = TrackRuntimeReadState {
+        let runtime = TrackRuntimeView {
             status: TrackStatus::Active,
             current_exposure: Exposure(1.0),
             desired_exposure: Some(Exposure(0.0)),
             manual_target_override: None,
-            executor: ExecutorReadView {
-                bindings: vec![BindingReadView {
+            executor: ExecutorView {
+                bindings: vec![BindingView {
                     id: "curve-maker:positive-retrace".into(),
                     policy: PolicyKind::CurveMaker,
                     is_passive_execution: true,
@@ -847,6 +805,7 @@ mod tests {
             mark_price: Some(101.0),
             best_bid: Some(100.9),
             best_ask: Some(101.1),
+            last_tick_at: None,
             market_data_stale_since: None,
         };
 

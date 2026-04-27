@@ -422,7 +422,7 @@ mod tests {
         let snapshot = manager
             .read()
             .await
-            .snapshot("btc-core")
+            .mutation_frame("btc-core")
             .expect("track snapshot");
         let binding = snapshot
             .executor_state

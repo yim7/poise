@@ -2,23 +2,24 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use poise_core::events::ExecutionGateReason;
 use poise_core::risk::{LossLimits, RiskTerminationCause};
 use poise_core::strategy::{BandBoundary, TrackConfig};
 use poise_core::types::{ExchangeRules, Exposure, Side};
 
-use crate::execution_gate::ExecutionGateState;
+use crate::execution_gate::{ExecutionGateDecision, ExecutionGateState};
 use crate::executor::RecoveryAnomaly;
 use crate::executor::binding::{BindingStatus, LiveOrderBinding};
 use crate::executor::boundary::{ProfileRevision, profile_revision_for_config};
 use crate::executor::ledger::BoundaryLedgerState;
 use crate::executor::policy::PolicyKind;
 use crate::ledger::TrackLedgerState;
+use crate::mutation_frame::{FrameObservedState, TrackMutationFrame, TrackMutationFrameRevision};
 use crate::ports::ExecutionQuote;
 use crate::price_gate::{
     PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
 };
 use crate::reconciler;
-use crate::snapshot::{ObservedState, TrackRestoreRevision, TrackRuntimeSnapshot};
 use crate::track::{Instrument, TrackId};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -195,13 +196,13 @@ pub struct TrackLiveView {
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct ExecutorReadView {
-    pub bindings: Vec<BindingReadView>,
+pub struct ExecutorView {
+    pub bindings: Vec<BindingView>,
     pub recovery_anomaly: Option<RecoveryAnomaly>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BindingReadView {
+pub struct BindingView {
     pub id: String,
     pub policy: PolicyKind,
     pub is_passive_execution: bool,
@@ -210,6 +211,26 @@ pub struct BindingReadView {
     pub price: f64,
     pub quantity: f64,
     pub increases_inventory: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackRuntimeView {
+    pub status: TrackStatus,
+    pub current_exposure: Exposure,
+    pub desired_exposure: Option<Exposure>,
+    pub manual_target_override: Option<Exposure>,
+    pub executor: ExecutorView,
+    pub ledger_state: TrackLedgerState,
+    pub unrealized_pnl: f64,
+    pub has_account_margin_guard: bool,
+    pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
+    pub strategy_price: Option<f64>,
+    pub strategy_price_status: StrategyPriceStatus,
+    pub mark_price: Option<f64>,
+    pub best_bid: Option<f64>,
+    pub best_ask: Option<f64>,
+    pub last_tick_at: Option<DateTime<Utc>>,
+    pub market_data_stale_since: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,13 +248,13 @@ pub struct ExecutorState {
 }
 
 impl ExecutorState {
-    pub fn read_view(&self) -> ExecutorReadView {
-        ExecutorReadView {
+    pub fn view(&self) -> ExecutorView {
+        ExecutorView {
             bindings: self
                 .bindings
                 .iter()
                 .filter(|binding| binding.is_active())
-                .map(|binding| BindingReadView {
+                .map(|binding| BindingView {
                     id: binding.binding_id.clone(),
                     policy: binding.policy(),
                     is_passive_execution: binding.is_passive_execution(),
@@ -467,10 +488,10 @@ impl TrackRuntime {
         fresh
     }
 
-    pub fn snapshot(&self) -> TrackRuntimeSnapshot {
-        TrackRuntimeSnapshot {
+    pub fn mutation_frame(&self) -> TrackMutationFrame {
+        TrackMutationFrame {
             track_id: self.id.clone(),
-            restore_revision: TrackRestoreRevision::for_track(&self.instrument, &self.config),
+            frame_revision: TrackMutationFrameRevision::for_track(&self.instrument, &self.config),
             runtime_state: self.track_state.clone(),
             current_exposure: self.current_exposure.clone(),
             desired_exposure: self.desired_exposure.clone(),
@@ -478,7 +499,7 @@ impl TrackRuntime {
             execution_gate_state: self.execution_gate_state.clone(),
             ledger_state: self.ledger_state.clone(),
             risk: self.risk_state.clone(),
-            observed: ObservedState {
+            observed: FrameObservedState {
                 strategy_price: None,
                 strategy_price_status: StrategyPriceStatus::Stale,
                 mark_price: None,
@@ -491,31 +512,32 @@ impl TrackRuntime {
         }
     }
 
-    pub fn restore_from_snapshot(&mut self, snapshot: &TrackRuntimeSnapshot) -> Result<()> {
-        if self.id != snapshot.track_id {
+    pub fn rollback_to_frame(&mut self, frame: &TrackMutationFrame) -> Result<()> {
+        if self.id != frame.track_id {
             anyhow::bail!(
-                "snapshot track id mismatch: runtime has `{}`, snapshot has `{}`",
+                "mutation frame track id mismatch: runtime has `{}`, frame has `{}`",
                 self.id.as_str(),
-                snapshot.track_id.as_str()
+                frame.track_id.as_str()
             );
         }
-        let expected_revision = TrackRestoreRevision::for_track(&self.instrument, &self.config);
-        if expected_revision != snapshot.restore_revision {
+        let expected_revision =
+            TrackMutationFrameRevision::for_track(&self.instrument, &self.config);
+        if expected_revision != frame.frame_revision {
             anyhow::bail!(
-                "snapshot restore revision mismatch for `{}`",
+                "mutation frame revision mismatch for `{}`",
                 self.id.as_str()
             );
         }
-        validate_snapshot_invariants(snapshot)?;
+        validate_frame_invariants(frame)?;
 
-        self.track_state = snapshot.runtime_state.clone();
-        self.current_exposure = snapshot.current_exposure.clone();
-        self.desired_exposure = snapshot.desired_exposure.clone();
+        self.track_state = frame.runtime_state.clone();
+        self.current_exposure = frame.current_exposure.clone();
+        self.desired_exposure = frame.desired_exposure.clone();
         self.active_risk_cap = None;
-        self.executor_state = snapshot.executor_state.clone();
-        self.ledger_state = snapshot.ledger_state.clone();
-        self.risk_state = snapshot.risk.clone();
-        self.execution_gate_state = snapshot.execution_gate_state.clone();
+        self.executor_state = frame.executor_state.clone();
+        self.ledger_state = frame.ledger_state.clone();
+        self.risk_state = frame.risk.clone();
+        self.execution_gate_state = frame.execution_gate_state.clone();
         self.strategy_price = None;
         self.strategy_price_status = StrategyPriceStatus::Stale;
         self.mark_price = None;
@@ -524,20 +546,20 @@ impl TrackRuntime {
         self.price_execution_gate = PriceExecutionGate::NoSubmit {
             reason: PriceExecutionBlockReason::MissingExecutionQuote,
         };
-        self.out_of_band_since = snapshot.observed.out_of_band_since;
+        self.out_of_band_since = frame.observed.out_of_band_since;
         self.last_tick_at = None;
-        self.market_data_stale_since = snapshot.observed.market_data_stale_since;
-        let mut expected_snapshot = snapshot.clone();
-        expected_snapshot.observed.strategy_price = None;
-        expected_snapshot.observed.strategy_price_status = StrategyPriceStatus::Stale;
-        expected_snapshot.observed.mark_price = None;
-        expected_snapshot.observed.best_bid = None;
-        expected_snapshot.observed.best_ask = None;
-        expected_snapshot.observed.last_tick_at = None;
+        self.market_data_stale_since = frame.observed.market_data_stale_since;
+        let mut expected_frame = frame.clone();
+        expected_frame.observed.strategy_price = None;
+        expected_frame.observed.strategy_price_status = StrategyPriceStatus::Stale;
+        expected_frame.observed.mark_price = None;
+        expected_frame.observed.best_bid = None;
+        expected_frame.observed.best_ask = None;
+        expected_frame.observed.last_tick_at = None;
         debug_assert_eq!(
-            self.snapshot(),
-            expected_snapshot,
-            "restore_from_snapshot left persisted fields unsynced"
+            self.mutation_frame(),
+            expected_frame,
+            "rollback_to_frame left frame fields unsynced"
         );
 
         Ok(())
@@ -597,6 +619,39 @@ impl TrackRuntime {
         }
     }
 
+    pub fn runtime_view(&self) -> TrackRuntimeView {
+        let live = self.live_view();
+        TrackRuntimeView {
+            status: self.status(),
+            current_exposure: self.current_exposure.clone(),
+            desired_exposure: live
+                .desired_exposure
+                .as_ref()
+                .map(|value| Exposure(*value))
+                .or_else(|| self.desired_exposure.clone()),
+            manual_target_override: self.manual_target_override(),
+            executor: self.executor_state.view(),
+            ledger_state: self.ledger_state.clone(),
+            unrealized_pnl: self.risk_state.unrealized_pnl,
+            has_account_margin_guard: matches!(
+                self.execution_gate_state.last_decision,
+                ExecutionGateDecision::NoSubmit {
+                    reason: ExecutionGateReason::AccountCapacityInsufficient { .. },
+                }
+            ),
+            price_execution_block_reason: live
+                .price_execution_block_reason
+                .or(self.execution_gate_state.price_execution_block_reason),
+            strategy_price: live.strategy_price,
+            strategy_price_status: live.strategy_price_status,
+            mark_price: live.mark_price,
+            best_bid: live.best_bid,
+            best_ask: live.best_ask,
+            last_tick_at: self.last_tick_at,
+            market_data_stale_since: self.market_data_stale_since,
+        }
+    }
+
     fn live_desired_exposure(&self) -> Option<Exposure> {
         if self.track_state.is_paused() {
             return None;
@@ -625,7 +680,7 @@ mod tests {
     use crate::track::Venue;
 
     #[test]
-    fn runtime_snapshot_is_current_process_state_not_persisted_document() {
+    fn runtime_frame_is_current_process_state_not_persisted_document() {
         let mut runtime = TrackRuntime::new(
             "test".into(),
             Instrument::new(Venue::Binance, "BTCUSDT"),
@@ -637,9 +692,9 @@ mod tests {
         );
         runtime.executor_state = dirty_executor_state();
 
-        let runtime_snapshot = runtime.snapshot();
+        let runtime_frame = runtime.mutation_frame();
         assert!(
-            !runtime_snapshot
+            !runtime_frame
                 .executor_state
                 .ledger_state
                 .progress
@@ -869,11 +924,11 @@ mod tests {
     }
 }
 
-fn validate_snapshot_invariants(snapshot: &TrackRuntimeSnapshot) -> Result<()> {
+fn validate_frame_invariants(frame: &TrackMutationFrame) -> Result<()> {
     if matches!(
-        snapshot.runtime_state,
+        frame.runtime_state,
         TrackState::Running(ControlState::Manual(ManualState::Flattened))
-    ) && snapshot.runtime_state.manual_target_override() != Some(Exposure(0.0))
+    ) && frame.runtime_state.manual_target_override() != Some(Exposure(0.0))
     {
         anyhow::bail!("manual_flattening requires manual_target_override = 0");
     }

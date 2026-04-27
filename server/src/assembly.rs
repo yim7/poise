@@ -1121,7 +1121,7 @@ total_loss_limit = 600.0
                 test_exchange_rules(),
             )
             .unwrap();
-        let mut snapshot = manager.snapshot("btc-core").unwrap();
+        let mut snapshot = manager.mutation_frame("btc-core").unwrap();
         snapshot.runtime_state =
             TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
         TrackMutationStore::commit_track_transition(
@@ -1279,7 +1279,7 @@ total_loss_limit = 600.0
             .manager()
             .read()
             .await
-            .snapshot("btc-core")
+            .mutation_frame("btc-core")
             .unwrap();
         assert_eq!(
             snapshot.status(),

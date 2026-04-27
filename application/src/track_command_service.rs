@@ -73,7 +73,7 @@ mod tests {
                 .manager()
                 .read()
                 .await
-                .snapshot("btc-core")
+                .mutation_frame("btc-core")
                 .unwrap()
                 .status(),
             poise_engine::runtime::TrackStatus::Paused

@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use poise_engine::runtime::TrackRuntimeView;
 use poise_engine::track::TrackId;
 
 use crate::{
     PreparedTrackRegistry, TrackListReadModel, TrackObservationService, TrackQueryStore,
-    TrackReadModel, runtime_read_state_loader, track_read_source::TrackReadSource,
+    TrackReadModel, track_read_source::TrackReadSource,
 };
 
 pub(crate) const DETAIL_EVENTS_LIMIT: usize = 20;
@@ -36,7 +37,11 @@ impl TrackReadSourceLoader {
         let mut read_models = Vec::new();
         for prepared in self.prepared_registry.iter() {
             let track_id = prepared.track_id().clone();
-            let Some(snapshot) = self.observation.track_snapshot(track_id.as_str()).await? else {
+            let Some(runtime) = self
+                .observation
+                .track_runtime_view(track_id.as_str())
+                .await?
+            else {
                 continue;
             };
             let definition = self
@@ -49,14 +54,11 @@ impl TrackReadSourceLoader {
                     )
                 })?
                 .read_definition();
-            let runtime = self
-                .load_runtime_read_state(&track_id, snapshot.clone())
-                .await?;
             let updated_at = self
                 .repository
                 .load_track_updated_at(&track_id)
                 .await?
-                .unwrap_or_else(|| infer_runtime_updated_at(&snapshot));
+                .unwrap_or_else(|| infer_runtime_updated_at(&runtime));
             read_models.push(TrackListReadModel::from_parts(
                 &definition,
                 &runtime,
@@ -82,7 +84,11 @@ impl TrackReadSourceLoader {
         &self,
         track_id: &TrackId,
     ) -> Result<Option<TrackReadSource>> {
-        let Some(snapshot) = self.observation.track_snapshot(track_id.as_str()).await? else {
+        let Some(runtime) = self
+            .observation
+            .track_runtime_view(track_id.as_str())
+            .await?
+        else {
             return Ok(None);
         };
 
@@ -98,12 +104,12 @@ impl TrackReadSourceLoader {
             .repository
             .load_track_updated_at(track_id)
             .await?
-            .unwrap_or_else(|| infer_runtime_updated_at(&snapshot));
+            .unwrap_or_else(|| infer_runtime_updated_at(&runtime));
 
         Ok(Some(
-            self.read_source_from_snapshot(
+            self.read_source_from_runtime(
                 track_id.clone(),
-                snapshot,
+                runtime,
                 updated_at,
                 recent_track_events,
                 recent_effects,
@@ -112,10 +118,10 @@ impl TrackReadSourceLoader {
         ))
     }
 
-    async fn read_source_from_snapshot(
+    async fn read_source_from_runtime(
         &self,
         track_id: TrackId,
-        snapshot: poise_engine::snapshot::TrackRuntimeSnapshot,
+        runtime: TrackRuntimeView,
         updated_at: DateTime<Utc>,
         recent_track_events: Vec<crate::StoredTrackEvent>,
         recent_effects: Vec<crate::PersistedTrackEffect>,
@@ -130,8 +136,6 @@ impl TrackReadSourceLoader {
                 )
             })?
             .read_definition();
-        let runtime = self.load_runtime_read_state(&track_id, snapshot).await?;
-
         Ok(TrackReadSource {
             definition,
             runtime,
@@ -140,27 +144,11 @@ impl TrackReadSourceLoader {
             recent_effects,
         })
     }
-
-    async fn load_runtime_read_state(
-        &self,
-        track_id: &TrackId,
-        snapshot: poise_engine::snapshot::TrackRuntimeSnapshot,
-    ) -> Result<crate::track_read_source::TrackRuntimeReadState> {
-        runtime_read_state_loader::runtime_read_state_from_snapshot(
-            track_id,
-            snapshot,
-            self.observation.as_ref(),
-        )
-        .await
-    }
 }
 
-fn infer_runtime_updated_at(
-    snapshot: &poise_engine::snapshot::TrackRuntimeSnapshot,
-) -> DateTime<Utc> {
-    snapshot
-        .observed
+fn infer_runtime_updated_at(runtime: &TrackRuntimeView) -> DateTime<Utc> {
+    runtime
         .last_tick_at
-        .or(snapshot.observed.market_data_stale_since)
+        .or(runtime.market_data_stale_since)
         .unwrap_or_else(Utc::now)
 }

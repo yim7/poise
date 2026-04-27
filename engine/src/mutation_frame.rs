@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 use poise_core::strategy::TrackConfig;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use poise_core::types::Exposure;
@@ -10,33 +9,22 @@ use crate::ledger::TrackLedgerState;
 use crate::runtime::{ExecutorState, RiskState, StrategyPriceStatus, TrackState};
 use crate::track::{Instrument, TrackId};
 
-fn strategy_price_status_is_stale(status: &StrategyPriceStatus) -> bool {
-    matches!(status, StrategyPriceStatus::Stale)
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct ObservedState {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FrameObservedState {
     pub strategy_price: Option<f64>,
-    #[serde(default, skip_serializing_if = "strategy_price_status_is_stale")]
     pub strategy_price_status: StrategyPriceStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark_price: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_bid: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_ask: Option<f64>,
     pub out_of_band_since: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_tick_at: Option<DateTime<Utc>>,
-    #[serde(default)]
     pub market_data_stale_since: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrackRestoreRevision(String);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackMutationFrameRevision(String);
 
-impl TrackRestoreRevision {
+impl TrackMutationFrameRevision {
     pub fn for_track(instrument: &Instrument, track_config: &TrackConfig) -> Self {
         let payload = serde_json::json!({
             "instrument": instrument,
@@ -53,9 +41,9 @@ impl TrackRestoreRevision {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct TrackRuntimeSnapshot {
+pub struct TrackMutationFrame {
     pub track_id: TrackId,
-    pub restore_revision: TrackRestoreRevision,
+    pub frame_revision: TrackMutationFrameRevision,
     pub runtime_state: TrackState,
     pub current_exposure: Exposure,
     pub desired_exposure: Option<Exposure>,
@@ -63,10 +51,10 @@ pub struct TrackRuntimeSnapshot {
     pub execution_gate_state: ExecutionGateState,
     pub ledger_state: TrackLedgerState,
     pub risk: RiskState,
-    pub observed: ObservedState,
+    pub observed: FrameObservedState,
 }
 
-impl TrackRuntimeSnapshot {
+impl TrackMutationFrame {
     pub fn status(&self) -> crate::runtime::TrackStatus {
         self.runtime_state.status()
     }

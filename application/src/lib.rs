@@ -8,7 +8,6 @@ pub mod notifications;
 pub mod query_service;
 pub mod read_model;
 mod runtime_lifecycle_service;
-mod runtime_read_state_loader;
 mod session_effect_queue;
 pub mod submit_effect_service;
 pub mod track_command_service;

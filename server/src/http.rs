@@ -314,10 +314,10 @@ mod tests {
     {
         let mut manager = test_manager();
         let mut snapshot = manager
-            .snapshot("btc-core")
+            .mutation_frame("btc-core")
             .expect("seeded manager should expose runtime snapshot");
         seed_snapshot_ledger(&mut snapshot);
-        manager.restore_track_state(&snapshot).unwrap();
+        manager.rollback_track_state(&snapshot).unwrap();
         observe_seed_market(&mut manager);
         repository
             .commit_track_transition(
@@ -385,10 +385,10 @@ mod tests {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let mut manager = test_manager();
         let mut snapshot = manager
-            .snapshot("btc-core")
+            .mutation_frame("btc-core")
             .expect("seeded manager should expose runtime snapshot");
         seed_snapshot_ledger(&mut snapshot);
-        manager.restore_track_state(&snapshot).unwrap();
+        manager.rollback_track_state(&snapshot).unwrap();
         observe_seed_market(&mut manager);
         repository
             .commit_track_transition(
@@ -518,7 +518,7 @@ mod tests {
             .unwrap();
     }
 
-    fn seed_snapshot_ledger(snapshot: &mut poise_engine::snapshot::TrackRuntimeSnapshot) {
+    fn seed_snapshot_ledger(snapshot: &mut poise_engine::mutation_frame::TrackMutationFrame) {
         snapshot.risk.unrealized_pnl = 265.2;
         snapshot.ledger_state.ledger_utc_day =
             chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
@@ -609,10 +609,10 @@ mod tests {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let mut manager = test_manager();
         let mut snapshot = manager
-            .snapshot("btc-core")
+            .mutation_frame("btc-core")
             .expect("seeded manager should expose runtime snapshot");
         snapshot.observed.market_data_stale_since = Some(Utc::now());
-        manager.restore_track_state(&snapshot).unwrap();
+        manager.rollback_track_state(&snapshot).unwrap();
         let state = {
             let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
             let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
@@ -909,7 +909,7 @@ mod tests {
         let manager = test_manager();
         repository.seed_snapshot(
             manager
-                .snapshot("btc-core")
+                .mutation_frame("btc-core")
                 .expect("seeded manager should expose runtime snapshot"),
         );
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
@@ -1127,7 +1127,7 @@ mod tests {
     }
 
     impl FailingRepository {
-        fn seed_snapshot(&self, snapshot: poise_engine::snapshot::TrackRuntimeSnapshot) {
+        fn seed_snapshot(&self, snapshot: poise_engine::mutation_frame::TrackMutationFrame) {
             self.updated_at
                 .lock()
                 .unwrap()

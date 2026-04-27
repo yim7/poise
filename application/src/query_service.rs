@@ -53,12 +53,12 @@ mod tests {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::SubmitRecoveryToken;
+    use poise_engine::mutation_frame::TrackMutationFrameRevision;
+    use poise_engine::mutation_frame::{FrameObservedState, TrackMutationFrame};
     use poise_engine::observation::MarketObservation;
     use poise_engine::ports::ExecutionQuote;
     use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::{AutoState, ControlState, ExecutorState, RiskState, TrackState};
-    use poise_engine::snapshot::TrackRestoreRevision;
-    use poise_engine::snapshot::{ObservedState, TrackRuntimeSnapshot};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
 
@@ -423,11 +423,11 @@ mod tests {
         }
     }
 
-    fn test_snapshot() -> TrackRuntimeSnapshot {
+    fn test_snapshot() -> TrackMutationFrame {
         let config = test_track_config();
-        TrackRuntimeSnapshot {
+        TrackMutationFrame {
             track_id: TrackId::new("btc-core"),
-            restore_revision: TrackRestoreRevision::for_track(
+            frame_revision: TrackMutationFrameRevision::for_track(
                 &Instrument::new(Venue::Binance, "BTCUSDT"),
                 &config,
             ),
@@ -443,7 +443,7 @@ mod tests {
                 unrealized_pnl: 265.2,
                 ..RiskState::default()
             },
-            observed: ObservedState {
+            observed: FrameObservedState {
                 strategy_price: Some(101.25),
                 strategy_price_status: poise_engine::runtime::StrategyPriceStatus::Live,
                 mark_price: Some(101.5),

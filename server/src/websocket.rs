@@ -968,7 +968,7 @@ mod tests {
 
     fn seeded_repository() -> Arc<TestRepository> {
         let repository = Arc::new(TestRepository::default());
-        let mut snapshot = test_manager().snapshot("btc-core").unwrap();
+        let mut snapshot = test_manager().mutation_frame("btc-core").unwrap();
         seed_snapshot_ledger(&mut snapshot);
         repository.seed_snapshot(snapshot);
         repository
@@ -1535,7 +1535,7 @@ mod tests {
         manager
     }
 
-    fn seed_snapshot_ledger(snapshot: &mut poise_engine::snapshot::TrackRuntimeSnapshot) {
+    fn seed_snapshot_ledger(snapshot: &mut poise_engine::mutation_frame::TrackMutationFrame) {
         snapshot.risk.unrealized_pnl = 265.2;
         snapshot.ledger_state.ledger_utc_day =
             chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
@@ -1582,7 +1582,7 @@ mod tests {
     }
 
     impl TestRepository {
-        fn seed_snapshot(&self, snapshot: poise_engine::snapshot::TrackRuntimeSnapshot) {
+        fn seed_snapshot(&self, snapshot: poise_engine::mutation_frame::TrackMutationFrame) {
             self.updated_at
                 .lock()
                 .unwrap()
