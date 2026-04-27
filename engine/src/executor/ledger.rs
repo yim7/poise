@@ -1,12 +1,11 @@
 use poise_core::types::Exposure;
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::executor::boundary::{
     BoundaryBlueprint, BoundaryDirection, BoundaryId, BoundaryOperation, ProfileRevision,
 };
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BoundaryProgress {
     pub cumulative_up: f64,
     pub cumulative_down: f64,
@@ -28,31 +27,6 @@ pub struct BoundaryLedgerState {
     /// Current-session progress absorbed from order fills before position updates arrive.
     /// This is executor runtime state, not restart truth.
     pub progress: BTreeMap<BoundaryId, BoundaryProgress>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BoundaryLedgerAnchorSnapshot {
-    pub profile_revision: ProfileRevision,
-    pub ledger_anchor_exposure: Exposure,
-}
-
-impl BoundaryLedgerState {
-    pub fn to_anchor_snapshot(&self) -> BoundaryLedgerAnchorSnapshot {
-        BoundaryLedgerAnchorSnapshot {
-            profile_revision: self.profile_revision.clone(),
-            ledger_anchor_exposure: self.ledger_anchor_exposure.clone(),
-        }
-    }
-}
-
-impl BoundaryLedgerAnchorSnapshot {
-    pub fn into_runtime_state(self) -> BoundaryLedgerState {
-        BoundaryLedgerState {
-            profile_revision: self.profile_revision,
-            ledger_anchor_exposure: self.ledger_anchor_exposure,
-            progress: BTreeMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -223,37 +197,6 @@ mod tests {
         assert!((progress.effective_crossed_qty - 0.4).abs() < 1e-9);
         assert!((progress.up_remaining - 0.6).abs() < 1e-9);
         assert!((progress.down_remaining - 0.4).abs() < 1e-9);
-    }
-
-    #[test]
-    fn boundary_anchor_snapshot_is_explicit_projection_without_session_progress() {
-        let boundary = boundary(1.0, 2.0);
-        let state = BoundaryLedgerState {
-            profile_revision: ProfileRevision("rev-1".to_string()),
-            ledger_anchor_exposure: Exposure(1.0),
-            progress: BTreeMap::from([(
-                boundary.id.clone(),
-                BoundaryProgress {
-                    cumulative_up: 0.6,
-                    cumulative_down: 0.2,
-                },
-            )]),
-        };
-
-        let value = serde_json::to_value(state.to_anchor_snapshot()).unwrap();
-
-        assert!(value.get("progress").is_none());
-
-        let restored: BoundaryLedgerState =
-            serde_json::from_value::<BoundaryLedgerAnchorSnapshot>(value)
-                .unwrap()
-                .into_runtime_state();
-        assert_eq!(restored.profile_revision, state.profile_revision);
-        assert_eq!(
-            restored.ledger_anchor_exposure,
-            state.ledger_anchor_exposure
-        );
-        assert!(restored.progress.is_empty());
     }
 
     #[test]

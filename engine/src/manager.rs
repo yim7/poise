@@ -1366,21 +1366,6 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_track_projects_no_round_or_slot_state_after_executor_refresh() {
-        let (mut manager, id) = manager();
-
-        manager.observe(&id, market(100.0)).unwrap();
-
-        let state_json =
-            serde_json::to_value(manager.snapshot(id.as_str()).unwrap().to_document()).unwrap();
-        let executor_state = state_json.get("executor_state").unwrap();
-        assert!(executor_state.get("active_round").is_none());
-        assert!(executor_state.get("slots").is_none());
-        assert!(executor_state.get("ledger_state").is_some());
-        assert!(executor_state.get("bindings").is_some());
-    }
-
-    #[test]
     fn manager_maps_manual_track_state_to_manual_override_policy_context() {
         let (manager, id) = manager();
         let mut track = manager.tracks.get(&id).unwrap().clone();

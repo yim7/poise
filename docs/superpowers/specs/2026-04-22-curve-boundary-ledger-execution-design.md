@@ -463,18 +463,6 @@ pub struct BoundaryLedgerState {
     pub ledger_anchor_exposure: Exposure,
     pub progress: BTreeMap<BoundaryId, BoundaryProgress>,
 }
-
-pub struct BoundaryLedgerAnchorSnapshot {
-    profile_revision: ProfileRevision,
-    ledger_anchor_exposure: Exposure,
-}
-
-pub struct ExecutorStateDocument {
-    ledger_state: BoundaryLedgerAnchorSnapshot,
-    bindings: Vec<LiveOrderBinding>,
-    recent_terminal_orders: Vec<RecentTerminalOrder>,
-    recovery_anomaly: Option<RecoveryAnomaly>,
-}
 ```
 
 这里只把最小的非派生运行事实保存在当前 executor state 中：
@@ -483,13 +471,9 @@ pub struct ExecutorStateDocument {
 - `ledger_anchor_exposure`
 - 当前会话内，每条边界自锚点以来由成交事件吸收的双向累计进度
 
-`progress` 不是重启真相，也不进入持久化 JSON。`BoundaryLedgerState` / `ExecutorState` / `TrackRuntimeSnapshot` 是内存运行态，不直接实现持久化 serde；需要 JSON 时必须通过显式 document 投影，例如 `BoundaryLedgerAnchorSnapshot` / `ExecutorStateDocument` / `TrackRuntimeSnapshotDocument`。
+`BoundaryLedgerState` / `ExecutorState` / `TrackRuntimeSnapshot` 是内存运行态，不实现持久化 serde，也不提供通用 `to_document()` 投影。若某个字段确实需要跨 JSON/DB 边界，应为那个持久化边界定义自己的 serde DTO；executor runtime state 不作为持久化协议。
 
-document 的边界按层区分：
-
-- `BoundaryLedgerAnchorSnapshot` 只保存 ledger anchor 信息，不保存 `progress`。
-- `ExecutorStateDocument` 可以保存 bindings / recent terminal orders / recovery anomaly，作为诊断和当前 session 恢复提示。
-- fresh activation / 进程重启的执行真相仍然来自交易所 open orders、当前仓位、当前价格和 track 配置；旧 binding id、cancel-pending 和 `progress` 不能作为恢复真相。
+fresh activation / 进程重启的执行真相来自交易所 open orders、当前仓位、当前价格、track 配置，以及业务持久化边界中的 control / ledger 状态。旧 binding id、cancel-pending、recovery anomaly 和 `progress` 不能作为恢复真相。
 
 `progress` 只解决运行中的时序窗口：Binance 的成交事件和仓位事件是两条独立 user-data 消息，成交先到、仓位后到时，executor 需要先把 fill 吸收到 boundary progress，避免在仓位更新到达前重复覆盖同一段 boundary。
 

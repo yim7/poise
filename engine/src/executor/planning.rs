@@ -1683,20 +1683,6 @@ mod tests {
     }
 
     #[test]
-    fn planning_no_longer_depends_on_active_round_or_slots() {
-        let config = config();
-        let rules = rules();
-
-        let plan = plan(input(&config, &rules, Exposure(0.0), Exposure(2.0)));
-        let state_json = serde_json::to_value(plan.state.to_document()).unwrap();
-
-        assert!(state_json.get("active_round").is_none());
-        assert!(state_json.get("slots").is_none());
-        assert!(state_json.get("ledger_state").is_some());
-        assert!(state_json.get("bindings").is_some());
-    }
-
-    #[test]
     fn planning_removes_terminal_bindings_before_returning_state() {
         let config = config();
         let rules = rules();

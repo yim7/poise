@@ -625,55 +625,7 @@ mod tests {
     use crate::track::Venue;
 
     #[test]
-    fn executor_state_document_round_trips_anchor_and_bindings() {
-        let mut state = ExecutorState::empty(Utc::now());
-        let boundary_id = BoundaryId {
-            profile_revision: state.ledger_state.profile_revision.clone(),
-            lower_exposure_bp: 0,
-            upper_exposure_bp: 10_000,
-        };
-        let operation = BoundaryOperation {
-            boundary_id,
-            direction: BoundaryDirection::Up,
-        };
-        state.bindings.push(LiveOrderBinding {
-            binding_id: "binding-1".to_string(),
-            proposal_key: BindingProposalKey {
-                policy: PolicyKind::CatchUp,
-                operations: vec![operation],
-            },
-            allocations: Vec::new(),
-            absorbed_exposure_qty: 0.0,
-            request: OrderRequest {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                side: poise_core::types::Side::Buy,
-                price: 100.0,
-                quantity: 1.0,
-                client_order_id: "client-1".to_string(),
-                reduce_only: false,
-            },
-            desired_exposure: Exposure(1.0),
-            submit_purpose: SubmitPurpose::AutoReconcile,
-            order_id: None,
-            status: BindingStatus::Working,
-            policy_state: BindingPolicyState::Stateless,
-        });
-
-        let json = serde_json::to_string(&state.to_document()).unwrap();
-        let restored = serde_json::from_str::<crate::snapshot::ExecutorStateDocument>(&json)
-            .unwrap()
-            .into_runtime_state();
-
-        assert_eq!(restored, state);
-        let value = serde_json::to_value(restored.to_document()).unwrap();
-        assert!(value.get("active_round").is_none());
-        assert!(value.get("slots").is_none());
-        assert!(value.get("ledger_state").is_some());
-        assert!(value.get("bindings").is_some());
-    }
-
-    #[test]
-    fn runtime_snapshot_document_is_explicit_projection_not_runtime_clone() {
+    fn runtime_snapshot_is_current_process_state_not_persisted_document() {
         let mut runtime = TrackRuntime::new(
             "test".into(),
             Instrument::new(Venue::Binance, "BTCUSDT"),
@@ -693,28 +645,6 @@ mod tests {
                 .progress
                 .is_empty(),
             "runtime clones must preserve current-session progress"
-        );
-
-        let snapshot_json = serde_json::to_value(runtime_snapshot.to_document()).unwrap();
-        let executor_state = snapshot_json.get("executor_state").unwrap();
-        assert!(executor_state.get("gap").is_none());
-        assert!(executor_state.get("mode").is_none());
-        assert!(executor_state.get("core_resting").is_none());
-        assert!(executor_state.get("ledger_state").is_some());
-        assert!(executor_state.get("bindings").is_some());
-        assert!(
-            executor_state
-                .get("ledger_state")
-                .and_then(|ledger| ledger.get("progress"))
-                .is_none(),
-            "serialized projection must not expose current-session progress"
-        );
-
-        let document = serde_json::from_value(snapshot_json).unwrap();
-        let restored = TrackRuntimeSnapshot::from_document(document);
-        assert!(
-            restored.executor_state.ledger_state.progress.is_empty(),
-            "explicit document restore starts a new session progress window"
         );
     }
 
