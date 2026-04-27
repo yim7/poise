@@ -126,18 +126,12 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::{NaiveDate, TimeZone, Utc};
-    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::Exposure;
     use poise_engine::executor::RecoveryAnomaly;
     use poise_engine::ledger::TrackLedgerState;
-    use poise_engine::mutation_frame::TrackMutationFrameRevision;
-    use poise_engine::mutation_frame::{FrameObservedState, TrackMutationFrame};
     use poise_engine::ports::ExecutionQuote;
-    use poise_engine::runtime::{
-        AutoState, ControlState, CurrentMarketData, ExecutorState, FreshSessionExternalInputs,
-        RiskState, TrackState,
-    };
-    use poise_engine::track::{Instrument, TrackId, Venue};
+    use poise_engine::runtime::{CurrentMarketData, FreshSessionExternalInputs};
+    use poise_engine::track::TrackId;
 
     use crate::mutation_executor::test_support::{
         MemoryRepository, seeded_manager, track_write_services,
@@ -150,10 +144,10 @@ mod tests {
     #[tokio::test]
     async fn load_track_recovery_summary_projects_application_owned_issue() {
         let write_repository = Arc::new(MemoryRepository::default());
-        let mut snapshot = test_snapshot();
-        snapshot.executor_state.recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
-        snapshot.executor_state.bindings.clear();
         let mut manager = seeded_manager();
+        let mut snapshot = manager.mutation_frame("btc-core").unwrap();
+        snapshot.set_recovery_anomaly(Some(RecoveryAnomaly::UnknownLiveOrder));
+        snapshot.clear_executor_bindings();
         manager.rollback_track_state(&snapshot).unwrap();
         let (services, _) = track_write_services(manager, write_repository);
         let service = services.runtime_lifecycle;
@@ -259,9 +253,8 @@ mod tests {
             let manager_handle = services.runtime_lifecycle.manager();
             let mut manager = manager_handle.write().await;
             let mut snapshot = manager.mutation_frame("btc-core").unwrap();
-            snapshot.current_exposure = Exposure(9.0);
-            snapshot.desired_exposure = Some(Exposure(4.0));
-            snapshot.executor_state.recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
+            snapshot.set_exposure_state(Exposure(9.0), Some(Exposure(4.0)));
+            snapshot.set_recovery_anomaly(Some(RecoveryAnomaly::UnknownLiveOrder));
             manager.rollback_track_state(&snapshot).unwrap();
         }
 
@@ -303,11 +296,11 @@ mod tests {
             snapshot.status(),
             poise_engine::runtime::TrackStatus::Paused
         );
-        assert_eq!(snapshot.current_exposure, Exposure(1.5));
-        assert_eq!(snapshot.desired_exposure, None);
-        assert!(snapshot.executor_state.bindings.is_empty());
-        assert!(snapshot.executor_state.recovery_anomaly.is_none());
-        assert_eq!(snapshot.ledger_state.gross_realized_pnl_cumulative, 42.0);
+        assert_eq!(snapshot.current_exposure(), &Exposure(1.5));
+        assert_eq!(snapshot.desired_exposure(), None);
+        assert!(!snapshot.has_executor_bindings());
+        assert!(!snapshot.recovery_anomaly_active());
+        assert_eq!(snapshot.ledger_state().gross_realized_pnl_cumulative, 42.0);
         let live_view = manager.track_live_view(&TrackId::new("btc-core")).unwrap();
         assert_eq!(live_view.strategy_price, Some(96.0));
         assert_eq!(live_view.best_bid, Some(95.8));
@@ -365,7 +358,7 @@ mod tests {
             let manager_handle = services.runtime_lifecycle.manager();
             let mut manager = manager_handle.write().await;
             let mut snapshot = manager.mutation_frame("btc-core").unwrap();
-            snapshot.executor_state.recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
+            snapshot.set_recovery_anomaly(Some(RecoveryAnomaly::UnknownLiveOrder));
             manager.rollback_track_state(&snapshot).unwrap();
         }
 
@@ -416,8 +409,8 @@ mod tests {
             let manager_handle = services.runtime_lifecycle.manager();
             let mut manager = manager_handle.write().await;
             let mut snapshot = manager.mutation_frame("btc-core").unwrap();
-            snapshot.executor_state.recovery_anomaly = Some(RecoveryAnomaly::UnknownLiveOrder);
-            assert!(!snapshot.executor_state.bindings.is_empty());
+            snapshot.set_recovery_anomaly(Some(RecoveryAnomaly::UnknownLiveOrder));
+            assert!(snapshot.has_executor_bindings());
             manager.rollback_track_state(&snapshot).unwrap();
         }
 
@@ -435,12 +428,9 @@ mod tests {
             .mutation_frame("btc-core")
             .unwrap();
         let effects = repository.pending_effects();
-        assert!(snapshot.executor_state.bindings.is_empty());
-        assert!(snapshot.executor_state.recovery_anomaly.is_none());
-        assert_eq!(
-            snapshot.executor_state.ledger_state.ledger_anchor_exposure,
-            Exposure(0.0)
-        );
+        assert!(!snapshot.has_executor_bindings());
+        assert!(!snapshot.recovery_anomaly_active());
+        assert_eq!(snapshot.executor_ledger_anchor_exposure(), &Exposure(0.0));
         let btc_statuses = effects
             .iter()
             .filter(|effect| effect.track_id == TrackId::new("btc-core"))
@@ -452,38 +442,5 @@ mod tests {
             vec![EffectStatus::Pending, EffectStatus::Pending],
             "old persisted effects are journal history, not startup work"
         );
-    }
-
-    fn test_snapshot() -> TrackMutationFrame {
-        let track_config = TrackConfig {
-            lower_price: 90.0,
-            upper_price: 110.0,
-            long_exposure_units: 8.0,
-            short_exposure_units: 8.0,
-            notional_per_unit: 375.0,
-            min_rebalance_units: 0.5,
-            shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze,
-        };
-        TrackMutationFrame {
-            track_id: TrackId::new("btc-core"),
-            frame_revision: TrackMutationFrameRevision::for_track(
-                &Instrument::new(Venue::Binance, "BTCUSDT"),
-                &track_config,
-            ),
-            runtime_state: TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)),
-            current_exposure: Exposure(3.5),
-            desired_exposure: Some(Exposure(4.0)),
-            executor_state: ExecutorState::empty(
-                Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-            ),
-            ledger_state: Default::default(),
-            execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
-            risk: RiskState {
-                unrealized_pnl: 0.0,
-                ..RiskState::default()
-            },
-            observed: FrameObservedState::default(),
-        }
     }
 }

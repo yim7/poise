@@ -484,8 +484,8 @@ mod tests {
             .await
             .mutation_frame("btc-core")
             .unwrap();
-        assert!(snapshot.executor_state.bindings.is_empty());
-        assert!(snapshot.executor_state.recovery_anomaly.is_none());
+        assert!(!snapshot.has_executor_bindings());
+        assert!(!snapshot.recovery_anomaly_active());
         assert_eq!(snapshot.status(), TrackStatus::WaitingMarketData);
     }
 
@@ -528,13 +528,13 @@ mod tests {
             let manager_handle = services.observation_service.manager();
             let mut manager = manager_handle.write().await;
             let mut snapshot = manager.mutation_frame("btc-core").unwrap();
-            snapshot.runtime_state = poise_engine::runtime::TrackState::Terminated {
+            snapshot.set_runtime_state(poise_engine::runtime::TrackState::Terminated {
                 cause: TerminationCause::ManualCommand,
-            };
-            snapshot.current_exposure = Exposure(9.0);
-            snapshot.desired_exposure = Some(Exposure(4.0));
-            snapshot.executor_state.recovery_anomaly =
-                Some(poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder);
+            });
+            snapshot.set_exposure_state(Exposure(9.0), Some(Exposure(4.0)));
+            snapshot.set_recovery_anomaly(Some(
+                poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder,
+            ));
             manager.rollback_track_state(&snapshot).unwrap();
         }
 
@@ -585,11 +585,11 @@ mod tests {
             .mutation_frame("btc-core")
             .unwrap();
         assert_eq!(snapshot.status(), TrackStatus::Paused);
-        assert_eq!(snapshot.current_exposure, Exposure(0.0));
-        assert_eq!(snapshot.desired_exposure, None);
-        assert!(snapshot.executor_state.bindings.is_empty());
-        assert!(snapshot.executor_state.recovery_anomaly.is_none());
-        assert_eq!(snapshot.ledger_state.gross_realized_pnl_cumulative, 42.0);
+        assert_eq!(snapshot.current_exposure(), &Exposure(0.0));
+        assert_eq!(snapshot.desired_exposure(), None);
+        assert!(!snapshot.has_executor_bindings());
+        assert!(!snapshot.recovery_anomaly_active());
+        assert_eq!(snapshot.ledger_state().gross_realized_pnl_cumulative, 42.0);
     }
 
     #[tokio::test]
@@ -684,8 +684,8 @@ mod tests {
             .await
             .mutation_frame("btc-core")
             .unwrap();
-        assert_eq!(snapshot.current_exposure, Exposure(0.3333333333333333));
-        assert_eq!(snapshot.risk.unrealized_pnl, 12.0);
+        assert_eq!(snapshot.current_exposure(), &Exposure(0.3333333333333333));
+        assert_eq!(snapshot.unrealized_pnl(), 12.0);
     }
 
     #[tokio::test]
@@ -844,8 +844,8 @@ mod tests {
                     .await
                     .mutation_frame("btc-core")
                     .unwrap();
-                if snapshot.current_exposure == Exposure(0.3333333333333333)
-                    && snapshot.risk.unrealized_pnl == 12.0
+                if snapshot.current_exposure() == &Exposure(0.3333333333333333)
+                    && snapshot.unrealized_pnl() == 12.0
                 {
                     break;
                 }

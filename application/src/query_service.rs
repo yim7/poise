@@ -50,15 +50,12 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{NaiveDate, TimeZone, Utc};
     use poise_core::events::DomainEvent;
-    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
+    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
     use poise_core::types::{Exposure, Side};
     use poise_engine::executor::SubmitRecoveryToken;
-    use poise_engine::mutation_frame::TrackMutationFrameRevision;
-    use poise_engine::mutation_frame::{FrameObservedState, TrackMutationFrame};
     use poise_engine::observation::MarketObservation;
     use poise_engine::ports::ExecutionQuote;
     use poise_engine::ports::OrderRequest;
-    use poise_engine::runtime::{AutoState, ControlState, ExecutorState, RiskState, TrackState};
     use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_engine::transition::TrackEffect;
 
@@ -72,19 +69,6 @@ mod tests {
     };
 
     use super::TrackQueryService;
-
-    fn test_track_config() -> TrackConfig {
-        TrackConfig {
-            lower_price: 90.0,
-            upper_price: 110.0,
-            long_exposure_units: 8.0,
-            short_exposure_units: 8.0,
-            notional_per_unit: 375.0,
-            min_rebalance_units: 0.5,
-            shape_family: ShapeFamily::Linear,
-            out_of_band_policy: BandProtectionPolicy::Freeze,
-        }
-    }
 
     #[tokio::test]
     async fn list_track_sources_reads_all_registered_snapshots() {
@@ -303,8 +287,7 @@ mod tests {
 
     impl FakeReadRepository {
         fn new() -> Self {
-            let snapshot = test_snapshot();
-            let track_id = snapshot.track_id.clone();
+            let track_id = TrackId::new("btc-core");
             let updated_at = Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap();
 
             Self {
@@ -420,39 +403,6 @@ mod tests {
             track_id: &TrackId,
         ) -> Result<Option<chrono::DateTime<Utc>>> {
             Ok(self.updated_at.get(track_id.as_str()).copied())
-        }
-    }
-
-    fn test_snapshot() -> TrackMutationFrame {
-        let config = test_track_config();
-        TrackMutationFrame {
-            track_id: TrackId::new("btc-core"),
-            frame_revision: TrackMutationFrameRevision::for_track(
-                &Instrument::new(Venue::Binance, "BTCUSDT"),
-                &config,
-            ),
-            runtime_state: TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)),
-            current_exposure: Exposure(3.5),
-            desired_exposure: Some(Exposure(4.0)),
-            executor_state: ExecutorState::empty(
-                Utc.with_ymd_and_hms(2026, 3, 26, 9, 45, 0).unwrap(),
-            ),
-            ledger_state: Default::default(),
-            execution_gate_state: poise_engine::execution_gate::ExecutionGateState::open(),
-            risk: RiskState {
-                unrealized_pnl: 265.2,
-                ..RiskState::default()
-            },
-            observed: FrameObservedState {
-                strategy_price: Some(101.25),
-                strategy_price_status: poise_engine::runtime::StrategyPriceStatus::Live,
-                mark_price: Some(101.5),
-                best_bid: Some(101.0),
-                best_ask: Some(101.5),
-                out_of_band_since: None,
-                last_tick_at: None,
-                market_data_stale_since: None,
-            },
         }
     }
 }

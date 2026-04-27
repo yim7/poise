@@ -719,7 +719,6 @@ mod tests {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::ExchangeRules;
     use poise_engine::command::TrackCommand;
-    use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{AccountSummarySnapshot, ClockPort};
     use poise_engine::track::{Instrument, TrackId, Venue};
@@ -968,9 +967,7 @@ mod tests {
 
     fn seeded_repository() -> Arc<TestRepository> {
         let repository = Arc::new(TestRepository::default());
-        let mut snapshot = test_manager().mutation_frame("btc-core").unwrap();
-        seed_snapshot_ledger(&mut snapshot);
-        repository.seed_snapshot(snapshot);
+        repository.seed_track(&TrackId::new("btc-core"));
         repository
     }
 
@@ -1535,31 +1532,6 @@ mod tests {
         manager
     }
 
-    fn seed_snapshot_ledger(snapshot: &mut poise_engine::mutation_frame::TrackMutationFrame) {
-        snapshot.risk.unrealized_pnl = 265.2;
-        snapshot.ledger_state.ledger_utc_day =
-            chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
-        snapshot.ledger_state.gross_realized_pnl_today = 980.1;
-        snapshot.ledger_state.gross_realized_pnl_cumulative = 980.1;
-        snapshot.ledger_state.trading_fee_cumulative = 12.3;
-        snapshot.ledger_state.funding_fee_cumulative = -4.0;
-        snapshot.ledger_state.unresolved_gaps = vec![
-            LedgerGapRecord {
-                gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset".into(),
-                reason: LedgerGapReason::UnsupportedCommissionAsset,
-                observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-                source: "ORDER_TRADE_UPDATE".into(),
-            },
-            LedgerGapRecord {
-                gap_key: "binance:funding_fee:btcusdt:2026-03-24T08:00:00+00:00:missing_symbol"
-                    .into(),
-                reason: LedgerGapReason::MissingSymbol,
-                observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-                source: "ACCOUNT_UPDATE:FUNDING_FEE".into(),
-            },
-        ];
-    }
-
     struct FakeClock;
 
     impl ClockPort for FakeClock {
@@ -1582,11 +1554,11 @@ mod tests {
     }
 
     impl TestRepository {
-        fn seed_snapshot(&self, snapshot: poise_engine::mutation_frame::TrackMutationFrame) {
+        fn seed_track(&self, track_id: &TrackId) {
             self.updated_at
                 .lock()
                 .unwrap()
-                .insert(snapshot.track_id.as_str().to_string(), Utc::now());
+                .insert(track_id.as_str().to_string(), Utc::now());
         }
 
         fn set_read_delay(&self, delay: Duration) {

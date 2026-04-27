@@ -1122,13 +1122,14 @@ total_loss_limit = 600.0
             )
             .unwrap();
         let mut snapshot = manager.mutation_frame("btc-core").unwrap();
-        snapshot.runtime_state =
-            TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
+        snapshot.set_runtime_state(TrackState::Running(ControlState::Automatic(
+            AutoState::FollowingBand,
+        )));
         TrackMutationStore::commit_track_transition(
             repository.as_ref(),
             "btc-core",
             None,
-            &snapshot.ledger_state,
+            snapshot.ledger_state(),
             &[],
         )
         .await
@@ -1145,7 +1146,7 @@ total_loss_limit = 600.0
         TrackMutationStore::save_track_ledger_state(
             repository.as_ref(),
             &TrackId::new("btc-core"),
-            &snapshot.ledger_state,
+            snapshot.ledger_state(),
         )
         .await
         .unwrap();
@@ -1285,7 +1286,6 @@ total_loss_limit = 600.0
             snapshot.status(),
             poise_engine::runtime::TrackStatus::Frozen
         );
-        assert_eq!(snapshot.observed.strategy_price, None);
     }
 
     #[tokio::test]

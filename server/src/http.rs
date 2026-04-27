@@ -315,15 +315,15 @@ mod tests {
         let mut manager = test_manager();
         let mut snapshot = manager
             .mutation_frame("btc-core")
-            .expect("seeded manager should expose runtime snapshot");
-        seed_snapshot_ledger(&mut snapshot);
+            .expect("seeded manager should expose mutation frame");
+        seed_frame_ledger(&mut snapshot);
         manager.rollback_track_state(&snapshot).unwrap();
         observe_seed_market(&mut manager);
         repository
             .commit_track_transition(
                 "btc-core",
                 None,
-                &snapshot.ledger_state,
+                snapshot.ledger_state(),
                 &[DomainEvent::ExposureTargetChanged {
                     from: Exposure(3.5),
                     to: Exposure(4.0),
@@ -332,7 +332,7 @@ mod tests {
             .await
             .unwrap();
         repository
-            .save_track_ledger_state(&TrackId::new("btc-core"), &snapshot.ledger_state)
+            .save_track_ledger_state(&TrackId::new("btc-core"), snapshot.ledger_state())
             .await
             .unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
@@ -386,15 +386,15 @@ mod tests {
         let mut manager = test_manager();
         let mut snapshot = manager
             .mutation_frame("btc-core")
-            .expect("seeded manager should expose runtime snapshot");
-        seed_snapshot_ledger(&mut snapshot);
+            .expect("seeded manager should expose mutation frame");
+        seed_frame_ledger(&mut snapshot);
         manager.rollback_track_state(&snapshot).unwrap();
         observe_seed_market(&mut manager);
         repository
             .commit_track_transition(
                 "btc-core",
                 None,
-                &snapshot.ledger_state,
+                snapshot.ledger_state(),
                 &[DomainEvent::ExposureTargetChanged {
                     from: Exposure(3.5),
                     to: Exposure(4.0),
@@ -403,7 +403,7 @@ mod tests {
             .await
             .unwrap();
         repository
-            .save_track_ledger_state(&TrackId::new("btc-core"), &snapshot.ledger_state)
+            .save_track_ledger_state(&TrackId::new("btc-core"), snapshot.ledger_state())
             .await
             .unwrap();
 
@@ -518,15 +518,15 @@ mod tests {
             .unwrap();
     }
 
-    fn seed_snapshot_ledger(snapshot: &mut poise_engine::mutation_frame::TrackMutationFrame) {
-        snapshot.risk.unrealized_pnl = 265.2;
-        snapshot.ledger_state.ledger_utc_day =
-            chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
-        snapshot.ledger_state.gross_realized_pnl_today = 980.1;
-        snapshot.ledger_state.gross_realized_pnl_cumulative = 980.1;
-        snapshot.ledger_state.trading_fee_cumulative = 12.3;
-        snapshot.ledger_state.funding_fee_cumulative = -4.0;
-        snapshot.ledger_state.unresolved_gaps = vec![
+    fn seed_frame_ledger(snapshot: &mut poise_engine::mutation_frame::TrackMutationFrame) {
+        snapshot.set_unrealized_pnl(265.2);
+        let mut ledger_state = snapshot.ledger_state().clone();
+        ledger_state.ledger_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
+        ledger_state.gross_realized_pnl_today = 980.1;
+        ledger_state.gross_realized_pnl_cumulative = 980.1;
+        ledger_state.trading_fee_cumulative = 12.3;
+        ledger_state.funding_fee_cumulative = -4.0;
+        ledger_state.unresolved_gaps = vec![
             LedgerGapRecord {
                 gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset".into(),
                 reason: LedgerGapReason::UnsupportedCommissionAsset,
@@ -541,6 +541,7 @@ mod tests {
                 source: "ACCOUNT_UPDATE:FUNDING_FEE".into(),
             },
         ];
+        snapshot.replace_ledger_state(ledger_state);
     }
 
     #[tokio::test]
@@ -610,8 +611,8 @@ mod tests {
         let mut manager = test_manager();
         let mut snapshot = manager
             .mutation_frame("btc-core")
-            .expect("seeded manager should expose runtime snapshot");
-        snapshot.observed.market_data_stale_since = Some(Utc::now());
+            .expect("seeded manager should expose mutation frame");
+        snapshot.set_market_data_stale_since(Some(Utc::now()));
         manager.rollback_track_state(&snapshot).unwrap();
         let state = {
             let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
@@ -907,11 +908,7 @@ mod tests {
     async fn submit_command_rolls_back_detail_when_persistence_fails() {
         let repository = Arc::new(FailingRepository::default());
         let manager = test_manager();
-        repository.seed_snapshot(
-            manager
-                .mutation_frame("btc-core")
-                .expect("seeded manager should expose runtime snapshot"),
-        );
+        repository.seed_track(&TrackId::new("btc-core"));
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
         let mutation_store = repository.clone() as Arc<dyn TrackMutationStore>;
         let effect_store = repository.clone() as Arc<dyn TrackEffectJournal>;
@@ -1127,11 +1124,11 @@ mod tests {
     }
 
     impl FailingRepository {
-        fn seed_snapshot(&self, snapshot: poise_engine::mutation_frame::TrackMutationFrame) {
+        fn seed_track(&self, track_id: &TrackId) {
             self.updated_at
                 .lock()
                 .unwrap()
-                .insert(snapshot.track_id.as_str().to_string(), Utc::now());
+                .insert(track_id.as_str().to_string(), Utc::now());
         }
     }
 

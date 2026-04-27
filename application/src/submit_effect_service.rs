@@ -424,17 +424,11 @@ mod tests {
             .await
             .mutation_frame("btc-core")
             .expect("track snapshot");
-        let binding = snapshot
-            .executor_state
-            .bindings
-            .iter()
-            .find(|binding| binding.request.client_order_id == target.request.client_order_id)
+        let (order_id, status) = snapshot
+            .binding_receipt_for_client_order_id(&target.request.client_order_id)
             .expect("target binding should still exist");
-        assert_eq!(binding.order_id.as_deref(), Some("live-order-1"));
-        assert_eq!(
-            binding.status,
-            poise_engine::executor::BindingStatus::Working
-        );
+        assert_eq!(order_id.as_deref(), Some("live-order-1"));
+        assert_eq!(status, poise_engine::executor::BindingStatus::Working);
 
         let persisted = repository
             .pending_effects()

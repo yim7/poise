@@ -14,7 +14,7 @@ use crate::executor::boundary::{ProfileRevision, profile_revision_for_config};
 use crate::executor::ledger::BoundaryLedgerState;
 use crate::executor::policy::PolicyKind;
 use crate::ledger::TrackLedgerState;
-use crate::mutation_frame::{FrameObservedState, TrackMutationFrame, TrackMutationFrameRevision};
+use crate::mutation_frame::{TrackMutationFrame, TrackMutationFrameRevision};
 use crate::ports::ExecutionQuote;
 use crate::price_gate::{
     PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
@@ -499,16 +499,8 @@ impl TrackRuntime {
             execution_gate_state: self.execution_gate_state.clone(),
             ledger_state: self.ledger_state.clone(),
             risk: self.risk_state.clone(),
-            observed: FrameObservedState {
-                strategy_price: None,
-                strategy_price_status: StrategyPriceStatus::Stale,
-                mark_price: None,
-                best_bid: None,
-                best_ask: None,
-                out_of_band_since: self.out_of_band_since,
-                last_tick_at: None,
-                market_data_stale_since: self.market_data_stale_since,
-            },
+            out_of_band_since: self.out_of_band_since,
+            market_data_stale_since: self.market_data_stale_since,
         }
     }
 
@@ -546,19 +538,12 @@ impl TrackRuntime {
         self.price_execution_gate = PriceExecutionGate::NoSubmit {
             reason: PriceExecutionBlockReason::MissingExecutionQuote,
         };
-        self.out_of_band_since = frame.observed.out_of_band_since;
+        self.out_of_band_since = frame.out_of_band_since;
         self.last_tick_at = None;
-        self.market_data_stale_since = frame.observed.market_data_stale_since;
-        let mut expected_frame = frame.clone();
-        expected_frame.observed.strategy_price = None;
-        expected_frame.observed.strategy_price_status = StrategyPriceStatus::Stale;
-        expected_frame.observed.mark_price = None;
-        expected_frame.observed.best_bid = None;
-        expected_frame.observed.best_ask = None;
-        expected_frame.observed.last_tick_at = None;
+        self.market_data_stale_since = frame.market_data_stale_since;
         debug_assert_eq!(
             self.mutation_frame(),
-            expected_frame,
+            *frame,
             "rollback_to_frame left frame fields unsynced"
         );
 

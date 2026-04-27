@@ -486,7 +486,7 @@ impl MutationExecutor {
             self.sync_account_capacity_gate_state(&mut manager, id)
                 .map_err(TrackMutationError::Mutation)?;
             let control_state_override =
-                persisted_control_state_after_command(&previous_frame.runtime_state, &command);
+                persisted_control_state_after_command(previous_frame.runtime_state(), &command);
             let transition = manager
                 .command(&TrackId::new(id), command)
                 .map_err(|error| {
@@ -1232,18 +1232,10 @@ impl MutationExecutor {
         let available_notional = self
             .account_margin_guard
             .available_notional_for(track.instrument());
-        if snapshot
-            .execution_gate_state
-            .account_capacity
-            .available_notional
-            == available_notional
-        {
+        if snapshot.account_capacity_available_notional() == available_notional {
             return Ok(());
         }
-        snapshot
-            .execution_gate_state
-            .account_capacity
-            .available_notional = available_notional;
+        snapshot.set_account_capacity_available_notional(available_notional);
         manager.rollback_track_state(&snapshot)
     }
 
@@ -1290,8 +1282,8 @@ impl MutationExecutor {
         R: TransitionResult,
     {
         let control_state_update = persisted_control_state_after_transition(
-            &previous_frame.runtime_state,
-            &next_frame.runtime_state,
+            previous_frame.runtime_state(),
+            next_frame.runtime_state(),
             control_state_override,
         );
         let has_session_effects = result
@@ -1299,7 +1291,7 @@ impl MutationExecutor {
             .iter()
             .any(|effect| !matches!(effect, TrackEffect::NoOp));
         let has_track_write = control_state_update.is_some()
-            || previous_frame.ledger_state != next_frame.ledger_state
+            || next_frame.ledger_changed_since(previous_frame)
             || !result.domain_events().is_empty();
         let has_effect_status_update = !effect_status_updates.is_empty();
         let has_work = has_track_write || has_effect_status_update || has_session_effects;
@@ -1313,7 +1305,7 @@ impl MutationExecutor {
                 .commit_track_transition(
                     id,
                     control_state_update.as_ref(),
-                    &next_frame.ledger_state,
+                    next_frame.ledger_state(),
                     result.domain_events(),
                 )
                 .await;
@@ -1361,9 +1353,8 @@ impl MutationExecutor {
             );
         }
 
-        let previous_recovery_anomaly_active =
-            previous_frame.executor_state.recovery_anomaly.is_some();
-        let next_recovery_anomaly_active = next_frame.executor_state.recovery_anomaly.is_some();
+        let previous_recovery_anomaly_active = previous_frame.recovery_anomaly_active();
+        let next_recovery_anomaly_active = next_frame.recovery_anomaly_active();
         if previous_recovery_anomaly_active != next_recovery_anomaly_active {
             self.recovery_anomaly_observer
                 .observe_recovery_anomaly_change(&TrackId::new(id), next_recovery_anomaly_active);
@@ -1397,12 +1388,7 @@ fn cancel_receipt_absorbed_exposure(
     let snapshot = manager
         .mutation_frame(id)
         .ok_or_else(|| anyhow!("track `{id}` not found"))?;
-    Ok(snapshot.executor_state.bindings.iter().any(|binding| {
-        binding.absorbed_exposure_qty > f64::EPSILON
-            && (binding.order_id.as_deref() == Some(order_id)
-                || binding.order_id.as_deref() == Some(receipt.order_id.as_str())
-                || binding.request.client_order_id == receipt.client_order_id)
-    }))
+    Ok(snapshot.has_absorbed_binding_for_cancel_receipt(order_id, receipt))
 }
 
 fn classify_cancel_receipt_resolution(
@@ -1901,8 +1887,7 @@ mod tests {
     fn frame_with_recovery_anomaly(active: bool) -> TrackMutationFrame {
         let manager = seeded_manager();
         let mut snapshot = manager.get_track("btc-core").unwrap().mutation_frame();
-        snapshot.executor_state.recovery_anomaly =
-            active.then_some(RecoveryAnomaly::UnknownLiveOrder);
+        snapshot.set_recovery_anomaly(active.then_some(RecoveryAnomaly::UnknownLiveOrder));
         snapshot
     }
 
@@ -1914,7 +1899,10 @@ mod tests {
 
         let previous_frame = frame_with_recovery_anomaly(false);
         let mut next_frame = previous_frame.clone();
-        next_frame.current_exposure = poise_core::types::Exposure(1.0);
+        next_frame.set_exposure_state(
+            poise_core::types::Exposure(1.0),
+            previous_frame.desired_exposure().cloned(),
+        );
 
         executor
             .commit_track_mutation(
@@ -2012,10 +2000,13 @@ mod tests {
                 .cloned()
                 .expect("seeded track should exist");
             let mut updated = track.mutation_frame();
-            updated.runtime_state =
-                TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
-            updated.current_exposure = poise_core::types::Exposure(2.4);
-            updated.desired_exposure = Some(poise_core::types::Exposure(2.4));
+            updated.set_runtime_state(TrackState::Running(ControlState::Automatic(
+                AutoState::FollowingBand,
+            )));
+            updated.set_exposure_state(
+                poise_core::types::Exposure(2.4),
+                Some(poise_core::types::Exposure(2.4)),
+            );
             manager
                 .rollback_track_state(&updated)
                 .expect("failed to seed active exposure state");
@@ -2505,12 +2496,15 @@ mod tests {
                 .cloned()
                 .expect("seeded track should exist");
             let mut updated = track.mutation_frame();
-            updated.runtime_state =
-                TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
-            updated.current_exposure = poise_core::types::Exposure(4.0);
-            updated.ledger_state.gross_realized_pnl_today = -290.0;
-            updated.ledger_state.gross_realized_pnl_cumulative = -290.0;
-            updated.risk.unrealized_pnl = -20.0;
+            updated.set_runtime_state(TrackState::Running(ControlState::Automatic(
+                AutoState::FollowingBand,
+            )));
+            updated.set_exposure_state(poise_core::types::Exposure(4.0), None);
+            let mut ledger_state = updated.ledger_state().clone();
+            ledger_state.gross_realized_pnl_today = -290.0;
+            ledger_state.gross_realized_pnl_cumulative = -290.0;
+            updated.replace_ledger_state(ledger_state);
+            updated.set_unrealized_pnl(-20.0);
             manager
                 .rollback_track_state(&updated)
                 .expect("failed to seed risk termination state");
@@ -2530,8 +2524,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            transition.frame.runtime_state,
-            TrackState::Terminated {
+            transition.frame.runtime_state(),
+            &TrackState::Terminated {
                 cause: TerminationCause::Risk(RiskTerminationCause::DailyLossLimit),
             }
         );
@@ -2612,14 +2606,14 @@ mod tests {
             let mut snapshot = manager
                 .mutation_frame("btc-core")
                 .expect("track mutation frame");
-            let binding = snapshot
-                .executor_state
-                .bindings
-                .iter_mut()
-                .find(|binding| binding.request.client_order_id == blocked_client_order_id)
-                .expect("blocked submit binding should exist");
-            binding.order_id = Some(closed_order_id.into());
-            binding.status = BindingStatus::CancelPending;
+            assert!(
+                snapshot.set_binding_order_status_for_client_order_id(
+                    &blocked_client_order_id,
+                    Some(closed_order_id.into()),
+                    BindingStatus::CancelPending,
+                ),
+                "blocked submit binding should exist"
+            );
             manager
                 .rollback_track_state(&snapshot)
                 .expect("updated track mutation frame");
@@ -2657,30 +2651,20 @@ mod tests {
             .await
             .mutation_frame("btc-core")
             .expect("track mutation frame");
-        let blocked_binding = snapshot
-            .executor_state
-            .bindings
-            .iter()
-            .find(|binding| binding.request.client_order_id == blocked_client_order_id)
+        let (_, blocked_binding_status) = snapshot
+            .binding_receipt_for_client_order_id(&blocked_client_order_id)
             .expect("blocked binding should remain in runtime history");
-        assert_eq!(blocked_binding.status, BindingStatus::Terminal);
+        assert_eq!(blocked_binding_status, BindingStatus::Terminal);
         assert!(
-            snapshot
-                .executor_state
-                .bindings
-                .iter()
-                .filter(|binding| binding.is_active())
-                .all(|binding| binding.order_id.as_deref() != Some(closed_order_id)),
+            !snapshot.has_active_binding_for_order_id(closed_order_id),
             "closed order should no longer have an active runtime binding"
         );
         for client_order_id in downstream_client_order_ids {
-            let binding = snapshot
-                .executor_state
-                .bindings
-                .iter()
-                .find(|binding| binding.request.client_order_id == client_order_id)
-                .expect("downstream binding should remain in runtime state");
-            assert!(binding.is_active());
+            assert_eq!(
+                snapshot.binding_is_active_for_client_order_id(&client_order_id),
+                Some(true),
+                "downstream binding should remain in runtime state"
+            );
         }
     }
 
@@ -2752,14 +2736,14 @@ mod tests {
             let mut snapshot = manager
                 .mutation_frame("btc-core")
                 .expect("track mutation frame");
-            let binding = snapshot
-                .executor_state
-                .bindings
-                .iter_mut()
-                .find(|binding| binding.request.client_order_id == blocked_client_order_id)
-                .expect("blocked submit binding should exist");
-            binding.order_id = Some(closed_order_id.into());
-            binding.status = BindingStatus::CancelPending;
+            assert!(
+                snapshot.set_binding_order_status_for_client_order_id(
+                    &blocked_client_order_id,
+                    Some(closed_order_id.into()),
+                    BindingStatus::CancelPending,
+                ),
+                "blocked submit binding should exist"
+            );
             manager
                 .rollback_track_state(&snapshot)
                 .expect("updated track mutation frame");
@@ -2816,14 +2800,8 @@ mod tests {
             .mutation_frame("btc-core")
             .expect("track mutation frame");
         for (_, client_order_id) in downstream {
-            let binding = snapshot
-                .executor_state
-                .bindings
-                .iter()
-                .find(|binding| binding.request.client_order_id == client_order_id)
-                .expect("downstream binding should remain in runtime history");
             assert!(
-                binding.is_active(),
+                snapshot.binding_is_active_for_client_order_id(&client_order_id) == Some(true),
                 "queue action, not cancel receipt writeback, retires downstream runtime bindings"
             );
         }
