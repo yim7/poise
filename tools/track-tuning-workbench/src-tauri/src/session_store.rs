@@ -70,9 +70,8 @@ impl SessionStore {
                 format!("写入草稿会话失败 `{}`: {error}", temp_file.display()),
             )
         })?;
-        replace_file_preserving_existing(&temp_file, &session_file).map_err(|error| {
+        replace_file_preserving_existing(&temp_file, &session_file).inspect_err(|_error| {
             let _ = fs::remove_file(&temp_file);
-            error
         })?;
         Ok(())
     }
@@ -197,19 +196,17 @@ where
             Ok(())
         }
         Err(error) => {
-            if had_existing_file {
-                if let Err(restore_error) = rename(backup_file, session_file) {
-                    return Err(CommandError::new(
-                        CommandErrorKind::SessionStore,
-                        format!(
-                            "落盘草稿会话失败 `{}` -> `{}`: {error}; 恢复旧草稿失败 `{}` -> `{}`: {restore_error}",
-                            temp_file.display(),
-                            session_file.display(),
-                            backup_file.display(),
-                            session_file.display()
-                        ),
-                    ));
-                }
+            if had_existing_file && let Err(restore_error) = rename(backup_file, session_file) {
+                return Err(CommandError::new(
+                    CommandErrorKind::SessionStore,
+                    format!(
+                        "落盘草稿会话失败 `{}` -> `{}`: {error}; 恢复旧草稿失败 `{}` -> `{}`: {restore_error}",
+                        temp_file.display(),
+                        session_file.display(),
+                        backup_file.display(),
+                        session_file.display()
+                    ),
+                ));
             }
             Err(CommandError::new(
                 CommandErrorKind::SessionStore,

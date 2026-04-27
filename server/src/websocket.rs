@@ -421,7 +421,7 @@ async fn handle_socket(mut socket: WebSocket, state: WebSocketState) {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                             let snapshot = diagnostics.take_snapshot_and_reset(Instant::now());
-                            log_websocket_lag(&snapshot, skipped as u64);
+                            log_websocket_lag(&snapshot, skipped);
                             emit_test_snapshot(&state, snapshot);
                             close_socket(&mut socket).await;
                             break;
@@ -442,7 +442,7 @@ async fn handle_socket(mut socket: WebSocket, state: WebSocketState) {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                             let snapshot = diagnostics.take_snapshot_and_reset(Instant::now());
-                            log_websocket_lag(&snapshot, skipped as u64);
+                            log_websocket_lag(&snapshot, skipped);
                             emit_test_snapshot(&state, snapshot);
                             close_socket(&mut socket).await;
                             break;
@@ -464,7 +464,7 @@ async fn handle_socket(mut socket: WebSocket, state: WebSocketState) {
                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
                     let snapshot = diagnostics.take_snapshot_and_reset(Instant::now());
-                    log_websocket_lag(&snapshot, skipped as u64);
+                    log_websocket_lag(&snapshot, skipped);
                     emit_test_snapshot(&state, snapshot);
                     close_socket(&mut socket).await;
                     return;
@@ -487,7 +487,7 @@ async fn handle_socket(mut socket: WebSocket, state: WebSocketState) {
                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
                     let snapshot = diagnostics.take_snapshot_and_reset(Instant::now());
-                    log_websocket_lag(&snapshot, skipped as u64);
+                    log_websocket_lag(&snapshot, skipped);
                     emit_test_snapshot(&state, snapshot);
                     close_socket(&mut socket).await;
                     return;

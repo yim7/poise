@@ -163,7 +163,7 @@ impl TickerState {
         };
 
         if let Some(quote) = merged.as_ref() {
-            self.last_quote = Some(quote.clone());
+            self.last_quote = Some(*quote);
         }
 
         merged

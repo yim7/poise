@@ -91,27 +91,26 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
     let binding_target =
         binding_target_for_recovery_token(input.previous_state, input.recovery_token);
 
-    if let Some(live_order) = input.live_order {
-        if let SubmitBindingRecovery::Recoverable(target)
+    if let Some(live_order) = input.live_order
+        && let SubmitBindingRecovery::Recoverable(target)
         | SubmitBindingRecovery::Dispatchable(target) = &binding_target
-        {
-            let receipt = OrderReceipt {
-                order_id: live_order.order_id.clone(),
-                client_order_id: live_order.client_order_id.clone(),
-                filled_qty: live_order.filled_qty,
-                status: live_order.status,
+    {
+        let receipt = OrderReceipt {
+            order_id: live_order.order_id.clone(),
+            client_order_id: live_order.client_order_id.clone(),
+            filled_qty: live_order.filled_qty,
+            status: live_order.status,
+        };
+        let resolution = recording::record_submit_receipt(
+            input.previous_state,
+            &target.request,
+            target.desired_exposure.clone(),
+            &receipt,
+        );
+        if let recording::SubmitReceiptResolution::Recorded { state } = resolution {
+            return SubmitRecoveryPlan {
+                resolution: SubmitRecoveryResolution::Recovered { state },
             };
-            let resolution = recording::record_submit_receipt(
-                input.previous_state,
-                &target.request,
-                target.desired_exposure.clone(),
-                &receipt,
-            );
-            if let recording::SubmitReceiptResolution::Recorded { state } = resolution {
-                return SubmitRecoveryPlan {
-                    resolution: SubmitRecoveryResolution::Recovered { state },
-                };
-            }
         }
     }
 

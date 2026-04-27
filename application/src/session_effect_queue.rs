@@ -68,6 +68,7 @@ impl EnqueuedTransitionEffects {
         self.effects.is_empty()
     }
 
+    #[cfg(any(test, feature = "server-test-support"))]
     pub(crate) fn effect_ids(&self) -> Vec<String> {
         self.effects
             .iter()
@@ -90,12 +91,14 @@ impl EnqueuedTransitionEffects {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SessionEffectQueueSnapshot {
     pub(crate) track_id: TrackId,
     pub(crate) pending_effects: Vec<SessionPendingEffectView>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SessionPendingEffectView {
     pub(crate) effect_id: String,
@@ -104,6 +107,7 @@ pub(crate) struct SessionPendingEffectView {
     pub(crate) created_at: DateTime<Utc>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionPendingEffectKind {
     Submit,
@@ -111,6 +115,7 @@ pub(crate) enum SessionPendingEffectKind {
     Other,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionPendingEffectState {
     Queued,
@@ -246,7 +251,6 @@ struct TrackQueue {
 }
 
 struct SessionEffectBatch {
-    batch_id: String,
     effects: VecDeque<QueuedEffect>,
 }
 
@@ -310,9 +314,9 @@ impl SessionEffectQueue {
 
         for (track_id, mut effects) in grouped {
             effects.sort_by_key(|effect| effect.sequence);
-            let Some(batch_id) = effects.first().map(|effect| effect.batch_id.clone()) else {
+            if effects.is_empty() {
                 continue;
-            };
+            }
             let queued_effects = effects
                 .into_iter()
                 .map(|effect| {
@@ -328,7 +332,6 @@ impl SessionEffectQueue {
 
             let track = inner.tracks.entry(track_id.clone()).or_default();
             track.batches.push_back(SessionEffectBatch {
-                batch_id,
                 effects: queued_effects,
             });
             inner.mark_track_ready(&track_id);
@@ -622,6 +625,7 @@ impl SessionEffectQueue {
         resolved
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot_for_track(&self, track_id: &TrackId) -> SessionEffectQueueSnapshot {
         let inner = self.inner.lock().unwrap();
         let pending_effects = inner
@@ -631,13 +635,14 @@ impl SessionEffectQueue {
                 track
                     .batches
                     .iter()
-                    .flat_map(|batch| batch.effects.iter())
+                    .enumerate()
+                    .flat_map(|(batch_index, batch)| {
+                        batch.effects.iter().map(move |item| (batch_index, item))
+                    })
                     .map(|item| {
+                        let (batch_index, item) = item;
                         let state = if let Some(until) = track.paused_until
-                            && track
-                                .batches
-                                .front()
-                                .is_some_and(|batch| batch.batch_id == item.effect.batch_id)
+                            && batch_index == 0
                             && track.front_effect().is_some_and(|effect| {
                                 effect.effect.effect_id == item.effect.effect_id
                             }) {
@@ -663,7 +668,12 @@ impl SessionEffectQueue {
 
     #[cfg(feature = "server-test-support")]
     pub fn pending_effect_count_for_test(&self, track_id: &TrackId) -> usize {
-        self.snapshot_for_track(track_id).pending_effects.len()
+        let inner = self.inner.lock().unwrap();
+        inner
+            .tracks
+            .get(track_id)
+            .map(|track| track.batches.iter().map(|batch| batch.effects.len()).sum())
+            .unwrap_or_default()
     }
 
     pub(crate) fn clear_track(&self, track_id: &TrackId) {
@@ -944,6 +954,7 @@ impl DeferredUntil {
     }
 }
 
+#[cfg(test)]
 impl From<QueuedEffectState> for SessionPendingEffectState {
     fn from(value: QueuedEffectState) -> Self {
         match value {
@@ -955,10 +966,12 @@ impl From<QueuedEffectState> for SessionPendingEffectState {
     }
 }
 
+#[cfg(test)]
 trait SessionTrackEffectExt {
     fn kind(&self) -> SessionPendingEffectKind;
 }
 
+#[cfg(test)]
 impl SessionTrackEffectExt for TrackEffect {
     fn kind(&self) -> SessionPendingEffectKind {
         match self {

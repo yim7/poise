@@ -68,16 +68,6 @@ pub struct TrackDefinition {
     pub loss_limits: LossLimits,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Venue;
-
-    #[test]
-    fn venue_as_str_supports_bybit() {
-        assert_eq!(Venue::Bybit.as_str(), "bybit");
-    }
-}
-
 impl TrackDefinition {
     pub fn new(
         id: TrackId,
@@ -93,5 +83,15 @@ impl TrackDefinition {
             max_notional,
             loss_limits,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Venue;
+
+    #[test]
+    fn venue_as_str_supports_bybit() {
+        assert_eq!(Venue::Bybit.as_str(), "bybit");
     }
 }

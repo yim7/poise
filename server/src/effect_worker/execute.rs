@@ -225,15 +225,15 @@ pub(super) async fn execute_cancellation(
             Ok(result)
         }
         Err(error) => {
-            if let OutcomeClass::OutcomeUnknown(_recovery) = classify_cancel_error(&error) {
-                if let Cancellation::One { order_id, .. } = &cancellation {
-                    return Ok(SessionDispatchResult::Cancel(
-                        CancelReceiptResolution::Unknown {
-                            order_id: order_id.clone(),
-                            reason: error.to_string(),
-                        },
-                    ));
-                }
+            if let OutcomeClass::OutcomeUnknown(_recovery) = classify_cancel_error(&error)
+                && let Cancellation::One { order_id, .. } = &cancellation
+            {
+                return Ok(SessionDispatchResult::Cancel(
+                    CancelReceiptResolution::Unknown {
+                        order_id: order_id.clone(),
+                        reason: error.to_string(),
+                    },
+                ));
             }
             worker
                 .state

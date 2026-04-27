@@ -39,7 +39,7 @@ pub enum ExchangeSyncMode {
 #[derive(Debug, Clone)]
 pub enum MarketMutationOutcome {
     LiveOnly,
-    Durable(TrackTransition),
+    Durable(Box<TrackTransition>),
 }
 
 impl ExchangeSyncMode {
@@ -83,6 +83,7 @@ impl TrackManager {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_track_with_tick_timeout_secs(
         &mut self,
         id: TrackId,
@@ -135,7 +136,7 @@ impl TrackManager {
         if let TrackObservation::Market(observation) = observation {
             return match self.observe_market_mutation(id, observation)? {
                 MarketMutationOutcome::LiveOnly => self.transition_for(id, vec![], vec![]),
-                MarketMutationOutcome::Durable(transition) => Ok(transition),
+                MarketMutationOutcome::Durable(transition) => Ok(*transition),
             };
         }
 
@@ -186,11 +187,11 @@ impl TrackManager {
             .mutation_frame();
 
         if market_mutation_requires_durable_write(&previous_frame, &next_frame, &events, &effects) {
-            return Ok(MarketMutationOutcome::Durable(TrackTransition {
+            return Ok(MarketMutationOutcome::Durable(Box::new(TrackTransition {
                 frame: next_frame,
                 events,
                 effects,
-            }));
+            })));
         }
 
         let (

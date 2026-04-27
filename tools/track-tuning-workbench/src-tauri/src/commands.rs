@@ -186,7 +186,7 @@ impl From<&EditableTrackFields> for EditableTrackFieldsPayload {
             max_notional: value.max_notional,
             min_rebalance_units: value.min_rebalance_units,
             leverage: value.leverage,
-            out_of_band_policy: serde_json::to_value(&value.out_of_band_policy)
+            out_of_band_policy: serde_json::to_value(value.out_of_band_policy)
                 .expect("BandProtectionPolicy should always serialize into JSON payload"),
             daily_loss_limit: value.daily_loss_limit,
             total_loss_limit: value.total_loss_limit,

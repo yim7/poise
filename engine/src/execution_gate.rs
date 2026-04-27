@@ -17,16 +17,13 @@ pub struct AccountCapacityGateInput {
     pub available_notional: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum ExecutionGateDecision {
+    #[default]
     Open,
-    NoSubmit { reason: ExecutionGateReason },
-}
-
-impl Default for ExecutionGateDecision {
-    fn default() -> Self {
-        Self::Open
-    }
+    NoSubmit {
+        reason: ExecutionGateReason,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

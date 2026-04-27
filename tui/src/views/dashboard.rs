@@ -44,7 +44,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             item.execution.execution_status,
             item.execution.active_binding_count,
         );
-        let price = format_price_summary(item.strategy_price, item.strategy_price_status.clone());
+        let price = format_price_summary(item.strategy_price, item.strategy_price_status);
         let exposure = format_exposure_summary(item.exposure.current, item.exposure.target);
         let total_pnl = pnl_signal(item.ledger.total_pnl);
 

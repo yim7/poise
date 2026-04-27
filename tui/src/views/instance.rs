@@ -399,12 +399,10 @@ fn execution_lines(
         if let Some(summary) = execution_summary {
             lines.push(Line::from(summary));
         }
-    } else {
-        if !binding_details.is_empty() {
-            lines.extend(binding_details.into_iter().map(Line::from));
-        } else if !lines.is_empty() {
-            lines.push(Line::from("bindings: none"));
-        }
+    } else if !binding_details.is_empty() {
+        lines.extend(binding_details.into_iter().map(Line::from));
+    } else if !lines.is_empty() {
+        lines.push(Line::from("bindings: none"));
     }
 
     limit_execution_lines(lines, max_lines)
@@ -450,9 +448,7 @@ fn minimal_execution_lines(
 }
 
 fn format_compact_execution_summary(execution: &TrackExecutionView) -> Option<String> {
-    let bindings = compact_binding_summary(execution);
-
-    bindings
+    compact_binding_summary(execution)
 }
 
 fn compact_binding_summary(execution: &TrackExecutionView) -> Option<String> {

@@ -413,8 +413,10 @@ mod tests {
 
     #[test]
     fn recovery_workset_coalesces_reseed_requests() {
-        let mut workset = RecoveryWorkset::default();
-        workset.reseed_required = true;
+        let mut workset = RecoveryWorkset {
+            reseed_required: true,
+            ..Default::default()
+        };
         workset.merge(RecoveryWorkset {
             anomaly_updates: HashMap::from([("SOLUSDT".to_string(), true)]),
             reseed_required: true,

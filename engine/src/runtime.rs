@@ -370,6 +370,7 @@ impl TrackRuntime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn with_tick_timeout_secs(
         id: TrackId,
         instrument: Instrument,
@@ -650,6 +651,18 @@ impl TrackRuntime {
     }
 }
 
+fn validate_frame_invariants(frame: &TrackMutationFrame) -> Result<()> {
+    if matches!(
+        frame.runtime_state,
+        TrackState::Running(ControlState::Manual(ManualState::Flattened))
+    ) && frame.runtime_state.manual_target_override() != Some(Exposure(0.0))
+    {
+        anyhow::bail!("manual_flattening requires manual_target_override = 0");
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
@@ -907,16 +920,4 @@ mod tests {
         });
         state
     }
-}
-
-fn validate_frame_invariants(frame: &TrackMutationFrame) -> Result<()> {
-    if matches!(
-        frame.runtime_state,
-        TrackState::Running(ControlState::Manual(ManualState::Flattened))
-    ) && frame.runtime_state.manual_target_override() != Some(Exposure(0.0))
-    {
-        anyhow::bail!("manual_flattening requires manual_target_override = 0");
-    }
-
-    Ok(())
 }

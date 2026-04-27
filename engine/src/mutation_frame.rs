@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use poise_core::types::Exposure;
 
 use crate::execution_gate::ExecutionGateState;
+#[cfg(any(test, feature = "test-support"))]
 use crate::executor::{BindingStatus, RecoveryAnomaly};
 use crate::ledger::TrackLedgerState;
 use crate::ports::OrderReceipt;

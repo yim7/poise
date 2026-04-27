@@ -223,39 +223,35 @@ fn empty_array_of_tables() -> &'static ArrayOfTables {
 
 fn project_track_fields_lossy(table: &Table) -> (EditableTrackFields, Vec<TrackLoadIssue>) {
     let mut issues = Vec::new();
-    let mut fields = EditableTrackFields::default();
-
-    fields.track_id = required_string_lossy(table, "track_id", &mut issues);
-    fields.symbol = required_string_lossy(table, "symbol", &mut issues);
+    let track_id = required_string_lossy(table, "track_id", &mut issues);
+    let symbol = required_string_lossy(table, "symbol", &mut issues);
 
     let lower_price = required_f64_lossy(table, "lower_price", &mut issues);
     let upper_price = required_f64_lossy(table, "upper_price", &mut issues);
-    fields.lower_price = lower_price.unwrap_or(0.0);
-    fields.upper_price = upper_price.unwrap_or(0.0);
+    let lower_price = lower_price.unwrap_or(0.0);
+    let upper_price = upper_price.unwrap_or(0.0);
 
     let long_exposure_units = required_f64_lossy(table, "long_exposure_units", &mut issues);
     let short_exposure_units = required_f64_lossy(table, "short_exposure_units", &mut issues);
-    fields.long_exposure_units = long_exposure_units.unwrap_or(0.0);
-    fields.short_exposure_units = short_exposure_units.unwrap_or(0.0);
+    let long_exposure_units = long_exposure_units.unwrap_or(0.0);
+    let short_exposure_units = short_exposure_units.unwrap_or(0.0);
 
-    fields.notional_per_unit =
+    let notional_per_unit =
         required_f64_lossy(table, "notional_per_unit", &mut issues).unwrap_or(0.0);
-    let implied_max_notional =
-        fields.long_exposure_units.max(fields.short_exposure_units) * fields.notional_per_unit;
-    fields.max_notional =
+    let implied_max_notional = long_exposure_units.max(short_exposure_units) * notional_per_unit;
+    let max_notional =
         optional_f64_lossy(table, "max_notional", &mut issues).unwrap_or(implied_max_notional);
-    fields.min_rebalance_units = optional_f64_lossy(table, "min_rebalance_units", &mut issues)
+    let min_rebalance_units = optional_f64_lossy(table, "min_rebalance_units", &mut issues)
         .unwrap_or(DEFAULT_MIN_REBALANCE_UNITS);
-    fields.leverage =
-        optional_u32_lossy(table, "leverage", &mut issues).unwrap_or(DEFAULT_LEVERAGE);
-    fields.out_of_band_policy =
+    let leverage = optional_u32_lossy(table, "leverage", &mut issues).unwrap_or(DEFAULT_LEVERAGE);
+    let out_of_band_policy =
         optional_band_protection_policy_lossy(table, "out_of_band_policy", &mut issues)
             .unwrap_or(BandProtectionPolicy::Freeze);
-    fields.daily_loss_limit =
+    let daily_loss_limit =
         required_f64_lossy(table, "daily_loss_limit", &mut issues).unwrap_or(0.0);
-    fields.total_loss_limit =
+    let total_loss_limit =
         required_f64_lossy(table, "total_loss_limit", &mut issues).unwrap_or(0.0);
-    fields.shape_family = optional_string_lossy(table, "shape_family", &mut issues)
+    let shape_family = optional_string_lossy(table, "shape_family", &mut issues)
         .and_then(|value| match TrackShapeFamily::parse(&value) {
             Ok(shape_family) => Some(shape_family),
             Err(_) => {
@@ -268,7 +264,25 @@ fn project_track_fields_lossy(table: &Table) -> (EditableTrackFields, Vec<TrackL
         })
         .unwrap_or(TrackShapeFamily::Linear);
 
-    (fields, issues)
+    (
+        EditableTrackFields {
+            track_id,
+            symbol,
+            lower_price,
+            upper_price,
+            long_exposure_units,
+            short_exposure_units,
+            notional_per_unit,
+            max_notional,
+            min_rebalance_units,
+            leverage,
+            out_of_band_policy,
+            daily_loss_limit,
+            total_loss_limit,
+            shape_family,
+        },
+        issues,
+    )
 }
 
 fn optional_string(table: &Table, key: &str) -> Result<Option<String>> {
@@ -337,9 +351,7 @@ fn optional_band_protection_policy_lossy(
     key: &str,
     issues: &mut Vec<TrackLoadIssue>,
 ) -> Option<BandProtectionPolicy> {
-    let Some(item) = table.get(key) else {
-        return None;
-    };
+    let item = table.get(key)?;
 
     match parse_band_protection_policy(item, key) {
         Ok(value) => Some(value),

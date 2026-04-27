@@ -458,6 +458,7 @@ impl MutationExecutor {
                 })
             }
             MarketMutationOutcome::Durable(transition) => {
+                let transition = *transition;
                 self.commit_track_mutation(
                     id,
                     &previous_frame,
@@ -1239,6 +1240,7 @@ impl MutationExecutor {
         manager.rollback_track_state(&snapshot)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn commit_track_mutation<R>(
         &self,
         id: &str,
@@ -1268,6 +1270,7 @@ impl MutationExecutor {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn commit_track_mutation_with_effect_status_updates<R>(
         &self,
         id: &str,

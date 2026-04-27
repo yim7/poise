@@ -344,9 +344,7 @@ impl TrackListReadModel {
             status: TrackReadStatus::from(runtime.status.clone()),
             updated_at,
             strategy_price: runtime.strategy_price,
-            strategy_price_status: TrackStrategyPriceStatus::from(
-                runtime.strategy_price_status.clone(),
-            ),
+            strategy_price_status: TrackStrategyPriceStatus::from(runtime.strategy_price_status),
             current_exposure: runtime.current_exposure.0,
             desired_exposure: runtime.desired_exposure.clone().map(|value| value.0),
             ledger_state: TrackReadLedgerState::from(runtime.ledger_state.clone()),
