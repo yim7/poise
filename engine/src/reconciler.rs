@@ -53,7 +53,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
         };
     }
 
-    let band = strategy::band_status(strategy_price, &track.config);
+    let band = strategy::band_status(strategy_price, track.config());
 
     let (target, new_runtime_state) = match &band {
         BandStatus::InBand { target } => resolve_in_band(track, strategy_price, target),
@@ -65,11 +65,11 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
     let intent = ExposureIntent {
         current: track.current_exposure.clone(),
         target: target.clone(),
-        unit_notional: track.config.notional_per_unit,
+        unit_notional: track.config().notional_per_unit,
         loss_guard: build_loss_guard_snapshot(&track.ledger_state, &track.risk_state),
     };
 
-    let decision = risk::evaluate_risk_outcome(&intent, track.max_notional, &track.loss_limits);
+    let decision = risk::evaluate_risk_outcome(&intent, track.max_notional(), track.loss_limits());
 
     let (approved_target, applied_risk_cap, mut events) = match decision {
         RiskOutcome::Allow { target } => (target, None, vec![]),
@@ -113,7 +113,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
     let execution_gate_decision = AccountCapacityGate::evaluate(AccountCapacityGateInput {
         current: track.current_exposure.clone(),
         approved_target: approved_target.clone(),
-        unit_notional: track.config.notional_per_unit,
+        unit_notional: track.config().notional_per_unit,
         available_notional: track
             .execution_gate_state
             .account_capacity
@@ -208,7 +208,7 @@ fn resolve_in_band(
             ))),
         ),
         TrackState::Running(ControlState::Automatic(AutoState::Flattening { boundary })) => {
-            let BandProtectionPolicy::Flatten { recover, .. } = track.config.out_of_band_policy
+            let BandProtectionPolicy::Flatten { recover, .. } = track.config().out_of_band_policy
             else {
                 return (
                     target.clone(),
@@ -220,8 +220,8 @@ fn resolve_in_band(
             if strategy::band_reentry_confirmed(
                 strategy_price,
                 &recover,
-                track.config.lower_price,
-                track.config.upper_price,
+                track.config().lower_price,
+                track.config().upper_price,
                 *boundary,
             ) {
                 (
@@ -320,8 +320,8 @@ fn flatten_with_trigger(
         if !strategy::flatten_confirm_reached(
             strategy_price,
             confirm_bps,
-            track.config.lower_price,
-            track.config.upper_price,
+            track.config().lower_price,
+            track.config().upper_price,
             boundary,
         ) {
             return (existing_target_anchor.clone(), None);
@@ -389,22 +389,34 @@ mod tests {
     use poise_core::strategy::*;
     use poise_core::track::{Instrument, TrackDefinition, Venue};
 
+    fn test_config() -> TrackConfig {
+        TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: 0.5,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: BandProtectionPolicy::Freeze,
+        }
+    }
+
     fn test_runtime() -> TrackRuntime {
+        test_runtime_with(test_config(), test_max_notional(), test_loss_limits())
+    }
+
+    fn test_runtime_with(
+        config: TrackConfig,
+        max_notional: f64,
+        loss_limits: LossLimits,
+    ) -> TrackRuntime {
         let definition = TrackDefinition::try_new(
             "test".into(),
             Instrument::new(Venue::Binance, "BTCUSDT"),
-            TrackConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                min_rebalance_units: 0.5,
-                shape_family: ShapeFamily::Linear,
-                out_of_band_policy: BandProtectionPolicy::Freeze,
-            },
-            Some(test_max_notional()),
-            test_loss_limits(),
+            config,
+            Some(max_notional),
+            loss_limits,
             None,
         )
         .unwrap();
@@ -421,6 +433,52 @@ mod tests {
             },
             Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
         )
+    }
+
+    fn replace_definition(
+        track: &mut TrackRuntime,
+        config: TrackConfig,
+        max_notional: f64,
+        loss_limits: LossLimits,
+    ) {
+        track.definition = TrackDefinition::try_new(
+            track.id().clone(),
+            track.instrument().clone(),
+            config,
+            Some(max_notional),
+            loss_limits,
+            Some(track.tick_timeout_secs),
+        )
+        .unwrap();
+    }
+
+    fn set_out_of_band_policy(track: &mut TrackRuntime, policy: BandProtectionPolicy) {
+        let mut config = track.config().clone();
+        config.out_of_band_policy = policy;
+        replace_definition(
+            track,
+            config,
+            track.max_notional(),
+            track.loss_limits().clone(),
+        );
+    }
+
+    fn set_max_notional(track: &mut TrackRuntime, max_notional: f64) {
+        replace_definition(
+            track,
+            track.config().clone(),
+            max_notional,
+            track.loss_limits().clone(),
+        );
+    }
+
+    fn set_loss_limits(track: &mut TrackRuntime, loss_limits: LossLimits) {
+        replace_definition(
+            track,
+            track.config().clone(),
+            track.max_notional(),
+            loss_limits,
+        );
     }
 
     fn test_max_notional() -> f64 {
@@ -476,7 +534,7 @@ mod tests {
     }
 
     fn strategy_target_at(price: f64) -> Exposure {
-        match strategy::band_status(price, &test_runtime().config) {
+        match strategy::band_status(price, test_runtime().config()) {
             BandStatus::InBand { target } => target,
             BandStatus::OutOfBand { .. } => panic!("price {price} should be in band"),
         }
@@ -521,7 +579,7 @@ mod tests {
     fn freeze_policy_uses_frozen_without_boundary_guard() {
         let mut track = test_runtime_with_strategy_target(Exposure(4.0));
         track.current_exposure = Exposure(1.0);
-        track.config.out_of_band_policy = BandProtectionPolicy::Freeze;
+        set_out_of_band_policy(&mut track, BandProtectionPolicy::Freeze);
 
         let result = reconcile_target(&track, 89.0);
 
@@ -542,7 +600,7 @@ mod tests {
         track.track_state = TrackState::Running(ControlState::Automatic(AutoState::Frozen {
             target_anchor: Exposure(4.0),
         }));
-        track.config.out_of_band_policy = BandProtectionPolicy::Freeze;
+        set_out_of_band_policy(&mut track, BandProtectionPolicy::Freeze);
 
         let result = reconcile_target(&track, 105.0);
 
@@ -559,10 +617,13 @@ mod tests {
     fn flatten_pending_samples_target_anchor_from_last_risk_approved_target() {
         let mut track = test_runtime_with_strategy_target(Exposure(4.0));
         track.current_exposure = Exposure(1.0);
-        track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
-            trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
-            recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
-        };
+        set_out_of_band_policy(
+            &mut track,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
+            },
+        );
 
         let result = reconcile_target(&track, 89.0);
 
@@ -586,10 +647,13 @@ mod tests {
                 target_anchor: Exposure(4.0),
                 boundary: BandBoundary::Below,
             }));
-        track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
-            trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
-            recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
-        };
+        set_out_of_band_policy(
+            &mut track,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
+            },
+        );
 
         let result = reconcile_target(&track, 105.0);
 
@@ -606,8 +670,8 @@ mod tests {
     fn freeze_keeps_sampled_target_anchor_when_risk_cap_changes_approved_target() {
         let mut track = test_runtime_with_strategy_target(Exposure(8.0));
         track.current_exposure = Exposure(4.0);
-        track.config.out_of_band_policy = BandProtectionPolicy::Freeze;
-        track.max_notional = 1500.0;
+        set_out_of_band_policy(&mut track, BandProtectionPolicy::Freeze);
+        set_max_notional(&mut track, 1500.0);
 
         let result = reconcile_target(&track, 89.0);
 
@@ -626,11 +690,14 @@ mod tests {
     fn flatten_pending_keeps_sampled_target_anchor_when_risk_cap_changes_approved_target() {
         let mut track = test_runtime_with_strategy_target(Exposure(8.0));
         track.current_exposure = Exposure(4.0);
-        track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
-            trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
-            recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
-        };
-        track.max_notional = 1500.0;
+        set_out_of_band_policy(
+            &mut track,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
+            },
+        );
+        set_max_notional(&mut track, 1500.0);
 
         let result = reconcile_target(&track, 89.0);
 
@@ -755,10 +822,13 @@ mod tests {
     #[test]
     fn flatten_policy_uses_flatten_confirm_before_flattening_with_current_runtime_shape() {
         let mut track = test_runtime();
-        track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
-            trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
-            recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
-        };
+        set_out_of_band_policy(
+            &mut track,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
+            },
+        );
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(8.0);
 
@@ -791,10 +861,13 @@ mod tests {
                 target_anchor: Exposure(4.0),
                 boundary: BandBoundary::Below,
             }));
-        track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
-            trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
-            recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
-        };
+        set_out_of_band_policy(
+            &mut track,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
+            },
+        );
 
         let result = reconcile_target(&track, 111.0);
 
@@ -813,10 +886,13 @@ mod tests {
     #[test]
     fn flatten_policy_immediate_trigger_enters_flattening_with_current_runtime_shape() {
         let mut track = test_runtime();
-        track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
-            trigger: BandFlattenTrigger::Immediate,
-            recover: BandRecoverPolicy::BackInBand,
-        };
+        set_out_of_band_policy(
+            &mut track,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::Immediate,
+                recover: BandRecoverPolicy::BackInBand,
+            },
+        );
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(8.0);
         track.desired_exposure = Some(Exposure(8.0));
@@ -836,10 +912,13 @@ mod tests {
     #[test]
     fn flatten_policy_immediate_trigger_bypasses_flatten_pending() {
         let mut track = test_runtime();
-        track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
-            trigger: BandFlattenTrigger::Immediate,
-            recover: BandRecoverPolicy::BackInBand,
-        };
+        set_out_of_band_policy(
+            &mut track,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::Immediate,
+                recover: BandRecoverPolicy::BackInBand,
+            },
+        );
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(8.0);
         track.desired_exposure = Some(Exposure(8.0));
@@ -866,10 +945,13 @@ mod tests {
     #[test]
     fn flatten_policy_uses_flatten_pending_before_flattening_when_trigger_is_flatten_confirm() {
         let mut track = test_runtime();
-        track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
-            trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
-            recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
-        };
+        set_out_of_band_policy(
+            &mut track,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
+            },
+        );
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(8.0);
 
@@ -890,10 +972,13 @@ mod tests {
     #[test]
     fn flatten_policy_uses_flatten_confirm_before_flattening_second_tick() {
         let mut track = test_runtime();
-        track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
-            trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
-            recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
-        };
+        set_out_of_band_policy(
+            &mut track,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
+            },
+        );
         track.track_state =
             TrackState::Running(ControlState::Automatic(AutoState::FlattenPending {
                 target_anchor: Exposure(8.0),
@@ -917,10 +1002,13 @@ mod tests {
     #[test]
     fn flattening_reentry_confirm_recovery_is_boundary_specific() {
         let mut below_track = test_runtime();
-        below_track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
-            trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
-            recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
-        };
+        set_out_of_band_policy(
+            &mut below_track,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
+            },
+        );
         below_track.track_state =
             TrackState::Running(ControlState::Automatic(AutoState::Flattening {
                 boundary: BandBoundary::Below,
@@ -938,10 +1026,13 @@ mod tests {
         assert_eq!(below_result.desired_exposure, strategy_target_at(109.5));
 
         let mut above_track = test_runtime();
-        above_track.config.out_of_band_policy = BandProtectionPolicy::Flatten {
-            trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
-            recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
-        };
+        set_out_of_band_policy(
+            &mut above_track,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
+                recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
+            },
+        );
         above_track.track_state =
             TrackState::Running(ControlState::Automatic(AutoState::Flattening {
                 boundary: BandBoundary::Above,
@@ -957,7 +1048,7 @@ mod tests {
     #[test]
     fn reconcile_target_terminate_targets_zero() {
         let mut track = test_runtime();
-        track.config.out_of_band_policy = BandProtectionPolicy::Terminate;
+        set_out_of_band_policy(&mut track, BandProtectionPolicy::Terminate);
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(8.0);
 
@@ -978,7 +1069,7 @@ mod tests {
         let mut track = test_runtime();
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(0.0);
-        track.max_notional = 1500.0;
+        set_max_notional(&mut track, 1500.0);
 
         let result = reconcile_target(&track, 90.0);
 
@@ -995,7 +1086,7 @@ mod tests {
         let mut track = test_runtime();
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(4.0);
-        track.max_notional = 1500.0;
+        set_max_notional(&mut track, 1500.0);
 
         let result = reconcile_target(&track, 90.0);
 
@@ -1021,7 +1112,7 @@ mod tests {
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(0.0);
         track.desired_exposure = Some(Exposure(4.0));
-        track.max_notional = 1500.0;
+        set_max_notional(&mut track, 1500.0);
 
         let result = reconcile_target(&track, 90.0);
 
@@ -1057,7 +1148,7 @@ mod tests {
             intended: Exposure(8.0),
             capped: Exposure(4.0),
         });
-        track.max_notional = 1500.0;
+        set_max_notional(&mut track, 1500.0);
 
         let result = reconcile_target(&track, 90.0);
 
@@ -1085,8 +1176,13 @@ mod tests {
         track.ledger_state.funding_fee_today = -2.0;
         track.ledger_state.funding_fee_cumulative = -5.0;
         track.risk_state.unrealized_pnl = -215.0;
-        track.loss_limits.daily_loss_limit = 120.0;
-        track.loss_limits.total_loss_limit = 500.0;
+        set_loss_limits(
+            &mut track,
+            LossLimits {
+                daily_loss_limit: 120.0,
+                total_loss_limit: 500.0,
+            },
+        );
 
         let result = reconcile_target(&track, 90.0);
 
@@ -1107,7 +1203,7 @@ mod tests {
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(4.0);
         track.desired_exposure = Some(Exposure(6.0));
-        track.config.out_of_band_policy = BandProtectionPolicy::Freeze;
+        set_out_of_band_policy(&mut track, BandProtectionPolicy::Freeze);
 
         let result = reconcile_target(&track, 85.0);
 
@@ -1120,7 +1216,7 @@ mod tests {
         let mut track = test_runtime();
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(0.0);
-        track.max_notional = 1500.0;
+        set_max_notional(&mut track, 1500.0);
 
         let result = reconcile_target(&track, 90.0);
 

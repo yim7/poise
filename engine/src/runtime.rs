@@ -320,11 +320,7 @@ impl ExecutorState {
 
 #[derive(Debug, Clone)]
 pub struct TrackRuntime {
-    pub(crate) id: TrackId,
-    pub(crate) instrument: Instrument,
-    pub(crate) config: TrackConfig,
-    pub(crate) max_notional: f64,
-    pub(crate) loss_limits: LossLimits,
+    pub(crate) definition: TrackDefinition,
     pub(crate) exchange_rules: ExchangeRules,
     pub(crate) track_state: TrackState,
     pub(crate) current_exposure: Exposure,
@@ -368,11 +364,7 @@ impl TrackRuntime {
         tick_timeout_secs: u64,
     ) -> Self {
         Self {
-            id: definition.track_id().clone(),
-            instrument: definition.instrument().clone(),
-            config: definition.track_config().clone(),
-            max_notional: definition.max_notional(),
-            loss_limits: definition.loss_limits().clone(),
+            definition,
             exchange_rules,
             track_state: TrackState::WaitingMarketData,
             current_exposure: Exposure(0.0),
@@ -398,15 +390,19 @@ impl TrackRuntime {
     }
 
     pub fn symbol(&self) -> &str {
-        &self.instrument.symbol
+        &self.definition.instrument().symbol
     }
 
     pub fn id(&self) -> &TrackId {
-        &self.id
+        self.definition.track_id()
     }
 
     pub fn instrument(&self) -> &Instrument {
-        &self.instrument
+        self.definition.instrument()
+    }
+
+    pub fn config(&self) -> &TrackConfig {
+        self.definition.track_config()
     }
 
     pub fn status(&self) -> TrackStatus {
@@ -418,11 +414,11 @@ impl TrackRuntime {
     }
 
     pub fn max_notional(&self) -> f64 {
-        self.max_notional
+        self.definition.max_notional()
     }
 
     pub fn loss_limits(&self) -> &LossLimits {
-        &self.loss_limits
+        self.definition.loss_limits()
     }
 
     pub fn exchange_rules(&self) -> &ExchangeRules {
@@ -431,11 +427,11 @@ impl TrackRuntime {
 
     fn static_definition(&self) -> TrackDefinition {
         TrackDefinition::try_new(
-            self.id.clone(),
-            self.instrument.clone(),
-            self.config.clone(),
-            Some(self.max_notional),
-            self.loss_limits.clone(),
+            self.id().clone(),
+            self.instrument().clone(),
+            self.config().clone(),
+            Some(self.max_notional()),
+            self.loss_limits().clone(),
             Some(self.tick_timeout_secs),
         )
         .expect("runtime static fields must remain a valid track definition")
@@ -463,7 +459,7 @@ impl TrackRuntime {
         fresh.current_exposure = current_exposure.clone();
         fresh.desired_exposure = track_state.manual_target_override();
         fresh.executor_state =
-            ExecutorState::empty(started_at).ensure_revision(&fresh.config, current_exposure);
+            ExecutorState::empty(started_at).ensure_revision(fresh.config(), current_exposure);
         fresh.ledger_state = ledger_state;
         fresh.execution_gate_state = ExecutionGateState::open();
         fresh.price_execution_gate = PriceExecutionGate::NoSubmit {
@@ -485,8 +481,8 @@ impl TrackRuntime {
 
     pub fn mutation_frame(&self) -> TrackMutationFrame {
         TrackMutationFrame {
-            track_id: self.id.clone(),
-            frame_revision: TrackMutationFrameRevision::for_track(&self.instrument, &self.config),
+            track_id: self.id().clone(),
+            frame_revision: TrackMutationFrameRevision::for_track(self.instrument(), self.config()),
             runtime_state: self.track_state.clone(),
             current_exposure: self.current_exposure.clone(),
             desired_exposure: self.desired_exposure.clone(),
@@ -500,19 +496,19 @@ impl TrackRuntime {
     }
 
     pub fn rollback_to_frame(&mut self, frame: &TrackMutationFrame) -> Result<()> {
-        if self.id != frame.track_id {
+        if self.id() != &frame.track_id {
             anyhow::bail!(
                 "mutation frame track id mismatch: runtime has `{}`, frame has `{}`",
-                self.id.as_str(),
+                self.id().as_str(),
                 frame.track_id.as_str()
             );
         }
         let expected_revision =
-            TrackMutationFrameRevision::for_track(&self.instrument, &self.config);
+            TrackMutationFrameRevision::for_track(self.instrument(), self.config());
         if expected_revision != frame.frame_revision {
             anyhow::bail!(
                 "mutation frame revision mismatch for `{}`",
-                self.id.as_str()
+                self.id().as_str()
             );
         }
         validate_frame_invariants(frame)?;

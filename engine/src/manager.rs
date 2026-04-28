@@ -365,7 +365,7 @@ impl TrackManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         track.executor_state = track.executor_state.reset_for_activation(
-            &track.config,
+            track.config(),
             track.current_exposure.clone(),
             activated_at,
         );
@@ -438,7 +438,7 @@ impl TrackManager {
                 let mut resumed = track.clone();
                 resumed.track_state = TrackState::WaitingMarketData;
                 resumed.executor_state = track.executor_state.reset_for_activation(
-                    &track.config,
+                    track.config(),
                     track.current_exposure.clone(),
                     resumed_at,
                 );
@@ -451,10 +451,10 @@ impl TrackManager {
                     result.execution_gate_decision,
                     executor::refresh_state(
                         &resumed.executor_state,
-                        &resumed.config,
+                        resumed.config(),
                         &resumed.current_exposure,
                         &result.desired_exposure,
-                        resumed.config.min_rebalance_units,
+                        resumed.config().min_rebalance_units,
                         resumed_at,
                     ),
                 )
@@ -464,7 +464,7 @@ impl TrackManager {
                     None,
                     ExecutionGateDecision::Open,
                     track.executor_state.reset_for_activation(
-                        &track.config,
+                        track.config(),
                         track.current_exposure.clone(),
                         resumed_at,
                     ),
@@ -835,7 +835,7 @@ impl TrackManager {
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        let unit_qty = track.config.base_qty_per_unit();
+        let unit_qty = track.config().base_qty_per_unit();
         track.current_exposure = if unit_qty <= f64::EPSILON {
             poise_core::types::Exposure(0.0)
         } else {
@@ -891,7 +891,7 @@ impl TrackManager {
             .clone();
         let previous_state = track.executor_state.clone();
         let recovery = executor::recover_working_orders(executor::RecoveryInput {
-            config: &track.config,
+            config: track.config(),
             current_exposure: &track.current_exposure,
             desired_exposure: track.desired_exposure.as_ref(),
             exchange_rules: &track.exchange_rules,
@@ -1074,11 +1074,11 @@ impl TrackManager {
     ) -> executor::SubmitIntentInput<'a> {
         let submit_purpose = self.submit_purpose_for_track(track, &desired_exposure);
         executor::SubmitIntentInput {
-            instrument: &track.instrument,
-            config: &track.config,
+            instrument: track.instrument(),
+            config: track.config(),
             exchange_rules: &track.exchange_rules,
-            base_qty_per_unit: track.config.base_qty_per_unit(),
-            min_rebalance_units: track.config.min_rebalance_units,
+            base_qty_per_unit: track.config().base_qty_per_unit(),
+            min_rebalance_units: track.config().min_rebalance_units,
             current_exposure: track.current_exposure.clone(),
             desired_exposure,
             execution_quote: Self::execution_quote_for_track(track),
@@ -1123,10 +1123,10 @@ impl TrackManager {
         if target.suppress_execution {
             let executor_state = executor::refresh_state(
                 &track.executor_state,
-                &track.config,
+                track.config(),
                 &track.current_exposure,
                 &target.desired_exposure,
-                track.config.min_rebalance_units,
+                track.config().min_rebalance_units,
                 observed_at,
             );
             return Ok(PlannedInventoryExecution {
@@ -1331,7 +1331,17 @@ mod tests {
 
         {
             let track = manager.tracks.get_mut(&id).unwrap();
-            track.config.notional_per_unit = 120.0;
+            let mut config = track.config().clone();
+            config.notional_per_unit = 120.0;
+            track.definition = TrackDefinition::try_new(
+                track.id().clone(),
+                track.instrument().clone(),
+                config,
+                Some(track.max_notional()),
+                track.loss_limits().clone(),
+                Some(track.tick_timeout_secs),
+            )
+            .unwrap();
         }
 
         manager.observe(&id, market(100.0)).unwrap();
