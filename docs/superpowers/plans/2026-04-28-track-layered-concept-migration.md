@@ -246,10 +246,10 @@ server::config::TrackSpec
 
 **步骤：**
 
-- [ ] 将 `TrackRuntime` 的 `id`、`instrument`、`config`、`max_notional`、`loss_limits` 折叠为 `definition: TrackDefinition`。
-- [ ] 为高频计算保留 `TrackRuntime` 方法，不让调用方写 `track.definition.track_config`。
-- [ ] 更新 reconciler / manager / runtime 内部直接字段访问。
-- [ ] 对测试中直接修改 `track.config`、`track.max_notional`、`track.loss_limits` 的 fixture 增加专门 builder/helper，避免生产结构为测试暴露可变字段。
+- [x] 将 `TrackRuntime` 的 `id`、`instrument`、`config`、`max_notional`、`loss_limits` 折叠为 `definition: TrackDefinition`。
+- [x] 为高频计算保留 `TrackRuntime` 方法，不让调用方写 `track.definition.track_config`。
+- [x] 更新 reconciler / manager / runtime 内部直接字段访问。
+- [x] 对测试中直接修改 `track.config`、`track.max_notional`、`track.loss_limits` 的 fixture 增加专门 builder/helper，避免生产结构为测试暴露可变字段。
 
 **最小验收命令：**
 
@@ -258,7 +258,16 @@ server::config::TrackSpec
 - `cargo test -p poise-engine runtime::tests::`
 - `cargo test -p poise-engine executor::tests::`
 
-**Commit SHA：** 待执行后回写
+**执行记录：**
+
+- 2026-04-28：已完成；`TrackRuntime` 内部静态字段已折叠为 `TrackDefinition`。
+- 验收：`cargo test -p poise-engine reconciler::tests::`
+- 验收：`cargo test -p poise-engine manager::tests::`
+- 验收：`cargo test -p poise-engine runtime::tests::`
+- 验收：`cargo test -p poise-engine executor::tests::`
+- 检查：`git diff --check`
+
+**Commit SHA：** `48e9fcd`
 
 ## Task 6：清理旧命名和文档
 
