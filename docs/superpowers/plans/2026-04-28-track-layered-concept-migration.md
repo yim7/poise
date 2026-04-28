@@ -205,10 +205,10 @@ server::config::TrackSpec
 
 **步骤：**
 
-- [ ] 将 `TrackManager::add_track` / `add_track_with_tick_timeout_secs` 改为接收 `TrackDefinition` 和 `ExchangeRules`。
-- [ ] 将 `TrackRuntime::new` / `with_tick_timeout_secs` 改为接收 `TrackDefinition`。
-- [ ] 保持 `TrackRuntime` 的 `id()`、`instrument()`、`config()`、`max_notional()`、`loss_limits()` 等方法，避免调用方了解 definition 内部结构。
-- [ ] 更新 server/application 的装配和测试 fixture，避免继续散传 definition 字段。
+- [x] 将 `TrackManager::add_track` / `add_track_with_tick_timeout_secs` 改为接收 `TrackDefinition` 和 `ExchangeRules`。
+- [x] 将 `TrackRuntime::new` / `with_tick_timeout_secs` 改为接收 `TrackDefinition`。
+- [x] 保持 `TrackRuntime` 的 `id()`、`instrument()`、`config()`、`max_notional()`、`loss_limits()` 等方法，避免调用方了解 definition 内部结构。
+- [x] 更新 server/application 的装配和测试 fixture，避免继续散传 definition 字段。
 
 **最小验收命令：**
 
@@ -217,7 +217,20 @@ server::config::TrackSpec
 - `cargo test -p poise-application mutation_executor::tests::`
 - `cargo test -p poise-server assembly::tests::runtime_state_exposes_observation_and_account_paths_only`
 
-**Commit SHA：** 待执行后回写
+**执行记录：**
+
+- 2026-04-28：已完成；runtime 内部字段尚未折叠，留给 Task 5。
+- 验收：`cargo test -p poise-engine manager::tests::`
+- 验收：`cargo test -p poise-engine runtime::tests::`
+- 验收：`cargo test -p poise-application mutation_executor::tests::`
+- 验收：`cargo test -p poise-server assembly::tests::runtime_state_exposes_observation_and_account_paths_only`
+- 额外确认：`cargo test -p poise-server runtime::exchange_state::tests::`
+- 额外确认：`cargo test -p poise-server runtime::startup_bootstrap::tests::`
+- 额外确认：`cargo test -p poise-server http::tests::`
+- 额外确认：`cargo test -p poise-server websocket::tests::`
+- 检查：`git diff --check`
+
+**Commit SHA：** `ef55038`
 
 ## Task 5：让 TrackRuntime 内部持有 TrackDefinition
 
