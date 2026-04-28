@@ -117,10 +117,10 @@ server::config::TrackSpec
 
 **步骤：**
 
-- [ ] 在 `core` 中定义并导出 `TrackId`、`Venue`、`Instrument`。
-- [ ] 将全 workspace 引用迁移到 `poise_core::track::{TrackId, Venue, Instrument}`。
-- [ ] 删除 engine 中对应类型定义，不保留长期 re-export。
-- [ ] 保留 engine 中真正属于运行/执行层的 track 相关类型。
+- [x] 在 `core` 中定义并导出 `TrackId`、`Venue`、`Instrument`。
+- [x] 将全 workspace 引用迁移到 `poise_core::track::{TrackId, Venue, Instrument}`。
+- [x] 删除 engine 中对应类型定义，不保留长期 re-export。
+- [x] 保留 engine 中真正属于运行/执行层的 track 相关类型。
 
 **最小验收命令：**
 
@@ -129,7 +129,17 @@ server::config::TrackSpec
 - `cargo test -p poise-application track_definition::tests::`
 - `cargo test -p poise-server config::tests::`
 
-**Commit SHA：** 待执行后回写
+**执行记录：**
+
+- 2026-04-28：已完成。
+- 验收：`cargo test -p poise-core track::tests::`
+- 验收：`cargo test -p poise-engine track::tests::`
+- 验收：`cargo test -p poise-application track_definition::tests::`
+- 验收：`cargo test -p poise-server config::tests::`
+- 额外确认：`cargo test -p poise-server assembly::tests::track_instrument_uses_service_exchange_venue`
+- 检查：`git diff --check`
+
+**Commit SHA：** `b7a50b2`
 
 ## Task 3：把静态 TrackDefinition 下沉到 core
 
