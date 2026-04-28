@@ -20,6 +20,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 mod account_refresh;
+mod diagnostics;
 mod exchange_state;
 mod guards;
 mod market_data;

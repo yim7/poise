@@ -7,6 +7,7 @@ use poise_engine::ports::{
 use crate::exchange_freshness::ExchangeFreshnessReason;
 use crate::order_outcome::{ReconcileReason, ReconcileRequest};
 
+use super::diagnostics::describe_runtime_bindings;
 use super::{ReconcileStateAccess, enqueue_reconcile_request, preserve_track_mutation_error};
 
 pub(super) async fn apply_user_data_event(
@@ -35,6 +36,26 @@ pub(super) async fn apply_user_data_event(
                 if is_terminal_no_fill_unknown_order(&order) {
                     return Ok(());
                 }
+                let runtime = state
+                    .observation_service
+                    .track_runtime_view(track_id)
+                    .await
+                    .ok()
+                    .flatten();
+                tracing::warn!(
+                    track_id,
+                    symbol = %instrument.symbol,
+                    order_id = %order.order_id,
+                    client_order_id = %order.client_order_id,
+                    status = ?order.status,
+                    side = ?order.side,
+                    price = order.price,
+                    qty = order.qty,
+                    filled_qty = order.filled_qty,
+                    realized_pnl = order.realized_pnl,
+                    local_bindings = ?describe_runtime_bindings(runtime.as_ref()),
+                    "unabsorbed order update encountered before reconcile"
+                );
                 state
                     .exchange_freshness
                     .mark_stale(track_id, ExchangeFreshnessReason::UnabsorbedOrderUpdate)

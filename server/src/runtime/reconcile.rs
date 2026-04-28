@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use poise_application::{
     RecoveryAnomalyObserver, TrackInstrument, TrackMutationError, TrackRecoveryIssue,
 };
@@ -12,15 +12,22 @@ use poise_engine::ports::ExecutionPort;
 use poise_engine::track::TrackId;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, MissedTickBehavior};
+use tokio::time::{Instant, MissedTickBehavior, sleep};
 
 use crate::order_outcome::reconcile_execution;
 use crate::server_context::ReconcileState;
 
 use super::{
-    ReconcileExecution, ReconcileRequest, ReconcileStateAccess, ServerRuntime, exchange_state,
-    preserve_track_mutation_error,
+    ReconcileExecution, ReconcileRequest, ReconcileStateAccess, ServerRuntime,
+    diagnostics::{describe_open_orders, describe_runtime_bindings},
+    exchange_state, preserve_track_mutation_error,
 };
+
+const ORDER_SET_RECOVERY_RESET_RETRY_ATTEMPTS: usize = 5;
+#[cfg(test)]
+const ORDER_SET_RECOVERY_RESET_RETRY_DELAY: Duration = Duration::from_millis(1);
+#[cfg(not(test))]
+const ORDER_SET_RECOVERY_RESET_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone)]
 struct RecoveryTrackedTrack {
@@ -228,30 +235,36 @@ pub(super) async fn sync_exchange_state_from_exchange(
         .await
         .map_err(TrackMutationError::Persistence)?;
 
-    if recovery_view.as_ref().is_some_and(|view| {
-        view.issue == Some(TrackRecoveryIssue::UnknownLiveOrder) && !view.has_working_orders
-    }) && !open_orders.is_empty()
+    if recovery_view
+        .as_ref()
+        .and_then(|view| view.issue)
+        .is_some_and(order_set_reset_required_for_recovery_issue)
     {
-        for order in open_orders.orders() {
-            execution
-                .cancel_order(instrument, &order.order_id)
+        if !open_orders.is_empty() {
+            let runtime = state
+                .observation_service
+                .track_runtime_view(track_id)
                 .await
-                .with_context(|| {
-                    format!(
-                        "failed to cancel unknown live order `{}` for {}",
-                        order.order_id, instrument.symbol
-                    )
-                })
+                .ok()
+                .flatten();
+            tracing::warn!(
+                track_id,
+                symbol = %instrument.symbol,
+                recovery_issue = ?recovery_view.as_ref().and_then(|view| view.issue),
+                exchange_open_orders = ?describe_open_orders(&open_orders),
+                local_bindings = ?describe_runtime_bindings(runtime.as_ref()),
+                "order-set recovery anomaly encountered; resetting instrument open orders"
+            );
+            reset_open_orders_for_order_set_recovery_anomaly(execution, instrument).await?;
+            position = execution
+                .get_position(instrument)
+                .await
+                .map_err(TrackMutationError::Persistence)?;
+            open_orders = execution
+                .get_open_orders(instrument)
+                .await
                 .map_err(TrackMutationError::Persistence)?;
         }
-        position = execution
-            .get_position(instrument)
-            .await
-            .map_err(TrackMutationError::Persistence)?;
-        open_orders = execution
-            .get_open_orders(instrument)
-            .await
-            .map_err(TrackMutationError::Persistence)?;
     }
 
     let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(
@@ -285,6 +298,53 @@ pub(super) async fn sync_exchange_state_from_exchange(
     }
     state.exchange_freshness.clear_if_current(sync_token).await;
     Ok(())
+}
+
+fn order_set_reset_required_for_recovery_issue(issue: TrackRecoveryIssue) -> bool {
+    matches!(
+        issue,
+        TrackRecoveryIssue::UnknownLiveOrder
+            | TrackRecoveryIssue::DuplicateLiveOrders
+            | TrackRecoveryIssue::AmbiguousLiveOrder
+    )
+}
+
+async fn reset_open_orders_for_order_set_recovery_anomaly(
+    execution: &dyn ExecutionPort,
+    instrument: &poise_engine::track::Instrument,
+) -> std::result::Result<(), TrackMutationError> {
+    execution
+        .cancel_all(instrument)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to cancel all live orders for order-set recovery anomaly on {}",
+                instrument.symbol
+            )
+        })
+        .map_err(TrackMutationError::Persistence)?;
+
+    for attempt in 0..ORDER_SET_RECOVERY_RESET_RETRY_ATTEMPTS {
+        let remaining = execution
+            .get_open_orders(instrument)
+            .await
+            .map_err(TrackMutationError::Persistence)?;
+        if remaining.is_empty() {
+            return Ok(());
+        }
+        if attempt + 1 == ORDER_SET_RECOVERY_RESET_RETRY_ATTEMPTS {
+            return Err(TrackMutationError::Persistence(anyhow!(
+                "order-set recovery reset left open orders on {} after cancel_all",
+                instrument.symbol
+            )));
+        }
+        sleep(ORDER_SET_RECOVERY_RESET_RETRY_DELAY).await;
+    }
+
+    Err(TrackMutationError::Persistence(anyhow!(
+        "order-set recovery reset exhausted retries for {}",
+        instrument.symbol
+    )))
 }
 
 fn update_recovery_tracking(
@@ -384,7 +444,27 @@ impl RecoveryWorkset {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use anyhow::{Result, anyhow};
+    use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
+    use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
+    use poise_engine::manager::ExchangeSyncMode;
+    use poise_engine::ports::{
+        ExchangeOpenOrderSnapshot, ExchangeOrder, ExecutionPort, OrderReceipt, OrderRequest,
+        OrderStatus, Position,
+    };
+    use poise_engine::track::{Instrument, TrackId, Venue};
+    use poise_engine::transition::TrackEffect;
+    use poise_storage::sqlite::SqliteStorage;
+
     use super::*;
+    use crate::test_support::{
+        build_runtime_and_effect_worker_test_contexts, build_test_application_services,
+        test_manager, unavailable_account_monitor,
+    };
 
     #[test]
     fn recovery_workset_coalesces_track_marks() {
@@ -444,5 +524,280 @@ mod tests {
                 reseed_required: true,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn sync_exchange_state_resets_order_set_for_unknown_live_order() {
+        assert_order_set_reset_for_recovery_anomaly(
+            RecoveryAnomaly::UnknownLiveOrder,
+            |tracked_request| {
+                vec![
+                    ExchangeOrder {
+                        instrument: tracked_request.instrument.clone(),
+                        order_id: "tracked-order".to_string(),
+                        client_order_id: tracked_request.client_order_id.clone(),
+                        side: tracked_request.side,
+                        price: tracked_request.price,
+                        qty: tracked_request.quantity,
+                        filled_qty: 0.0,
+                        realized_pnl: 0.0,
+                        status: OrderStatus::New,
+                    },
+                    ExchangeOrder {
+                        instrument: tracked_request.instrument.clone(),
+                        order_id: "unknown-order".to_string(),
+                        client_order_id: "unknown-client".to_string(),
+                        side: poise_core::types::Side::Sell,
+                        price: tracked_request.price - 1.0,
+                        qty: tracked_request.quantity,
+                        filled_qty: 0.0,
+                        realized_pnl: 0.0,
+                        status: OrderStatus::New,
+                    },
+                ]
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_exchange_state_resets_order_set_for_duplicate_live_orders() {
+        assert_order_set_reset_for_recovery_anomaly(
+            RecoveryAnomaly::DuplicateLiveOrders,
+            |tracked_request| {
+                vec![
+                    ExchangeOrder {
+                        instrument: tracked_request.instrument.clone(),
+                        order_id: "tracked-order-a".to_string(),
+                        client_order_id: tracked_request.client_order_id.clone(),
+                        side: tracked_request.side,
+                        price: tracked_request.price,
+                        qty: tracked_request.quantity,
+                        filled_qty: 0.0,
+                        realized_pnl: 0.0,
+                        status: OrderStatus::New,
+                    },
+                    ExchangeOrder {
+                        instrument: tracked_request.instrument.clone(),
+                        order_id: "tracked-order-b".to_string(),
+                        client_order_id: tracked_request.client_order_id.clone(),
+                        side: tracked_request.side,
+                        price: tracked_request.price,
+                        qty: tracked_request.quantity,
+                        filled_qty: 0.0,
+                        realized_pnl: 0.0,
+                        status: OrderStatus::New,
+                    },
+                ]
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_exchange_state_resets_order_set_for_ambiguous_live_order() {
+        assert_order_set_reset_for_recovery_anomaly(
+            RecoveryAnomaly::AmbiguousLiveOrder,
+            |tracked_request| {
+                vec![
+                    ExchangeOrder {
+                        instrument: tracked_request.instrument.clone(),
+                        order_id: "ambiguous-order".to_string(),
+                        client_order_id: "ambiguous-client".to_string(),
+                        side: tracked_request.side,
+                        price: tracked_request.price,
+                        qty: tracked_request.quantity,
+                        filled_qty: 0.0,
+                        realized_pnl: 0.0,
+                        status: OrderStatus::New,
+                    },
+                    ExchangeOrder {
+                        instrument: tracked_request.instrument.clone(),
+                        order_id: "tracked-order".to_string(),
+                        client_order_id: tracked_request.client_order_id.clone(),
+                        side: tracked_request.side,
+                        price: tracked_request.price,
+                        qty: tracked_request.quantity,
+                        filled_qty: 0.0,
+                        realized_pnl: 0.0,
+                        status: OrderStatus::New,
+                    },
+                ]
+            },
+        )
+        .await;
+    }
+
+    async fn assert_order_set_reset_for_recovery_anomaly<F>(
+        anomaly: RecoveryAnomaly,
+        build_open_orders: F,
+    ) where
+        F: FnOnce(&OrderRequest) -> Vec<ExchangeOrder>,
+    {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            test_manager("btc-core"),
+            repository.clone() as Arc<dyn TrackMutationStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
+            notifications.clone(),
+            account_margin_guard,
+        );
+        let account_monitor = unavailable_account_monitor(notifications);
+        let (runtime_context, _effect_worker_context) =
+            build_runtime_and_effect_worker_test_contexts(
+                &services,
+                repository.clone() as Arc<dyn TrackQueryStore>,
+                repository.clone() as Arc<dyn TrackEffectJournal>,
+                account_monitor,
+            );
+
+        let transition = runtime_context
+            .observe_market("btc-core", 95.0)
+            .await
+            .unwrap();
+        let tracked_request = transition
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                TrackEffect::SubmitOrder { request, .. } => Some(request.clone()),
+                _ => None,
+            })
+            .expect("seed market should create a tracked submit order");
+
+        {
+            let manager_handle = services.runtime_lifecycle_service.manager();
+            let mut manager = manager_handle.write().await;
+            let mut snapshot = manager.mutation_frame("btc-core").unwrap();
+            assert!(snapshot.set_binding_order_status_for_client_order_id(
+                &tracked_request.client_order_id,
+                Some("tracked-order".to_string()),
+                BindingStatus::Working,
+            ));
+            snapshot.set_recovery_anomaly(Some(anomaly));
+            manager.rollback_track_state(&snapshot).unwrap();
+        }
+
+        let exchange = OrderSetRecoveryExchange::new(
+            tracked_request.instrument.clone(),
+            build_open_orders(&tracked_request),
+        );
+
+        sync_exchange_state_from_exchange(
+            &runtime_context,
+            &exchange,
+            "btc-core",
+            &Instrument::new(Venue::Binance, "BTCUSDT"),
+            ExchangeSyncMode::RecoverAndReconcile,
+        )
+        .await
+        .unwrap();
+
+        let summary = runtime_context
+            .runtime_state()
+            .reconcile
+            .runtime_lifecycle_service
+            .load_track_recovery_summary(&TrackId::new("btc-core"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(summary.issue, None);
+        assert_eq!(exchange.cancel_all_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(exchange.cancel_order_calls.load(Ordering::SeqCst), 0);
+        assert!(exchange.open_orders_are_empty());
+        assert_eq!(exchange.get_open_orders_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(exchange.get_position_calls.load(Ordering::SeqCst), 2);
+    }
+
+    struct OrderSetRecoveryExchange {
+        instrument: Instrument,
+        open_orders: Mutex<Vec<ExchangeOrder>>,
+        cancel_all_calls: AtomicUsize,
+        cancel_order_calls: AtomicUsize,
+        get_position_calls: AtomicUsize,
+        get_open_orders_calls: AtomicUsize,
+        clear_on_next_read: Mutex<bool>,
+    }
+
+    impl OrderSetRecoveryExchange {
+        fn new(instrument: Instrument, open_orders: Vec<ExchangeOrder>) -> Self {
+            Self {
+                instrument,
+                open_orders: Mutex::new(open_orders),
+                cancel_all_calls: AtomicUsize::new(0),
+                cancel_order_calls: AtomicUsize::new(0),
+                get_position_calls: AtomicUsize::new(0),
+                get_open_orders_calls: AtomicUsize::new(0),
+                clear_on_next_read: Mutex::new(false),
+            }
+        }
+
+        fn open_orders_are_empty(&self) -> bool {
+            self.open_orders.lock().unwrap().is_empty()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutionPort for OrderSetRecoveryExchange {
+        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
+            Err(anyhow!("submit_order is not used in this test"))
+        }
+
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            _order_id: &str,
+        ) -> Result<OrderReceipt> {
+            self.cancel_order_calls.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow!("cancel_order should not be used in this test"))
+        }
+
+        async fn cancel_all(&self, instrument: &Instrument) -> Result<()> {
+            assert_eq!(instrument, &self.instrument);
+            self.cancel_all_calls.fetch_add(1, Ordering::SeqCst);
+            *self.clear_on_next_read.lock().unwrap() = true;
+            Ok(())
+        }
+
+        async fn get_position(&self, instrument: &Instrument) -> Result<Position> {
+            assert_eq!(instrument, &self.instrument);
+            self.get_position_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Position {
+                instrument: instrument.clone(),
+                qty: 0.0,
+                avg_price: 0.0,
+                unrealized_pnl: 0.0,
+            })
+        }
+
+        async fn get_open_orders(
+            &self,
+            instrument: &Instrument,
+        ) -> Result<ExchangeOpenOrderSnapshot> {
+            assert_eq!(instrument, &self.instrument);
+            self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
+            let should_clear = {
+                let mut clear_on_next_read = self.clear_on_next_read.lock().unwrap();
+                if *clear_on_next_read {
+                    *clear_on_next_read = false;
+                    true
+                } else {
+                    false
+                }
+            };
+            if should_clear {
+                let snapshot = self.open_orders.lock().unwrap().clone();
+                self.open_orders.lock().unwrap().clear();
+                return Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                    snapshot,
+                ));
+            }
+            Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                self.open_orders.lock().unwrap().clone(),
+            ))
+        }
     }
 }
