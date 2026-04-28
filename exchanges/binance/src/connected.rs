@@ -235,11 +235,11 @@ mod tests {
     };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-    use poise_core::types::Side;
-    use poise_engine::{
-        ports::{ExecutionPortError, ExecutionPortErrorKind},
+    use poise_core::{
         track::{Instrument, Venue},
+        types::Side,
     };
+    use poise_engine::ports::{ExecutionPortError, ExecutionPortErrorKind};
 
     use super::*;
 
