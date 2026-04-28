@@ -102,7 +102,7 @@ server::config::TrackSpec
 - 验收：`cargo test -p poise-server config::tests::`
 - 验收：`cargo test -p poise-server exchange_startup::tests::`
 
-**Commit SHA：** 未提交
+**Commit SHA：** `24f6a6c`
 
 ## Task 2：把 track 标识和交易标的类型下沉到 core
 
