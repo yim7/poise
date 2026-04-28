@@ -10,7 +10,7 @@ use crate::executor::{BindingStatus, RecoveryAnomaly};
 use crate::ledger::TrackLedgerState;
 use crate::ports::OrderReceipt;
 use crate::runtime::{ExecutorState, RiskState, TrackState};
-use crate::track::{Instrument, TrackId};
+use poise_core::track::{Instrument, TrackId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TrackMutationFrameRevision(String);

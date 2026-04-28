@@ -209,7 +209,10 @@ mod tests {
             allocations: Vec::new(),
             absorbed_exposure_qty: 0.0,
             request: OrderRequest {
-                instrument: crate::track::Instrument::new(crate::track::Venue::Binance, "BTCUSDT"),
+                instrument: poise_core::track::Instrument::new(
+                    poise_core::track::Venue::Binance,
+                    "BTCUSDT",
+                ),
                 side: poise_core::types::Side::Buy,
                 price: 100.0,
                 quantity: 1.0,
@@ -242,7 +245,10 @@ mod tests {
             }],
             absorbed_exposure_qty: 0.0,
             request: OrderRequest {
-                instrument: crate::track::Instrument::new(crate::track::Venue::Binance, "BTCUSDT"),
+                instrument: poise_core::track::Instrument::new(
+                    poise_core::track::Venue::Binance,
+                    "BTCUSDT",
+                ),
                 side: poise_core::types::Side::Buy,
                 price: 100.0,
                 quantity: 1.0,
@@ -280,7 +286,10 @@ mod tests {
             }],
             absorbed_exposure_qty: 0.0,
             request: OrderRequest {
-                instrument: crate::track::Instrument::new(crate::track::Venue::Binance, "BTCUSDT"),
+                instrument: poise_core::track::Instrument::new(
+                    poise_core::track::Venue::Binance,
+                    "BTCUSDT",
+                ),
                 side: poise_core::types::Side::Buy,
                 price: 100.0,
                 quantity: 1.0,

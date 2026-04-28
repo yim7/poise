@@ -20,7 +20,7 @@ use crate::price_gate::{
     PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
 };
 use crate::reconciler;
-use crate::track::{Instrument, TrackId};
+use poise_core::track::{Instrument, TrackId};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -675,7 +675,7 @@ mod tests {
     use crate::executor::policy::PolicyKind;
     use crate::ports::OrderRequest;
     use crate::price_gate::SubmitPurpose;
-    use crate::track::Venue;
+    use poise_core::track::Venue;
 
     #[test]
     fn runtime_frame_is_current_process_state_not_persisted_document() {

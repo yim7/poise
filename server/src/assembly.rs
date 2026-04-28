@@ -15,13 +15,13 @@ use poise_application::{
 };
 use poise_binance::connect as connect_binance;
 use poise_bybit::connect as connect_bybit;
+use poise_core::track::{Instrument, TrackId, Venue};
 use poise_engine::manager::TrackManager;
 use poise_engine::ports::ClockPort;
 #[cfg(test)]
 use poise_engine::ports::MetadataPort;
 #[cfg(test)]
 use poise_engine::ports::{AccountPort, AccountSummaryPort, ExecutionPort, MarketDataPort};
-use poise_engine::track::{Instrument, TrackId, Venue};
 #[cfg(test)]
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
@@ -570,6 +570,7 @@ mod tests {
         TrackMutationStore, TrackQueryStore,
     };
     use poise_core::events::DomainEvent as EngineDomainEvent;
+    use poise_core::track::{Instrument, TrackId, Venue};
     use poise_engine::manager::TrackManager;
     use poise_engine::observation::{MarketObservation, TrackObservation};
     use poise_engine::ports::{
@@ -578,7 +579,6 @@ mod tests {
         OrderRequest, Position,
     };
     use poise_engine::runtime::{AutoState, ControlState, TrackState};
-    use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_protocol::StreamEvent;
     use poise_storage::sqlite::SqliteStorage;
     use tokio::net::TcpListener;

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use poise_core::track::Instrument;
 use poise_engine::ports::AccountCapacitySnapshot;
-use poise_engine::track::Instrument;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -111,7 +111,7 @@ impl TrackReconcileGuards {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use poise_engine::track::{Instrument, Venue};
+    use poise_core::track::{Instrument, Venue};
 
     use super::*;
 

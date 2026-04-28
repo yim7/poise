@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
+use poise_core::track::TrackId;
 use poise_engine::execution_plan::TrackEffect;
 use poise_engine::executor::PendingSubmitHint;
 use poise_engine::observation::CompleteOpenOrderSnapshot;
-use poise_engine::track::TrackId;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionTrackEffect {
@@ -987,13 +987,13 @@ impl SessionTrackEffectExt for TrackEffect {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::observation::{CompleteOpenOrderSnapshot, OrderObservation};
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::price_gate::SubmitPurpose;
-    use poise_engine::track::{Instrument, TrackId, Venue};
 
     use super::{
         CancelQueueAction, CancelReceiptResolution, DeferredUntil, FollowUpQueueAction,

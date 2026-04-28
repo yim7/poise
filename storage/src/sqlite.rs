@@ -13,9 +13,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::schema;
 use poise_core::events::DomainEvent;
+use poise_core::track::TrackId;
 use poise_engine::execution_plan::TrackEffect;
 use poise_engine::ledger::TrackLedgerState;
-use poise_engine::track::TrackId;
 
 pub struct SqliteStorage {
     conn: Arc<Mutex<Connection>>,
@@ -956,12 +956,12 @@ mod tests {
     };
     use poise_core::events::DomainEvent;
     use poise_core::strategy::BandBoundary;
+    use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::ledger::TrackLedgerState;
     use poise_engine::ports::OrderRequest;
-    use poise_engine::track::{Instrument, TrackId, Venue};
     use rusqlite::Connection;
 
     fn test_instrument(symbol: &str) -> Instrument {

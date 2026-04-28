@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use poise_core::types::Side;
 
 use crate::ledger::TrackLedgerEvent;
-use crate::track::Instrument;
+use poise_core::track::Instrument;
 
 // ── Exchange types ──
 

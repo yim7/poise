@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
+use poise_core::track::Venue;
 use poise_engine::ports::{
     AccountPort, AccountSummaryPort, ExecutionPort, MarketDataPort, MetadataPort,
 };
-use poise_engine::track::Venue;
 
 #[derive(Clone)]
 pub struct Exchange {
@@ -96,11 +96,11 @@ mod tests {
     use chrono::Utc;
     use tokio::sync::mpsc;
 
+    use poise_core::track::Instrument;
     use poise_engine::ports::{
         AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOpenOrderSnapshot,
         MarketDataTick, OrderReceipt, OrderRequest, Position, UserDataEvent,
     };
-    use poise_engine::track::Instrument;
 
     use super::*;
 

@@ -16,7 +16,7 @@ use crate::executor::boundary::{
 use crate::executor::ledger::BoundaryLedgerView;
 use crate::ports::{ExecutionQuote, OrderRequest};
 use crate::price_gate::SubmitPurpose;
-use crate::track::Instrument;
+use poise_core::track::Instrument;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -723,7 +723,7 @@ mod tests {
     use crate::executor::ledger::{BoundaryLedgerView, BoundaryOperationView};
     use crate::ports::ExecutionQuote;
     use crate::price_gate::SubmitPurpose;
-    use crate::track::{Instrument, Venue};
+    use poise_core::track::{Instrument, Venue};
 
     use super::*;
 

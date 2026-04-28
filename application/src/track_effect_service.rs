@@ -73,7 +73,7 @@ mod tests {
     use crate::{ApplicationNotification, EffectStatus};
 
     use super::TrackEffectService;
-    use poise_engine::track::TrackId;
+    use poise_core::track::TrackId;
 
     #[tokio::test]
     async fn effect_service_completes_effect_failed_and_updates_effect_status() {

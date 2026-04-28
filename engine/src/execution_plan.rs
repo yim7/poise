@@ -6,7 +6,7 @@ use poise_core::types::{ExchangeRules, Exposure};
 
 use crate::ports::OrderRequest;
 use crate::price_gate::SubmitPurpose;
-use crate::track::Instrument;
+use poise_core::track::Instrument;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionPlan {

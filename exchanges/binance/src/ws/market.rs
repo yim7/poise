@@ -7,8 +7,8 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
+use poise_core::track::{Instrument, Venue};
 use poise_engine::ports::{ExecutionQuote, ExecutionQuoteTick, MarkPriceTick, MarketDataTick};
-use poise_engine::track::{Instrument, Venue};
 
 use super::{
     backoff_delay, connect_websocket, log_websocket_error,
@@ -172,7 +172,7 @@ mod tests {
     use tokio::{net::TcpListener, time::timeout};
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-    use poise_engine::track::{Instrument, Venue};
+    use poise_core::track::{Instrument, Venue};
 
     use super::*;
     use crate::rest::BinanceRestClient;

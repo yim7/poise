@@ -167,12 +167,12 @@ mod tests {
     use axum::routing::get;
     use chrono::Utc;
     use poise_application::{ConfiguredTrackDefinition, PreparedTrackRegistry};
+    use poise_core::track::{Instrument, Venue};
     use poise_core::types::ExchangeRules;
     use poise_engine::ports::{
         AccountPort, ClockPort, ExchangeInfo, ExchangeOpenOrderSnapshot, ExecutionPort,
         MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, OrderStatus, Position,
     };
-    use poise_engine::track::{Instrument, Venue};
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 

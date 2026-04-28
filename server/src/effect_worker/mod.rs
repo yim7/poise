@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use poise_application::{SessionEffectOutcome, SessionTrackEffect};
+use poise_core::track::Instrument;
 use poise_engine::executor::SubmitRecoveryToken;
 use poise_engine::ports::{AccountPort, ExecutionPort, OrderRequest};
-use poise_engine::track::Instrument;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -138,11 +138,11 @@ fn is_insufficient_margin_failure(message: &str) -> bool {
 
 enum Cancellation {
     One {
-        instrument: poise_engine::track::Instrument,
+        instrument: poise_core::track::Instrument,
         order_id: String,
     },
     All {
-        instrument: poise_engine::track::Instrument,
+        instrument: poise_core::track::Instrument,
     },
 }
 

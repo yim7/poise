@@ -3,9 +3,9 @@ use std::future::Future;
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
+use poise_core::track::Instrument;
 use poise_engine::ports::{AccountCapacitySnapshot, UserDataEvent};
 use poise_engine::runtime::FreshSessionExternalInputs;
-use poise_engine::track::Instrument;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
@@ -186,7 +186,7 @@ async fn rebuild_fresh_sessions(
             .reconcile
             .runtime_lifecycle_service
             .fresh_start_track_runtime(
-                &poise_engine::track::TrackId::new(seed.track_id()),
+                &poise_core::track::TrackId::new(seed.track_id()),
                 current_utc_day,
                 FreshSessionExternalInputs {
                     current_exposure: seed.exposure_from_position_qty(position.qty),
@@ -381,6 +381,7 @@ mod tests {
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
+    use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
@@ -389,7 +390,6 @@ mod tests {
         UserDataPayload,
     };
     use poise_engine::runtime::{TerminationCause, TrackStatus};
-    use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 

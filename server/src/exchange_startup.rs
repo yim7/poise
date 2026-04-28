@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use poise_engine::track::Instrument;
+use poise_core::track::Instrument;
 
 use crate::config::{ExchangeConfig, TrackSpec};
 use crate::startup_preparation::{SymbolLeverageSetter, TrackLeverageIndex};
@@ -58,7 +58,7 @@ mod tests {
 
     use anyhow::anyhow;
     use poise_application::{ConfiguredTrackDefinition, PreparedTrackRegistry};
-    use poise_engine::track::{Instrument, TrackId, Venue};
+    use poise_core::track::{Instrument, TrackId, Venue};
 
     use super::{build_symbol_leverage_setter, build_track_leverage_index};
     use crate::config::{ExchangeConfig, TrackSpec};

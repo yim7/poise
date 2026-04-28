@@ -3,8 +3,8 @@ use poise_application::{
     CancelQueueAction, CancelReceiptResolution, SessionEffectOutcome, SessionQueueAction,
     SessionTrackEffect,
 };
+use poise_core::track::{Instrument, TrackId};
 use poise_engine::execution_plan::TrackEffect;
-use poise_engine::track::{Instrument, TrackId};
 
 use super::{Cancellation, EffectWorker};
 use crate::order_outcome::{ReconcileReason, cancel_writeback_outcome_unknown};
@@ -234,6 +234,7 @@ mod tests {
 
     use anyhow::Result;
     use chrono::Utc;
+    use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
@@ -241,7 +242,6 @@ mod tests {
         ExchangeOpenOrderSnapshot, ExecutionPort, OrderReceipt, OrderRequest, Position,
     };
     use poise_engine::price_gate::SubmitPurpose;
-    use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_storage::sqlite::SqliteStorage;
 
     use crate::effect_worker::EffectWorker;

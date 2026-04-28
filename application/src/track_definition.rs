@@ -5,8 +5,8 @@ use poise_core::risk::{LossLimits, validate_loss_limits, validate_max_notional};
 use poise_core::strategy::{
     BandProtectionPolicy, DEFAULT_MIN_REBALANCE_UNITS, ShapeFamily, TrackConfig, validate_config,
 };
+use poise_core::track::{Instrument, TrackId, Venue};
 use poise_core::types::Exposure;
-use poise_engine::track::{Instrument, TrackId, Venue};
 
 const DEFAULT_TICK_TIMEOUT_SECS: u64 = 30;
 
@@ -211,7 +211,7 @@ impl PreparedTrackRegistry {
 #[cfg(test)]
 mod tests {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
-    use poise_engine::track::{TrackId, Venue};
+    use poise_core::track::{TrackId, Venue};
 
     use super::{ConfiguredTrackDefinition, ConfiguredTrackInput, PreparedTrackRegistry};
 

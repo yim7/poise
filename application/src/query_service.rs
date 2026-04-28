@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use poise_engine::track::TrackId;
+use poise_core::track::TrackId;
 
 use crate::{
     PreparedTrackRegistry, TrackListReadModel, TrackObservationService, TrackQueryStore,
@@ -49,13 +49,13 @@ mod tests {
     use chrono::{NaiveDate, TimeZone, Utc};
     use poise_core::events::DomainEvent;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
+    use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::observation::MarketObservation;
     use poise_engine::ports::ExecutionQuote;
     use poise_engine::ports::OrderRequest;
-    use poise_engine::track::{Instrument, TrackId, Venue};
 
     use crate::mutation_executor::test_support::{
         MemoryRepository, seeded_manager, track_write_services,

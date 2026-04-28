@@ -5,7 +5,7 @@ use poise_application::{AccountMonitorConfig, ConfiguredTrackDefinition, Configu
 use poise_binance as binance;
 use poise_bybit as bybit;
 use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
-use poise_engine::track::{TrackId, Venue};
+use poise_core::track::{TrackId, Venue};
 use serde::{Deserialize, Deserializer};
 
 use crate::exchange_startup::build_track_leverage_index;
@@ -140,7 +140,7 @@ where
 mod tests {
     use poise_application::{ConfiguredTrackDefinition, ConfiguredTrackInput};
     use poise_core::strategy::ShapeFamily;
-    use poise_engine::track::{TrackId, Venue};
+    use poise_core::track::{TrackId, Venue};
 
     use super::{
         AccountMonitorConfig, ExchangeConfig, default_bind_address, load_config, parse_config,

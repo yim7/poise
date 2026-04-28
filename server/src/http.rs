@@ -3,8 +3,8 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use poise_application::{DiagnosticSeverity, TrackMutationError};
+use poise_core::track::TrackId;
 use poise_engine::command::TrackCommand;
-use poise_engine::track::TrackId;
 use poise_protocol::{
     AccountSummaryView, ActivityLevelView, TrackCommandAccepted, TrackCommandRequest,
     TrackCommandType, TrackDetailView, TrackDiagnosticItemView, TrackDiagnosticsView,
@@ -235,6 +235,7 @@ mod tests {
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
+    use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::{
         events::DomainEvent,
         types::{ExchangeRules, Exposure},
@@ -243,7 +244,6 @@ mod tests {
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::AccountSummarySnapshot;
     use poise_engine::ports::ClockPort;
-    use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_protocol::{
         AccountSummaryView, ExecutionBindingIntentView, ExecutionBindingStatusView,
         ExecutionStatusView, RiskSignalView, TrackCommandAccepted, TrackCommandRequest,

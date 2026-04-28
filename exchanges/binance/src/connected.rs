@@ -4,12 +4,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use poise_core::track::Instrument;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExecutionPort, ExecutionPortError, MarketDataPort, MarketDataTick,
     MetadataPort, OrderReceipt, OrderRequest, Position, UserDataEvent,
 };
-use poise_engine::track::Instrument;
 
 use crate::{
     Config,

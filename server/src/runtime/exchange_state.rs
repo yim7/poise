@@ -136,12 +136,12 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
+    use poise_core::track::{Instrument, Venue};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::ports::{
         ExchangeOpenOrderSnapshot, ExchangeOrder, ExecutionPort, OrderReceipt, OrderRequest,
         OrderStatus, Position, UserDataEvent, UserDataPayload,
     };
-    use poise_engine::track::{Instrument, Venue};
     use poise_storage::sqlite::SqliteStorage;
 
     use crate::runtime::exchange_state::apply_user_data_event;
@@ -222,7 +222,7 @@ mod tests {
             poise_engine::manager::TrackManager::new(Arc::new(crate::assembly::SystemClock));
         manager
             .add_track(
-                poise_engine::track::TrackId::new("btc-core"),
+                poise_core::track::TrackId::new("btc-core"),
                 Instrument::new(Venue::Binance, "BTCUSDT"),
                 poise_core::strategy::TrackConfig {
                     lower_price: 90.0,

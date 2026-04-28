@@ -9,13 +9,13 @@ use crate::test_support::RuntimeTestContext;
 use anyhow::{Result, anyhow};
 use poise_application::TrackMutationError;
 use poise_application::TrackStartupDefinition;
+use poise_core::track::{Instrument, TrackId};
 use poise_core::types::Exposure;
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::ports::{
     AccountPort, AccountSummaryPort, ClockPort, ExecutionPort, MarketDataPort, MetadataPort,
     UserDataEvent,
 };
-use poise_engine::track::{Instrument, TrackId};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -394,7 +394,7 @@ pub(crate) async fn enqueue_reconcile_request(
     state: &impl ReconcileStateAccess,
     execution: &dyn ExecutionPort,
     request: ReconcileRequest,
-    instrument: &poise_engine::track::Instrument,
+    instrument: &poise_core::track::Instrument,
 ) -> std::result::Result<ReconcileExecution, TrackMutationError> {
     reconcile::enqueue_reconcile_request(state, execution, request, instrument).await
 }
@@ -403,7 +403,7 @@ async fn sync_exchange_state_from_exchange(
     state: &impl ReconcileStateAccess,
     execution: &dyn ExecutionPort,
     track_id: &str,
-    instrument: &poise_engine::track::Instrument,
+    instrument: &poise_core::track::Instrument,
     mode: ExchangeSyncMode,
 ) -> std::result::Result<(), TrackMutationError> {
     reconcile::sync_exchange_state_from_exchange(state, execution, track_id, instrument, mode).await

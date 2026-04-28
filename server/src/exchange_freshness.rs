@@ -107,11 +107,11 @@ impl ExchangeFreshness {
 
 #[cfg(test)]
 mod tests {
+    use poise_core::track::{Instrument, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::ports::OrderRequest;
-    use poise_engine::track::{Instrument, Venue};
 
     use super::{ExchangeFreshness, ExchangeFreshnessReason, FreshnessGateDecision};
 

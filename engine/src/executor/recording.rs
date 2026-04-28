@@ -333,7 +333,7 @@ mod tests {
     use crate::executor::{ExecutorInput, PolicyContext, SubmitIntentInput, plan};
     use crate::ports::ExecutionQuote;
     use crate::price_gate::{PriceExecutionGate, SubmitPurpose};
-    use crate::track::{Instrument, Venue};
+    use poise_core::track::{Instrument, Venue};
 
     fn only_progress(ledger_state: &BoundaryLedgerState) -> &BoundaryProgress {
         ledger_state

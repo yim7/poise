@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::NaiveDate;
+use poise_core::track::TrackId;
 use poise_engine::ledger::TrackLedgerState;
 use poise_engine::runtime::FreshSessionExternalInputs;
-use poise_engine::track::TrackId;
 
 use crate::mutation_executor::MutationExecutor;
 use crate::{TrackControlState, TrackObservationService, TrackQueryStore, TrackRecoveryIssue};
@@ -126,12 +126,12 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::{NaiveDate, TimeZone, Utc};
+    use poise_core::track::TrackId;
     use poise_core::types::Exposure;
     use poise_engine::executor::RecoveryAnomaly;
     use poise_engine::ledger::TrackLedgerState;
     use poise_engine::ports::ExecutionQuote;
     use poise_engine::runtime::{CurrentMarketData, FreshSessionExternalInputs};
-    use poise_engine::track::TrackId;
 
     use crate::mutation_executor::test_support::{
         MemoryRepository, seeded_manager, track_write_services,

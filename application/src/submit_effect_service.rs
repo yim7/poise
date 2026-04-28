@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::{Error, Result};
+use poise_core::track::TrackId;
 use poise_engine::executor::SubmitRecoveryToken;
 #[cfg(any(test, feature = "server-test-support"))]
 use poise_engine::manager::TrackManager;
 use poise_engine::ports::{ExchangeOrder, OrderReceipt, OrderRequest};
-use poise_engine::track::TrackId;
 #[cfg(any(test, feature = "server-test-support"))]
 use tokio::sync::RwLock;
 
@@ -217,6 +217,7 @@ mod tests {
         MemoryRepository, manager_with_pending_submit, seeded_manager, track_write_services,
     };
     use crate::{ApplicationNotification, EffectStatus};
+    use poise_core::track::{TrackId, Venue};
     use poise_core::types::Exposure;
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
@@ -224,7 +225,6 @@ mod tests {
     use poise_engine::ports::{
         ExchangeOrder, ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus,
     };
-    use poise_engine::track::{TrackId, Venue};
     use tokio::time::timeout;
 
     use super::{
@@ -259,7 +259,7 @@ mod tests {
             TrackId::new("btc-core"),
             "btc-core:batch-1:0".into(),
             OrderRequest {
-                instrument: poise_engine::track::Instrument::new(Venue::Binance, "BTCUSDT"),
+                instrument: poise_core::track::Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: poise_core::types::Side::Buy,
                 price: 100.0,
                 quantity: 0.1,
@@ -290,7 +290,7 @@ mod tests {
             TrackId::new("missing-track"),
             "btc-core:batch-1:0".into(),
             OrderRequest {
-                instrument: poise_engine::track::Instrument::new(Venue::Binance, "BTCUSDT"),
+                instrument: poise_core::track::Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: poise_core::types::Side::Buy,
                 price: 100.0,
                 quantity: 0.1,
@@ -330,7 +330,7 @@ mod tests {
         let repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), repository);
         let current_request = OrderRequest {
-            instrument: poise_engine::track::Instrument::new(Venue::Binance, "BTCUSDT"),
+            instrument: poise_core::track::Instrument::new(Venue::Binance, "BTCUSDT"),
             side: poise_core::types::Side::Sell,
             price: 105.0,
             quantity: 0.2,

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use poise_application::PreparedTrackRegistry;
+use poise_core::track::{Instrument, TrackId};
 use poise_engine::ports::{ExchangeInfo, MetadataPort};
-use poise_engine::track::{Instrument, TrackId};
 use tokio::time::{Duration, sleep};
 
 pub(crate) type TrackLeverageIndex = HashMap<TrackId, u32>;

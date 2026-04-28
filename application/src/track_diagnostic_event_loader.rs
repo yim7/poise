@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use poise_engine::track::TrackId;
+use poise_core::track::TrackId;
 
 use crate::{StoredTrackEvent, TrackObservationService, TrackQueryStore};
 

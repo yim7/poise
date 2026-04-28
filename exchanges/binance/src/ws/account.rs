@@ -9,13 +9,13 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
+use poise_core::track::{Instrument, Venue};
 use poise_engine::ledger::{
     ExecutionLedgerUpdate, LedgerAdjustmentEvent, LedgerDelta, LedgerGapReason, LedgerGapRecord,
     TrackLedgerEvent,
 };
 use poise_engine::observation::OrderObservation;
 use poise_engine::ports::{Position, TrackLedgerUpdate, UserDataEvent, UserDataPayload};
-use poise_engine::track::{Instrument, Venue};
 
 use super::{
     KeepaliveStatus, UserStreamDiagnostics, UserWebSocket, backoff_delay, connect_user_stream,
@@ -350,6 +350,7 @@ mod tests {
     };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+    use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
     use poise_engine::ledger::{
         ExecutionLedgerUpdate, LedgerAdjustmentEvent, LedgerDelta, LedgerGapRecord,
@@ -357,7 +358,6 @@ mod tests {
     };
     use poise_engine::observation::OrderObservation;
     use poise_engine::ports::{OrderStatus, Position, TrackLedgerUpdate, UserDataPayload};
-    use poise_engine::track::{Instrument, Venue};
 
     use super::*;
     use crate::ws::BinanceWsClient;

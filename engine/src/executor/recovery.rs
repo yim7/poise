@@ -371,7 +371,7 @@ mod tests {
     use crate::executor::policy::PolicyKind;
     use crate::ports::OrderStatus;
     use crate::price_gate::SubmitPurpose;
-    use crate::track::{Instrument, Venue};
+    use poise_core::track::{Instrument, Venue};
 
     fn rules() -> ExchangeRules {
         ExchangeRules {

@@ -320,15 +320,15 @@ fn average_count(total: usize, count: usize) -> f64 {
 
 enum PendingSocketUpdate {
     TrackChanged {
-        track_id: poise_engine::track::TrackId,
+        track_id: poise_core::track::TrackId,
     },
     AccountChanged,
 }
 
 #[derive(Default)]
 struct PendingSocketUpdates {
-    track_ids: Vec<poise_engine::track::TrackId>,
-    pending_track_ids: HashSet<poise_engine::track::TrackId>,
+    track_ids: Vec<poise_core::track::TrackId>,
+    pending_track_ids: HashSet<poise_core::track::TrackId>,
     account_changed: bool,
 }
 
@@ -534,7 +534,7 @@ async fn handle_socket(mut socket: WebSocket, state: WebSocketState) {
 async fn push_projected_updates(
     socket: &mut WebSocket,
     state: &WebSocketState,
-    track_id: poise_engine::track::TrackId,
+    track_id: poise_core::track::TrackId,
     diagnostics: &mut WebSocketDiagnostics,
 ) -> bool {
     let load_started_at = Instant::now();
@@ -717,12 +717,12 @@ mod tests {
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
+    use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::ExchangeRules;
     use poise_engine::command::TrackCommand;
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{AccountSummarySnapshot, ClockPort};
-    use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_protocol::{
         ExecutionStateView, ExecutionStatusView, RiskSignalView, StreamEvent, TrackStatus,
     };
@@ -1819,7 +1819,7 @@ mod tests {
 
         async fn cancel_order(
             &self,
-            _instrument: &poise_engine::track::Instrument,
+            _instrument: &poise_core::track::Instrument,
             order_id: &str,
         ) -> Result<poise_engine::ports::OrderReceipt> {
             Ok(poise_engine::ports::OrderReceipt {
@@ -1830,13 +1830,13 @@ mod tests {
             })
         }
 
-        async fn cancel_all(&self, _instrument: &poise_engine::track::Instrument) -> Result<()> {
+        async fn cancel_all(&self, _instrument: &poise_core::track::Instrument) -> Result<()> {
             Ok(())
         }
 
         async fn get_position(
             &self,
-            instrument: &poise_engine::track::Instrument,
+            instrument: &poise_core::track::Instrument,
         ) -> Result<poise_engine::ports::Position> {
             Ok(poise_engine::ports::Position {
                 instrument: instrument.clone(),
@@ -1848,7 +1848,7 @@ mod tests {
 
         async fn get_open_orders(
             &self,
-            _instrument: &poise_engine::track::Instrument,
+            _instrument: &poise_core::track::Instrument,
         ) -> Result<poise_engine::ports::ExchangeOpenOrderSnapshot> {
             Ok(
                 poise_engine::ports::ExchangeOpenOrderSnapshot::from_complete_exchange_query(
@@ -1862,7 +1862,7 @@ mod tests {
     impl poise_engine::ports::AccountPort for NoopExchange {
         async fn get_account_capacity_snapshot(
             &self,
-            _instrument: &poise_engine::track::Instrument,
+            _instrument: &poise_core::track::Instrument,
         ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
             Ok(poise_engine::ports::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,

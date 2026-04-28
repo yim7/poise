@@ -40,7 +40,7 @@ mod tests {
     use crate::ports::{ExecutionQuote, OrderRequest};
     use crate::price_gate::{PriceExecutionGate, SubmitPurpose};
     use crate::runtime::ExecutorState;
-    use crate::track::{Instrument, Venue};
+    use poise_core::track::{Instrument, Venue};
 
     fn config() -> TrackConfig {
         TrackConfig {

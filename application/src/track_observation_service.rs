@@ -28,7 +28,7 @@ impl TrackObservationService {
 
     pub async fn resolve_track_id(
         &self,
-        instrument: &poise_engine::track::Instrument,
+        instrument: &poise_core::track::Instrument,
     ) -> Option<String> {
         self.executor.resolve_track_id(instrument).await
     }
@@ -132,9 +132,9 @@ impl TrackObservationService {
 mod tests {
     use std::sync::Arc;
 
+    use poise_core::track::TrackId;
     use poise_engine::observation::MarketObservation;
     use poise_engine::ports::ExecutionQuote;
-    use poise_engine::track::TrackId;
 
     use super::TrackObservationService;
     use crate::ApplicationNotification;

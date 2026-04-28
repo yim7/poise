@@ -4,12 +4,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use poise_core::track::Instrument;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExecutionPort, MarketDataPort, MarketDataTick, MetadataPort,
     OrderReceipt, OrderRequest, Position, UserDataEvent,
 };
-use poise_engine::track::Instrument;
 
 use crate::{Config, rest::BybitRestClient, ws::BybitWsClient};
 
@@ -220,9 +220,9 @@ mod tests {
     };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+    use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
     use poise_engine::ports::{OrderRequest, OrderStatus};
-    use poise_engine::track::{Instrument, Venue};
 
     use super::*;
 
@@ -286,7 +286,7 @@ mod tests {
         let account_summary = BybitAccountSummary::new(Arc::clone(&rest));
         let account = BybitAccount::new(Arc::clone(&rest), Arc::clone(&ws));
         let metadata = BybitMetadata::new(Arc::clone(&rest));
-        let instrument = poise_engine::track::Instrument::new(Venue::Bybit, "BTCUSDT");
+        let instrument = poise_core::track::Instrument::new(Venue::Bybit, "BTCUSDT");
 
         let summary = account_summary.get_account_summary().await.unwrap();
         let capacity = account

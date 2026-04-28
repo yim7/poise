@@ -47,12 +47,12 @@ fn describe_binding(binding: &BindingView) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use poise_core::track::{Instrument, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::ports::{ExchangeOpenOrderSnapshot, ExchangeOrder, OrderStatus};
     use poise_engine::runtime::{
         BindingView, ExecutorView, StrategyPriceStatus, TrackRuntimeView, TrackStatus,
     };
-    use poise_engine::track::{Instrument, Venue};
 
     use super::{describe_open_orders, describe_runtime_bindings};
 

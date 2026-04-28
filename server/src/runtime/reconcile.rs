@@ -6,10 +6,10 @@ use anyhow::{Context, anyhow};
 use poise_application::{
     RecoveryAnomalyObserver, TrackInstrument, TrackMutationError, TrackRecoveryIssue,
 };
+use poise_core::track::TrackId;
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::observation::CompleteOpenOrderSnapshot;
 use poise_engine::ports::ExecutionPort;
-use poise_engine::track::TrackId;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, sleep};
@@ -31,7 +31,7 @@ const ORDER_SET_RECOVERY_RESET_RETRY_DELAY: Duration = Duration::from_millis(200
 
 #[derive(Debug, Clone)]
 struct RecoveryTrackedTrack {
-    instrument: poise_engine::track::Instrument,
+    instrument: poise_core::track::Instrument,
     next_retry_at: Instant,
 }
 
@@ -44,7 +44,7 @@ pub(crate) struct RecoveryDirtyState {
 impl RecoveryDirtyState {
     pub(crate) fn mark_recovery_anomaly(
         &self,
-        track_id: &poise_engine::track::TrackId,
+        track_id: &poise_core::track::TrackId,
         active: bool,
     ) {
         self.workset
@@ -81,11 +81,7 @@ impl RecoveryAnomalyDirtyObserver {
 }
 
 impl RecoveryAnomalyObserver for RecoveryAnomalyDirtyObserver {
-    fn observe_recovery_anomaly_change(
-        &self,
-        track_id: &poise_engine::track::TrackId,
-        active: bool,
-    ) {
+    fn observe_recovery_anomaly_change(&self, track_id: &poise_core::track::TrackId, active: bool) {
         self.dirty_state.mark_recovery_anomaly(track_id, active);
     }
 }
@@ -143,12 +139,12 @@ pub(super) fn spawn_recovery_task(
                 }
                 _ = ticker.tick() => {
                     let now = Instant::now();
-                    let due_anomaly_tracks: Vec<(String, poise_engine::track::Instrument)> = tracked
+                    let due_anomaly_tracks: Vec<(String, poise_core::track::Instrument)> = tracked
                         .iter()
                         .filter(|(_, tracked_track)| tracked_track.next_retry_at <= now)
                         .map(|(track_id, tracked_track)| (track_id.clone(), tracked_track.instrument.clone()))
                         .collect();
-                    let due_audit_tracks: Vec<(String, poise_engine::track::Instrument)> = instruments
+                    let due_audit_tracks: Vec<(String, poise_core::track::Instrument)> = instruments
                         .iter()
                         .filter(|track| {
                             next_audit_at
@@ -196,7 +192,7 @@ pub(super) async fn enqueue_reconcile_request(
     state: &impl ReconcileStateAccess,
     execution: &dyn ExecutionPort,
     request: ReconcileRequest,
-    instrument: &poise_engine::track::Instrument,
+    instrument: &poise_core::track::Instrument,
 ) -> std::result::Result<ReconcileExecution, TrackMutationError> {
     let reconcile_execution = reconcile_execution(&request.track_id, vec![request.reason]);
     let state = state.reconcile_state_view();
@@ -215,7 +211,7 @@ pub(super) async fn sync_exchange_state_from_exchange(
     state: &impl ReconcileStateAccess,
     execution: &dyn ExecutionPort,
     track_id: &str,
-    instrument: &poise_engine::track::Instrument,
+    instrument: &poise_core::track::Instrument,
     mode: ExchangeSyncMode,
 ) -> std::result::Result<(), TrackMutationError> {
     let state = state.reconcile_state_view();
@@ -311,7 +307,7 @@ fn order_set_reset_required_for_recovery_issue(issue: TrackRecoveryIssue) -> boo
 
 async fn reset_open_orders_for_order_set_recovery_anomaly(
     execution: &dyn ExecutionPort,
-    instrument: &poise_engine::track::Instrument,
+    instrument: &poise_core::track::Instrument,
 ) -> std::result::Result<(), TrackMutationError> {
     execution
         .cancel_all(instrument)
@@ -450,6 +446,7 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
+    use poise_core::track::{Instrument, TrackId, Venue};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
     use poise_engine::manager::ExchangeSyncMode;
@@ -457,7 +454,6 @@ mod tests {
         ExchangeOpenOrderSnapshot, ExchangeOrder, ExecutionPort, OrderReceipt, OrderRequest,
         OrderStatus, Position,
     };
-    use poise_engine::track::{Instrument, TrackId, Venue};
     use poise_storage::sqlite::SqliteStorage;
 
     use super::*;

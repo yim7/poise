@@ -10,6 +10,7 @@ use poise_application::{
 };
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
+use poise_core::track::{TrackId, Venue};
 use poise_core::types::{ExchangeRules, Exposure, Side};
 use poise_engine::execution_plan::TrackEffect;
 use poise_engine::executor::SubmitRecoveryToken;
@@ -20,7 +21,6 @@ use poise_engine::ports::{
     OrderReceipt, OrderRequest, OrderStatus, Position, UserDataEvent,
 };
 use poise_engine::price_gate::SubmitPurpose;
-use poise_engine::track::{TrackId, Venue};
 use poise_engine::transition::TrackTransition;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -230,7 +230,7 @@ pub(crate) fn test_manager(track_id: &str) -> TrackManager {
     manager
         .add_track(
             TrackId::new(track_id),
-            poise_engine::track::Instrument::new(Venue::Binance, default_symbol_for(track_id)),
+            poise_core::track::Instrument::new(Venue::Binance, default_symbol_for(track_id)),
             poise_core::strategy::TrackConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -259,7 +259,7 @@ pub(crate) fn test_manager(track_id: &str) -> TrackManager {
 pub(crate) fn test_submit_effect(track_id: &str) -> TrackEffect {
     TrackEffect::SubmitOrder {
         request: OrderRequest {
-            instrument: poise_engine::track::Instrument::new(
+            instrument: poise_core::track::Instrument::new(
                 Venue::Binance,
                 default_symbol_for(track_id),
             ),
@@ -359,7 +359,7 @@ impl ExecutionPort for RecordingExecutionPort {
 
     async fn cancel_order(
         &self,
-        _instrument: &poise_engine::track::Instrument,
+        _instrument: &poise_core::track::Instrument,
         order_id: &str,
     ) -> Result<OrderReceipt> {
         Ok(OrderReceipt {
@@ -370,13 +370,13 @@ impl ExecutionPort for RecordingExecutionPort {
         })
     }
 
-    async fn cancel_all(&self, _instrument: &poise_engine::track::Instrument) -> Result<()> {
+    async fn cancel_all(&self, _instrument: &poise_core::track::Instrument) -> Result<()> {
         self.cancel_all_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
-    async fn get_position(&self, instrument: &poise_engine::track::Instrument) -> Result<Position> {
+    async fn get_position(&self, instrument: &poise_core::track::Instrument) -> Result<Position> {
         Ok(Position {
             instrument: instrument.clone(),
             qty: 0.0,
@@ -387,7 +387,7 @@ impl ExecutionPort for RecordingExecutionPort {
 
     async fn get_open_orders(
         &self,
-        _instrument: &poise_engine::track::Instrument,
+        _instrument: &poise_core::track::Instrument,
     ) -> Result<ExchangeOpenOrderSnapshot> {
         Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
             Vec::new(),
@@ -402,7 +402,7 @@ pub(crate) struct NoopAccountPort;
 impl AccountPort for NoopAccountPort {
     async fn get_account_capacity_snapshot(
         &self,
-        _instrument: &poise_engine::track::Instrument,
+        _instrument: &poise_core::track::Instrument,
     ) -> Result<AccountCapacitySnapshot> {
         Ok(AccountCapacitySnapshot {
             max_increase_notional: 1_000_000.0,

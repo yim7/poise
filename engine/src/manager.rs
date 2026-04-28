@@ -26,8 +26,8 @@ use crate::runtime::{
     QuoteHealthView, StrategyPriceStatus, StrategyTargetView, TerminationCause, TrackLiveView,
     TrackRuntime, TrackRuntimeView, TrackState,
 };
-use crate::track::{Instrument, TrackId};
 use crate::transition::TrackTransition;
+use poise_core::track::{Instrument, TrackId};
 
 const DEFAULT_TICK_TIMEOUT_SECS: u64 = 30;
 
@@ -1237,7 +1237,7 @@ mod tests {
     use crate::ledger::TrackLedgerState;
     use crate::ports::ExecutionQuote;
     use crate::runtime::{CurrentMarketData, TrackStatus};
-    use crate::track::Venue;
+    use poise_core::track::Venue;
 
     #[derive(Debug)]
     struct FixedClock(chrono::DateTime<Utc>);

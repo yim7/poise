@@ -553,6 +553,7 @@ mod tests {
     use poise_core::events::DomainEvent;
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
+    use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::{BindingStatus, PolicyKind, SubmitRecoveryToken};
@@ -560,7 +561,6 @@ mod tests {
     use poise_engine::runtime::{
         BindingView, ExecutorView, StrategyPriceStatus, TrackRuntimeView, TrackStatus,
     };
-    use poise_engine::track::{Instrument, TrackId, Venue};
 
     use super::{
         TrackActivityLevel, TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadModel,

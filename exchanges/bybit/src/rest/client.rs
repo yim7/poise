@@ -543,8 +543,8 @@ mod tests {
 
         let receipt = client
             .submit_order(OrderRequest {
-                instrument: poise_engine::track::Instrument::new(
-                    poise_engine::track::Venue::Bybit,
+                instrument: poise_core::track::Instrument::new(
+                    poise_core::track::Venue::Bybit,
                     "BTCUSDT",
                 ),
                 side: poise_core::types::Side::Buy,

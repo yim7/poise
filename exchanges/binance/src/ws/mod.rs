@@ -15,8 +15,8 @@ use tokio_tungstenite::{
     tungstenite::{Error as WebSocketError, error::ProtocolError},
 };
 
+use poise_core::track::Instrument;
 use poise_engine::ports::{MarketDataTick, UserDataEvent};
-use poise_engine::track::Instrument;
 
 use crate::rest::BinanceRestClient;
 

@@ -391,7 +391,7 @@ mod tests {
     fn test_runtime() -> TrackRuntime {
         TrackRuntime::new(
             "test".into(),
-            crate::track::Instrument::new(crate::track::Venue::Binance, "BTCUSDT"),
+            poise_core::track::Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
             TrackConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,

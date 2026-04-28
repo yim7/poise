@@ -12,7 +12,7 @@ use crate::price_gate::{
     working_order_gate_action,
 };
 use crate::runtime::ExecutorState;
-use crate::track::Instrument;
+use poise_core::track::Instrument;
 
 use super::binding::{
     BindingPolicyState, BindingProposal, BindingStatus, LiveOrderBinding, SubmitRecoveryToken,
@@ -420,7 +420,7 @@ mod tests {
     use crate::executor::ledger::BoundaryProgress;
     use crate::ports::ExecutionQuote;
     use crate::price_gate::PriceExecutionGate;
-    use crate::track::{Instrument, Venue};
+    use poise_core::track::{Instrument, Venue};
 
     fn config() -> TrackConfig {
         TrackConfig {
