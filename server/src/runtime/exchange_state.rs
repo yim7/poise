@@ -136,7 +136,7 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
-    use poise_core::track::{Instrument, Venue};
+    use poise_core::track::{Instrument, TrackDefinition, Venue};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::ports::{
         ExchangeOpenOrderSnapshot, ExchangeOrder, ExecutionPort, OrderReceipt, OrderRequest,
@@ -222,23 +222,27 @@ mod tests {
             poise_engine::manager::TrackManager::new(Arc::new(crate::assembly::SystemClock));
         manager
             .add_track(
-                poise_core::track::TrackId::new("btc-core"),
-                Instrument::new(Venue::Binance, "BTCUSDT"),
-                poise_core::strategy::TrackConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: poise_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
-                },
-                3_000.0,
-                poise_core::risk::LossLimits {
-                    daily_loss_limit: 300.0,
-                    total_loss_limit: 600.0,
-                },
+                TrackDefinition::try_new(
+                    poise_core::track::TrackId::new("btc-core"),
+                    Instrument::new(Venue::Binance, "BTCUSDT"),
+                    poise_core::strategy::TrackConfig {
+                        lower_price: 90.0,
+                        upper_price: 110.0,
+                        long_exposure_units: 8.0,
+                        short_exposure_units: 8.0,
+                        notional_per_unit: 375.0,
+                        min_rebalance_units: 0.5,
+                        shape_family: poise_core::strategy::ShapeFamily::Linear,
+                        out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
+                    },
+                    Some(3_000.0),
+                    poise_core::risk::LossLimits {
+                        daily_loss_limit: 300.0,
+                        total_loss_limit: 600.0,
+                    },
+                    None,
+                )
+                .unwrap(),
                 poise_core::types::ExchangeRules {
                     price_tick: 0.1,
                     quantity_step: 0.001,

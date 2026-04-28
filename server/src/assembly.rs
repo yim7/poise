@@ -257,15 +257,7 @@ async fn assemble_with_state_store(
             track.clone(),
             startup_capacity_mode,
         ));
-        manager.add_track_with_tick_timeout_secs(
-            track_id.clone(),
-            instrument,
-            track.track_config().clone(),
-            track.max_notional(),
-            track.loss_limits().clone(),
-            info.rules,
-            track.tick_timeout_secs(),
-        )?;
+        manager.add_track(track.clone(), info.rules)?;
     }
 
     let (notifications, _) = broadcast::channel(256);
@@ -570,7 +562,7 @@ mod tests {
         TrackMutationStore, TrackQueryStore,
     };
     use poise_core::events::DomainEvent as EngineDomainEvent;
-    use poise_core::track::{Instrument, TrackId, Venue};
+    use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_engine::manager::TrackManager;
     use poise_engine::observation::{MarketObservation, TrackObservation};
     use poise_engine::ports::{
@@ -1099,23 +1091,27 @@ total_loss_limit = 600.0
         let mut manager = TrackManager::new(Arc::new(SystemClock));
         manager
             .add_track(
-                TrackId::new("btc-core"),
-                Instrument::new(Venue::Binance, "BTCUSDT"),
-                poise_core::strategy::TrackConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: poise_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
-                },
-                3000.0,
-                poise_core::risk::LossLimits {
-                    daily_loss_limit: 300.0,
-                    total_loss_limit: 600.0,
-                },
+                TrackDefinition::try_new(
+                    TrackId::new("btc-core"),
+                    Instrument::new(Venue::Binance, "BTCUSDT"),
+                    poise_core::strategy::TrackConfig {
+                        lower_price: 90.0,
+                        upper_price: 110.0,
+                        long_exposure_units: 8.0,
+                        short_exposure_units: 8.0,
+                        notional_per_unit: 375.0,
+                        min_rebalance_units: 0.5,
+                        shape_family: poise_core::strategy::ShapeFamily::Linear,
+                        out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
+                    },
+                    Some(3000.0),
+                    poise_core::risk::LossLimits {
+                        daily_loss_limit: 300.0,
+                        total_loss_limit: 600.0,
+                    },
+                    None,
+                )
+                .unwrap(),
                 test_exchange_rules(),
             )
             .unwrap();
@@ -1355,23 +1351,27 @@ total_loss_limit = 600.0
         let mut manager = TrackManager::new(Arc::new(SystemClock));
         manager
             .add_track(
-                TrackId::new("btc-core"),
-                Instrument::new(Venue::Binance, "BTCUSDT"),
-                poise_core::strategy::TrackConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: poise_core::strategy::ShapeFamily::Linear,
-                    out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
-                },
-                3000.0,
-                poise_core::risk::LossLimits {
-                    daily_loss_limit: 100.0,
-                    total_loss_limit: 300.0,
-                },
+                TrackDefinition::try_new(
+                    TrackId::new("btc-core"),
+                    Instrument::new(Venue::Binance, "BTCUSDT"),
+                    poise_core::strategy::TrackConfig {
+                        lower_price: 90.0,
+                        upper_price: 110.0,
+                        long_exposure_units: 8.0,
+                        short_exposure_units: 8.0,
+                        notional_per_unit: 375.0,
+                        min_rebalance_units: 0.5,
+                        shape_family: poise_core::strategy::ShapeFamily::Linear,
+                        out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
+                    },
+                    Some(3000.0),
+                    poise_core::risk::LossLimits {
+                        daily_loss_limit: 100.0,
+                        total_loss_limit: 300.0,
+                    },
+                    None,
+                )
+                .unwrap(),
                 test_exchange_rules(),
             )
             .unwrap();

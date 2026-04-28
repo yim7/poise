@@ -1428,7 +1428,7 @@ pub(crate) mod test_support {
     use poise_core::events::DomainEvent;
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
-    use poise_core::track::{Instrument, TrackId, Venue};
+    use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
@@ -1773,23 +1773,27 @@ pub(crate) mod test_support {
         let mut manager = TrackManager::new(Arc::new(TestClock));
         manager
             .add_track(
-                TrackId::new("btc-core"),
-                Instrument::new(Venue::Binance, "BTCUSDT"),
-                TrackConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: ShapeFamily::Linear,
-                    out_of_band_policy: BandProtectionPolicy::Freeze,
-                },
-                3_000.0,
-                LossLimits {
-                    daily_loss_limit: 300.0,
-                    total_loss_limit: 600.0,
-                },
+                TrackDefinition::try_new(
+                    TrackId::new("btc-core"),
+                    Instrument::new(Venue::Binance, "BTCUSDT"),
+                    TrackConfig {
+                        lower_price: 90.0,
+                        upper_price: 110.0,
+                        long_exposure_units: 8.0,
+                        short_exposure_units: 8.0,
+                        notional_per_unit: 375.0,
+                        min_rebalance_units: 0.5,
+                        shape_family: ShapeFamily::Linear,
+                        out_of_band_policy: BandProtectionPolicy::Freeze,
+                    },
+                    Some(3_000.0),
+                    LossLimits {
+                        daily_loss_limit: 300.0,
+                        total_loss_limit: 600.0,
+                    },
+                    None,
+                )
+                .unwrap(),
                 ExchangeRules {
                     price_tick: 0.1,
                     quantity_step: 0.001,

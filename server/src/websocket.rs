@@ -717,7 +717,7 @@ mod tests {
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
-    use poise_core::track::{Instrument, TrackId, Venue};
+    use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_core::types::ExchangeRules;
     use poise_engine::command::TrackCommand;
     use poise_engine::execution_plan::TrackEffect;
@@ -729,7 +729,6 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
 
-    use crate::effect_worker::EffectWorker;
     use crate::projector::TrackProjector;
     use crate::server_context::WebSocketState;
     use crate::test_support::{
@@ -1134,16 +1133,21 @@ mod tests {
             repository,
             state.notifications.clone(),
         );
-        let worker = EffectWorker::new(
-            effect_worker_state,
-            Arc::new(NoopExchange),
-            Arc::new(NoopExchange),
-            Duration::from_millis(10),
-        );
         let (client, _) = connect_async(&url).await.unwrap();
         let (_, mut stream) = client.split();
 
-        worker.run_once().await.unwrap();
+        for _ in 0..10 {
+            if state.notifications.receiver_count() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(state.notifications.receiver_count() > 0);
+        effect_worker_state
+            .effect_service
+            .complete_effect_succeeded("btc-core", "effect-1")
+            .await
+            .unwrap();
 
         let first = recv_event(&mut stream).await;
         let second = recv_event(&mut stream).await;
@@ -1489,23 +1493,27 @@ mod tests {
         let mut manager = TrackManager::new(Arc::new(FakeClock));
         manager
             .add_track(
-                TrackId::new("btc-core"),
-                Instrument::new(Venue::Binance, "BTCUSDT"),
-                TrackConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: ShapeFamily::Linear,
-                    out_of_band_policy: BandProtectionPolicy::Freeze,
-                },
-                3000.0,
-                LossLimits {
-                    daily_loss_limit: 100.0,
-                    total_loss_limit: 300.0,
-                },
+                TrackDefinition::try_new(
+                    TrackId::new("btc-core"),
+                    Instrument::new(Venue::Binance, "BTCUSDT"),
+                    TrackConfig {
+                        lower_price: 90.0,
+                        upper_price: 110.0,
+                        long_exposure_units: 8.0,
+                        short_exposure_units: 8.0,
+                        notional_per_unit: 375.0,
+                        min_rebalance_units: 0.5,
+                        shape_family: ShapeFamily::Linear,
+                        out_of_band_policy: BandProtectionPolicy::Freeze,
+                    },
+                    Some(3000.0),
+                    LossLimits {
+                        daily_loss_limit: 100.0,
+                        total_loss_limit: 300.0,
+                    },
+                    None,
+                )
+                .unwrap(),
                 ExchangeRules {
                     price_tick: 0.0,
                     quantity_step: 0.0,

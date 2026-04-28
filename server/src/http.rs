@@ -235,7 +235,7 @@ mod tests {
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
-    use poise_core::track::{Instrument, TrackId, Venue};
+    use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_core::{
         events::DomainEvent,
         types::{ExchangeRules, Exposure},
@@ -482,23 +482,27 @@ mod tests {
         let mut manager = TrackManager::new(Arc::new(FakeClock));
         manager
             .add_track(
-                TrackId::new("btc-core"),
-                Instrument::new(Venue::Binance, "BTCUSDT"),
-                TrackConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: ShapeFamily::Linear,
-                    out_of_band_policy: BandProtectionPolicy::Freeze,
-                },
-                3000.0,
-                LossLimits {
-                    daily_loss_limit: 100.0,
-                    total_loss_limit: 300.0,
-                },
+                TrackDefinition::try_new(
+                    TrackId::new("btc-core"),
+                    Instrument::new(Venue::Binance, "BTCUSDT"),
+                    TrackConfig {
+                        lower_price: 90.0,
+                        upper_price: 110.0,
+                        long_exposure_units: 8.0,
+                        short_exposure_units: 8.0,
+                        notional_per_unit: 375.0,
+                        min_rebalance_units: 0.5,
+                        shape_family: ShapeFamily::Linear,
+                        out_of_band_policy: BandProtectionPolicy::Freeze,
+                    },
+                    Some(3000.0),
+                    LossLimits {
+                        daily_loss_limit: 100.0,
+                        total_loss_limit: 300.0,
+                    },
+                    None,
+                )
+                .unwrap(),
                 test_exchange_rules(),
             )
             .unwrap();

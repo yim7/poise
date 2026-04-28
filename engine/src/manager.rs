@@ -3,8 +3,6 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use poise_core::events::DomainEvent;
-use poise_core::risk::{LossLimits, validate_loss_limits, validate_max_notional};
-use poise_core::strategy::TrackConfig;
 use poise_core::types::ExchangeRules;
 use poise_core::types::Exposure;
 
@@ -27,9 +25,7 @@ use crate::runtime::{
     TrackRuntime, TrackRuntimeView, TrackState,
 };
 use crate::transition::TrackTransition;
-use poise_core::track::{Instrument, TrackId};
-
-const DEFAULT_TICK_TIMEOUT_SECS: u64 = 30;
+use poise_core::track::{DEFAULT_TICK_TIMEOUT_SECS, Instrument, TrackDefinition, TrackId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExchangeSyncMode {
@@ -66,35 +62,24 @@ impl TrackManager {
 
     pub fn add_track(
         &mut self,
-        id: TrackId,
-        instrument: Instrument,
-        config: TrackConfig,
-        max_notional: f64,
-        loss_limits: LossLimits,
+        definition: TrackDefinition,
         exchange_rules: ExchangeRules,
     ) -> Result<()> {
         self.add_track_with_tick_timeout_secs(
-            id,
-            instrument,
-            config,
-            max_notional,
-            loss_limits,
+            definition.clone(),
             exchange_rules,
-            DEFAULT_TICK_TIMEOUT_SECS,
+            definition.tick_timeout_secs(),
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn add_track_with_tick_timeout_secs(
         &mut self,
-        id: TrackId,
-        instrument: Instrument,
-        config: TrackConfig,
-        max_notional: f64,
-        loss_limits: LossLimits,
+        definition: TrackDefinition,
         exchange_rules: ExchangeRules,
         tick_timeout_secs: u64,
     ) -> Result<()> {
+        let id = definition.track_id().clone();
+        let instrument = definition.instrument().clone();
         if self.tracks.contains_key(&id) {
             bail!("duplicate track id `{}`", id.as_str());
         }
@@ -106,20 +91,12 @@ impl TrackManager {
             );
         }
 
-        poise_core::strategy::validate_config(&config).map_err(|e| anyhow::anyhow!(e))?;
-        validate_max_notional(max_notional).map_err(|e| anyhow::anyhow!(e))?;
-        validate_loss_limits(&loss_limits).map_err(|e| anyhow::anyhow!(e))?;
-        let track = TrackRuntime::new(
-            id.clone(),
-            instrument.clone(),
-            config,
-            max_notional,
-            loss_limits,
+        let track = TrackRuntime::with_tick_timeout_secs(
+            definition,
             exchange_rules,
             self.clock.now(),
+            tick_timeout_secs,
         );
-        let mut track = track;
-        track.tick_timeout_secs = tick_timeout_secs;
         self.tracks.insert(id.clone(), track);
         self.instruments.insert(instrument, id);
         Ok(())
@@ -1228,7 +1205,9 @@ fn market_mutation_requires_durable_write(
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+    use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
+    use poise_core::track::TrackDefinition;
     use poise_core::types::{ExchangeRules, Side};
 
     use crate::execution_plan::TrackEffect;
@@ -1253,16 +1232,16 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
         )));
         let id = TrackId::from("test");
-        manager
-            .add_track(
-                id.clone(),
-                Instrument::new(Venue::Binance, "BTCUSDT"),
-                config(),
-                10_000.0,
-                loss_limits(),
-                rules(),
-            )
-            .unwrap();
+        let definition = TrackDefinition::try_new(
+            id.clone(),
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            config(),
+            Some(10_000.0),
+            loss_limits(),
+            None,
+        )
+        .unwrap();
+        manager.add_track(definition, rules()).unwrap();
         (manager, id)
     }
 

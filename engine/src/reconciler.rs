@@ -387,11 +387,12 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::*;
+    use poise_core::track::{Instrument, TrackDefinition, Venue};
 
     fn test_runtime() -> TrackRuntime {
-        TrackRuntime::new(
+        let definition = TrackDefinition::try_new(
             "test".into(),
-            poise_core::track::Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+            Instrument::new(Venue::Binance, "BTCUSDT"),
             TrackConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -402,8 +403,14 @@ mod tests {
                 shape_family: ShapeFamily::Linear,
                 out_of_band_policy: BandProtectionPolicy::Freeze,
             },
-            test_max_notional(),
+            Some(test_max_notional()),
             test_loss_limits(),
+            None,
+        )
+        .unwrap();
+
+        TrackRuntime::new(
+            definition,
             poise_core::types::ExchangeRules {
                 price_tick: 0.1,
                 quantity_step: 0.1,

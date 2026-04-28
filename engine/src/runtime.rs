@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use poise_core::events::ExecutionGateReason;
 use poise_core::risk::{LossLimits, RiskTerminationCause};
 use poise_core::strategy::{BandBoundary, TrackConfig};
+use poise_core::track::{Instrument, TrackDefinition, TrackId};
 use poise_core::types::{ExchangeRules, Exposure, Side};
 
 use crate::execution_gate::{ExecutionGateDecision, ExecutionGateState};
@@ -20,8 +21,6 @@ use crate::price_gate::{
     PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
 };
 use crate::reconciler;
-use poise_core::track::{Instrument, TrackId};
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackStatus {
@@ -350,43 +349,30 @@ pub struct TrackRuntime {
 
 impl TrackRuntime {
     pub fn new(
-        id: TrackId,
-        instrument: Instrument,
-        config: TrackConfig,
-        max_notional: f64,
-        loss_limits: LossLimits,
+        definition: TrackDefinition,
         exchange_rules: ExchangeRules,
         started_at: DateTime<Utc>,
     ) -> Self {
         Self::with_tick_timeout_secs(
-            id,
-            instrument,
-            config,
-            max_notional,
-            loss_limits,
+            definition.clone(),
             exchange_rules,
             started_at,
-            30,
+            definition.tick_timeout_secs(),
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn with_tick_timeout_secs(
-        id: TrackId,
-        instrument: Instrument,
-        config: TrackConfig,
-        max_notional: f64,
-        loss_limits: LossLimits,
+        definition: TrackDefinition,
         exchange_rules: ExchangeRules,
         started_at: DateTime<Utc>,
         tick_timeout_secs: u64,
     ) -> Self {
         Self {
-            id,
-            instrument,
-            config,
-            max_notional,
-            loss_limits,
+            id: definition.track_id().clone(),
+            instrument: definition.instrument().clone(),
+            config: definition.track_config().clone(),
+            max_notional: definition.max_notional(),
+            loss_limits: definition.loss_limits().clone(),
             exchange_rules,
             track_state: TrackState::WaitingMarketData,
             current_exposure: Exposure(0.0),
@@ -443,6 +429,18 @@ impl TrackRuntime {
         &self.exchange_rules
     }
 
+    fn static_definition(&self) -> TrackDefinition {
+        TrackDefinition::try_new(
+            self.id.clone(),
+            self.instrument.clone(),
+            self.config.clone(),
+            Some(self.max_notional),
+            self.loss_limits.clone(),
+            Some(self.tick_timeout_secs),
+        )
+        .expect("runtime static fields must remain a valid track definition")
+    }
+
     pub fn fresh_start(
         &self,
         track_state: TrackState,
@@ -456,11 +454,7 @@ impl TrackRuntime {
             exchange_rules,
         } = external_inputs;
         let mut fresh = Self::with_tick_timeout_secs(
-            self.id.clone(),
-            self.instrument.clone(),
-            self.config.clone(),
-            self.max_notional,
-            self.loss_limits.clone(),
+            self.static_definition(),
             exchange_rules,
             started_at,
             self.tick_timeout_secs,
@@ -675,19 +669,11 @@ mod tests {
     use crate::executor::policy::PolicyKind;
     use crate::ports::OrderRequest;
     use crate::price_gate::SubmitPurpose;
-    use poise_core::track::Venue;
+    use poise_core::track::{TrackDefinition, Venue};
 
     #[test]
     fn runtime_frame_is_current_process_state_not_persisted_document() {
-        let mut runtime = TrackRuntime::new(
-            "test".into(),
-            Instrument::new(Venue::Binance, "BTCUSDT"),
-            test_config(),
-            10_000.0,
-            test_loss_limits(),
-            test_rules(0.1),
-            Utc::now(),
-        );
+        let mut runtime = TrackRuntime::new(test_definition(), test_rules(0.1), Utc::now());
         runtime.executor_state = dirty_executor_state();
 
         let runtime_frame = runtime.mutation_frame();
@@ -860,16 +846,20 @@ mod tests {
         }
     }
 
-    fn test_runtime() -> TrackRuntime {
-        TrackRuntime::new(
+    fn test_definition() -> TrackDefinition {
+        TrackDefinition::try_new(
             "test".into(),
             Instrument::new(Venue::Binance, "BTCUSDT"),
             test_config(),
-            10_000.0,
+            Some(10_000.0),
             test_loss_limits(),
-            test_rules(0.1),
-            Utc::now(),
+            None,
         )
+        .unwrap()
+    }
+
+    fn test_runtime() -> TrackRuntime {
+        TrackRuntime::new(test_definition(), test_rules(0.1), Utc::now())
     }
 
     fn dirty_executor_state() -> ExecutorState {

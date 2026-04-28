@@ -228,20 +228,24 @@ pub(crate) fn test_manager(track_id: &str) -> TrackManager {
     let mut manager = TrackManager::new(Arc::new(crate::assembly::SystemClock));
     manager
         .add_track(
-            TrackId::new(track_id),
-            poise_core::track::Instrument::new(Venue::Binance, default_symbol_for(track_id)),
-            poise_core::strategy::TrackConfig {
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                min_rebalance_units: 0.5,
-                shape_family: ShapeFamily::Linear,
-                out_of_band_policy: BandProtectionPolicy::Freeze,
-            },
-            test_max_notional(),
-            test_loss_limits(),
+            TrackDefinition::try_new(
+                TrackId::new(track_id),
+                Instrument::new(Venue::Binance, default_symbol_for(track_id)),
+                TrackConfig {
+                    lower_price: 90.0,
+                    upper_price: 110.0,
+                    long_exposure_units: 8.0,
+                    short_exposure_units: 8.0,
+                    notional_per_unit: 375.0,
+                    min_rebalance_units: 0.5,
+                    shape_family: ShapeFamily::Linear,
+                    out_of_band_policy: BandProtectionPolicy::Freeze,
+                },
+                Some(test_max_notional()),
+                test_loss_limits(),
+                None,
+            )
+            .unwrap(),
             ExchangeRules {
                 price_tick: 0.1,
                 quantity_step: 0.1,
