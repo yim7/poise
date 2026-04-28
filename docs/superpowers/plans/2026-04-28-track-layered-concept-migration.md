@@ -283,10 +283,10 @@ server::config::TrackSpec
 
 **步骤：**
 
-- [ ] 更新仍有参考价值的设计文档，把 `ConfiguredTrackDefinition` / `TrackPreparedDefinition` 替换为新的分层模型。
-- [ ] 不机械改早期历史记录；只更新仍被当作当前设计依据的文档。
-- [ ] 搜索确认生产代码中不再有 `ConfiguredTrackDefinition`、`ConfiguredTrackInput`、`PreparedTrackRegistry`、`TrackPreparedDefinition`。
-- [ ] 回写 Task 1-5 的 commit SHA。
+- [x] 更新仍有参考价值的设计文档，把 `ConfiguredTrackDefinition` / `TrackPreparedDefinition` 替换为新的分层模型。
+- [x] 不机械改早期历史记录；只更新仍被当作当前设计依据的文档。
+- [x] 搜索确认生产代码中不再有 `ConfiguredTrackDefinition`、`ConfiguredTrackInput`、`PreparedTrackRegistry`、`TrackPreparedDefinition`。
+- [x] 回写 Task 1-5 的 commit SHA。
 
 **最小验收命令：**
 
@@ -295,7 +295,16 @@ server::config::TrackSpec
 - `cargo test -p poise-application track_definition::tests::`
 - `cargo test -p poise-server config::tests::`
 
-**Commit SHA：** 待执行后回写
+**执行记录：**
+
+- 2026-04-28：已完成；两个仍作为当前设计依据的 spec 已更新为 `TrackSpec -> core::TrackDefinition -> TrackRuntime` 分层模型，两个早期 implementation plan 保留为历史执行记录。
+- 验收：`rg -n "ConfiguredTrackDefinition|ConfiguredTrackInput|PreparedTrackRegistry|TrackPreparedDefinition" application/src core/src engine/src server/src storage/src` 无命中。
+- 验收：`cargo test -p poise-core track::tests::`
+- 验收：`cargo test -p poise-application track_definition::tests::`
+- 验收：`cargo test -p poise-server config::tests::`
+- 检查：`git diff --check`
+
+**Commit SHA：** `5814aa2`
 
 ## 并行性
 
