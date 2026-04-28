@@ -157,14 +157,14 @@ server::config::TrackSpec
 
 **步骤：**
 
-- [ ] 在 `core::track` 中定义 `TrackDefinition`，字段包括 `track_id`、`instrument`、`track_config`、`max_notional`、`loss_limits`、`tick_timeout_secs`。
-- [ ] 在 `TrackDefinition` 上提供 `try_new(track_id, instrument, track_config, max_notional, loss_limits, tick_timeout_secs)`，接收已经分组好的领域对象，不接 15 个 TOML 原始字段。
-- [ ] 将默认值补齐和校验逻辑移动到 `TrackDefinition::try_new`。
-- [ ] 将 `server::config::TrackSpec::to_configured_input` 改为 `to_track_definition`，由它负责 TOML schema 字段到领域对象的映射，并调用 `TrackDefinition::try_new`。
-- [ ] 删除 `ConfiguredTrackInput` 和 `ConfiguredTrackDefinition`。
-- [ ] 评估并删除浅层 `TrackReadDefinition` / `TrackStartupDefinition`；read model 和 startup 优先直接使用 `core::TrackDefinition` 或其语义方法。
-- [ ] 如果某个 projection 必须保留，必须说明它隐藏了什么信息，而不是只复制字段。
-- [ ] 将 `PreparedTrackRegistry` 改名为 `TrackDefinitionRegistry`，并存储 `core::TrackDefinition`。
+- [x] 在 `core::track` 中定义 `TrackDefinition`，字段包括 `track_id`、`instrument`、`track_config`、`max_notional`、`loss_limits`、`tick_timeout_secs`。
+- [x] 在 `TrackDefinition` 上提供 `try_new(track_id, instrument, track_config, max_notional, loss_limits, tick_timeout_secs)`，接收已经分组好的领域对象，不接 15 个 TOML 原始字段。
+- [x] 将默认值补齐和校验逻辑移动到 `TrackDefinition::try_new`。
+- [x] 将 `server::config::TrackSpec::to_configured_input` 改为 `to_track_definition`，由它负责 TOML schema 字段到领域对象的映射，并调用 `TrackDefinition::try_new`。
+- [x] 删除 `ConfiguredTrackInput` 和 `ConfiguredTrackDefinition`。
+- [x] 评估并删除浅层 `TrackReadDefinition` / `TrackStartupDefinition`；read model 和 startup 优先直接使用 `core::TrackDefinition` 或其语义方法。
+- [x] 如果某个 projection 必须保留，必须说明它隐藏了什么信息，而不是只复制字段。
+- [x] 将 `PreparedTrackRegistry` 改名为 `TrackDefinitionRegistry`，并存储 `core::TrackDefinition`。
 
 **最小验收命令：**
 
@@ -174,7 +174,21 @@ server::config::TrackSpec
 - `cargo test -p poise-server config::tests::`
 - `cargo test -p poise-server exchange_startup::tests::`
 
-**Commit SHA：** 待执行后回写
+**执行记录：**
+
+- 2026-04-28：已完成；未保留 read/startup projection。
+- 验收：`cargo test -p poise-core track::tests::`
+- 验收：`cargo test -p poise-application track_definition::tests::`
+- 验收：`cargo test -p poise-application query_service::tests::`
+- 验收：`cargo test -p poise-server config::tests::`
+- 验收：`cargo test -p poise-server exchange_startup::tests::`
+- 额外确认：`cargo test -p poise-application read_model::tests::`
+- 额外确认：`cargo test -p poise-server assembly::tests::track_instrument_uses_service_exchange_venue`
+- 额外确认：`cargo test -p poise-server state_bootstrap::tests::`
+- 额外确认：`cargo test -p poise-server --test startup_preparation`
+- 检查：`git diff --check`
+
+**Commit SHA：** `1b7fa97`
 
 ## Task 4：让 engine 构造入口接收 TrackDefinition
 
