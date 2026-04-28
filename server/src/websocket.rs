@@ -733,7 +733,7 @@ mod tests {
     use crate::server_context::WebSocketState;
     use crate::test_support::{
         build_effect_worker_test_context, build_test_application_services, build_websocket_state,
-        test_prepared_registry, unavailable_account_monitor,
+        test_track_definition_registry, unavailable_account_monitor,
     };
     use poise_application::{
         AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
@@ -800,7 +800,7 @@ mod tests {
         );
         let query_service = Arc::new(TrackQueryService::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
-            test_prepared_registry("btc-core"),
+            test_track_definition_registry("btc-core"),
             Arc::clone(&services.observation_service),
         ));
         let websocket_state = build_websocket_state(
@@ -848,7 +848,7 @@ mod tests {
         );
         let query_service = Arc::new(TrackQueryService::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
-            test_prepared_registry("btc-core"),
+            test_track_definition_registry("btc-core"),
             Arc::clone(&services.observation_service),
         ));
         let websocket_state = build_websocket_state(
@@ -901,7 +901,7 @@ mod tests {
         );
         let query_service = Arc::new(TrackQueryService::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
-            test_prepared_registry("btc-core"),
+            test_track_definition_registry("btc-core"),
             Arc::clone(&services.observation_service),
         ));
         let mut websocket_state = build_websocket_state(

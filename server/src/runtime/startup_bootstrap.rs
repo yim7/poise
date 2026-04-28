@@ -397,7 +397,8 @@ mod tests {
     use crate::runtime::{RuntimePorts, RuntimeStartupCapacityMode, RuntimeStartupDefinition};
     use crate::test_support::{
         build_runtime_and_effect_worker_test_contexts, build_test_application_services,
-        seed_persisted_pending_submit_effect, test_prepared_registry, unavailable_account_monitor,
+        seed_persisted_pending_submit_effect, test_track_definition_registry,
+        unavailable_account_monitor,
     };
 
     use super::complete_startup;
@@ -440,7 +441,7 @@ mod tests {
                 Arc::new(SystemClock),
             ),
             vec![RuntimeStartupDefinition::new(
-                test_prepared_registry("btc-core")
+                test_track_definition_registry("btc-core")
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
                     .clone(),
@@ -559,7 +560,7 @@ mod tests {
                 Arc::new(SystemClock),
             ),
             vec![RuntimeStartupDefinition::new(
-                test_prepared_registry("btc-core")
+                test_track_definition_registry("btc-core")
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
                     .clone(),
@@ -637,7 +638,7 @@ mod tests {
                 Arc::new(SystemClock),
             ),
             vec![RuntimeStartupDefinition::new(
-                test_prepared_registry("btc-core")
+                test_track_definition_registry("btc-core")
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
                     .clone(),
@@ -733,7 +734,7 @@ mod tests {
                 Arc::new(SystemClock),
             ),
             vec![RuntimeStartupDefinition::new(
-                test_prepared_registry("btc-core")
+                test_track_definition_registry("btc-core")
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
                     .clone(),
@@ -803,7 +804,7 @@ mod tests {
                 Arc::new(SystemClock),
             ),
             vec![RuntimeStartupDefinition::new(
-                test_prepared_registry("btc-core")
+                test_track_definition_registry("btc-core")
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
                     .clone(),

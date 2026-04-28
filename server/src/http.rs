@@ -257,7 +257,7 @@ mod tests {
     use crate::server_context::{HttpState, WebSocketState};
     use crate::test_support::{
         build_http_state, build_test_application_services, build_websocket_state,
-        test_prepared_registry, unavailable_account_monitor,
+        test_track_definition_registry, unavailable_account_monitor,
     };
 
     use poise_application::{
@@ -350,7 +350,7 @@ mod tests {
         );
         let query_service = Arc::new(TrackQueryService::new(
             query_store.clone(),
-            test_prepared_registry("btc-core"),
+            test_track_definition_registry("btc-core"),
             services.observation_service.clone(),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
@@ -373,7 +373,7 @@ mod tests {
                 &services,
                 Arc::new(TrackQueryService::new(
                     repository as Arc<dyn TrackQueryStore>,
-                    test_prepared_registry("btc-core"),
+                    test_track_definition_registry("btc-core"),
                     services.observation_service.clone(),
                 )),
                 projector,
@@ -452,7 +452,7 @@ mod tests {
         let account_projector = Arc::new(AccountProjector::new());
         let query_service = Arc::new(TrackQueryService::new(
             query_store.clone(),
-            test_prepared_registry("btc-core"),
+            test_track_definition_registry("btc-core"),
             services.observation_service.clone(),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
@@ -638,7 +638,7 @@ mod tests {
             );
             let query_service = Arc::new(TrackQueryService::new(
                 query_store.clone(),
-                test_prepared_registry("btc-core"),
+                test_track_definition_registry("btc-core"),
                 services.observation_service.clone(),
             ));
             let debug_query_service = Arc::new(TrackDebugQueryService::new(
@@ -661,7 +661,7 @@ mod tests {
                     &services,
                     Arc::new(TrackQueryService::new(
                         repository as Arc<dyn TrackQueryStore>,
-                        test_prepared_registry("btc-core"),
+                        test_track_definition_registry("btc-core"),
                         services.observation_service.clone(),
                     )),
                     projector,
@@ -934,7 +934,7 @@ mod tests {
         let query_store = repository.clone() as Arc<dyn TrackQueryStore>;
         let query_service = Arc::new(TrackQueryService::new(
             query_store.clone(),
-            test_prepared_registry("btc-core"),
+            test_track_definition_registry("btc-core"),
             services.observation_service.clone(),
         ));
         let projector = Arc::new(TrackProjector::new());

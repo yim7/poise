@@ -47,8 +47,9 @@ async fn main() -> Result<()> {
         Err(error) => return Err(anyhow::anyhow!(render_startup_error(&error))),
     };
     let (platform, runtime_handles, listener) = prepared_state
-        .run_startup(|repositories, prepared_registry| async {
-            let platform = assembly::assemble(&config, prepared_registry, repositories).await?;
+        .run_startup(|repositories, track_definition_registry| async {
+            let platform =
+                assembly::assemble(&config, track_definition_registry, repositories).await?;
             start_platform(&config, platform).await
         })
         .await?;
@@ -108,11 +109,6 @@ fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<Start
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("missing value for --instance-dir"))?;
                 instance_dir = Some(std::path::PathBuf::from(value));
-            }
-            "--rebuild-state" => {
-                return Err(anyhow::anyhow!(
-                    "`--rebuild-state` 已移除；启动现在会直接基于当前配置、持久控制/账本状态和交易所真值 fresh-start"
-                ));
             }
             other => {
                 return Err(anyhow::anyhow!("unknown argument: {other}"));
@@ -182,7 +178,9 @@ mod tests {
 
     use super::{StartupOptions, parse_startup_options};
 
-    fn test_prepared_registry(config: &crate::config::Config) -> Arc<TrackDefinitionRegistry> {
+    fn test_track_definition_registry(
+        config: &crate::config::Config,
+    ) -> Arc<TrackDefinitionRegistry> {
         let configured = config
             .tracks
             .iter()
@@ -213,21 +211,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_startup_options_rejects_rebuild_state_flag() {
-        let error = parse_startup_options(
-            vec![
-                "--rebuild-state".to_string(),
-                "--instance-dir".to_string(),
-                "/tmp/poise-a".to_string(),
-            ]
-            .into_iter(),
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("`--rebuild-state` 已移除"));
-    }
-
-    #[test]
     fn parse_config_path_rejects_unknown_arguments() {
         let error = parse_startup_options(vec!["--bogus".to_string()].into_iter()).unwrap_err();
         assert!(error.to_string().contains("unknown argument"));
@@ -246,7 +229,6 @@ mod tests {
         assert!(rendered.contains(".data/testnet/poise-server.sqlite"));
         assert!(rendered.contains("btc-core"));
         assert!(rendered.contains("persisted business state is missing"));
-        assert!(!rendered.contains("--rebuild-state"));
     }
 
     fn workspace_root() -> PathBuf {
@@ -529,7 +511,7 @@ total_loss_limit = 600.0
         let exchange = Arc::new(FakeExchange);
         let platform = crate::assembly::assemble_with_exchange_ports(
             &config,
-            test_prepared_registry(&config),
+            test_track_definition_registry(&config),
             crate::assembly::ExchangePorts::new(
                 exchange.clone(),
                 Arc::new(FakeMarketData::default()),
@@ -691,7 +673,7 @@ total_loss_limit = 600.0
         let exchange = Arc::new(FakeExchange);
         let platform = crate::assembly::assemble_with_exchange_ports(
             &config,
-            test_prepared_registry(&config),
+            test_track_definition_registry(&config),
             crate::assembly::ExchangePorts::new(
                 exchange.clone(),
                 Arc::new(FailingStartMarketData),

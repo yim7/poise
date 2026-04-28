@@ -16,27 +16,27 @@ pub(crate) const DETAIL_EFFECTS_LIMIT: usize = 20;
 #[derive(Clone)]
 pub(crate) struct TrackReadSourceLoader {
     repository: Arc<dyn TrackQueryStore>,
-    prepared_registry: Arc<TrackDefinitionRegistry>,
+    track_definition_registry: Arc<TrackDefinitionRegistry>,
     observation: Arc<TrackObservationService>,
 }
 
 impl TrackReadSourceLoader {
     pub(crate) fn new(
         repository: Arc<dyn TrackQueryStore>,
-        prepared_registry: Arc<TrackDefinitionRegistry>,
+        track_definition_registry: Arc<TrackDefinitionRegistry>,
         observation: Arc<TrackObservationService>,
     ) -> Self {
         Self {
             repository,
-            prepared_registry,
+            track_definition_registry,
             observation,
         }
     }
 
     pub(crate) async fn list_track_read_models(&self) -> Result<Vec<TrackListReadModel>> {
         let mut read_models = Vec::new();
-        for prepared in self.prepared_registry.iter() {
-            let track_id = prepared.track_id().clone();
+        for definition in self.track_definition_registry.iter() {
+            let track_id = definition.track_id().clone();
             let Some(runtime) = self
                 .observation
                 .track_runtime_view(track_id.as_str())
@@ -128,7 +128,7 @@ impl TrackReadSourceLoader {
     }
 
     fn definition_for(&self, track_id: &TrackId) -> Result<&TrackDefinition> {
-        self.prepared_registry
+        self.track_definition_registry
             .get(track_id)
             .ok_or_else(|| anyhow::anyhow!("missing track definition for `{}`", track_id.as_str()))
     }

@@ -15,13 +15,13 @@ pub struct TrackQueryService {
 impl TrackQueryService {
     pub fn new(
         repository: Arc<dyn TrackQueryStore>,
-        prepared_registry: Arc<TrackDefinitionRegistry>,
+        track_definition_registry: Arc<TrackDefinitionRegistry>,
         observation: Arc<TrackObservationService>,
     ) -> Self {
         Self {
             loader: Arc::new(TrackReadSourceLoader::new(
                 repository,
-                prepared_registry,
+                track_definition_registry,
                 observation,
             )),
         }
@@ -107,7 +107,7 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), live_repository);
         let source = TrackReadSourceLoader::new(
             Arc::new(FakeReadRepository::new()),
-            test_prepared_registry(),
+            test_track_definition_registry(),
             Arc::new(services.observation),
         )
         .load_track_read_source(&TrackId::new("btc-core"))
@@ -147,7 +147,7 @@ mod tests {
             .unwrap();
         let service = TrackQueryService::new(
             repository,
-            test_prepared_registry(),
+            test_track_definition_registry(),
             Arc::new(services.observation),
         );
 
@@ -182,7 +182,7 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), live_repository);
         let service = TrackQueryService::new(
             repository,
-            test_prepared_registry(),
+            test_track_definition_registry(),
             Arc::new(services.observation),
         );
 
@@ -204,7 +204,7 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), live_repository);
         let service = TrackQueryService::new(
             repository,
-            test_prepared_registry(),
+            test_track_definition_registry(),
             Arc::new(services.observation),
         );
 
@@ -222,7 +222,7 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), live_repository);
         let service = TrackQueryService::new(
             repository,
-            test_prepared_registry(),
+            test_track_definition_registry(),
             Arc::new(services.observation),
         );
 
@@ -243,13 +243,13 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), live_repository);
         let service = TrackQueryService::new(
             repository.clone(),
-            test_prepared_registry(),
+            test_track_definition_registry(),
             Arc::new(services.observation),
         );
         (service, repository)
     }
 
-    fn test_prepared_registry() -> Arc<TrackDefinitionRegistry> {
+    fn test_track_definition_registry() -> Arc<TrackDefinitionRegistry> {
         Arc::new(
             TrackDefinitionRegistry::new(vec![
                 TrackDefinition::try_new(

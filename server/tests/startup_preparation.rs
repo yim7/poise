@@ -21,11 +21,11 @@ struct FakeBuiltExchange(&'static str);
 #[tokio::test]
 async fn prepare_exchange_startup_builds_exchange_before_setting_leverage() {
     let call_log = Arc::new(Mutex::new(Vec::new()));
-    let prepared_registry = prepared_registry("btc-core", "BTCUSDT");
+    let track_definition_registry = track_definition_registry("btc-core", "BTCUSDT");
     let track_leverage_index = TrackLeverageIndex::from([(TrackId::new("btc-core"), 20)]);
 
     let built_exchange: FakeBuiltExchange = startup_preparation::prepare_exchange_startup_with(
-        &prepared_registry,
+        &track_definition_registry,
         &track_leverage_index,
         {
             let call_log = call_log.clone();
@@ -64,11 +64,11 @@ async fn prepare_exchange_startup_builds_exchange_before_setting_leverage() {
 #[tokio::test]
 async fn prepare_exchange_startup_failure_surfaces_track_symbol_and_leverage_context() {
     let call_log = Arc::new(Mutex::new(Vec::new()));
-    let prepared_registry = prepared_registry("btc-core", "BTCUSDT");
+    let track_definition_registry = track_definition_registry("btc-core", "BTCUSDT");
     let track_leverage_index = TrackLeverageIndex::from([(TrackId::new("btc-core"), 7)]);
 
     let result: Result<FakeBuiltExchange> = startup_preparation::prepare_exchange_startup_with(
-        &prepared_registry,
+        &track_definition_registry,
         &track_leverage_index,
         {
             let call_log = call_log.clone();
@@ -126,7 +126,7 @@ async fn load_exchange_info_with_retry_retries_transient_failures() {
     assert_eq!(info.rules, test_exchange_rules());
 }
 
-fn prepared_registry(track_id: &str, symbol: &str) -> TrackDefinitionRegistry {
+fn track_definition_registry(track_id: &str, symbol: &str) -> TrackDefinitionRegistry {
     TrackDefinitionRegistry::new(vec![
         TrackDefinition::try_new(
             TrackId::new(track_id),

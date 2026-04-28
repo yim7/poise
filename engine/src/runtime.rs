@@ -320,7 +320,7 @@ impl ExecutorState {
 
 #[derive(Debug, Clone)]
 pub struct TrackRuntime {
-    pub(crate) definition: TrackDefinition,
+    definition: TrackDefinition,
     pub(crate) exchange_rules: ExchangeRules,
     pub(crate) track_state: TrackState,
     pub(crate) current_exposure: Exposure,
@@ -419,6 +419,24 @@ impl TrackRuntime {
 
     pub fn loss_limits(&self) -> &LossLimits {
         self.definition.loss_limits()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_definition_for_test(
+        &mut self,
+        config: TrackConfig,
+        max_notional: f64,
+        loss_limits: LossLimits,
+    ) {
+        self.definition = TrackDefinition::try_new(
+            self.id().clone(),
+            self.instrument().clone(),
+            config,
+            Some(max_notional),
+            loss_limits,
+            Some(self.tick_timeout_secs),
+        )
+        .expect("test definition replacement must be valid");
     }
 
     pub fn exchange_rules(&self) -> &ExchangeRules {

@@ -176,8 +176,8 @@ pub(crate) fn test_loss_limits() -> LossLimits {
     }
 }
 
-pub(crate) fn test_prepared_registry(track_id: &str) -> Arc<TrackDefinitionRegistry> {
-    prepared_registry_for(
+pub(crate) fn test_track_definition_registry(track_id: &str) -> Arc<TrackDefinitionRegistry> {
+    track_definition_registry_for(
         track_id,
         default_symbol_for(track_id),
         test_max_notional(),
@@ -185,7 +185,7 @@ pub(crate) fn test_prepared_registry(track_id: &str) -> Arc<TrackDefinitionRegis
     )
 }
 
-fn prepared_registry_for(
+fn track_definition_registry_for(
     track_id: &str,
     symbol: &str,
     max_notional: f64,

@@ -1333,15 +1333,11 @@ mod tests {
             let track = manager.tracks.get_mut(&id).unwrap();
             let mut config = track.config().clone();
             config.notional_per_unit = 120.0;
-            track.definition = TrackDefinition::try_new(
-                track.id().clone(),
-                track.instrument().clone(),
+            track.replace_definition_for_test(
                 config,
-                Some(track.max_notional()),
+                track.max_notional(),
                 track.loss_limits().clone(),
-                Some(track.tick_timeout_secs),
-            )
-            .unwrap();
+            );
         }
 
         manager.observe(&id, market(100.0)).unwrap();

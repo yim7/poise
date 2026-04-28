@@ -441,15 +441,7 @@ mod tests {
         max_notional: f64,
         loss_limits: LossLimits,
     ) {
-        track.definition = TrackDefinition::try_new(
-            track.id().clone(),
-            track.instrument().clone(),
-            config,
-            Some(max_notional),
-            loss_limits,
-            Some(track.tick_timeout_secs),
-        )
-        .unwrap();
+        track.replace_definition_for_test(config, max_notional, loss_limits);
     }
 
     fn set_out_of_band_policy(track: &mut TrackRuntime, policy: BandProtectionPolicy) {

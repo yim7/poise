@@ -60,7 +60,7 @@ pub struct StateRepositories {
 
 pub struct PreparedStateStore {
     repositories: StateRepositories,
-    prepared_registry: Arc<TrackDefinitionRegistry>,
+    track_definition_registry: Arc<TrackDefinitionRegistry>,
 }
 
 impl PreparedStateStore {
@@ -71,14 +71,14 @@ impl PreparedStateStore {
     {
         startup(
             self.repositories.clone(),
-            Arc::clone(&self.prepared_registry),
+            Arc::clone(&self.track_definition_registry),
         )
         .await
     }
 
     #[cfg(test)]
     pub fn registry(&self) -> &TrackDefinitionRegistry {
-        &self.prepared_registry
+        &self.track_definition_registry
     }
 }
 
@@ -132,17 +132,19 @@ pub async fn prepare_state_repository(
 ) -> BootstrapResult<PreparedStateStore> {
     ensure_parent_dir(db_path).map_err(unexpected)?;
     let db_path = db_path.to_path_buf();
-    let prepared_registry = Arc::new(build_prepared_registry(config).map_err(unexpected)?);
+    let track_definition_registry =
+        Arc::new(build_track_definition_registry(config).map_err(unexpected)?);
 
     let repository = SqliteStorage::new(&db_path).map_err(unexpected)?;
-    let mismatches = detect_persisted_state_mismatches(prepared_registry.as_ref(), &repository)
-        .await
-        .map_err(unexpected)?;
+    let mismatches =
+        detect_persisted_state_mismatches(track_definition_registry.as_ref(), &repository)
+            .await
+            .map_err(unexpected)?;
     if mismatches.is_empty() {
         let repository = Arc::new(repository);
         return Ok(PreparedStateStore {
             repositories: StateRepositories::from_sqlite_storage(repository),
-            prepared_registry,
+            track_definition_registry,
         });
     }
 
@@ -152,7 +154,7 @@ pub async fn prepare_state_repository(
     })
 }
 
-fn build_prepared_registry(config: &Config) -> Result<TrackDefinitionRegistry> {
+fn build_track_definition_registry(config: &Config) -> Result<TrackDefinitionRegistry> {
     let mut configured = Vec::with_capacity(config.tracks.len());
     for track in &config.tracks {
         configured.push(track.to_track_definition(config.exchange.venue())?);
@@ -169,11 +171,11 @@ fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
 }
 
 async fn detect_persisted_state_mismatches(
-    prepared_registry: &TrackDefinitionRegistry,
+    track_definition_registry: &TrackDefinitionRegistry,
     repository: &SqliteStorage,
 ) -> Result<Vec<PersistedStateMismatch>> {
     let mut mismatches = Vec::new();
-    for track in prepared_registry.iter() {
+    for track in track_definition_registry.iter() {
         let track_id = track.track_id().as_str();
         let has_control_truth =
             TrackQueryStore::load_track_control_state(repository, track.track_id())
@@ -221,7 +223,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_state_repository_builds_prepared_track_registry_for_startup() {
+    async fn prepare_state_repository_builds_track_definition_registry_for_startup() {
         let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
         let db_path = test_db_path(instance_dir.path());

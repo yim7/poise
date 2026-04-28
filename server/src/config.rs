@@ -442,19 +442,19 @@ total_loss_limit = 600.0
     }
 
     #[test]
-    fn parses_bybit_testnet_example_config() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../configs/bybit-testnet.demo.toml");
+    fn parses_demo_config() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../configs/demo.toml");
         let config = load_config(&path).unwrap();
 
-        assert_eq!(config.exchange.venue(), Venue::Bybit);
-        if let ExchangeConfig::Bybit(exchange) = &config.exchange {
-            assert_eq!(exchange.deployment, poise_bybit::Deployment::Testnet);
+        assert_eq!(config.exchange.venue(), Venue::Binance);
+        if let ExchangeConfig::Binance(exchange) = &config.exchange {
+            assert_eq!(exchange.deployment, poise_binance::Deployment::Testnet);
         } else {
-            panic!("expected Bybit fixture to parse as ExchangeConfig::Bybit");
+            panic!("expected demo config to parse as ExchangeConfig::Binance");
         }
         assert_eq!(config.tracks.len(), 1);
         assert_eq!(config.tracks[0].track_id(), TrackId::new("btc-core"));
+        assert_eq!(config.tracks[0].leverage, Some(10));
     }
 
     #[test]
@@ -761,21 +761,21 @@ total_loss_limit = 600.0
     }
 
     #[test]
-    fn parses_binance_testnet_example_config() {
-        let config = parse_config(include_str!("../../configs/binance-testnet.demo.toml")).unwrap();
+    fn demo_config_has_current_track_shape() {
+        let config = parse_config(include_str!("../../configs/demo.toml")).unwrap();
         let track = &config.tracks[0];
         let equivalent_track_step = (track.upper_price - track.lower_price)
             / (track.long_exposure_units + track.short_exposure_units);
 
         assert_eq!(config.tracks.len(), 1);
         assert_eq!(track.track_id().as_str(), "btc-core");
-        assert_eq!(track.upper_price - track.lower_price, 5500.0);
-        assert!((equivalent_track_step - 137.5).abs() < f64::EPSILON);
+        assert_eq!(track.upper_price - track.lower_price, 2000.0);
+        assert!((equivalent_track_step - 100.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn binance_testnet_example_config_explicitly_lists_complete_track_parameters() {
-        let raw = include_str!("../../configs/binance-testnet.demo.toml");
+    fn demo_config_explicitly_lists_complete_track_parameters() {
+        let raw = include_str!("../../configs/demo.toml");
 
         assert!(raw.contains("min_rebalance_units ="));
         assert!(raw.contains("shape_family ="));
@@ -787,27 +787,11 @@ total_loss_limit = 600.0
     }
 
     #[test]
-    fn test_demo_config_explicitly_lists_complete_track_parameters() {
-        let raw = include_str!("../../configs/test.demo.toml");
+    fn demo_config_defines_exchange_only_at_service_level() {
+        let raw = include_str!("../../configs/demo.toml");
 
-        assert!(raw.contains("min_rebalance_units ="));
-        assert!(raw.contains("shape_family ="));
-        assert!(raw.contains("out_of_band_policy ="));
-        assert!(raw.contains("tick_timeout_secs ="));
-        assert!(raw.contains("max_notional ="));
-        assert!(raw.contains("daily_loss_limit ="));
-        assert!(raw.contains("total_loss_limit ="));
-    }
-
-    #[test]
-    fn demo_configs_define_exchange_only_at_service_level() {
-        for raw in [
-            include_str!("../../configs/binance-testnet.demo.toml"),
-            include_str!("../../configs/test.demo.toml"),
-        ] {
-            assert_eq!(raw.matches("venue = ").count(), 1);
-            assert!(!raw.contains("[[tracks]]\ntrack_id = \"btc-core\"\nvenue = "));
-        }
+        assert_eq!(raw.matches("venue = ").count(), 1);
+        assert!(!raw.contains("[[tracks]]\ntrack_id = \"btc-core\"\nvenue = "));
     }
 
     #[test]
@@ -815,10 +799,10 @@ total_loss_limit = 600.0
         let raw = include_str!("../../README.md");
 
         assert!(raw.contains("[exchange]\nvenue = \"binance\"\ndeployment = \"testnet\""));
+        assert!(raw.contains("configs/demo.toml"));
         assert!(!raw.contains("[[tracks]]\ntrack_id = \"btc-core\"\nvenue = "));
         assert!(!raw.contains("environment = \"testnet\" 时，服务端固定接 Binance"));
         assert!(!raw.contains("environment = \"mainnet\" 时，服务端固定接 Binance"));
-        assert!(!raw.contains("configs/binance-mainnet.demo.toml"));
         assert!(!raw.contains("environment = \"testnet\""));
         assert!(!raw.contains("environment = \"mainnet\""));
         assert!(!raw.contains("environment = \"test\""));
@@ -852,13 +836,10 @@ total_loss_limit = 600.0
     }
 
     #[test]
-    fn demo_configs_do_not_define_environment() {
-        for raw in [
-            include_str!("../../configs/binance-testnet.demo.toml"),
-            include_str!("../../configs/test.demo.toml"),
-        ] {
-            assert!(!raw.contains("environment = "));
-        }
+    fn demo_config_does_not_define_environment() {
+        let raw = include_str!("../../configs/demo.toml");
+
+        assert!(!raw.contains("environment = "));
     }
 
     #[test]

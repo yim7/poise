@@ -7,7 +7,6 @@ source "${SCRIPT_DIR}/lib/poise-instance.sh"
 REPO_ROOT="$(poise_repo_root_from_script_dir "$SCRIPT_DIR")"
 
 RAW_INSTANCE_DIR="${POISE_INSTANCE_DIR:-}"
-REBUILD_STATE="${POISE_REBUILD_STATE:-0}"
 DRY_RUN=0
 
 usage() {
@@ -17,7 +16,6 @@ usage() {
 
 环境变量:
   POISE_INSTANCE_DIR  实例目录，必须包含 config.toml
-  POISE_REBUILD_STATE 设为 1 时，启动时追加 --rebuild-state
 EOF
 }
 
@@ -58,15 +56,7 @@ if [[ "$DRY_RUN" -ne 1 && ! -f "$CONFIG_PATH" ]]; then
   exit 1
 fi
 
-if [[ "$REBUILD_STATE" != "0" && "$REBUILD_STATE" != "1" ]]; then
-  echo "POISE_REBUILD_STATE must be 0 or 1" >&2
-  exit 1
-fi
-
 SERVER_ARGS=(--instance-dir "$INSTANCE_DIR")
-if [[ "$REBUILD_STATE" == "1" ]]; then
-  SERVER_ARGS+=(--rebuild-state)
-fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   cat <<EOF
@@ -74,11 +64,10 @@ repo_root=$REPO_ROOT
 instance_dir=$INSTANCE_DIR
 config_path=$CONFIG_PATH
 log_path=$LOG_PATH
-rebuild_state=$REBUILD_STATE
 command=cargo run --manifest-path $REPO_ROOT/Cargo.toml -p poise-server -- ${SERVER_ARGS[*]}
 EOF
   exit 0
 fi
 
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] starting poise-server instance_dir=$INSTANCE_DIR rebuild_state=$REBUILD_STATE" | tee -a "$LOG_PATH"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] starting poise-server instance_dir=$INSTANCE_DIR" | tee -a "$LOG_PATH"
 cargo run --manifest-path "$REPO_ROOT/Cargo.toml" -p poise-server -- "${SERVER_ARGS[@]}" 2>&1 | tee -a "$LOG_PATH"

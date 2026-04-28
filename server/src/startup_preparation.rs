@@ -16,11 +16,11 @@ pub(crate) trait SymbolLeverageSetter: Send + Sync {
 }
 
 pub(crate) async fn apply_track_startup_leverage(
-    prepared_registry: &TrackDefinitionRegistry,
+    track_definition_registry: &TrackDefinitionRegistry,
     track_leverage_index: &TrackLeverageIndex,
     symbol_leverage_setter: &dyn SymbolLeverageSetter,
 ) -> Result<()> {
-    for track in prepared_registry.iter() {
+    for track in track_definition_registry.iter() {
         let track_id = track.track_id().clone();
         let instrument = track.instrument().clone();
         let leverage = track_leverage_index
@@ -55,7 +55,7 @@ pub(crate) async fn prepare_exchange_startup_with<
     BuildExchangeFuture,
     BuildSetter,
 >(
-    prepared_registry: &TrackDefinitionRegistry,
+    track_definition_registry: &TrackDefinitionRegistry,
     track_leverage_index: &TrackLeverageIndex,
     build_exchange_fn: BuildExchange,
     build_symbol_leverage_setter_fn: BuildSetter,
@@ -68,7 +68,7 @@ where
     let exchange = build_exchange_fn().await?;
     let symbol_leverage_setter = build_symbol_leverage_setter_fn()?;
     apply_track_startup_leverage(
-        prepared_registry,
+        track_definition_registry,
         track_leverage_index,
         symbol_leverage_setter.as_ref(),
     )

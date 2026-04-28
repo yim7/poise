@@ -1,68 +1,50 @@
 # Poise
 
-`Poise` 是一个面向 Binance / Bybit USDⓈ-M Futures 的探索型策略运行项目。当前主线把策略定义为价格带内的目标占用函数，并通过库存执行器持续把实际仓位拉回目标仓位。
+`Poise` 是一个面向 Binance / Bybit USDⓈ-M Futures 的探索型策略运行项目。当前主线把每个 track 定义为价格带内的目标占用函数，并通过库存执行器持续把实际仓位拉回目标仓位。
 
-当前主线实现已经统一到下面这套结构：
+项目仍在快速探索，旧方案不会保留兼容层。当前文档只保留两类入口：
 
-- `poise-server` 负责运行态、控制面、持久化和交易所接入
-- `poise-tui` 负责本地值守、联调和操作入口
-- `poise-protocol` 负责 `server` 与 `tui` 共享 DTO
-
-项目仍在持续调整设计，旧方案不会保留兼容层。文档以本文件、[`docs/protocol-contract.md`](docs/protocol-contract.md) 和当前架构 spec / plan 为准。
+- 本文件：启动、配置和常用开发入口。
+- [docs/system-overview.md](docs/system-overview.md)：当前系统边界、运行语义和事实源。
 
 ## 工作区结构
 
-- [`core/`](core/)：纯领域模型、策略参数、风险规则、领域事件
-- [`engine/`](engine/)：单网格状态机、注册表、对账逻辑
-- [`storage/`](storage/)：SQLite 快照与领域事件存储
-- [`protocol/`](protocol/)：对外 HTTP / WebSocket DTO
-- [`exchanges/binance/`](exchanges/binance/)：Binance REST / WebSocket 适配
-- [`exchanges/bybit/`](exchanges/bybit/)：Bybit REST / WebSocket 适配
-- [`server/`](server/)：服务端装配、应用服务、HTTP / WS 入口
-- [`tui/`](tui/)：终端运维界面
+- [core/](core/)：领域模型、策略参数、风险规则、领域事件。
+- [engine/](engine/)：track 运行时、状态机、目标计算、执行规划和恢复。
+- [application/](application/)：用例服务、读模型、持久化 port 和定义索引。
+- [storage/](storage/)：SQLite 持久化适配。
+- [protocol/](protocol/)：`server` 与 `tui` 共享的 HTTP / WebSocket DTO。
+- [exchanges/binance/](exchanges/binance/)：Binance USDⓈ-M Futures 适配。
+- [exchanges/bybit/](exchanges/bybit/)：Bybit USDⓈ-M Futures 适配。
+- [server/](server/)：配置、装配、HTTP / WebSocket、runtime task 和交易所接入。
+- [tui/](tui/)：本地值守和操作界面。
 
 ## 当前约束
 
-- 同一交易所内，同一 `symbol` 只允许一个轨道
-- `track_id` 是显式配置的稳定标识，不由 `symbol` 派生
-- HTTP / WebSocket 以 `track_id` 作为一等标识
-- SQLite 默认路径是 `<instance-dir>/.data/poise-server.sqlite`
-- `strategy_price` 当前定义为盘口中间价 `book_mid = (best_bid + best_ask) / 2`
-- `mark_price` 只用于风控和价格保护，不参与目标仓位计算
-- 执行定价统一使用盘口一档：`Buy -> best_ask`，`Sell -> best_bid`
-- 缺少盘口或 `mark_price` 与盘口偏离过大时，自动执行会进入 `attention_required`
-- 策略层带外策略稳定值是 `freeze / flatten / terminate`
-- `freeze` 一出主带即冻结当前目标，不再继续补仓；回带内后自动恢复正常策略
-- 自动带外 `flatten` 先进入 `frozen`，继续穿过外侧触发带后才把目标压到 `0` 并进入 `flattening`，再按恢复规则自动恢复
-- 手动 `Flatten` 会进入 `manual_flattening`，只能由 `Resume` 清除人工目标覆盖
+- 一个服务实例只连接一个交易所。
+- `track_id` 是显式配置的稳定业务标识，不由 `symbol` 派生。
+- 同一实例内 `track_id` 必须唯一。
+- 同一实例内 `venue + symbol` 必须唯一。
+- HTTP / WebSocket 以 `track_id` 作为一等标识。
+- SQLite 默认路径是 `<instance-dir>/.data/poise-server.sqlite`。
+- 启动遇到当前配置与持久业务状态不兼容时会失败，需要操作者显式处理实例目录或数据库。
 
 ## 快速开始
 
 ### 1. 准备实例目录
 
-服务端启动时必须传 `--instance-dir <path>`，并从该目录读取 `config.toml`。每个实例目录对应一个独立运行实例，配置、数据库、日志和状态备份都落在这个目录下面。
-
-手工联调 Binance USDⓈ-M Futures 测试网时，先准备实例目录：
+服务端必须通过 `--instance-dir <path>` 启动，并从实例目录读取 `config.toml`。
 
 ```bash
-mkdir -p "$HOME/poise-instances/testnet-demo"
-cp configs/binance-testnet.demo.toml "$HOME/poise-instances/testnet-demo/config.toml"
+mkdir -p "$HOME/poise-instances/testnet"
+cp configs/demo.toml "$HOME/poise-instances/testnet/config.toml"
 ```
 
-手工联调 Bybit 测试网时，把上面的模板换成：
+把实例目录里的 `exchange.venue`、`exchange.deployment`、`exchange.api_key` 和 `exchange.api_secret` 改成当前实例要连接的交易所和凭证。
 
-```bash
-mkdir -p "$HOME/poise-instances/bybit-testnet-demo"
-cp configs/bybit-testnet.demo.toml "$HOME/poise-instances/bybit-testnet-demo/config.toml"
-```
+### 2. 配置 track
 
-补充说明：
-
-- [`configs/binance-testnet.demo.toml`](configs/binance-testnet.demo.toml) 只作为测试网实例模板
-- [`configs/test.demo.toml`](configs/test.demo.toml) 只给仓库内自动化测试和示例参考使用，不用于真实运行
-- 真实运行时推荐把本地凭证和实例配置都放在实例目录，不再把 `*.local.toml` 留在仓库配置目录里
-
-下面给的是一份字段完整的 `track` 示例，当前支持的参数都显式写出来：
+一份最小可读的配置形状如下：
 
 ```toml
 bind_address = "127.0.0.1:8000"
@@ -91,193 +73,27 @@ total_loss_limit = 750.0
 tick_timeout_secs = 30
 ```
 
-补充说明：
+当前配置语义：
 
-- 可以继续追加 `[[tracks]]`，每个轨道都要配置唯一的 `track_id`
-- 当前同一交易所内每个 `symbol` 只能出现一次
-- `exchange.venue` 当前必须显式配置，现阶段仓库内支持 `binance` 和 `bybit`
-- `exchange.deployment = "testnet"` 时，服务端接对应交易所的测试网地址
-- `exchange.deployment = "mainnet"` 时，服务端接对应交易所的主网地址
-- 真实启动时必须显式配置 `exchange.api_key`、`exchange.api_secret`
-- 当前实现启动时一定会建立用户流、拉取 server time、持仓和挂单，所以空凭证会在启动阶段直接失败
-- `leverage` 不写时默认按 `10x` 处理，并会在每个 `track` 启动时先下发到交易所
-- 风控参数会在启动阶段校验：`max_notional > 0`、`daily_loss_limit > 0`、`total_loss_limit > 0`
-- `shape_family` 当前支持 `linear`、`inertial`、`responsive`
-- `out_of_band_policy` 当前支持字符串简写和完整对象两种输入形状；当前稳定形状是：`freeze / terminate` 用字符串，`flatten` 用对象
-- workbench 导出时，如果 `flatten` 恰好等于当前默认值，也会优先写成字符串简写 `"flatten"`
-- `flatten` 是自动带外平仓语义，不再接受旧的 `reduce_only`
-- 三者都按“围绕价格带中点对称”的控仓曲线解释
-- `inertial` 更恋边，从上下两侧往中间收仓都更慢
-- `responsive` 更恋中，从上下两侧往中间收仓都更快
-- `long_exposure_units` 和 `short_exposure_units` 只决定曲线整体上移或下移；`long > short` 表示偏多，`long < short` 表示偏空
-- 旧的 `concave / convex` 配置和值对应的持久化状态不再兼容，需要先清理后再启动
-- 示例里的 `btc-core` 区间总带宽是 `2000 USD`，在线性模式下等效每格约 `100 USD`
-- 联调前要按当前测试网价格手动平移这个区间
-- `min_rebalance_units` 当前表示“触发下一次执行动作的最小目标变化”，不再只是 `current_exposure -> latest_target` 的停手阈值
-- 没有活动生命周期时，`min_rebalance_units` 的参考点是 `current_exposure`
-- 存在 `SubmitPending` 或 `Working` 时，`min_rebalance_units` 的参考点是当前执行目标 `working_order.desired_exposure`
-- 当最新目标相对当前执行目标的漂移仍低于门槛时，系统会继续当前生命周期：
-  - 已有 `SubmitPending` 会继续执行，不会因为小幅 target 漂移被连续 supersede
-  - 已有 `Working` 不会因为小幅 target 漂移被 cancel-replace
-- 如果需要更频繁跟随最新目标，应调低该值；如果希望执行更稳、减少 supersede / cancel-replace，应调高该值
+- `exchange.venue` 支持 `binance` 和 `bybit`。
+- `exchange.deployment` 支持 `testnet` 和 `mainnet`。
+- `leverage` 不写时默认 `10`，启动时会按 track 下发到交易所。
+- `shape_family` 支持 `linear`、`inertial`、`responsive`。
+- `out_of_band_policy` 支持 `freeze`、`flatten`、`terminate`。
+- `flatten` 可用对象形式配置 `trigger` 和 `recover`。
+- `min_rebalance_units` 是触发下一次执行动作的最小目标变化。
 
-### 1.1 `out_of_band_policy` 字段说明
+详细边界见 [docs/system-overview.md](docs/system-overview.md)。
 
-`out_of_band_policy` 决定价格离开主带时系统采用哪一种自动保护策略。
-
-当前支持三种策略：
-
-- `freeze`
-  - 一出主带就进入 `frozen`
-  - 不继续增加风险，不主动平仓
-  - 一回主带就恢复正常策略控制
-- `flatten`
-  - 自动带外平仓策略
-  - 是否立即平仓由 `trigger` 决定
-  - 平仓后何时自动恢复由 `recover` 决定
-- `terminate`
-  - 一出主带就真正终止
-  - 不再自动恢复
-
-#### 字符串简写
-
-如果只想使用默认参数，可以直接写字符串：
-
-```toml
-out_of_band_policy = "freeze"
-out_of_band_policy = "flatten"
-out_of_band_policy = "terminate"
-```
-
-这三个字符串等价于：
-
-- `"freeze"` 等价于 `out_of_band_policy = "freeze"`
-- `"terminate"` 等价于 `out_of_band_policy = "terminate"`
-- `"flatten"` 等价于：
-
-```toml
-out_of_band_policy = { flatten = {
-  trigger = { flatten_confirm = { bps = 500 } },
-  recover = { reentry_confirm = { bps = 500 } }
-} }
-```
-
-这里的默认值表示：
-
-- 出主带后不会立刻平仓
-- 继续沿带外方向再走出主带宽的 `5%` 才真正 `flatten`
-- `flatten` 之后，回带内还要再向内确认主带宽的 `5%` 才自动恢复
-
-#### 完整对象
-
-`freeze`：
-
-```toml
-out_of_band_policy = "freeze"
-```
-
-`terminate`：
-
-```toml
-out_of_band_policy = "terminate"
-```
-
-`flatten`：
-
-```toml
-out_of_band_policy = { flatten = {
-  trigger = "immediate",
-  recover = "back_in_band"
-} }
-```
-
-`flatten` 有两个子字段：
-
-- `trigger`
-  - `"immediate"`
-    - 一出主带就立即进入 `flattening`
-  - `{ flatten_confirm = { bps = N } }`
-    - 一出主带先进入等待阶段
-    - 只有继续沿带外方向再走出主带宽的 `N / 10000`，才真正进入 `flattening`
-- `recover`
-  - `"back_in_band"`
-    - 回到主带内就恢复
-  - `{ reentry_confirm = { bps = N } }`
-    - 回到主带内后，还要继续向带内确认主带宽的 `N / 10000` 才恢复
-
-这里的 `bps` 都是相对主带宽的基点值，不是相对价格本身：
-
-- `500 bps = 主带宽的 5%`
-- `250 bps = 主带宽的 2.5%`
-
-#### 常见案例
-
-1. 只冻结，不平仓：
-
-```toml
-out_of_band_policy = "freeze"
-```
-
-2. 传统自动平仓，回带内就恢复：
-
-```toml
-out_of_band_policy = { flatten = {
-  trigger = "immediate",
-  recover = "back_in_band"
-} }
-```
-
-3. 出带后先确认再平仓，回带内立即恢复：
-
-```toml
-out_of_band_policy = { flatten = {
-  trigger = { flatten_confirm = { bps = 250 } },
-  recover = "back_in_band"
-} }
-```
-
-4. 出带后先确认再平仓，回带内再确认恢复：
-
-```toml
-out_of_band_policy = { flatten = {
-  trigger = { flatten_confirm = { bps = 250 } },
-  recover = { reentry_confirm = { bps = 500 } }
-} }
-```
-
-### 2. 启动服务端
-
-`Poise` 服务端通过 `poise-server` 二进制启动。
-
-把 `$HOME/poise-instances/testnet-demo/config.toml` 里的 `exchange.api_key` 和 `exchange.api_secret` 改成你自己的测试网凭证，然后按默认严格模式启动：
+### 3. 启动服务端
 
 ```bash
-cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet-demo"
+cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet"
 ```
 
-如果当前本地 SQLite 快照和新的配置不一致，默认会拒绝启动。这时如果你确认要丢弃旧本地快照，并按交易所真实仓位和挂单重建本地状态，再加 `--rebuild-state`：
+启动后服务端会读取配置、初始化 SQLite、连接交易所、执行 startup-only 杠杆设置、恢复本地业务状态，并启动 HTTP / WebSocket 控制面。
 
-```bash
-cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet-demo" --rebuild-state
-```
-
-`--rebuild-state` 的语义是：
-
-- 先备份当前 `<instance-dir>/.data/poise-server.sqlite`
-- 删除旧本地快照对应的 SQLite sidecar 文件
-- 用当前配置重新初始化本地状态
-- 启动后再按交易所真实仓位和挂单继续接管
-
-服务端启动后会：
-
-- 读取配置中的全部网格
-- 初始化 SQLite
-- 建立 HTTP / WebSocket 控制面
-- 接入对应交易所的市场数据和用户流
-
-### 3. 启动 TUI
-
-`Poise` 终端界面通过 `poise-tui` 二进制启动。
+### 4. 启动 TUI
 
 ```bash
 cargo run -p poise-tui
@@ -288,188 +104,78 @@ cargo run -p poise-tui
 - HTTP：`http://127.0.0.1:8000`
 - WebSocket：`ws://127.0.0.1:8000/ws`
 
-如果要改地址，可以在启动前设置 `POISE_BASE_URL`：
+如果要改地址：
 
 ```bash
 export POISE_BASE_URL=http://127.0.0.1:9000
 cargo run -p poise-tui
 ```
 
-`poise-tui` 会先请求 `/tracks`，再加载当前轨道详情，并从 `POISE_BASE_URL` 自动推导 `/ws` 订阅地址。
-
-### 4. 用 HTTP 快速确认
+### 5. HTTP 快速确认
 
 ```bash
 curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/account
 curl http://127.0.0.1:8000/tracks
 curl http://127.0.0.1:8000/tracks/btc-core
 ```
 
-## 当前协议
-
-当前对外接口只有 5 个入口：
+当前公开入口：
 
 - `GET /health`
+- `GET /account`
 - `GET /tracks`
 - `GET /tracks/:id`
 - `POST /tracks/:id/commands`
+- `GET /debug/tracks/:id/diagnostics`
 - `GET /ws`
 
-`GET /health` 的语义：
+协议 DTO 以 [protocol/src/lib.rs](protocol/src/lib.rs) 和序列化测试为准，不再维护单独协议文档。
 
-- `200`：当前全部轨道都没有 `attention_required`
-- `503`：至少一个轨道出现 `stale market data` 或 `recovery anomaly`
-- 响应体包含 `status`、`track_count`、`attention_required_count`
+## zellij 值守
 
-字段和错误语义见 [`docs/protocol-contract.md`](docs/protocol-contract.md)。
-
-## 数据
-
-- 服务端按实例目录使用单个 SQLite 文件保存全部轨道状态
-
-多账号主网运行时，目录应该显式分开，例如：
-
-```text
-~/poise-instances/mainnet-account-a/
-  config.toml
-  .data/
-  .logs/
-
-~/poise-instances/mainnet-account-b/
-  config.toml
-  .data/
-  .logs/
-```
-
-只要实例目录不同，数据库和日志就不会共享。
-
-## 开发与验证
-
-常用命令：
+本地连续跑测试网实例时，可以用仓库里的 zellij 脚本托管 server、TUI 和 health probe。
 
 ```bash
-cargo test -p poise-storage
-cargo test -p poise-server
-cargo test -p poise-tui
-cargo test
-```
-
-
-## 用 zellij 连续跑模拟仓
-
-这套方式适合本机连续值守测试网。它解决的是“会话托管”和“固定巡检”，不替代系统级 supervisor。
-
-仓库内置了 4 个运行资产：
-
-- [`scripts/start-instance-zellij.sh`](scripts/start-instance-zellij.sh)：创建或附着到 `zellij` session
-- [`scripts/run-instance-tui.sh`](scripts/run-instance-tui.sh)：启动 `poise-tui`
-- [`scripts/run-instance-server.sh`](scripts/run-instance-server.sh)：启动 `poise-server` 并把日志落到实例目录
-- [`scripts/probe-health.sh`](scripts/probe-health.sh)：循环探测 `GET /health`
-
-对应布局文件在 [`ops/zellij/poise-instance.kdl`](ops/zellij/poise-instance.kdl)。
-
-### 1. 先准备本地配置
-
-```bash
-mkdir -p "$HOME/poise-instances/testnet-demo"
-cp configs/binance-testnet.demo.toml "$HOME/poise-instances/testnet-demo/config.toml"
-```
-
-把 `$HOME/poise-instances/testnet-demo/config.toml` 里的 `exchange.api_key` 和 `exchange.api_secret` 改成你自己的测试网凭证。
-
-### 2. 启动 zellij 会话
-
-先确保本机已经安装 `zellij`，然后执行：
-
-```bash
-export POISE_INSTANCE_DIR="$HOME/poise-instances/testnet-demo"
+export POISE_INSTANCE_DIR="$HOME/poise-instances/testnet"
 ./scripts/start-instance-zellij.sh
 ```
 
-默认会创建或附着到名为 `poise-testnet-demo` 的 session。布局里有 3 个 pane：
-
-- 左侧主 pane：`poise-tui`
-- 右上：`poise-server`
-- 右下：`/health` 巡检
-
-### 3. 常用环境变量
-
-如果你想改默认值，可以在启动前设置：
+常用环境变量：
 
 ```bash
-export POISE_INSTANCE_DIR="$HOME/poise-instances/testnet-demo"
+export POISE_INSTANCE_DIR="$HOME/poise-instances/testnet"
 export POISE_BASE_URL=http://127.0.0.1:8000
-export POISE_LOG_DIR="$HOME/poise-instances/testnet-demo/.logs"
-export POISE_REBUILD_STATE=0
+export POISE_LOG_DIR="$HOME/poise-instances/testnet/.logs"
 export POISE_HEALTH_FAILURE_THRESHOLD=3
-export POISE_TUI_LOG="$HOME/poise-instances/testnet-demo/.logs/poise-tui.log"
-export POISE_ZELLIJ_SESSION_NAME=poise-testnet-demo
+export POISE_TUI_LOG="$HOME/poise-instances/testnet/.logs/poise-tui.log"
+export POISE_ZELLIJ_SESSION_NAME=poise-testnet
 ./scripts/start-instance-zellij.sh
 ```
 
-如果你要通过脚本方式重建本地状态，可以把 `POISE_REBUILD_STATE=1`，这样 `run-instance-server.sh` 会自动在 `poise-server` 启动命令后追加 `--rebuild-state`：
+日志默认写到 `<instance-dir>/.logs/`：
+
+- `poise-server.log`
+- `poise-tui.log`
+- `health-probe.log`
+
+只看脚本参数，不启动：
 
 ```bash
-export POISE_INSTANCE_DIR="$HOME/poise-instances/testnet-demo"
-export POISE_REBUILD_STATE=1
-./scripts/run-instance-server.sh
-```
-
-如果你想在连续失败达到阈值时触发外部通知，还可以额外设置：
-
-```bash
-export POISE_HEALTH_ALERT_HOOK='printf "alert:%s:%s\n" "$POISE_HEALTH_FAILURE_COUNT" "$POISE_HEALTH_LAST_STATUS"'
-```
-
-### 4. 日志位置
-
-默认日志目录是 `<instance-dir>/.logs/`，主要看这三个文件：
-
-- `$HOME/poise-instances/testnet-demo/.logs/poise-tui.log`
-- `$HOME/poise-instances/testnet-demo/.logs/poise-server.log`
-- `$HOME/poise-instances/testnet-demo/.logs/health-probe.log`
-
-### 5. 巡检脚本
-
-单次探测只需要 `POISE_BASE_URL`：
-
-```bash
-POISE_BASE_URL=http://127.0.0.1:8000 ./scripts/probe-health.sh --once
-```
-
-只看脚本会用什么参数，不真正启动：
-
-```bash
-POISE_INSTANCE_DIR="$HOME/poise-instances/testnet-demo" ./scripts/start-instance-zellij.sh --dry-run
-POISE_INSTANCE_DIR="$HOME/poise-instances/testnet-demo" ./scripts/run-instance-server.sh --dry-run
-POISE_INSTANCE_DIR="$HOME/poise-instances/testnet-demo" ./scripts/run-instance-tui.sh --dry-run
+POISE_INSTANCE_DIR="$HOME/poise-instances/testnet" ./scripts/start-instance-zellij.sh --dry-run
+POISE_INSTANCE_DIR="$HOME/poise-instances/testnet" ./scripts/run-instance-server.sh --dry-run
+POISE_INSTANCE_DIR="$HOME/poise-instances/testnet" ./scripts/run-instance-tui.sh --dry-run
 POISE_BASE_URL=http://127.0.0.1:8000 ./scripts/probe-health.sh --dry-run
 ```
 
-### 6. 会话管理
+## 开发与验证
 
-列出当前 session：
-
-```bash
-zellij list-sessions
-```
-
-重新附着：
+默认优先跑与改动直接相关的最小测试。常用入口：
 
 ```bash
-zellij attach poise-testnet-demo
+cargo test -p poise-core
+cargo test -p poise-engine
+cargo test -p poise-application
+cargo test -p poise-server
+cargo test -p poise-tui
 ```
-
-结束这套模拟仓会话：
-
-```bash
-zellij kill-sessions poise-testnet-demo
-```
-
-## 当前文档
-
-- [`docs/protocol-contract.md`](docs/protocol-contract.md)：当前 HTTP / WebSocket 协议
-- [`docs/grid-strategy-product-theory-research.md`](docs/grid-strategy-product-theory-research.md)：当前策略研究与产品侧约束
-- [`docs/superpowers/specs/2026-03-26-grid-phase2-application-projection-design.md`](docs/superpowers/specs/2026-03-26-grid-phase2-application-projection-design.md)：当前架构 spec
-- [`docs/superpowers/specs/2026-03-24-grid-strategy-family-design.md`](docs/superpowers/specs/2026-03-24-grid-strategy-family-design.md)：当前策略族模型设计
-- [`docs/superpowers/plans/2026-03-25-grid-platform-architecture-convergence.md`](docs/superpowers/plans/2026-03-25-grid-platform-architecture-convergence.md)：Poise 当前收敛计划与验收标准

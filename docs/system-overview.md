@@ -1,0 +1,143 @@
+# Poise 当前系统说明
+
+本文只记录当前实现仍成立的系统事实。历史 plan、旧 spec、旧协议说明和阶段性评审不再作为文档保留；如果设计继续变化，应直接更新本文或 README。
+
+## 事实源
+
+- 架构事实源是代码和测试，本文只做当前边界摘要。
+- 配置 schema 的事实源是 `server/src/config.rs`。
+- HTTP / WebSocket DTO 的事实源是 `protocol/src/lib.rs` 和对应序列化测试。
+- HTTP 路由事实源是 `server/src/http.rs`，WebSocket 推送事实源是 `server/src/websocket.rs`。
+- 策略和风险计算事实源是 `core/src/strategy.rs`、`core/src/risk.rs` 和 `core/src/track.rs`。
+- 运行时状态机和执行器事实源是 `engine/src/runtime.rs`、`engine/src/manager.rs` 和 `engine/src/executor/`。
+
+## 分层边界
+
+Poise 目前按知识边界分层，而不是按启动步骤分层。
+
+- `core/` 拥有领域概念：`TrackId`、`Venue`、`Instrument`、`TrackDefinition`、`TrackConfig`、风险限制和领域事件。
+- `engine/` 拥有单个 track 的运行时状态、目标计算、执行规划、恢复和对账逻辑。
+- `application/` 拥有用例层服务、读模型、持久化 port、`TrackDefinitionRegistry` 和 session effect 队列。
+- `storage/` 是 SQLite 适配层，只实现 application 定义的持久化 port。
+- `exchanges/binance/` 和 `exchanges/bybit/` 各自封装交易所协议、鉴权、REST / WebSocket 映射和窄控制 helper。
+- `server/` 拥有配置解析、启动装配、交易所选择、HTTP / WebSocket、runtime task 和进程级状态。
+- `protocol/` 拥有 `server` 与 `tui` 共享的 wire DTO。
+- `tui/` 是本地值守界面，只依赖 HTTP / WebSocket 协议。
+
+当前静态 track 定义链路是：
+
+```text
+server::config::TrackSpec
+  -> core::track::TrackDefinition
+  -> application::TrackDefinitionRegistry
+  -> engine::runtime::TrackRuntime
+```
+
+`TrackSpec` 只表达 TOML / serde schema。`TrackDefinition` 是核心静态定义 owner。`TrackDefinitionRegistry` 是 application 层索引，不重新定义默认值或领域计算。`TrackRuntime` 是 `TrackDefinition + dynamic state`，外部通过语义方法读取静态字段，不直接穿透内部 definition 字段。
+
+## 配置与身份
+
+服务端只支持单实例连接单交易所。`[exchange]` 决定当前实例的 `venue`，`[[tracks]]` 不再配置 venue。
+
+当前重要约束：
+
+- `track_id` 是显式配置的稳定业务标识。
+- `Instrument` 由 `exchange.venue()` 和 track `symbol` 组成。
+- 同一实例内 `track_id` 必须唯一。
+- 同一实例内 `Instrument { venue, symbol }` 必须唯一。
+- `leverage` 是 server-owned startup-only 配置，不进入 `TrackDefinition` 或 `TrackConfig`。
+- 未配置 `leverage` 时默认 `10`。
+
+`TrackSpec::to_track_definition(venue)` 负责把配置字段投影为 `TrackDefinition`，并触发 core 层策略、风险和默认值校验。
+
+## 启动与运行时
+
+启动主路径：
+
+1. `server/src/main.rs` 读取 `--instance-dir` 下的 `config.toml`。
+2. `state_bootstrap::prepare_state_repository(...)` 初始化 SQLite，构造 `TrackDefinitionRegistry`，并检查当前配置与持久业务状态是否兼容。
+3. `assembly::assemble(...)` 构造交易所连接，按 track 执行 startup-only 杠杆设置，加载交易所规则，并把每个 `TrackDefinition` 注册进 `TrackManager`。
+4. `RuntimeStartupDefinition` 把 `TrackDefinition` 和启动容量模式组合成 server runtime 内部输入。
+5. `ServerRuntime::start()` 完成 live exchange state bootstrap，然后启动 market data、user data、recovery、effect worker、account monitor 和 health 相关 task。
+
+启动遇到持久状态与当前配置不兼容时会失败，操作者应显式处理实例目录或数据库。
+
+## 策略与执行语义
+
+策略价格：
+
+- `strategy_price = book_mid = (best_bid + best_ask) / 2`。
+- `mark_price` 只用于风险、展示和价格执行 gate，不参与目标仓位计算。
+- 自动执行使用盘口一档定价：`Buy -> best_ask`，`Sell -> best_bid`。
+
+曲线参数：
+
+- `shape_family` 支持 `linear`、`inertial`、`responsive`。
+- 三种曲线都围绕价格带中点对称解释。
+- `long_exposure_units` 和 `short_exposure_units` 决定目标曲线整体偏多或偏空。
+
+执行门槛：
+
+- `min_rebalance_units` 表示触发下一次执行动作的最小目标变化。
+- 没有活动生命周期时，参考点是 `current_exposure`。
+- 存在 `SubmitPending` 或 `Working` 时，参考点是当前执行目标。
+
+带外策略：
+
+- `freeze`：离开主带后冻结目标，回到主带后自动恢复。
+- `flatten`：离开主带后按 trigger / recover 规则自动压到 `0` 并恢复。
+- `terminate`：离开主带后进入终态，不自动恢复。
+
+人工命令：
+
+- `pause` 暂停自动控制。
+- `resume` 从暂停或手动平仓恢复。
+- `flatten` 写入人工目标 `0`，进入 `manual_flattening`，必须用 `resume` 清除。
+- `terminate` 进入终态，目标收敛到 `0`，不会自动恢复。
+
+## 持久化与读模型
+
+SQLite 文件位于 `<instance-dir>/.data/poise-server.sqlite`。
+
+持久化边界保存业务状态和事件，不保存完整当前配置定义。读侧需要静态定义时，从当前配置构造出的 `TrackDefinitionRegistry` 读取。
+
+读模型链路：
+
+```text
+TrackDefinitionRegistry + TrackRuntimeView + persisted events/effects/ledger
+  -> application read model
+  -> server projector
+  -> protocol DTO
+```
+
+`server` projector 不直接暴露 engine 内部运行时结构。HTTP / WebSocket 对外只推投影后的读模型。
+
+## HTTP / WebSocket
+
+当前公开入口：
+
+- `GET /health`
+- `GET /account`
+- `GET /tracks`
+- `GET /tracks/:id`
+- `POST /tracks/:id/commands`
+- `GET /debug/tracks/:id/diagnostics`
+- `GET /ws`
+
+协议字段不再单独维护长文档。修改协议时必须更新 `protocol/src/lib.rs` 和序列化测试；需要说明语义时，在本文只保留高层约束。
+
+WebSocket 当前推送：
+
+- `track_list_item_changed`
+- `track_detail_changed`
+- `track_live_view_changed`
+- `account_summary_changed`
+
+`/debug/...` 接口是排查入口，不是稳定产品协议。
+
+## 文档维护规则
+
+- README 只保留项目入口、启动方式和文档导航。
+- 本文保留当前架构、边界和运行语义。
+- 不再保留历史 plan/spec 作为主文档；过时讨论直接删除。
+- 如果某个文档不能明确回答“当前实现如何工作”，默认不保留。

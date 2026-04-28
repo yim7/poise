@@ -9,7 +9,6 @@ LAYOUT_PATH="${REPO_ROOT}/ops/zellij/poise-instance.kdl"
 
 RAW_INSTANCE_DIR="${POISE_INSTANCE_DIR:-}"
 BASE_URL="${POISE_BASE_URL:-http://127.0.0.1:8000}"
-REBUILD_STATE="${POISE_REBUILD_STATE:-0}"
 DRY_RUN=0
 
 usage() {
@@ -20,7 +19,6 @@ usage() {
 环境变量:
   POISE_INSTANCE_DIR         实例目录，必须包含 config.toml
   POISE_BASE_URL             实例 HTTP 服务基地址，默认 http://127.0.0.1:8000
-  POISE_REBUILD_STATE        设为 1 时，server pane 启动时追加 --rebuild-state
   POISE_ZELLIJ_SESSION_NAME  zellij session 名称，可选；默认从实例目录 basename 推导
 EOF
 }
@@ -63,15 +61,9 @@ if [[ "$DRY_RUN" -ne 1 && ! -f "$CONFIG_PATH" ]]; then
   exit 1
 fi
 
-if [[ "$REBUILD_STATE" != "0" && "$REBUILD_STATE" != "1" ]]; then
-  echo "POISE_REBUILD_STATE must be 0 or 1" >&2
-  exit 1
-fi
-
 export POISE_INSTANCE_DIR="$INSTANCE_DIR"
 export POISE_BASE_URL="$BASE_URL"
 export POISE_LOG_DIR="$LOG_DIR"
-export POISE_REBUILD_STATE="$REBUILD_STATE"
 export POISE_REPO_ROOT="$REPO_ROOT"
 export POISE_SERVER_LOG="${POISE_SERVER_LOG:-${LOG_DIR}/poise-server.log}"
 export POISE_HEALTH_LOG="${POISE_HEALTH_LOG:-${LOG_DIR}/health-probe.log}"
@@ -85,7 +77,6 @@ layout_path=$LAYOUT_PATH
 session_name=$SESSION_NAME
 base_url=$POISE_BASE_URL
 log_dir=$POISE_LOG_DIR
-rebuild_state=$POISE_REBUILD_STATE
 create_command=zellij attach --create-background $SESSION_NAME options --default-layout $LAYOUT_PATH
 attach_command=zellij attach $SESSION_NAME
 EOF

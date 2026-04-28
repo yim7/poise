@@ -114,7 +114,7 @@ mod tests {
             track_spec("btc-core", "BTCUSDT", Some(20)),
             track_spec("eth-core", "ETHUSDT", None),
         ];
-        let registry = prepared_registry(&tracks);
+        let registry = track_definition_registry(&tracks);
         let index = build_track_leverage_index(&tracks).unwrap();
         let calls = Arc::new(Mutex::new(Vec::new()));
 
@@ -135,7 +135,7 @@ mod tests {
     #[tokio::test]
     async fn apply_track_startup_leverage_adds_track_symbol_and_leverage_context() {
         let tracks = vec![track_spec("btc-core", "BTCUSDT", Some(7))];
-        let registry = prepared_registry(&tracks);
+        let registry = track_definition_registry(&tracks);
         let index = build_track_leverage_index(&tracks).unwrap();
 
         let error = apply_track_startup_leverage(
@@ -153,7 +153,7 @@ mod tests {
         assert!(message.contains("exchange rejected leverage"));
     }
 
-    fn prepared_registry(tracks: &[TrackSpec]) -> TrackDefinitionRegistry {
+    fn track_definition_registry(tracks: &[TrackSpec]) -> TrackDefinitionRegistry {
         let configured = tracks
             .iter()
             .map(|track| track.to_track_definition(Venue::Binance))
