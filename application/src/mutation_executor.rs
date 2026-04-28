@@ -10,6 +10,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use poise_core::events::DomainEvent;
 use poise_engine::command::TrackCommand;
+use poise_engine::execution_plan::TrackEffect;
 use poise_engine::executor::{
     OrderUpdateAbsorbResult, SubmitRecoveryPlan, SubmitRecoveryResolution, SubmitRecoveryToken,
 };
@@ -26,7 +27,7 @@ use poise_engine::runtime::{
     TrackLiveView, TrackRuntimeView, TrackState,
 };
 use poise_engine::track::{Instrument, TrackId};
-use poise_engine::transition::{TrackEffect, TrackTransition};
+use poise_engine::transition::TrackTransition;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
 use crate::submit_effect_service::{SubmitAttemptResult, SubmitExecutionRecovery};
@@ -1428,11 +1429,11 @@ pub(crate) mod test_support {
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Exposure, Side};
+    use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{ClockPort, OrderRequest};
     use poise_engine::track::{Instrument, TrackId, Venue};
-    use poise_engine::transition::TrackEffect;
     use tokio::sync::broadcast;
 
     use crate::{
@@ -1815,6 +1816,7 @@ mod tests {
     use crate::{CancelReceiptResolution, EffectStatus, SessionEffectQueue, TrackEffectJournal};
     use poise_core::risk::RiskTerminationCause;
     use poise_core::types::{Exposure, Side};
+    use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
     use poise_engine::mutation_frame::TrackMutationFrame;
     use poise_engine::observation::{
@@ -1823,7 +1825,7 @@ mod tests {
     use poise_engine::ports::{ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus};
     use poise_engine::runtime::{AutoState, ControlState, TerminationCause, TrackState};
     use poise_engine::track::{Instrument, TrackId, Venue};
-    use poise_engine::transition::{TrackEffect, TrackTransition};
+    use poise_engine::transition::TrackTransition;
     use tokio::sync::broadcast;
     use tokio::sync::broadcast::error::TryRecvError;
 

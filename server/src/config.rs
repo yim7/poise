@@ -15,7 +15,7 @@ use crate::exchange_startup::build_track_leverage_index;
 pub struct Config {
     #[serde(default = "default_bind_address")]
     pub bind_address: String,
-    pub tracks: Vec<TrackFileDefinition>,
+    pub tracks: Vec<TrackSpec>,
     pub exchange: ExchangeConfig,
     #[serde(default)]
     pub account_monitor: AccountMonitorConfig,
@@ -23,7 +23,7 @@ pub struct Config {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TrackFileDefinition {
+pub struct TrackSpec {
     pub track_id: String,
     pub symbol: String,
     pub lower_price: f64,
@@ -41,9 +41,6 @@ pub struct TrackFileDefinition {
     pub total_loss_limit: f64,
     pub tick_timeout_secs: Option<u64>,
 }
-
-#[cfg(test)]
-pub type TrackDefinition = TrackFileDefinition;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "venue", rename_all = "snake_case")]
@@ -87,7 +84,7 @@ pub fn parse_config(input: &str) -> Result<Config> {
     Ok(config)
 }
 
-impl TrackFileDefinition {
+impl TrackSpec {
     pub fn track_id(&self) -> TrackId {
         TrackId::new(self.track_id.clone())
     }

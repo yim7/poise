@@ -11,7 +11,7 @@ use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountMonitor, ApplicationNotification, PreparedTrackRegistry, TrackCommandService,
     TrackDebugQueryService, TrackEffectService, TrackObservationService, TrackQueryService,
-    TrackReadServices, TrackRuntimeLifecycleService, TrackServiceSet,
+    TrackRuntimeLifecycleService, TrackServiceSet,
 };
 use poise_binance::connect as connect_binance;
 use poise_bybit::connect as connect_bybit;
@@ -294,13 +294,15 @@ async fn assemble_with_state_store(
     let runtime_lifecycle_service = Arc::new(write_services.runtime_lifecycle);
     #[cfg(test)]
     let manager = observation_service.manager();
-    let read_services = TrackReadServices::new(
-        query_store,
+    let query_service = Arc::new(TrackQueryService::new(
+        query_store.clone(),
         prepared_registry.clone(),
         observation_service.clone(),
-    );
-    let query_service = read_services.query_service();
-    let debug_query_service = read_services.debug_query_service();
+    ));
+    let debug_query_service = Arc::new(TrackDebugQueryService::new(
+        query_store,
+        observation_service.clone(),
+    ));
     let projector = Arc::new(TrackProjector::new());
     let account_projector = Arc::new(AccountProjector::new());
     let account_monitor = if let Some(account_store) = repositories.account_monitor_store() {
@@ -585,7 +587,7 @@ mod tests {
     use crate::runtime::AccountMarginGuardStore;
     use tokio_tungstenite::connect_async;
 
-    use crate::config::{Config, ExchangeConfig, TrackDefinition, parse_config};
+    use crate::config::{Config, ExchangeConfig, TrackSpec, parse_config};
     use crate::http::router;
     use crate::projector::TrackProjector;
     use crate::state_bootstrap::StateRepositories;
@@ -594,7 +596,9 @@ mod tests {
         build_test_application_services, build_websocket_state as build_test_websocket_state,
         unavailable_account_monitor,
     };
-    use poise_application::{ConfiguredTrackDefinition, PreparedTrackRegistry, TrackReadServices};
+    use poise_application::{
+        ConfiguredTrackDefinition, PreparedTrackRegistry, TrackDebugQueryService, TrackQueryService,
+    };
 
     use super::{
         ServerPlatform, SystemClock, assemble, build_exchange, validate_unique_instruments,
@@ -786,7 +790,7 @@ total_loss_limit = 600.0
         let config = Config {
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![
-                TrackDefinition {
+                TrackSpec {
                     track_id: "btc-core".into(),
                     symbol: "BTCUSDT".into(),
                     lower_price: 90.0,
@@ -803,7 +807,7 @@ total_loss_limit = 600.0
                     total_loss_limit: 600.0,
                     tick_timeout_secs: None,
                 },
-                TrackDefinition {
+                TrackSpec {
                     track_id: "eth-core".into(),
                     symbol: "ETHUSDT".into(),
                     lower_price: 2000.0,
@@ -864,7 +868,7 @@ total_loss_limit = 600.0
         let config = Config {
             bind_address: "127.0.0.1:0".into(),
             tracks: vec![
-                TrackDefinition {
+                TrackSpec {
                     track_id: "btc-core".into(),
                     symbol: "BTCUSDT".into(),
                     lower_price: 90.0,
@@ -881,7 +885,7 @@ total_loss_limit = 600.0
                     total_loss_limit: 600.0,
                     tick_timeout_secs: None,
                 },
-                TrackDefinition {
+                TrackSpec {
                     track_id: "btc-alt".into(),
                     symbol: "BTCUSDT".into(),
                     lower_price: 80.0,
@@ -916,7 +920,7 @@ total_loss_limit = 600.0
     async fn assemble_requires_exchange_credentials_for_real_runtime() {
         let config = Config {
             bind_address: "127.0.0.1:0".into(),
-            tracks: vec![TrackDefinition {
+            tracks: vec![TrackSpec {
                 track_id: "btc-core".into(),
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,
@@ -1006,7 +1010,7 @@ total_loss_limit = 600.0
     async fn pause_command_persists_across_reassembly() {
         let config = Config {
             bind_address: "127.0.0.1:0".into(),
-            tracks: vec![TrackDefinition {
+            tracks: vec![TrackSpec {
                 track_id: "btc-core".into(),
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,
@@ -1072,7 +1076,7 @@ total_loss_limit = 600.0
     async fn reassembly_uses_persistent_control_state_not_runtime_snapshot_status() {
         let config = Config {
             bind_address: "127.0.0.1:0".into(),
-            tracks: vec![TrackDefinition {
+            tracks: vec![TrackSpec {
                 track_id: "btc-core".into(),
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,
@@ -1389,13 +1393,16 @@ total_loss_limit = 600.0
             events.clone(),
             account_margin_guard.clone(),
         );
-        let read_services = TrackReadServices::new(
-            repository.clone() as Arc<dyn TrackQueryStore>,
+        let query_store = repository.clone() as Arc<dyn TrackQueryStore>;
+        let query_service = Arc::new(TrackQueryService::new(
+            query_store.clone(),
             crate::test_support::test_prepared_registry("btc-core"),
             services.observation_service.clone(),
-        );
-        let query_service = read_services.query_service();
-        let debug_query_service = read_services.debug_query_service();
+        ));
+        let debug_query_service = Arc::new(TrackDebugQueryService::new(
+            query_store,
+            services.observation_service.clone(),
+        ));
         let projector = Arc::new(TrackProjector::new());
         let account_monitor = unavailable_account_monitor(events.clone());
         let account_projector = Arc::new(crate::account_projector::AccountProjector::new());

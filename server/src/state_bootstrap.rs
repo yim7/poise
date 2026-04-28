@@ -211,7 +211,7 @@ mod tests {
     use rusqlite::params;
 
     use super::prepare_state_repository;
-    use crate::config::{Config, ExchangeConfig, TrackDefinition};
+    use crate::config::{Config, ExchangeConfig, TrackSpec};
 
     #[tokio::test]
     async fn prepare_state_repository_requires_explicit_bootstrap_mode() {
@@ -449,7 +449,7 @@ mod tests {
     fn test_config(lower_price: f64) -> Config {
         Config {
             bind_address: "127.0.0.1:0".into(),
-            tracks: vec![TrackDefinition {
+            tracks: vec![TrackSpec {
                 track_id: "btc-core".into(),
                 symbol: "BTCUSDT".into(),
                 lower_price,

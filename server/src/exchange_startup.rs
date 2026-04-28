@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use poise_engine::track::Instrument;
 
-use crate::config::{ExchangeConfig, TrackFileDefinition};
+use crate::config::{ExchangeConfig, TrackSpec};
 use crate::startup_preparation::{SymbolLeverageSetter, TrackLeverageIndex};
 
 pub(crate) const DEFAULT_TRACK_LEVERAGE: u32 = 10;
@@ -36,9 +36,7 @@ pub(crate) fn build_symbol_leverage_setter(
     }
 }
 
-pub(crate) fn build_track_leverage_index(
-    tracks: &[TrackFileDefinition],
-) -> Result<TrackLeverageIndex> {
+pub(crate) fn build_track_leverage_index(tracks: &[TrackSpec]) -> Result<TrackLeverageIndex> {
     let mut index = HashMap::with_capacity(tracks.len());
     for track in tracks {
         let leverage = track.leverage.unwrap_or(DEFAULT_TRACK_LEVERAGE);
@@ -63,13 +61,12 @@ mod tests {
     use poise_engine::track::{Instrument, TrackId, Venue};
 
     use super::{build_symbol_leverage_setter, build_track_leverage_index};
-    use crate::config::{ExchangeConfig, TrackDefinition};
+    use crate::config::{ExchangeConfig, TrackSpec};
     use crate::startup_preparation::{SymbolLeverageSetter, apply_track_startup_leverage};
 
     #[test]
     fn track_leverage_index_defaults_to_ten() {
-        let index =
-            build_track_leverage_index(&[track_definition("btc-core", "BTCUSDT", None)]).unwrap();
+        let index = build_track_leverage_index(&[track_spec("btc-core", "BTCUSDT", None)]).unwrap();
 
         assert_eq!(index.get(&TrackId::new("btc-core")), Some(&10));
     }
@@ -77,8 +74,7 @@ mod tests {
     #[test]
     fn track_leverage_index_preserves_explicit_leverage() {
         let index =
-            build_track_leverage_index(&[track_definition("btc-core", "BTCUSDT", Some(25))])
-                .unwrap();
+            build_track_leverage_index(&[track_spec("btc-core", "BTCUSDT", Some(25))]).unwrap();
 
         assert_eq!(index.get(&TrackId::new("btc-core")), Some(&25));
     }
@@ -86,8 +82,7 @@ mod tests {
     #[test]
     fn track_leverage_index_stores_only_startup_fields() {
         let index =
-            build_track_leverage_index(&[track_definition("btc-core", "BTCUSDT", Some(12))])
-                .unwrap();
+            build_track_leverage_index(&[track_spec("btc-core", "BTCUSDT", Some(12))]).unwrap();
         let expected = HashMap::from([(TrackId::new("btc-core"), 12)]);
 
         assert_eq!(index, expected);
@@ -116,8 +111,8 @@ mod tests {
     #[tokio::test]
     async fn apply_track_startup_leverage_uses_track_index_in_registry_order() {
         let tracks = vec![
-            track_definition("btc-core", "BTCUSDT", Some(20)),
-            track_definition("eth-core", "ETHUSDT", None),
+            track_spec("btc-core", "BTCUSDT", Some(20)),
+            track_spec("eth-core", "ETHUSDT", None),
         ];
         let registry = prepared_registry(&tracks);
         let index = build_track_leverage_index(&tracks).unwrap();
@@ -139,7 +134,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_track_startup_leverage_adds_track_symbol_and_leverage_context() {
-        let tracks = vec![track_definition("btc-core", "BTCUSDT", Some(7))];
+        let tracks = vec![track_spec("btc-core", "BTCUSDT", Some(7))];
         let registry = prepared_registry(&tracks);
         let index = build_track_leverage_index(&tracks).unwrap();
 
@@ -158,7 +153,7 @@ mod tests {
         assert!(message.contains("exchange rejected leverage"));
     }
 
-    fn prepared_registry(tracks: &[TrackDefinition]) -> PreparedTrackRegistry {
+    fn prepared_registry(tracks: &[TrackSpec]) -> PreparedTrackRegistry {
         let configured = tracks
             .iter()
             .map(|track| {
@@ -169,8 +164,8 @@ mod tests {
         PreparedTrackRegistry::new(configured).unwrap()
     }
 
-    fn track_definition(track_id: &str, symbol: &str, leverage: Option<u32>) -> TrackDefinition {
-        TrackDefinition {
+    fn track_spec(track_id: &str, symbol: &str, leverage: Option<u32>) -> TrackSpec {
+        TrackSpec {
             track_id: track_id.into(),
             symbol: symbol.into(),
             lower_price: 90.0,

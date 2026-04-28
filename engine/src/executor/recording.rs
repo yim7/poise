@@ -328,7 +328,7 @@ mod tests {
     use poise_core::types::{ExchangeRules, Exposure};
 
     use super::*;
-    use crate::execution_plan::ExecutionAction;
+    use crate::execution_plan::TrackEffect;
     use crate::executor::ledger::BoundaryLedgerState;
     use crate::executor::{ExecutorInput, PolicyContext, SubmitIntentInput, plan};
     use crate::ports::ExecutionQuote;
@@ -610,7 +610,7 @@ mod tests {
             .effects
             .iter()
             .find_map(|effect| match effect {
-                ExecutionAction::SubmitOrder { request, .. } => Some(request),
+                TrackEffect::SubmitOrder { request, .. } => Some(request),
                 _ => None,
             })
             .expect("remaining boundary qty should be submitted");

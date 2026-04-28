@@ -450,6 +450,7 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
+    use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
     use poise_engine::manager::ExchangeSyncMode;
     use poise_engine::ports::{
@@ -457,7 +458,6 @@ mod tests {
         OrderStatus, Position,
     };
     use poise_engine::track::{Instrument, TrackId, Venue};
-    use poise_engine::transition::TrackEffect;
     use poise_storage::sqlite::SqliteStorage;
 
     use super::*;

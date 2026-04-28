@@ -29,7 +29,7 @@ mod tests {
     use poise_core::types::{ExchangeRules, Exposure, Side};
 
     use super::*;
-    use crate::execution_plan::ExecutionAction;
+    use crate::execution_plan::TrackEffect;
     use crate::executor::binding::{
         BindingOperationAllocation, BindingPolicyState, BindingStatus, LiveOrderBinding,
     };
@@ -269,7 +269,7 @@ mod tests {
 
         assert!(plan.effects.iter().any(|effect| matches!(
             effect,
-            ExecutionAction::CancelOrder { order_id, .. } if order_id == "maker-order"
+            TrackEffect::CancelOrder { order_id, .. } if order_id == "maker-order"
         )));
         let maker = plan
             .state
@@ -434,7 +434,7 @@ mod tests {
 
         assert!(plan.effects.iter().any(|effect| matches!(
             effect,
-            ExecutionAction::CancelOrder { order_id, .. } if order_id == "catch-up-order"
+            TrackEffect::CancelOrder { order_id, .. } if order_id == "catch-up-order"
         )));
         let binding = plan
             .state

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use poise_engine::transition::TrackEffect;
+use poise_engine::execution_plan::TrackEffect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExchangeFreshnessReason {
@@ -108,10 +108,10 @@ impl ExchangeFreshness {
 #[cfg(test)]
 mod tests {
     use poise_core::types::{Exposure, Side};
+    use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::ports::OrderRequest;
     use poise_engine::track::{Instrument, Venue};
-    use poise_engine::transition::TrackEffect;
 
     use super::{ExchangeFreshness, ExchangeFreshnessReason, FreshnessGateDecision};
 

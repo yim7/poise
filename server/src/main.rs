@@ -664,7 +664,7 @@ total_loss_limit = 600.0
 
         let config = crate::config::Config {
             bind_address: bind_address.to_string(),
-            tracks: vec![crate::config::TrackDefinition {
+            tracks: vec![crate::config::TrackSpec {
                 track_id: "btc-core".into(),
                 symbol: "BTCUSDT".into(),
                 lower_price: 90.0,

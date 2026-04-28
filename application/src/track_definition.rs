@@ -110,57 +110,6 @@ impl ConfiguredTrackDefinition {
     pub fn tick_timeout_secs(&self) -> u64 {
         self.tick_timeout_secs
     }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TrackPreparedDefinition {
-    track_id: TrackId,
-    instrument: Instrument,
-    track_config: TrackConfig,
-    max_notional: f64,
-    loss_limits: LossLimits,
-    tick_timeout_secs: u64,
-}
-
-impl TrackPreparedDefinition {
-    pub fn from_configured(definition: ConfiguredTrackDefinition) -> Self {
-        Self {
-            track_id: definition.track_id,
-            instrument: definition.instrument,
-            track_config: definition.track_config,
-            max_notional: definition.max_notional,
-            loss_limits: definition.loss_limits,
-            tick_timeout_secs: definition.tick_timeout_secs,
-        }
-    }
-
-    pub fn track_id(&self) -> &TrackId {
-        &self.track_id
-    }
-
-    pub fn instrument(&self) -> &Instrument {
-        &self.instrument
-    }
-
-    pub fn track_config(&self) -> &TrackConfig {
-        &self.track_config
-    }
-
-    pub fn max_notional(&self) -> f64 {
-        self.max_notional
-    }
-
-    pub fn effective_max_notional(&self) -> f64 {
-        effective_max_notional(&self.track_config, self.max_notional)
-    }
-
-    pub fn loss_limits(&self) -> &LossLimits {
-        &self.loss_limits
-    }
-
-    pub fn tick_timeout_secs(&self) -> u64 {
-        self.tick_timeout_secs
-    }
 
     pub fn read_definition(&self) -> TrackReadDefinition {
         TrackReadDefinition {
@@ -235,27 +184,26 @@ pub fn effective_max_notional(config: &TrackConfig, max_notional: f64) -> f64 {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PreparedTrackRegistry {
-    tracks: BTreeMap<String, TrackPreparedDefinition>,
+    tracks: BTreeMap<String, ConfiguredTrackDefinition>,
 }
 
 impl PreparedTrackRegistry {
     pub fn new(definitions: Vec<ConfiguredTrackDefinition>) -> Result<Self> {
         let mut tracks = BTreeMap::new();
         for definition in definitions {
-            let prepared = TrackPreparedDefinition::from_configured(definition);
-            let track_id = prepared.track_id().as_str().to_string();
-            if tracks.insert(track_id.clone(), prepared).is_some() {
+            let track_id = definition.track_id().as_str().to_string();
+            if tracks.insert(track_id.clone(), definition).is_some() {
                 return Err(anyhow!("duplicate track id `{track_id}`"));
             }
         }
         Ok(Self { tracks })
     }
 
-    pub fn get(&self, track_id: &TrackId) -> Option<&TrackPreparedDefinition> {
+    pub fn get(&self, track_id: &TrackId) -> Option<&ConfiguredTrackDefinition> {
         self.tracks.get(track_id.as_str())
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &TrackPreparedDefinition> {
+    pub fn iter(&self) -> impl Iterator<Item = &ConfiguredTrackDefinition> {
         self.tracks.values()
     }
 }
@@ -265,32 +213,27 @@ mod tests {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
     use poise_engine::track::{TrackId, Venue};
 
-    use super::{
-        ConfiguredTrackDefinition, ConfiguredTrackInput, PreparedTrackRegistry,
-        TrackPreparedDefinition,
-    };
+    use super::{ConfiguredTrackDefinition, ConfiguredTrackInput, PreparedTrackRegistry};
 
-    fn startup_definition_fixture(max_notional: Option<f64>) -> TrackPreparedDefinition {
-        TrackPreparedDefinition::from_configured(
-            ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
-                track_id: TrackId::new("btc-core"),
-                venue: Venue::Binance,
-                symbol: "BTCUSDT".into(),
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                min_rebalance_units: Some(0.5),
-                shape_family: Some(ShapeFamily::Linear),
-                out_of_band_policy: Some(BandProtectionPolicy::Freeze),
-                max_notional,
-                daily_loss_limit: 300.0,
-                total_loss_limit: 600.0,
-                tick_timeout_secs: Some(30),
-            })
-            .unwrap(),
-        )
+    fn startup_definition_fixture(max_notional: Option<f64>) -> ConfiguredTrackDefinition {
+        ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
+            track_id: TrackId::new("btc-core"),
+            venue: Venue::Binance,
+            symbol: "BTCUSDT".into(),
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: Some(0.5),
+            shape_family: Some(ShapeFamily::Linear),
+            out_of_band_policy: Some(BandProtectionPolicy::Freeze),
+            max_notional,
+            daily_loss_limit: 300.0,
+            total_loss_limit: 600.0,
+            tick_timeout_secs: Some(30),
+        })
+        .unwrap()
     }
 
     #[test]
@@ -353,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_track_registry_projects_read_definition_without_restore_helpers() {
+    fn prepared_track_registry_returns_normalized_definition_with_read_projection() {
         let configured = ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
             track_id: TrackId::new("btc-core"),
             venue: Venue::Binance,
@@ -373,7 +316,7 @@ mod tests {
         })
         .unwrap();
         let registry = PreparedTrackRegistry::new(vec![configured]).unwrap();
-        let prepared = registry.get(&TrackId::new("btc-core")).unwrap();
+        let prepared: &ConfiguredTrackDefinition = registry.get(&TrackId::new("btc-core")).unwrap();
 
         let read_definition = prepared.read_definition();
         assert_eq!(read_definition.track_id.as_str(), "btc-core");
@@ -386,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_track_definition_projects_startup_definition() {
+    fn configured_track_definition_projects_startup_definition() {
         let prepared = startup_definition_fixture(Some(3_000.0));
         let startup = prepared.startup_definition();
 

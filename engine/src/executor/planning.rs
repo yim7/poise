@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
-use crate::execution_plan::ExecutionAction;
+use crate::execution_plan::TrackEffect;
 use crate::ports::{ExecutionQuote, OrderRequest};
 use crate::price_gate::{
     PriceExecutionGate, SubmitPurpose, WorkingOrderGateAction, allows_submit,
@@ -58,7 +58,7 @@ pub struct ExecutorPlan {
     pub state: ExecutorState,
     #[allow(dead_code)]
     pub desired_bindings: Vec<BindingProposal>,
-    pub effects: Vec<ExecutionAction>,
+    pub effects: Vec<TrackEffect>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -186,16 +186,16 @@ pub fn refresh_state(
 }
 
 fn noop_plan(state: ExecutorState) -> ExecutorPlan {
-    finish_plan(state, Vec::new(), vec![ExecutionAction::NoOp])
+    finish_plan(state, Vec::new(), vec![TrackEffect::NoOp])
 }
 
 fn finish_plan(
     mut state: ExecutorState,
     desired_bindings: Vec<BindingProposal>,
-    mut effects: Vec<ExecutionAction>,
+    mut effects: Vec<TrackEffect>,
 ) -> ExecutorPlan {
     if effects.is_empty() {
-        effects.push(ExecutionAction::NoOp);
+        effects.push(TrackEffect::NoOp);
     }
     // Terminal bindings are an ExecutorPlan output invariant, including early returns.
     state
@@ -245,7 +245,7 @@ fn refresh_curve_maker_due_grace_start(
 fn apply_price_gate_to_existing_bindings(
     state: &mut ExecutorState,
     gate: PriceExecutionGate,
-) -> Vec<ExecutionAction> {
+) -> Vec<TrackEffect> {
     let mut effects = Vec::new();
     for binding in &mut state.bindings {
         if !matches!(
@@ -276,7 +276,7 @@ fn reconcile_bindings(
     exchange_rules: &ExchangeRules,
     observed_at: DateTime<Utc>,
     curve_maker_grace_ms: i64,
-) -> Vec<ExecutionAction> {
+) -> Vec<TrackEffect> {
     let mut effects = Vec::new();
     let existing_count = state.bindings.len();
     let mut matched_existing = BTreeSet::new();
@@ -349,13 +349,13 @@ fn binding_is_active(binding: &LiveOrderBinding) -> bool {
     super::binding::binding_is_active(binding)
 }
 
-fn cancel_binding(binding: &mut LiveOrderBinding, effects: &mut Vec<ExecutionAction>) {
+fn cancel_binding(binding: &mut LiveOrderBinding, effects: &mut Vec<TrackEffect>) {
     if binding.status == BindingStatus::CancelPending {
         return;
     }
     binding.status = BindingStatus::CancelPending;
     if let Some(order_id) = binding.order_id.clone() {
-        effects.push(ExecutionAction::CancelOrder {
+        effects.push(TrackEffect::CancelOrder {
             instrument: binding.request.instrument.clone(),
             order_id,
         });
@@ -372,10 +372,10 @@ fn update_existing_binding_from_desired(binding: &mut LiveOrderBinding, desired:
 fn submit_desired_binding(
     state: &mut ExecutorState,
     desired: &DesiredBinding,
-    effects: &mut Vec<ExecutionAction>,
+    effects: &mut Vec<TrackEffect>,
 ) {
     let binding = desired_binding_from_spec(desired);
-    let effect = ExecutionAction::SubmitOrder {
+    let effect = TrackEffect::SubmitOrder {
         request: binding.request.clone(),
         desired_exposure: binding.desired_exposure.clone(),
         submit_purpose: binding.submit_purpose,
@@ -527,7 +527,7 @@ mod tests {
             .effects
             .iter()
             .find_map(|effect| match effect {
-                ExecutionAction::SubmitOrder { request, .. }
+                TrackEffect::SubmitOrder { request, .. }
                     if request.client_order_id == catch_up_binding.request.client_order_id =>
                 {
                     Some(request)
@@ -560,7 +560,7 @@ mod tests {
         assert_eq!(
             plan.effects
                 .iter()
-                .filter(|effect| matches!(effect, ExecutionAction::SubmitOrder { request, .. } if request.client_order_id.starts_with("bc-")))
+                .filter(|effect| matches!(effect, TrackEffect::SubmitOrder { request, .. } if request.client_order_id.starts_with("bc-")))
                 .count(),
             1
         );
@@ -630,13 +630,13 @@ mod tests {
 
         assert!(plan.effects.iter().any(|effect| matches!(
             effect,
-            ExecutionAction::CancelOrder { order_id, .. } if order_id == "existing-order"
+            TrackEffect::CancelOrder { order_id, .. } if order_id == "existing-order"
         )));
         let replacement = plan
             .effects
             .iter()
             .find_map(|effect| match effect {
-                ExecutionAction::SubmitOrder { request, .. }
+                TrackEffect::SubmitOrder { request, .. }
                     if request.client_order_id != existing_binding.request.client_order_id =>
                 {
                     Some(request)
@@ -736,7 +736,7 @@ mod tests {
             !next
                 .effects
                 .iter()
-                .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. })),
+                .any(|effect| matches!(effect, TrackEffect::SubmitOrder { .. })),
             "cancel-pending owner must block additional replacement submits"
         );
         assert_eq!(
@@ -774,13 +774,13 @@ mod tests {
 
         assert!(plan.effects.iter().any(|effect| matches!(
             effect,
-            ExecutionAction::CancelOrder { order_id, .. } if order_id == "increase-order"
+            TrackEffect::CancelOrder { order_id, .. } if order_id == "increase-order"
         )));
         assert!(
             !plan
                 .effects
                 .iter()
-                .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. }))
+                .any(|effect| matches!(effect, TrackEffect::SubmitOrder { .. }))
         );
         assert_eq!(plan.state.bindings[0].status, BindingStatus::CancelPending);
     }
@@ -809,13 +809,13 @@ mod tests {
             !plan
                 .effects
                 .iter()
-                .any(|effect| matches!(effect, ExecutionAction::CancelOrder { .. }))
+                .any(|effect| matches!(effect, TrackEffect::CancelOrder { .. }))
         );
         assert!(
             !plan
                 .effects
                 .iter()
-                .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { .. }))
+                .any(|effect| matches!(effect, TrackEffect::SubmitOrder { .. }))
         );
         assert_eq!(plan.state.bindings[0].status, BindingStatus::Working);
         assert_eq!(plan.state.bindings[0].request.price, 99.7);
@@ -856,7 +856,7 @@ mod tests {
             plan.state.recovery_anomaly,
             Some(crate::executor::RecoveryAnomaly::BoundaryProgressOutOfRange)
         );
-        assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
+        assert_eq!(plan.effects, vec![TrackEffect::NoOp]);
         assert_eq!(plan.state.bindings[0].status, BindingStatus::Working);
     }
 
@@ -884,7 +884,7 @@ mod tests {
             !plan
                 .effects
                 .iter()
-                .any(|effect| matches!(effect, ExecutionAction::CancelOrder { .. }))
+                .any(|effect| matches!(effect, TrackEffect::CancelOrder { .. }))
         );
         assert_eq!(plan.state.bindings[0].status, BindingStatus::Working);
     }
@@ -929,11 +929,11 @@ mod tests {
 
         assert!(plan.effects.iter().any(|effect| matches!(
             effect,
-            ExecutionAction::CancelOrder { order_id, .. } if order_id == "maker-order"
+            TrackEffect::CancelOrder { order_id, .. } if order_id == "maker-order"
         )));
         assert!(plan.effects.iter().any(|effect| matches!(
             effect,
-            ExecutionAction::SubmitOrder { request, .. } if request.side == Side::Buy
+            TrackEffect::SubmitOrder { request, .. } if request.side == Side::Buy
         )));
         assert!(plan.state.bindings.iter().any(|binding| {
             binding.proposal_key.policy == PolicyKind::CurveMaker
@@ -985,11 +985,11 @@ mod tests {
 
         assert!(plan.effects.iter().any(|effect| matches!(
             effect,
-            ExecutionAction::CancelOrder { order_id, .. } if order_id == "maker-order"
+            TrackEffect::CancelOrder { order_id, .. } if order_id == "maker-order"
         )));
         assert!(plan.effects.iter().any(|effect| matches!(
             effect,
-            ExecutionAction::SubmitOrder { request, .. } if request.side == Side::Buy
+            TrackEffect::SubmitOrder { request, .. } if request.side == Side::Buy
         )));
         assert!(plan.state.bindings.iter().any(|binding| {
             binding.proposal_key.policy == PolicyKind::CurveMaker
@@ -1046,13 +1046,13 @@ mod tests {
         assert!(
             !plan.effects
                 .iter()
-                .any(|effect| matches!(effect, ExecutionAction::CancelOrder { order_id, .. } if order_id == "near-maker-order"))
+                .any(|effect| matches!(effect, TrackEffect::CancelOrder { order_id, .. } if order_id == "near-maker-order"))
         );
         assert!(
             !plan
                 .effects
                 .iter()
-                .any(|effect| matches!(effect, ExecutionAction::SubmitOrder { request, .. } if request.client_order_id.starts_with("bc-")))
+                .any(|effect| matches!(effect, TrackEffect::SubmitOrder { request, .. } if request.client_order_id.starts_with("bc-")))
         );
         assert!(plan.state.bindings.iter().any(|binding| {
             binding.order_id.as_deref() == Some("near-maker-order")
@@ -1207,7 +1207,7 @@ mod tests {
             plan.state.recovery_anomaly,
             Some(crate::executor::RecoveryAnomaly::ExpectedExposureMismatch)
         );
-        assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
+        assert_eq!(plan.effects, vec![TrackEffect::NoOp]);
     }
 
     #[test]
@@ -1283,6 +1283,6 @@ mod tests {
             plan.state.recovery_anomaly,
             Some(crate::executor::RecoveryAnomaly::BoundaryProgressOutOfRange)
         );
-        assert_eq!(plan.effects, vec![ExecutionAction::NoOp]);
+        assert_eq!(plan.effects, vec![TrackEffect::NoOp]);
     }
 }

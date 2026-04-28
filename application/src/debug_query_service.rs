@@ -5,8 +5,8 @@ use poise_core::events::DomainEvent;
 use poise_engine::track::TrackId;
 
 use crate::{
-    DiagnosticSeverity, StoredTrackEvent, TrackDiagnosticItem,
-    track_diagnostic_event_loader::TrackDiagnosticEventLoader,
+    DiagnosticSeverity, StoredTrackEvent, TrackDiagnosticItem, TrackObservationService,
+    TrackQueryStore, track_diagnostic_event_loader::TrackDiagnosticEventLoader,
 };
 
 pub struct TrackDebugQueryService {
@@ -14,8 +14,13 @@ pub struct TrackDebugQueryService {
 }
 
 impl TrackDebugQueryService {
-    pub(crate) fn from_loader(loader: Arc<TrackDiagnosticEventLoader>) -> Self {
-        Self { loader }
+    pub fn new(
+        repository: Arc<dyn TrackQueryStore>,
+        observation: Arc<TrackObservationService>,
+    ) -> Self {
+        Self {
+            loader: Arc::new(TrackDiagnosticEventLoader::new(repository, observation)),
+        }
     }
 
     pub async fn load_track_diagnostics(
@@ -54,33 +59,27 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
-    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
     use poise_core::types::{Exposure, Side};
+    use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::ports::OrderRequest;
     use poise_engine::track::{Instrument, TrackId, Venue};
-    use poise_engine::transition::TrackEffect;
 
     use crate::mutation_executor::test_support::{
         MemoryRepository, seeded_manager, track_write_services,
     };
     use crate::{
-        ConfiguredTrackDefinition, ConfiguredTrackInput, DiagnosticSeverity, EffectStatus,
-        PersistedTrackEffect, PreparedTrackRegistry, StoredTrackEvent, TrackQueryStore,
-        TrackReadServices,
+        DiagnosticSeverity, EffectStatus, PersistedTrackEffect, StoredTrackEvent, TrackQueryStore,
     };
+
+    use super::TrackDebugQueryService;
 
     #[tokio::test]
     async fn load_track_diagnostics_projects_only_diagnostic_events_in_order() {
         let repository = Arc::new(FakeReadRepository::new());
         let live_repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), live_repository);
-        let read_services = TrackReadServices::new(
-            repository,
-            test_prepared_registry(),
-            Arc::new(services.observation),
-        );
-        let service = read_services.debug_query_service();
+        let service = TrackDebugQueryService::new(repository, Arc::new(services.observation));
 
         let diagnostics = service
             .load_track_diagnostics(&TrackId::new("btc-core"))
@@ -107,12 +106,8 @@ mod tests {
         let repository = Arc::new(FakeReadRepository::new());
         let live_repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), live_repository);
-        let read_services = TrackReadServices::new(
-            repository.clone(),
-            Arc::default(),
-            Arc::new(services.observation),
-        );
-        let service = read_services.debug_query_service();
+        let service =
+            TrackDebugQueryService::new(repository.clone(), Arc::new(services.observation));
 
         let diagnostics = service
             .load_track_diagnostics(&TrackId::new("btc-core"))
@@ -122,32 +117,6 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(repository.effect_query_count(), 0);
-    }
-
-    fn test_prepared_registry() -> Arc<PreparedTrackRegistry> {
-        Arc::new(
-            PreparedTrackRegistry::new(vec![
-                ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
-                    track_id: TrackId::new("btc-core"),
-                    venue: Venue::Binance,
-                    symbol: "BTCUSDT".into(),
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: Some(0.5),
-                    shape_family: Some(ShapeFamily::Linear),
-                    out_of_band_policy: Some(BandProtectionPolicy::Freeze),
-                    max_notional: None,
-                    daily_loss_limit: 100.0,
-                    total_loss_limit: 300.0,
-                    tick_timeout_secs: Some(30),
-                })
-                .unwrap(),
-            ])
-            .unwrap(),
-        )
     }
 
     struct FakeReadRepository {

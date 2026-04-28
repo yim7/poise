@@ -218,13 +218,13 @@ mod tests {
     };
     use crate::{ApplicationNotification, EffectStatus};
     use poise_core::types::Exposure;
+    use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::observation::MarketObservation;
     use poise_engine::ports::{
         ExchangeOrder, ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus,
     };
     use poise_engine::track::{TrackId, Venue};
-    use poise_engine::transition::TrackEffect;
     use tokio::time::timeout;
 
     use super::{

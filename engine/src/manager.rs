@@ -10,6 +10,7 @@ use poise_core::types::Exposure;
 
 use crate::command::TrackCommand;
 use crate::execution_gate::ExecutionGateDecision;
+use crate::execution_plan::TrackEffect;
 use crate::executor;
 use crate::ledger::{LedgerDelta, LedgerGapRecord};
 use crate::mutation_frame::TrackMutationFrame;
@@ -26,7 +27,7 @@ use crate::runtime::{
     TrackRuntime, TrackRuntimeView, TrackState,
 };
 use crate::track::{Instrument, TrackId};
-use crate::transition::{TrackEffect, TrackTransition};
+use crate::transition::TrackTransition;
 
 const DEFAULT_TICK_TIMEOUT_SECS: u64 = 30;
 
@@ -1230,7 +1231,7 @@ mod tests {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{ExchangeRules, Side};
 
-    use crate::execution_plan::ExecutionAction;
+    use crate::execution_plan::TrackEffect;
     use crate::executor::binding::LiveOrderBinding;
     use crate::executor::{PolicyContext, policy::PolicyKind};
     use crate::ledger::TrackLedgerState;
@@ -1322,7 +1323,7 @@ mod tests {
             .effects
             .iter()
             .find_map(|effect| match effect {
-                ExecutionAction::SubmitOrder { request, .. }
+                TrackEffect::SubmitOrder { request, .. }
                     if request.client_order_id == catch_up_binding.request.client_order_id =>
                 {
                     Some(request)

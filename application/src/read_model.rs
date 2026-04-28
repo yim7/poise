@@ -3,11 +3,11 @@ use poise_core::events::{DomainEvent, ExecutionGateReason};
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
 use poise_core::types::Side;
+use poise_engine::execution_plan::TrackEffect;
 use poise_engine::executor::{BindingStatus, PolicyKind, RecoveryAnomaly};
 use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
 use poise_engine::price_gate::PriceExecutionBlockReason;
 use poise_engine::runtime::{StrategyPriceStatus, TrackRuntimeView, TrackStatus};
-use poise_engine::transition::TrackEffect;
 use serde::{Deserialize, Serialize};
 
 use crate::track_definition::TrackReadDefinition;
@@ -554,13 +554,13 @@ mod tests {
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
+    use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::{BindingStatus, PolicyKind, SubmitRecoveryToken};
     use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::{
         BindingView, ExecutorView, StrategyPriceStatus, TrackRuntimeView, TrackStatus,
     };
     use poise_engine::track::{Instrument, TrackId, Venue};
-    use poise_engine::transition::TrackEffect;
 
     use super::{
         TrackActivityLevel, TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadModel,

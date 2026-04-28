@@ -1,9 +1,7 @@
 use poise_core::events::DomainEvent;
 
-use crate::execution_plan::ExecutionAction;
+use crate::execution_plan::TrackEffect;
 use crate::mutation_frame::TrackMutationFrame;
-
-pub type TrackEffect = ExecutionAction;
 
 #[derive(Debug, Clone)]
 pub struct TrackTransition {

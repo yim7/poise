@@ -13,20 +13,18 @@ pub struct TrackQueryService {
 }
 
 impl TrackQueryService {
-    pub(crate) fn from_loader(loader: Arc<TrackReadSourceLoader>) -> Self {
-        Self { loader }
-    }
-
     pub fn new(
         repository: Arc<dyn TrackQueryStore>,
         prepared_registry: Arc<PreparedTrackRegistry>,
         observation: Arc<TrackObservationService>,
     ) -> Self {
-        Self::from_loader(Arc::new(TrackReadSourceLoader::new(
-            repository,
-            prepared_registry,
-            observation,
-        )))
+        Self {
+            loader: Arc::new(TrackReadSourceLoader::new(
+                repository,
+                prepared_registry,
+                observation,
+            )),
+        }
     }
 
     pub async fn list_track_sources(&self) -> Result<Vec<TrackListReadModel>> {
@@ -52,12 +50,12 @@ mod tests {
     use poise_core::events::DomainEvent;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
     use poise_core::types::{Exposure, Side};
+    use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::observation::MarketObservation;
     use poise_engine::ports::ExecutionQuote;
     use poise_engine::ports::OrderRequest;
     use poise_engine::track::{Instrument, TrackId, Venue};
-    use poise_engine::transition::TrackEffect;
 
     use crate::mutation_executor::test_support::{
         MemoryRepository, seeded_manager, track_write_services,

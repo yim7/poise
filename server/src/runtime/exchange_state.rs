@@ -136,12 +136,12 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
+    use poise_engine::execution_plan::TrackEffect;
     use poise_engine::ports::{
         ExchangeOpenOrderSnapshot, ExchangeOrder, ExecutionPort, OrderReceipt, OrderRequest,
         OrderStatus, Position, UserDataEvent, UserDataPayload,
     };
     use poise_engine::track::{Instrument, Venue};
-    use poise_engine::transition::TrackEffect;
     use poise_storage::sqlite::SqliteStorage;
 
     use crate::runtime::exchange_state::apply_user_data_event;

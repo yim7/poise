@@ -10,12 +10,12 @@ use crate::track::Instrument;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionPlan {
-    pub actions: Vec<ExecutionAction>,
+    pub actions: Vec<TrackEffect>,
     pub events: Vec<DomainEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ExecutionAction {
+pub enum TrackEffect {
     SubmitOrder {
         request: OrderRequest,
         desired_exposure: Exposure,
@@ -53,21 +53,19 @@ pub fn is_meetable_minimum(price: f64, quantity: f64, rules: &ExchangeRules) -> 
 impl ExecutionPlan {
     pub fn noop() -> Self {
         Self {
-            actions: vec![ExecutionAction::NoOp],
+            actions: vec![TrackEffect::NoOp],
             events: vec![],
         }
     }
 
     pub fn hold(_reason: String) -> Self {
         Self {
-            actions: vec![ExecutionAction::NoOp],
+            actions: vec![TrackEffect::NoOp],
             events: vec![],
         }
     }
 
     pub fn has_actions(&self) -> bool {
-        self.actions
-            .iter()
-            .any(|a| !matches!(a, ExecutionAction::NoOp))
+        self.actions.iter().any(|a| !matches!(a, TrackEffect::NoOp))
     }
 }

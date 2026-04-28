@@ -262,7 +262,7 @@ mod tests {
 
     use poise_application::{
         AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
-        StoredAccountMonitorState, TrackQueryService, TrackReadServices,
+        StoredAccountMonitorState, TrackDebugQueryService, TrackQueryService,
     };
 
     #[derive(Clone)]
@@ -348,13 +348,15 @@ mod tests {
             notifications,
             account_margin_guard.clone(),
         );
-        let read_services = TrackReadServices::new(
-            query_store,
+        let query_service = Arc::new(TrackQueryService::new(
+            query_store.clone(),
             test_prepared_registry("btc-core"),
             services.observation_service.clone(),
-        );
-        let query_service = read_services.query_service();
-        let debug_query_service = read_services.debug_query_service();
+        ));
+        let debug_query_service = Arc::new(TrackDebugQueryService::new(
+            query_store,
+            services.observation_service.clone(),
+        ));
         let projector = Arc::new(TrackProjector::new());
         let account_monitor = unavailable_account_monitor(services.notifications.clone());
         let account_projector = Arc::new(AccountProjector::new());
@@ -448,13 +450,15 @@ mod tests {
         );
         let projector = Arc::new(TrackProjector::new());
         let account_projector = Arc::new(AccountProjector::new());
-        let read_services = TrackReadServices::new(
-            query_store,
+        let query_service = Arc::new(TrackQueryService::new(
+            query_store.clone(),
             test_prepared_registry("btc-core"),
             services.observation_service.clone(),
-        );
-        let query_service = read_services.query_service();
-        let debug_query_service = read_services.debug_query_service();
+        ));
+        let debug_query_service = Arc::new(TrackDebugQueryService::new(
+            query_store,
+            services.observation_service.clone(),
+        ));
         HttpTestState {
             http_state: build_http_state(
                 &services,
@@ -628,13 +632,15 @@ mod tests {
                 notifications,
                 account_margin_guard.clone(),
             );
-            let read_services = TrackReadServices::new(
-                query_store,
+            let query_service = Arc::new(TrackQueryService::new(
+                query_store.clone(),
                 test_prepared_registry("btc-core"),
                 services.observation_service.clone(),
-            );
-            let query_service = read_services.query_service();
-            let debug_query_service = read_services.debug_query_service();
+            ));
+            let debug_query_service = Arc::new(TrackDebugQueryService::new(
+                query_store,
+                services.observation_service.clone(),
+            ));
             let projector = Arc::new(TrackProjector::new());
             let account_monitor = unavailable_account_monitor(services.notifications.clone());
             let account_projector = Arc::new(AccountProjector::new());
@@ -921,16 +927,19 @@ mod tests {
             notifications,
             account_margin_guard,
         );
-        let read_services = TrackReadServices::new(
-            repository.clone() as Arc<dyn TrackQueryStore>,
+        let query_store = repository.clone() as Arc<dyn TrackQueryStore>;
+        let query_service = Arc::new(TrackQueryService::new(
+            query_store.clone(),
             test_prepared_registry("btc-core"),
             services.observation_service.clone(),
-        );
-        let query_service = read_services.query_service();
+        ));
         let projector = Arc::new(TrackProjector::new());
         let account_monitor = unavailable_account_monitor(services.notifications.clone());
         let account_projector = Arc::new(AccountProjector::new());
-        let debug_query_service = read_services.debug_query_service();
+        let debug_query_service = Arc::new(TrackDebugQueryService::new(
+            query_store,
+            services.observation_service.clone(),
+        ));
         let app = router(HttpTestState {
             http_state: build_http_state(
                 &services,

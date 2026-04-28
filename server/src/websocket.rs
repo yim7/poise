@@ -719,10 +719,10 @@ mod tests {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::ExchangeRules;
     use poise_engine::command::TrackCommand;
+    use poise_engine::execution_plan::TrackEffect;
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{AccountSummarySnapshot, ClockPort};
     use poise_engine::track::{Instrument, TrackId, Venue};
-    use poise_engine::transition::TrackEffect;
     use poise_protocol::{
         ExecutionStateView, ExecutionStatusView, RiskSignalView, StreamEvent, TrackStatus,
     };
