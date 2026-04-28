@@ -1236,7 +1236,12 @@ total_loss_limit = 600.0
             .unwrap()
         });
 
-        persistence.wait_for_first_save_start().await;
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            persistence.wait_for_first_save_start(),
+        )
+        .await
+        .expect("resume command should start its persistence write");
 
         let tick_state = platform.runtime_test_context();
         let tick_request = tokio::spawn(async move {
@@ -1261,13 +1266,25 @@ total_loss_limit = 600.0
         .await;
         persistence.release_first_save();
 
-        let response = resume_request.await.unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(1), resume_request)
+            .await
+            .expect("resume request should finish after the first save is released")
+            .unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
-        persistence.wait_for_completed_saves(2).await;
-        let _ = tick_request.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), tick_request)
+            .await
+            .expect("newer tick should finish after the command save is released")
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            persistence.wait_for_completed_saves(1),
+        )
+        .await
+        .expect("command persistence write should complete");
         assert!(
             second_save_started.is_err(),
-            "tick save should wait for command save to finish"
+            "newer tick must not begin a persistence write before the command save finishes"
         );
 
         let snapshot = platform
