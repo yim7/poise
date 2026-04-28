@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use poise_application::{
-    AccountMonitorStore, ConfiguredTrackDefinition, PreparedTrackRegistry, TrackEffectJournal,
-    TrackMutationStore, TrackQueryStore,
+    AccountMonitorStore, TrackDefinitionRegistry, TrackEffectJournal, TrackMutationStore,
+    TrackQueryStore,
 };
 use poise_storage::sqlite::SqliteStorage;
 
@@ -60,13 +60,13 @@ pub struct StateRepositories {
 
 pub struct PreparedStateStore {
     repositories: StateRepositories,
-    prepared_registry: Arc<PreparedTrackRegistry>,
+    prepared_registry: Arc<TrackDefinitionRegistry>,
 }
 
 impl PreparedStateStore {
     pub async fn run_startup<T, F, Fut>(self, startup: F) -> Result<T>
     where
-        F: FnOnce(StateRepositories, Arc<PreparedTrackRegistry>) -> Fut,
+        F: FnOnce(StateRepositories, Arc<TrackDefinitionRegistry>) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
         startup(
@@ -77,7 +77,7 @@ impl PreparedStateStore {
     }
 
     #[cfg(test)]
-    pub fn registry(&self) -> &PreparedTrackRegistry {
+    pub fn registry(&self) -> &TrackDefinitionRegistry {
         &self.prepared_registry
     }
 }
@@ -152,14 +152,12 @@ pub async fn prepare_state_repository(
     })
 }
 
-fn build_prepared_registry(config: &Config) -> Result<PreparedTrackRegistry> {
+fn build_prepared_registry(config: &Config) -> Result<TrackDefinitionRegistry> {
     let mut configured = Vec::with_capacity(config.tracks.len());
     for track in &config.tracks {
-        configured.push(ConfiguredTrackDefinition::try_from_input(
-            track.to_configured_input(config.exchange.venue()),
-        )?);
+        configured.push(track.to_track_definition(config.exchange.venue())?);
     }
-    PreparedTrackRegistry::new(configured)
+    TrackDefinitionRegistry::new(configured)
 }
 
 fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
@@ -171,7 +169,7 @@ fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
 }
 
 async fn detect_persisted_state_mismatches(
-    prepared_registry: &PreparedTrackRegistry,
+    prepared_registry: &TrackDefinitionRegistry,
     repository: &SqliteStorage,
 ) -> Result<Vec<PersistedStateMismatch>> {
     let mut mismatches = Vec::new();
@@ -201,8 +199,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use poise_application::PersistedControlMode;
-    use poise_application::PreparedTrackRegistry;
     use poise_application::TrackControlState;
+    use poise_application::TrackDefinitionRegistry;
     use poise_application::TrackMutationStore;
     use poise_application::TrackQueryStore;
     use poise_core::track::TrackId;
@@ -229,7 +227,7 @@ mod tests {
         let db_path = test_db_path(instance_dir.path());
         let prepared = prepare_state_repository(&config, &db_path).await.unwrap();
 
-        let registry: &PreparedTrackRegistry = prepared.registry();
+        let registry: &TrackDefinitionRegistry = prepared.registry();
         assert_eq!(registry.iter().count(), 1);
         assert!(registry.get(&TrackId::new("btc-core")).is_some());
     }

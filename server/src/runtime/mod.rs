@@ -8,8 +8,7 @@ use crate::server_context::{EffectWorkerState, ReconcileState, RuntimeState};
 use crate::test_support::RuntimeTestContext;
 use anyhow::{Result, anyhow};
 use poise_application::TrackMutationError;
-use poise_application::TrackStartupDefinition;
-use poise_core::track::{Instrument, TrackId};
+use poise_core::track::{Instrument, TrackDefinition, TrackId};
 use poise_core::types::Exposure;
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::ports::{
@@ -41,15 +40,12 @@ pub(crate) enum RuntimeStartupCapacityMode {
 
 #[derive(Clone)]
 pub(crate) struct RuntimeStartupDefinition {
-    track: TrackStartupDefinition,
+    track: TrackDefinition,
     capacity_mode: RuntimeStartupCapacityMode,
 }
 
 impl RuntimeStartupDefinition {
-    pub(crate) fn new(
-        track: TrackStartupDefinition,
-        capacity_mode: RuntimeStartupCapacityMode,
-    ) -> Self {
+    pub(crate) fn new(track: TrackDefinition, capacity_mode: RuntimeStartupCapacityMode) -> Self {
         Self {
             track,
             capacity_mode,

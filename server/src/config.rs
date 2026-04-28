@@ -1,11 +1,14 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use poise_application::{AccountMonitorConfig, ConfiguredTrackDefinition, ConfiguredTrackInput};
+use poise_application::AccountMonitorConfig;
 use poise_binance as binance;
 use poise_bybit as bybit;
-use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
-use poise_core::track::{TrackId, Venue};
+use poise_core::risk::LossLimits;
+use poise_core::strategy::{
+    BandProtectionPolicy, DEFAULT_MIN_REBALANCE_UNITS, ShapeFamily, TrackConfig,
+};
+use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
 use serde::{Deserialize, Deserializer};
 
 use crate::exchange_startup::build_track_leverage_index;
@@ -74,10 +77,9 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<Config> {
 pub fn parse_config(input: &str) -> Result<Config> {
     let config: Config = toml_edit::de::from_str(input).context("failed to parse TOML config")?;
     for track in &config.tracks {
-        ConfiguredTrackDefinition::try_from_input(
-            track.to_configured_input(config.exchange.venue()),
-        )
-        .map_err(|error| anyhow::anyhow!("invalid track `{}`: {error}", track.track_id))?;
+        track
+            .to_track_definition(config.exchange.venue())
+            .map_err(|error| anyhow::anyhow!("invalid track `{}`: {error}", track.track_id))?;
     }
     build_track_leverage_index(&config.tracks)?;
     config.account_monitor.validate()?;
@@ -89,24 +91,35 @@ impl TrackSpec {
         TrackId::new(self.track_id.clone())
     }
 
-    pub fn to_configured_input(&self, venue: Venue) -> ConfiguredTrackInput {
-        ConfiguredTrackInput {
-            track_id: self.track_id(),
-            venue,
-            symbol: self.symbol.clone(),
+    pub fn to_track_definition(&self, venue: Venue) -> Result<TrackDefinition> {
+        let track_config = TrackConfig {
             lower_price: self.lower_price,
             upper_price: self.upper_price,
             long_exposure_units: self.long_exposure_units,
             short_exposure_units: self.short_exposure_units,
             notional_per_unit: self.notional_per_unit,
-            min_rebalance_units: self.min_rebalance_units,
-            shape_family: self.shape_family,
-            out_of_band_policy: self.out_of_band_policy,
-            max_notional: self.max_notional,
+            min_rebalance_units: self
+                .min_rebalance_units
+                .unwrap_or(DEFAULT_MIN_REBALANCE_UNITS),
+            shape_family: self.shape_family.unwrap_or(ShapeFamily::Linear),
+            out_of_band_policy: self
+                .out_of_band_policy
+                .unwrap_or(BandProtectionPolicy::Freeze),
+        };
+        let loss_limits = LossLimits {
             daily_loss_limit: self.daily_loss_limit,
             total_loss_limit: self.total_loss_limit,
-            tick_timeout_secs: self.tick_timeout_secs,
-        }
+        };
+
+        TrackDefinition::try_new(
+            self.track_id(),
+            Instrument::new(venue, self.symbol.clone()),
+            track_config,
+            self.max_notional,
+            loss_limits,
+            self.tick_timeout_secs,
+        )
+        .map_err(anyhow::Error::msg)
     }
 }
 
@@ -138,7 +151,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use poise_application::{ConfiguredTrackDefinition, ConfiguredTrackInput};
     use poise_core::strategy::ShapeFamily;
     use poise_core::track::{TrackId, Venue};
 
@@ -147,7 +159,7 @@ mod tests {
     };
 
     #[test]
-    fn track_file_definition_maps_mechanically_to_configured_track_input() {
+    fn track_spec_builds_track_definition_from_service_venue() {
         let config = parse_config(
             r#"
 [exchange]
@@ -167,13 +179,14 @@ total_loss_limit = 600.0
         )
         .unwrap();
 
-        let input: ConfiguredTrackInput =
-            config.tracks[0].to_configured_input(config.exchange.venue());
-        assert_eq!(input.track_id.as_str(), "btc-core");
-        assert_eq!(input.venue, Venue::Binance);
-        assert_eq!(input.symbol, "BTCUSDT");
-        assert_eq!(input.min_rebalance_units, None);
-        assert_eq!(input.tick_timeout_secs, None);
+        let definition = config.tracks[0]
+            .to_track_definition(config.exchange.venue())
+            .unwrap();
+        assert_eq!(definition.track_id().as_str(), "btc-core");
+        assert_eq!(definition.instrument().venue, Venue::Binance);
+        assert_eq!(definition.instrument().symbol, "BTCUSDT");
+        assert_eq!(definition.track_config().min_rebalance_units, 0.5);
+        assert_eq!(definition.tick_timeout_secs(), 30);
     }
 
     #[test]
@@ -493,10 +506,9 @@ total_loss_limit = 600.0
         )
         .unwrap();
 
-        let track = ConfiguredTrackDefinition::try_from_input(
-            config.tracks[0].to_configured_input(config.exchange.venue()),
-        )
-        .unwrap();
+        let track = config.tracks[0]
+            .to_track_definition(config.exchange.venue())
+            .unwrap();
 
         assert_eq!(config.bind_address, default_bind_address());
         if let ExchangeConfig::Binance(exchange) = &config.exchange {
@@ -537,10 +549,9 @@ total_loss_limit = 600.0
         )
         .unwrap();
 
-        let track = ConfiguredTrackDefinition::try_from_input(
-            config.tracks[0].to_configured_input(config.exchange.venue()),
-        )
-        .unwrap();
+        let track = config.tracks[0]
+            .to_track_definition(config.exchange.venue())
+            .unwrap();
 
         assert!((track.track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON);
     }
@@ -694,10 +705,9 @@ total_loss_limit = 500.0
         )
         .unwrap();
 
-        let definition = ConfiguredTrackDefinition::try_from_input(
-            config.tracks[0].to_configured_input(config.exchange.venue()),
-        )
-        .unwrap();
+        let definition = config.tracks[0]
+            .to_track_definition(config.exchange.venue())
+            .unwrap();
         assert!((definition.max_notional() - 5000.0).abs() < f64::EPSILON);
         assert!((definition.loss_limits().daily_loss_limit - 200.0).abs() < f64::EPSILON);
         assert!((definition.loss_limits().total_loss_limit - 500.0).abs() < f64::EPSILON);

@@ -3,14 +3,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
-    AccountCapacityGuard, AccountMonitor, ApplicationNotification, ConfiguredTrackDefinition,
-    ConfiguredTrackInput, PreparedTrackRegistry, TrackCommandService, TrackEffectJournal,
-    TrackEffectService, TrackMutationStore, TrackObservationService, TrackQueryStore,
-    TrackRuntimeLifecycleService, TrackServiceSet,
+    AccountCapacityGuard, AccountMonitor, ApplicationNotification, TrackCommandService,
+    TrackDefinitionRegistry, TrackEffectJournal, TrackEffectService, TrackMutationStore,
+    TrackObservationService, TrackQueryStore, TrackRuntimeLifecycleService, TrackServiceSet,
 };
 use poise_core::risk::LossLimits;
-use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
-use poise_core::track::{TrackId, Venue};
+use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
+use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
 use poise_core::types::{ExchangeRules, Exposure, Side};
 use poise_engine::execution_plan::TrackEffect;
 use poise_engine::executor::SubmitRecoveryToken;
@@ -177,7 +176,7 @@ pub(crate) fn test_loss_limits() -> LossLimits {
     }
 }
 
-pub(crate) fn test_prepared_registry(track_id: &str) -> Arc<PreparedTrackRegistry> {
+pub(crate) fn test_prepared_registry(track_id: &str) -> Arc<TrackDefinitionRegistry> {
     prepared_registry_for(
         track_id,
         default_symbol_for(track_id),
@@ -191,26 +190,26 @@ fn prepared_registry_for(
     symbol: &str,
     max_notional: f64,
     loss_limits: LossLimits,
-) -> Arc<PreparedTrackRegistry> {
+) -> Arc<TrackDefinitionRegistry> {
     Arc::new(
-        PreparedTrackRegistry::new(vec![
-            ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
-                track_id: TrackId::new(track_id),
-                venue: Venue::Binance,
-                symbol: symbol.to_string(),
-                lower_price: 90.0,
-                upper_price: 110.0,
-                long_exposure_units: 8.0,
-                short_exposure_units: 8.0,
-                notional_per_unit: 375.0,
-                min_rebalance_units: Some(0.5),
-                shape_family: Some(ShapeFamily::Linear),
-                out_of_band_policy: Some(BandProtectionPolicy::Freeze),
-                max_notional: Some(max_notional),
-                daily_loss_limit: loss_limits.daily_loss_limit,
-                total_loss_limit: loss_limits.total_loss_limit,
-                tick_timeout_secs: Some(30),
-            })
+        TrackDefinitionRegistry::new(vec![
+            TrackDefinition::try_new(
+                TrackId::new(track_id),
+                Instrument::new(Venue::Binance, symbol.to_string()),
+                TrackConfig {
+                    lower_price: 90.0,
+                    upper_price: 110.0,
+                    long_exposure_units: 8.0,
+                    short_exposure_units: 8.0,
+                    notional_per_unit: 375.0,
+                    min_rebalance_units: 0.5,
+                    shape_family: ShapeFamily::Linear,
+                    out_of_band_policy: BandProtectionPolicy::Freeze,
+                },
+                Some(max_notional),
+                loss_limits,
+                Some(30),
+            )
             .unwrap(),
         ])
         .unwrap(),

@@ -47,10 +47,7 @@ pub use session_effect_queue::{
 };
 pub use track_command_service::TrackCommandService;
 pub use track_control_state::{PersistedControlMode, TrackControlCommand, TrackControlState};
-pub use track_definition::{
-    ConfiguredTrackDefinition, ConfiguredTrackInput, PreparedTrackRegistry, TrackReadDefinition,
-    TrackStartupDefinition,
-};
+pub use track_definition::TrackDefinitionRegistry;
 pub use track_effect_service::TrackEffectService;
 pub use track_effect_store::TrackEffectJournal;
 pub use track_mutation_store::TrackMutationStore;

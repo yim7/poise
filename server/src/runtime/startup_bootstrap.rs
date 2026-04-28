@@ -443,7 +443,7 @@ mod tests {
                 test_prepared_registry("btc-core")
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
-                    .startup_definition(),
+                    .clone(),
                 RuntimeStartupCapacityMode::AccountCapacitySnapshot,
             )],
         );
@@ -562,7 +562,7 @@ mod tests {
                 test_prepared_registry("btc-core")
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
-                    .startup_definition(),
+                    .clone(),
                 RuntimeStartupCapacityMode::AccountCapacitySnapshot,
             )],
         );
@@ -640,7 +640,7 @@ mod tests {
                 test_prepared_registry("btc-core")
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
-                    .startup_definition(),
+                    .clone(),
                 RuntimeStartupCapacityMode::AccountCapacitySnapshot,
             )],
         );
@@ -736,7 +736,7 @@ mod tests {
                 test_prepared_registry("btc-core")
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
-                    .startup_definition(),
+                    .clone(),
                 RuntimeStartupCapacityMode::AccountCapacitySnapshot,
             )],
         );
@@ -806,7 +806,7 @@ mod tests {
                 test_prepared_registry("btc-core")
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
-                    .startup_definition(),
+                    .clone(),
                 RuntimeStartupCapacityMode::AccountCapacitySnapshot,
             )],
         );

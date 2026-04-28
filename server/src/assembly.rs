@@ -9,8 +9,8 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
-    AccountMonitor, ApplicationNotification, PreparedTrackRegistry, TrackCommandService,
-    TrackDebugQueryService, TrackEffectService, TrackObservationService, TrackQueryService,
+    AccountMonitor, ApplicationNotification, TrackCommandService, TrackDebugQueryService,
+    TrackDefinitionRegistry, TrackEffectService, TrackObservationService, TrackQueryService,
     TrackRuntimeLifecycleService, TrackServiceSet,
 };
 use poise_binance::connect as connect_binance;
@@ -120,7 +120,7 @@ pub(crate) async fn build_exchange(config: &ExchangeConfig) -> Result<Exchange> 
 
 pub async fn assemble(
     config: &Config,
-    prepared_registry: Arc<PreparedTrackRegistry>,
+    prepared_registry: Arc<TrackDefinitionRegistry>,
     repositories: StateRepositories,
 ) -> Result<ServerPlatform> {
     let track_leverage_index = build_track_leverage_index(&config.tracks)?;
@@ -155,7 +155,7 @@ pub async fn assemble(
 
 async fn build_exchange_and_prepare_startup(
     config: &Config,
-    prepared_registry: &PreparedTrackRegistry,
+    prepared_registry: &TrackDefinitionRegistry,
     track_leverage_index: &TrackLeverageIndex,
 ) -> Result<Exchange> {
     prepare_exchange_startup_with(
@@ -198,7 +198,7 @@ impl ExchangePorts {
 #[cfg(test)]
 pub(crate) async fn assemble_with_exchange_ports(
     config: &Config,
-    prepared_registry: Arc<PreparedTrackRegistry>,
+    prepared_registry: Arc<TrackDefinitionRegistry>,
     exchange_ports: ExchangePorts,
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
@@ -225,7 +225,7 @@ pub(crate) async fn assemble_with_exchange_ports(
 
 async fn assemble_with_state_store(
     config: &Config,
-    prepared_registry: Arc<PreparedTrackRegistry>,
+    prepared_registry: Arc<TrackDefinitionRegistry>,
     exchange: Exchange,
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
@@ -254,7 +254,7 @@ async fn assemble_with_state_store(
             .ok_or_else(|| anyhow!("missing startup leverage for track `{}`", track_id.as_str()))?;
         let startup_capacity_mode = build_startup_capacity_mode(&instrument, startup_leverage);
         startup_definitions.push(RuntimeStartupDefinition::new(
-            track.startup_definition(),
+            track.clone(),
             startup_capacity_mode,
         ));
         manager.add_track_with_tick_timeout_secs(
@@ -596,9 +596,7 @@ mod tests {
         build_test_application_services, build_websocket_state as build_test_websocket_state,
         unavailable_account_monitor,
     };
-    use poise_application::{
-        ConfiguredTrackDefinition, PreparedTrackRegistry, TrackDebugQueryService, TrackQueryService,
-    };
+    use poise_application::{TrackDebugQueryService, TrackDefinitionRegistry, TrackQueryService};
 
     use super::{
         ServerPlatform, SystemClock, assemble, build_exchange, validate_unique_instruments,
@@ -616,18 +614,14 @@ mod tests {
         }
     }
 
-    fn test_prepared_registry(config: &Config) -> Arc<PreparedTrackRegistry> {
+    fn test_prepared_registry(config: &Config) -> Arc<TrackDefinitionRegistry> {
         let configured = config
             .tracks
             .iter()
-            .map(|track| {
-                ConfiguredTrackDefinition::try_from_input(
-                    track.to_configured_input(config.exchange.venue()),
-                )
-            })
+            .map(|track| track.to_track_definition(config.exchange.venue()))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        Arc::new(PreparedTrackRegistry::new(configured).unwrap())
+        Arc::new(TrackDefinitionRegistry::new(configured).unwrap())
     }
 
     #[test]
@@ -1449,7 +1443,7 @@ total_loss_limit = 600.0
                         crate::test_support::test_prepared_registry("btc-core")
                             .get(&TrackId::new("btc-core"))
                             .unwrap()
-                            .startup_definition(),
+                            .clone(),
                         crate::runtime::RuntimeStartupCapacityMode::AccountCapacitySnapshot,
                     )],
                 ),

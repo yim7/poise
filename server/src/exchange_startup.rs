@@ -57,7 +57,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use anyhow::anyhow;
-    use poise_application::{ConfiguredTrackDefinition, PreparedTrackRegistry};
+    use poise_application::TrackDefinitionRegistry;
     use poise_core::track::{Instrument, TrackId, Venue};
 
     use super::{build_symbol_leverage_setter, build_track_leverage_index};
@@ -153,15 +153,13 @@ mod tests {
         assert!(message.contains("exchange rejected leverage"));
     }
 
-    fn prepared_registry(tracks: &[TrackSpec]) -> PreparedTrackRegistry {
+    fn prepared_registry(tracks: &[TrackSpec]) -> TrackDefinitionRegistry {
         let configured = tracks
             .iter()
-            .map(|track| {
-                ConfiguredTrackDefinition::try_from_input(track.to_configured_input(Venue::Binance))
-            })
+            .map(|track| track.to_track_definition(Venue::Binance))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        PreparedTrackRegistry::new(configured).unwrap()
+        TrackDefinitionRegistry::new(configured).unwrap()
     }
 
     fn track_spec(track_id: &str, symbol: &str, leverage: Option<u32>) -> TrackSpec {

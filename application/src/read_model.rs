@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use poise_core::events::{DomainEvent, ExecutionGateReason};
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
+use poise_core::track::TrackDefinition;
 use poise_core::types::Side;
 use poise_engine::execution_plan::TrackEffect;
 use poise_engine::executor::{BindingStatus, PolicyKind, RecoveryAnomaly};
@@ -10,7 +11,6 @@ use poise_engine::price_gate::PriceExecutionBlockReason;
 use poise_engine::runtime::{StrategyPriceStatus, TrackRuntimeView, TrackStatus};
 use serde::{Deserialize, Serialize};
 
-use crate::track_definition::TrackReadDefinition;
 use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
 use crate::track_read_source::TrackReadSource;
 
@@ -285,6 +285,7 @@ impl TrackReadModel {
             recent_effects,
         } = source;
         let list_view = TrackListReadModel::from_parts(&definition, &runtime, updated_at);
+        let track_config = definition.track_config();
         let recent_activity = project_recent_activity(recent_track_events, recent_effects);
 
         let bindings = project_bindings(&runtime);
@@ -299,16 +300,16 @@ impl TrackReadModel {
             symbol: list_view.symbol.clone(),
             status: list_view.status,
             updated_at: list_view.updated_at,
-            lower_price: definition.track_config.lower_price,
-            upper_price: definition.track_config.upper_price,
-            long_exposure_units: definition.track_config.long_exposure_units,
-            short_exposure_units: definition.track_config.short_exposure_units,
-            notional_per_unit: definition.track_config.notional_per_unit,
-            min_rebalance_units: definition.track_config.min_rebalance_units,
-            shape_family: definition.track_config.shape_family,
-            out_of_band_policy: definition.track_config.out_of_band_policy,
-            max_notional: definition.max_notional,
-            loss_limits: definition.loss_limits,
+            lower_price: track_config.lower_price,
+            upper_price: track_config.upper_price,
+            long_exposure_units: track_config.long_exposure_units,
+            short_exposure_units: track_config.short_exposure_units,
+            notional_per_unit: track_config.notional_per_unit,
+            min_rebalance_units: track_config.min_rebalance_units,
+            shape_family: track_config.shape_family,
+            out_of_band_policy: track_config.out_of_band_policy,
+            max_notional: definition.max_notional(),
+            loss_limits: definition.loss_limits().clone(),
             strategy_price: list_view.strategy_price,
             strategy_price_status: list_view.strategy_price_status,
             mark_price: runtime.mark_price,
@@ -333,14 +334,14 @@ impl TrackReadModel {
 
 impl TrackListReadModel {
     pub(crate) fn from_parts(
-        definition: &TrackReadDefinition,
+        definition: &TrackDefinition,
         runtime: &TrackRuntimeView,
         updated_at: DateTime<Utc>,
     ) -> Self {
         Self {
-            track_id: definition.track_id.as_str().to_string(),
-            venue: definition.instrument.venue.as_str().to_string(),
-            symbol: definition.instrument.symbol.clone(),
+            track_id: definition.track_id().as_str().to_string(),
+            venue: definition.instrument().venue.as_str().to_string(),
+            symbol: definition.instrument().symbol.clone(),
             status: TrackReadStatus::from(runtime.status.clone()),
             updated_at,
             strategy_price: runtime.strategy_price,
@@ -553,7 +554,7 @@ mod tests {
     use poise_core::events::DomainEvent;
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
-    use poise_core::track::{Instrument, TrackId, Venue};
+    use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::{BindingStatus, PolicyKind, SubmitRecoveryToken};
@@ -566,7 +567,6 @@ mod tests {
         TrackActivityLevel, TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadModel,
         TrackReadStatus, TrackStrategyPriceStatus,
     };
-    use crate::TrackReadDefinition;
     use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
     use crate::track_read_source::TrackReadSource;
 
@@ -583,20 +583,25 @@ mod tests {
         }
     }
 
+    fn test_track_definition() -> TrackDefinition {
+        TrackDefinition::try_new(
+            TrackId::new("btc-core"),
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            test_track_config(),
+            Some(3000.0),
+            LossLimits {
+                daily_loss_limit: 100.0,
+                total_loss_limit: 300.0,
+            },
+            Some(30),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn read_model_from_source_flattens_runtime_view() {
-        let track_config = test_track_config();
         let read_model = TrackReadModel::from_source(TrackReadSource {
-            definition: TrackReadDefinition {
-                track_id: TrackId::new("btc-core"),
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                track_config: track_config.clone(),
-                max_notional: 3000.0,
-                loss_limits: LossLimits {
-                    daily_loss_limit: 100.0,
-                    total_loss_limit: 300.0,
-                },
-            },
+            definition: test_track_definition(),
             runtime: TrackRuntimeView {
                 status: TrackStatus::Active,
                 current_exposure: Exposure(3.5),
@@ -671,16 +676,7 @@ mod tests {
     #[test]
     fn read_model_exposes_strategy_price_status_and_best_bid_ask() {
         let read_model = TrackReadModel::from_source(TrackReadSource {
-            definition: TrackReadDefinition {
-                track_id: TrackId::new("btc-core"),
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                track_config: test_track_config(),
-                max_notional: 3000.0,
-                loss_limits: LossLimits {
-                    daily_loss_limit: 100.0,
-                    total_loss_limit: 300.0,
-                },
-            },
+            definition: test_track_definition(),
             runtime: TrackRuntimeView {
                 status: TrackStatus::Active,
                 current_exposure: Exposure(1.0),
@@ -722,18 +718,8 @@ mod tests {
 
     #[test]
     fn read_model_uses_runtime_view_for_market_and_target_fields() {
-        let track_config = test_track_config();
         let read_model = TrackReadModel::from_source(TrackReadSource {
-            definition: TrackReadDefinition {
-                track_id: TrackId::new("btc-core"),
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                track_config: track_config.clone(),
-                max_notional: 3000.0,
-                loss_limits: LossLimits {
-                    daily_loss_limit: 100.0,
-                    total_loss_limit: 300.0,
-                },
-            },
+            definition: test_track_definition(),
             runtime: TrackRuntimeView {
                 status: TrackStatus::Active,
                 current_exposure: Exposure(1.0),

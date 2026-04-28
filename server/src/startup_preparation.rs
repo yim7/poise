@@ -3,7 +3,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use poise_application::PreparedTrackRegistry;
+use poise_application::TrackDefinitionRegistry;
 use poise_core::track::{Instrument, TrackId};
 use poise_engine::ports::{ExchangeInfo, MetadataPort};
 use tokio::time::{Duration, sleep};
@@ -16,7 +16,7 @@ pub(crate) trait SymbolLeverageSetter: Send + Sync {
 }
 
 pub(crate) async fn apply_track_startup_leverage(
-    prepared_registry: &PreparedTrackRegistry,
+    prepared_registry: &TrackDefinitionRegistry,
     track_leverage_index: &TrackLeverageIndex,
     symbol_leverage_setter: &dyn SymbolLeverageSetter,
 ) -> Result<()> {
@@ -55,7 +55,7 @@ pub(crate) async fn prepare_exchange_startup_with<
     BuildExchangeFuture,
     BuildSetter,
 >(
-    prepared_registry: &PreparedTrackRegistry,
+    prepared_registry: &TrackDefinitionRegistry,
     track_leverage_index: &TrackLeverageIndex,
     build_exchange_fn: BuildExchange,
     build_symbol_leverage_setter_fn: BuildSetter,

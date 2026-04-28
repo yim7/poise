@@ -3,9 +3,10 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
-use poise_application::{ConfiguredTrackDefinition, ConfiguredTrackInput, PreparedTrackRegistry};
-use poise_core::strategy::ShapeFamily;
-use poise_core::track::{Instrument, TrackId, Venue};
+use poise_application::TrackDefinitionRegistry;
+use poise_core::risk::LossLimits;
+use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
+use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
 use poise_core::types::ExchangeRules;
 use poise_engine::ports::{ExchangeInfo, MetadataPort};
 
@@ -125,25 +126,28 @@ async fn load_exchange_info_with_retry_retries_transient_failures() {
     assert_eq!(info.rules, test_exchange_rules());
 }
 
-fn prepared_registry(track_id: &str, symbol: &str) -> PreparedTrackRegistry {
-    PreparedTrackRegistry::new(vec![
-        ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
-            track_id: TrackId::new(track_id),
-            venue: Venue::Binance,
-            symbol: symbol.to_string(),
-            lower_price: 90.0,
-            upper_price: 110.0,
-            long_exposure_units: 8.0,
-            short_exposure_units: 6.0,
-            notional_per_unit: 375.0,
-            min_rebalance_units: Some(0.5),
-            shape_family: Some(ShapeFamily::Linear),
-            out_of_band_policy: None,
-            max_notional: Some(3_000.0),
-            daily_loss_limit: 300.0,
-            total_loss_limit: 600.0,
-            tick_timeout_secs: None,
-        })
+fn prepared_registry(track_id: &str, symbol: &str) -> TrackDefinitionRegistry {
+    TrackDefinitionRegistry::new(vec![
+        TrackDefinition::try_new(
+            TrackId::new(track_id),
+            Instrument::new(Venue::Binance, symbol.to_string()),
+            TrackConfig {
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 6.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: 0.5,
+                shape_family: ShapeFamily::Linear,
+                out_of_band_policy: BandProtectionPolicy::Freeze,
+            },
+            Some(3_000.0),
+            LossLimits {
+                daily_loss_limit: 300.0,
+                total_loss_limit: 600.0,
+            },
+            None,
+        )
         .unwrap(),
     ])
     .unwrap()

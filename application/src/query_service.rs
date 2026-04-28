@@ -4,7 +4,7 @@ use anyhow::Result;
 use poise_core::track::TrackId;
 
 use crate::{
-    PreparedTrackRegistry, TrackListReadModel, TrackObservationService, TrackQueryStore,
+    TrackDefinitionRegistry, TrackListReadModel, TrackObservationService, TrackQueryStore,
     TrackReadModel, track_read_source_loader::TrackReadSourceLoader,
 };
 
@@ -15,7 +15,7 @@ pub struct TrackQueryService {
 impl TrackQueryService {
     pub fn new(
         repository: Arc<dyn TrackQueryStore>,
-        prepared_registry: Arc<PreparedTrackRegistry>,
+        prepared_registry: Arc<TrackDefinitionRegistry>,
         observation: Arc<TrackObservationService>,
     ) -> Self {
         Self {
@@ -48,8 +48,9 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{NaiveDate, TimeZone, Utc};
     use poise_core::events::DomainEvent;
+    use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
-    use poise_core::track::{Instrument, TrackId, Venue};
+    use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
@@ -61,9 +62,8 @@ mod tests {
         MemoryRepository, seeded_manager, track_write_services,
     };
     use crate::{
-        ConfiguredTrackDefinition, ConfiguredTrackInput, EffectStatus, PersistedTrackEffect,
-        PreparedTrackRegistry, StoredTrackEvent, TrackQueryStore,
-        track_read_source_loader::TrackReadSourceLoader,
+        EffectStatus, PersistedTrackEffect, StoredTrackEvent, TrackDefinitionRegistry,
+        TrackQueryStore, track_read_source_loader::TrackReadSourceLoader,
     };
 
     use super::TrackQueryService;
@@ -249,26 +249,29 @@ mod tests {
         (service, repository)
     }
 
-    fn test_prepared_registry() -> Arc<PreparedTrackRegistry> {
+    fn test_prepared_registry() -> Arc<TrackDefinitionRegistry> {
         Arc::new(
-            PreparedTrackRegistry::new(vec![
-                ConfiguredTrackDefinition::try_from_input(ConfiguredTrackInput {
-                    track_id: TrackId::new("btc-core"),
-                    venue: Venue::Binance,
-                    symbol: "BTCUSDT".into(),
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: Some(0.5),
-                    shape_family: Some(ShapeFamily::Linear),
-                    out_of_band_policy: Some(BandProtectionPolicy::Freeze),
-                    max_notional: None,
-                    daily_loss_limit: 100.0,
-                    total_loss_limit: 300.0,
-                    tick_timeout_secs: Some(30),
-                })
+            TrackDefinitionRegistry::new(vec![
+                TrackDefinition::try_new(
+                    TrackId::new("btc-core"),
+                    Instrument::new(Venue::Binance, "BTCUSDT"),
+                    poise_core::strategy::TrackConfig {
+                        lower_price: 90.0,
+                        upper_price: 110.0,
+                        long_exposure_units: 8.0,
+                        short_exposure_units: 8.0,
+                        notional_per_unit: 375.0,
+                        min_rebalance_units: 0.5,
+                        shape_family: ShapeFamily::Linear,
+                        out_of_band_policy: BandProtectionPolicy::Freeze,
+                    },
+                    None,
+                    LossLimits {
+                        daily_loss_limit: 100.0,
+                        total_loss_limit: 300.0,
+                    },
+                    Some(30),
+                )
                 .unwrap(),
             ])
             .unwrap(),

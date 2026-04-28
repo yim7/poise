@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use poise_core::track::TrackId;
+use poise_core::track::{TrackDefinition, TrackId};
 use poise_engine::runtime::TrackRuntimeView;
 
 use crate::{
-    PreparedTrackRegistry, TrackListReadModel, TrackObservationService, TrackQueryStore,
+    TrackDefinitionRegistry, TrackListReadModel, TrackObservationService, TrackQueryStore,
     TrackReadModel, track_read_source::TrackReadSource,
 };
 
@@ -16,14 +16,14 @@ pub(crate) const DETAIL_EFFECTS_LIMIT: usize = 20;
 #[derive(Clone)]
 pub(crate) struct TrackReadSourceLoader {
     repository: Arc<dyn TrackQueryStore>,
-    prepared_registry: Arc<PreparedTrackRegistry>,
+    prepared_registry: Arc<TrackDefinitionRegistry>,
     observation: Arc<TrackObservationService>,
 }
 
 impl TrackReadSourceLoader {
     pub(crate) fn new(
         repository: Arc<dyn TrackQueryStore>,
-        prepared_registry: Arc<PreparedTrackRegistry>,
+        prepared_registry: Arc<TrackDefinitionRegistry>,
         observation: Arc<TrackObservationService>,
     ) -> Self {
         Self {
@@ -44,16 +44,7 @@ impl TrackReadSourceLoader {
             else {
                 continue;
             };
-            let definition = self
-                .prepared_registry
-                .get(&track_id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "missing prepared track definition for `{}`",
-                        track_id.as_str()
-                    )
-                })?
-                .read_definition();
+            let definition = self.definition_for(&track_id)?.clone();
             let updated_at = self
                 .repository
                 .load_track_updated_at(&track_id)
@@ -126,16 +117,7 @@ impl TrackReadSourceLoader {
         recent_track_events: Vec<crate::StoredTrackEvent>,
         recent_effects: Vec<crate::PersistedTrackEffect>,
     ) -> Result<TrackReadSource> {
-        let definition = self
-            .prepared_registry
-            .get(&track_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "missing prepared track definition for `{}`",
-                    track_id.as_str()
-                )
-            })?
-            .read_definition();
+        let definition = self.definition_for(&track_id)?.clone();
         Ok(TrackReadSource {
             definition,
             runtime,
@@ -143,6 +125,12 @@ impl TrackReadSourceLoader {
             recent_track_events,
             recent_effects,
         })
+    }
+
+    fn definition_for(&self, track_id: &TrackId) -> Result<&TrackDefinition> {
+        self.prepared_registry
+            .get(track_id)
+            .ok_or_else(|| anyhow::anyhow!("missing track definition for `{}`", track_id.as_str()))
     }
 }
 

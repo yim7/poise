@@ -166,7 +166,7 @@ mod tests {
     use axum::http::StatusCode;
     use axum::routing::get;
     use chrono::Utc;
-    use poise_application::{ConfiguredTrackDefinition, PreparedTrackRegistry};
+    use poise_application::TrackDefinitionRegistry;
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::ExchangeRules;
     use poise_engine::ports::{
@@ -182,18 +182,14 @@ mod tests {
 
     use super::{StartupOptions, parse_startup_options};
 
-    fn test_prepared_registry(config: &crate::config::Config) -> Arc<PreparedTrackRegistry> {
+    fn test_prepared_registry(config: &crate::config::Config) -> Arc<TrackDefinitionRegistry> {
         let configured = config
             .tracks
             .iter()
-            .map(|track| {
-                ConfiguredTrackDefinition::try_from_input(
-                    track.to_configured_input(config.exchange.venue()),
-                )
-            })
+            .map(|track| track.to_track_definition(config.exchange.venue()))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        Arc::new(PreparedTrackRegistry::new(configured).unwrap())
+        Arc::new(TrackDefinitionRegistry::new(configured).unwrap())
     }
 
     #[test]
