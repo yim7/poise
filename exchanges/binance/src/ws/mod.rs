@@ -22,17 +22,31 @@ use crate::rest::BinanceRestClient;
 
 type UserWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+pub(super) const EVENT_ORDER_TRADE_UPDATE: &str = "ORDER_TRADE_UPDATE";
+pub(super) const EVENT_ACCOUNT_UPDATE: &str = "ACCOUNT_UPDATE";
+pub(super) const EVENT_LISTEN_KEY_EXPIRED: &str = "listenKeyExpired";
+const USER_DATA_EVENT_SUBSCRIPTIONS: &[&str] = &[EVENT_ORDER_TRADE_UPDATE, EVENT_ACCOUNT_UPDATE];
+
 pub struct BinanceWsClient {
     rest: Arc<BinanceRestClient>,
-    ws_base_url: String,
+    public_ws_base_url: String,
+    market_ws_base_url: String,
+    user_ws_base_url: String,
     reconnect_delay: Duration,
 }
 
 impl BinanceWsClient {
-    pub fn new(rest: Arc<BinanceRestClient>, ws_base_url: impl Into<String>) -> Self {
+    pub(crate) fn with_ws_routes(
+        rest: Arc<BinanceRestClient>,
+        public_ws_base_url: impl Into<String>,
+        market_ws_base_url: impl Into<String>,
+        user_ws_base_url: impl Into<String>,
+    ) -> Self {
         Self {
             rest,
-            ws_base_url: ws_base_url.into().trim_end_matches('/').to_string(),
+            public_ws_base_url: public_ws_base_url.into().trim_end_matches('/').to_string(),
+            market_ws_base_url: market_ws_base_url.into().trim_end_matches('/').to_string(),
+            user_ws_base_url: user_ws_base_url.into().trim_end_matches('/').to_string(),
             reconnect_delay: Duration::from_millis(250),
         }
     }
@@ -43,9 +57,12 @@ impl BinanceWsClient {
         ws_base_url: impl Into<String>,
         reconnect_delay: Duration,
     ) -> Self {
+        let ws_base_url = ws_base_url.into().trim_end_matches('/').to_string();
         Self {
             rest,
-            ws_base_url: ws_base_url.into().trim_end_matches('/').to_string(),
+            public_ws_base_url: ws_base_url.clone(),
+            market_ws_base_url: ws_base_url.clone(),
+            user_ws_base_url: ws_base_url,
             reconnect_delay,
         }
     }
@@ -55,25 +72,28 @@ impl BinanceWsClient {
         instrument: &Instrument,
     ) -> Result<mpsc::Receiver<MarketDataTick>> {
         let (sender, receiver) = mpsc::channel(128);
-        let url = format!(
-            "{}/stream?streams={}@markPrice/{}@bookTicker",
-            self.ws_base_url,
-            instrument.symbol.to_lowercase(),
-            instrument.symbol.to_lowercase()
+        let urls = price_stream_urls(
+            &self.public_ws_base_url,
+            &self.market_ws_base_url,
+            &instrument.symbol,
         );
         let symbol = instrument.symbol.clone();
         let reconnect_delay = self.reconnect_delay;
 
-        tokio::spawn(async move {
-            market::run_market_stream(url, symbol, sender, reconnect_delay).await;
-        });
+        for url in urls {
+            let symbol = symbol.clone();
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                market::run_market_stream(url, symbol, sender, reconnect_delay).await;
+            });
+        }
 
         Ok(receiver)
     }
 
     pub async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
         let (sender, receiver) = mpsc::channel(128);
-        let ws_base_url = self.ws_base_url.clone();
+        let ws_base_url = self.user_ws_base_url.clone();
         let rest = Arc::clone(&self.rest);
         let reconnect_delay = self.reconnect_delay;
         let initial_listen_key = rest.start_user_stream().await?;
@@ -96,11 +116,30 @@ impl BinanceWsClient {
 }
 
 async fn connect_user_stream(ws_base_url: &str, listen_key: &str) -> Result<UserWebSocket> {
-    let url = format!("{ws_base_url}/ws/{listen_key}");
+    let url = user_stream_url(ws_base_url, listen_key);
     let (websocket, _) = connect_websocket(&url)
         .await
         .with_context(|| format!("failed to connect user data websocket `{url}`"))?;
     Ok(websocket)
+}
+
+fn user_stream_url(ws_base_url: &str, listen_key: &str) -> String {
+    format!(
+        "{ws_base_url}/ws?listenKey={listen_key}&events={}",
+        USER_DATA_EVENT_SUBSCRIPTIONS.join("/")
+    )
+}
+
+fn price_stream_urls(
+    public_ws_base_url: &str,
+    market_ws_base_url: &str,
+    symbol: &str,
+) -> Vec<String> {
+    let symbol = symbol.to_lowercase();
+    vec![
+        format!("{market_ws_base_url}/stream?streams={symbol}@markPrice"),
+        format!("{public_ws_base_url}/stream?streams={symbol}@bookTicker"),
+    ]
 }
 
 async fn connect_websocket(
@@ -324,6 +363,40 @@ mod tests {
         let connector = super::websocket_connector("ws://127.0.0.1:18081/ws").unwrap();
 
         assert!(connector.is_none());
+    }
+
+    #[test]
+    fn user_stream_url_uses_private_user_data_base_url() {
+        assert_eq!(
+            super::user_stream_url("wss://fstream.binance.com/private", "listen-key"),
+            "wss://fstream.binance.com/private/ws?listenKey=listen-key&events=ORDER_TRADE_UPDATE/ACCOUNT_UPDATE"
+        );
+    }
+
+    #[test]
+    fn price_stream_urls_use_routed_market_and_public_base_urls() {
+        assert_eq!(
+            super::price_stream_urls(
+                "wss://fstream.binance.com/public",
+                "wss://fstream.binance.com/market",
+                "BTCUSDT"
+            ),
+            vec![
+                "wss://fstream.binance.com/market/stream?streams=btcusdt@markPrice",
+                "wss://fstream.binance.com/public/stream?streams=btcusdt@bookTicker",
+            ]
+        );
+    }
+
+    #[test]
+    fn price_stream_urls_keep_market_and_public_categories_explicit() {
+        assert_eq!(
+            super::price_stream_urls("ws://127.0.0.1:19080", "ws://127.0.0.1:19080", "BTCUSDT"),
+            vec![
+                "ws://127.0.0.1:19080/stream?streams=btcusdt@markPrice",
+                "ws://127.0.0.1:19080/stream?streams=btcusdt@bookTicker",
+            ]
+        );
     }
 
     #[test]

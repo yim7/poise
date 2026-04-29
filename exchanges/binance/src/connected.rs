@@ -25,9 +25,11 @@ pub async fn connect(config: &Config) -> Result<Connected> {
         api_key,
         api_secret,
     ));
-    let ws = Arc::new(BinanceWsClient::new(
+    let ws = Arc::new(BinanceWsClient::with_ws_routes(
         Arc::clone(&rest),
-        endpoints.ws_base_url(),
+        endpoints.public_ws_base_url(),
+        endpoints.market_ws_base_url(),
+        endpoints.user_ws_base_url(),
     ));
 
     Ok(Connected::from_clients(rest, ws))
@@ -334,7 +336,13 @@ mod tests {
             "api-key",
             "secret-key",
         ));
-        let ws = Arc::new(BinanceWsClient::new(Arc::clone(&rest), ws_base_url));
+        let ws_base_url = ws_base_url.into();
+        let ws = Arc::new(BinanceWsClient::with_ws_routes(
+            Arc::clone(&rest),
+            ws_base_url.clone(),
+            ws_base_url.clone(),
+            ws_base_url,
+        ));
         Connected::from_clients(rest, ws)
     }
 

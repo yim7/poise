@@ -14,7 +14,8 @@ use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{ExchangeOrder, Position, UserDataEvent, UserDataPayload};
 
 use super::{
-    KeepaliveStatus, UserStreamDiagnostics, UserWebSocket, backoff_delay, connect_user_stream,
+    EVENT_ACCOUNT_UPDATE, EVENT_LISTEN_KEY_EXPIRED, EVENT_ORDER_TRADE_UPDATE, KeepaliveStatus,
+    UserStreamDiagnostics, UserWebSocket, backoff_delay, connect_user_stream,
     log_user_stream_disconnect, log_user_stream_error,
     models::{AccountUpdateEnvelope, OrderTradeUpdateEnvelope, UserEventTypeEnvelope},
     parse_decimal, parse_side, quote_asset_for_symbol,
@@ -176,7 +177,7 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
         .event_type;
 
     match event_type.as_str() {
-        "ORDER_TRADE_UPDATE" => {
+        EVENT_ORDER_TRADE_UPDATE => {
             let envelope = serde_json::from_str::<OrderTradeUpdateEnvelope>(payload)
                 .with_context(|| format!("failed to parse {event_type} payload"))?;
             let event_time = parse_user_event_time(&event_type, envelope.event_time)?;
@@ -264,7 +265,7 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
 
             Ok(UserStreamMessage::Events(events))
         }
-        "ACCOUNT_UPDATE" => {
+        EVENT_ACCOUNT_UPDATE => {
             let envelope = serde_json::from_str::<AccountUpdateEnvelope>(payload)
                 .with_context(|| format!("failed to parse {event_type} payload"))?;
             let event_time = parse_user_event_time(&event_type, envelope.event_time)?;
@@ -325,7 +326,7 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
 
             Ok(UserStreamMessage::Events(events))
         }
-        "listenKeyExpired" => Ok(UserStreamMessage::ListenKeyExpired),
+        EVENT_LISTEN_KEY_EXPIRED => Ok(UserStreamMessage::ListenKeyExpired),
         _ => Ok(UserStreamMessage::UnsupportedEvent { event_type }),
     }
 }
