@@ -11,6 +11,17 @@ members = [
     "tui",
     "tools/track-tuning-workbench/src-tauri",
 ]
+default-members = [
+    "application",
+    "core",
+    "engine",
+    "storage",
+    "protocol",
+    "exchanges/binance",
+    "exchanges/bybit",
+    "server",
+    "tui",
+]
 resolver = "3"
 
 [workspace.package]

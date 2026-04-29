@@ -13,7 +13,7 @@ serde_json.workspace = true
 sha2.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-clipboard-manager = "2.3.2"
-tauri-plugin-dialog = "2.7.0"
+tauri-plugin-dialog = { version = "2.7.0", default-features = false }
 toml_edit.workspace = true
 
 [dev-dependencies]
