@@ -15,7 +15,7 @@ use poise_engine::execution_plan::TrackEffect;
 use poise_engine::executor::{
     OrderUpdateAbsorbResult, SubmitRecoveryPlan, SubmitRecoveryResolution, SubmitRecoveryToken,
 };
-use poise_engine::ledger::TrackLedgerEvent;
+use poise_engine::ledger::{TrackPnlRecord, TrackPnlStats};
 use poise_engine::manager::MarketMutationOutcome;
 use poise_engine::manager::{ExchangeSyncMode, TrackManager};
 use poise_engine::observation::{
@@ -117,14 +117,6 @@ pub struct TrackInstrument {
     pub instrument: Instrument,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ApplyTrackLedgerEventResult {
-    pub absorb_result: Option<OrderUpdateAbsorbResult>,
-    pub order_status: Option<poise_engine::ports::OrderStatus>,
-    pub domain_events: Vec<DomainEvent>,
-    pub effects: Vec<TrackEffect>,
-}
-
 #[derive(Debug)]
 pub enum TrackMutationError {
     LoadedTrackInvariant { track_id: String },
@@ -209,16 +201,6 @@ impl TransitionResult for SubmitRecoveryPlan {
 
     fn effects(&self) -> &[TrackEffect] {
         &[]
-    }
-}
-
-impl TransitionResult for ApplyTrackLedgerEventResult {
-    fn domain_events(&self) -> &[DomainEvent] {
-        &self.domain_events
-    }
-
-    fn effects(&self) -> &[TrackEffect] {
-        &self.effects
     }
 }
 
@@ -316,7 +298,7 @@ impl MutationExecutor {
         &self,
         track_id: &TrackId,
         control_state: TrackControlState,
-        ledger_state: poise_engine::ledger::TrackLedgerState,
+        pnl_stats: TrackPnlStats,
         external_inputs: FreshSessionExternalInputs,
     ) -> Result<bool> {
         let _mutation_guard = self.lock_track_mutation(track_id.as_str()).await;
@@ -327,7 +309,7 @@ impl MutationExecutor {
         manager.fresh_start_track(
             track_id,
             control_state.to_startup_runtime_state(),
-            ledger_state,
+            pnl_stats,
             external_inputs,
         )?;
         Ok(true)
@@ -545,7 +527,10 @@ impl MutationExecutor {
 
     pub(crate) async fn track_runtime_view(&self, id: &str) -> Result<Option<TrackRuntimeView>> {
         let manager = self.manager.read().await;
-        Ok(manager.get_track(id).map(|track| track.runtime_view()))
+        if manager.get_track(id).is_none() {
+            return Ok(None);
+        }
+        manager.track_runtime_view(&TrackId::new(id)).map(Some)
     }
 
     pub(crate) async fn quote_health_view(&self, id: &str) -> Result<QuoteHealthView> {
@@ -588,45 +573,28 @@ impl MutationExecutor {
         Ok(result)
     }
 
-    pub async fn apply_track_ledger_event(
-        &self,
-        id: &str,
-        event: TrackLedgerEvent,
-    ) -> Result<ApplyTrackLedgerEventResult> {
-        self.mutate_track(id, |manager| match &event {
-            TrackLedgerEvent::Execution(update) => {
-                let mut order_update = update.order_update.clone();
-                order_update.realized_pnl = 0.0;
-                let (transition, absorb_result) =
-                    manager.observe_order_update(&TrackId::new(id), order_update)?;
-                manager.apply_ledger_adjustment(
-                    &TrackId::new(id),
-                    &update.ledger_deltas,
-                    &update.ledger_gaps,
-                )?;
-                Ok(ApplyTrackLedgerEventResult {
-                    absorb_result: Some(absorb_result),
-                    order_status: Some(update.order_update.status),
-                    domain_events: transition.events,
-                    effects: transition.effects,
-                })
+    pub async fn record_track_pnl(&self, id: &str, record: TrackPnlRecord) -> Result<bool> {
+        let _mutation_guard = self.lock_track_mutation(id).await;
+        let track_id = TrackId::new(id);
+        {
+            let manager = self.manager.read().await;
+            if manager.get_track(id).is_none() {
+                return Err(anyhow!("track `{id}` not found"));
             }
-            TrackLedgerEvent::Adjustment(update) => {
-                manager.apply_ledger_adjustment(
-                    &TrackId::new(id),
-                    &update.ledger_deltas,
-                    &update.ledger_gaps,
-                )?;
-                Ok(ApplyTrackLedgerEventResult {
-                    absorb_result: None,
-                    order_status: None,
-                    domain_events: Vec::new(),
-                    effects: Vec::new(),
-                })
+        }
+
+        let inserted = self
+            .mutation_store
+            .insert_track_pnl_record(&track_id, &record)
+            .await?;
+        if inserted {
+            {
+                let mut manager = self.manager.write().await;
+                manager.apply_pnl_record(&track_id, &record)?;
             }
-        })
-        .await
-        .map_err(anyhow::Error::new)
+            self.emit_internal_notification(ApplicationNotification::TrackChanged { track_id });
+        }
+        Ok(inserted)
     }
 
     pub async fn sync_exchange_state(
@@ -1294,9 +1262,7 @@ impl MutationExecutor {
             .effects()
             .iter()
             .any(|effect| !matches!(effect, TrackEffect::NoOp));
-        let has_track_write = control_state_update.is_some()
-            || next_frame.ledger_changed_since(previous_frame)
-            || !result.domain_events().is_empty();
+        let has_track_write = control_state_update.is_some() || !result.domain_events().is_empty();
         let has_effect_status_update = !effect_status_updates.is_empty();
         let has_work = has_track_write || has_effect_status_update || has_session_effects;
         if skip_when_noop && !has_work {
@@ -1306,12 +1272,7 @@ impl MutationExecutor {
         if has_track_write {
             let persistence_result = self
                 .mutation_store
-                .commit_track_transition(
-                    id,
-                    control_state_update.as_ref(),
-                    next_frame.ledger_state(),
-                    result.domain_events(),
-                )
+                .commit_track_transition(id, control_state_update.as_ref(), result.domain_events())
                 .await;
 
             if let Err(error) = persistence_result {
@@ -1424,7 +1385,7 @@ pub(crate) mod test_support {
 
     use anyhow::Result;
     use async_trait::async_trait;
-    use chrono::Utc;
+    use chrono::{NaiveDate, Utc};
     use poise_core::events::DomainEvent;
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
@@ -1432,6 +1393,7 @@ pub(crate) mod test_support {
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
+    use poise_engine::ledger::{TrackPnlRecord, TrackPnlStats};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{ClockPort, OrderRequest};
     use tokio::sync::broadcast;
@@ -1464,7 +1426,7 @@ pub(crate) mod test_support {
     #[derive(Default)]
     pub(crate) struct MemoryRepository {
         control_states: Mutex<HashMap<String, TrackControlState>>,
-        ledger_states: Mutex<HashMap<String, poise_engine::ledger::TrackLedgerState>>,
+        pnl_records: Mutex<HashMap<String, Vec<TrackPnlRecord>>>,
         events: Mutex<HashMap<String, Vec<DomainEvent>>>,
         effects: Mutex<Vec<PersistedTrackEffect>>,
         business_write_calls: Mutex<usize>,
@@ -1630,16 +1592,26 @@ pub(crate) mod test_support {
                 .cloned())
         }
 
-        async fn load_track_ledger_state(
+        async fn load_track_pnl_stats(
             &self,
             track_id: &TrackId,
-        ) -> Result<Option<poise_engine::ledger::TrackLedgerState>> {
-            Ok(self
-                .ledger_states
+            pnl_utc_day: NaiveDate,
+        ) -> Result<TrackPnlStats> {
+            let mut stats = TrackPnlStats {
+                pnl_utc_day,
+                ..TrackPnlStats::default()
+            };
+            for record in self
+                .pnl_records
                 .lock()
                 .unwrap()
                 .get(track_id.as_str())
-                .cloned())
+                .cloned()
+                .unwrap_or_default()
+            {
+                stats.apply_record(&record);
+            }
+            Ok(stats)
         }
 
         async fn load_track_updated_at(
@@ -1656,7 +1628,6 @@ pub(crate) mod test_support {
             &self,
             id: &str,
             control_state: Option<&TrackControlState>,
-            ledger_state: &poise_engine::ledger::TrackLedgerState,
             events: &[DomainEvent],
         ) -> Result<CommittedTrackWrite> {
             *self.business_write_calls.lock().unwrap() += 1;
@@ -1681,9 +1652,6 @@ pub(crate) mod test_support {
                 self.save_track_control_state(&track_id, control_state)
                     .await?;
             }
-            self.save_track_ledger_state(&track_id, ledger_state)
-                .await?;
-
             Ok(CommittedTrackWrite { track_id })
         }
 
@@ -1709,16 +1677,18 @@ pub(crate) mod test_support {
             Ok(())
         }
 
-        async fn save_track_ledger_state(
+        async fn insert_track_pnl_record(
             &self,
             track_id: &TrackId,
-            state: &poise_engine::ledger::TrackLedgerState,
-        ) -> Result<()> {
-            self.ledger_states
+            record: &TrackPnlRecord,
+        ) -> Result<bool> {
+            self.pnl_records
                 .lock()
                 .unwrap()
-                .insert(track_id.as_str().to_string(), state.clone());
-            Ok(())
+                .entry(track_id.as_str().to_string())
+                .or_default()
+                .push(record.clone());
+            Ok(true)
         }
     }
 
@@ -1868,7 +1838,6 @@ mod tests {
                     price: 100.0,
                     quantity: 0.1,
                     filled_qty: 0.0,
-                    realized_pnl: 0.0,
                     status: OrderStatus::New,
                 })
                 .collect(),
@@ -2043,12 +2012,9 @@ mod tests {
                 .is_none(),
             "live-only tick should not persist control state"
         );
-        assert!(
-            repository
-                .load_track_ledger_state(&TrackId::new("btc-core"))
-                .await
-                .unwrap()
-                .is_none(),
+        assert_eq!(
+            repository.business_write_call_count(),
+            0,
             "live-only tick should not persist any durable runtime projection"
         );
     }
@@ -2076,13 +2042,10 @@ mod tests {
                 .is_none(),
             "effect status writeback should not create control truth"
         );
-        assert!(
-            repository
-                .load_track_ledger_state(&TrackId::new("btc-core"))
-                .await
-                .unwrap()
-                .is_none(),
-            "effect status writeback should not create ledger truth"
+        assert_eq!(
+            repository.business_write_call_count(),
+            0,
+            "effect status writeback should not create durable track truth"
         );
     }
 
@@ -2115,14 +2078,6 @@ mod tests {
                 .await
                 .unwrap(),
             Some(TrackControlState::default())
-        );
-        assert!(
-            repository
-                .load_track_ledger_state(&TrackId::new("btc-core"))
-                .await
-                .unwrap()
-                .is_some(),
-            "first durable write should also establish ledger truth"
         );
     }
 
@@ -2475,8 +2430,10 @@ mod tests {
             .commit_track_transition(
                 "btc-core",
                 None,
-                &poise_engine::ledger::TrackLedgerState::default(),
-                &[],
+                &[poise_core::events::DomainEvent::ExposureTargetChanged {
+                    from: Exposure(0.0),
+                    to: Exposure(1.0),
+                }],
             )
             .await
             .expect("store owner should complete durable truth on first business write");
@@ -2507,10 +2464,10 @@ mod tests {
                 AutoState::FollowingBand,
             )));
             updated.set_exposure_state(poise_core::types::Exposure(4.0), None);
-            let mut ledger_state = updated.ledger_state().clone();
-            ledger_state.gross_realized_pnl_today = -290.0;
-            ledger_state.gross_realized_pnl_cumulative = -290.0;
-            updated.replace_ledger_state(ledger_state);
+            let mut pnl_stats = updated.pnl_stats().clone();
+            pnl_stats.gross_realized_pnl_today = -290.0;
+            pnl_stats.gross_realized_pnl_cumulative = -290.0;
+            updated.replace_pnl_stats(pnl_stats);
             updated.set_unrealized_pnl(-20.0);
             manager
                 .rollback_track_state(&updated)

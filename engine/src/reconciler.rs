@@ -66,7 +66,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
         current: track.current_exposure.clone(),
         target: target.clone(),
         unit_notional: track.config().notional_per_unit,
-        loss_guard: build_loss_guard_snapshot(&track.ledger_state, &track.risk_state),
+        loss_guard: build_loss_guard_snapshot(&track.pnl_stats, &track.risk_state),
     };
 
     let decision = risk::evaluate_risk_outcome(&intent, track.max_notional(), track.loss_limits());
@@ -548,11 +548,11 @@ mod tests {
     fn reconcile_target_terminates_when_risk_requests_termination() {
         let mut track = test_runtime();
         track.current_exposure = Exposure(4.0);
-        track.ledger_state.ledger_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 4, 8).unwrap();
-        track.ledger_state.gross_realized_pnl_today = -90.0;
+        track.pnl_stats.pnl_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 4, 8).unwrap();
+        track.pnl_stats.gross_realized_pnl_today = -90.0;
         track.risk_state.unrealized_pnl = -35.0;
-        track.ledger_state.gross_realized_pnl_cumulative = -90.0;
-        track.ledger_state.trading_fee_cumulative = 0.0;
+        track.pnl_stats.gross_realized_pnl_cumulative = -90.0;
+        track.pnl_stats.trading_fee_cumulative = 0.0;
 
         let result = reconcile_target(&track, 95.0);
 
@@ -1156,17 +1156,17 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_builds_loss_guard_snapshot_from_ledger_accessors() {
+    fn reconcile_builds_loss_guard_snapshot_from_pnl_stats() {
         let mut track = test_runtime();
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(2.0);
-        track.ledger_state.ledger_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 4, 8).unwrap();
-        track.ledger_state.gross_realized_pnl_today = 100.0;
-        track.ledger_state.gross_realized_pnl_cumulative = 320.0;
-        track.ledger_state.trading_fee_today = 8.0;
-        track.ledger_state.trading_fee_cumulative = 20.0;
-        track.ledger_state.funding_fee_today = -2.0;
-        track.ledger_state.funding_fee_cumulative = -5.0;
+        track.pnl_stats.pnl_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 4, 8).unwrap();
+        track.pnl_stats.gross_realized_pnl_today = 100.0;
+        track.pnl_stats.gross_realized_pnl_cumulative = 320.0;
+        track.pnl_stats.trading_fee_today = 8.0;
+        track.pnl_stats.trading_fee_cumulative = 20.0;
+        track.pnl_stats.funding_fee_today = -2.0;
+        track.pnl_stats.funding_fee_cumulative = -5.0;
         track.risk_state.unrealized_pnl = -215.0;
         set_loss_limits(
             &mut track,

@@ -21,9 +21,9 @@
         "execution_status": "normal",
         "active_binding_count": 1
       },
-      "ledger": {
-        "total_pnl": 1229.0,
-        "has_unresolved_gaps": false
+      "pnl": {
+        "pnl_asset": "USDT",
+        "total_pnl": 1229.0
       }
     }
   ]

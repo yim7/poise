@@ -398,7 +398,6 @@ mod tests {
             price: stale.request.price,
             qty: stale.request.quantity,
             filled_qty: 0.0,
-            realized_pnl: 0.0,
             status: OrderStatus::New,
         };
 

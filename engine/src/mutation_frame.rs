@@ -7,7 +7,7 @@ use poise_core::types::Exposure;
 use crate::execution_gate::ExecutionGateState;
 #[cfg(any(test, feature = "test-support"))]
 use crate::executor::{BindingStatus, RecoveryAnomaly};
-use crate::ledger::TrackLedgerState;
+use crate::ledger::TrackPnlStats;
 use crate::ports::OrderReceipt;
 use crate::runtime::{ExecutorState, RiskState, TrackState};
 use poise_core::track::{Instrument, TrackId};
@@ -36,7 +36,7 @@ pub struct TrackMutationFrame {
     pub(crate) desired_exposure: Option<Exposure>,
     pub(crate) executor_state: ExecutorState,
     pub(crate) execution_gate_state: ExecutionGateState,
-    pub(crate) ledger_state: TrackLedgerState,
+    pub(crate) pnl_stats: TrackPnlStats,
     pub(crate) risk: RiskState,
     pub(crate) out_of_band_since: Option<DateTime<Utc>>,
     pub(crate) market_data_stale_since: Option<DateTime<Utc>>,
@@ -79,17 +79,13 @@ impl TrackMutationFrame {
         self.desired_exposure = desired_exposure;
     }
 
-    pub fn ledger_state(&self) -> &TrackLedgerState {
-        &self.ledger_state
+    pub fn pnl_stats(&self) -> &TrackPnlStats {
+        &self.pnl_stats
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn replace_ledger_state(&mut self, ledger_state: TrackLedgerState) {
-        self.ledger_state = ledger_state;
-    }
-
-    pub fn ledger_changed_since(&self, previous: &Self) -> bool {
-        self.ledger_state != previous.ledger_state
+    pub fn replace_pnl_stats(&mut self, pnl_stats: TrackPnlStats) {
+        self.pnl_stats = pnl_stats;
     }
 
     #[cfg(any(test, feature = "test-support"))]

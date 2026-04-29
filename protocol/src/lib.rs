@@ -29,7 +29,7 @@ pub struct TrackListItemView {
     pub strategy_price_status: StrategyPriceStatusView,
     pub exposure: ExposureSummaryView,
     pub execution: ExecutionBadgeView,
-    pub ledger: TrackListLedgerView,
+    pub pnl: TrackListPnlView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,10 +53,9 @@ pub struct ExposureSummaryView {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TrackListLedgerView {
+pub struct TrackListPnlView {
+    pub pnl_asset: String,
     pub total_pnl: f64,
-    #[serde(default)]
-    pub has_unresolved_gaps: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,7 +75,7 @@ pub struct TrackDetailView {
     pub loss_limits: TrackLossLimitsView,
     pub market: TrackMarketView,
     pub position: TrackPositionView,
-    pub ledger: TrackLedgerView,
+    pub pnl: TrackPnlView,
     pub execution: TrackExecutionView,
     pub activity: Vec<TrackActivityItemView>,
     pub available_commands: Vec<TrackCommandView>,
@@ -155,51 +154,14 @@ pub struct TrackPositionView {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TrackLedgerView {
+pub struct TrackPnlView {
+    pub pnl_asset: String,
     pub gross_realized_pnl: f64,
     pub net_realized_pnl: f64,
     pub unrealized_pnl: f64,
     pub total_pnl: f64,
     pub trading_fee_cumulative: f64,
     pub funding_fee_cumulative: f64,
-    #[serde(default)]
-    pub unresolved_gaps: Vec<TrackLedgerGapView>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TrackLedgerGapReasonView {
-    UnsupportedCommissionAsset,
-    MissingCommissionAsset,
-    MissingSymbol,
-    UnsupportedFundingAsset,
-    #[default]
-    Unknown,
-}
-
-impl<'de> Deserialize<'de> for TrackLedgerGapReasonView {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Ok(match value.as_str() {
-            "unsupported_commission_asset" => Self::UnsupportedCommissionAsset,
-            "missing_commission_asset" => Self::MissingCommissionAsset,
-            "missing_symbol" => Self::MissingSymbol,
-            "unsupported_funding_asset" => Self::UnsupportedFundingAsset,
-            "unknown" => Self::Unknown,
-            _ => Self::Unknown,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TrackLedgerGapView {
-    pub gap_key: String,
-    pub reason: TrackLedgerGapReasonView,
-    pub observed_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -584,8 +546,7 @@ mod tests {
         ExecutionBindingStatusView, ExecutionBindingView, ExecutionStateView, ExecutionStatusView,
         RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView, StreamEvent,
         TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
-        TrackDiagnosticsView, TrackExecutionView, TrackLedgerGapReasonView, TrackListResponse,
-        TrackStatus,
+        TrackDiagnosticsView, TrackExecutionView, TrackListResponse, TrackStatus,
     };
 
     #[test]
@@ -702,7 +663,7 @@ mod tests {
                         "strategy_price_status":"live",
                         "exposure":{"current":0.5,"target":0.75},
                         "execution":{"state":"open","execution_status":"normal","active_binding_count":1},
-                        "ledger":{"total_pnl":1229.0,"has_unresolved_gaps":false}
+                        "pnl":{"pnl_asset":"USDT","total_pnl":1229.0}
                     }
                 ]
             }"#,
@@ -713,12 +674,8 @@ mod tests {
         assert_eq!(response.items.len(), 1);
         assert_eq!(response.items[0].id, "btc-core");
         assert_eq!(
-            serialized["items"][0]["ledger"]["total_pnl"].as_f64(),
+            serialized["items"][0]["pnl"]["total_pnl"].as_f64(),
             Some(1229.0)
-        );
-        assert_eq!(
-            serialized["items"][0]["ledger"]["has_unresolved_gaps"].as_bool(),
-            Some(false)
         );
     }
 
@@ -735,7 +692,7 @@ mod tests {
                         "strategy_price_status":"live",
                         "exposure":{"current":0.5,"target":0.75},
                         "execution":{"state":"open","execution_status":"normal","active_binding_count":1},
-                        "ledger":{"total_pnl":1229.0,"has_unresolved_gaps":false}
+                        "pnl":{"pnl_asset":"USDT","total_pnl":1229.0}
                     }
                 ]
             }"#,
@@ -744,7 +701,7 @@ mod tests {
 
         let serialized = serde_json::to_value(&response).unwrap();
         assert_eq!(
-            serialized["items"][0]["ledger"]["total_pnl"].as_f64(),
+            serialized["items"][0]["pnl"]["total_pnl"].as_f64(),
             Some(1229.0)
         );
     }
@@ -813,7 +770,7 @@ mod tests {
                 "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                 "position":{"current_exposure":0.5,"desired_exposure":0.75},
-                "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[]},
+                "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
                 "execution":{"state":"open","execution_status":"attention_required","attention_reasons":["missing execution quote"],"inventory_gap":0.0,"active_binding_count":0,"bindings":[]},
                 "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
                 "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
@@ -870,7 +827,7 @@ mod tests {
                     "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                     "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                     "position":{"current_exposure":0.5,"desired_exposure":0.75},
-                    "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[]},
+                    "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
                     "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"active_binding_count":0,"bindings":[]},
                     "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
                     "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
@@ -900,10 +857,7 @@ mod tests {
                     detail_json["strategy"]["min_rebalance_units"].as_f64(),
                     Some(0.5)
                 );
-                assert_eq!(
-                    detail_json["ledger"]["unrealized_pnl"].as_f64(),
-                    Some(265.2)
-                );
+                assert_eq!(detail_json["pnl"]["unrealized_pnl"].as_f64(), Some(265.2));
             }
             other => panic!("unexpected event variant: {other:?}"),
         }
@@ -920,7 +874,7 @@ mod tests {
                 "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                 "position":{"current_exposure":0.5,"desired_exposure":0.75},
-                "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[{"gap_key":"gap-1","reason":"unsupported_commission_asset","observed_at":"2026-03-31T11:11:11Z"}]},
+                "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
                 "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"active_binding_count":0,"bindings":[]},
                 "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
                 "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
@@ -929,40 +883,8 @@ mod tests {
         .unwrap();
 
         let detail_json = serde_json::to_value(&detail).unwrap();
-        assert_eq!(
-            detail_json["ledger"]["unrealized_pnl"].as_f64(),
-            Some(265.2)
-        );
-        assert_eq!(
-            detail.ledger.unresolved_gaps[0].reason,
-            TrackLedgerGapReasonView::UnsupportedCommissionAsset
-        );
+        assert_eq!(detail_json["pnl"]["unrealized_pnl"].as_f64(), Some(265.2));
         assert_eq!(detail_json["execution"]["state"].as_str(), Some("open"));
-    }
-
-    #[test]
-    fn deserializes_unknown_track_ledger_gap_reason_as_unknown() {
-        let detail: TrackDetailView = serde_json::from_str(
-            r#"{
-                "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
-                "status":{"lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},"strategy_price":64000.0,"strategy_price_status":"live"},
-                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze"},
-                "max_notional":3000.0,
-                "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
-                "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
-                "position":{"current_exposure":0.5,"desired_exposure":0.75},
-                "ledger":{"gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0,"unresolved_gaps":[{"gap_key":"gap-1","reason":"future_gap_reason","observed_at":"2026-03-31T11:11:11Z"}]},
-                "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"active_binding_count":0,"bindings":[]},
-                "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
-                "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            detail.ledger.unresolved_gaps[0].reason,
-            TrackLedgerGapReasonView::Unknown
-        );
     }
 
     #[test]

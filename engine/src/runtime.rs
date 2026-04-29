@@ -14,7 +14,7 @@ use crate::executor::binding::{BindingStatus, LiveOrderBinding};
 use crate::executor::boundary::{ProfileRevision, profile_revision_for_config};
 use crate::executor::ledger::BoundaryLedgerState;
 use crate::executor::policy::PolicyKind;
-use crate::ledger::TrackLedgerState;
+use crate::ledger::TrackPnlStats;
 use crate::mutation_frame::{TrackMutationFrame, TrackMutationFrameRevision};
 use crate::ports::ExecutionQuote;
 use crate::price_gate::{
@@ -219,7 +219,7 @@ pub struct TrackRuntimeView {
     pub desired_exposure: Option<Exposure>,
     pub manual_target_override: Option<Exposure>,
     pub executor: ExecutorView,
-    pub ledger_state: TrackLedgerState,
+    pub pnl_stats: TrackPnlStats,
     pub unrealized_pnl: f64,
     pub has_account_margin_guard: bool,
     pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
@@ -328,7 +328,7 @@ pub struct TrackRuntime {
     pub(crate) desired_exposure: Option<Exposure>,
     pub(crate) active_risk_cap: Option<AppliedRiskCap>,
     pub(crate) executor_state: ExecutorState,
-    pub(crate) ledger_state: TrackLedgerState,
+    pub(crate) pnl_stats: TrackPnlStats,
     pub(crate) risk_state: RiskState,
     pub(crate) execution_gate_state: ExecutionGateState,
     pub(crate) strategy_price: Option<f64>,
@@ -371,7 +371,7 @@ impl TrackRuntime {
             desired_exposure: None,
             active_risk_cap: None,
             executor_state: ExecutorState::empty(started_at),
-            ledger_state: TrackLedgerState::default(),
+            pnl_stats: TrackPnlStats::default(),
             risk_state: RiskState::default(),
             execution_gate_state: ExecutionGateState::open(),
             strategy_price: None,
@@ -458,7 +458,7 @@ impl TrackRuntime {
     pub fn fresh_start(
         &self,
         track_state: TrackState,
-        ledger_state: TrackLedgerState,
+        pnl_stats: TrackPnlStats,
         external_inputs: FreshSessionExternalInputs,
         started_at: DateTime<Utc>,
     ) -> Self {
@@ -478,7 +478,7 @@ impl TrackRuntime {
         fresh.desired_exposure = track_state.manual_target_override();
         fresh.executor_state =
             ExecutorState::empty(started_at).ensure_revision(fresh.config(), current_exposure);
-        fresh.ledger_state = ledger_state;
+        fresh.pnl_stats = pnl_stats;
         fresh.execution_gate_state = ExecutionGateState::open();
         fresh.price_execution_gate = PriceExecutionGate::NoSubmit {
             reason: PriceExecutionBlockReason::MissingExecutionQuote,
@@ -506,7 +506,7 @@ impl TrackRuntime {
             desired_exposure: self.desired_exposure.clone(),
             executor_state: self.executor_state.clone(),
             execution_gate_state: self.execution_gate_state.clone(),
-            ledger_state: self.ledger_state.clone(),
+            pnl_stats: self.pnl_stats.clone(),
             risk: self.risk_state.clone(),
             out_of_band_since: self.out_of_band_since,
             market_data_stale_since: self.market_data_stale_since,
@@ -536,7 +536,7 @@ impl TrackRuntime {
         self.desired_exposure = frame.desired_exposure.clone();
         self.active_risk_cap = None;
         self.executor_state = frame.executor_state.clone();
-        self.ledger_state = frame.ledger_state.clone();
+        self.pnl_stats = frame.pnl_stats.clone();
         self.risk_state = frame.risk.clone();
         self.execution_gate_state = frame.execution_gate_state.clone();
         self.strategy_price = None;
@@ -625,7 +625,7 @@ impl TrackRuntime {
                 .or_else(|| self.desired_exposure.clone()),
             manual_target_override: self.manual_target_override(),
             executor: self.executor_state.view(),
-            ledger_state: self.ledger_state.clone(),
+            pnl_stats: self.pnl_stats.clone(),
             unrealized_pnl: self.risk_state.unrealized_pnl,
             has_account_margin_guard: matches!(
                 self.execution_gate_state.last_decision,
@@ -718,13 +718,13 @@ mod tests {
 
         let fresh = runtime.fresh_start(
             TrackState::WaitingMarketData,
-            TrackLedgerState {
-                ledger_utc_day: Utc
+            TrackPnlStats {
+                pnl_utc_day: Utc
                     .with_ymd_and_hms(2026, 4, 23, 0, 0, 0)
                     .unwrap()
                     .date_naive(),
                 gross_realized_pnl_cumulative: 55.0,
-                ..TrackLedgerState::default()
+                ..TrackPnlStats::default()
             },
             FreshSessionExternalInputs {
                 current_exposure: Exposure(2.5),
@@ -770,7 +770,7 @@ mod tests {
             Some(Utc.with_ymd_and_hms(2026, 4, 23, 8, 1, 0).unwrap())
         );
         assert!(fresh.market_data_stale_since.is_none());
-        assert_eq!(fresh.ledger_state.gross_realized_pnl_cumulative, 55.0);
+        assert_eq!(fresh.pnl_stats.gross_realized_pnl_cumulative, 55.0);
     }
 
     #[test]
@@ -789,7 +789,7 @@ mod tests {
 
         let fresh = runtime.fresh_start(
             TrackState::WaitingMarketData,
-            TrackLedgerState::default(),
+            TrackPnlStats::default(),
             FreshSessionExternalInputs {
                 current_exposure: Exposure(1.0),
                 market_data: None,

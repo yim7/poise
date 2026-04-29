@@ -104,13 +104,24 @@ SQLite 文件位于 `<instance-dir>/.data/poise-server.sqlite`。
 读模型链路：
 
 ```text
-TrackDefinitionRegistry + TrackRuntimeView + persisted events/effects/ledger
+TrackDefinitionRegistry + TrackRuntimeView + persisted events/effects
   -> application read model
   -> server projector
   -> protocol DTO
 ```
 
 `server` projector 不直接暴露 engine 内部运行时结构。HTTP / WebSocket 对外只推投影后的读模型。
+
+Track PNL 统计只把本地可归属到 track 的明细作为事实来源：
+
+- `track_pnl_records` 记录每笔成交已实现盈亏、交易手续费，以及可归属到 symbol/track 的资金费。
+- `pnl_asset` 只存在于 HTTP / WebSocket 公开读模型，由当前 track 的 instrument 推导；PNL 明细和运行时统计不重复保存这份可推导信息。
+- 非 `pnl_asset` 计价的手续费不进入本地 PNL 统计。
+- `TrackPnlStats` 是运行时和读模型使用的即时统计结果，不是持久化真值；启动和查询时可以从明细重新聚合。
+- 当日 PNL 窗口按当前 UTC 日展示，明细是否进入当日统计由它自己的发生时间决定。
+- 订单成交更新只更新订单/执行器状态；PNL 明细作为独立记录写入，避免订单状态和财务统计互相隐藏规则。
+- 资金费如果无法归属到某个 track，就不进入 track PNL 统计。
+- HTTP / WebSocket 公开读模型使用 `pnl` 字段，不再用旧的 `ledger` 命名承载 PNL 统计。
 
 ## HTTP / WebSocket
 

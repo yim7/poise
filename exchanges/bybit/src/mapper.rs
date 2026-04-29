@@ -237,7 +237,6 @@ pub(crate) fn build_bybit_open_order(order: BybitActiveOrder) -> Result<Exchange
         price,
         qty,
         filled_qty,
-        realized_pnl: 0.0,
         status: order_status
             .into_order_status()
             .ok_or_else(|| anyhow!("unsupported Bybit order status: {order_status:?}"))?,

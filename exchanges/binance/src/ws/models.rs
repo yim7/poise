@@ -70,12 +70,18 @@ pub(super) struct OrderTradeUpdate {
     pub(super) client_order_id: String,
     #[serde(rename = "S")]
     pub(super) side: String,
+    #[serde(rename = "x")]
+    pub(super) execution_type: Option<String>,
     #[serde(rename = "p")]
     pub(super) price: String,
     #[serde(rename = "q")]
     pub(super) quantity: String,
     #[serde(rename = "z")]
     pub(super) cumulative_filled_quantity: Option<String>,
+    #[serde(rename = "l")]
+    pub(super) last_filled_quantity: Option<String>,
+    #[serde(rename = "t")]
+    pub(super) trade_id: Option<u64>,
     #[serde(rename = "rp")]
     pub(super) realized_pnl: String,
     #[serde(rename = "n")]

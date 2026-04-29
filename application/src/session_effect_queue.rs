@@ -1052,7 +1052,6 @@ mod tests {
                     price: 100.0,
                     quantity: 0.1,
                     filled_qty: 0.0,
-                    realized_pnl: 0.0,
                     status: OrderStatus::New,
                 })
                 .collect(),

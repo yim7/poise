@@ -590,7 +590,6 @@ mod tests {
         ExecutionQuoteTick, MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt,
         OrderRequest, Position,
     };
-    use poise_engine::runtime::{AutoState, ControlState, TrackState};
     use poise_protocol::StreamEvent;
     use poise_storage::sqlite::SqliteStorage;
     use tokio::net::TcpListener;
@@ -1180,32 +1179,12 @@ total_loss_limit = 600.0
                 test_exchange_rules(),
             )
             .unwrap();
-        let mut snapshot = manager.mutation_frame("btc-core").unwrap();
-        snapshot.set_runtime_state(TrackState::Running(ControlState::Automatic(
-            AutoState::FollowingBand,
-        )));
-        TrackMutationStore::commit_track_transition(
-            repository.as_ref(),
-            "btc-core",
-            None,
-            snapshot.ledger_state(),
-            &[],
-        )
-        .await
-        .unwrap();
         TrackMutationStore::save_track_control_state(
             repository.as_ref(),
             &TrackId::new("btc-core"),
             &TrackControlState::Paused {
                 resume_mode: PersistedControlMode::Automatic,
             },
-        )
-        .await
-        .unwrap();
-        TrackMutationStore::save_track_ledger_state(
-            repository.as_ref(),
-            &TrackId::new("btc-core"),
-            snapshot.ledger_state(),
         )
         .await
         .unwrap();
@@ -1631,7 +1610,6 @@ total_loss_limit = 600.0
     #[derive(Default)]
     struct BlockingPersistence {
         control_states: AsyncMutex<HashMap<String, TrackControlState>>,
-        ledger_states: AsyncMutex<HashMap<String, poise_engine::ledger::TrackLedgerState>>,
         started_saves: AtomicUsize,
         completed_saves: AtomicUsize,
         first_save_started: Notify,
@@ -1669,7 +1647,6 @@ total_loss_limit = 600.0
             &self,
             id: &str,
             control_state: Option<&TrackControlState>,
-            ledger_state: &poise_engine::ledger::TrackLedgerState,
             _events: &[EngineDomainEvent],
         ) -> Result<CommittedTrackWrite> {
             let save_index = self.started_saves.fetch_add(1, Ordering::SeqCst);
@@ -1683,9 +1660,6 @@ total_loss_limit = 600.0
                 self.save_track_control_state(&track_id, control_state)
                     .await?;
             }
-            self.save_track_ledger_state(&track_id, ledger_state)
-                .await?;
-
             self.completed_saves.fetch_add(1, Ordering::SeqCst);
             self.completed_save.notify_waiters();
             Ok(CommittedTrackWrite { track_id })
@@ -1707,16 +1681,12 @@ total_loss_limit = 600.0
             Ok(())
         }
 
-        async fn save_track_ledger_state(
+        async fn insert_track_pnl_record(
             &self,
-            track_id: &TrackId,
-            state: &poise_engine::ledger::TrackLedgerState,
-        ) -> Result<()> {
-            self.ledger_states
-                .lock()
-                .await
-                .insert(track_id.as_str().to_string(), state.clone());
-            Ok(())
+            _track_id: &TrackId,
+            _record: &poise_engine::ledger::TrackPnlRecord,
+        ) -> Result<bool> {
+            Ok(true)
         }
     }
 
@@ -1768,16 +1738,15 @@ total_loss_limit = 600.0
                 .cloned())
         }
 
-        async fn load_track_ledger_state(
+        async fn load_track_pnl_stats(
             &self,
-            track_id: &TrackId,
-        ) -> Result<Option<poise_engine::ledger::TrackLedgerState>> {
-            Ok(self
-                .ledger_states
-                .lock()
-                .await
-                .get(track_id.as_str())
-                .cloned())
+            _track_id: &TrackId,
+            pnl_utc_day: chrono::NaiveDate,
+        ) -> Result<poise_engine::ledger::TrackPnlStats> {
+            Ok(poise_engine::ledger::TrackPnlStats {
+                pnl_utc_day,
+                ..poise_engine::ledger::TrackPnlStats::default()
+            })
         }
     }
 

@@ -46,7 +46,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         );
         let price = format_price_summary(item.strategy_price, item.strategy_price_status);
         let exposure = format_exposure_summary(item.exposure.current, item.exposure.target);
-        let total_pnl = pnl_signal(item.ledger.total_pnl);
+        let total_pnl = pnl_signal(item.pnl.total_pnl);
+        let total_pnl_text = format!("{} {}", total_pnl.text, item.pnl.pnl_asset);
 
         Row::new(vec![
             Cell::from(item.id.clone()),
@@ -56,7 +57,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Cell::from(execution.text).style(execution.style),
             Cell::from(price.text).style(price.style),
             Cell::from(exposure.text).style(exposure.style),
-            Cell::from(total_pnl.text).style(total_pnl.style),
+            Cell::from(total_pnl_text).style(total_pnl.style),
         ])
     });
 
@@ -421,7 +422,7 @@ mod tests {
                         "strategy_price_status": "live",
                         "exposure": {"current": 3.5, "target": 3.0},
                         "execution": {"state": "open", "execution_status": "normal", "active_binding_count": 0},
-                        "ledger": {"total_pnl": 12.3, "has_unresolved_gaps": false}
+                        "pnl": {"pnl_asset": "USDT", "total_pnl": 12.3}
                     }
                 ]
             }"#,
@@ -532,7 +533,7 @@ mod tests {
                         "strategy_price_status": "live",
                         "exposure": {"current": 3.5, "target": 3.0},
                         "execution": {"state": "open", "execution_status": "attention_required", "active_binding_count": 1},
-                        "ledger": {"total_pnl": 12345.67, "has_unresolved_gaps": false}
+                        "pnl": {"pnl_asset": "USDT", "total_pnl": 12345.67}
                     }
                 ]
             }"#,
@@ -564,7 +565,7 @@ mod tests {
                         "strategy_price_status": "live",
                         "exposure": {"current": 3.5, "target": 3.0},
                         "execution": {"state": "open", "execution_status": "normal", "active_binding_count": 0},
-                        "ledger": {"total_pnl": 12.3, "has_unresolved_gaps": false}
+                        "pnl": {"pnl_asset": "USDT", "total_pnl": 12.3}
                     }
                 ]
             }"#,
@@ -602,7 +603,7 @@ mod tests {
                         "strategy_price_status": "live",
                         "exposure": {"current": 3.5, "target": 3.0},
                         "execution": {"state": "open", "execution_status": "normal", "active_binding_count": 0},
-                        "ledger": {"total_pnl": -245.3, "has_unresolved_gaps": false}
+                        "pnl": {"pnl_asset": "USDT", "total_pnl": -245.3}
                     }
                 ]
             }"#,

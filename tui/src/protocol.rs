@@ -4,8 +4,8 @@ pub use poise_protocol::{
     ExecutionStateView, ExecutionStatusView, PriceExecutionBlockReasonView, RiskSignalView,
     StrategyPriceStatusView, StreamEvent, TrackCommandAccepted, TrackCommandRequest,
     TrackCommandType, TrackCommandView, TrackDetailView, TrackDiagnosticsView, TrackExecutionView,
-    TrackLedgerGapReasonView, TrackLedgerGapView, TrackLedgerView, TrackListItemView,
-    TrackListLedgerView, TrackListResponse, TrackLiveView, TrackStatus,
+    TrackListItemView, TrackListPnlView, TrackListResponse, TrackLiveView, TrackPnlView,
+    TrackStatus,
 };
 
 #[cfg(test)]

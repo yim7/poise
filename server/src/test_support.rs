@@ -286,11 +286,9 @@ where
     R: TrackMutationStore + TrackEffectJournal + ?Sized,
 {
     store
-        .commit_track_transition(
-            track_id,
-            None,
-            &poise_engine::ledger::TrackLedgerState::default(),
-            &[],
+        .save_track_control_state(
+            &TrackId::new(track_id),
+            &poise_application::TrackControlState::default(),
         )
         .await?;
     let created_at = chrono::Utc::now();

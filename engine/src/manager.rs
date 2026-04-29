@@ -10,7 +10,7 @@ use crate::command::TrackCommand;
 use crate::execution_gate::ExecutionGateDecision;
 use crate::execution_plan::TrackEffect;
 use crate::executor;
-use crate::ledger::{LedgerDelta, LedgerGapRecord};
+use crate::ledger::{TrackPnlRecord, TrackPnlStats};
 use crate::mutation_frame::TrackMutationFrame;
 use crate::observation::{
     CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
@@ -228,31 +228,14 @@ impl TrackManager {
         Ok((self.transition_for(id, events, effects)?, absorb_result))
     }
 
-    pub fn apply_ledger_adjustment(
-        &mut self,
-        id: &TrackId,
-        deltas: &[LedgerDelta],
-        gaps: &[LedgerGapRecord],
-    ) -> Result<()> {
-        let today = self.clock.now().date_naive();
+    pub fn apply_pnl_record(&mut self, id: &TrackId, record: &TrackPnlRecord) -> Result<()> {
+        let pnl_utc_day = self.current_pnl_utc_day();
         let track = self
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-
-        for delta in deltas {
-            track.ledger_state.apply_delta(today, delta);
-        }
-        for gap in gaps {
-            if track
-                .ledger_state
-                .unresolved_gaps
-                .iter()
-                .all(|existing| existing.gap_key != gap.gap_key)
-            {
-                track.ledger_state.record_gap(gap.clone());
-            }
-        }
+        track.pnl_stats.normalize_utc_day(pnl_utc_day);
+        track.pnl_stats.apply_record(record);
         Ok(())
     }
 
@@ -376,7 +359,7 @@ impl TrackManager {
         &mut self,
         id: &TrackId,
         track_state: TrackState,
-        ledger_state: crate::ledger::TrackLedgerState,
+        pnl_stats: TrackPnlStats,
         external_inputs: FreshSessionExternalInputs,
     ) -> Result<()> {
         let started_at = self.clock.now();
@@ -385,7 +368,7 @@ impl TrackManager {
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
             .clone();
-        let fresh = track.fresh_start(track_state, ledger_state, external_inputs, started_at);
+        let fresh = track.fresh_start(track_state, pnl_stats, external_inputs, started_at);
         self.tracks.insert(id.clone(), fresh);
         Ok(())
     }
@@ -540,7 +523,7 @@ impl TrackManager {
             .tracks
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        Ok(track.live_view())
+        Ok(self.track_with_current_pnl_day(track).live_view())
     }
 
     pub fn track_runtime_view(&self, id: &TrackId) -> Result<TrackRuntimeView> {
@@ -548,7 +531,7 @@ impl TrackManager {
             .tracks
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        Ok(track.runtime_view())
+        Ok(self.track_with_current_pnl_day(track).runtime_view())
     }
 
     pub fn quote_health_view(&self, id: &TrackId) -> Result<QuoteHealthView> {
@@ -564,7 +547,9 @@ impl TrackManager {
             .tracks
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        Ok(track.strategy_target_view())
+        Ok(self
+            .track_with_current_pnl_day(track)
+            .strategy_target_view())
     }
 
     pub fn rollback_track_state(&mut self, frame: &TrackMutationFrame) -> Result<()> {
@@ -687,7 +672,6 @@ impl TrackManager {
             price: order.price,
             quantity: order.qty,
             filled_qty: order.filled_qty,
-            realized_pnl: 0.0,
             status: order.status,
         });
         let plan = {
@@ -850,16 +834,10 @@ impl TrackManager {
         id: &TrackId,
         observation: OrderObservation,
     ) -> Result<executor::OrderUpdateAbsorbResult> {
-        let today = self.clock.now().date_naive();
         let track = self
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-
-        track.ledger_state.apply_delta(
-            today,
-            &crate::ledger::LedgerDelta::GrossRealizedPnl(observation.realized_pnl),
-        );
 
         if track.executor_state.recovery_anomaly.is_some() {
             return Ok(executor::OrderUpdateAbsorbResult::DuplicateReplay);
@@ -1107,6 +1085,8 @@ impl TrackManager {
         track: &TrackRuntime,
         strategy_price: f64,
     ) -> Result<PlannedInventoryExecution> {
+        let normalized_track = self.track_with_current_pnl_day(track);
+        let track = &normalized_track;
         let target = reconciler::reconcile_target(track, strategy_price);
         if track.executor_state.recovery_anomaly.is_some() {
             return Ok(PlannedInventoryExecution {
@@ -1154,6 +1134,18 @@ impl TrackManager {
             executor_state: plan.state,
         })
     }
+
+    fn current_pnl_utc_day(&self) -> chrono::NaiveDate {
+        self.clock.now().date_naive()
+    }
+
+    fn track_with_current_pnl_day(&self, track: &TrackRuntime) -> TrackRuntime {
+        let mut track = track.clone();
+        track
+            .pnl_stats
+            .normalize_utc_day(self.current_pnl_utc_day());
+        track
+    }
 }
 
 struct PlannedInventoryExecution {
@@ -1183,6 +1175,7 @@ fn market_mutation_requires_durable_write(
         if !has_non_target_events && !has_execution_effects {
             normalized_next.executor_state = previous_frame.executor_state.clone();
         }
+        normalized_next.pnl_stats = previous_frame.pnl_stats.clone();
         normalized_next != *previous_frame
     };
     let target_reached_without_new_effects = next_frame
@@ -1213,7 +1206,7 @@ mod tests {
     use crate::execution_plan::TrackEffect;
     use crate::executor::binding::LiveOrderBinding;
     use crate::executor::{PolicyContext, policy::PolicyKind};
-    use crate::ledger::TrackLedgerState;
+    use crate::ledger::TrackPnlStats;
     use crate::ports::ExecutionQuote;
     use crate::runtime::{CurrentMarketData, TrackStatus};
     use poise_core::track::Venue;
@@ -1397,6 +1390,94 @@ mod tests {
     }
 
     #[test]
+    fn position_observation_does_not_mutate_pnl_stats() {
+        let (mut manager, id) = manager();
+        {
+            let track = manager.tracks.get_mut(&id).unwrap();
+            track.pnl_stats.gross_realized_pnl_today = 20.0;
+            track.pnl_stats.gross_realized_pnl_cumulative = 20.0;
+        }
+
+        manager
+            .observe(
+                &id,
+                TrackObservation::Position(PositionObservation {
+                    qty: -0.2,
+                    unrealized_pnl: 5.0,
+                }),
+            )
+            .unwrap();
+
+        let track = manager.tracks.get(&id).unwrap();
+        assert_eq!(track.current_exposure, Exposure(-0.2));
+        assert!((track.risk_state.unrealized_pnl - 5.0).abs() < f64::EPSILON);
+        assert!((track.pnl_stats.gross_realized_pnl_today - 20.0).abs() < f64::EPSILON);
+        assert!((track.pnl_stats.gross_realized_pnl_cumulative - 20.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn applying_pnl_record_rolls_today_window_to_current_utc_day() {
+        let (mut manager, id) = manager();
+        {
+            let track = manager.tracks.get_mut(&id).unwrap();
+            track.pnl_stats.pnl_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 4, 21).unwrap();
+            track.pnl_stats.gross_realized_pnl_today = 20.0;
+            track.pnl_stats.trading_fee_today = 2.0;
+            track.pnl_stats.gross_realized_pnl_cumulative = 20.0;
+            track.pnl_stats.trading_fee_cumulative = 2.0;
+        }
+
+        manager
+            .apply_pnl_record(
+                &id,
+                &TrackPnlRecord::trade_summary(
+                    Instrument::new(Venue::Binance, "BTCUSDT"),
+                    Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
+                    "test".into(),
+                    None,
+                    None,
+                    5.0,
+                    0.5,
+                ),
+            )
+            .unwrap();
+
+        let stats = &manager.tracks.get(&id).unwrap().pnl_stats;
+        assert_eq!(
+            stats.pnl_utc_day,
+            chrono::NaiveDate::from_ymd_opt(2026, 4, 22).unwrap()
+        );
+        assert_eq!(stats.gross_realized_pnl_today, 5.0);
+        assert_eq!(stats.trading_fee_today, 0.5);
+        assert_eq!(stats.gross_realized_pnl_cumulative, 25.0);
+        assert_eq!(stats.trading_fee_cumulative, 2.5);
+    }
+
+    #[test]
+    fn runtime_view_rolls_today_window_even_without_new_pnl_record() {
+        let (mut manager, id) = manager();
+        {
+            let track = manager.tracks.get_mut(&id).unwrap();
+            track.pnl_stats.pnl_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 4, 21).unwrap();
+            track.pnl_stats.gross_realized_pnl_today = 20.0;
+            track.pnl_stats.trading_fee_today = 2.0;
+            track.pnl_stats.gross_realized_pnl_cumulative = 20.0;
+            track.pnl_stats.trading_fee_cumulative = 2.0;
+        }
+
+        let view = manager.track_runtime_view(&id).unwrap();
+
+        assert_eq!(
+            view.pnl_stats.pnl_utc_day,
+            chrono::NaiveDate::from_ymd_opt(2026, 4, 22).unwrap()
+        );
+        assert_eq!(view.pnl_stats.gross_realized_pnl_today, 0.0);
+        assert_eq!(view.pnl_stats.trading_fee_today, 0.0);
+        assert_eq!(view.pnl_stats.gross_realized_pnl_cumulative, 20.0);
+        assert_eq!(view.pnl_stats.trading_fee_cumulative, 2.0);
+    }
+
+    #[test]
     fn fresh_start_track_replaces_existing_runtime_with_new_session_state() {
         let (mut manager, id) = manager();
         {
@@ -1439,9 +1520,9 @@ mod tests {
                 TrackState::Paused {
                     suspended: ControlState::Automatic(AutoState::FollowingBand),
                 },
-                TrackLedgerState {
+                TrackPnlStats {
                     gross_realized_pnl_cumulative: 13.0,
-                    ..TrackLedgerState::default()
+                    ..TrackPnlStats::default()
                 },
                 FreshSessionExternalInputs {
                     current_exposure: Exposure(1.5),
@@ -1468,7 +1549,7 @@ mod tests {
         assert_eq!(track.desired_exposure, None);
         assert!(track.executor_state.bindings.is_empty());
         assert!(track.executor_state.recovery_anomaly.is_none());
-        assert_eq!(track.ledger_state.gross_realized_pnl_cumulative, 13.0);
+        assert_eq!(track.pnl_stats.gross_realized_pnl_cumulative, 13.0);
         assert_eq!(track.strategy_price, Some(96.0));
         assert_eq!(track.best_bid, Some(95.8));
         assert_eq!(track.best_ask, Some(96.2));

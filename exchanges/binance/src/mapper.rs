@@ -82,7 +82,6 @@ impl TryFrom<BinanceOpenOrder> for ExchangeOrder {
                 .map(|qty| parse_decimal("executedQty", qty))
                 .transpose()?
                 .unwrap_or(0.0),
-            realized_pnl: 0.0,
             status: parse_order_status(&value.status)?,
         })
     }
@@ -296,7 +295,6 @@ mod tests {
                 price: 65123.4,
                 qty: 0.01,
                 filled_qty: 0.004,
-                realized_pnl: 0.0,
                 status: OrderStatus::PartiallyFilled,
             }
         );

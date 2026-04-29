@@ -6,27 +6,28 @@ use poise_protocol::{
     ExecutionStateView, ExecutionStatusView, ExposureSummaryView, InstrumentView,
     ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, StrategyPriceStatusView,
     TrackActivityItemView, TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionView,
-    TrackIdentityView, TrackLedgerGapReasonView, TrackLedgerGapView, TrackLedgerView,
-    TrackLifecycleView, TrackListItemView, TrackListLedgerView, TrackLossLimitsView,
-    TrackMarketView, TrackPositionView, TrackStatus as ProtocolTrackStatus, TrackStatusPanelView,
-    TrackStrategyView,
+    TrackIdentityView, TrackLifecycleView, TrackListItemView, TrackListPnlView,
+    TrackLossLimitsView, TrackMarketView, TrackPnlView, TrackPositionView,
+    TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
 };
+
+use poise_core::track::quote_asset_for_symbol;
 
 use poise_application::{
     TrackActivityLevel, TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent,
-    TrackReadBindingPolicy, TrackReadBindingStatus, TrackReadLedgerGap, TrackReadLedgerGapReason,
-    TrackReadModel, TrackReadStatus, TrackRecoveryIssue, TrackStrategyPriceStatus,
+    TrackReadBindingPolicy, TrackReadBindingStatus, TrackReadModel, TrackReadStatus,
+    TrackRecoveryIssue, TrackStrategyPriceStatus,
 };
 
 pub struct TrackProjector;
 
-struct LedgerSummary {
+struct PnlSummary {
+    pnl_asset: String,
     gross_realized_pnl: f64,
     net_realized_pnl: f64,
     total_pnl: f64,
     trading_fee_cumulative: f64,
     funding_fee_cumulative: f64,
-    has_unresolved_gaps: bool,
 }
 
 impl TrackProjector {
@@ -35,7 +36,7 @@ impl TrackProjector {
     }
 
     pub fn project_list_item(&self, source: &TrackListReadModel) -> TrackListItemView {
-        let ledger = project_list_ledger_summary(source);
+        let pnl = project_list_pnl_summary(source);
 
         TrackListItemView {
             id: source.track_id.clone(),
@@ -55,15 +56,15 @@ impl TrackProjector {
                 execution_status: project_list_execution_status(source),
                 active_binding_count: source.active_binding_count,
             },
-            ledger: TrackListLedgerView {
-                total_pnl: ledger.total_pnl,
-                has_unresolved_gaps: ledger.has_unresolved_gaps,
+            pnl: TrackListPnlView {
+                pnl_asset: pnl.pnl_asset,
+                total_pnl: pnl.total_pnl,
             },
         }
     }
 
     pub fn project_detail(&self, source: &TrackReadModel) -> TrackDetailView {
-        let ledger = project_detail_ledger_summary(source);
+        let pnl = project_detail_pnl_summary(source);
 
         TrackDetailView {
             identity: TrackIdentityView {
@@ -102,19 +103,14 @@ impl TrackProjector {
                 current_exposure: source.current_exposure,
                 desired_exposure: source.desired_exposure,
             },
-            ledger: TrackLedgerView {
-                gross_realized_pnl: ledger.gross_realized_pnl,
-                net_realized_pnl: ledger.net_realized_pnl,
+            pnl: TrackPnlView {
+                pnl_asset: pnl.pnl_asset,
+                gross_realized_pnl: pnl.gross_realized_pnl,
+                net_realized_pnl: pnl.net_realized_pnl,
                 unrealized_pnl: source.unrealized_pnl,
-                total_pnl: ledger.total_pnl,
-                trading_fee_cumulative: ledger.trading_fee_cumulative,
-                funding_fee_cumulative: ledger.funding_fee_cumulative,
-                unresolved_gaps: source
-                    .ledger_state
-                    .unresolved_gaps
-                    .iter()
-                    .map(project_ledger_gap)
-                    .collect(),
+                total_pnl: pnl.total_pnl,
+                trading_fee_cumulative: pnl.trading_fee_cumulative,
+                funding_fee_cumulative: pnl.funding_fee_cumulative,
             },
             execution: TrackExecutionView {
                 state: project_execution_state(source),
@@ -142,55 +138,36 @@ impl TrackProjector {
     }
 }
 
-fn project_list_ledger_summary(source: &TrackListReadModel) -> LedgerSummary {
-    let gross_realized_pnl = source.ledger_state.gross_realized_pnl_cumulative;
-    let net_realized_pnl = source.ledger_state.net_realized_pnl();
+fn project_list_pnl_summary(source: &TrackListReadModel) -> PnlSummary {
+    let gross_realized_pnl = source.pnl_stats.gross_realized_pnl_cumulative;
+    let net_realized_pnl = source.pnl_stats.net_realized_pnl();
 
-    LedgerSummary {
+    PnlSummary {
+        pnl_asset: pnl_asset_for_symbol(&source.symbol),
         gross_realized_pnl,
         net_realized_pnl,
         total_pnl: net_realized_pnl + source.unrealized_pnl,
-        trading_fee_cumulative: source.ledger_state.trading_fee_cumulative,
-        funding_fee_cumulative: source.ledger_state.funding_fee_cumulative,
-        has_unresolved_gaps: !source.ledger_state.unresolved_gaps.is_empty(),
+        trading_fee_cumulative: source.pnl_stats.trading_fee_cumulative,
+        funding_fee_cumulative: source.pnl_stats.funding_fee_cumulative,
     }
 }
 
-fn project_detail_ledger_summary(source: &TrackReadModel) -> LedgerSummary {
-    let gross_realized_pnl = source.ledger_state.gross_realized_pnl_cumulative;
-    let net_realized_pnl = source.ledger_state.net_realized_pnl();
+fn project_detail_pnl_summary(source: &TrackReadModel) -> PnlSummary {
+    let gross_realized_pnl = source.pnl_stats.gross_realized_pnl_cumulative;
+    let net_realized_pnl = source.pnl_stats.net_realized_pnl();
 
-    LedgerSummary {
+    PnlSummary {
+        pnl_asset: pnl_asset_for_symbol(&source.symbol),
         gross_realized_pnl,
         net_realized_pnl,
         total_pnl: net_realized_pnl + source.unrealized_pnl,
-        trading_fee_cumulative: source.ledger_state.trading_fee_cumulative,
-        funding_fee_cumulative: source.ledger_state.funding_fee_cumulative,
-        has_unresolved_gaps: !source.ledger_state.unresolved_gaps.is_empty(),
+        trading_fee_cumulative: source.pnl_stats.trading_fee_cumulative,
+        funding_fee_cumulative: source.pnl_stats.funding_fee_cumulative,
     }
 }
 
-fn project_ledger_gap(gap: &TrackReadLedgerGap) -> TrackLedgerGapView {
-    TrackLedgerGapView {
-        gap_key: gap.gap_key.clone(),
-        reason: project_ledger_gap_reason(gap.reason),
-        observed_at: gap.observed_at.to_rfc3339(),
-    }
-}
-
-fn project_ledger_gap_reason(reason: TrackReadLedgerGapReason) -> TrackLedgerGapReasonView {
-    match reason {
-        TrackReadLedgerGapReason::UnsupportedCommissionAsset => {
-            TrackLedgerGapReasonView::UnsupportedCommissionAsset
-        }
-        TrackReadLedgerGapReason::MissingCommissionAsset => {
-            TrackLedgerGapReasonView::MissingCommissionAsset
-        }
-        TrackReadLedgerGapReason::MissingSymbol => TrackLedgerGapReasonView::MissingSymbol,
-        TrackReadLedgerGapReason::UnsupportedFundingAsset => {
-            TrackLedgerGapReasonView::UnsupportedFundingAsset
-        }
-    }
+fn pnl_asset_for_symbol(symbol: &str) -> String {
+    quote_asset_for_symbol(symbol).unwrap_or(symbol).to_string()
 }
 
 fn project_activity_level(level: TrackActivityLevel) -> ActivityLevelView {
@@ -468,15 +445,14 @@ mod tests {
     use poise_application::{
         ReadModelBinding, TrackActivityEntry, TrackActivityLevel, TrackListReadModel,
         TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadBindingPolicy,
-        TrackReadBindingStatus, TrackReadLedgerGap, TrackReadLedgerGapReason, TrackReadLedgerState,
-        TrackReadModel, TrackReadStatus, TrackRecoveryIssue, TrackStrategyPriceStatus,
+        TrackReadBindingStatus, TrackReadModel, TrackReadPnlStats, TrackReadStatus,
+        TrackRecoveryIssue, TrackStrategyPriceStatus,
     };
     use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily};
     use poise_core::types::Side;
     use poise_protocol::{
         ActivityLevelView, ExecutionBindingIntentView, ExecutionBindingPolicyView,
         ExecutionBindingStatusView, ExecutionStateView, ExecutionStatusView, TrackCommandType,
-        TrackLedgerGapReasonView,
     };
 
     use super::TrackProjector;
@@ -500,11 +476,7 @@ mod tests {
         assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
         assert_eq!(item.execution.active_binding_count, 1);
         assert_eq!(item.lifecycle.updated_at, "2026-03-26T10:01:30+00:00");
-        assert!((item_json["ledger"]["total_pnl"].as_f64().unwrap() - 1229.0).abs() < 1e-9);
-        assert_eq!(
-            item_json["ledger"]["has_unresolved_gaps"].as_bool(),
-            Some(true)
-        );
+        assert!((item_json["pnl"]["total_pnl"].as_f64().unwrap() - 1229.0).abs() < 1e-9);
 
         let mut anomaly_source = list_source_with_submitting_effect();
         anomaly_source.recovery_issue = Some(TrackRecoveryIssue::UnknownLiveOrder);
@@ -516,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn projects_list_item_total_pnl_from_shared_ledger_summary() {
+    fn projects_list_item_total_pnl_from_shared_pnl_summary() {
         let list_source = list_source_with_submitting_effect();
         let detail_source = source_with_submitting_effect();
         let projector = TrackProjector::new();
@@ -524,25 +496,22 @@ mod tests {
         let item_json = serde_json::to_value(projector.project_list_item(&list_source)).unwrap();
         let detail_json = serde_json::to_value(projector.project_detail(&detail_source)).unwrap();
 
-        let item_total = item_json["ledger"]["total_pnl"].as_f64().unwrap();
-        let detail_total = detail_json["ledger"]["total_pnl"].as_f64().unwrap();
+        let item_total = item_json["pnl"]["total_pnl"].as_f64().unwrap();
+        let detail_total = detail_json["pnl"]["total_pnl"].as_f64().unwrap();
 
         assert!((item_total - 1229.0).abs() < 1e-9);
         assert!((item_total - detail_total).abs() < 1e-9);
     }
 
     #[test]
-    fn projects_list_item_lightweight_ledger_view() {
+    fn projects_list_item_lightweight_pnl_view() {
         let source = list_source_with_submitting_effect();
         let item_json =
             serde_json::to_value(TrackProjector::new().project_list_item(&source)).unwrap();
 
-        assert!((item_json["ledger"]["total_pnl"].as_f64().unwrap() - 1229.0).abs() < 1e-9);
-        assert_eq!(
-            item_json["ledger"]["has_unresolved_gaps"].as_bool(),
-            Some(true)
-        );
-        assert!(item_json.get("pnl").is_none());
+        assert!((item_json["pnl"]["total_pnl"].as_f64().unwrap() - 1229.0).abs() < 1e-9);
+        assert!(item_json["pnl"].get("gross_realized_pnl").is_none());
+        assert!(item_json.get("ledger").is_none());
     }
 
     #[test]
@@ -566,60 +535,23 @@ mod tests {
     }
 
     #[test]
-    fn projects_detail_ledger_from_unified_ledger_state() {
+    fn projects_detail_pnl_from_track_pnl_stats() {
         let source = source_with_submitting_effect();
         let detail_json =
             serde_json::to_value(TrackProjector::new().project_detail(&source)).unwrap();
 
         assert_eq!(
-            detail_json["ledger"]["gross_realized_pnl"].as_f64(),
+            detail_json["pnl"]["gross_realized_pnl"].as_f64(),
             Some(980.1)
         );
-        assert!((detail_json["ledger"]["net_realized_pnl"].as_f64().unwrap() - 963.8).abs() < 1e-9);
+        assert!((detail_json["pnl"]["net_realized_pnl"].as_f64().unwrap() - 963.8).abs() < 1e-9);
         assert_eq!(
-            detail_json["ledger"]["trading_fee_cumulative"].as_f64(),
+            detail_json["pnl"]["trading_fee_cumulative"].as_f64(),
             Some(12.3)
         );
         assert_eq!(
-            detail_json["ledger"]["funding_fee_cumulative"].as_f64(),
+            detail_json["pnl"]["funding_fee_cumulative"].as_f64(),
             Some(-4.0)
-        );
-    }
-
-    #[test]
-    fn projects_all_unresolved_ledger_gaps() {
-        let source = source_with_submitting_effect();
-        let detail_json =
-            serde_json::to_value(TrackProjector::new().project_detail(&source)).unwrap();
-
-        assert_eq!(
-            detail_json["ledger"]["unresolved_gaps"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(
-            detail_json["ledger"]["unresolved_gaps"][0]["gap_key"].as_str(),
-            Some("binance:order_trade_update:btcusdt:12345:commission_asset")
-        );
-        assert_eq!(
-            detail_json["ledger"]["unresolved_gaps"][1]["gap_key"].as_str(),
-            Some("binance:funding_fee:btcusdt:2026-03-24T08:00:00+00:00:missing_symbol")
-        );
-    }
-
-    #[test]
-    fn projects_gap_reason_as_protocol_enum() {
-        let detail = TrackProjector::new().project_detail(&source_with_submitting_effect());
-
-        assert_eq!(
-            detail.ledger.unresolved_gaps[0].reason,
-            TrackLedgerGapReasonView::UnsupportedCommissionAsset
-        );
-        assert_eq!(
-            detail.ledger.unresolved_gaps[1].reason,
-            TrackLedgerGapReasonView::MissingSymbol
         );
     }
 
@@ -1011,13 +943,13 @@ mod tests {
     }
 
     #[test]
-    fn projects_execution_ledger_observability() {
+    fn projects_execution_pnl_observability() {
         let detail = TrackProjector::new().project_detail(&source_with_submitting_effect());
 
-        assert!((detail.ledger.gross_realized_pnl - 980.1).abs() < f64::EPSILON);
-        assert!((detail.ledger.net_realized_pnl - 963.8).abs() < 1e-9);
-        assert!((detail.ledger.total_pnl - 1229.0).abs() < 1e-9);
-        assert!((detail.ledger.unrealized_pnl - 265.2).abs() < f64::EPSILON);
+        assert!((detail.pnl.gross_realized_pnl - 980.1).abs() < f64::EPSILON);
+        assert!((detail.pnl.net_realized_pnl - 963.8).abs() < 1e-9);
+        assert!((detail.pnl.total_pnl - 1229.0).abs() < 1e-9);
+        assert!((detail.pnl.unrealized_pnl - 265.2).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1108,27 +1040,13 @@ mod tests {
             best_ask: Some(101.5),
             current_exposure: 3.5,
             desired_exposure: Some(4.0),
-            ledger_state: TrackReadLedgerState {
+            pnl_stats: TrackReadPnlStats {
                 gross_realized_pnl_today: 980.1,
                 gross_realized_pnl_cumulative: 980.1,
                 trading_fee_today: 0.0,
                 trading_fee_cumulative: 12.3,
                 funding_fee_today: 0.0,
                 funding_fee_cumulative: -4.0,
-                unresolved_gaps: vec![
-                    TrackReadLedgerGap {
-                        gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset".into(),
-                        reason: TrackReadLedgerGapReason::UnsupportedCommissionAsset,
-                        observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-                    },
-                    TrackReadLedgerGap {
-                        gap_key:
-                            "binance:funding_fee:btcusdt:2026-03-24T08:00:00+00:00:missing_symbol"
-                                .into(),
-                        reason: TrackReadLedgerGapReason::MissingSymbol,
-                        observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-                    },
-                ],
             },
             unrealized_pnl: 265.2,
             inventory_gap: 0.5,

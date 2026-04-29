@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use poise_core::types::Side;
 
-use crate::ledger::TrackLedgerEvent;
+use crate::ledger::TrackPnlRecord;
 use poise_core::track::Instrument;
 
 // ── Exchange types ──
@@ -84,7 +84,6 @@ pub struct ExchangeOrder {
     pub qty: f64,
     #[serde(default)]
     pub filled_qty: f64,
-    pub realized_pnl: f64,
     pub status: OrderStatus,
 }
 
@@ -195,13 +194,7 @@ pub struct AccountSummarySnapshot {
 pub enum UserDataPayload {
     OrderUpdate(ExchangeOrder),
     PositionUpdate(Position),
-    TrackLedger(TrackLedgerUpdate),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TrackLedgerUpdate {
-    pub instrument: Instrument,
-    pub event: TrackLedgerEvent,
+    TrackPnl(TrackPnlRecord),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -215,7 +208,7 @@ impl UserDataEvent {
         match &self.payload {
             UserDataPayload::OrderUpdate(order) => &order.instrument,
             UserDataPayload::PositionUpdate(position) => &position.instrument,
-            UserDataPayload::TrackLedger(update) => &update.instrument,
+            UserDataPayload::TrackPnl(record) => &record.instrument,
         }
     }
 }

@@ -76,7 +76,7 @@ mod tests {
                 }],
                 recovery_anomaly: None,
             },
-            ledger_state: Default::default(),
+            pnl_stats: Default::default(),
             unrealized_pnl: 0.0,
             has_account_margin_guard: false,
             price_execution_block_reason: None,
@@ -111,7 +111,6 @@ mod tests {
                 price: 4670.0,
                 qty: 0.066,
                 filled_qty: 0.0,
-                realized_pnl: 0.0,
                 status: OrderStatus::New,
             },
             ExchangeOrder {
@@ -122,7 +121,6 @@ mod tests {
                 price: 4640.0,
                 qty: 0.066,
                 filled_qty: 0.0,
-                realized_pnl: 0.0,
                 status: OrderStatus::New,
             },
         ]);

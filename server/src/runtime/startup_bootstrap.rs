@@ -491,8 +491,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_startup_rebuilds_from_persisted_control_and_ledger_not_dirty_manager_runtime()
-    {
+    async fn complete_startup_rebuilds_from_persisted_control_and_pnl_records_not_dirty_manager_runtime()
+     {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let manager = seeded_manager();
         repository
@@ -505,12 +505,20 @@ mod tests {
             .await
             .unwrap();
         repository
-            .save_track_ledger_state(
+            .insert_track_pnl_record(
                 &TrackId::new("btc-core"),
-                &poise_engine::ledger::TrackLedgerState {
-                    gross_realized_pnl_cumulative: 42.0,
-                    ..poise_engine::ledger::TrackLedgerState::default()
-                },
+                &poise_engine::ledger::TrackPnlRecord::trade_summary(
+                    poise_core::track::Instrument::new(
+                        poise_core::track::Venue::Binance,
+                        "BTCUSDT",
+                    ),
+                    Utc::now(),
+                    "test".into(),
+                    None,
+                    None,
+                    42.0,
+                    0.0,
+                ),
             )
             .await
             .unwrap();
@@ -590,23 +598,13 @@ mod tests {
         assert_eq!(snapshot.desired_exposure(), None);
         assert!(!snapshot.has_executor_bindings());
         assert!(!snapshot.recovery_anomaly_active());
-        assert_eq!(snapshot.ledger_state().gross_realized_pnl_cumulative, 42.0);
+        assert_eq!(snapshot.pnl_stats().gross_realized_pnl_cumulative, 42.0);
     }
 
     #[tokio::test]
     async fn complete_startup_ignores_cleanup_order_updates_but_replays_new_session_events() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let manager = seeded_manager();
-        repository
-            .commit_track_transition(
-                "btc-core",
-                None,
-                &poise_engine::ledger::TrackLedgerState::default(),
-                &[],
-            )
-            .await
-            .unwrap();
-
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(
@@ -693,16 +691,6 @@ mod tests {
     async fn complete_startup_uses_rest_open_orders_barrier_without_waiting_for_cleanup_update() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let manager = seeded_manager();
-        repository
-            .commit_track_transition(
-                "btc-core",
-                None,
-                &poise_engine::ledger::TrackLedgerState::default(),
-                &[],
-            )
-            .await
-            .unwrap();
-
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(
@@ -763,16 +751,6 @@ mod tests {
     async fn user_task_processes_late_events_after_startup_handoff_even_when_event_time_is_old() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let manager = seeded_manager();
-        repository
-            .commit_track_transition(
-                "btc-core",
-                None,
-                &poise_engine::ledger::TrackLedgerState::default(),
-                &[],
-            )
-            .await
-            .unwrap();
-
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(
@@ -921,7 +899,6 @@ mod tests {
                 price: 99.0,
                 qty: 0.1,
                 filled_qty: 0.0,
-                realized_pnl: 0.0,
                 status: OrderStatus::Canceled,
             }),
         }
@@ -1010,7 +987,6 @@ mod tests {
                         price: 99.0,
                         qty: 0.1,
                         filled_qty: 0.0,
-                        realized_pnl: 0.0,
                         status: OrderStatus::New,
                     },
                 ]),

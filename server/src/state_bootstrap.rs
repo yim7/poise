@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -11,36 +11,14 @@ use poise_storage::sqlite::SqliteStorage;
 
 use crate::config::Config;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PersistedStateMismatch {
-    pub track_id: String,
-    pub detail: PersistedStateMismatchDetail,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PersistedStateMismatchDetail {
-    PersistedTrackMissingBusinessState,
-}
-
 #[derive(Debug)]
 pub enum StateBootstrapError {
-    PersistedStateMismatch {
-        db_path: PathBuf,
-        mismatches: Vec<PersistedStateMismatch>,
-    },
     Unexpected(anyhow::Error),
 }
 
 impl std::fmt::Display for StateBootstrapError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PersistedStateMismatch { db_path, .. } => {
-                write!(
-                    f,
-                    "persisted state does not match current config in `{}`",
-                    db_path.display()
-                )
-            }
             Self::Unexpected(error) => std::fmt::Display::fmt(error, f),
         }
     }
@@ -136,21 +114,10 @@ pub async fn prepare_state_repository(
         Arc::new(build_track_definition_registry(config).map_err(unexpected)?);
 
     let repository = SqliteStorage::new(&db_path).map_err(unexpected)?;
-    let mismatches =
-        detect_persisted_state_mismatches(track_definition_registry.as_ref(), &repository)
-            .await
-            .map_err(unexpected)?;
-    if mismatches.is_empty() {
-        let repository = Arc::new(repository);
-        return Ok(PreparedStateStore {
-            repositories: StateRepositories::from_sqlite_storage(repository),
-            track_definition_registry,
-        });
-    }
-
-    Err(StateBootstrapError::PersistedStateMismatch {
-        db_path,
-        mismatches,
+    let repository = Arc::new(repository);
+    Ok(PreparedStateStore {
+        repositories: StateRepositories::from_sqlite_storage(repository),
+        track_definition_registry,
     })
 }
 
@@ -170,32 +137,6 @@ fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
         .with_context(|| format!("failed to create database directory `{}`", parent.display()))
 }
 
-async fn detect_persisted_state_mismatches(
-    track_definition_registry: &TrackDefinitionRegistry,
-    repository: &SqliteStorage,
-) -> Result<Vec<PersistedStateMismatch>> {
-    let mut mismatches = Vec::new();
-    for track in track_definition_registry.iter() {
-        let track_id = track.track_id().as_str();
-        let has_control_truth =
-            TrackQueryStore::load_track_control_state(repository, track.track_id())
-                .await?
-                .is_some();
-        let has_ledger_truth =
-            TrackQueryStore::load_track_ledger_state(repository, track.track_id())
-                .await?
-                .is_some();
-        if has_control_truth != has_ledger_truth {
-            mismatches.push(PersistedStateMismatch {
-                track_id: track_id.to_string(),
-                detail: PersistedStateMismatchDetail::PersistedTrackMissingBusinessState,
-            });
-        }
-    }
-
-    Ok(mismatches)
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -206,7 +147,6 @@ mod tests {
     use poise_application::TrackMutationStore;
     use poise_application::TrackQueryStore;
     use poise_core::track::TrackId;
-    use poise_engine::ledger::TrackLedgerState;
     use poise_storage::sqlite::SqliteStorage;
     use rusqlite::params;
 
@@ -248,26 +188,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strict_mode_rejects_persisted_track_missing_business_state() {
-        let instance_dir = tempfile::tempdir().unwrap();
-        let config = test_config(90.0);
-        let db_path = test_db_path(instance_dir.path());
-        persist_control_state_without_ledger(&db_path).await;
-
-        let error = prepare_state_repository(&config, &db_path)
-            .await
-            .err()
-            .unwrap();
-
-        assert!(
-            error
-                .to_string()
-                .contains("persisted state does not match current config")
-        );
-    }
-
-    #[tokio::test]
-    async fn strict_mode_accepts_complete_business_state_for_configured_track() {
+    async fn strict_mode_accepts_persisted_control_state_for_configured_track() {
         let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
         let db_path = test_db_path(instance_dir.path());
@@ -275,10 +196,6 @@ mod tests {
             &db_path,
             TrackControlState::Enabled {
                 mode: PersistedControlMode::Automatic,
-            },
-            TrackLedgerState {
-                gross_realized_pnl_cumulative: 42.0,
-                ..TrackLedgerState::default()
             },
         )
         .await;
@@ -297,46 +214,6 @@ mod tests {
                 mode: PersistedControlMode::Automatic,
             })
         );
-        assert_eq!(
-            TrackQueryStore::load_track_ledger_state(
-                query_store.as_ref(),
-                &TrackId::new("btc-core")
-            )
-            .await
-            .unwrap()
-            .unwrap()
-            .gross_realized_pnl_cumulative,
-            42.0
-        );
-    }
-
-    #[tokio::test]
-    async fn strict_mode_returns_structured_mismatch() {
-        let instance_dir = tempfile::tempdir().unwrap();
-        let config = test_config(90.0);
-        let db_path = test_db_path(instance_dir.path());
-        persist_control_state_without_ledger(&db_path).await;
-
-        let error = prepare_state_repository(&config, &db_path)
-            .await
-            .err()
-            .unwrap();
-
-        match error {
-            super::StateBootstrapError::PersistedStateMismatch {
-                db_path: actual_db_path,
-                mismatches,
-            } => {
-                assert_eq!(actual_db_path, db_path);
-                assert_eq!(mismatches.len(), 1);
-                match &mismatches[0].detail {
-                    super::PersistedStateMismatchDetail::PersistedTrackMissingBusinessState => {
-                        assert_eq!(mismatches[0].track_id, "btc-core");
-                    }
-                }
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
     }
 
     #[tokio::test]
@@ -349,7 +226,7 @@ mod tests {
             account_monitor: Default::default(),
         };
         let db_path = test_db_path(instance_dir.path());
-        persist_control_state_without_ledger(&db_path).await;
+        persist_control_state(&db_path).await;
 
         let prepared = prepare_state_repository(&config, &db_path).await.unwrap();
         assert_eq!(prepared.registry().iter().count(), 0);
@@ -366,7 +243,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strict_mode_ignores_presence_without_control_or_ledger_truth() {
+    async fn strict_mode_ignores_presence_without_control_truth() {
         let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
         let db_path = test_db_path(instance_dir.path());
@@ -386,10 +263,6 @@ mod tests {
             TrackControlState::Paused {
                 resume_mode: PersistedControlMode::Automatic,
             },
-            TrackLedgerState {
-                gross_realized_pnl_cumulative: 17.0,
-                ..TrackLedgerState::default()
-            },
         )
         .await;
 
@@ -406,17 +279,6 @@ mod tests {
             Some(TrackControlState::Paused {
                 resume_mode: PersistedControlMode::Automatic,
             })
-        );
-        assert_eq!(
-            TrackQueryStore::load_track_ledger_state(
-                query_store.as_ref(),
-                &TrackId::new("btc-core")
-            )
-            .await
-            .unwrap()
-            .unwrap()
-            .gross_realized_pnl_cumulative,
-            17.0
         );
     }
 
@@ -488,7 +350,7 @@ mod tests {
         .unwrap();
     }
 
-    async fn persist_control_state_without_ledger(db_path: &Path) {
+    async fn persist_control_state(db_path: &Path) {
         super::ensure_parent_dir(db_path).unwrap();
         let storage = SqliteStorage::new(db_path).unwrap();
         storage
@@ -502,19 +364,11 @@ mod tests {
             .unwrap();
     }
 
-    async fn persist_business_state(
-        db_path: &Path,
-        control_state: TrackControlState,
-        ledger_state: TrackLedgerState,
-    ) {
+    async fn persist_business_state(db_path: &Path, control_state: TrackControlState) {
         super::ensure_parent_dir(db_path).unwrap();
         let storage = SqliteStorage::new(db_path).unwrap();
         storage
             .save_track_control_state(&TrackId::new("btc-core"), &control_state)
-            .await
-            .unwrap();
-        storage
-            .save_track_ledger_state(&TrackId::new("btc-core"), &ledger_state)
             .await
             .unwrap();
     }

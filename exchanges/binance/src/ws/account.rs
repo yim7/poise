@@ -10,12 +10,8 @@ use tokio::{
 use tokio_tungstenite::tungstenite::Message;
 
 use poise_core::track::{Instrument, Venue};
-use poise_engine::ledger::{
-    ExecutionLedgerUpdate, LedgerAdjustmentEvent, LedgerDelta, LedgerGapReason, LedgerGapRecord,
-    TrackLedgerEvent,
-};
-use poise_engine::observation::OrderObservation;
-use poise_engine::ports::{Position, TrackLedgerUpdate, UserDataEvent, UserDataPayload};
+use poise_engine::ledger::TrackPnlRecord;
+use poise_engine::ports::{ExchangeOrder, Position, UserDataEvent, UserDataPayload};
 
 use super::{
     KeepaliveStatus, UserStreamDiagnostics, UserWebSocket, backoff_delay, connect_user_stream,
@@ -185,7 +181,6 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                 .with_context(|| format!("failed to parse {event_type} payload"))?;
             let event_time = parse_user_event_time(&event_type, envelope.event_time)?;
             let order = envelope.order;
-            let realized_pnl = parse_decimal("o.rp", &order.realized_pnl)?;
             let price = parse_decimal("o.p", &order.price)?;
             let quantity = parse_decimal("o.q", &order.quantity)?;
             let filled_qty = order
@@ -195,66 +190,79 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                 .transpose()?
                 .unwrap_or(0.0);
             let instrument = Instrument::new(Venue::Binance, order.symbol.clone());
-            let mut ledger_deltas = vec![LedgerDelta::GrossRealizedPnl(realized_pnl)];
-            let mut ledger_gaps = Vec::new();
-            if let Some(commission_amount) = order
-                .commission_amount
+            let side = parse_side(&order.side)?;
+
+            let mut events = vec![UserDataEvent {
+                event_time,
+                payload: UserDataPayload::OrderUpdate(ExchangeOrder {
+                    instrument: instrument.clone(),
+                    order_id: order.order_id.to_string(),
+                    client_order_id: order.client_order_id.clone(),
+                    side,
+                    price,
+                    qty: quantity,
+                    filled_qty,
+                    status: parse_order_status(&order.status)?,
+                }),
+            }];
+
+            let trade_qty = order
+                .last_filled_quantity
                 .as_deref()
-                .filter(|value| !value.is_empty())
-            {
-                let commission_amount = parse_decimal("o.n", commission_amount)?;
-                if commission_amount.abs() > f64::EPSILON {
-                    match (
-                        order.commission_asset.as_deref(),
-                        quote_asset_for_symbol(&order.symbol),
-                    ) {
-                        (Some(asset), Some(quote_asset)) if asset == quote_asset => {
-                            ledger_deltas.push(LedgerDelta::TradingFee(commission_amount));
-                        }
-                        (Some(_), _) => ledger_gaps.push(LedgerGapRecord {
-                            gap_key: format!(
-                                "binance:order_trade_update:{}:{}:commission_asset",
-                                order.symbol.to_lowercase(),
-                                order.order_id
-                            ),
-                            reason: LedgerGapReason::UnsupportedCommissionAsset,
-                            observed_at: event_time,
-                            source: "binance:order_trade_update".into(),
-                        }),
-                        (None, _) => ledger_gaps.push(LedgerGapRecord {
-                            gap_key: format!(
-                                "binance:order_trade_update:{}:{}:missing_commission_asset",
-                                order.symbol.to_lowercase(),
-                                order.order_id
-                            ),
-                            reason: LedgerGapReason::MissingCommissionAsset,
-                            observed_at: event_time,
-                            source: "binance:order_trade_update".into(),
-                        }),
-                    }
-                }
+                .map(|value| parse_decimal("o.l", value))
+                .transpose()?
+                .unwrap_or(filled_qty);
+            if order.execution_type.as_deref() == Some("TRADE") && trade_qty.abs() > f64::EPSILON {
+                let realized_pnl = parse_decimal("o.rp", &order.realized_pnl)?;
+                let commission_amount = if let Some(commission_amount) = order
+                    .commission_amount
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                {
+                    parse_decimal("o.n", commission_amount)?
+                } else {
+                    0.0
+                };
+                let pnl_asset = instrument.pnl_asset();
+                let trading_fee = match order.commission_asset.as_deref() {
+                    Some(asset) if asset == pnl_asset => commission_amount,
+                    None if commission_amount.abs() <= f64::EPSILON => 0.0,
+                    _ => 0.0,
+                };
+                let trade_id = order.trade_id.map(|value| value.to_string());
+                let source_key = Some(match trade_id.as_deref() {
+                    Some(trade_id) => format!(
+                        "binance:order_trade_update:{}:{}",
+                        order.symbol.to_lowercase(),
+                        trade_id
+                    ),
+                    None => format!(
+                        "binance:order_trade_update:{}:{}:{}",
+                        order.symbol.to_lowercase(),
+                        order.order_id,
+                        event_time.timestamp_millis()
+                    ),
+                });
+
+                events.push(UserDataEvent {
+                    event_time,
+                    payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade(
+                        instrument,
+                        event_time,
+                        "binance:order_trade_update".into(),
+                        source_key,
+                        Some(order.order_id.to_string()),
+                        trade_id,
+                        side,
+                        price,
+                        trade_qty,
+                        realized_pnl,
+                        trading_fee,
+                    )),
+                });
             }
 
-            Ok(UserStreamMessage::Events(vec![UserDataEvent {
-                event_time,
-                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
-                    instrument,
-                    event: TrackLedgerEvent::Execution(ExecutionLedgerUpdate {
-                        order_update: OrderObservation {
-                            order_id: order.order_id.to_string(),
-                            client_order_id: order.client_order_id,
-                            side: parse_side(&order.side)?,
-                            price,
-                            quantity,
-                            filled_qty,
-                            realized_pnl,
-                            status: parse_order_status(&order.status)?,
-                        },
-                        ledger_deltas,
-                        ledger_gaps,
-                    }),
-                }),
-            }]))
+            Ok(UserStreamMessage::Events(events))
         }
         "ACCOUNT_UPDATE" => {
             let envelope = serde_json::from_str::<AccountUpdateEnvelope>(payload)
@@ -276,34 +284,26 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                     return Ok(UserStreamMessage::Events(Vec::new()));
                 };
                 let balance_change = parse_decimal("a.B.bc", &balance.balance_change)?;
-                let mut ledger_deltas = Vec::new();
-                let mut ledger_gaps = Vec::new();
-                match quote_asset_for_symbol(symbol) {
-                    Some(quote_asset) if quote_asset == balance.asset => {
-                        ledger_deltas.push(LedgerDelta::FundingFee(balance_change));
-                    }
-                    _ => ledger_gaps.push(LedgerGapRecord {
-                        gap_key: format!(
-                            "binance:funding_fee:{}:{}:asset",
-                            symbol.to_lowercase(),
-                            balance.asset.to_lowercase()
-                        ),
-                        reason: LedgerGapReason::UnsupportedFundingAsset,
-                        observed_at: event_time,
-                        source: "binance:funding_fee".into(),
-                    }),
+                let Some(quote_asset) = quote_asset_for_symbol(symbol) else {
+                    return Ok(UserStreamMessage::Events(Vec::new()));
+                };
+                if quote_asset != balance.asset {
+                    return Ok(UserStreamMessage::Events(Vec::new()));
                 }
 
                 return Ok(UserStreamMessage::Events(vec![UserDataEvent {
                     event_time,
-                    payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
-                        instrument: Instrument::new(Venue::Binance, symbol.to_string()),
-                        event: TrackLedgerEvent::Adjustment(LedgerAdjustmentEvent {
-                            ledger_deltas,
-                            ledger_gaps,
-                            source: "binance:funding_fee".into(),
-                        }),
-                    }),
+                    payload: UserDataPayload::TrackPnl(TrackPnlRecord::funding(
+                        Instrument::new(Venue::Binance, symbol.to_string()),
+                        event_time,
+                        "binance:funding_fee".into(),
+                        Some(format!(
+                            "binance:funding_fee:{}:{}",
+                            symbol.to_lowercase(),
+                            event_time.timestamp_millis()
+                        )),
+                        balance_change,
+                    )),
                 }]));
             }
 
@@ -352,12 +352,7 @@ mod tests {
 
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
-    use poise_engine::ledger::{
-        ExecutionLedgerUpdate, LedgerAdjustmentEvent, LedgerDelta, LedgerGapRecord,
-        TrackLedgerEvent,
-    };
-    use poise_engine::observation::OrderObservation;
-    use poise_engine::ports::{OrderStatus, Position, TrackLedgerUpdate, UserDataPayload};
+    use poise_engine::ports::{OrderStatus, Position, UserDataPayload};
 
     use super::*;
     use crate::ws::BinanceWsClient;
@@ -372,8 +367,11 @@ mod tests {
                 "i": 12345,
                 "c": "grid-order-004",
                 "S": "SELL",
+                "x": "TRADE",
                 "p": "65000.5",
                 "q": "0.020",
+                "z": "0.020",
+                "l": "0.020",
                 "rp": "12.34",
                 "X": "FILLED"
             }
@@ -383,31 +381,42 @@ mod tests {
 
         assert_eq!(
             events,
-            UserStreamMessage::Events(vec![UserDataEvent {
-                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
-                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    event: TrackLedgerEvent::Execution(ExecutionLedgerUpdate {
-                        order_update: OrderObservation {
-                            order_id: "12345".into(),
-                            client_order_id: "grid-order-004".into(),
-                            side: Side::Sell,
-                            price: 65000.5,
-                            quantity: 0.02,
-                            filled_qty: 0.0,
-                            realized_pnl: 12.34,
-                            status: OrderStatus::Filled,
-                        },
-                        ledger_deltas: vec![LedgerDelta::GrossRealizedPnl(12.34)],
-                        ledger_gaps: vec![],
+            UserStreamMessage::Events(vec![
+                UserDataEvent {
+                    event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                    payload: UserDataPayload::OrderUpdate(ExchangeOrder {
+                        instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                        order_id: "12345".into(),
+                        client_order_id: "grid-order-004".into(),
+                        side: Side::Sell,
+                        price: 65000.5,
+                        qty: 0.02,
+                        filled_qty: 0.02,
+                        status: OrderStatus::Filled,
                     }),
-                }),
-            }])
+                },
+                UserDataEvent {
+                    event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                    payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade(
+                        Instrument::new(Venue::Binance, "BTCUSDT"),
+                        Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                        "binance:order_trade_update".into(),
+                        Some("binance:order_trade_update:btcusdt:12345:1700000000000".into()),
+                        Some("12345".into()),
+                        None,
+                        Side::Sell,
+                        65000.5,
+                        0.02,
+                        12.34,
+                        0.0,
+                    )),
+                },
+            ])
         );
     }
 
     #[test]
-    fn parses_order_trade_update_into_track_ledger_execution_event() {
+    fn parses_order_trade_update_into_order_update_and_pnl_record() {
         let payload = r#"{
             "e": "ORDER_TRADE_UPDATE",
             "E": 1700000000000,
@@ -416,8 +425,12 @@ mod tests {
                 "i": 12345,
                 "c": "grid-order-004",
                 "S": "SELL",
+                "x": "TRADE",
                 "p": "65000.5",
                 "q": "0.020",
+                "z": "0.020",
+                "l": "0.020",
+                "t": 67890,
                 "rp": "12.34",
                 "n": "3.2",
                 "N": "USDT",
@@ -429,34 +442,42 @@ mod tests {
 
         assert_eq!(
             events,
-            UserStreamMessage::Events(vec![UserDataEvent {
-                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
-                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    event: TrackLedgerEvent::Execution(ExecutionLedgerUpdate {
-                        order_update: OrderObservation {
-                            order_id: "12345".into(),
-                            client_order_id: "grid-order-004".into(),
-                            side: Side::Sell,
-                            price: 65000.5,
-                            quantity: 0.02,
-                            filled_qty: 0.0,
-                            realized_pnl: 12.34,
-                            status: OrderStatus::Filled,
-                        },
-                        ledger_deltas: vec![
-                            LedgerDelta::GrossRealizedPnl(12.34),
-                            LedgerDelta::TradingFee(3.2),
-                        ],
-                        ledger_gaps: vec![],
+            UserStreamMessage::Events(vec![
+                UserDataEvent {
+                    event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                    payload: UserDataPayload::OrderUpdate(ExchangeOrder {
+                        instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                        order_id: "12345".into(),
+                        client_order_id: "grid-order-004".into(),
+                        side: Side::Sell,
+                        price: 65000.5,
+                        qty: 0.02,
+                        filled_qty: 0.02,
+                        status: OrderStatus::Filled,
                     }),
-                }),
-            }])
+                },
+                UserDataEvent {
+                    event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                    payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade(
+                        Instrument::new(Venue::Binance, "BTCUSDT"),
+                        Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                        "binance:order_trade_update".into(),
+                        Some("binance:order_trade_update:btcusdt:67890".into()),
+                        Some("12345".into()),
+                        Some("67890".into()),
+                        Side::Sell,
+                        65000.5,
+                        0.02,
+                        12.34,
+                        3.2,
+                    )),
+                },
+            ])
         );
     }
 
     #[test]
-    fn parses_funding_fee_account_update_into_track_ledger_adjustment_event() {
+    fn parses_funding_fee_account_update_into_track_pnl_record() {
         let payload = r#"{
             "e": "ACCOUNT_UPDATE",
             "E": 1700000000000,
@@ -481,20 +502,19 @@ mod tests {
             events,
             UserStreamMessage::Events(vec![UserDataEvent {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
-                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    event: TrackLedgerEvent::Adjustment(LedgerAdjustmentEvent {
-                        ledger_deltas: vec![LedgerDelta::FundingFee(-1.5)],
-                        ledger_gaps: vec![],
-                        source: "binance:funding_fee".into(),
-                    }),
-                }),
+                payload: UserDataPayload::TrackPnl(TrackPnlRecord::funding(
+                    Instrument::new(Venue::Binance, "BTCUSDT"),
+                    Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                    "binance:funding_fee".into(),
+                    Some("binance:funding_fee:btcusdt:1700000000000".into()),
+                    -1.5,
+                )),
             }])
         );
     }
 
     #[test]
-    fn parses_unsupported_commission_asset_into_execution_gap_record() {
+    fn non_trade_order_update_does_not_create_pnl_record() {
         let payload = r#"{
             "e": "ORDER_TRADE_UPDATE",
             "E": 1700000000000,
@@ -505,6 +525,49 @@ mod tests {
                 "S": "SELL",
                 "p": "65000.5",
                 "q": "0.020",
+                "z": "0.000",
+                "l": "0.000",
+                "x": "NEW",
+                "rp": "0",
+                "X": "NEW"
+            }
+        }"#;
+
+        let events = parse_user_data_message(payload).unwrap();
+
+        assert_eq!(
+            events,
+            UserStreamMessage::Events(vec![UserDataEvent {
+                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                payload: UserDataPayload::OrderUpdate(ExchangeOrder {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                    order_id: "12345".into(),
+                    client_order_id: "grid-order-004".into(),
+                    side: Side::Sell,
+                    price: 65000.5,
+                    qty: 0.02,
+                    filled_qty: 0.0,
+                    status: OrderStatus::New,
+                }),
+            }])
+        );
+    }
+
+    #[test]
+    fn ignores_non_quote_commission_amount_in_pnl_stats_record() {
+        let payload = r#"{
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 1700000000000,
+            "o": {
+                "s": "BTCUSDT",
+                "i": 12345,
+                "c": "grid-order-004",
+                "S": "SELL",
+                "x": "TRADE",
+                "p": "65000.5",
+                "q": "0.020",
+                "z": "0.020",
+                "l": "0.020",
                 "rp": "12.34",
                 "n": "0.01",
                 "N": "BNB",
@@ -516,32 +579,37 @@ mod tests {
 
         assert_eq!(
             events,
-            UserStreamMessage::Events(vec![UserDataEvent {
-                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
-                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    event: TrackLedgerEvent::Execution(ExecutionLedgerUpdate {
-                        order_update: OrderObservation {
-                            order_id: "12345".into(),
-                            client_order_id: "grid-order-004".into(),
-                            side: Side::Sell,
-                            price: 65000.5,
-                            quantity: 0.02,
-                            filled_qty: 0.0,
-                            realized_pnl: 12.34,
-                            status: OrderStatus::Filled,
-                        },
-                        ledger_deltas: vec![LedgerDelta::GrossRealizedPnl(12.34)],
-                        ledger_gaps: vec![LedgerGapRecord {
-                            gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset"
-                                .into(),
-                            reason: LedgerGapReason::UnsupportedCommissionAsset,
-                            observed_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-                            source: "binance:order_trade_update".into(),
-                        }],
+            UserStreamMessage::Events(vec![
+                UserDataEvent {
+                    event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                    payload: UserDataPayload::OrderUpdate(ExchangeOrder {
+                        instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                        order_id: "12345".into(),
+                        client_order_id: "grid-order-004".into(),
+                        side: Side::Sell,
+                        price: 65000.5,
+                        qty: 0.02,
+                        filled_qty: 0.02,
+                        status: OrderStatus::Filled,
                     }),
-                }),
-            }])
+                },
+                UserDataEvent {
+                    event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                    payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade(
+                        Instrument::new(Venue::Binance, "BTCUSDT"),
+                        Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                        "binance:order_trade_update".into(),
+                        Some("binance:order_trade_update:btcusdt:12345:1700000000000".into()),
+                        Some("12345".into()),
+                        None,
+                        Side::Sell,
+                        65000.5,
+                        0.02,
+                        12.34,
+                        0.0,
+                    )),
+                },
+            ])
         );
     }
 
@@ -555,6 +623,7 @@ mod tests {
                     "s": "BTCUSDT",
                     "pa": "0.015",
                     "ep": "64200.0",
+                    "cr": "200.5",
                     "up": "12.3"
                 }]
             }

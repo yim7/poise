@@ -46,7 +46,7 @@ mod tests {
 
     use anyhow::Result;
     use async_trait::async_trait;
-    use chrono::{NaiveDate, TimeZone, Utc};
+    use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
@@ -164,40 +164,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_track_detail_source_keeps_live_runtime_ledger_when_persisted_today_is_stale() {
-        let repository = Arc::new(FakeReadRepository::new().with_track_ledger_state(
-            "btc-core",
-            poise_engine::ledger::TrackLedgerState {
-                ledger_utc_day: NaiveDate::from_ymd_opt(2026, 4, 22).unwrap(),
-                gross_realized_pnl_today: 25.0,
-                gross_realized_pnl_cumulative: 100.0,
-                trading_fee_today: 2.0,
-                trading_fee_cumulative: 8.0,
-                funding_fee_today: -1.0,
-                funding_fee_cumulative: -4.0,
-                unresolved_gaps: vec![],
-            },
-        ));
-        let live_repository = Arc::new(MemoryRepository::default());
-        let (services, _) = track_write_services(seeded_manager(), live_repository);
-        let service = TrackQueryService::new(
-            repository,
-            test_track_definition_registry(),
-            Arc::new(services.observation),
-        );
-
-        let source = service
-            .load_track_detail_source(&TrackId::new("btc-core"))
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(source.ledger_state.gross_realized_pnl_today, 0.0);
-        assert_eq!(source.ledger_state.trading_fee_today, 0.0);
-        assert_eq!(source.ledger_state.funding_fee_today, 0.0);
-    }
-
-    #[tokio::test]
     async fn list_track_sources_reads_live_runtime_without_persisted_snapshot() {
         let repository = Arc::new(FakeReadRepository::without_snapshots());
         let live_repository = Arc::new(MemoryRepository::default());
@@ -282,7 +248,6 @@ mod tests {
         updated_at: HashMap<String, chrono::DateTime<Utc>>,
         events: HashMap<String, Vec<StoredTrackEvent>>,
         effects: HashMap<String, Vec<PersistedTrackEffect>>,
-        ledger_states: HashMap<String, poise_engine::ledger::TrackLedgerState>,
         effect_limits: std::sync::Mutex<Vec<usize>>,
     }
 
@@ -332,7 +297,6 @@ mod tests {
                         updated_at,
                     }],
                 )]),
-                ledger_states: HashMap::new(),
                 effect_limits: std::sync::Mutex::new(Vec::new()),
             }
         }
@@ -345,16 +309,6 @@ mod tests {
 
         fn recorded_effect_limits(&self) -> Vec<usize> {
             self.effect_limits.lock().unwrap().clone()
-        }
-
-        fn with_track_ledger_state(
-            mut self,
-            track_id: &str,
-            ledger_state: poise_engine::ledger::TrackLedgerState,
-        ) -> Self {
-            self.ledger_states
-                .insert(track_id.to_string(), ledger_state);
-            self
         }
     }
 
@@ -392,11 +346,15 @@ mod tests {
             Ok(None)
         }
 
-        async fn load_track_ledger_state(
+        async fn load_track_pnl_stats(
             &self,
-            track_id: &TrackId,
-        ) -> Result<Option<poise_engine::ledger::TrackLedgerState>> {
-            Ok(self.ledger_states.get(track_id.as_str()).cloned())
+            _track_id: &TrackId,
+            pnl_utc_day: chrono::NaiveDate,
+        ) -> Result<poise_engine::ledger::TrackPnlStats> {
+            Ok(poise_engine::ledger::TrackPnlStats {
+                pnl_utc_day,
+                ..poise_engine::ledger::TrackPnlStats::default()
+            })
         }
 
         async fn load_track_updated_at(

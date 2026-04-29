@@ -536,7 +536,6 @@ mod tests {
                         price: tracked_request.price,
                         qty: tracked_request.quantity,
                         filled_qty: 0.0,
-                        realized_pnl: 0.0,
                         status: OrderStatus::New,
                     },
                     ExchangeOrder {
@@ -547,7 +546,6 @@ mod tests {
                         price: tracked_request.price - 1.0,
                         qty: tracked_request.quantity,
                         filled_qty: 0.0,
-                        realized_pnl: 0.0,
                         status: OrderStatus::New,
                     },
                 ]
@@ -570,7 +568,6 @@ mod tests {
                         price: tracked_request.price,
                         qty: tracked_request.quantity,
                         filled_qty: 0.0,
-                        realized_pnl: 0.0,
                         status: OrderStatus::New,
                     },
                     ExchangeOrder {
@@ -581,7 +578,6 @@ mod tests {
                         price: tracked_request.price,
                         qty: tracked_request.quantity,
                         filled_qty: 0.0,
-                        realized_pnl: 0.0,
                         status: OrderStatus::New,
                     },
                 ]
@@ -604,7 +600,6 @@ mod tests {
                         price: tracked_request.price,
                         qty: tracked_request.quantity,
                         filled_qty: 0.0,
-                        realized_pnl: 0.0,
                         status: OrderStatus::New,
                     },
                     ExchangeOrder {
@@ -615,7 +610,6 @@ mod tests {
                         price: tracked_request.price,
                         qty: tracked_request.quantity,
                         filled_qty: 0.0,
-                        realized_pnl: 0.0,
                         status: OrderStatus::New,
                     },
                 ]

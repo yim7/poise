@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use chrono::NaiveDate;
 use poise_core::track::TrackId;
-use poise_engine::ledger::TrackLedgerState;
+use poise_engine::ledger::TrackPnlStats;
 use poise_engine::runtime::FreshSessionExternalInputs;
 
 use crate::mutation_executor::MutationExecutor;
@@ -46,37 +46,27 @@ impl TrackRuntimeLifecycleService {
         self.query_store.load_track_control_state(track_id).await
     }
 
-    pub async fn load_track_ledger_state(
+    pub async fn load_track_pnl_stats(
         &self,
         track_id: &TrackId,
         current_utc_day: NaiveDate,
-    ) -> Result<Option<TrackLedgerState>> {
-        let Some(mut ledger_state) = self.query_store.load_track_ledger_state(track_id).await?
-        else {
-            return Ok(None);
-        };
-        ledger_state.normalize_utc_day(current_utc_day);
-        Ok(Some(ledger_state))
+    ) -> Result<TrackPnlStats> {
+        self.query_store
+            .load_track_pnl_stats(track_id, current_utc_day)
+            .await
     }
 
     async fn load_persisted_components(
         &self,
         track_id: &TrackId,
         current_utc_day: NaiveDate,
-    ) -> Result<(TrackControlState, TrackLedgerState)> {
+    ) -> Result<(TrackControlState, TrackPnlStats)> {
         let control_state = self
             .load_track_control_state(track_id)
             .await?
             .unwrap_or_default();
-        let ledger_state = self
-            .load_track_ledger_state(track_id, current_utc_day)
-            .await?
-            .unwrap_or_else(|| {
-                let mut ledger_state = TrackLedgerState::default();
-                ledger_state.normalize_utc_day(current_utc_day);
-                ledger_state
-            });
-        Ok((control_state, ledger_state))
+        let pnl_stats = self.load_track_pnl_stats(track_id, current_utc_day).await?;
+        Ok((control_state, pnl_stats))
     }
 
     pub async fn fresh_start_track_runtime(
@@ -85,11 +75,11 @@ impl TrackRuntimeLifecycleService {
         current_utc_day: NaiveDate,
         external_inputs: FreshSessionExternalInputs,
     ) -> Result<bool> {
-        let (control_state, ledger_state) = self
+        let (control_state, pnl_stats) = self
             .load_persisted_components(track_id, current_utc_day)
             .await?;
         self.executor
-            .fresh_start_track_runtime(track_id, control_state, ledger_state, external_inputs)
+            .fresh_start_track_runtime(track_id, control_state, pnl_stats, external_inputs)
             .await
     }
 
@@ -129,7 +119,7 @@ mod tests {
     use poise_core::track::TrackId;
     use poise_core::types::Exposure;
     use poise_engine::executor::RecoveryAnomaly;
-    use poise_engine::ledger::TrackLedgerState;
+    use poise_engine::ledger::TrackPnlRecord;
     use poise_engine::ports::ExecutionQuote;
     use poise_engine::runtime::{CurrentMarketData, FreshSessionExternalInputs};
 
@@ -163,7 +153,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_track_ledger_state_normalizes_utc_day() {
+    async fn load_track_pnl_stats_aggregates_records_for_utc_day() {
         let repository = Arc::new(MemoryRepository::default());
         TrackMutationStore::save_track_control_state(
             repository.as_ref(),
@@ -174,32 +164,43 @@ mod tests {
         )
         .await
         .unwrap();
-        TrackMutationStore::save_track_ledger_state(
+        TrackMutationStore::insert_track_pnl_record(
             repository.as_ref(),
             &TrackId::new("btc-core"),
-            &TrackLedgerState {
-                ledger_utc_day: NaiveDate::from_ymd_opt(2026, 4, 22).unwrap(),
-                gross_realized_pnl_today: 25.0,
-                gross_realized_pnl_cumulative: 100.0,
-                trading_fee_today: 2.0,
-                trading_fee_cumulative: 8.0,
-                funding_fee_today: -1.0,
-                funding_fee_cumulative: -4.0,
-                unresolved_gaps: vec![],
-            },
+            &TrackPnlRecord::trade_summary(
+                poise_core::track::Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 22, 8, 0, 0).unwrap(),
+                "test".into(),
+                None,
+                None,
+                100.0,
+                8.0,
+            ),
+        )
+        .await
+        .unwrap();
+        TrackMutationStore::insert_track_pnl_record(
+            repository.as_ref(),
+            &TrackId::new("btc-core"),
+            &TrackPnlRecord::funding(
+                poise_core::track::Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
+                "test".into(),
+                None,
+                -4.0,
+            ),
         )
         .await
         .unwrap();
         let (services, _) = track_write_services(seeded_manager(), repository);
 
-        let ledger_state = services
+        let pnl_stats = services
             .runtime_lifecycle
-            .load_track_ledger_state(
+            .load_track_pnl_stats(
                 &TrackId::new("btc-core"),
                 NaiveDate::from_ymd_opt(2026, 4, 23).unwrap(),
             )
             .await
-            .unwrap()
             .unwrap();
         let control_state = services
             .runtime_lifecycle
@@ -209,13 +210,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            ledger_state.ledger_utc_day,
+            pnl_stats.pnl_utc_day,
             NaiveDate::from_ymd_opt(2026, 4, 23).unwrap()
         );
-        assert_eq!(ledger_state.gross_realized_pnl_today, 0.0);
-        assert_eq!(ledger_state.trading_fee_today, 0.0);
-        assert_eq!(ledger_state.funding_fee_today, 0.0);
-        assert_eq!(ledger_state.gross_realized_pnl_cumulative, 100.0);
+        assert_eq!(pnl_stats.gross_realized_pnl_today, 0.0);
+        assert_eq!(pnl_stats.trading_fee_today, 0.0);
+        assert_eq!(pnl_stats.funding_fee_today, 0.0);
+        assert_eq!(pnl_stats.gross_realized_pnl_cumulative, 100.0);
         assert_eq!(
             control_state,
             TrackControlState::Paused {
@@ -237,13 +238,18 @@ mod tests {
         )
         .await
         .unwrap();
-        TrackMutationStore::save_track_ledger_state(
+        TrackMutationStore::insert_track_pnl_record(
             repository.as_ref(),
             &TrackId::new("btc-core"),
-            &TrackLedgerState {
-                gross_realized_pnl_cumulative: 42.0,
-                ..TrackLedgerState::default()
-            },
+            &TrackPnlRecord::trade_summary(
+                poise_core::track::Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+                Utc::now(),
+                "test".into(),
+                None,
+                None,
+                42.0,
+                0.0,
+            ),
         )
         .await
         .unwrap();
@@ -300,7 +306,7 @@ mod tests {
         assert_eq!(snapshot.desired_exposure(), None);
         assert!(!snapshot.has_executor_bindings());
         assert!(!snapshot.recovery_anomaly_active());
-        assert_eq!(snapshot.ledger_state().gross_realized_pnl_cumulative, 42.0);
+        assert_eq!(snapshot.pnl_stats().gross_realized_pnl_cumulative, 42.0);
         let live_view = manager.track_live_view(&TrackId::new("btc-core")).unwrap();
         assert_eq!(live_view.strategy_price, Some(96.0));
         assert_eq!(live_view.best_bid, Some(95.8));

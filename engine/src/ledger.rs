@@ -1,86 +1,153 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::observation::OrderObservation;
+use poise_core::track::Instrument;
+use poise_core::types::Side;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TrackLedgerState {
-    pub ledger_utc_day: NaiveDate,
-    pub gross_realized_pnl_today: f64,
-    pub gross_realized_pnl_cumulative: f64,
-    #[serde(default)]
-    pub trading_fee_today: f64,
-    pub trading_fee_cumulative: f64,
-    #[serde(default)]
-    pub funding_fee_today: f64,
-    pub funding_fee_cumulative: f64,
-    #[serde(default)]
-    pub unresolved_gaps: Vec<LedgerGapRecord>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackPnlRecordKind {
+    Trade,
+    Funding,
 }
 
-impl Default for TrackLedgerState {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackPnlRecord {
+    pub instrument: Instrument,
+    pub occurred_at: DateTime<Utc>,
+    pub kind: TrackPnlRecordKind,
+    pub source: String,
+    pub source_key: Option<String>,
+    pub order_id: Option<String>,
+    pub trade_id: Option<String>,
+    pub side: Option<Side>,
+    pub price: Option<f64>,
+    pub qty: Option<f64>,
+    pub realized_pnl: f64,
+    pub trading_fee: f64,
+    pub funding_fee: f64,
+}
+
+impl TrackPnlRecord {
+    #[allow(clippy::too_many_arguments)]
+    pub fn trade(
+        instrument: Instrument,
+        occurred_at: DateTime<Utc>,
+        source: String,
+        source_key: Option<String>,
+        order_id: Option<String>,
+        trade_id: Option<String>,
+        side: Side,
+        price: f64,
+        qty: f64,
+        realized_pnl: f64,
+        trading_fee: f64,
+    ) -> Self {
+        Self {
+            instrument,
+            occurred_at,
+            kind: TrackPnlRecordKind::Trade,
+            source,
+            source_key,
+            order_id,
+            trade_id,
+            side: Some(side),
+            price: Some(price),
+            qty: Some(qty),
+            realized_pnl,
+            trading_fee,
+            funding_fee: 0.0,
+        }
+    }
+
+    pub fn funding(
+        instrument: Instrument,
+        occurred_at: DateTime<Utc>,
+        source: String,
+        source_key: Option<String>,
+        funding_fee: f64,
+    ) -> Self {
+        Self {
+            instrument,
+            occurred_at,
+            kind: TrackPnlRecordKind::Funding,
+            source,
+            source_key,
+            order_id: None,
+            trade_id: None,
+            side: None,
+            price: None,
+            qty: None,
+            realized_pnl: 0.0,
+            trading_fee: 0.0,
+            funding_fee,
+        }
+    }
+
+    pub fn trade_summary(
+        instrument: Instrument,
+        occurred_at: DateTime<Utc>,
+        source: String,
+        source_key: Option<String>,
+        trade_id: Option<String>,
+        realized_pnl: f64,
+        trading_fee: f64,
+    ) -> Self {
+        Self {
+            instrument,
+            occurred_at,
+            kind: TrackPnlRecordKind::Trade,
+            source,
+            source_key,
+            order_id: None,
+            trade_id,
+            side: None,
+            price: None,
+            qty: None,
+            realized_pnl,
+            trading_fee,
+            funding_fee: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackPnlStats {
+    pub pnl_utc_day: NaiveDate,
+    pub gross_realized_pnl_today: f64,
+    pub gross_realized_pnl_cumulative: f64,
+    pub trading_fee_today: f64,
+    pub trading_fee_cumulative: f64,
+    pub funding_fee_today: f64,
+    pub funding_fee_cumulative: f64,
+}
+
+impl Default for TrackPnlStats {
     fn default() -> Self {
         Self {
-            ledger_utc_day: NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch date"),
+            pnl_utc_day: NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch date"),
             gross_realized_pnl_today: 0.0,
             gross_realized_pnl_cumulative: 0.0,
             trading_fee_today: 0.0,
             trading_fee_cumulative: 0.0,
             funding_fee_today: 0.0,
             funding_fee_cumulative: 0.0,
-            unresolved_gaps: Vec::new(),
         }
     }
 }
 
-impl TrackLedgerState {
-    pub fn is_empty(&self) -> bool {
-        self.gross_realized_pnl_today.abs() <= f64::EPSILON
-            && self.gross_realized_pnl_cumulative.abs() <= f64::EPSILON
-            && self.trading_fee_today.abs() <= f64::EPSILON
-            && self.trading_fee_cumulative.abs() <= f64::EPSILON
-            && self.funding_fee_today.abs() <= f64::EPSILON
-            && self.funding_fee_cumulative.abs() <= f64::EPSILON
-            && self.unresolved_gaps.is_empty()
-    }
-
-    pub fn apply_delta(&mut self, utc_day: NaiveDate, delta: &LedgerDelta) {
-        self.ensure_utc_day(utc_day);
-        match delta {
-            LedgerDelta::GrossRealizedPnl(amount) => self.apply_gross_realized_pnl(*amount),
-            LedgerDelta::TradingFee(amount) => {
-                self.trading_fee_today += amount;
-                self.trading_fee_cumulative += amount;
-            }
-            LedgerDelta::FundingFee(amount) => {
-                self.funding_fee_today += amount;
-                self.funding_fee_cumulative += amount;
-            }
-        }
-    }
-
-    pub fn apply_gross_realized_pnl(&mut self, amount: f64) {
-        if amount.abs() > f64::EPSILON {
-            self.gross_realized_pnl_today += amount;
-            self.gross_realized_pnl_cumulative += amount;
-        }
-    }
-
+impl TrackPnlStats {
     pub fn normalize_utc_day(&mut self, utc_day: NaiveDate) {
         self.ensure_utc_day(utc_day);
     }
 
     pub fn ensure_utc_day(&mut self, utc_day: NaiveDate) {
-        if self.ledger_utc_day != utc_day {
-            self.ledger_utc_day = utc_day;
+        if self.pnl_utc_day != utc_day {
+            self.pnl_utc_day = utc_day;
             self.gross_realized_pnl_today = 0.0;
             self.trading_fee_today = 0.0;
             self.funding_fee_today = 0.0;
         }
-    }
-
-    pub fn record_gap(&mut self, gap: LedgerGapRecord) {
-        self.unresolved_gaps.push(gap);
     }
 
     pub fn net_realized_pnl_today(&self) -> f64 {
@@ -95,55 +162,28 @@ impl TrackLedgerState {
     pub fn net_realized_pnl(&self) -> f64 {
         self.net_realized_pnl_cumulative()
     }
+
+    pub fn apply_record(&mut self, record: &TrackPnlRecord) {
+        if record.occurred_at.date_naive() == self.pnl_utc_day {
+            self.gross_realized_pnl_today += record.realized_pnl;
+            self.trading_fee_today += record.trading_fee;
+            self.funding_fee_today += record.funding_fee;
+        }
+        self.gross_realized_pnl_cumulative += record.realized_pnl;
+        self.trading_fee_cumulative += record.trading_fee;
+        self.funding_fee_cumulative += record.funding_fee;
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum LedgerDelta {
-    GrossRealizedPnl(f64),
-    TradingFee(f64),
-    FundingFee(f64),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExecutionLedgerUpdate {
-    pub order_update: OrderObservation,
-    #[serde(default)]
-    pub ledger_deltas: Vec<LedgerDelta>,
-    #[serde(default)]
-    pub ledger_gaps: Vec<LedgerGapRecord>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LedgerAdjustmentEvent {
-    #[serde(default)]
-    pub ledger_deltas: Vec<LedgerDelta>,
-    #[serde(default)]
-    pub ledger_gaps: Vec<LedgerGapRecord>,
-    pub source: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TrackLedgerEvent {
-    Execution(ExecutionLedgerUpdate),
-    Adjustment(LedgerAdjustmentEvent),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LedgerGapRecord {
-    pub gap_key: String,
-    pub reason: LedgerGapReason,
-    pub observed_at: DateTime<Utc>,
-    pub source: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LedgerGapReason {
-    UnsupportedCommissionAsset,
-    MissingCommissionAsset,
-    MissingSymbol,
-    UnsupportedFundingAsset,
+impl TrackPnlStats {
+    pub fn is_empty(&self) -> bool {
+        self.gross_realized_pnl_today.abs() <= f64::EPSILON
+            && self.gross_realized_pnl_cumulative.abs() <= f64::EPSILON
+            && self.trading_fee_today.abs() <= f64::EPSILON
+            && self.trading_fee_cumulative.abs() <= f64::EPSILON
+            && self.funding_fee_today.abs() <= f64::EPSILON
+            && self.funding_fee_cumulative.abs() <= f64::EPSILON
+    }
 }
 
 #[cfg(test)]
@@ -154,93 +194,134 @@ mod tests {
 
     #[test]
     fn apply_gross_realized_pnl_rolls_utc_daily_window() {
-        let mut ledger = TrackLedgerState {
-            ledger_utc_day: NaiveDate::from_ymd_opt(2026, 3, 24).unwrap(),
+        let mut stats = TrackPnlStats {
+            pnl_utc_day: NaiveDate::from_ymd_opt(2026, 3, 24).unwrap(),
             gross_realized_pnl_today: 12.5,
             gross_realized_pnl_cumulative: 17.5,
-            ..TrackLedgerState::default()
+            ..TrackPnlStats::default()
         };
 
-        ledger.ensure_utc_day(NaiveDate::from_ymd_opt(2026, 3, 25).unwrap());
-        ledger.apply_gross_realized_pnl(-5.0);
+        stats.ensure_utc_day(NaiveDate::from_ymd_opt(2026, 3, 25).unwrap());
+        stats.apply_record(&TrackPnlRecord::trade_summary(
+            Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+            Utc.with_ymd_and_hms(2026, 3, 25, 8, 0, 0).unwrap(),
+            "test".into(),
+            None,
+            None,
+            -5.0,
+            0.0,
+        ));
 
         assert_eq!(
-            ledger.ledger_utc_day,
+            stats.pnl_utc_day,
             NaiveDate::from_ymd_opt(2026, 3, 25).unwrap()
         );
-        assert!((ledger.gross_realized_pnl_today + 5.0).abs() < f64::EPSILON);
-        assert!((ledger.gross_realized_pnl_cumulative - 12.5).abs() < f64::EPSILON);
+        assert!((stats.gross_realized_pnl_today + 5.0).abs() < f64::EPSILON);
+        assert!((stats.gross_realized_pnl_cumulative - 12.5).abs() < f64::EPSILON);
     }
 
     #[test]
     fn normalize_utc_day_is_the_single_rollover_owner() {
-        let mut ledger = TrackLedgerState {
-            ledger_utc_day: NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
+        let mut stats = TrackPnlStats {
+            pnl_utc_day: NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
             gross_realized_pnl_today: 120.0,
             gross_realized_pnl_cumulative: 500.0,
             trading_fee_today: 5.0,
             trading_fee_cumulative: 30.0,
             funding_fee_today: -2.0,
             funding_fee_cumulative: -11.0,
-            ..TrackLedgerState::default()
+            ..TrackPnlStats::default()
         };
 
-        ledger.normalize_utc_day(NaiveDate::from_ymd_opt(2026, 4, 9).unwrap());
+        stats.normalize_utc_day(NaiveDate::from_ymd_opt(2026, 4, 9).unwrap());
 
         assert_eq!(
-            ledger.ledger_utc_day,
+            stats.pnl_utc_day,
             NaiveDate::from_ymd_opt(2026, 4, 9).unwrap()
         );
-        assert_eq!(ledger.gross_realized_pnl_today, 0.0);
-        assert_eq!(ledger.trading_fee_today, 0.0);
-        assert_eq!(ledger.funding_fee_today, 0.0);
-        assert_eq!(ledger.gross_realized_pnl_cumulative, 500.0);
-        assert_eq!(ledger.trading_fee_cumulative, 30.0);
-        assert_eq!(ledger.funding_fee_cumulative, -11.0);
-    }
-
-    #[test]
-    fn record_gap_preserves_existing_entries() {
-        let mut ledger = TrackLedgerState::default();
-        ledger.record_gap(LedgerGapRecord {
-            gap_key: "gap-1".into(),
-            reason: LedgerGapReason::UnsupportedCommissionAsset,
-            observed_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 0, 0).unwrap(),
-            source: "binance:order_trade_update".into(),
-        });
-        ledger.record_gap(LedgerGapRecord {
-            gap_key: "gap-2".into(),
-            reason: LedgerGapReason::MissingSymbol,
-            observed_at: Utc.with_ymd_and_hms(2026, 3, 29, 8, 5, 0).unwrap(),
-            source: "binance:account_update".into(),
-        });
-
-        assert_eq!(ledger.unresolved_gaps.len(), 2);
+        assert_eq!(stats.gross_realized_pnl_today, 0.0);
+        assert_eq!(stats.trading_fee_today, 0.0);
+        assert_eq!(stats.funding_fee_today, 0.0);
+        assert_eq!(stats.gross_realized_pnl_cumulative, 500.0);
+        assert_eq!(stats.trading_fee_cumulative, 30.0);
+        assert_eq!(stats.funding_fee_cumulative, -11.0);
     }
 
     #[test]
     fn net_realized_pnl_today_includes_today_fees_and_funding() {
-        let mut ledger = TrackLedgerState::default();
-        let day = NaiveDate::from_ymd_opt(2026, 4, 8).unwrap();
+        let mut stats = TrackPnlStats {
+            pnl_utc_day: NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
+            ..TrackPnlStats::default()
+        };
+        stats.apply_record(&TrackPnlRecord::trade_summary(
+            Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+            Utc.with_ymd_and_hms(2026, 4, 8, 8, 0, 0).unwrap(),
+            "test".into(),
+            None,
+            None,
+            120.0,
+            5.0,
+        ));
+        stats.apply_record(&TrackPnlRecord::funding(
+            Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+            Utc.with_ymd_and_hms(2026, 4, 8, 9, 0, 0).unwrap(),
+            "test".into(),
+            None,
+            -2.0,
+        ));
 
-        ledger.apply_delta(day, &LedgerDelta::GrossRealizedPnl(120.0));
-        ledger.apply_delta(day, &LedgerDelta::TradingFee(5.0));
-        ledger.apply_delta(day, &LedgerDelta::FundingFee(-2.0));
-
-        assert!((ledger.net_realized_pnl_today() - 113.0).abs() < f64::EPSILON);
+        assert!((stats.net_realized_pnl_today() - 113.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn utc_day_rollover_resets_today_fee_fields_but_keeps_cumulative_values() {
-        let mut ledger = TrackLedgerState::default();
-        let day1 = NaiveDate::from_ymd_opt(2026, 4, 8).unwrap();
-        let day2 = NaiveDate::from_ymd_opt(2026, 4, 9).unwrap();
+        let mut stats = TrackPnlStats {
+            pnl_utc_day: NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
+            ..TrackPnlStats::default()
+        };
+        stats.apply_record(&TrackPnlRecord::trade_summary(
+            Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+            Utc.with_ymd_and_hms(2026, 4, 8, 8, 0, 0).unwrap(),
+            "test".into(),
+            None,
+            None,
+            120.0,
+            5.0,
+        ));
+        stats.ensure_utc_day(NaiveDate::from_ymd_opt(2026, 4, 9).unwrap());
+        stats.apply_record(&TrackPnlRecord::trade_summary(
+            Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+            Utc.with_ymd_and_hms(2026, 4, 9, 8, 0, 0).unwrap(),
+            "test".into(),
+            None,
+            None,
+            10.0,
+            0.0,
+        ));
 
-        ledger.apply_delta(day1, &LedgerDelta::GrossRealizedPnl(120.0));
-        ledger.apply_delta(day1, &LedgerDelta::TradingFee(5.0));
-        ledger.apply_delta(day2, &LedgerDelta::GrossRealizedPnl(10.0));
+        assert!((stats.trading_fee_today - 0.0).abs() < f64::EPSILON);
+        assert!((stats.trading_fee_cumulative - 5.0).abs() < f64::EPSILON);
+    }
 
-        assert!((ledger.trading_fee_today - 0.0).abs() < f64::EPSILON);
-        assert!((ledger.trading_fee_cumulative - 5.0).abs() < f64::EPSILON);
+    #[test]
+    fn apply_record_only_updates_amounts() {
+        let record = TrackPnlRecord::trade_summary(
+            Instrument::new(poise_core::track::Venue::Binance, "ETHBTC"),
+            Utc.with_ymd_and_hms(2026, 4, 8, 8, 0, 0).unwrap(),
+            "test".into(),
+            None,
+            None,
+            0.002,
+            0.00001,
+        );
+        let mut stats = TrackPnlStats {
+            pnl_utc_day: NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
+            ..TrackPnlStats::default()
+        };
+
+        stats.apply_record(&record);
+
+        assert_eq!(stats.gross_realized_pnl_cumulative, 0.002);
+        assert_eq!(stats.trading_fee_cumulative, 0.00001);
     }
 }

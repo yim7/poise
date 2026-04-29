@@ -219,11 +219,15 @@ mod tests {
             Ok(None)
         }
 
-        async fn load_track_ledger_state(
+        async fn load_track_pnl_stats(
             &self,
             _track_id: &TrackId,
-        ) -> Result<Option<poise_engine::ledger::TrackLedgerState>> {
-            Ok(None)
+            pnl_utc_day: chrono::NaiveDate,
+        ) -> Result<poise_engine::ledger::TrackPnlStats> {
+            Ok(poise_engine::ledger::TrackPnlStats {
+                pnl_utc_day,
+                ..poise_engine::ledger::TrackPnlStats::default()
+            })
         }
 
         async fn load_track_updated_at(

@@ -23,7 +23,7 @@ mod websocket;
 use std::env;
 
 use anyhow::Result;
-use state_bootstrap::{PersistedStateMismatchDetail, StateBootstrapError};
+use state_bootstrap::StateBootstrapError;
 
 use crate::instance_dir::InstanceDir;
 
@@ -41,11 +41,11 @@ async fn main() -> Result<()> {
     let instance_dir = InstanceDir::new(&options.instance_dir);
     let config = config::load_config(instance_dir.config_path())?;
     let db_path = instance_dir.db_path();
-    let prepared_state = match state_bootstrap::prepare_state_repository(&config, &db_path).await {
-        Ok(repository) => repository,
-        Err(StateBootstrapError::Unexpected(error)) => return Err(error),
-        Err(error) => return Err(anyhow::anyhow!(render_startup_error(&error))),
-    };
+    let prepared_state = state_bootstrap::prepare_state_repository(&config, &db_path)
+        .await
+        .map_err(|error| match error {
+            StateBootstrapError::Unexpected(error) => error,
+        })?;
     let (platform, runtime_handles, listener) = prepared_state
         .run_startup(|repositories, track_definition_registry| async {
             let platform =
@@ -122,33 +122,6 @@ fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<Start
     })
 }
 
-fn render_startup_error(error: &StateBootstrapError) -> String {
-    match error {
-        StateBootstrapError::PersistedStateMismatch {
-            db_path,
-            mismatches,
-        } => {
-            let mut rendered = format!(
-                "persisted state does not match current config in `{}`.",
-                db_path.display()
-            );
-
-            for mismatch in mismatches {
-                match &mismatch.detail {
-                    PersistedStateMismatchDetail::PersistedTrackMissingBusinessState => {
-                        rendered.push_str(&format!(
-                            "\ntrack `{}`:\n  persisted business state is missing while persisted track presence still exists",
-                            mismatch.track_id,
-                        ));
-                    }
-                }
-            }
-            rendered
-        }
-        StateBootstrapError::Unexpected(error) => error.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -172,9 +145,7 @@ mod tests {
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
-    use crate::state_bootstrap::{
-        PersistedStateMismatchDetail, StateBootstrapError, StateRepositories,
-    };
+    use crate::state_bootstrap::StateRepositories;
 
     use super::{StartupOptions, parse_startup_options};
 
@@ -214,21 +185,6 @@ mod tests {
     fn parse_config_path_rejects_unknown_arguments() {
         let error = parse_startup_options(vec!["--bogus".to_string()].into_iter()).unwrap_err();
         assert!(error.to_string().contains("unknown argument"));
-    }
-
-    #[test]
-    fn render_startup_error_formats_structured_mismatch_for_cli() {
-        let rendered = super::render_startup_error(&StateBootstrapError::PersistedStateMismatch {
-            db_path: std::path::PathBuf::from(".data/testnet/poise-server.sqlite"),
-            mismatches: vec![crate::state_bootstrap::PersistedStateMismatch {
-                track_id: "btc-core".into(),
-                detail: PersistedStateMismatchDetail::PersistedTrackMissingBusinessState,
-            }],
-        });
-
-        assert!(rendered.contains(".data/testnet/poise-server.sqlite"));
-        assert!(rendered.contains("btc-core"));
-        assert!(rendered.contains("persisted business state is missing"));
     }
 
     fn workspace_root() -> PathBuf {

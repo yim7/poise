@@ -240,7 +240,6 @@ mod tests {
         events::DomainEvent,
         types::{ExchangeRules, Exposure},
     };
-    use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::AccountSummarySnapshot;
     use poise_engine::ports::ClockPort;
@@ -316,23 +315,18 @@ mod tests {
         let mut snapshot = manager
             .mutation_frame("btc-core")
             .expect("seeded manager should expose mutation frame");
-        seed_frame_ledger(&mut snapshot);
+        seed_frame_pnl_stats(&mut snapshot);
         manager.rollback_track_state(&snapshot).unwrap();
         observe_seed_market(&mut manager);
         repository
             .commit_track_transition(
                 "btc-core",
                 None,
-                snapshot.ledger_state(),
                 &[DomainEvent::ExposureTargetChanged {
                     from: Exposure(3.5),
                     to: Exposure(4.0),
                 }],
             )
-            .await
-            .unwrap();
-        repository
-            .save_track_ledger_state(&TrackId::new("btc-core"), snapshot.ledger_state())
             .await
             .unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
@@ -389,14 +383,13 @@ mod tests {
         let mut snapshot = manager
             .mutation_frame("btc-core")
             .expect("seeded manager should expose mutation frame");
-        seed_frame_ledger(&mut snapshot);
+        seed_frame_pnl_stats(&mut snapshot);
         manager.rollback_track_state(&snapshot).unwrap();
         observe_seed_market(&mut manager);
         repository
             .commit_track_transition(
                 "btc-core",
                 None,
-                snapshot.ledger_state(),
                 &[DomainEvent::ExposureTargetChanged {
                     from: Exposure(3.5),
                     to: Exposure(4.0),
@@ -404,11 +397,6 @@ mod tests {
             )
             .await
             .unwrap();
-        repository
-            .save_track_ledger_state(&TrackId::new("btc-core"), snapshot.ledger_state())
-            .await
-            .unwrap();
-
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
         let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
         let effect_store: Arc<dyn TrackEffectJournal> = repository.clone();
@@ -526,30 +514,15 @@ mod tests {
             .unwrap();
     }
 
-    fn seed_frame_ledger(snapshot: &mut poise_engine::mutation_frame::TrackMutationFrame) {
+    fn seed_frame_pnl_stats(snapshot: &mut poise_engine::mutation_frame::TrackMutationFrame) {
         snapshot.set_unrealized_pnl(265.2);
-        let mut ledger_state = snapshot.ledger_state().clone();
-        ledger_state.ledger_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
-        ledger_state.gross_realized_pnl_today = 980.1;
-        ledger_state.gross_realized_pnl_cumulative = 980.1;
-        ledger_state.trading_fee_cumulative = 12.3;
-        ledger_state.funding_fee_cumulative = -4.0;
-        ledger_state.unresolved_gaps = vec![
-            LedgerGapRecord {
-                gap_key: "binance:order_trade_update:btcusdt:12345:commission_asset".into(),
-                reason: LedgerGapReason::UnsupportedCommissionAsset,
-                observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-                source: "ORDER_TRADE_UPDATE".into(),
-            },
-            LedgerGapRecord {
-                gap_key: "binance:funding_fee:btcusdt:2026-03-24T08:00:00+00:00:missing_symbol"
-                    .into(),
-                reason: LedgerGapReason::MissingSymbol,
-                observed_at: Utc.with_ymd_and_hms(2026, 3, 24, 8, 0, 0).unwrap(),
-                source: "ACCOUNT_UPDATE:FUNDING_FEE".into(),
-            },
-        ];
-        snapshot.replace_ledger_state(ledger_state);
+        let mut pnl_stats = snapshot.pnl_stats().clone();
+        pnl_stats.pnl_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
+        pnl_stats.gross_realized_pnl_today = 980.1;
+        pnl_stats.gross_realized_pnl_cumulative = 980.1;
+        pnl_stats.trading_fee_cumulative = 12.3;
+        pnl_stats.funding_fee_cumulative = -4.0;
+        snapshot.replace_pnl_stats(pnl_stats);
     }
 
     #[tokio::test]
@@ -725,17 +698,12 @@ mod tests {
             Some(0.5)
         );
         assert_eq!(
-            payload_json["ledger"]["gross_realized_pnl"].as_f64(),
+            payload_json["pnl"]["gross_realized_pnl"].as_f64(),
             Some(980.1)
         );
-        assert!(
-            (payload_json["ledger"]["net_realized_pnl"].as_f64().unwrap() - 963.8).abs() < 1e-9
-        );
-        assert!((payload_json["ledger"]["total_pnl"].as_f64().unwrap() - 1229.0).abs() < 1e-9);
-        assert_eq!(
-            payload_json["ledger"]["unrealized_pnl"].as_f64(),
-            Some(265.2)
-        );
+        assert!((payload_json["pnl"]["net_realized_pnl"].as_f64().unwrap() - 963.8).abs() < 1e-9);
+        assert!((payload_json["pnl"]["total_pnl"].as_f64().unwrap() - 1229.0).abs() < 1e-9);
+        assert_eq!(payload_json["pnl"]["unrealized_pnl"].as_f64(), Some(265.2));
         assert_eq!(
             payload.execution.execution_status,
             ExecutionStatusView::Normal
@@ -1151,7 +1119,6 @@ mod tests {
             &self,
             _id: &str,
             _control_state: Option<&poise_application::TrackControlState>,
-            _ledger_state: &poise_engine::ledger::TrackLedgerState,
             _events: &[poise_core::events::DomainEvent],
         ) -> anyhow::Result<CommittedTrackWrite> {
             Err(anyhow!("persistence unavailable"))
@@ -1172,11 +1139,11 @@ mod tests {
             Err(anyhow!("persistence unavailable"))
         }
 
-        async fn save_track_ledger_state(
+        async fn insert_track_pnl_record(
             &self,
             _track_id: &TrackId,
-            _state: &poise_engine::ledger::TrackLedgerState,
-        ) -> anyhow::Result<()> {
+            _record: &poise_engine::ledger::TrackPnlRecord,
+        ) -> anyhow::Result<bool> {
             Err(anyhow!("persistence unavailable"))
         }
     }
@@ -1232,11 +1199,15 @@ mod tests {
             Ok(None)
         }
 
-        async fn load_track_ledger_state(
+        async fn load_track_pnl_stats(
             &self,
             _track_id: &TrackId,
-        ) -> anyhow::Result<Option<poise_engine::ledger::TrackLedgerState>> {
-            Ok(None)
+            pnl_utc_day: chrono::NaiveDate,
+        ) -> anyhow::Result<poise_engine::ledger::TrackPnlStats> {
+            Ok(poise_engine::ledger::TrackPnlStats {
+                pnl_utc_day,
+                ..poise_engine::ledger::TrackPnlStats::default()
+            })
         }
     }
 }

@@ -392,7 +392,6 @@ mod tests {
             price: binding.request.price,
             quantity: binding.request.quantity,
             filled_qty: binding.request.quantity,
-            realized_pnl: 0.0,
             status: OrderStatus::Filled,
         };
 
@@ -452,7 +451,6 @@ mod tests {
             price: binding.request.price,
             quantity: binding.request.quantity,
             filled_qty: binding.request.quantity * 0.4,
-            realized_pnl: 0.0,
             status: OrderStatus::PartiallyFilled,
         };
 
@@ -519,7 +517,6 @@ mod tests {
             price: binding.request.price,
             quantity: binding.request.quantity,
             filled_qty: binding.request.quantity * 0.25,
-            realized_pnl: 0.0,
             status: OrderStatus::Canceled,
         };
 
@@ -580,7 +577,6 @@ mod tests {
             price: binding.request.price,
             quantity: binding.request.quantity,
             filled_qty: binding.request.quantity * 0.4,
-            realized_pnl: 0.0,
             status: OrderStatus::Canceled,
         };
         let applied = apply_order_observation_with_result(&planned.state, &canceled);

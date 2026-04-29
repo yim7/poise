@@ -10,7 +10,7 @@ use poise_engine::runtime::{QuoteHealthView, StrategyTargetView, TrackLiveView, 
 #[cfg(any(test, feature = "server-test-support"))]
 use tokio::sync::RwLock;
 
-use crate::mutation_executor::{ApplyTrackLedgerEventResult, MutationExecutor, TrackInstrument};
+use crate::mutation_executor::{MutationExecutor, TrackInstrument};
 
 #[derive(Clone)]
 pub struct TrackObservationService {
@@ -92,12 +92,12 @@ impl TrackObservationService {
             .await
     }
 
-    pub async fn apply_track_ledger_event(
+    pub async fn record_track_pnl(
         &self,
         id: &str,
-        event: poise_engine::ledger::TrackLedgerEvent,
-    ) -> Result<ApplyTrackLedgerEventResult> {
-        self.executor.apply_track_ledger_event(id, event).await
+        record: poise_engine::ledger::TrackPnlRecord,
+    ) -> Result<bool> {
+        self.executor.record_track_pnl(id, record).await
     }
 
     pub async fn sync_exchange_state(

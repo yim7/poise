@@ -1115,12 +1115,12 @@ mod tests {
         assert_eq!(detail.status.lifecycle.status, TrackStatus::Paused);
         assert_eq!(detail.execution.state, ExecutionStateView::Paused);
         assert_eq!(
-            detail_json["ledger"]["total_pnl"].as_f64(),
-            Some(detail.ledger.total_pnl)
+            detail_json["pnl"]["total_pnl"].as_f64(),
+            Some(detail.pnl.total_pnl)
         );
         assert_eq!(
-            detail_json["ledger"]["unrealized_pnl"].as_f64(),
-            Some(detail.ledger.unrealized_pnl)
+            detail_json["pnl"]["unrealized_pnl"].as_f64(),
+            Some(detail.pnl.unrealized_pnl)
         );
     }
 
@@ -1165,8 +1165,8 @@ mod tests {
         assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
         assert!(item.execution.active_binding_count > 0);
         assert_eq!(
-            item_json["ledger"]["total_pnl"].as_f64(),
-            Some(item.ledger.total_pnl)
+            item_json["pnl"]["total_pnl"].as_f64(),
+            Some(item.pnl.total_pnl)
         );
         assert!(
             events
@@ -1552,7 +1552,6 @@ mod tests {
     struct TestRepository {
         updated_at: Mutex<HashMap<String, chrono::DateTime<Utc>>>,
         control_states: Mutex<HashMap<String, poise_application::TrackControlState>>,
-        ledger_states: Mutex<HashMap<String, poise_engine::ledger::TrackLedgerState>>,
         events: Mutex<HashMap<String, Vec<StoredTrackEvent>>>,
         effects: Mutex<Vec<PersistedTrackEffect>>,
         next_event_id: Mutex<i64>,
@@ -1614,7 +1613,6 @@ mod tests {
             &self,
             id: &str,
             control_state: Option<&poise_application::TrackControlState>,
-            ledger_state: &poise_engine::ledger::TrackLedgerState,
             events: &[poise_core::events::DomainEvent],
         ) -> Result<CommittedTrackWrite> {
             let now = Utc::now();
@@ -1638,9 +1636,6 @@ mod tests {
                 self.save_track_control_state(&track_id, control_state)
                     .await?;
             }
-            self.save_track_ledger_state(&track_id, ledger_state)
-                .await?;
-
             Ok(CommittedTrackWrite { track_id })
         }
 
@@ -1672,16 +1667,12 @@ mod tests {
             Ok(())
         }
 
-        async fn save_track_ledger_state(
+        async fn insert_track_pnl_record(
             &self,
-            track_id: &TrackId,
-            state: &poise_engine::ledger::TrackLedgerState,
-        ) -> Result<()> {
-            self.ledger_states
-                .lock()
-                .unwrap()
-                .insert(track_id.as_str().to_string(), state.clone());
-            Ok(())
+            _track_id: &TrackId,
+            _record: &poise_engine::ledger::TrackPnlRecord,
+        ) -> Result<bool> {
+            Ok(true)
         }
     }
 
@@ -1744,16 +1735,15 @@ mod tests {
                 .cloned())
         }
 
-        async fn load_track_ledger_state(
+        async fn load_track_pnl_stats(
             &self,
-            track_id: &TrackId,
-        ) -> Result<Option<poise_engine::ledger::TrackLedgerState>> {
-            Ok(self
-                .ledger_states
-                .lock()
-                .unwrap()
-                .get(track_id.as_str())
-                .cloned())
+            _track_id: &TrackId,
+            pnl_utc_day: chrono::NaiveDate,
+        ) -> Result<poise_engine::ledger::TrackPnlStats> {
+            Ok(poise_engine::ledger::TrackPnlStats {
+                pnl_utc_day,
+                ..poise_engine::ledger::TrackPnlStats::default()
+            })
         }
 
         async fn list_recent_track_events(

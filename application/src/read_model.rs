@@ -6,7 +6,7 @@ use poise_core::track::TrackDefinition;
 use poise_core::types::Side;
 use poise_engine::execution_plan::TrackEffect;
 use poise_engine::executor::{BindingStatus, PolicyKind, RecoveryAnomaly};
-use poise_engine::ledger::{LedgerGapReason, LedgerGapRecord, TrackLedgerState};
+use poise_engine::ledger::TrackPnlStats;
 use poise_engine::price_gate::PriceExecutionBlockReason;
 use poise_engine::runtime::{StrategyPriceStatus, TrackRuntimeView, TrackStatus};
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,7 @@ pub struct TrackListReadModel {
     pub strategy_price_status: TrackStrategyPriceStatus,
     pub current_exposure: f64,
     pub desired_exposure: Option<f64>,
-    pub ledger_state: TrackReadLedgerState,
+    pub pnl_stats: TrackReadPnlStats,
     pub unrealized_pnl: f64,
     pub recovery_issue: Option<TrackRecoveryIssue>,
     pub has_account_margin_guard: bool,
@@ -73,7 +73,7 @@ pub struct TrackReadModel {
     pub best_ask: Option<f64>,
     pub current_exposure: f64,
     pub desired_exposure: Option<f64>,
-    pub ledger_state: TrackReadLedgerState,
+    pub pnl_stats: TrackReadPnlStats,
     pub unrealized_pnl: f64,
     pub inventory_gap: f64,
     pub recovery_issue: Option<TrackRecoveryIssue>,
@@ -203,25 +203,24 @@ impl From<PriceExecutionBlockReason> for TrackPriceExecutionBlockReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct TrackReadLedgerState {
+pub struct TrackReadPnlStats {
     pub gross_realized_pnl_today: f64,
     pub gross_realized_pnl_cumulative: f64,
     pub trading_fee_today: f64,
     pub trading_fee_cumulative: f64,
     pub funding_fee_today: f64,
     pub funding_fee_cumulative: f64,
-    pub unresolved_gaps: Vec<TrackReadLedgerGap>,
 }
 
-impl TrackReadLedgerState {
+impl TrackReadPnlStats {
     pub fn net_realized_pnl(&self) -> f64 {
         self.gross_realized_pnl_cumulative - self.trading_fee_cumulative
             + self.funding_fee_cumulative
     }
 }
 
-impl From<TrackLedgerState> for TrackReadLedgerState {
-    fn from(value: TrackLedgerState) -> Self {
+impl From<TrackPnlStats> for TrackReadPnlStats {
+    fn from(value: TrackPnlStats) -> Self {
         Self {
             gross_realized_pnl_today: value.gross_realized_pnl_today,
             gross_realized_pnl_cumulative: value.gross_realized_pnl_cumulative,
@@ -229,48 +228,6 @@ impl From<TrackLedgerState> for TrackReadLedgerState {
             trading_fee_cumulative: value.trading_fee_cumulative,
             funding_fee_today: value.funding_fee_today,
             funding_fee_cumulative: value.funding_fee_cumulative,
-            unresolved_gaps: value
-                .unresolved_gaps
-                .into_iter()
-                .map(TrackReadLedgerGap::from)
-                .collect(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TrackReadLedgerGap {
-    pub gap_key: String,
-    pub reason: TrackReadLedgerGapReason,
-    pub observed_at: DateTime<Utc>,
-}
-
-impl From<LedgerGapRecord> for TrackReadLedgerGap {
-    fn from(value: LedgerGapRecord) -> Self {
-        Self {
-            gap_key: value.gap_key,
-            reason: value.reason.into(),
-            observed_at: value.observed_at,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TrackReadLedgerGapReason {
-    UnsupportedCommissionAsset,
-    MissingCommissionAsset,
-    MissingSymbol,
-    UnsupportedFundingAsset,
-}
-
-impl From<LedgerGapReason> for TrackReadLedgerGapReason {
-    fn from(value: LedgerGapReason) -> Self {
-        match value {
-            LedgerGapReason::UnsupportedCommissionAsset => Self::UnsupportedCommissionAsset,
-            LedgerGapReason::MissingCommissionAsset => Self::MissingCommissionAsset,
-            LedgerGapReason::MissingSymbol => Self::MissingSymbol,
-            LedgerGapReason::UnsupportedFundingAsset => Self::UnsupportedFundingAsset,
         }
     }
 }
@@ -317,7 +274,7 @@ impl TrackReadModel {
             best_ask: runtime.best_ask,
             current_exposure: list_view.current_exposure,
             desired_exposure: list_view.desired_exposure,
-            ledger_state: list_view.ledger_state.clone(),
+            pnl_stats: list_view.pnl_stats.clone(),
             unrealized_pnl: list_view.unrealized_pnl,
             inventory_gap,
             recovery_issue: list_view.recovery_issue,
@@ -348,7 +305,7 @@ impl TrackListReadModel {
             strategy_price_status: TrackStrategyPriceStatus::from(runtime.strategy_price_status),
             current_exposure: runtime.current_exposure.0,
             desired_exposure: runtime.desired_exposure.clone().map(|value| value.0),
-            ledger_state: TrackReadLedgerState::from(runtime.ledger_state.clone()),
+            pnl_stats: TrackReadPnlStats::from(runtime.pnl_stats.clone()),
             unrealized_pnl: runtime.unrealized_pnl,
             recovery_issue: runtime
                 .executor
@@ -377,7 +334,7 @@ impl From<&TrackReadModel> for TrackListReadModel {
             strategy_price_status: value.strategy_price_status,
             current_exposure: value.current_exposure,
             desired_exposure: value.desired_exposure,
-            ledger_state: value.ledger_state.clone(),
+            pnl_stats: value.pnl_stats.clone(),
             unrealized_pnl: value.unrealized_pnl,
             recovery_issue: value.recovery_issue,
             has_account_margin_guard: value.has_account_margin_guard,
@@ -608,7 +565,7 @@ mod tests {
                 desired_exposure: Some(Exposure(4.0)),
                 manual_target_override: None,
                 executor: ExecutorView::default(),
-                ledger_state: Default::default(),
+                pnl_stats: Default::default(),
                 unrealized_pnl: 0.0,
                 has_account_margin_guard: false,
                 price_execution_block_reason: None,
@@ -683,7 +640,7 @@ mod tests {
                 desired_exposure: Some(Exposure(2.0)),
                 manual_target_override: None,
                 executor: ExecutorView::default(),
-                ledger_state: Default::default(),
+                pnl_stats: Default::default(),
                 unrealized_pnl: 0.0,
                 has_account_margin_guard: false,
                 price_execution_block_reason: Some(
@@ -726,7 +683,7 @@ mod tests {
                 desired_exposure: Some(Exposure(2.0)),
                 manual_target_override: None,
                 executor: ExecutorView::default(),
-                ledger_state: Default::default(),
+                pnl_stats: Default::default(),
                 unrealized_pnl: 0.0,
                 has_account_margin_guard: false,
                 price_execution_block_reason: Some(
@@ -780,7 +737,7 @@ mod tests {
                 }],
                 recovery_anomaly: None,
             },
-            ledger_state: Default::default(),
+            pnl_stats: Default::default(),
             unrealized_pnl: 0.0,
             has_account_margin_guard: false,
             price_execution_block_reason: None,

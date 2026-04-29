@@ -10,12 +10,8 @@ use tokio::{
 use tokio_tungstenite::tungstenite::Message;
 
 use poise_core::track::{Instrument, Venue};
-use poise_engine::ledger::{
-    LedgerAdjustmentEvent, LedgerDelta, LedgerGapReason, LedgerGapRecord, TrackLedgerEvent,
-};
-use poise_engine::ports::{
-    ExchangeOrder, Position, TrackLedgerUpdate, UserDataEvent, UserDataPayload,
-};
+use poise_engine::ledger::TrackPnlRecord;
+use poise_engine::ports::{ExchangeOrder, Position, UserDataEvent, UserDataPayload};
 
 use super::{
     backoff_delay, connect_websocket,
@@ -242,57 +238,32 @@ fn parse_execution_update(
     event_time: chrono::DateTime<Utc>,
     update: ExecutionUpdate,
 ) -> Result<UserDataEvent> {
-    let mut ledger_deltas = vec![LedgerDelta::GrossRealizedPnl(update.exec_pnl)];
-    let mut ledger_gaps = Vec::new();
-
-    if update.exec_fee.abs() > f64::EPSILON {
-        let expected_asset = quote_asset_for_symbol(&update.symbol);
-        let fee_asset = normalized_fee_currency(update.fee_currency.as_deref()).or(expected_asset);
-
-        match (fee_asset, expected_asset) {
-            (Some(asset), Some(expected_asset)) if asset == expected_asset => {
-                ledger_deltas.push(LedgerDelta::TradingFee(update.exec_fee));
-            }
-            (Some(_), _) => ledger_gaps.push(LedgerGapRecord {
-                gap_key: format!(
-                    "bybit:execution:{}:{}:fee_currency",
-                    update.symbol.to_lowercase(),
-                    update.exec_id
-                ),
-                reason: LedgerGapReason::UnsupportedCommissionAsset,
-                observed_at: event_time,
-                source: "bybit:execution".into(),
-            }),
-            (None, _) => ledger_gaps.push(LedgerGapRecord {
-                gap_key: format!(
-                    "bybit:execution:{}:{}:missing_fee_currency",
-                    update.symbol.to_lowercase(),
-                    update.exec_id
-                ),
-                reason: LedgerGapReason::MissingCommissionAsset,
-                observed_at: event_time,
-                source: "bybit:execution".into(),
-            }),
-        }
-    }
+    let symbol = update.symbol;
+    let exec_id = update.exec_id;
+    let instrument = Instrument::new(Venue::Bybit, symbol.clone());
+    let pnl_asset = instrument.pnl_asset();
+    let trading_fee = match normalized_fee_currency(update.fee_currency.as_deref()) {
+        Some(asset) if asset == pnl_asset => update.exec_fee,
+        Some(_) => 0.0,
+        None => update.exec_fee,
+    };
 
     Ok(UserDataEvent {
         event_time,
-        payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
-            instrument: Instrument::new(Venue::Bybit, update.symbol),
-            event: TrackLedgerEvent::Adjustment(LedgerAdjustmentEvent {
-                ledger_deltas,
-                ledger_gaps,
-                source: "bybit:execution".into(),
-            }),
-        }),
+        payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade_summary(
+            instrument,
+            event_time,
+            "bybit:execution".into(),
+            Some(format!(
+                "bybit:execution:{}:{}",
+                symbol.to_lowercase(),
+                exec_id
+            )),
+            Some(exec_id),
+            update.exec_pnl,
+            trading_fee,
+        )),
     })
-}
-
-fn quote_asset_for_symbol(symbol: &str) -> Option<&'static str> {
-    ["USDT", "USDC", "FDUSD", "BUSD"]
-        .into_iter()
-        .find(|asset| symbol.ends_with(asset))
 }
 
 fn normalized_fee_currency(value: Option<&str>) -> Option<&str> {
@@ -307,13 +278,10 @@ mod tests {
     use tokio::{net::TcpListener, time::timeout};
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-    use poise_core::track::{Instrument, Venue};
-    use poise_core::types::Side;
-    use poise_engine::ledger::{LedgerAdjustmentEvent, LedgerDelta, TrackLedgerEvent};
-    use poise_engine::ports::TrackLedgerUpdate;
-
     use super::*;
     use crate::ws::BybitWsClient;
+    use poise_core::track::{Instrument, Venue};
+    use poise_core::types::Side;
 
     #[test]
     fn parses_order_update_into_user_data_event() {
@@ -428,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_execution_update_into_track_ledger_adjustment() {
+    fn parses_execution_update_into_track_pnl_record() {
         let payload = r#"{
             "topic": "execution.linear",
             "creationTime": 1700000000000,
@@ -447,17 +415,15 @@ mod tests {
             events,
             vec![UserDataEvent {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
-                    instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
-                    event: TrackLedgerEvent::Adjustment(LedgerAdjustmentEvent {
-                        ledger_deltas: vec![
-                            LedgerDelta::GrossRealizedPnl(12.34),
-                            LedgerDelta::TradingFee(3.21),
-                        ],
-                        ledger_gaps: vec![],
-                        source: "bybit:execution".into(),
-                    }),
-                }),
+                payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade_summary(
+                    Instrument::new(Venue::Bybit, "BTCUSDT"),
+                    Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                    "bybit:execution".into(),
+                    Some("bybit:execution:btcusdt:exec-1".into()),
+                    Some("exec-1".into()),
+                    12.34,
+                    3.21,
+                )),
             }]
         );
     }
@@ -482,17 +448,15 @@ mod tests {
             events,
             vec![UserDataEvent {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
-                    instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
-                    event: TrackLedgerEvent::Adjustment(LedgerAdjustmentEvent {
-                        ledger_deltas: vec![
-                            LedgerDelta::GrossRealizedPnl(0.50),
-                            LedgerDelta::TradingFee(1.25),
-                        ],
-                        ledger_gaps: vec![],
-                        source: "bybit:execution".into(),
-                    }),
-                }),
+                payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade_summary(
+                    Instrument::new(Venue::Bybit, "BTCUSDT"),
+                    Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                    "bybit:execution".into(),
+                    Some("bybit:execution:btcusdt:exec-2".into()),
+                    Some("exec-2".into()),
+                    0.50,
+                    1.25,
+                )),
             }]
         );
     }
@@ -558,17 +522,15 @@ mod tests {
             event,
             UserDataEvent {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-                payload: UserDataPayload::TrackLedger(TrackLedgerUpdate {
-                    instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
-                    event: TrackLedgerEvent::Adjustment(LedgerAdjustmentEvent {
-                        ledger_deltas: vec![
-                            LedgerDelta::GrossRealizedPnl(12.34),
-                            LedgerDelta::TradingFee(3.21),
-                        ],
-                        ledger_gaps: vec![],
-                        source: "bybit:execution".into(),
-                    }),
-                }),
+                payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade_summary(
+                    Instrument::new(Venue::Bybit, "BTCUSDT"),
+                    Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                    "bybit:execution".into(),
+                    Some("bybit:execution:btcusdt:exec-bridge-1".into()),
+                    Some("exec-bridge-1".into()),
+                    12.34,
+                    3.21,
+                )),
             }
         );
 

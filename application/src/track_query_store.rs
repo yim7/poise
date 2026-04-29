@@ -1,8 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use poise_core::track::TrackId;
-use poise_engine::ledger::TrackLedgerState;
+use poise_engine::ledger::TrackPnlStats;
 
 use crate::TrackControlState;
 use crate::track_persistence::{PersistedTrackEffect, StoredTrackEvent};
@@ -23,8 +23,11 @@ pub trait TrackQueryStore: Send + Sync {
         &self,
         track_id: &TrackId,
     ) -> Result<Option<TrackControlState>>;
-    async fn load_track_ledger_state(&self, track_id: &TrackId)
-    -> Result<Option<TrackLedgerState>>;
+    async fn load_track_pnl_stats(
+        &self,
+        track_id: &TrackId,
+        pnl_utc_day: NaiveDate,
+    ) -> Result<TrackPnlStats>;
     /// Read-model freshness metadata only.
     ///
     /// This timestamp is backed by `persisted_track_presence`; it is not durable

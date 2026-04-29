@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use poise_application::{
     self as app, CommittedTrackWrite, EffectJournalEntry, EffectStatus, EffectStatusUpdate,
     PersistedTrackEffect, StoredTrackEvent, TrackControlState, TrackEffectJournal,
@@ -14,8 +14,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::schema;
 use poise_core::events::DomainEvent;
 use poise_core::track::TrackId;
+use poise_core::types::Side;
 use poise_engine::execution_plan::TrackEffect;
-use poise_engine::ledger::TrackLedgerState;
+use poise_engine::ledger::{TrackPnlRecord, TrackPnlRecordKind, TrackPnlStats};
 
 pub struct SqliteStorage {
     conn: Arc<Mutex<Connection>>,
@@ -340,7 +341,6 @@ impl SqliteStorage {
         conn: Arc<Mutex<Connection>>,
         id: String,
         control_state: Option<TrackControlState>,
-        ledger_state_for_persistence: Option<TrackLedgerState>,
         events: Vec<DomainEvent>,
     ) -> Result<CommittedTrackWrite> {
         let updated_at = Utc::now();
@@ -351,7 +351,7 @@ impl SqliteStorage {
             .transaction()
             .context("failed to start sqlite transition transaction")?;
 
-        let control_state = if control_state.is_none() && ledger_state_for_persistence.is_some() {
+        let control_state = if control_state.is_none() && !events.is_empty() {
             let has_persisted_control_truth = tx
                 .query_row(
                     "SELECT 1 FROM track_control_state WHERE track_id = ?1 LIMIT 1",
@@ -370,7 +370,7 @@ impl SqliteStorage {
             control_state
         };
 
-        if control_state.is_some() || ledger_state_for_persistence.is_some() || !events.is_empty() {
+        if control_state.is_some() || !events.is_empty() {
             tx.execute(
                 "INSERT INTO persisted_track_presence (track_id, created_at, updated_at)
                  VALUES (?1, ?2, ?3)
@@ -396,23 +396,6 @@ impl SqliteStorage {
                 params![id, control_state_json, updated_at_text],
             )
             .context("failed to save track control state")?;
-        }
-
-        if let Some(ledger_state_for_persistence) = ledger_state_for_persistence {
-            let ledger_state_json = serde_json::to_string(&ledger_state_for_persistence)
-                .context("failed to serialize track persistent ledger state")?;
-            tx.execute(
-                "INSERT INTO track_ledger_state (
-                    track_id,
-                    ledger_state_json,
-                    updated_at
-                ) VALUES (?1, ?2, ?3)
-                ON CONFLICT(track_id) DO UPDATE SET
-                    ledger_state_json = excluded.ledger_state_json,
-                    updated_at = excluded.updated_at",
-                params![id, ledger_state_json, updated_at_text],
-            )
-            .context("failed to save track ledger state")?;
         }
 
         for event in events {
@@ -658,45 +641,6 @@ impl SqliteStorage {
         Ok(())
     }
 
-    fn save_track_ledger_state_blocking(
-        conn: Arc<Mutex<Connection>>,
-        track_id: TrackId,
-        state: TrackLedgerState,
-    ) -> Result<()> {
-        let ledger_state_json =
-            serde_json::to_string(&state).context("failed to serialize track ledger state")?;
-        let updated_at = Utc::now().to_rfc3339();
-        let mut conn = Self::lock_connection(&conn)?;
-        let tx = conn
-            .transaction()
-            .context("failed to start sqlite track ledger state transaction")?;
-
-        tx.execute(
-            "INSERT INTO track_ledger_state (
-                track_id,
-                ledger_state_json,
-                updated_at
-            ) VALUES (?1, ?2, ?3)
-            ON CONFLICT(track_id) DO UPDATE SET
-                ledger_state_json = excluded.ledger_state_json,
-                updated_at = excluded.updated_at",
-            params![track_id.as_str(), ledger_state_json, updated_at],
-        )
-        .context("failed to save track ledger state")?;
-
-        tx.execute(
-            "INSERT INTO persisted_track_presence (track_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(track_id) DO UPDATE SET
-                 updated_at = excluded.updated_at",
-            params![track_id.as_str(), updated_at.as_str(), updated_at.as_str()],
-        )
-        .context("failed to upsert persisted track presence from track ledger state")?;
-        tx.commit()
-            .context("failed to commit sqlite track ledger state transaction")?;
-        Ok(())
-    }
-
     fn load_track_control_state_blocking(
         conn: Arc<Mutex<Connection>>,
         track_id: TrackId,
@@ -720,28 +664,158 @@ impl SqliteStorage {
         .transpose()
     }
 
-    fn load_track_ledger_state_blocking(
+    fn insert_track_pnl_record_blocking(
         conn: Arc<Mutex<Connection>>,
         track_id: TrackId,
-    ) -> Result<Option<TrackLedgerState>> {
-        let conn = Self::lock_connection(&conn)?;
-        let row = conn
-            .query_row(
-                "SELECT ledger_state_json
-                 FROM track_ledger_state
-                 WHERE track_id = ?1",
-                params![track_id.as_str()],
-                |row| row.get::<_, String>(0),
+        record: TrackPnlRecord,
+    ) -> Result<bool> {
+        let mut conn = Self::lock_connection(&conn)?;
+        let tx = conn
+            .transaction()
+            .context("failed to start sqlite track pnl record transaction")?;
+        let updated_at = Utc::now().to_rfc3339();
+        let inserted = tx
+            .execute(
+                "INSERT OR IGNORE INTO track_pnl_records (
+                    track_id,
+                    venue,
+                    symbol,
+                    occurred_at,
+                    kind,
+                    source,
+                    source_key,
+                    order_id,
+                    trade_id,
+                    side,
+                    price,
+                    qty,
+                    realized_pnl,
+                    trading_fee,
+                    funding_fee
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    track_id.as_str(),
+                    record.instrument.venue.as_str(),
+                    record.instrument.symbol,
+                    record.occurred_at.to_rfc3339(),
+                    track_pnl_record_kind_as_str(record.kind),
+                    record.source,
+                    record.source_key,
+                    record.order_id,
+                    record.trade_id,
+                    record.side.map(side_as_str),
+                    record.price,
+                    record.qty,
+                    record.realized_pnl,
+                    record.trading_fee,
+                    record.funding_fee,
+                ],
             )
-            .optional()
-            .context("failed to load track ledger state")?;
+            .context("failed to insert track pnl record")?
+            > 0;
 
-        row.map(|ledger_state_json| {
-            serde_json::from_str(&ledger_state_json)
-                .context("failed to deserialize track ledger state")
-        })
-        .transpose()
+        if inserted {
+            tx.execute(
+                "INSERT INTO persisted_track_presence (track_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(track_id) DO UPDATE SET
+                     updated_at = excluded.updated_at",
+                params![track_id.as_str(), updated_at.as_str(), updated_at.as_str()],
+            )
+            .context("failed to upsert persisted track presence from track pnl record")?;
+        }
+
+        tx.commit()
+            .context("failed to commit sqlite track pnl record transaction")?;
+        Ok(inserted)
     }
+
+    fn load_track_pnl_stats_blocking(
+        conn: Arc<Mutex<Connection>>,
+        track_id: TrackId,
+        pnl_utc_day: NaiveDate,
+    ) -> Result<TrackPnlStats> {
+        let conn = Self::lock_connection(&conn)?;
+        let (gross_realized_pnl_cumulative, trading_fee_cumulative, funding_fee_cumulative) =
+            sum_pnl_records(&conn, track_id.as_str(), None, None)?;
+        let day_start =
+            DateTime::<Utc>::from_naive_utc_and_offset(pnl_utc_day.and_time(NaiveTime::MIN), Utc);
+        let next_day = pnl_utc_day
+            .succ_opt()
+            .ok_or_else(|| anyhow!("invalid pnl utc day `{pnl_utc_day}`"))?;
+        let day_end =
+            DateTime::<Utc>::from_naive_utc_and_offset(next_day.and_time(NaiveTime::MIN), Utc);
+        let (gross_realized_pnl_today, trading_fee_today, funding_fee_today) = sum_pnl_records(
+            &conn,
+            track_id.as_str(),
+            Some(day_start.to_rfc3339()),
+            Some(day_end.to_rfc3339()),
+        )?;
+
+        Ok(TrackPnlStats {
+            pnl_utc_day,
+            gross_realized_pnl_today,
+            gross_realized_pnl_cumulative,
+            trading_fee_today,
+            trading_fee_cumulative,
+            funding_fee_today,
+            funding_fee_cumulative,
+            ..TrackPnlStats::default()
+        })
+    }
+}
+
+fn track_pnl_record_kind_as_str(kind: TrackPnlRecordKind) -> &'static str {
+    match kind {
+        TrackPnlRecordKind::Trade => "trade",
+        TrackPnlRecordKind::Funding => "funding",
+    }
+}
+
+fn side_as_str(side: Side) -> &'static str {
+    match side {
+        Side::Buy => "buy",
+        Side::Sell => "sell",
+    }
+}
+
+fn sum_pnl_records(
+    conn: &Connection,
+    track_id: &str,
+    occurred_at_start: Option<String>,
+    occurred_at_end: Option<String>,
+) -> Result<(f64, f64, f64)> {
+    let mut statement = match (&occurred_at_start, &occurred_at_end) {
+        (Some(_), Some(_)) => conn.prepare(
+            "SELECT
+                COALESCE(SUM(realized_pnl), 0),
+                COALESCE(SUM(trading_fee), 0),
+                COALESCE(SUM(funding_fee), 0)
+             FROM track_pnl_records
+             WHERE track_id = ?1
+               AND occurred_at >= ?2
+               AND occurred_at < ?3",
+        )?,
+        _ => conn.prepare(
+            "SELECT
+                COALESCE(SUM(realized_pnl), 0),
+                COALESCE(SUM(trading_fee), 0),
+                COALESCE(SUM(funding_fee), 0)
+             FROM track_pnl_records
+             WHERE track_id = ?1",
+        )?,
+    };
+
+    let sums = match (occurred_at_start, occurred_at_end) {
+        (Some(start), Some(end)) => statement.query_row(params![track_id, start, end], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?,
+        _ => statement.query_row(params![track_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?,
+    };
+
+    Ok(sums)
 }
 
 #[async_trait]
@@ -750,17 +824,15 @@ impl TrackMutationStore for SqliteStorage {
         &self,
         id: &str,
         control_state: Option<&TrackControlState>,
-        ledger_state: &TrackLedgerState,
         events: &[DomainEvent],
     ) -> Result<CommittedTrackWrite> {
         let conn = Arc::clone(&self.conn);
         let id = id.to_owned();
         let control_state = control_state.cloned();
-        let ledger_state = ledger_state.clone();
         let events = events.to_vec();
 
         tokio::task::spawn_blocking(move || {
-            Self::save_transition_blocking(conn, id, control_state, Some(ledger_state), events)
+            Self::save_transition_blocking(conn, id, control_state, events)
         })
         .await
         .context("failed to join commit_track_transition blocking task")?
@@ -791,20 +863,20 @@ impl TrackMutationStore for SqliteStorage {
         .context("failed to join save_track_control_state blocking task")?
     }
 
-    async fn save_track_ledger_state(
+    async fn insert_track_pnl_record(
         &self,
         track_id: &TrackId,
-        state: &TrackLedgerState,
-    ) -> Result<()> {
+        record: &TrackPnlRecord,
+    ) -> Result<bool> {
         let conn = Arc::clone(&self.conn);
         let track_id = track_id.clone();
-        let state = state.clone();
+        let record = record.clone();
 
         tokio::task::spawn_blocking(move || {
-            Self::save_track_ledger_state_blocking(conn, track_id, state)
+            Self::insert_track_pnl_record_blocking(conn, track_id, record)
         })
         .await
-        .context("failed to join save_track_ledger_state blocking task")?
+        .context("failed to join insert_track_pnl_record blocking task")?
     }
 }
 
@@ -877,16 +949,19 @@ impl TrackQueryStore for SqliteStorage {
             .context("failed to join load_track_control_state blocking task")?
     }
 
-    async fn load_track_ledger_state(
+    async fn load_track_pnl_stats(
         &self,
         track_id: &TrackId,
-    ) -> Result<Option<TrackLedgerState>> {
+        pnl_utc_day: NaiveDate,
+    ) -> Result<TrackPnlStats> {
         let conn = Arc::clone(&self.conn);
         let track_id = track_id.clone();
 
-        tokio::task::spawn_blocking(move || Self::load_track_ledger_state_blocking(conn, track_id))
-            .await
-            .context("failed to join load_track_ledger_state blocking task")?
+        tokio::task::spawn_blocking(move || {
+            Self::load_track_pnl_stats_blocking(conn, track_id, pnl_utc_day)
+        })
+        .await
+        .context("failed to join load_track_pnl_stats blocking task")?
     }
 
     async fn load_track_updated_at(&self, track_id: &TrackId) -> Result<Option<DateTime<Utc>>> {
@@ -960,7 +1035,7 @@ mod tests {
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
-    use poise_engine::ledger::TrackLedgerState;
+    use poise_engine::ledger::TrackPnlRecord;
     use poise_engine::ports::OrderRequest;
     use rusqlite::Connection;
 
@@ -1001,7 +1076,7 @@ mod tests {
         effects: &[TrackEffect],
     ) -> TestCommittedTransition {
         storage
-            .commit_track_transition(track_id, None, &TrackLedgerState::default(), events)
+            .commit_track_transition(track_id, None, events)
             .await
             .unwrap();
         let created_at = Utc::now();
@@ -1256,20 +1331,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn control_and_ledger_state_round_trip_outside_runtime_snapshot() {
+    async fn control_state_round_trip_outside_runtime_snapshot() {
         let storage = SqliteStorage::in_memory().unwrap();
         let expected_control = app::TrackControlState::Paused {
             resume_mode: app::PersistedControlMode::ManualFlatten,
-        };
-        let expected_ledger = TrackLedgerState {
-            ledger_utc_day: NaiveDate::from_ymd_opt(2026, 4, 23).unwrap(),
-            gross_realized_pnl_today: 12.0,
-            gross_realized_pnl_cumulative: 120.0,
-            trading_fee_today: 1.0,
-            trading_fee_cumulative: 10.0,
-            funding_fee_today: -0.5,
-            funding_fee_cumulative: -2.0,
-            unresolved_gaps: vec![],
         };
 
         TrackMutationStore::save_track_control_state(
@@ -1279,28 +1344,75 @@ mod tests {
         )
         .await
         .unwrap();
-        TrackMutationStore::save_track_ledger_state(
-            &storage,
-            &TrackId::new("btc-core"),
-            &expected_ledger,
-        )
-        .await
-        .unwrap();
         let actual_control =
             TrackQueryStore::load_track_control_state(&storage, &TrackId::new("btc-core"))
                 .await
                 .unwrap();
-        let actual_ledger =
-            TrackQueryStore::load_track_ledger_state(&storage, &TrackId::new("btc-core"))
-                .await
-                .unwrap();
 
         assert_eq!(actual_control, Some(expected_control));
-        assert_eq!(actual_ledger, Some(expected_ledger));
     }
 
     #[tokio::test]
-    async fn saving_control_or_ledger_state_records_persisted_track_presence() {
+    async fn track_pnl_records_aggregate_stats_by_occurred_day() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let track_id = TrackId::new("btc-core");
+
+        TrackMutationStore::insert_track_pnl_record(
+            &storage,
+            &track_id,
+            &TrackPnlRecord::trade(
+                test_instrument("BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 8, 9, 0, 0).unwrap(),
+                "binance:order_trade_update".into(),
+                Some("binance:btcusdt:trade:1001".into()),
+                Some("order-1".into()),
+                Some("1001".into()),
+                Side::Sell,
+                1900.0,
+                0.4,
+                120.0,
+                3.0,
+            ),
+        )
+        .await
+        .unwrap();
+        TrackMutationStore::insert_track_pnl_record(
+            &storage,
+            &track_id,
+            &TrackPnlRecord::funding(
+                test_instrument("BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 7, 8, 0, 0).unwrap(),
+                "binance:funding_fee".into(),
+                Some("binance:btcusdt:funding:2026-04-07T08:00:00Z".into()),
+                -1.5,
+            ),
+        )
+        .await
+        .unwrap();
+
+        let stats = TrackQueryStore::load_track_pnl_stats(
+            &storage,
+            &track_id,
+            NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            stats.pnl_utc_day,
+            NaiveDate::from_ymd_opt(2026, 4, 8).unwrap()
+        );
+        assert_eq!(stats.gross_realized_pnl_today, 120.0);
+        assert_eq!(stats.gross_realized_pnl_cumulative, 120.0);
+        assert_eq!(stats.trading_fee_today, 3.0);
+        assert_eq!(stats.trading_fee_cumulative, 3.0);
+        assert_eq!(stats.funding_fee_today, 0.0);
+        assert_eq!(stats.funding_fee_cumulative, -1.5);
+        assert_eq!(stats.net_realized_pnl_cumulative(), 115.5);
+    }
+
+    #[tokio::test]
+    async fn saving_control_or_pnl_record_records_persisted_track_presence() {
         let storage = SqliteStorage::in_memory().unwrap();
 
         TrackMutationStore::save_track_control_state(
@@ -1310,10 +1422,18 @@ mod tests {
         )
         .await
         .unwrap();
-        TrackMutationStore::save_track_ledger_state(
+        TrackMutationStore::insert_track_pnl_record(
             &storage,
             &TrackId::new("eth-core"),
-            &TrackLedgerState::default(),
+            &TrackPnlRecord::trade_summary(
+                test_instrument("ETHUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 8, 9, 0, 0).unwrap(),
+                "test".into(),
+                None,
+                None,
+                1.0,
+                0.0,
+            ),
         )
         .await
         .unwrap();
@@ -1470,10 +1590,9 @@ mod tests {
     #[tokio::test]
     async fn commit_track_transition_backfills_default_control_truth_on_first_business_write() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let ledger_state = TrackLedgerState::default();
 
         storage
-            .commit_track_transition("test-1", None, &ledger_state, &[])
+            .commit_track_transition("test-1", None, &[test_event()])
             .await
             .unwrap();
 
@@ -1483,13 +1602,6 @@ mod tests {
                 .await
                 .unwrap(),
             Some(TrackControlState::default())
-        );
-        assert_eq!(
-            storage
-                .load_track_ledger_state(&TrackId::new("test-1"))
-                .await
-                .unwrap(),
-            Some(ledger_state)
         );
     }
 

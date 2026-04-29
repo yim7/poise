@@ -52,7 +52,6 @@ pub(super) async fn apply_user_data_event(
                     price = order.price,
                     qty = order.qty,
                     filled_qty = order.filled_qty,
-                    realized_pnl = order.realized_pnl,
                     local_bindings = ?describe_runtime_bindings(runtime.as_ref()),
                     "unabsorbed order update encountered before reconcile"
                 );
@@ -72,30 +71,12 @@ pub(super) async fn apply_user_data_event(
                 .await?;
             }
         }
-        UserDataPayload::TrackLedger(update) => {
-            let result = state
+        UserDataPayload::TrackPnl(record) => {
+            state
                 .observation_service
-                .apply_track_ledger_event(track_id, update.event)
+                .record_track_pnl(track_id, record)
                 .await
                 .map_err(preserve_track_mutation_error)?;
-            if result.absorb_result
-                == Some(poise_engine::executor::OrderUpdateAbsorbResult::Unabsorbed)
-            {
-                state
-                    .exchange_freshness
-                    .mark_stale(track_id, ExchangeFreshnessReason::UnabsorbedOrderUpdate)
-                    .await;
-                enqueue_reconcile_request(
-                    &state,
-                    execution,
-                    ReconcileRequest {
-                        track_id: track_id.to_string(),
-                        reason: ReconcileReason::UnabsorbedOrderUpdate,
-                    },
-                    &instrument,
-                )
-                .await?;
-            }
         }
     }
 
@@ -117,7 +98,6 @@ pub(super) fn order_observation(order: &ExchangeOrder) -> OrderObservation {
         price: order.price,
         quantity: order.qty,
         filled_qty: order.filled_qty,
-        realized_pnl: order.realized_pnl,
         status: order.status,
     }
 }
@@ -126,7 +106,6 @@ fn is_terminal_no_fill_unknown_order(order: &ExchangeOrder) -> bool {
     !order.status.keeps_working_order()
         && order.status != OrderStatus::Filled
         && order.filled_qty.abs() <= f64::EPSILON
-        && order.realized_pnl.abs() <= f64::EPSILON
 }
 
 #[cfg(test)]
@@ -205,7 +184,6 @@ mod tests {
                     price: request.price,
                     qty: request.quantity,
                     filled_qty: request.quantity,
-                    realized_pnl: 0.0,
                     status: OrderStatus::Filled,
                 }),
             },

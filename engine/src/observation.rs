@@ -39,7 +39,6 @@ pub struct OrderObservation {
     pub quantity: f64,
     #[serde(default)]
     pub filled_qty: f64,
-    pub realized_pnl: f64,
     pub status: OrderStatus,
 }
 

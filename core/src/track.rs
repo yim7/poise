@@ -60,6 +60,18 @@ impl Instrument {
             symbol: symbol.into(),
         }
     }
+
+    pub fn pnl_asset(&self) -> String {
+        quote_asset_for_symbol(&self.symbol)
+            .unwrap_or(self.symbol.as_str())
+            .to_string()
+    }
+}
+
+pub fn quote_asset_for_symbol(symbol: &str) -> Option<&'static str> {
+    ["USDT", "USDC", "FDUSD", "BUSD", "BTC", "ETH"]
+        .into_iter()
+        .find(|asset| symbol.ends_with(asset))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -196,6 +208,15 @@ mod tests {
     #[test]
     fn venue_as_str_supports_bybit() {
         assert_eq!(Venue::Bybit.as_str(), "bybit");
+    }
+
+    #[test]
+    fn instrument_pnl_asset_uses_quote_asset_suffix() {
+        assert_eq!(
+            Instrument::new(Venue::Binance, "PAXGUSDT").pnl_asset(),
+            "USDT"
+        );
+        assert_eq!(Instrument::new(Venue::Binance, "ETHBTC").pnl_asset(), "BTC");
     }
 
     #[test]

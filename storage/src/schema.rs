@@ -8,7 +8,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         // `persisted_track_presence` is a read-model helper for listing tracks
         // and updated-at metadata. Startup correctness must use the explicit
-        // control and ledger truth tables instead.
+        // control state; PNL stats are rebuilt from track_pnl_records.
         "CREATE TABLE IF NOT EXISTS persisted_track_presence (
             track_id TEXT PRIMARY KEY,
             created_at TEXT NOT NULL,
@@ -21,10 +21,23 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS track_ledger_state (
-            track_id TEXT PRIMARY KEY,
-            ledger_state_json TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+        CREATE TABLE IF NOT EXISTS track_pnl_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id TEXT NOT NULL,
+            venue TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            source TEXT NOT NULL,
+            source_key TEXT,
+            order_id TEXT,
+            trade_id TEXT,
+            side TEXT,
+            price REAL,
+            qty REAL,
+            realized_pnl REAL NOT NULL DEFAULT 0,
+            trading_fee REAL NOT NULL DEFAULT 0,
+            funding_fee REAL NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS track_events (
@@ -77,8 +90,25 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     )?;
     ensure_columns_present(
         conn,
-        "track_ledger_state",
-        &["track_id", "ledger_state_json", "updated_at"],
+        "track_pnl_records",
+        &[
+            "id",
+            "track_id",
+            "venue",
+            "symbol",
+            "occurred_at",
+            "kind",
+            "source",
+            "source_key",
+            "order_id",
+            "trade_id",
+            "side",
+            "price",
+            "qty",
+            "realized_pnl",
+            "trading_fee",
+            "funding_fee",
+        ],
     )?;
     ensure_columns_present(
         conn,
@@ -117,7 +147,14 @@ pub fn initialize(conn: &Connection) -> Result<()> {
          ON track_events(track_id, created_at);
 
          CREATE INDEX IF NOT EXISTS idx_track_effects_recent
-         ON track_effects(track_id, updated_at DESC, created_at DESC, batch_id DESC, sequence DESC, effect_id DESC);",
+         ON track_effects(track_id, updated_at DESC, created_at DESC, batch_id DESC, sequence DESC, effect_id DESC);
+
+         CREATE INDEX IF NOT EXISTS idx_track_pnl_records_track_day
+         ON track_pnl_records(track_id, occurred_at);
+
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_track_pnl_records_source_key
+         ON track_pnl_records(source_key)
+         WHERE source_key IS NOT NULL;",
     )?;
     Ok(())
 }
@@ -209,14 +246,23 @@ mod tests {
             .unwrap();
         assert_eq!(control_state_count, 1);
 
-        let ledger_state_count: i64 = conn
+        let legacy_ledger_state_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='track_ledger_state'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(ledger_state_count, 1);
+        assert_eq!(legacy_ledger_state_count, 0);
+
+        let pnl_records_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='track_pnl_records'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pnl_records_count, 1);
 
         let index_count: i64 = conn
             .query_row(
@@ -263,13 +309,26 @@ mod tests {
                 "updated_at".to_string(),
             ]
         );
-        let ledger_columns = table_columns(&conn, "track_ledger_state").unwrap();
+        let pnl_record_columns = table_columns(&conn, "track_pnl_records").unwrap();
         assert_eq!(
-            ledger_columns,
+            pnl_record_columns,
             vec![
+                "id".to_string(),
                 "track_id".to_string(),
-                "ledger_state_json".to_string(),
-                "updated_at".to_string(),
+                "venue".to_string(),
+                "symbol".to_string(),
+                "occurred_at".to_string(),
+                "kind".to_string(),
+                "source".to_string(),
+                "source_key".to_string(),
+                "order_id".to_string(),
+                "trade_id".to_string(),
+                "side".to_string(),
+                "price".to_string(),
+                "qty".to_string(),
+                "realized_pnl".to_string(),
+                "trading_fee".to_string(),
+                "funding_fee".to_string(),
             ]
         );
     }

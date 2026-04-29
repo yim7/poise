@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use poise_core::events::DomainEvent;
 use poise_core::track::TrackId;
-use poise_engine::ledger::TrackLedgerState;
+use poise_engine::ledger::TrackPnlRecord;
 
 use crate::TrackControlState;
 use crate::track_persistence::CommittedTrackWrite;
@@ -17,7 +17,6 @@ pub trait TrackMutationStore: Send + Sync {
         &self,
         id: &str,
         control_state: Option<&TrackControlState>,
-        ledger_state: &TrackLedgerState,
         events: &[DomainEvent],
     ) -> Result<CommittedTrackWrite>;
 
@@ -27,9 +26,9 @@ pub trait TrackMutationStore: Send + Sync {
         track_id: &TrackId,
         state: &TrackControlState,
     ) -> Result<()>;
-    async fn save_track_ledger_state(
+    async fn insert_track_pnl_record(
         &self,
         track_id: &TrackId,
-        state: &TrackLedgerState,
-    ) -> Result<()>;
+        record: &TrackPnlRecord,
+    ) -> Result<bool>;
 }
