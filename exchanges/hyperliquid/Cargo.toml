@@ -6,7 +6,11 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+hex.workspace = true
+k256 = { version = "0.13", features = ["ecdsa"] }
 poise-core = { path = "../../core" }
 poise-engine = { path = "../../engine" }
+rmp-serde = "1"
 serde.workspace = true
 serde_json.workspace = true
+sha3 = "0.10"
