@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use k256::ecdsa::SigningKey;
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 use sha3::{Digest, Keccak256};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,19 @@ impl Signature {
         bytes.extend_from_slice(&self.s);
         bytes.push(self.v);
         hex::encode(bytes)
+    }
+}
+
+impl Serialize for Signature {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("Signature", 3)?;
+        state.serialize_field("r", &format!("0x{}", hex::encode(self.r)))?;
+        state.serialize_field("s", &format!("0x{}", hex::encode(self.s)))?;
+        state.serialize_field("v", &self.v)?;
+        state.end()
     }
 }
 
@@ -112,7 +126,8 @@ fn l1_agent_message_hash(source: &str, connection_id: [u8; 32]) -> [u8; 32] {
 fn signing_key_from_hex(private_key: &str) -> Result<SigningKey> {
     let private_key = private_key.trim().trim_start_matches("0x");
     let bytes = hex::decode(private_key).context("invalid Hyperliquid private key hex")?;
-    SigningKey::from_slice(&bytes).map_err(|error| anyhow!("invalid Hyperliquid private key: {error}"))
+    SigningKey::from_slice(&bytes)
+        .map_err(|error| anyhow!("invalid Hyperliquid private key: {error}"))
 }
 
 fn parse_address(address: &str) -> Result<[u8; 20]> {

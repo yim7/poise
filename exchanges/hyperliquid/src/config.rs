@@ -281,7 +281,12 @@ mod tests {
                     vault_address,
                 } => {
                     let credentials = config.credentials().unwrap();
-                    assert_eq!(credentials.private_key(), private_key, "case `{}`", case.name);
+                    assert_eq!(
+                        credentials.private_key(),
+                        private_key,
+                        "case `{}`",
+                        case.name
+                    );
                     assert_eq!(
                         credentials.wallet_address(),
                         wallet_address,

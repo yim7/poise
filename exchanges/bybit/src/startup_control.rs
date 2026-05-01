@@ -43,9 +43,11 @@ impl SymbolLeverageControl {
                 deployment,
                 api_key,
                 api_secret,
-            } => BybitRestClient::new(deployment.clone(), api_key.clone(), api_secret.clone())
-                .set_leverage(symbol, leverage)
-                .await,
+            } => {
+                BybitRestClient::new(deployment.clone(), api_key.clone(), api_secret.clone())
+                    .set_leverage(symbol, leverage)
+                    .await
+            }
             SymbolLeverageRest::Injected(rest) => rest.set_leverage(symbol, leverage).await,
         }
     }

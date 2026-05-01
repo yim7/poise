@@ -39,7 +39,10 @@ pub(crate) fn account_summary_from_state(
     state: &ClearinghouseStateResponse,
 ) -> Result<AccountSummarySnapshot> {
     Ok(AccountSummarySnapshot {
-        equity: parse_decimal("marginSummary.accountValue", &state.margin_summary.account_value)?,
+        equity: parse_decimal(
+            "marginSummary.accountValue",
+            &state.margin_summary.account_value,
+        )?,
         available: parse_decimal("withdrawable", &state.withdrawable)?,
         unrealized_pnl: state
             .asset_positions
@@ -159,7 +162,11 @@ mod tests {
 
         let error = build_exchange_info(&meta, "BTC").unwrap_err();
 
-        assert!(error.to_string().contains("missing Hyperliquid asset `BTC`"));
+        assert!(
+            error
+                .to_string()
+                .contains("missing Hyperliquid asset `BTC`")
+        );
     }
 
     #[test]

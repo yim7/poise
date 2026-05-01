@@ -97,7 +97,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.oid, 12345);
-        assert_eq!(response.cloid.as_deref(), Some("0x11111111111111111111111111111111"));
+        assert_eq!(
+            response.cloid.as_deref(),
+            Some("0x11111111111111111111111111111111")
+        );
         assert_eq!(response.limit_px, "65000.5");
     }
 }
