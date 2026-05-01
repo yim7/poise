@@ -9,6 +9,7 @@ use poise_core::strategy::{
     BandProtectionPolicy, DEFAULT_MIN_REBALANCE_UNITS, ShapeFamily, TrackConfig,
 };
 use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
+use poise_hyperliquid as hyperliquid;
 use serde::{Deserialize, Deserializer};
 
 use crate::exchange_startup::build_track_leverage_index;
@@ -50,6 +51,7 @@ pub struct TrackSpec {
 pub enum ExchangeConfig {
     Binance(binance::Config),
     Bybit(bybit::Config),
+    Hyperliquid(hyperliquid::Config),
 }
 
 impl Default for ExchangeConfig {
@@ -63,6 +65,7 @@ impl ExchangeConfig {
         match self {
             Self::Binance(_) => Venue::Binance,
             Self::Bybit(_) => Venue::Bybit,
+            Self::Hyperliquid(_) => Venue::Hyperliquid,
         }
     }
 }
@@ -212,6 +215,38 @@ total_loss_limit = 600.0
         .unwrap();
 
         assert_eq!(config.tracks[0].leverage, Some(20));
+    }
+
+    #[test]
+    fn parses_hyperliquid_exchange_config() {
+        let config = parse_config(
+            r#"
+[exchange]
+venue = "hyperliquid"
+deployment = "testnet"
+private_key = "0x1111111111111111111111111111111111111111111111111111111111111111"
+wallet_address = "0x2222222222222222222222222222222222222222"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTC"
+lower_price = 90000.0
+upper_price = 110000.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.exchange.venue(), Venue::Hyperliquid);
+        let definition = config.tracks[0]
+            .to_track_definition(config.exchange.venue())
+            .unwrap();
+        assert_eq!(definition.instrument().venue, Venue::Hyperliquid);
+        assert_eq!(definition.instrument().symbol, "BTC");
     }
 
     #[test]

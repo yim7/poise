@@ -33,6 +33,9 @@ pub(crate) fn build_symbol_leverage_setter(
         ExchangeConfig::Bybit(bybit_config) => Ok(Arc::new(
             poise_bybit::SymbolLeverageControl::new(bybit_config)?,
         )),
+        ExchangeConfig::Hyperliquid(_) => Err(anyhow!(
+            "Hyperliquid startup leverage control is not implemented yet"
+        )),
     }
 }
 

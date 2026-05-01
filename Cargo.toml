@@ -7,6 +7,7 @@ members = [
     "protocol",
     "exchanges/binance",
     "exchanges/bybit",
+    "exchanges/hyperliquid",
     "server",
     "tui",
     "tools/track-tuning-workbench/src-tauri",
@@ -19,6 +20,7 @@ default-members = [
     "protocol",
     "exchanges/binance",
     "exchanges/bybit",
+    "exchanges/hyperliquid",
     "server",
     "tui",
 ]

@@ -2,31 +2,52 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::{Config, rest::BybitRestClient};
+use crate::{Config, Deployment, rest::BybitRestClient};
 
 pub struct SymbolLeverageControl {
-    rest: Arc<BybitRestClient>,
+    rest: SymbolLeverageRest,
+}
+
+enum SymbolLeverageRest {
+    Live {
+        deployment: Deployment,
+        api_key: String,
+        api_secret: String,
+    },
+    #[allow(dead_code)]
+    Injected(Arc<BybitRestClient>),
 }
 
 impl SymbolLeverageControl {
     pub fn new(config: &Config) -> Result<Self> {
         let (api_key, api_secret) = config.credentials()?;
         Ok(Self {
-            rest: Arc::new(BybitRestClient::new(
-                config.deployment.clone(),
+            rest: SymbolLeverageRest::Live {
+                deployment: config.deployment.clone(),
                 api_key,
                 api_secret,
-            )),
+            },
         })
     }
 
     #[cfg(test)]
     fn from_rest_client(rest: Arc<BybitRestClient>) -> Self {
-        Self { rest }
+        Self {
+            rest: SymbolLeverageRest::Injected(rest),
+        }
     }
 
     pub async fn set_leverage(&self, symbol: &str, leverage: u32) -> Result<()> {
-        self.rest.set_leverage(symbol, leverage).await
+        match &self.rest {
+            SymbolLeverageRest::Live {
+                deployment,
+                api_key,
+                api_secret,
+            } => BybitRestClient::new(deployment.clone(), api_key.clone(), api_secret.clone())
+                .set_leverage(symbol, leverage)
+                .await,
+            SymbolLeverageRest::Injected(rest) => rest.set_leverage(symbol, leverage).await,
+        }
     }
 }
 

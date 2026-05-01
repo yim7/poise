@@ -5,7 +5,17 @@ use anyhow::Result;
 use crate::{Config, rest::BinanceRestClient};
 
 pub struct SymbolLeverageControl {
-    rest: Arc<BinanceRestClient>,
+    rest: SymbolLeverageRest,
+}
+
+enum SymbolLeverageRest {
+    Live {
+        rest_base_url: String,
+        api_key: String,
+        api_secret: String,
+    },
+    #[allow(dead_code)]
+    Injected(Arc<BinanceRestClient>),
 }
 
 impl SymbolLeverageControl {
@@ -13,21 +23,34 @@ impl SymbolLeverageControl {
         let endpoints = config.endpoints();
         let (api_key, api_secret) = config.credentials()?;
         Ok(Self {
-            rest: Arc::new(BinanceRestClient::new(
-                endpoints.rest_base_url(),
+            rest: SymbolLeverageRest::Live {
+                rest_base_url: endpoints.rest_base_url().to_string(),
                 api_key,
                 api_secret,
-            )),
+            },
         })
     }
 
     #[cfg(test)]
     fn from_rest_client(rest: Arc<BinanceRestClient>) -> Self {
-        Self { rest }
+        Self {
+            rest: SymbolLeverageRest::Injected(rest),
+        }
     }
 
     pub async fn set_leverage(&self, symbol: &str, leverage: u32) -> Result<()> {
-        self.rest.set_leverage(symbol, leverage).await
+        match &self.rest {
+            SymbolLeverageRest::Live {
+                rest_base_url,
+                api_key,
+                api_secret,
+            } => {
+                BinanceRestClient::new(rest_base_url.clone(), api_key.clone(), api_secret.clone())
+                    .set_leverage(symbol, leverage)
+                    .await
+            }
+            SymbolLeverageRest::Injected(rest) => rest.set_leverage(symbol, leverage).await,
+        }
     }
 }
 

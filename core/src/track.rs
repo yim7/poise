@@ -36,6 +36,7 @@ impl From<&str> for TrackId {
 pub enum Venue {
     Binance,
     Bybit,
+    Hyperliquid,
 }
 
 impl Venue {
@@ -43,6 +44,7 @@ impl Venue {
         match self {
             Self::Binance => "binance",
             Self::Bybit => "bybit",
+            Self::Hyperliquid => "hyperliquid",
         }
     }
 }
@@ -208,6 +210,11 @@ mod tests {
     #[test]
     fn venue_as_str_supports_bybit() {
         assert_eq!(Venue::Bybit.as_str(), "bybit");
+    }
+
+    #[test]
+    fn venue_as_str_supports_hyperliquid() {
+        assert_eq!(Venue::Hyperliquid.as_str(), "hyperliquid");
     }
 
     #[test]

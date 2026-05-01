@@ -133,6 +133,9 @@ pub(crate) async fn build_exchange(config: &ExchangeConfig) -> Result<Exchange> 
                 connected.metadata(),
             ))
         }
+        ExchangeConfig::Hyperliquid(_) => Err(anyhow!(
+            "Hyperliquid exchange ports are not implemented yet"
+        )),
     }
 }
 

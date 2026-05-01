@@ -13,6 +13,7 @@ poise-binance = { path = "../exchanges/binance" }
 poise-bybit = { path = "../exchanges/bybit" }
 poise-core = { path = "../core" }
 poise-engine = { path = "../engine" }
+poise-hyperliquid = { path = "../exchanges/hyperliquid" }
 poise-protocol = { path = "../protocol" }
 poise-storage = { path = "../storage" }
 serde.workspace = true
