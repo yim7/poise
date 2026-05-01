@@ -58,7 +58,7 @@
   - 验收：`cargo test -p poise-hyperliquid ws::tests::`
   - Commit SHA：`c54c7b6`
 
-- [ ] Task 8: 文档和最终验收
+- [x] Task 8: 文档和最终验收
   - 文件：`README.md`、`docs/system-overview.md`
   - 验收：相关最小测试全部通过；必要时扩大到 `cargo test -p poise-hyperliquid`、`cargo test -p poise-server config::tests::`、`cargo test -p poise-server assembly::tests::`、`cargo test -p poise-server exchange_startup::tests::`
-  - Commit SHA：
+  - Commit SHA：`5970f85`
