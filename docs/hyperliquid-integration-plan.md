@@ -19,10 +19,10 @@
 
 ## 任务清单
 
-- [ ] Task 1: 配置边界和 workspace 接入
+- [x] Task 1: 配置边界和 workspace 接入
   - 文件：`Cargo.toml`、`core/src/track.rs`、`server/Cargo.toml`、`server/src/config.rs`、`server/src/assembly.rs`、`server/src/exchange_startup.rs`、`exchanges/hyperliquid/*`
   - 验收：`cargo test -p poise-core track::tests::venue_as_str_supports_hyperliquid` 和 `cargo test -p poise-server config::tests::parses_hyperliquid_exchange_config`
-  - Commit SHA：
+  - Commit SHA：`00095b9`
 
 - [ ] Task 2: Hyperliquid 配置、端点和凭证校验
   - 文件：`exchanges/hyperliquid/src/config.rs`
