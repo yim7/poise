@@ -29,11 +29,11 @@
   - 验收：`cargo test -p poise-hyperliquid config::tests::`
   - Commit SHA：`0eb17ff`
 
-- [ ] Task 3: REST info 模型和 mapper
+- [x] Task 3: REST info 模型和 mapper
   - 文件：`exchanges/hyperliquid/src/rest/models.rs`、`exchanges/hyperliquid/src/mapper.rs`
   - 覆盖：`meta -> ExchangeInfo`、`userState -> Position/AccountSummary/Capacity`、`openOrders -> ExchangeOrder`
   - 验收：`cargo test -p poise-hyperliquid mapper::tests::`
-  - Commit SHA：
+  - Commit SHA：`638ef44`
 
 - [ ] Task 4: L1 签名和 exchange action 编码
   - 文件：`exchanges/hyperliquid/src/signing.rs`、`exchanges/hyperliquid/src/rest/actions.rs`
