@@ -41,11 +41,11 @@
   - 验收：`cargo test -p poise-hyperliquid signing::tests::`
   - Commit SHA：`1d14fd7`
 
-- [ ] Task 5: REST client 写操作和只读查询
+- [x] Task 5: REST client 写操作和只读查询
   - 文件：`exchanges/hyperliquid/src/rest/client.rs`
   - 覆盖：`meta`、`user_state`、`open_orders`、`submit_order`、`cancel_order`、`cancel_all`、`set_leverage`
   - 验收：`cargo test -p poise-hyperliquid rest::client::tests::`
-  - Commit SHA：
+  - Commit SHA：`04235bc`
 
 - [ ] Task 6: Connected ports 和 server 装配
   - 文件：`exchanges/hyperliquid/src/connected.rs`、`exchanges/hyperliquid/src/startup_control.rs`、`server/src/assembly.rs`、`server/src/exchange_startup.rs`
