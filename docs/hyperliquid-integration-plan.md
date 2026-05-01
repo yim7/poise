@@ -24,10 +24,10 @@
   - 验收：`cargo test -p poise-core track::tests::venue_as_str_supports_hyperliquid` 和 `cargo test -p poise-server config::tests::parses_hyperliquid_exchange_config`
   - Commit SHA：`00095b9`
 
-- [ ] Task 2: Hyperliquid 配置、端点和凭证校验
+- [x] Task 2: Hyperliquid 配置、端点和凭证校验
   - 文件：`exchanges/hyperliquid/src/config.rs`
   - 验收：`cargo test -p poise-hyperliquid config::tests::`
-  - Commit SHA：
+  - Commit SHA：`0eb17ff`
 
 - [ ] Task 3: REST info 模型和 mapper
   - 文件：`exchanges/hyperliquid/src/rest/models.rs`、`exchanges/hyperliquid/src/mapper.rs`
