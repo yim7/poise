@@ -35,11 +35,11 @@
   - 验收：`cargo test -p poise-hyperliquid mapper::tests::`
   - Commit SHA：`638ef44`
 
-- [ ] Task 4: L1 签名和 exchange action 编码
+- [x] Task 4: L1 签名和 exchange action 编码
   - 文件：`exchanges/hyperliquid/src/signing.rs`、`exchanges/hyperliquid/src/rest/actions.rs`
   - 覆盖：order、cancel、updateLeverage 的固定 payload 签名样本；地址统一小写；nonce 与 vault marker 进入 action hash
   - 验收：`cargo test -p poise-hyperliquid signing::tests::`
-  - Commit SHA：
+  - Commit SHA：`1d14fd7`
 
 - [ ] Task 5: REST client 写操作和只读查询
   - 文件：`exchanges/hyperliquid/src/rest/client.rs`
