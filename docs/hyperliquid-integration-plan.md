@@ -52,11 +52,11 @@
   - 验收：`cargo test -p poise-hyperliquid connected::tests::` 和 `cargo test -p poise-server assembly::tests::`
   - Commit SHA：`23241c2`
 
-- [ ] Task 7: WebSocket 行情和用户事件
+- [x] Task 7: WebSocket 行情和用户事件
   - 文件：`exchanges/hyperliquid/src/ws/*`
   - 覆盖：BBO/mark tick、order update、fills、funding、断线通知与重连订阅
   - 验收：`cargo test -p poise-hyperliquid ws::tests::`
-  - Commit SHA：
+  - Commit SHA：`c54c7b6`
 
 - [ ] Task 8: 文档和最终验收
   - 文件：`README.md`、`docs/system-overview.md`
