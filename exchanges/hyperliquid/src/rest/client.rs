@@ -10,7 +10,7 @@ use poise_engine::ports::{
     OrderRequest as PortOrderRequest, OrderStatus, Position,
 };
 
-use crate::config::Credentials;
+use crate::config::{Config, Credentials};
 use crate::mapper::{
     account_summary_from_state, build_exchange_info, open_order_from_response, position_from_state,
 };
@@ -30,6 +30,18 @@ pub(crate) struct HyperliquidRestClient {
 }
 
 impl HyperliquidRestClient {
+    pub(crate) fn new(config: &Config) -> Result<Self> {
+        Ok(Self::with_http_client_and_timestamp_provider(
+            config.endpoints().rest_base_url().to_string(),
+            config.credentials()?,
+            Arc::new(|| chrono::Utc::now().timestamp_millis() as u64),
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .context("failed to build Hyperliquid HTTP client")?,
+        ))
+    }
+
     pub(crate) fn with_http_client_and_timestamp_provider(
         base_url: impl Into<String>,
         credentials: Credentials,

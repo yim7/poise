@@ -23,6 +23,13 @@ impl SymbolLeverageSetter for poise_bybit::SymbolLeverageControl {
     }
 }
 
+#[async_trait::async_trait]
+impl SymbolLeverageSetter for poise_hyperliquid::SymbolLeverageControl {
+    async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()> {
+        self.set_leverage(&instrument.symbol, leverage).await
+    }
+}
+
 pub(crate) fn build_symbol_leverage_setter(
     config: &ExchangeConfig,
 ) -> Result<Arc<dyn SymbolLeverageSetter>> {
@@ -33,8 +40,8 @@ pub(crate) fn build_symbol_leverage_setter(
         ExchangeConfig::Bybit(bybit_config) => Ok(Arc::new(
             poise_bybit::SymbolLeverageControl::new(bybit_config)?,
         )),
-        ExchangeConfig::Hyperliquid(_) => Err(anyhow!(
-            "Hyperliquid startup leverage control is not implemented yet"
+        ExchangeConfig::Hyperliquid(hyperliquid_config) => Ok(Arc::new(
+            poise_hyperliquid::SymbolLeverageControl::new(hyperliquid_config)?,
         )),
     }
 }
@@ -107,6 +114,19 @@ mod tests {
             deployment: poise_bybit::Deployment::Testnet,
             api_key: Some("demo-key".into()),
             api_secret: Some("demo-secret".into()),
+        }))
+        .unwrap();
+    }
+
+    #[test]
+    fn build_symbol_leverage_setter_accepts_hyperliquid_credentials() {
+        build_symbol_leverage_setter(&ExchangeConfig::Hyperliquid(poise_hyperliquid::Config {
+            deployment: poise_hyperliquid::Deployment::Testnet,
+            private_key: Some(
+                "0xe908f86dbb4d55ac876378565aafeabc187f6690f046459397b17d9b9a19688e".into(),
+            ),
+            wallet_address: Some("0x2222222222222222222222222222222222222222".into()),
+            vault_address: None,
         }))
         .unwrap();
     }

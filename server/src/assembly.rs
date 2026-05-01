@@ -22,6 +22,7 @@ use poise_engine::ports::ClockPort;
 use poise_engine::ports::MetadataPort;
 #[cfg(test)]
 use poise_engine::ports::{AccountPort, AccountSummaryPort, ExecutionPort, MarketDataPort};
+use poise_hyperliquid::connect as connect_hyperliquid;
 #[cfg(test)]
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
@@ -133,9 +134,17 @@ pub(crate) async fn build_exchange(config: &ExchangeConfig) -> Result<Exchange> 
                 connected.metadata(),
             ))
         }
-        ExchangeConfig::Hyperliquid(_) => Err(anyhow!(
-            "Hyperliquid exchange ports are not implemented yet"
-        )),
+        ExchangeConfig::Hyperliquid(hyperliquid_config) => {
+            let connected = connect_hyperliquid(hyperliquid_config).await?;
+            Ok(Exchange::new(
+                Venue::Hyperliquid,
+                connected.execution(),
+                connected.market_data(),
+                connected.account_summary(),
+                connected.account(),
+                connected.metadata(),
+            ))
+        }
     }
 }
 
@@ -769,6 +778,35 @@ total_loss_limit = 600.0
         let exchange = build_exchange(&config.exchange).await.unwrap();
 
         assert_eq!(exchange.venue(), Venue::Bybit);
+    }
+
+    #[tokio::test]
+    async fn build_exchange_uses_exchange_deployment_for_hyperliquid_endpoint_selection() {
+        let config = parse_config(
+            r#"
+[exchange]
+venue = "hyperliquid"
+deployment = "mainnet"
+private_key = "0xe908f86dbb4d55ac876378565aafeabc187f6690f046459397b17d9b9a19688e"
+wallet_address = "0x2222222222222222222222222222222222222222"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTC"
+lower_price = 90000.0
+upper_price = 110000.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 3000.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+"#,
+        )
+        .unwrap();
+
+        let exchange = build_exchange(&config.exchange).await.unwrap();
+
+        assert_eq!(exchange.venue(), Venue::Hyperliquid);
     }
 
     #[tokio::test]
