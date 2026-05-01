@@ -428,9 +428,11 @@ fn build_startup_capacity_mode(
     startup_leverage: u32,
 ) -> RuntimeStartupCapacityMode {
     match instrument.venue {
-        Venue::Bybit => RuntimeStartupCapacityMode::AvailableBalanceTimesLeverage {
-            leverage: startup_leverage,
-        },
+        Venue::Bybit | Venue::Hyperliquid => {
+            RuntimeStartupCapacityMode::AvailableBalanceTimesLeverage {
+                leverage: startup_leverage,
+            }
+        }
         _ => RuntimeStartupCapacityMode::AccountCapacitySnapshot,
     }
 }
@@ -607,7 +609,7 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
 
-    use crate::runtime::AccountMarginGuardStore;
+    use crate::runtime::{AccountMarginGuardStore, RuntimeStartupCapacityMode};
     use tokio_tungstenite::connect_async;
 
     use crate::config::{Config, ExchangeConfig, TrackSpec, parse_config};
@@ -622,8 +624,8 @@ mod tests {
     use poise_application::{TrackDebugQueryService, TrackDefinitionRegistry, TrackQueryService};
 
     use super::{
-        ServerPlatform, SystemClock, assemble, build_exchange, validate_registry_venue,
-        validate_unique_instruments, validate_unique_track_ids,
+        ServerPlatform, SystemClock, assemble, build_exchange, build_startup_capacity_mode,
+        validate_registry_venue, validate_unique_instruments, validate_unique_track_ids,
     };
 
     fn test_exchange_rules() -> poise_core::types::ExchangeRules {
@@ -645,6 +647,32 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         Arc::new(TrackDefinitionRegistry::new(configured).unwrap())
+    }
+
+    #[test]
+    fn hyperliquid_startup_capacity_uses_track_leverage() {
+        let mode = build_startup_capacity_mode(&Instrument::new(Venue::Hyperliquid, "BTC"), 25);
+
+        match mode {
+            RuntimeStartupCapacityMode::AvailableBalanceTimesLeverage { leverage } => {
+                assert_eq!(leverage, 25);
+            }
+            RuntimeStartupCapacityMode::AccountCapacitySnapshot => {
+                panic!("expected leverage-based Hyperliquid startup capacity")
+            }
+        }
+    }
+
+    #[test]
+    fn binance_startup_capacity_uses_exchange_snapshot() {
+        let mode = build_startup_capacity_mode(&Instrument::new(Venue::Binance, "BTCUSDT"), 25);
+
+        match mode {
+            RuntimeStartupCapacityMode::AccountCapacitySnapshot => {}
+            RuntimeStartupCapacityMode::AvailableBalanceTimesLeverage { .. } => {
+                panic!("expected Binance exchange-provided startup capacity")
+            }
+        }
     }
 
     #[test]
