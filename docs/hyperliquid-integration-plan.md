@@ -47,10 +47,10 @@
   - 验收：`cargo test -p poise-hyperliquid rest::client::tests::`
   - Commit SHA：`04235bc`
 
-- [ ] Task 6: Connected ports 和 server 装配
+- [x] Task 6: Connected ports 和 server 装配
   - 文件：`exchanges/hyperliquid/src/connected.rs`、`exchanges/hyperliquid/src/startup_control.rs`、`server/src/assembly.rs`、`server/src/exchange_startup.rs`
   - 验收：`cargo test -p poise-hyperliquid connected::tests::` 和 `cargo test -p poise-server assembly::tests::`
-  - Commit SHA：
+  - Commit SHA：`23241c2`
 
 - [ ] Task 7: WebSocket 行情和用户事件
   - 文件：`exchanges/hyperliquid/src/ws/*`
