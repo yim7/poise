@@ -5,4 +5,8 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
+poise-core = { path = "../../core" }
+poise-engine = { path = "../../engine" }
 serde.workspace = true
+serde_json.workspace = true
