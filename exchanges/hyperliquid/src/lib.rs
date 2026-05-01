@@ -7,6 +7,7 @@ mod rest;
 #[allow(dead_code)]
 mod signing;
 mod startup_control;
+mod ws;
 
 pub use config::{Config, Deployment, Endpoints};
 pub use connected::{Connected, connect};

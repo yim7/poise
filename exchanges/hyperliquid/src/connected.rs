@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use tokio::sync::mpsc;
@@ -12,14 +12,20 @@ use poise_engine::ports::{
     OrderReceipt, OrderRequest, Position, UserDataEvent,
 };
 
-use crate::{Config, rest::client::HyperliquidRestClient};
+use crate::{Config, rest::client::HyperliquidRestClient, ws::HyperliquidWsClient};
 
 const DEFAULT_CAPACITY_LEVERAGE: u32 = 10;
 
 pub async fn connect(config: &Config) -> Result<Connected> {
-    Ok(Connected::from_rest_client(Arc::new(
-        HyperliquidRestClient::new(config)?,
-    )))
+    let credentials = config.credentials()?;
+    let ws = Arc::new(HyperliquidWsClient::new(
+        config.endpoints().ws_url().to_string(),
+        credentials.wallet_address().to_string(),
+    ));
+    Ok(Connected::from_rest_client(
+        Arc::new(HyperliquidRestClient::new(config)?),
+        ws,
+    ))
 }
 
 #[derive(Clone)]
@@ -32,12 +38,12 @@ pub struct Connected {
 }
 
 impl Connected {
-    fn from_rest_client(rest: Arc<HyperliquidRestClient>) -> Self {
+    fn from_rest_client(rest: Arc<HyperliquidRestClient>, ws: Arc<HyperliquidWsClient>) -> Self {
         Self::from_parts(
             Arc::new(HyperliquidExecution::new(Arc::clone(&rest))),
-            Arc::new(HyperliquidMarketData),
+            Arc::new(HyperliquidMarketData::new(Arc::clone(&ws))),
             Arc::new(HyperliquidAccountSummary::new(Arc::clone(&rest))),
-            Arc::new(HyperliquidAccount::new(Arc::clone(&rest))),
+            Arc::new(HyperliquidAccount::new(Arc::clone(&rest), ws)),
             Arc::new(HyperliquidMetadata::new(rest)),
         )
     }
@@ -89,7 +95,15 @@ impl HyperliquidExecution {
     }
 }
 
-struct HyperliquidMarketData;
+struct HyperliquidMarketData {
+    ws: Arc<HyperliquidWsClient>,
+}
+
+impl HyperliquidMarketData {
+    fn new(ws: Arc<HyperliquidWsClient>) -> Self {
+        Self { ws }
+    }
+}
 
 struct HyperliquidAccountSummary {
     rest: Arc<HyperliquidRestClient>,
@@ -103,11 +117,12 @@ impl HyperliquidAccountSummary {
 
 struct HyperliquidAccount {
     rest: Arc<HyperliquidRestClient>,
+    ws: Arc<HyperliquidWsClient>,
 }
 
 impl HyperliquidAccount {
-    fn new(rest: Arc<HyperliquidRestClient>) -> Self {
-        Self { rest }
+    fn new(rest: Arc<HyperliquidRestClient>, ws: Arc<HyperliquidWsClient>) -> Self {
+        Self { rest, ws }
     }
 }
 
@@ -151,11 +166,9 @@ impl ExecutionPort for HyperliquidExecution {
 impl MarketDataPort for HyperliquidMarketData {
     async fn subscribe_prices(
         &self,
-        _instrument: &Instrument,
+        instrument: &Instrument,
     ) -> Result<mpsc::Receiver<MarketDataTick>> {
-        Err(anyhow!(
-            "Hyperliquid market data websocket is not implemented yet"
-        ))
+        self.ws.subscribe_prices(instrument).await
     }
 }
 
@@ -178,9 +191,7 @@ impl AccountPort for HyperliquidAccount {
     }
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
-        Err(anyhow!(
-            "Hyperliquid user data websocket is not implemented yet"
-        ))
+        self.ws.subscribe_user_data().await
     }
 }
 
