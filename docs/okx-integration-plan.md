@@ -667,7 +667,7 @@ Commit SHA：`0a95e81`
 - Modify: `exchanges/okx/src/rest/mod.rs`
 - Modify: `exchanges/okx/src/lib.rs`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `rest::client::tests` 覆盖：
 
@@ -688,7 +688,7 @@ cargo test -p poise-okx rest::client::tests::
 
 Expected: client missing.
 
-- [ ] **Step 2: 实现 REST client**
+- [x] **Step 2: 实现 REST client**
 
 `OkxRestClient` fields:
 
@@ -719,7 +719,7 @@ Methods:
 
 Use `reqwest::Client::builder().no_proxy().build()?` to avoid system proxy side effects in tests.
 
-- [ ] **Step 3: 运行测试确认通过**
+- [x] **Step 3: 运行测试确认通过**
 
 Run:
 

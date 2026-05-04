@@ -3252,10 +3252,12 @@ dependencies = [
  "hmac",
  "poise-core",
  "poise-engine",
+ "reqwest 0.11.27",
  "serde",
  "serde_json",
  "sha2",
  "tokio",
+ "url",
 ]
 
 [[package]]
