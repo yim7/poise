@@ -380,7 +380,7 @@ cargo test -p poise-server exchange_startup::tests::build_symbol_leverage_setter
 
 Expected: 全部 PASS。
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 Commit message:
 
@@ -391,7 +391,7 @@ git commit -m "Add OKX config boundary"
 
 回写本 task 的 `Commit SHA`。
 
-Commit SHA：
+Commit SHA：`b4a840e`
 
 ### Task 2: OKX 配置、端点和 REST 签名
 
