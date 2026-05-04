@@ -957,7 +957,7 @@ Expected:
 - 除当前 task SHA 回写前，没有未完成计划项
 - 工作区只有计划 SHA 回写变更或为空
 
-- [ ] **Step 4: 提交并回写 SHA**
+- [x] **Step 4: 提交并回写 SHA**
 
 Commit message:
 
@@ -966,7 +966,7 @@ git add README.md SECURITY.md docs/system-overview.md docs/okx-integration-desig
 git commit -m "docs: document OKX swap support"
 ```
 
-Commit SHA：
+Commit SHA：`9d83f4f`
 
 ## 最终完成审计
 
