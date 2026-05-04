@@ -19,7 +19,7 @@ Poise 目前按知识边界分层，而不是按启动步骤分层。
 - `engine/` 拥有单个 track 的运行时状态、目标计算、执行规划、恢复和对账逻辑。
 - `application/` 拥有用例层服务、读模型、持久化 port、`TrackDefinitionRegistry` 和 session effect 队列。
 - `storage/` 是 SQLite 适配层，只实现 application 定义的持久化 port。
-- `exchanges/binance/`、`exchanges/bybit/` 和 `exchanges/hyperliquid/` 各自封装交易所协议、鉴权、REST / WebSocket 映射和窄控制 helper。
+- `exchanges/binance/`、`exchanges/bybit/`、`exchanges/hyperliquid/` 和 `exchanges/okx/` 各自封装交易所协议、鉴权、REST / WebSocket 映射和窄控制 helper。
 - `server/` 拥有配置解析、启动装配、交易所选择、HTTP / WebSocket、runtime task 和进程级状态。
 - `protocol/` 拥有 `server` 与 `tui` 共享的 wire DTO。
 - `tui/` 是本地值守界面，只依赖 HTTP / WebSocket 协议。
@@ -41,17 +41,17 @@ server::config::TrackSpec
 
 当前重要约束：
 
-- `exchange.venue` 当前支持 `binance`、`bybit` 和 `hyperliquid`。
-- Binance / Bybit 使用 `api_key` 和 `api_secret`；Hyperliquid 使用 `private_key` 和 `wallet_address`，可选 `vault_address`。
+- `exchange.venue` 当前支持 `binance`、`bybit`、`hyperliquid` 和 `okx`。
+- Binance / Bybit 使用 `api_key` 和 `api_secret`；Hyperliquid 使用 `private_key` 和 `wallet_address`，可选 `vault_address`；OKX 使用 `api_key`、`api_secret` 和 `passphrase`。
 - `track_id` 是显式配置的稳定业务标识。
 - `Instrument` 由 `exchange.venue()` 和 track `symbol` 组成。
-- `symbol` 是当前交易所的合约标识：Binance / Bybit 使用 `BTCUSDT` 这类合约符号，Hyperliquid perpetuals 使用 `BTC`、`ETH` 这类 coin 名称。
+- `symbol` 是当前交易所的合约标识：Binance / Bybit 使用 `BTCUSDT` 这类合约符号，Hyperliquid perpetuals 使用 `BTC`、`ETH` 这类 coin 名称，OKX SWAP 使用 `BTC-USDT-SWAP` 这类 instrument id。
 - 同一实例内 `track_id` 必须唯一。
 - 同一实例内 `Instrument { venue, symbol }` 必须唯一。
 - `leverage` 是 server-owned startup-only 配置，不进入 `TrackDefinition` 或 `TrackConfig`。
 - 未配置 `leverage` 时默认 `10`。
 
-当前交易所接入只覆盖 Poise 运行需要的合约能力。Hyperliquid 适配器只接入 perpetuals，不提供 spot、提现、划转、TWAP 或 vault 运维功能；可选 `vault_address` 只作为 Hyperliquid action 签名上下文进入适配器内部。
+当前交易所接入只覆盖 Poise 运行需要的合约能力。Hyperliquid 适配器只接入 perpetuals，不提供 spot、提现、划转、TWAP 或 vault 运维功能；可选 `vault_address` 只作为 Hyperliquid action 签名上下文进入适配器内部。OKX 适配器只接入 `SWAP` 永续合约，REST 覆盖规则查询、账户摘要、持仓、open orders、下单、撤单、cancel all 和启动期杠杆设置；WebSocket 覆盖 ticker、mark price、订单更新、成交 PNL、持仓更新、断线重连和重订阅。OKX 当前只支持 `cross` 保证金模式和 `net` 持仓模式，不提供 spot、期权、划转、提现或资金账户操作。
 
 `TrackSpec::to_track_definition(venue)` 负责把配置字段投影为 `TrackDefinition`，并触发 core 层策略、风险和默认值校验。
 

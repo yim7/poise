@@ -1,6 +1,6 @@
 # OKX 合约接入执行计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use task-list checkbox syntax for tracking.
 
 **Goal:** 自研 OKX `SWAP` 永续合约交易所适配，只覆盖 Poise 当前运行需要的合约能力。
 
@@ -912,7 +912,7 @@ Commit SHA：`4486595`
 - Modify: `SECURITY.md`
 - Modify: `docs/system-overview.md`
 
-- [ ] **Step 1: 更新文档**
+- [x] **Step 1: 更新文档**
 
 README 需要说明：
 
@@ -927,7 +927,7 @@ README 需要说明：
 
 `docs/system-overview.md` 需要更新当前支持交易所、配置字段和 symbol 规则。
 
-- [ ] **Step 2: 运行最终测试**
+- [x] **Step 2: 运行最终测试**
 
 Run:
 
@@ -941,7 +941,7 @@ cargo test -p poise-server exchange_startup::tests::
 
 Expected: 全部 PASS。
 
-- [ ] **Step 3: 静态审计**
+- [x] **Step 3: 静态审计**
 
 Run:
 
