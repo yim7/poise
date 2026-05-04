@@ -54,7 +54,7 @@ impl OkxRestClient {
     }
 
     #[cfg(test)]
-    fn with_http_client_and_timestamp_provider(
+    pub(crate) fn with_http_client_and_timestamp_provider(
         base_url: impl Into<String>,
         credentials: Credentials,
         simulated_trading: bool,

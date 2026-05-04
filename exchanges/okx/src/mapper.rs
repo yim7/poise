@@ -12,6 +12,10 @@ use crate::rest::models::{
 };
 
 pub(crate) fn exchange_info_from_instrument(value: InstrumentInfo) -> Result<ExchangeInfo> {
+    if let Some(contract_value) = value.ct_val.as_deref() {
+        let _ = parse_decimal("ctVal", contract_value)?;
+    }
+
     Ok(ExchangeInfo {
         instrument: Instrument::new(Venue::Okx, value.inst_id),
         rules: poise_core::types::ExchangeRules {
