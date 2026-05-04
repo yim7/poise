@@ -803,7 +803,7 @@ cargo test -p poise-server exchange_startup::tests::
 
 Expected: 全部 PASS。
 
-- [ ] **Step 4: 提交并回写 SHA**
+- [x] **Step 4: 提交并回写 SHA**
 
 Commit message:
 
@@ -812,7 +812,7 @@ git add exchanges/okx server/src/assembly.rs server/src/exchange_startup.rs
 git commit -m "Wire OKX exchange ports"
 ```
 
-Commit SHA：
+Commit SHA：`bc5d1c3`
 
 ### Task 6: WebSocket 行情和用户事件
 
