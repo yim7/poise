@@ -11,12 +11,19 @@ use poise_engine::ports::{
     OrderReceipt, OrderRequest, Position, UserDataEvent,
 };
 
-use crate::{Config, rest::client::OkxRestClient};
+use crate::{Config, rest::client::OkxRestClient, ws::OkxWsClient};
 
 pub async fn connect(config: &Config) -> Result<Connected> {
-    Ok(Connected::from_rest_client(Arc::new(OkxRestClient::new(
-        config,
-    )?)))
+    let credentials = config.credentials()?;
+    let endpoints = config.endpoints();
+    Ok(Connected::from_clients(
+        Arc::new(OkxRestClient::new(config)?),
+        Arc::new(OkxWsClient::new(
+            endpoints.public_ws_url(),
+            endpoints.private_ws_url(),
+            credentials,
+        )),
+    ))
 }
 
 #[derive(Clone)]
@@ -29,12 +36,22 @@ pub struct Connected {
 }
 
 impl Connected {
+    fn from_clients(rest: Arc<OkxRestClient>, ws: Arc<OkxWsClient>) -> Self {
+        Self::from_parts(
+            Arc::new(OkxExecution::new(Arc::clone(&rest))),
+            Arc::new(OkxMarketData::new(Some(Arc::clone(&ws)))),
+            Arc::new(OkxAccountSummary::new(Arc::clone(&rest))),
+            Arc::new(OkxAccount::new(Arc::clone(&rest), Some(ws))),
+            Arc::new(OkxMetadata::new(rest)),
+        )
+    }
+
     fn from_rest_client(rest: Arc<OkxRestClient>) -> Self {
         Self::from_parts(
             Arc::new(OkxExecution::new(Arc::clone(&rest))),
-            Arc::new(OkxPendingMarketData),
+            Arc::new(OkxMarketData::new(None)),
             Arc::new(OkxAccountSummary::new(Arc::clone(&rest))),
-            Arc::new(OkxAccount::new(Arc::clone(&rest))),
+            Arc::new(OkxAccount::new(Arc::clone(&rest), None)),
             Arc::new(OkxMetadata::new(rest)),
         )
     }
@@ -80,12 +97,15 @@ struct OkxExecution {
     rest: Arc<OkxRestClient>,
 }
 
-struct OkxPendingMarketData;
+struct OkxMarketData {
+    ws: Option<Arc<OkxWsClient>>,
+}
 struct OkxAccountSummary {
     rest: Arc<OkxRestClient>,
 }
 struct OkxAccount {
     rest: Arc<OkxRestClient>,
+    ws: Option<Arc<OkxWsClient>>,
 }
 struct OkxMetadata {
     rest: Arc<OkxRestClient>,
@@ -97,6 +117,12 @@ impl OkxExecution {
     }
 }
 
+impl OkxMarketData {
+    fn new(ws: Option<Arc<OkxWsClient>>) -> Self {
+        Self { ws }
+    }
+}
+
 impl OkxAccountSummary {
     fn new(rest: Arc<OkxRestClient>) -> Self {
         Self { rest }
@@ -104,8 +130,8 @@ impl OkxAccountSummary {
 }
 
 impl OkxAccount {
-    fn new(rest: Arc<OkxRestClient>) -> Self {
-        Self { rest }
+    fn new(rest: Arc<OkxRestClient>, ws: Option<Arc<OkxWsClient>>) -> Self {
+        Self { rest, ws }
     }
 }
 
@@ -142,14 +168,16 @@ impl ExecutionPort for OkxExecution {
 }
 
 #[async_trait]
-impl MarketDataPort for OkxPendingMarketData {
+impl MarketDataPort for OkxMarketData {
     async fn subscribe_prices(
         &self,
-        _instrument: &Instrument,
+        instrument: &Instrument,
     ) -> Result<mpsc::Receiver<MarketDataTick>> {
-        Err(anyhow!(
-            "OKX market data stream is pending WebSocket wiring"
-        ))
+        self.ws
+            .as_ref()
+            .ok_or_else(|| anyhow!("OKX market data stream requires WebSocket client"))?
+            .subscribe_prices(instrument)
+            .await
     }
 }
 
@@ -172,7 +200,11 @@ impl AccountPort for OkxAccount {
     }
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
-        Err(anyhow!("OKX user data stream is pending WebSocket wiring"))
+        self.ws
+            .as_ref()
+            .ok_or_else(|| anyhow!("OKX user data stream requires WebSocket client"))?
+            .subscribe_user_data()
+            .await
     }
 }
 

@@ -3,6 +3,7 @@ mod connected;
 mod mapper;
 mod rest;
 mod startup_control;
+mod ws;
 
 pub use config::{Config, Credentials, Deployment, Endpoints};
 pub use connected::{Connected, connect};

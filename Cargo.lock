@@ -3249,7 +3249,9 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "futures-util",
  "hmac",
+ "native-tls",
  "poise-core",
  "poise-engine",
  "reqwest 0.11.27",
@@ -3257,6 +3259,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "tokio-tungstenite",
+ "tracing",
  "url",
 ]
 

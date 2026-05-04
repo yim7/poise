@@ -825,7 +825,7 @@ Commit SHA：`bc5d1c3`
 - Modify: `exchanges/okx/src/lib.rs`
 - Modify: `exchanges/okx/src/connected.rs`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `ws::tests` 覆盖：
 
@@ -846,7 +846,7 @@ cargo test -p poise-okx ws::tests::
 
 Expected: WS module incomplete.
 
-- [ ] **Step 2: 实现 WS client**
+- [x] **Step 2: 实现 WS client**
 
 `OkxWsClient` fields:
 
@@ -877,13 +877,13 @@ pub(crate) struct OkxWsClient {
 - parse messages and send `UserDataEvent`
 - on disconnect, sleep backoff, relogin and resubscribe
 
-- [ ] **Step 3: 接入 connected ports**
+- [x] **Step 3: 接入 connected ports**
 
 `OkxMarketData` routes `subscribe_prices` to `OkxWsClient`.
 
 `OkxAccount` routes `subscribe_user_data` to `OkxWsClient`.
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run:
 

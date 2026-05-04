@@ -109,6 +109,18 @@ pub struct Credentials {
 }
 
 impl Credentials {
+    pub(crate) fn new(
+        api_key: impl Into<String>,
+        api_secret: impl Into<String>,
+        passphrase: impl Into<String>,
+    ) -> Self {
+        Self {
+            api_key: api_key.into(),
+            api_secret: api_secret.into(),
+            passphrase: passphrase.into(),
+        }
+    }
+
     pub fn api_key(&self) -> &str {
         &self.api_key
     }
