@@ -23,6 +23,7 @@ use poise_engine::ports::MetadataPort;
 #[cfg(test)]
 use poise_engine::ports::{AccountPort, AccountSummaryPort, ExecutionPort, MarketDataPort};
 use poise_hyperliquid::connect as connect_hyperliquid;
+use poise_okx::connect as connect_okx;
 #[cfg(test)]
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
@@ -138,6 +139,17 @@ pub(crate) async fn build_exchange(config: &ExchangeConfig) -> Result<Exchange> 
             let connected = connect_hyperliquid(hyperliquid_config).await?;
             Ok(Exchange::new(
                 Venue::Hyperliquid,
+                connected.execution(),
+                connected.market_data(),
+                connected.account_summary(),
+                connected.account(),
+                connected.metadata(),
+            ))
+        }
+        ExchangeConfig::Okx(okx_config) => {
+            let connected = connect_okx(okx_config).await?;
+            Ok(Exchange::new(
+                Venue::Okx,
                 connected.execution(),
                 connected.market_data(),
                 connected.account_summary(),
@@ -428,7 +440,7 @@ fn build_startup_capacity_mode(
     startup_leverage: u32,
 ) -> RuntimeStartupCapacityMode {
     match instrument.venue {
-        Venue::Bybit | Venue::Hyperliquid => {
+        Venue::Bybit | Venue::Hyperliquid | Venue::Okx => {
             RuntimeStartupCapacityMode::AvailableBalanceTimesLeverage {
                 leverage: startup_leverage,
             }
@@ -835,6 +847,36 @@ total_loss_limit = 600.0
         let exchange = build_exchange(&config.exchange).await.unwrap();
 
         assert_eq!(exchange.venue(), Venue::Hyperliquid);
+    }
+
+    #[tokio::test]
+    async fn build_exchange_uses_exchange_deployment_for_okx_endpoint_selection() {
+        let config = parse_config(
+            r#"
+[exchange]
+venue = "okx"
+deployment = "demo"
+api_key = "demo-key"
+api_secret = "demo-secret"
+passphrase = "demo-passphrase"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTC-USDT-SWAP"
+lower_price = 90000.0
+upper_price = 110000.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 3000.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+"#,
+        )
+        .unwrap();
+
+        let exchange = build_exchange(&config.exchange).await.unwrap();
+
+        assert_eq!(exchange.venue(), Venue::Okx);
     }
 
     #[tokio::test]

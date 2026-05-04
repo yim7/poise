@@ -37,6 +37,7 @@ pub enum Venue {
     Binance,
     Bybit,
     Hyperliquid,
+    Okx,
 }
 
 impl Venue {
@@ -45,6 +46,7 @@ impl Venue {
             Self::Binance => "binance",
             Self::Bybit => "bybit",
             Self::Hyperliquid => "hyperliquid",
+            Self::Okx => "okx",
         }
     }
 }
@@ -215,6 +217,11 @@ mod tests {
     #[test]
     fn venue_as_str_supports_hyperliquid() {
         assert_eq!(Venue::Hyperliquid.as_str(), "hyperliquid");
+    }
+
+    #[test]
+    fn venue_as_str_supports_okx() {
+        assert_eq!(Venue::Okx.as_str(), "okx");
     }
 
     #[test]

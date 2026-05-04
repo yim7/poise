@@ -14,6 +14,7 @@ poise-bybit = { path = "../exchanges/bybit" }
 poise-core = { path = "../core" }
 poise-engine = { path = "../engine" }
 poise-hyperliquid = { path = "../exchanges/hyperliquid" }
+poise-okx = { path = "../exchanges/okx" }
 poise-protocol = { path = "../protocol" }
 poise-storage = { path = "../storage" }
 serde.workspace = true

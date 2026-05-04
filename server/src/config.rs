@@ -10,6 +10,7 @@ use poise_core::strategy::{
 };
 use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
 use poise_hyperliquid as hyperliquid;
+use poise_okx as okx;
 use serde::{Deserialize, Deserializer};
 
 use crate::exchange_startup::build_track_leverage_index;
@@ -52,6 +53,7 @@ pub enum ExchangeConfig {
     Binance(binance::Config),
     Bybit(bybit::Config),
     Hyperliquid(hyperliquid::Config),
+    Okx(okx::Config),
 }
 
 impl Default for ExchangeConfig {
@@ -66,6 +68,7 @@ impl ExchangeConfig {
             Self::Binance(_) => Venue::Binance,
             Self::Bybit(_) => Venue::Bybit,
             Self::Hyperliquid(_) => Venue::Hyperliquid,
+            Self::Okx(_) => Venue::Okx,
         }
     }
 }
@@ -247,6 +250,47 @@ total_loss_limit = 600.0
             .unwrap();
         assert_eq!(definition.instrument().venue, Venue::Hyperliquid);
         assert_eq!(definition.instrument().symbol, "BTC");
+    }
+
+    #[test]
+    fn parses_okx_exchange_config() {
+        let config = parse_config(
+            r#"
+[exchange]
+venue = "okx"
+deployment = "demo"
+api_key = "demo-key"
+api_secret = "demo-secret"
+passphrase = "demo-passphrase"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTC-USDT-SWAP"
+lower_price = 90000.0
+upper_price = 110000.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.exchange.venue(), Venue::Okx);
+        let definition = config.tracks[0]
+            .to_track_definition(config.exchange.venue())
+            .unwrap();
+        assert_eq!(definition.instrument().venue, Venue::Okx);
+        assert_eq!(definition.instrument().symbol, "BTC-USDT-SWAP");
+        if let ExchangeConfig::Okx(exchange) = &config.exchange {
+            assert_eq!(exchange.deployment, poise_okx::Deployment::Demo);
+            assert_eq!(exchange.api_key.as_deref(), Some("demo-key"));
+            assert_eq!(exchange.api_secret.as_deref(), Some("demo-secret"));
+            assert_eq!(exchange.passphrase.as_deref(), Some("demo-passphrase"));
+        } else {
+            panic!("expected OKX fixture to parse as ExchangeConfig::Okx");
+        }
     }
 
     #[test]

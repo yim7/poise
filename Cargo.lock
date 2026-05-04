@@ -3242,6 +3242,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "poise-okx"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "poise-core",
+ "poise-engine",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "poise-protocol"
 version = "0.1.0"
 dependencies = [
@@ -3264,6 +3277,7 @@ dependencies = [
  "poise-core",
  "poise-engine",
  "poise-hyperliquid",
+ "poise-okx",
  "poise-protocol",
  "poise-storage",
  "reqwest 0.11.27",

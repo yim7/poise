@@ -30,6 +30,13 @@ impl SymbolLeverageSetter for poise_hyperliquid::SymbolLeverageControl {
     }
 }
 
+#[async_trait::async_trait]
+impl SymbolLeverageSetter for poise_okx::SymbolLeverageControl {
+    async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()> {
+        self.set_leverage(&instrument.symbol, leverage).await
+    }
+}
+
 pub(crate) fn build_symbol_leverage_setter(
     config: &ExchangeConfig,
 ) -> Result<Arc<dyn SymbolLeverageSetter>> {
@@ -43,6 +50,9 @@ pub(crate) fn build_symbol_leverage_setter(
         ExchangeConfig::Hyperliquid(hyperliquid_config) => Ok(Arc::new(
             poise_hyperliquid::SymbolLeverageControl::new(hyperliquid_config)?,
         )),
+        ExchangeConfig::Okx(okx_config) => {
+            Ok(Arc::new(poise_okx::SymbolLeverageControl::new(okx_config)?))
+        }
     }
 }
 
@@ -127,6 +137,17 @@ mod tests {
             ),
             wallet_address: Some("0x2222222222222222222222222222222222222222".into()),
             vault_address: None,
+        }))
+        .unwrap();
+    }
+
+    #[test]
+    fn build_symbol_leverage_setter_accepts_okx_credentials() {
+        build_symbol_leverage_setter(&ExchangeConfig::Okx(poise_okx::Config {
+            deployment: poise_okx::Deployment::Demo,
+            api_key: Some("demo-key".into()),
+            api_secret: Some("demo-secret".into()),
+            passphrase: Some("demo-passphrase".into()),
         }))
         .unwrap();
     }
