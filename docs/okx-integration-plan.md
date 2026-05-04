@@ -649,7 +649,7 @@ cargo test -p poise-okx rest::models::tests::
 
 Expected: 全部 PASS。
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 Commit message:
 
@@ -658,7 +658,7 @@ git add exchanges/okx
 git commit -m "Add OKX REST models and mappers"
 ```
 
-Commit SHA：
+Commit SHA：`0a95e81`
 
 ### Task 4: REST client 查询和写操作
 
