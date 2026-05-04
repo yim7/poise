@@ -894,7 +894,7 @@ cargo test -p poise-okx connected::tests::
 
 Expected: 全部 PASS。
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 Commit message:
 
@@ -903,7 +903,7 @@ git add exchanges/okx
 git commit -m "Add OKX websocket streams"
 ```
 
-Commit SHA：
+Commit SHA：`4486595`
 
 ### Task 7: 文档和最终验收
 
