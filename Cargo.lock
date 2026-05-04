@@ -3253,6 +3253,7 @@ dependencies = [
  "poise-core",
  "poise-engine",
  "serde",
+ "serde_json",
  "sha2",
  "tokio",
 ]

@@ -570,7 +570,7 @@ Commit SHA：`a58c0c1`
 - Modify: `exchanges/okx/src/lib.rs`
 - Modify: `exchanges/okx/src/rest/mod.rs`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 覆盖以下行为：
 
@@ -590,7 +590,7 @@ cargo test -p poise-okx rest::models::tests::
 
 Expected: 模型和 mapper 缺失导致失败。
 
-- [ ] **Step 2: 实现模型**
+- [x] **Step 2: 实现模型**
 
 `OkxEnvelope<T>`:
 
@@ -614,7 +614,7 @@ Required response models:
 
 Use serde renames to mirror OKX fields exactly.
 
-- [ ] **Step 3: 实现 mapper**
+- [x] **Step 3: 实现 mapper**
 
 `mapper.rs` owns:
 
@@ -638,7 +638,7 @@ Mapping decisions:
 - `filled` -> `OrderStatus::Filled`
 - `canceled` / `mmp_canceled` -> `OrderStatus::Canceled`
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run:
 
