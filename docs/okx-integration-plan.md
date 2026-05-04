@@ -551,7 +551,7 @@ cargo test -p poise-okx rest::auth::tests::
 
 Expected: 全部 PASS。
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 Commit message:
 
@@ -560,7 +560,7 @@ git add Cargo.toml exchanges/okx
 git commit -m "Add OKX config validation and signing"
 ```
 
-Commit SHA：
+Commit SHA：`a58c0c1`
 
 ### Task 3: REST 模型和 mapper
 
