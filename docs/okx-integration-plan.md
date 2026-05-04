@@ -729,7 +729,7 @@ cargo test -p poise-okx rest::client::tests::
 
 Expected: 全部 PASS。
 
-- [ ] **Step 4: 提交并回写 SHA**
+- [x] **Step 4: 提交并回写 SHA**
 
 Commit message:
 
@@ -738,7 +738,7 @@ git add exchanges/okx
 git commit -m "Add OKX REST client"
 ```
 
-Commit SHA：
+Commit SHA：`5f0ed46`
 
 ### Task 5: Connected ports、startup control 和 server 装配
 
