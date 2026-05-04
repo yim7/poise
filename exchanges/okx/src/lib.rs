@@ -1,5 +1,6 @@
 mod config;
 mod connected;
+mod rest;
 mod startup_control;
 
 pub use config::{Config, Credentials, Deployment, Endpoints};

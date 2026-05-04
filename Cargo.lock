@@ -3247,10 +3247,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
+ "hmac",
  "poise-core",
  "poise-engine",
  "serde",
+ "sha2",
  "tokio",
 ]
 

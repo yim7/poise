@@ -401,7 +401,7 @@ Commit SHA：`b4a840e`
 - Create: `exchanges/okx/src/rest/mod.rs`
 - Create: `exchanges/okx/src/rest/auth.rs`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `exchanges/okx/src/config.rs`：
 
@@ -414,6 +414,7 @@ fn deployment_resolves_mainnet_and_demo_endpoints() {
             "https://www.okx.com",
             "wss://ws.okx.com:8443/ws/v5/public",
             "wss://ws.okx.com:8443/ws/v5/private",
+            "wss://ws.okx.com:8443/ws/v5/business",
             false,
         )
     );
@@ -423,6 +424,7 @@ fn deployment_resolves_mainnet_and_demo_endpoints() {
             "https://www.okx.com",
             "wss://wspap.okx.com:8443/ws/v5/public",
             "wss://wspap.okx.com:8443/ws/v5/private",
+            "wss://wspap.okx.com:8443/ws/v5/business",
             true,
         )
     );
@@ -477,7 +479,7 @@ fn builds_websocket_login_signature_path() {
 
 签名固定值由独立 HMAC-SHA256 + Base64 计算得到，测试不调用生产 signer 之外的 helper。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run:
 
@@ -488,7 +490,7 @@ cargo test -p poise-okx rest::auth::tests::
 
 Expected: auth module and signer missing.
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 Add workspace dependency if missing:
 
@@ -538,7 +540,7 @@ pub(crate) fn sign_okx_payload(
 mod rest;
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run:
 

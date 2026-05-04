@@ -129,3 +129,86 @@ fn required_field(value: Option<&str>, field_name: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("missing required {field_name}"))?;
     Ok(value.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deployment_resolves_mainnet_and_demo_endpoints() {
+        assert_eq!(
+            Deployment::Mainnet.endpoints(),
+            Endpoints::new(
+                "https://www.okx.com",
+                "wss://ws.okx.com:8443/ws/v5/public",
+                "wss://ws.okx.com:8443/ws/v5/private",
+                "wss://ws.okx.com:8443/ws/v5/business",
+                false,
+            )
+        );
+        assert_eq!(
+            Deployment::Demo.endpoints(),
+            Endpoints::new(
+                "https://www.okx.com",
+                "wss://wspap.okx.com:8443/ws/v5/public",
+                "wss://wspap.okx.com:8443/ws/v5/private",
+                "wss://wspap.okx.com:8443/ws/v5/business",
+                true,
+            )
+        );
+    }
+
+    #[test]
+    fn credentials_validate_required_fields_and_trim_values() {
+        let config = Config {
+            deployment: Deployment::Demo,
+            api_key: Some("  demo-key  ".to_string()),
+            api_secret: Some("\n demo-secret \t".to_string()),
+            passphrase: Some(" demo-passphrase ".to_string()),
+        };
+
+        let credentials = config.credentials().unwrap();
+
+        assert_eq!(credentials.api_key(), "demo-key");
+        assert_eq!(credentials.api_secret(), "demo-secret");
+        assert_eq!(credentials.passphrase(), "demo-passphrase");
+    }
+
+    #[test]
+    fn credentials_reject_missing_required_fields() {
+        let cases = [
+            (
+                Config {
+                    deployment: Deployment::Demo,
+                    api_key: None,
+                    api_secret: Some("demo-secret".to_string()),
+                    passphrase: Some("demo-passphrase".to_string()),
+                },
+                "missing required exchange.api_key",
+            ),
+            (
+                Config {
+                    deployment: Deployment::Demo,
+                    api_key: Some("demo-key".to_string()),
+                    api_secret: Some(" ".to_string()),
+                    passphrase: Some("demo-passphrase".to_string()),
+                },
+                "missing required exchange.api_secret",
+            ),
+            (
+                Config {
+                    deployment: Deployment::Demo,
+                    api_key: Some("demo-key".to_string()),
+                    api_secret: Some("demo-secret".to_string()),
+                    passphrase: None,
+                },
+                "missing required exchange.passphrase",
+            ),
+        ];
+
+        for (config, expected) in cases {
+            let error = config.credentials().unwrap_err();
+            assert!(error.to_string().contains(expected));
+        }
+    }
+}
