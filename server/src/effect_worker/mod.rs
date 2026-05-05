@@ -16,12 +16,16 @@ use crate::server_context::EffectWorkerState;
 mod dispatch;
 mod execute;
 mod retry;
+
+const DEFAULT_ERROR_BACKOFF_INTERVAL: Duration = Duration::from_secs(1);
+
 #[derive(Clone)]
 pub struct EffectWorker {
     state: EffectWorkerState,
     execution: Arc<dyn ExecutionPort>,
     account: Arc<dyn AccountPort>,
     poll_interval: Duration,
+    error_backoff_interval: Duration,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -44,11 +48,30 @@ impl EffectWorker {
         poll_interval: Duration,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
+        Self::with_shutdown_rx_and_error_backoff(
+            state,
+            execution,
+            account,
+            poll_interval,
+            DEFAULT_ERROR_BACKOFF_INTERVAL,
+            shutdown_rx,
+        )
+    }
+
+    fn with_shutdown_rx_and_error_backoff(
+        state: impl Into<EffectWorkerState>,
+        execution: Arc<dyn ExecutionPort>,
+        account: Arc<dyn AccountPort>,
+        poll_interval: Duration,
+        error_backoff_interval: Duration,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> Self {
         Self {
             state: state.into(),
             execution,
             account,
             poll_interval,
+            error_backoff_interval,
             shutdown_rx,
         }
     }
@@ -78,7 +101,17 @@ impl EffectWorker {
                     }
                 }
                 _ = sleep(self.poll_interval) => {
-                    self.run_once().await?;
+                    if let Err(error) = self.run_once().await {
+                        tracing::warn!("effect worker iteration failed: {error}");
+                        if wait_for_backoff_or_shutdown(
+                            &mut shutdown_rx,
+                            self.error_backoff_interval,
+                        )
+                        .await
+                        {
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
@@ -132,6 +165,21 @@ impl EffectWorker {
     }
 }
 
+async fn wait_for_backoff_or_shutdown(
+    shutdown_rx: &mut watch::Receiver<bool>,
+    backoff_interval: Duration,
+) -> bool {
+    if *shutdown_rx.borrow() {
+        return true;
+    }
+
+    tokio::select! {
+        biased;
+        changed = shutdown_rx.changed() => changed.is_err() || *shutdown_rx.borrow(),
+        _ = sleep(backoff_interval) => false,
+    }
+}
+
 fn is_insufficient_margin_failure(message: &str) -> bool {
     message.contains(r#""code":-2019"#) || message.contains("Margin is insufficient")
 }
@@ -150,6 +198,209 @@ impl Cancellation {
     fn instrument(&self) -> &Instrument {
         match self {
             Self::One { instrument, .. } | Self::All { instrument } => instrument,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use anyhow::{Result, anyhow};
+    use chrono::Utc;
+    use poise_core::track::{Instrument, TrackId, Venue};
+    use poise_engine::ports::{
+        ExchangeOpenOrderSnapshot, ExecutionPort, OrderReceipt, OrderRequest, OrderStatus, Position,
+    };
+    use poise_storage::sqlite::SqliteStorage;
+    use tokio::sync::{Notify, watch};
+    use tokio::time::timeout;
+
+    use crate::effect_worker::EffectWorker;
+    use crate::test_support::{NoopAccountPort, build_effect_worker_context_for_repository};
+
+    #[tokio::test]
+    async fn worker_continues_after_iteration_error() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let effect_worker_context = build_effect_worker_context_for_repository(repository);
+        let track_id = TrackId::new("btc-core");
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+        effect_worker_context
+            .effect_worker_state
+            .session_effect_queue
+            .enqueue_transition_effects_for_test(
+                &track_id,
+                &[poise_engine::execution_plan::TrackEffect::CancelOrder {
+                    instrument: instrument.clone(),
+                    order_id: "unknown-order".into(),
+                }],
+                Utc::now(),
+            );
+
+        let execution = Arc::new(ReconcileFailThenRecordExecution::default());
+        let account = Arc::new(NoopAccountPort);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let worker = EffectWorker::with_shutdown_rx_and_error_backoff(
+            effect_worker_context.clone(),
+            execution.clone(),
+            account,
+            Duration::from_millis(1),
+            Duration::from_millis(10),
+            shutdown_rx,
+        );
+        let worker_task = tokio::spawn(async move { worker.run_until_shutdown().await });
+
+        execution.wait_for_reconcile_attempt().await;
+        let follow_up_track_id = TrackId::new("eth-core");
+        let follow_up_instrument = Instrument::new(Venue::Binance, "ETHUSDT");
+        effect_worker_context
+            .effect_worker_state
+            .session_effect_queue
+            .enqueue_transition_effects_for_test(
+                &follow_up_track_id,
+                &[poise_engine::execution_plan::TrackEffect::CancelAll {
+                    instrument: follow_up_instrument,
+                }],
+                Utc::now(),
+            );
+
+        timeout(Duration::from_millis(100), execution.wait_for_cancel_all())
+            .await
+            .expect("effect worker should continue processing effects after one failed iteration");
+        shutdown_tx.send(true).unwrap();
+        worker_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn worker_backs_off_after_iteration_error_before_next_poll() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let effect_worker_context = build_effect_worker_context_for_repository(repository);
+        let track_id = TrackId::new("btc-core");
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+        effect_worker_context
+            .effect_worker_state
+            .session_effect_queue
+            .enqueue_transition_effects_for_test(
+                &track_id,
+                &[poise_engine::execution_plan::TrackEffect::CancelOrder {
+                    instrument: instrument.clone(),
+                    order_id: "unknown-order".into(),
+                }],
+                Utc::now(),
+            );
+
+        let execution = Arc::new(ReconcileFailThenRecordExecution::default());
+        let account = Arc::new(NoopAccountPort);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let worker = EffectWorker::with_shutdown_rx_and_error_backoff(
+            effect_worker_context.clone(),
+            execution.clone(),
+            account,
+            Duration::from_millis(1),
+            Duration::from_millis(75),
+            shutdown_rx,
+        );
+        let worker_task = tokio::spawn(async move { worker.run_until_shutdown().await });
+
+        execution.wait_for_reconcile_attempt().await;
+        let follow_up_track_id = TrackId::new("eth-core");
+        let follow_up_instrument = Instrument::new(Venue::Binance, "ETHUSDT");
+        effect_worker_context
+            .effect_worker_state
+            .session_effect_queue
+            .enqueue_transition_effects_for_test(
+                &follow_up_track_id,
+                &[poise_engine::execution_plan::TrackEffect::CancelAll {
+                    instrument: follow_up_instrument,
+                }],
+                Utc::now(),
+            );
+
+        timeout(Duration::from_millis(20), execution.wait_for_cancel_all())
+            .await
+            .expect_err("effect worker should back off after a failed iteration");
+        timeout(Duration::from_millis(200), execution.wait_for_cancel_all())
+            .await
+            .expect("effect worker should continue after the error backoff interval");
+        shutdown_tx.send(true).unwrap();
+        worker_task.await.unwrap().unwrap();
+    }
+
+    #[derive(Default)]
+    struct ReconcileFailThenRecordExecution {
+        reconcile_attempts: AtomicUsize,
+        cancel_all_calls: AtomicUsize,
+        reconcile_notify: Notify,
+        cancel_all_notify: Notify,
+    }
+
+    impl ReconcileFailThenRecordExecution {
+        async fn wait_for_reconcile_attempt(&self) {
+            loop {
+                if self.reconcile_attempts.load(Ordering::SeqCst) > 0 {
+                    return;
+                }
+                self.reconcile_notify.notified().await;
+            }
+        }
+
+        async fn wait_for_cancel_all(&self) {
+            loop {
+                if self.cancel_all_calls.load(Ordering::SeqCst) > 0 {
+                    return;
+                }
+                self.cancel_all_notify.notified().await;
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutionPort for ReconcileFailThenRecordExecution {
+        async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
+            Ok(OrderReceipt {
+                order_id: "test-order".into(),
+                client_order_id: req.client_order_id,
+                filled_qty: 0.0,
+                status: OrderStatus::New,
+            })
+        }
+
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            _order_id: &str,
+        ) -> Result<OrderReceipt> {
+            Err(anyhow::Error::new(
+                poise_engine::ports::ExecutionPortError::cancel_outcome_unknown(
+                    "Unknown order sent.",
+                ),
+            ))
+        }
+
+        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
+            self.cancel_all_calls.fetch_add(1, Ordering::SeqCst);
+            self.cancel_all_notify.notify_waiters();
+            Ok(())
+        }
+
+        async fn get_position(&self, instrument: &Instrument) -> Result<Position> {
+            self.reconcile_attempts.fetch_add(1, Ordering::SeqCst);
+            self.reconcile_notify.notify_waiters();
+            Err(anyhow!(
+                "simulated reconcile failure for {}",
+                instrument.symbol
+            ))
+        }
+
+        async fn get_open_orders(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<ExchangeOpenOrderSnapshot> {
+            Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                Vec::new(),
+            ))
         }
     }
 }

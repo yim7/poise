@@ -20,6 +20,7 @@ pub(crate) fn exchange_info_from_instrument(value: InstrumentInfo) -> Result<Exc
         instrument: Instrument::new(Venue::Okx, value.inst_id),
         rules: poise_core::types::ExchangeRules {
             price_tick: parse_decimal("tickSz", &value.tick_sz)?,
+            price_precision: Default::default(),
             quantity_step: parse_decimal("lotSz", &value.lot_sz)?,
             min_qty: parse_decimal("minSz", &value.min_sz)?,
             min_notional: 0.0,
@@ -143,6 +144,7 @@ mod tests {
             info.rules,
             ExchangeRules {
                 price_tick: 0.1,
+                price_precision: Default::default(),
                 quantity_step: 0.01,
                 min_qty: 0.01,
                 min_notional: 0.0,

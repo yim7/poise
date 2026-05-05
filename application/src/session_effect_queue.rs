@@ -6,6 +6,7 @@ use poise_core::track::TrackId;
 use poise_engine::execution_plan::TrackEffect;
 use poise_engine::executor::PendingSubmitHint;
 use poise_engine::observation::CompleteOpenOrderSnapshot;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionTrackEffect {
@@ -228,19 +229,29 @@ pub enum SessionQueueAction {
     },
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SessionEffectQueue {
     inner: Arc<Mutex<SessionEffectQueueInner>>,
 }
 
-#[derive(Default)]
 struct SessionEffectQueueInner {
+    session_id: String,
     tracks: HashMap<TrackId, TrackQueue>,
     ready_tracks: VecDeque<TrackId>,
     effect_index: HashMap<String, TrackId>,
     follow_up_tokens: HashMap<InternalFollowUpKey, FollowUpPointer>,
     next_follow_up_token: u64,
     next_batch_id: u64,
+}
+
+impl Default for SessionEffectQueue {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SessionEffectQueueInner::new(
+                Uuid::new_v4().simple().to_string(),
+            ))),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -696,6 +707,18 @@ impl SessionEffectQueue {
 }
 
 impl SessionEffectQueueInner {
+    fn new(session_id: String) -> Self {
+        Self {
+            session_id,
+            tracks: HashMap::new(),
+            ready_tracks: VecDeque::new(),
+            effect_index: HashMap::new(),
+            follow_up_tokens: HashMap::new(),
+            next_follow_up_token: 0,
+            next_batch_id: 0,
+        }
+    }
+
     fn validate_cancel_follow_up_plan(
         &self,
         plan: &CancelFollowUpResolutionPlan,
@@ -923,7 +946,12 @@ impl SessionEffectQueueInner {
 
     fn next_batch_id_for(&mut self, track_id: &TrackId) -> String {
         self.next_batch_id += 1;
-        format!("{}:batch:{}", track_id.as_str(), self.next_batch_id)
+        format!(
+            "{}:session:{}:batch:{}",
+            track_id.as_str(),
+            self.session_id,
+            self.next_batch_id
+        )
     }
 }
 
@@ -1056,6 +1084,25 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    #[test]
+    fn default_queues_generate_distinct_effect_identity_across_process_sessions() {
+        let first = SessionEffectQueue::default();
+        let second = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+
+        let first_ids = first
+            .enqueue_transition_effects(&track_id, &[cancel_all_effect()], Utc::now())
+            .effect_ids();
+        let second_ids = second
+            .enqueue_transition_effects(&track_id, &[cancel_all_effect()], Utc::now())
+            .effect_ids();
+
+        assert_ne!(
+            first_ids[0], second_ids[0],
+            "fresh process queues must not reuse persisted journal effect ids"
+        );
     }
 
     #[test]

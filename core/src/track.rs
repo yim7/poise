@@ -65,10 +65,13 @@ impl Instrument {
         }
     }
 
-    pub fn pnl_asset(&self) -> String {
-        quote_asset_for_symbol(&self.symbol)
-            .unwrap_or(self.symbol.as_str())
-            .to_string()
+    pub fn quote_asset(&self) -> String {
+        match self.venue {
+            Venue::Hyperliquid => "USDC".to_string(),
+            _ => quote_asset_for_symbol(&self.symbol)
+                .unwrap_or(self.symbol.as_str())
+                .to_string(),
+        }
     }
 }
 
@@ -225,12 +228,23 @@ mod tests {
     }
 
     #[test]
-    fn instrument_pnl_asset_uses_quote_asset_suffix() {
+    fn instrument_quote_asset_uses_quote_asset_suffix() {
         assert_eq!(
-            Instrument::new(Venue::Binance, "PAXGUSDT").pnl_asset(),
+            Instrument::new(Venue::Binance, "PAXGUSDT").quote_asset(),
             "USDT"
         );
-        assert_eq!(Instrument::new(Venue::Binance, "ETHBTC").pnl_asset(), "BTC");
+        assert_eq!(
+            Instrument::new(Venue::Binance, "ETHBTC").quote_asset(),
+            "BTC"
+        );
+    }
+
+    #[test]
+    fn hyperliquid_instrument_quote_asset_is_usdc() {
+        assert_eq!(
+            Instrument::new(Venue::Hyperliquid, "ETH").quote_asset(),
+            "USDC"
+        );
     }
 
     #[test]

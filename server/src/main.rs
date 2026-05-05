@@ -742,6 +742,7 @@ total_loss_limit = 600.0
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 rules: ExchangeRules {
                     price_tick: 0.1,
+                    price_precision: Default::default(),
                     quantity_step: 0.1,
                     min_qty: 0.0,
                     min_notional: 0.0,

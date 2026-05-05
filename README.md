@@ -50,9 +50,53 @@ mkdir -p "$HOME/poise-instances/testnet"
 cp configs/demo.toml "$HOME/poise-instances/testnet/config.toml"
 ```
 
-把实例目录里的 `[exchange]` 改成当前实例要连接的交易所和凭证。Binance / Bybit 使用 `api_key` 和 `api_secret`；Hyperliquid 使用 `private_key` 和 `wallet_address`，可选 `vault_address`；OKX 使用 `api_key`、`api_secret` 和 `passphrase`。
+把实例目录里的 `[exchange]` 改成当前实例要连接的交易所和凭证。一个实例只能选择一个交易所。
 
-### 2. 配置 track
+### 2. 选择交易所
+
+Binance USDⓈ-M Futures：
+
+```toml
+[exchange]
+venue = "binance"
+deployment = "testnet"
+api_key = ""
+api_secret = ""
+```
+
+Bybit USDⓈ-M Futures：
+
+```toml
+[exchange]
+venue = "bybit"
+deployment = "testnet"
+api_key = ""
+api_secret = ""
+```
+
+Hyperliquid Perps：
+
+```toml
+[exchange]
+venue = "hyperliquid"
+deployment = "testnet"
+private_key = "0x..."
+wallet_address = "0x..."
+# vault_address = "0x..."
+```
+
+OKX SWAP 永续合约：
+
+```toml
+[exchange]
+venue = "okx"
+deployment = "demo"
+api_key = ""
+api_secret = ""
+passphrase = ""
+```
+
+### 3. 配置 track
 
 一份最小可读的配置形状如下：
 
@@ -83,26 +127,19 @@ total_loss_limit = 750.0
 tick_timeout_secs = 30
 ```
 
-OKX demo 环境的最小 `[exchange]` 形状：
-
-```toml
-[exchange]
-venue = "okx"
-deployment = "demo"
-api_key = ""
-api_secret = ""
-passphrase = ""
-```
-
 当前配置语义：
 
 - `exchange.venue` 支持 `binance`、`bybit`、`hyperliquid` 和 `okx`。
 - Binance / Bybit / Hyperliquid 的 `exchange.deployment` 支持 `testnet` 和 `mainnet`；OKX 支持 `demo` 和 `mainnet`。
+- Binance / Bybit 使用 `api_key` 和 `api_secret`。
+- Hyperliquid 使用 `private_key` 和 `wallet_address`，可选 `vault_address`；这些字段必须是 `0x` 前缀 hex。
+- OKX 使用 `api_key`、`api_secret` 和 `passphrase`。
 - Binance / Bybit 的 `symbol` 使用交易所合约符号，例如 `BTCUSDT`。
 - Hyperliquid 只接入 perpetuals，`symbol` 使用 coin 名称，例如 `BTC` 或 `ETH`，不是 `BTCUSDT`。
+- Hyperliquid unified account / portfolio margin 下，Poise 使用 `spotClearinghouseState` 的 USDC 可用余额作为启动保证金口径；standard mode 下使用 perps `clearinghouseState.withdrawable`。
 - OKX 只接入 `SWAP` 永续合约，`symbol` 使用 OKX instrument id，例如 `BTC-USDT-SWAP`；当前只支持 `cross` 保证金模式和 `net` 持仓模式。
-- Hyperliquid 配置字段是 `private_key`、`wallet_address` 和可选 `vault_address`；当前不支持 spot、提现、划转、TWAP 或 vault 运维功能。
-- OKX 配置字段是 `api_key`、`api_secret` 和 `passphrase`；当前不支持 spot、期权、划转、提现或资金账户操作。
+- Hyperliquid 当前不支持 spot、提现、划转、TWAP 或 vault 运维功能。
+- OKX 当前不支持 spot、期权、划转、提现或资金账户操作。
 - `leverage` 不写时默认 `10`，启动时会按 track 下发到交易所。
 - `shape_family` 支持 `linear`、`inertial`、`responsive`。
 - `out_of_band_policy` 支持 `freeze`、`flatten`、`terminate`。
@@ -111,7 +148,7 @@ passphrase = ""
 
 详细边界见 [docs/system-overview.md](docs/system-overview.md)。
 
-### 3. 启动服务端
+### 4. 启动服务端
 
 ```bash
 cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet"
@@ -119,7 +156,7 @@ cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet"
 
 启动后服务端会读取配置、初始化 SQLite、连接交易所、执行 startup-only 杠杆设置、恢复本地业务状态，并启动 HTTP / WebSocket 控制面。
 
-### 4. 启动 TUI
+### 5. 启动 TUI
 
 ```bash
 cargo run -p poise-tui
@@ -137,7 +174,7 @@ export POISE_BASE_URL=http://127.0.0.1:9000
 cargo run -p poise-tui
 ```
 
-### 5. HTTP 快速确认
+### 6. HTTP 快速确认
 
 ```bash
 curl http://127.0.0.1:8000/health

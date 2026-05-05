@@ -329,7 +329,7 @@ fn structural_matches_for_live_order(
         })
         .filter(|candidate| {
             let binding = candidate.binding(state);
-            values_match(binding.request.price, live_order.price, rules.price_tick)
+            rules.prices_match(binding.request.price, live_order.price)
         })
         .filter(|candidate| {
             let binding = candidate.binding(state);
@@ -376,6 +376,7 @@ mod tests {
     fn rules() -> ExchangeRules {
         ExchangeRules {
             price_tick: 0.1,
+            price_precision: Default::default(),
             quantity_step: 0.01,
             min_qty: 0.0,
             min_notional: 0.0,

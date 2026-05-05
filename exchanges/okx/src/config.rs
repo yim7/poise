@@ -109,6 +109,7 @@ pub struct Credentials {
 }
 
 impl Credentials {
+    #[cfg(test)]
     pub(crate) fn new(
         api_key: impl Into<String>,
         api_secret: impl Into<String>,

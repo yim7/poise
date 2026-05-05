@@ -1766,6 +1766,7 @@ pub(crate) mod test_support {
                 .unwrap(),
                 ExchangeRules {
                     price_tick: 0.1,
+                    price_precision: Default::default(),
                     quantity_step: 0.001,
                     min_qty: 0.001,
                     min_notional: 5.0,

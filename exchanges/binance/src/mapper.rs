@@ -112,6 +112,7 @@ impl TryFrom<BinanceExchangeInfo> for ExchangeInfo {
             instrument,
             rules: poise_core::types::ExchangeRules {
                 price_tick: parse_optional_decimal("tickSize", price_filter.tick_size.as_deref())?,
+                price_precision: Default::default(),
                 quantity_step: parse_optional_decimal(
                     "stepSize",
                     lot_size_filter.step_size.as_deref(),
@@ -337,6 +338,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 rules: ExchangeRules {
                     price_tick: 0.1,
+                    price_precision: Default::default(),
                     quantity_step: 0.001,
                     min_qty: 0.001,
                     min_notional: 100.0,

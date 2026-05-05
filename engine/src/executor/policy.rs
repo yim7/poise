@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use poise_core::strategy::TrackConfig;
-use poise_core::types::{ExchangeRules, Exposure, Side};
+use poise_core::types::{ExchangeRules, Exposure, PriceRounding, Side};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -422,11 +422,7 @@ fn binding_is_passive_covering_owner(
         || curve_maker_grace_expired(binding, observed_at, curve_maker_grace_ms)
         || binding.request.side != desired.request.side
         || binding.request.reduce_only != desired.request.reduce_only
-        || !values_match(
-            binding.request.price,
-            desired.request.price,
-            exchange_rules.price_tick,
-        )
+        || !exchange_rules.prices_match(binding.request.price, desired.request.price)
     {
         return false;
     }
@@ -513,11 +509,7 @@ fn binding_request_matches_desired(
 ) -> bool {
     binding.request.instrument == desired.request.instrument
         && binding.request.side == desired.request.side
-        && values_match(
-            binding.request.price,
-            desired.request.price,
-            exchange_rules.price_tick,
-        )
+        && exchange_rules.prices_match(binding.request.price, desired.request.price)
         && values_match(
             binding.request.quantity,
             desired.request.quantity,
@@ -630,22 +622,15 @@ fn maker_price_for_operation(
             trigger_price_for_boundary(boundary.lower_exposure.0, input.config)
         }
     };
-    raw_price.is_finite().then(|| {
-        round_passive_price(
-            raw_price,
-            input.exchange_rules.price_tick,
-            operation.direction,
-        )
-    })
+    raw_price
+        .is_finite()
+        .then(|| round_passive_price(raw_price, input.exchange_rules, operation.direction))
 }
 
-fn round_passive_price(price: f64, tick: f64, direction: BoundaryDirection) -> f64 {
-    if tick <= f64::EPSILON {
-        return price;
-    }
+fn round_passive_price(price: f64, rules: &ExchangeRules, direction: BoundaryDirection) -> f64 {
     match direction {
-        BoundaryDirection::Up => (price / tick).floor() * tick,
-        BoundaryDirection::Down => (price / tick).ceil() * tick,
+        BoundaryDirection::Up => rules.round_price(price, PriceRounding::Down),
+        BoundaryDirection::Down => rules.round_price(price, PriceRounding::Up),
     }
 }
 
@@ -715,7 +700,7 @@ fn next_client_order_id(policy: PolicyKind) -> String {
 #[cfg(test)]
 mod tests {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
-    use poise_core::types::{ExchangeRules, Exposure};
+    use poise_core::types::{ExchangeRules, Exposure, PricePrecision};
 
     use crate::executor::boundary::{
         BoundaryDirection, BoundaryId, BoundaryOperation, ProfileRevision, discretize_boundaries,
@@ -754,12 +739,33 @@ mod tests {
     fn rules() -> ExchangeRules {
         ExchangeRules {
             price_tick: 0.1,
+            price_precision: Default::default(),
             quantity_step: 0.01,
             min_qty: 0.0,
             min_notional: 0.0,
             maker_fee_rate: 0.0,
             taker_fee_rate: 0.0,
         }
+    }
+
+    #[test]
+    fn passive_price_rounding_uses_dynamic_exchange_precision() {
+        let rules = ExchangeRules {
+            price_tick: 0.0001,
+            price_precision: PricePrecision::significant_figures(2, 5),
+            quantity_step: 0.01,
+            min_qty: 0.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        };
+
+        assert!(
+            (round_passive_price(1234.56, &rules, BoundaryDirection::Up) - 1234.5).abs() < 1e-9
+        );
+        assert!(
+            (round_passive_price(1234.56, &rules, BoundaryDirection::Down) - 1234.6).abs() < 1e-9
+        );
     }
 
     #[test]

@@ -46,6 +46,7 @@ impl Connected {
         )
     }
 
+    #[cfg(test)]
     fn from_rest_client(rest: Arc<OkxRestClient>) -> Self {
         Self::from_parts(
             Arc::new(OkxExecution::new(Arc::clone(&rest))),

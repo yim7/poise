@@ -1516,6 +1516,7 @@ mod tests {
                 .unwrap(),
                 ExchangeRules {
                     price_tick: 0.0,
+                    price_precision: Default::default(),
                     quantity_step: 0.0,
                     min_qty: 0.0,
                     min_notional: 0.0,

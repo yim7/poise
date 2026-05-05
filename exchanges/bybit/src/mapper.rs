@@ -49,6 +49,7 @@ impl TryFrom<InstrumentInfoResult> for ExchangeInfo {
             instrument: Instrument::new(Venue::Bybit, info.symbol),
             rules: poise_core::types::ExchangeRules {
                 price_tick: required_value("priceFilter.tickSize", info.price_filter.tick_size)?,
+                price_precision: Default::default(),
                 quantity_step: required_value(
                     "lotSizeFilter.qtyStep",
                     info.lot_size_filter.qty_step,
@@ -288,6 +289,7 @@ mod tests {
             exchange_info.rules,
             ExchangeRules {
                 price_tick: 0.1,
+                price_precision: Default::default(),
                 quantity_step: 0.001,
                 min_qty: 0.001,
                 min_notional: 5.0,

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
@@ -14,20 +16,28 @@ use tokio::{
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+use crate::client_order_id::ClientOrderIdMapper;
+
 const DEFAULT_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 
 pub struct HyperliquidWsClient {
     ws_url: String,
     wallet_address: String,
     reconnect_delay: Duration,
+    client_order_ids: Arc<ClientOrderIdMapper>,
 }
 
 impl HyperliquidWsClient {
-    pub fn new(ws_url: impl Into<String>, wallet_address: impl Into<String>) -> Self {
+    pub(crate) fn new_with_client_order_id_mapper(
+        ws_url: impl Into<String>,
+        wallet_address: impl Into<String>,
+        client_order_ids: Arc<ClientOrderIdMapper>,
+    ) -> Self {
         Self {
             ws_url: ws_url.into(),
             wallet_address: wallet_address.into(),
             reconnect_delay: DEFAULT_RECONNECT_DELAY,
+            client_order_ids,
         }
     }
 
@@ -41,6 +51,7 @@ impl HyperliquidWsClient {
             ws_url: ws_url.into(),
             wallet_address: wallet_address.into(),
             reconnect_delay,
+            client_order_ids: ClientOrderIdMapper::shared(),
         }
     }
 
@@ -64,9 +75,17 @@ impl HyperliquidWsClient {
         let ws_url = self.ws_url.clone();
         let wallet_address = self.wallet_address.clone();
         let reconnect_delay = self.reconnect_delay;
+        let client_order_ids = Arc::clone(&self.client_order_ids);
 
         tokio::spawn(async move {
-            run_user_stream(ws_url, wallet_address, sender, reconnect_delay).await;
+            run_user_stream(
+                ws_url,
+                wallet_address,
+                sender,
+                reconnect_delay,
+                client_order_ids,
+            )
+            .await;
         });
         Ok(receiver)
     }
@@ -138,6 +157,7 @@ async fn run_user_stream(
     wallet_address: String,
     sender: mpsc::Sender<UserDataEvent>,
     reconnect_delay: Duration,
+    client_order_ids: Arc<ClientOrderIdMapper>,
 ) {
     let mut attempt = 0_u32;
 
@@ -150,20 +170,25 @@ async fn run_user_stream(
                 } else {
                     while let Some(message) = ws.next().await {
                         match message {
-                            Ok(Message::Text(text)) => match parse_user_data_message(&text) {
-                                Ok(events) => {
-                                    for event in events {
-                                        if sender.send(event).await.is_err() {
-                                            return;
+                            Ok(Message::Text(text)) => {
+                                match parse_user_data_message_with_client_order_ids(
+                                    &text,
+                                    &client_order_ids,
+                                ) {
+                                    Ok(events) => {
+                                        for event in events {
+                                            if sender.send(event).await.is_err() {
+                                                return;
+                                            }
                                         }
                                     }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            "failed to parse Hyperliquid user message: {error}"
+                                        );
+                                    }
                                 }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        "failed to parse Hyperliquid user message: {error}"
-                                    );
-                                }
-                            },
+                            }
                             Ok(Message::Close(_)) => {
                                 tracing::info!("Hyperliquid user websocket closed; reconnecting");
                                 break;
@@ -222,6 +247,16 @@ where
         serde_json::json!({ "type": "userEvents", "user": wallet_address }),
     )
     .await?;
+    send_subscription(
+        ws,
+        serde_json::json!({ "type": "userFills", "user": wallet_address, "aggregateByTime": false }),
+    )
+    .await?;
+    send_subscription(
+        ws,
+        serde_json::json!({ "type": "userFundings", "user": wallet_address }),
+    )
+    .await?;
     Ok(())
 }
 
@@ -259,12 +294,22 @@ pub(crate) fn parse_market_data_message(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn parse_user_data_message(message: &str) -> Result<Vec<UserDataEvent>> {
+    parse_user_data_message_with_client_order_ids(message, &ClientOrderIdMapper::default())
+}
+
+pub(crate) fn parse_user_data_message_with_client_order_ids(
+    message: &str,
+    client_order_ids: &ClientOrderIdMapper,
+) -> Result<Vec<UserDataEvent>> {
     let value: serde_json::Value =
         serde_json::from_str(message).context("invalid Hyperliquid websocket JSON")?;
     match value["channel"].as_str() {
-        Some("orderUpdates") => parse_order_updates(&value["data"]),
+        Some("orderUpdates") => parse_order_updates(&value["data"], client_order_ids),
         Some("userEvents") => parse_user_events(&value["data"]),
+        Some("userFills") => parse_user_fills(&value["data"]),
+        Some("userFundings") => parse_user_fundings(&value["data"]),
         _ => Ok(Vec::new()),
     }
 }
@@ -316,28 +361,34 @@ fn parse_active_asset_ctx(
     }))
 }
 
-fn parse_order_updates(data: &serde_json::Value) -> Result<Vec<UserDataEvent>> {
+fn parse_order_updates(
+    data: &serde_json::Value,
+    client_order_ids: &ClientOrderIdMapper,
+) -> Result<Vec<UserDataEvent>> {
     data.as_array()
         .context("Hyperliquid orderUpdates data must be an array")?
         .iter()
-        .map(parse_order_update)
+        .map(|value| parse_order_update(value, client_order_ids))
         .collect()
 }
 
-fn parse_order_update(value: &serde_json::Value) -> Result<UserDataEvent> {
+fn parse_order_update(
+    value: &serde_json::Value,
+    client_order_ids: &ClientOrderIdMapper,
+) -> Result<UserDataEvent> {
     let order = &value["order"];
     let timestamp = required_i64(value, "statusTimestamp")?;
     let order_id = required_u64(order, "oid")?.to_string();
+    let exchange_client_order_id = order
+        .get("cloid")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&order_id);
     Ok(UserDataEvent {
         event_time: millis_to_utc(timestamp)?,
         payload: UserDataPayload::OrderUpdate(ExchangeOrder {
             instrument: Instrument::new(Venue::Hyperliquid, required_str(order, "coin")?),
             order_id: order_id.clone(),
-            client_order_id: order
-                .get("cloid")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(&order_id)
-                .to_string(),
+            client_order_id: client_order_ids.local_id_for_exchange(exchange_client_order_id),
             side: parse_side(required_str(order, "side")?)?,
             price: parse_decimal("order.limitPx", required_str(order, "limitPx")?)?,
             qty: parse_decimal("order.origSz", required_str(order, "origSz")?)?,
@@ -355,6 +406,40 @@ fn parse_user_events(data: &serde_json::Value) -> Result<Vec<UserDataEvent>> {
         return parse_funding(funding).map(|event| vec![event]);
     }
     Ok(Vec::new())
+}
+
+fn parse_user_fills(data: &serde_json::Value) -> Result<Vec<UserDataEvent>> {
+    if data
+        .get("isSnapshot")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    data.get("fills")
+        .and_then(serde_json::Value::as_array)
+        .context("Hyperliquid userFills data must include fills array")?
+        .iter()
+        .map(parse_fill)
+        .collect()
+}
+
+fn parse_user_fundings(data: &serde_json::Value) -> Result<Vec<UserDataEvent>> {
+    if data
+        .get("isSnapshot")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
+
+    data.get("fundings")
+        .and_then(serde_json::Value::as_array)
+        .context("Hyperliquid userFundings data must include fundings array")?
+        .iter()
+        .map(parse_funding)
+        .collect()
 }
 
 fn parse_fill(value: &serde_json::Value) -> Result<UserDataEvent> {
@@ -468,6 +553,7 @@ mod tests {
 
     use super::{
         HyperliquidWsClient, backoff_delay, parse_market_data_message, parse_user_data_message,
+        parse_user_data_message_with_client_order_ids,
     };
 
     #[test]
@@ -530,6 +616,34 @@ mod tests {
     }
 
     #[test]
+    fn maps_registered_order_update_cloid_back_to_internal_client_order_id() {
+        let client_order_ids = crate::client_order_id::ClientOrderIdMapper::default();
+        let internal_client_order_id = "bk-56961625d79c44978c760c53fda4eefc";
+        let exchange_cloid = client_order_ids.exchange_id_for_local(internal_client_order_id);
+        let message = format!(
+            r#"{{"channel":"orderUpdates","data":[{{"order":{{"coin":"BTC","side":"B","limitPx":"65000.5","sz":"0.02","oid":12345,"timestamp":1700000000000,"origSz":"0.02","cloid":"{exchange_cloid}"}},"status":"open","statusTimestamp":1700000000001}}]}}"#
+        );
+
+        let events = parse_user_data_message_with_client_order_ids(&message, &client_order_ids)
+            .expect("registered cloid should parse");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].payload,
+            UserDataPayload::OrderUpdate(ExchangeOrder {
+                instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
+                order_id: "12345".to_string(),
+                client_order_id: internal_client_order_id.to_string(),
+                side: Side::Buy,
+                price: 65000.5,
+                qty: 0.02,
+                filled_qty: 0.0,
+                status: OrderStatus::New,
+            })
+        );
+    }
+
+    #[test]
     fn parses_user_fills_and_funding_into_pnl_events() {
         let fill_events = parse_user_data_message(
             r#"{"channel":"userEvents","data":{"fills":[{"coin":"BTC","px":"65000.5","sz":"0.02","side":"B","time":1700000000000,"closedPnl":"3.25","hash":"0xabc","oid":12345,"tid":999,"fee":"0.12","feeToken":"USDC","crossed":true,"startPosition":"0","dir":"Open Long"}]}}"#,
@@ -566,6 +680,72 @@ mod tests {
                 kind: TrackPnlRecordKind::Funding,
                 source: "hyperliquid:funding".to_string(),
                 source_key: Some("hyperliquid:funding:BTC:1700000000000".to_string()),
+                order_id: None,
+                trade_id: None,
+                side: None,
+                price: None,
+                qty: None,
+                realized_pnl: 0.0,
+                trading_fee: 0.0,
+                funding_fee: -0.15,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_streaming_user_fills_channel_into_pnl_events() {
+        let events = parse_user_data_message(
+            r#"{"channel":"userFills","data":{"isSnapshot":false,"user":"0x2222222222222222222222222222222222222222","fills":[{"coin":"ETH","px":"2376.0","sz":"0.0064","side":"B","time":1700000000000,"closedPnl":"-0.100416","hash":"0xabc","oid":411114920977,"tid":321706137923647,"fee":"0.002189","feeToken":"USDC","crossed":false,"startPosition":"-0.1573","dir":"Close Short","cloid":"0x835f7f8e065191679a9ed647e59f538b"}]}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].payload,
+            UserDataPayload::TrackPnl(TrackPnlRecord {
+                instrument: Instrument::new(Venue::Hyperliquid, "ETH"),
+                occurred_at: chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
+                kind: TrackPnlRecordKind::Trade,
+                source: "hyperliquid:fill".to_string(),
+                source_key: Some("hyperliquid:fill:ETH:321706137923647".to_string()),
+                order_id: Some("411114920977".to_string()),
+                trade_id: Some("321706137923647".to_string()),
+                side: Some(Side::Buy),
+                price: Some(2376.0),
+                qty: Some(0.0064),
+                realized_pnl: -0.100416,
+                trading_fee: 0.002189,
+                funding_fee: 0.0,
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_user_fills_snapshot_to_avoid_replaying_old_events_on_restart() {
+        let events = parse_user_data_message(
+            r#"{"channel":"userFills","data":{"isSnapshot":true,"user":"0x2222222222222222222222222222222222222222","fills":[{"coin":"ETH","px":"2376.0","sz":"0.0064","side":"B","time":1700000000000,"closedPnl":"-0.100416","hash":"0xabc","oid":411114920977,"tid":321706137923647,"fee":"0.002189","feeToken":"USDC","crossed":false,"startPosition":"-0.1573","dir":"Close Short"}]}}"#,
+        )
+        .unwrap();
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn parses_streaming_user_fundings_channel_into_pnl_events() {
+        let events = parse_user_data_message(
+            r#"{"channel":"userFundings","data":{"isSnapshot":false,"user":"0x2222222222222222222222222222222222222222","fundings":[{"time":1700000000000,"coin":"ETH","usdc":"-0.15","szi":"0.02","fundingRate":"0.00001"}]}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].payload,
+            UserDataPayload::TrackPnl(TrackPnlRecord {
+                instrument: Instrument::new(Venue::Hyperliquid, "ETH"),
+                occurred_at: chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
+                kind: TrackPnlRecordKind::Funding,
+                source: "hyperliquid:funding".to_string(),
+                source_key: Some("hyperliquid:funding:ETH:1700000000000".to_string()),
                 order_id: None,
                 trade_id: None,
                 side: None,
@@ -660,7 +840,7 @@ mod tests {
             ] {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut websocket = accept_async(stream).await.unwrap();
-                for _ in 0..2 {
+                for _ in 0..4 {
                     if let Some(Ok(Message::Text(text))) = websocket.next().await {
                         observed_server.lock().unwrap().push(text);
                     }
@@ -689,11 +869,32 @@ mod tests {
             .unwrap();
 
         let messages = observed.lock().unwrap();
-        assert_eq!(messages.len(), 4);
+        assert_eq!(messages.len(), 8);
         assert!(
             messages
                 .iter()
                 .filter(|message| message.contains(r#""type":"orderUpdates""#))
+                .count()
+                == 2
+        );
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.contains(r#""type":"userEvents""#))
+                .count()
+                == 2
+        );
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.contains(r#""type":"userFills""#))
+                .count()
+                == 2
+        );
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.contains(r#""type":"userFundings""#))
                 .count()
                 == 2
         );

@@ -11,7 +11,7 @@ use poise_protocol::{
     TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
 };
 
-use poise_core::track::quote_asset_for_symbol;
+use poise_core::track::Instrument;
 
 use poise_application::{
     TrackActivityLevel, TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent,
@@ -40,7 +40,7 @@ impl TrackProjector {
 
         TrackListItemView {
             id: source.track_id.clone(),
-            instrument: project_instrument(&source.venue, &source.symbol),
+            instrument: project_instrument(&source.instrument),
             lifecycle: TrackLifecycleView {
                 status: project_track_status(&source.status),
                 updated_at: source.updated_at.to_rfc3339(),
@@ -69,7 +69,7 @@ impl TrackProjector {
         TrackDetailView {
             identity: TrackIdentityView {
                 id: source.track_id.clone(),
-                instrument: project_instrument(&source.venue, &source.symbol),
+                instrument: project_instrument(&source.instrument),
             },
             status: TrackStatusPanelView {
                 lifecycle: TrackLifecycleView {
@@ -143,7 +143,7 @@ fn project_list_pnl_summary(source: &TrackListReadModel) -> PnlSummary {
     let net_realized_pnl = source.pnl_stats.net_realized_pnl();
 
     PnlSummary {
-        pnl_asset: pnl_asset_for_symbol(&source.symbol),
+        pnl_asset: source.instrument.quote_asset(),
         gross_realized_pnl,
         net_realized_pnl,
         total_pnl: net_realized_pnl + source.unrealized_pnl,
@@ -157,17 +157,13 @@ fn project_detail_pnl_summary(source: &TrackReadModel) -> PnlSummary {
     let net_realized_pnl = source.pnl_stats.net_realized_pnl();
 
     PnlSummary {
-        pnl_asset: pnl_asset_for_symbol(&source.symbol),
+        pnl_asset: source.instrument.quote_asset(),
         gross_realized_pnl,
         net_realized_pnl,
         total_pnl: net_realized_pnl + source.unrealized_pnl,
         trading_fee_cumulative: source.pnl_stats.trading_fee_cumulative,
         funding_fee_cumulative: source.pnl_stats.funding_fee_cumulative,
     }
-}
-
-fn pnl_asset_for_symbol(symbol: &str) -> String {
-    quote_asset_for_symbol(symbol).unwrap_or(symbol).to_string()
 }
 
 fn project_activity_level(level: TrackActivityLevel) -> ActivityLevelView {
@@ -178,10 +174,10 @@ fn project_activity_level(level: TrackActivityLevel) -> ActivityLevelView {
     }
 }
 
-fn project_instrument(venue: &str, symbol: &str) -> InstrumentView {
+fn project_instrument(instrument: &Instrument) -> InstrumentView {
     InstrumentView {
-        venue: venue.to_string(),
-        symbol: symbol.to_string(),
+        venue: instrument.venue.as_str().to_string(),
+        symbol: instrument.symbol.clone(),
     }
 }
 
@@ -449,6 +445,7 @@ mod tests {
         TrackRecoveryIssue, TrackStrategyPriceStatus,
     };
     use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily};
+    use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
     use poise_protocol::{
         ActivityLevelView, ExecutionBindingIntentView, ExecutionBindingPolicyView,
@@ -459,7 +456,7 @@ mod tests {
 
     #[test]
     fn project_instrument_preserves_exchange_name() {
-        let view = super::project_instrument("binance", "BTCUSDT");
+        let view = super::project_instrument(&Instrument::new(Venue::Binance, "BTCUSDT"));
 
         assert_eq!(view.venue, "binance");
         assert_eq!(view.symbol, "BTCUSDT");
@@ -953,6 +950,17 @@ mod tests {
     }
 
     #[test]
+    fn projects_hyperliquid_perp_pnl_asset_as_usdc() {
+        let mut source = source_with_submitting_effect();
+        source.instrument = Instrument::new(Venue::Hyperliquid, "ETH");
+        let detail = TrackProjector::new().project_detail(&source);
+        let list = TrackProjector::new().project_list_item(&TrackListReadModel::from(&source));
+
+        assert_eq!(detail.pnl.pnl_asset, "USDC");
+        assert_eq!(list.pnl.pnl_asset, "USDC");
+    }
+
+    #[test]
     fn project_activity_preserves_application_activity_message_and_level() {
         let mut source = source_with_submitting_effect();
         source.recent_activity = vec![test_activity(
@@ -1016,8 +1024,7 @@ mod tests {
     fn source_with_submitting_effect() -> TrackReadModel {
         TrackReadModel {
             track_id: "btc-core".into(),
-            venue: "binance".into(),
-            symbol: "BTCUSDT".into(),
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
             status: TrackReadStatus::Active,
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             lower_price: 90.0,

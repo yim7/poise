@@ -852,6 +852,7 @@ mod tests {
     fn test_rules(price_tick: f64) -> ExchangeRules {
         ExchangeRules {
             price_tick,
+            price_precision: Default::default(),
             quantity_step: 0.01,
             min_qty: 0.0,
             min_notional: 0.0,

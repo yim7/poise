@@ -4,12 +4,15 @@ use anyhow::{Context, Result, anyhow};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use tokio::sync::OnceCell;
 
+use poise_core::types::PriceRounding;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderRequest as PortOrderRequest, OrderStatus, Position,
 };
 
+use crate::client_order_id::ClientOrderIdMapper;
 use crate::config::{Config, Credentials};
 use crate::mapper::{
     account_summary_from_state, build_exchange_info, open_order_from_response, position_from_state,
@@ -18,8 +21,13 @@ use crate::rest::actions::{
     CancelAction, CancelRequest, ExchangeAction, LimitOrderType, OrderAction, OrderRequest,
     OrderType, UpdateLeverageAction,
 };
-use crate::rest::models::{ClearinghouseStateResponse, MetaResponse, OpenOrderResponse};
+use crate::rest::models::{
+    ClearinghouseStateResponse, MetaResponse, OpenOrderResponse, SpotClearinghouseStateResponse,
+};
+use crate::rules::normalize_perp_price;
 use crate::signing::{HyperliquidChain, action_hash, sign_l1_action};
+
+const MAX_DECIMAL_SCALE: u32 = 16;
 
 pub(crate) struct HyperliquidRestClient {
     http: reqwest::Client,
@@ -27,19 +35,38 @@ pub(crate) struct HyperliquidRestClient {
     credentials: Credentials,
     timestamp_provider: Arc<dyn Fn() -> u64 + Send + Sync>,
     chain: HyperliquidChain,
+    meta_cache: OnceCell<MetaResponse>,
+    uses_spot_margin_balance_cache: OnceCell<bool>,
+    client_order_ids: Arc<ClientOrderIdMapper>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AssetDescriptor {
+    id: u32,
+    sz_decimals: u32,
 }
 
 impl HyperliquidRestClient {
     pub(crate) fn new(config: &Config) -> Result<Self> {
-        Ok(Self::with_http_client_and_timestamp_provider(
-            config.endpoints().rest_base_url().to_string(),
-            config.credentials()?,
-            Arc::new(|| chrono::Utc::now().timestamp_millis() as u64),
-            reqwest::Client::builder()
-                .no_proxy()
-                .build()
-                .context("failed to build Hyperliquid HTTP client")?,
-        ))
+        Self::new_with_client_order_id_mapper(config, ClientOrderIdMapper::shared())
+    }
+
+    pub(crate) fn new_with_client_order_id_mapper(
+        config: &Config,
+        client_order_ids: Arc<ClientOrderIdMapper>,
+    ) -> Result<Self> {
+        Ok(
+            Self::with_http_client_timestamp_provider_and_client_order_id_mapper(
+                config.endpoints().rest_base_url().to_string(),
+                config.credentials()?,
+                Arc::new(|| chrono::Utc::now().timestamp_millis() as u64),
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .context("failed to build Hyperliquid HTTP client")?,
+                client_order_ids,
+            ),
+        )
     }
 
     pub(crate) fn with_http_client_and_timestamp_provider(
@@ -47,6 +74,22 @@ impl HyperliquidRestClient {
         credentials: Credentials,
         timestamp_provider: Arc<dyn Fn() -> u64 + Send + Sync>,
         http: reqwest::Client,
+    ) -> Self {
+        Self::with_http_client_timestamp_provider_and_client_order_id_mapper(
+            base_url,
+            credentials,
+            timestamp_provider,
+            http,
+            ClientOrderIdMapper::shared(),
+        )
+    }
+
+    pub(crate) fn with_http_client_timestamp_provider_and_client_order_id_mapper(
+        base_url: impl Into<String>,
+        credentials: Credentials,
+        timestamp_provider: Arc<dyn Fn() -> u64 + Send + Sync>,
+        http: reqwest::Client,
+        client_order_ids: Arc<ClientOrderIdMapper>,
     ) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         let chain =
@@ -61,6 +104,9 @@ impl HyperliquidRestClient {
             credentials,
             timestamp_provider,
             chain,
+            meta_cache: OnceCell::new(),
+            uses_spot_margin_balance_cache: OnceCell::new(),
+            client_order_ids,
         }
     }
 
@@ -70,14 +116,29 @@ impl HyperliquidRestClient {
     }
 
     pub(crate) async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
+        let uses_spot_margin_balance = self.uses_spot_margin_balance().await?;
         let state = self.user_state().await?;
-        account_summary_from_state(&state)
+        let mut summary = account_summary_from_state(&state)?;
+        if uses_spot_margin_balance {
+            let spot_state = self.spot_user_state().await?;
+            summary.equity = usdc_total_balance(&spot_state)?;
+            summary.available = usdc_available_after_maintenance(&spot_state)?;
+        }
+        Ok(summary)
     }
 
     pub(crate) async fn get_account_capacity_snapshot(
         &self,
         leverage: u32,
     ) -> Result<AccountCapacitySnapshot> {
+        if self.uses_spot_margin_balance().await? {
+            let spot_state = self.spot_user_state().await?;
+            return Ok(AccountCapacitySnapshot {
+                max_increase_notional: usdc_available_after_maintenance(&spot_state)?
+                    * leverage as f64,
+            });
+        }
+
         let state = self.user_state().await?;
         let withdrawable = state
             .withdrawable
@@ -103,23 +164,32 @@ impl HyperliquidRestClient {
         orders
             .into_iter()
             .filter(|order| order.coin == symbol)
-            .map(open_order_from_response)
+            .map(|order| {
+                let mut order = open_order_from_response(order)?;
+                order.client_order_id = self
+                    .client_order_ids
+                    .local_id_for_exchange(&order.client_order_id);
+                Ok(order)
+            })
             .collect()
     }
 
     pub(crate) async fn submit_order(&self, request: PortOrderRequest) -> Result<OrderReceipt> {
-        let asset = self.asset_id(&request.instrument.symbol).await?;
+        let asset = self.asset_descriptor(&request.instrument.symbol).await?;
+        let cloid = self
+            .client_order_ids
+            .exchange_id_for_local(&request.client_order_id);
         let action = ExchangeAction::Order(OrderAction {
             orders: vec![OrderRequest {
-                asset,
+                asset: asset.id,
                 is_buy: matches!(request.side, poise_core::types::Side::Buy),
-                limit_px: format_decimal(request.price),
-                sz: format_decimal(request.quantity),
+                limit_px: format_price_decimal(request.price, asset.sz_decimals),
+                sz: format_size_decimal(request.quantity, asset.sz_decimals),
                 reduce_only: request.reduce_only,
                 order_type: OrderType::Limit(LimitOrderType {
                     tif: "Gtc".to_string(),
                 }),
-                cloid: Some(request.client_order_id.clone()),
+                cloid: Some(cloid),
             }],
             grouping: "na".to_string(),
             builder: None,
@@ -178,7 +248,10 @@ impl HyperliquidRestClient {
     }
 
     async fn meta(&self) -> Result<MetaResponse> {
-        self.post_info(&json!({ "type": "meta" })).await
+        self.meta_cache
+            .get_or_try_init(|| async { self.post_info(&json!({ "type": "meta" })).await })
+            .await
+            .cloned()
     }
 
     async fn user_state(&self) -> Result<ClearinghouseStateResponse> {
@@ -189,12 +262,46 @@ impl HyperliquidRestClient {
         .await
     }
 
+    async fn spot_user_state(&self) -> Result<SpotClearinghouseStateResponse> {
+        self.post_info(&json!({
+            "type": "spotClearinghouseState",
+            "user": self.credentials.wallet_address(),
+        }))
+        .await
+    }
+
+    async fn uses_spot_margin_balance(&self) -> Result<bool> {
+        self.uses_spot_margin_balance_cache
+            .get_or_try_init(|| async {
+                let abstraction: String = self
+                    .post_info(&json!({
+                        "type": "userAbstraction",
+                        "user": self.credentials.wallet_address(),
+                    }))
+                    .await?;
+                Ok(matches!(
+                    abstraction.as_str(),
+                    "unifiedAccount" | "portfolioMargin"
+                ))
+            })
+            .await
+            .copied()
+    }
+
     async fn asset_id(&self, symbol: &str) -> Result<u32> {
+        Ok(self.asset_descriptor(symbol).await?.id)
+    }
+
+    async fn asset_descriptor(&self, symbol: &str) -> Result<AssetDescriptor> {
         let meta = self.meta().await?;
         meta.universe
             .iter()
-            .position(|asset| asset.name == symbol)
-            .map(|index| index as u32)
+            .enumerate()
+            .find(|(_, asset)| asset.name == symbol)
+            .map(|(index, asset)| AssetDescriptor {
+                id: index as u32,
+                sz_decimals: asset.sz_decimals,
+            })
             .ok_or_else(|| anyhow!("missing Hyperliquid asset `{symbol}`"))
     }
 
@@ -206,12 +313,14 @@ impl HyperliquidRestClient {
         let nonce = (self.timestamp_provider)();
         let connection_id = action_hash(action, nonce, self.credentials.vault_address())?;
         let signature = sign_l1_action(self.credentials.private_key(), self.chain, connection_id)?;
-        let body = json!({
+        let mut body = json!({
             "action": action,
             "nonce": nonce,
             "signature": signature,
-            "vaultAddress": self.credentials.vault_address(),
         });
+        if let Some(vault_address) = self.credentials.vault_address() {
+            body["vaultAddress"] = json!(vault_address);
+        }
         self.post_json("/exchange", &body).await
     }
 
@@ -242,6 +351,33 @@ impl HyperliquidRestClient {
             format!("failed to deserialize Hyperliquid response for {path}: {body}")
         })
     }
+}
+
+fn usdc_total_balance(state: &SpotClearinghouseStateResponse) -> Result<f64> {
+    parse_decimal("USDC.total", &usdc_balance(state)?.total)
+}
+
+fn usdc_available_after_maintenance(state: &SpotClearinghouseStateResponse) -> Result<f64> {
+    if let Some((_, value)) = state
+        .token_to_available_after_maintenance
+        .iter()
+        .find(|(token, _)| *token == 0)
+    {
+        return parse_decimal("tokenToAvailableAfterMaintenance[USDC]", value);
+    }
+
+    let balance = usdc_balance(state)?;
+    Ok(parse_decimal("USDC.total", &balance.total)? - parse_decimal("USDC.hold", &balance.hold)?)
+}
+
+fn usdc_balance(
+    state: &SpotClearinghouseStateResponse,
+) -> Result<&crate::rest::models::SpotBalance> {
+    state
+        .balances
+        .iter()
+        .find(|balance| balance.coin == "USDC" && balance.token == 0)
+        .context("missing Hyperliquid unified USDC balance")
 }
 
 fn order_receipt_from_response(
@@ -296,18 +432,67 @@ fn required_u64(value: &serde_json::Value, field: &str) -> Result<u64> {
         .ok_or_else(|| anyhow!("missing Hyperliquid `{field}`"))
 }
 
+fn parse_decimal(field: &str, value: &str) -> Result<f64> {
+    value
+        .parse::<f64>()
+        .with_context(|| format!("invalid Hyperliquid decimal `{field}`: {value}"))
+}
+
 fn format_decimal(value: f64) -> String {
     if !value.is_finite() {
         return value.to_string();
     }
-    let mut value = format!("{value:.16}");
-    while value.contains('.') && value.ends_with('0') {
-        value.pop();
+
+    for scale in 0..=MAX_DECIMAL_SCALE {
+        let factor = 10_f64.powi(scale as i32);
+        let scaled = value * factor;
+        let rounded = scaled.round();
+        let tolerance = scaled.abs().max(1.0) * f64::EPSILON * 16.0;
+        if (scaled - rounded).abs() <= tolerance {
+            let normalized = rounded / factor;
+            return trim_decimal_string(format!("{normalized:.scale$}", scale = scale as usize));
+        }
     }
-    if value.ends_with('.') {
-        value.pop();
+
+    value.to_string()
+}
+
+fn format_price_decimal(value: f64, sz_decimals: u32) -> String {
+    format_decimal(normalize_perp_price(
+        value,
+        sz_decimals,
+        PriceRounding::Nearest,
+    ))
+}
+
+fn format_size_decimal(value: f64, sz_decimals: u32) -> String {
+    if !value.is_finite() {
+        return value.to_string();
     }
-    value
+    format_decimal_at_scale(value, sz_decimals as usize)
+}
+
+fn format_decimal_at_scale(value: f64, decimals: usize) -> String {
+    let factor = 10_f64.powi(decimals as i32);
+    let rounded = (value * factor).round() / factor;
+    trim_decimal_string(format!("{rounded:.decimals$}"))
+}
+
+fn trim_decimal_string(mut value: String) -> String {
+    if value.contains('.') {
+        while value.ends_with('0') {
+            value.pop();
+        }
+        if value.ends_with('.') {
+            value.pop();
+        }
+    }
+
+    if value == "-0" {
+        "0".to_string()
+    } else {
+        value
+    }
 }
 
 #[cfg(test)]
@@ -344,6 +529,7 @@ mod tests {
     async fn info_queries_post_expected_info_requests_and_map_responses() {
         let server = MockHttpServer::spawn(vec![
             MockResponse::json(200, r#"{"universe":[{"name":"BTC","szDecimals":5}]}"#),
+            MockResponse::json(200, r#""disabled""#),
             MockResponse::json(
                 200,
                 r#"{"marginSummary":{"accountValue":"125.5"},"withdrawable":"100.25","assetPositions":[{"position":{"coin":"BTC","szi":"0.02","entryPx":"65000.5","unrealizedPnl":"3.25"}}]}"#,
@@ -383,14 +569,148 @@ mod tests {
         let requests = server.requests().await;
         assert_eq!(requests[0].path, "/info");
         assert_eq!(requests[0].json_body()["type"], "meta");
-        assert_eq!(requests[1].json_body()["type"], "clearinghouseState");
+        assert_eq!(requests[1].json_body()["type"], "userAbstraction");
+        assert_eq!(requests[2].json_body()["type"], "clearinghouseState");
         assert_eq!(
-            requests[1].json_body()["user"],
+            requests[2].json_body()["user"],
             "0x2222222222222222222222222222222222222222"
         );
-        assert_eq!(requests[2].json_body()["type"], "clearinghouseState");
         assert_eq!(requests[3].json_body()["type"], "clearinghouseState");
-        assert_eq!(requests[4].json_body()["type"], "openOrders");
+        assert_eq!(requests[4].json_body()["type"], "clearinghouseState");
+        assert_eq!(requests[5].json_body()["type"], "openOrders");
+    }
+
+    #[tokio::test]
+    async fn unified_account_summary_uses_spot_usdc_as_balance_source_of_truth() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, r#""unifiedAccount""#),
+            MockResponse::json(
+                200,
+                r#"{"marginSummary":{"accountValue":"300.509522"},"withdrawable":"0.0","assetPositions":[{"position":{"coin":"BTC","szi":"-0.02034","entryPx":"78805.1","unrealizedPnl":"-30.85317"}}]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"balances":[{"coin":"USDC","token":0,"total":"891.55684101","hold":"314.896004","entryNtl":"0.0"}],"tokenToAvailableAfterMaintenance":[[0,"871.15175301"]]}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_000_000_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let summary = client.get_account_summary().await.unwrap();
+
+        assert_eq!(summary.equity, 891.55684101);
+        assert_eq!(summary.available, 871.15175301);
+        assert_eq!(summary.unrealized_pnl, -30.85317);
+        let requests = server.requests().await;
+        assert_eq!(requests[0].json_body()["type"], "userAbstraction");
+        assert_eq!(requests[1].json_body()["type"], "clearinghouseState");
+        assert_eq!(requests[2].json_body()["type"], "spotClearinghouseState");
+    }
+
+    #[tokio::test]
+    async fn unified_account_capacity_uses_spot_usdc_available_after_maintenance() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, r#""unifiedAccount""#),
+            MockResponse::json(
+                200,
+                r#"{"balances":[{"coin":"USDC","token":0,"total":"891.55684101","hold":"314.896004","entryNtl":"0.0"}],"tokenToAvailableAfterMaintenance":[[0,"871.15175301"]]}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_000_000_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let capacity = client.get_account_capacity_snapshot(20).await.unwrap();
+
+        assert_eq!(capacity.max_increase_notional, 17_423.0350602);
+        let requests = server.requests().await;
+        assert_eq!(requests[0].json_body()["type"], "userAbstraction");
+        assert_eq!(requests[1].json_body()["type"], "spotClearinghouseState");
+    }
+
+    #[tokio::test]
+    async fn cached_info_queries_avoid_repeated_high_weight_requests() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, r#""unifiedAccount""#),
+            MockResponse::json(
+                200,
+                r#"{"marginSummary":{"accountValue":"300.509522"},"withdrawable":"0.0","assetPositions":[]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"balances":[{"coin":"USDC","token":0,"total":"891.55684101","hold":"314.896004","entryNtl":"0.0"}],"tokenToAvailableAfterMaintenance":[[0,"871.15175301"]]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"marginSummary":{"accountValue":"301.0"},"withdrawable":"0.0","assetPositions":[]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"balances":[{"coin":"USDC","token":0,"total":"892.0","hold":"314.0","entryNtl":"0.0"}],"tokenToAvailableAfterMaintenance":[[0,"872.0"]]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"ETH","szDecimals":4},{"name":"BTC","szDecimals":5}]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":67890}}]}}}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":67891}}]}}}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        client.get_account_summary().await.unwrap();
+        client.get_account_summary().await.unwrap();
+        for client_order_id in ["bc-first", "bc-second"] {
+            client
+                .submit_order(PortOrderRequest {
+                    instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
+                    side: Side::Buy,
+                    price: 2000.0,
+                    quantity: 3.5,
+                    client_order_id: client_order_id.to_string(),
+                    reduce_only: false,
+                })
+                .await
+                .unwrap();
+        }
+
+        let requests = server.requests().await;
+        let info_types = requests
+            .iter()
+            .filter(|request| request.path == "/info")
+            .map(|request| request.json_body()["type"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            info_types,
+            vec![
+                "userAbstraction",
+                "clearinghouseState",
+                "spotClearinghouseState",
+                "clearinghouseState",
+                "spotClearinghouseState",
+                "meta",
+            ]
+        );
     }
 
     #[tokio::test]
@@ -440,6 +760,173 @@ mod tests {
         assert_eq!(body["action"]["orders"][0]["b"], true);
         assert_eq!(body["action"]["orders"][0]["p"], "2000");
         assert_eq!(body["signature"]["v"], 27);
+        assert!(body.get("vaultAddress").is_none());
+    }
+
+    #[tokio::test]
+    async fn submit_order_trims_binary_float_noise_from_wire_decimals() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"ETH","szDecimals":4},{"name":"BTC","szDecimals":5}]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":67890}}]}}}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        client
+            .submit_order(PortOrderRequest {
+                instrument: Instrument::new(Venue::Hyperliquid, "ETH"),
+                side: Side::Sell,
+                price: 2356.4,
+                quantity: 0.13140000000000002,
+                client_order_id: "bc-67ceddd7d1a94ebb8bbe0ffb8e1f5f0f".to_string(),
+                reduce_only: false,
+            })
+            .await
+            .unwrap();
+
+        let requests = server.requests().await;
+        let order = &requests[1].json_body()["action"]["orders"][0];
+        assert_eq!(order["p"], "2356.4");
+        assert_eq!(order["s"], "0.1314");
+    }
+
+    #[tokio::test]
+    async fn submit_order_formats_price_to_hyperliquid_significant_figure_rule() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"BTC","szDecimals":5},{"name":"ETH","szDecimals":4}]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":67890}}]}}}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        client
+            .submit_order(PortOrderRequest {
+                instrument: Instrument::new(Venue::Hyperliquid, "ETH"),
+                side: Side::Buy,
+                price: 2359.19,
+                quantity: 0.0063,
+                client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
+                reduce_only: true,
+            })
+            .await
+            .unwrap();
+
+        let requests = server.requests().await;
+        let order = &requests[1].json_body()["action"]["orders"][0];
+        assert_eq!(order["a"], 1);
+        assert_eq!(order["p"], "2359.2");
+        assert_eq!(order["s"], "0.0063");
+    }
+
+    #[tokio::test]
+    async fn submit_order_maps_internal_client_order_id_to_hyperliquid_cloid() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"ETH","szDecimals":4},{"name":"BTC","szDecimals":5}]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":67890}}]}}}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let internal_client_order_id = "bc-56961625d79c44978c760c53fda4eefc";
+        let receipt = client
+            .submit_order(PortOrderRequest {
+                instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
+                side: Side::Buy,
+                price: 2000.0,
+                quantity: 3.5,
+                client_order_id: internal_client_order_id.to_string(),
+                reduce_only: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(receipt.client_order_id, internal_client_order_id);
+        let requests = server.requests().await;
+        let body = requests[1].json_body();
+        let cloid = body["action"]["orders"][0]["c"]
+            .as_str()
+            .expect("Hyperliquid cloid must be serialized as a string");
+        assert_ne!(cloid, internal_client_order_id);
+        assert_eq!(cloid.len(), 34);
+        assert!(cloid.starts_with("0x"));
+        assert!(cloid[2..].chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test]
+    async fn open_orders_map_registered_hyperliquid_cloid_back_to_internal_client_order_id() {
+        let internal_client_order_id = "bk-56961625d79c44978c760c53fda4eefc";
+        let exchange_cloid = crate::client_order_id::hyperliquid_cloid(internal_client_order_id);
+        let open_orders = format!(
+            r#"[{{"coin":"BTC","oid":67890,"cloid":"{exchange_cloid}","side":"B","limitPx":"2000","sz":"3.5"}}]"#
+        );
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"ETH","szDecimals":4},{"name":"BTC","szDecimals":5}]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":67890}}]}}}"#,
+            ),
+            MockResponse::json(200, &open_orders),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        client
+            .submit_order(PortOrderRequest {
+                instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
+                side: Side::Buy,
+                price: 2000.0,
+                quantity: 3.5,
+                client_order_id: internal_client_order_id.to_string(),
+                reduce_only: false,
+            })
+            .await
+            .unwrap();
+
+        let open_orders = client.get_open_orders("BTC").await.unwrap();
+
+        assert_eq!(open_orders.len(), 1);
+        assert_eq!(open_orders[0].client_order_id, internal_client_order_id);
     }
 
     #[tokio::test]
@@ -454,15 +941,7 @@ mod tests {
                 200,
                 r#"[{"coin":"BTC","oid":12345,"side":"B","limitPx":"65000.5","sz":"0.02"}]"#,
             ),
-            MockResponse::json(
-                200,
-                r#"{"universe":[{"name":"ETH","szDecimals":4},{"name":"BTC","szDecimals":5}]}"#,
-            ),
             MockResponse::json(200, r#"{"status":"ok","response":{"type":"cancel"}}"#),
-            MockResponse::json(
-                200,
-                r#"{"universe":[{"name":"ETH","szDecimals":4},{"name":"BTC","szDecimals":5}]}"#,
-            ),
             MockResponse::json(
                 200,
                 r#"{"status":"ok","response":{"type":"updateLeverage"}}"#,
@@ -486,12 +965,12 @@ mod tests {
         assert_eq!(requests[1].json_body()["action"]["type"], "cancel");
         assert_eq!(requests[1].json_body()["action"]["cancels"][0]["a"], 1);
         assert_eq!(requests[1].json_body()["action"]["cancels"][0]["o"], 67890);
-        assert_eq!(requests[4].json_body()["action"]["type"], "cancel");
-        assert_eq!(requests[4].json_body()["action"]["cancels"][0]["o"], 12345);
-        assert_eq!(requests[6].json_body()["action"]["type"], "updateLeverage");
-        assert_eq!(requests[6].json_body()["action"]["asset"], 1);
-        assert_eq!(requests[6].json_body()["action"]["isCross"], true);
-        assert_eq!(requests[6].json_body()["action"]["leverage"], 10);
+        assert_eq!(requests[3].json_body()["action"]["type"], "cancel");
+        assert_eq!(requests[3].json_body()["action"]["cancels"][0]["o"], 12345);
+        assert_eq!(requests[4].json_body()["action"]["type"], "updateLeverage");
+        assert_eq!(requests[4].json_body()["action"]["asset"], 1);
+        assert_eq!(requests[4].json_body()["action"]["isCross"], true);
+        assert_eq!(requests[4].json_body()["action"]["leverage"], 10);
     }
 
     #[derive(Debug, Clone)]

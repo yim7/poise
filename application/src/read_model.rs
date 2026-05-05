@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use poise_core::events::{DomainEvent, ExecutionGateReason};
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
-use poise_core::track::TrackDefinition;
+use poise_core::track::{Instrument, TrackDefinition};
 use poise_core::types::Side;
 use poise_engine::execution_plan::TrackEffect;
 use poise_engine::executor::{BindingStatus, PolicyKind, RecoveryAnomaly};
@@ -32,8 +32,7 @@ pub enum TrackActivityLevel {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackListReadModel {
     pub track_id: String,
-    pub venue: String,
-    pub symbol: String,
+    pub instrument: Instrument,
     pub status: TrackReadStatus,
     pub updated_at: DateTime<Utc>,
     pub strategy_price: Option<f64>,
@@ -52,8 +51,7 @@ pub struct TrackListReadModel {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackReadModel {
     pub track_id: String,
-    pub venue: String,
-    pub symbol: String,
+    pub instrument: Instrument,
     pub status: TrackReadStatus,
     pub updated_at: DateTime<Utc>,
     pub lower_price: f64,
@@ -253,8 +251,7 @@ impl TrackReadModel {
 
         Self {
             track_id: list_view.track_id.clone(),
-            venue: list_view.venue.clone(),
-            symbol: list_view.symbol.clone(),
+            instrument: list_view.instrument.clone(),
             status: list_view.status,
             updated_at: list_view.updated_at,
             lower_price: track_config.lower_price,
@@ -297,8 +294,7 @@ impl TrackListReadModel {
     ) -> Self {
         Self {
             track_id: definition.track_id().as_str().to_string(),
-            venue: definition.instrument().venue.as_str().to_string(),
-            symbol: definition.instrument().symbol.clone(),
+            instrument: definition.instrument().clone(),
             status: TrackReadStatus::from(runtime.status.clone()),
             updated_at,
             strategy_price: runtime.strategy_price,
@@ -326,8 +322,7 @@ impl From<&TrackReadModel> for TrackListReadModel {
     fn from(value: &TrackReadModel) -> Self {
         Self {
             track_id: value.track_id.clone(),
-            venue: value.venue.clone(),
-            symbol: value.symbol.clone(),
+            instrument: value.instrument.clone(),
             status: value.status,
             updated_at: value.updated_at,
             strategy_price: value.strategy_price,
@@ -614,7 +609,10 @@ mod tests {
         });
 
         assert_eq!(read_model.track_id, "btc-core");
-        assert_eq!(read_model.symbol, "BTCUSDT");
+        assert_eq!(
+            read_model.instrument,
+            Instrument::new(Venue::Binance, "BTCUSDT")
+        );
         assert_eq!(read_model.status, TrackReadStatus::Active);
         assert_eq!(read_model.recovery_issue, None);
         assert_eq!(read_model.active_binding_count, 0);

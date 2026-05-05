@@ -7,8 +7,7 @@ use poise_engine::ports::{
 };
 
 use crate::rest::models::{ClearinghouseStateResponse, MetaResponse, OpenOrderResponse};
-
-const PERP_MAX_DECIMALS: i32 = 6;
+use crate::rules::{perp_price_precision, representative_perp_price_tick};
 const MIN_NOTIONAL_USD: f64 = 10.0;
 const VIP0_MAKER_FEE_RATE: f64 = 0.00015;
 const VIP0_TAKER_FEE_RATE: f64 = 0.00045;
@@ -20,12 +19,12 @@ pub(crate) fn build_exchange_info(meta: &MetaResponse, symbol: &str) -> Result<E
         .find(|asset| asset.name == symbol)
         .ok_or_else(|| anyhow!("missing Hyperliquid asset `{symbol}`"))?;
     let quantity_step = decimal_step(asset.sz_decimals as i32);
-    let price_decimals = (PERP_MAX_DECIMALS - asset.sz_decimals as i32).max(0);
 
     Ok(ExchangeInfo {
         instrument: Instrument::new(Venue::Hyperliquid, symbol),
         rules: ExchangeRules {
-            price_tick: decimal_step(price_decimals),
+            price_tick: representative_perp_price_tick(asset.sz_decimals),
+            price_precision: perp_price_precision(asset.sz_decimals),
             quantity_step,
             min_qty: quantity_step,
             min_notional: MIN_NOTIONAL_USD,
@@ -118,7 +117,7 @@ fn parse_decimal(field: &str, value: &str) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use poise_core::track::{Instrument, Venue};
-    use poise_core::types::{ExchangeRules, Side};
+    use poise_core::types::{ExchangeRules, PricePrecision, Side};
     use poise_engine::ports::{ExchangeOrder, OrderStatus, Position};
 
     use crate::rest::models::{
@@ -146,7 +145,8 @@ mod tests {
         assert_eq!(
             info.rules,
             ExchangeRules {
-                price_tick: 0.1,
+                price_tick: 1.0,
+                price_precision: PricePrecision::significant_figures(1, 5),
                 quantity_step: 0.00001,
                 min_qty: 0.00001,
                 min_notional: 10.0,
@@ -154,6 +154,20 @@ mod tests {
                 taker_fee_rate: 0.00045,
             }
         );
+    }
+
+    #[test]
+    fn exchange_info_uses_hyperliquid_effective_price_tick_for_eth() {
+        let meta = MetaResponse {
+            universe: vec![PerpAssetMeta {
+                name: "ETH".to_string(),
+                sz_decimals: 4,
+            }],
+        };
+
+        let info = build_exchange_info(&meta, "ETH").unwrap();
+
+        assert_eq!(info.rules.price_tick, 0.1);
     }
 
     #[test]

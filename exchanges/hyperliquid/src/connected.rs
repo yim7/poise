@@ -12,18 +12,26 @@ use poise_engine::ports::{
     OrderReceipt, OrderRequest, Position, UserDataEvent,
 };
 
-use crate::{Config, rest::client::HyperliquidRestClient, ws::HyperliquidWsClient};
+use crate::{
+    Config, client_order_id::ClientOrderIdMapper, rest::client::HyperliquidRestClient,
+    ws::HyperliquidWsClient,
+};
 
 const DEFAULT_CAPACITY_LEVERAGE: u32 = 10;
 
 pub async fn connect(config: &Config) -> Result<Connected> {
     let credentials = config.credentials()?;
-    let ws = Arc::new(HyperliquidWsClient::new(
+    let client_order_ids = ClientOrderIdMapper::shared();
+    let ws = Arc::new(HyperliquidWsClient::new_with_client_order_id_mapper(
         config.endpoints().ws_url().to_string(),
         credentials.wallet_address().to_string(),
+        Arc::clone(&client_order_ids),
     ));
     Ok(Connected::from_rest_client(
-        Arc::new(HyperliquidRestClient::new(config)?),
+        Arc::new(HyperliquidRestClient::new_with_client_order_id_mapper(
+            config,
+            client_order_ids,
+        )?),
         ws,
     ))
 }

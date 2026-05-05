@@ -22,6 +22,21 @@ pub(crate) struct ClearinghouseStateResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct SpotClearinghouseStateResponse {
+    pub balances: Vec<SpotBalance>,
+    #[serde(rename = "tokenToAvailableAfterMaintenance", default)]
+    pub token_to_available_after_maintenance: Vec<(u32, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct SpotBalance {
+    pub coin: String,
+    pub token: u32,
+    pub total: String,
+    pub hold: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct MarginSummary {
     #[serde(rename = "accountValue")]
     pub account_value: String,
@@ -86,6 +101,21 @@ mod tests {
         assert_eq!(
             response.asset_positions[0].position.entry_px.as_deref(),
             Some("65000.5")
+        );
+    }
+
+    #[test]
+    fn deserializes_spot_clearinghouse_state_response() {
+        let response: SpotClearinghouseStateResponse = serde_json::from_str(
+            r#"{"balances":[{"coin":"USDC","token":0,"total":"891.55684101","hold":"314.896004","entryNtl":"0.0"}],"tokenToAvailableAfterMaintenance":[[0,"871.15175301"]]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.balances[0].coin, "USDC");
+        assert_eq!(response.balances[0].token, 0);
+        assert_eq!(
+            response.token_to_available_after_maintenance[0],
+            (0, "871.15175301".to_string())
         );
     }
 

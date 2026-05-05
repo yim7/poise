@@ -241,9 +241,9 @@ fn parse_execution_update(
     let symbol = update.symbol;
     let exec_id = update.exec_id;
     let instrument = Instrument::new(Venue::Bybit, symbol.clone());
-    let pnl_asset = instrument.pnl_asset();
+    let quote_asset = instrument.quote_asset();
     let trading_fee = match normalized_fee_currency(update.fee_currency.as_deref()) {
-        Some(asset) if asset == pnl_asset => update.exec_fee,
+        Some(asset) if asset == quote_asset => update.exec_fee,
         Some(_) => 0.0,
         None => update.exec_fee,
     };

@@ -283,6 +283,7 @@ mod tests {
                         }),
                         exchange_rules: poise_core::types::ExchangeRules {
                             price_tick: 0.5,
+                            price_precision: Default::default(),
                             quantity_step: 0.001,
                             min_qty: 0.001,
                             min_notional: 5.0,

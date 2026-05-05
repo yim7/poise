@@ -35,11 +35,129 @@ impl Side {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeRules {
     pub price_tick: f64,
+    #[serde(default)]
+    pub price_precision: PricePrecision,
     pub quantity_step: f64,
     pub min_qty: f64,
     pub min_notional: f64,
     pub maker_fee_rate: f64,
     pub taker_fee_rate: f64,
+}
+
+impl ExchangeRules {
+    pub fn round_price(&self, price: f64, rounding: PriceRounding) -> f64 {
+        self.price_precision.round(price, rounding, self.price_tick)
+    }
+
+    pub fn prices_match(&self, left: f64, right: f64) -> bool {
+        match self.price_precision {
+            PricePrecision::FixedTick => values_match(left, right, self.price_tick),
+            _ => {
+                let left = self.round_price(left, PriceRounding::Nearest);
+                let right = self.round_price(right, PriceRounding::Nearest);
+                values_match(
+                    left,
+                    right,
+                    self.price_precision.match_tolerance(left, right),
+                )
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceRounding {
+    Down,
+    Up,
+    Nearest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PricePrecision {
+    FixedTick,
+    SignificantFigures {
+        max_decimals: u32,
+        significant_figures: u32,
+    },
+}
+
+impl Default for PricePrecision {
+    fn default() -> Self {
+        Self::FixedTick
+    }
+}
+
+impl PricePrecision {
+    pub fn significant_figures(max_decimals: u32, significant_figures: u32) -> Self {
+        Self::SignificantFigures {
+            max_decimals,
+            significant_figures: significant_figures.max(1),
+        }
+    }
+
+    pub fn round(self, price: f64, rounding: PriceRounding, fixed_tick: f64) -> f64 {
+        if !price.is_finite() {
+            return price;
+        }
+
+        let step = match self {
+            Self::FixedTick => fixed_tick,
+            Self::SignificantFigures {
+                max_decimals,
+                significant_figures,
+            } => significant_figure_step(price, max_decimals, significant_figures),
+        };
+        round_to_price_step(price, step, rounding)
+    }
+
+    fn match_tolerance(self, left: f64, right: f64) -> f64 {
+        match self {
+            Self::FixedTick => f64::EPSILON,
+            Self::SignificantFigures {
+                max_decimals,
+                significant_figures,
+            } => {
+                significant_figure_step(
+                    left.abs().max(right.abs()),
+                    max_decimals,
+                    significant_figures,
+                ) * 1e-9
+            }
+        }
+    }
+}
+
+fn significant_figure_step(price: f64, max_decimals: u32, significant_figures: u32) -> f64 {
+    if price.abs() <= f64::EPSILON {
+        return 10_f64.powi(-(max_decimals as i32));
+    }
+
+    let magnitude = price.abs().log10().floor() as i32;
+    let significant_scale = significant_figures as i32 - 1 - magnitude;
+    let scale = (max_decimals as i32).min(significant_scale);
+    10_f64.powi(-scale)
+}
+
+fn round_to_price_step(price: f64, step: f64, rounding: PriceRounding) -> f64 {
+    if step <= f64::EPSILON {
+        return price;
+    }
+
+    let scaled = price / step;
+    let tolerance = scaled.abs().max(1.0) * f64::EPSILON * 16.0;
+    let units = match rounding {
+        PriceRounding::Down => (scaled + tolerance).floor(),
+        PriceRounding::Up => (scaled - tolerance).ceil(),
+        PriceRounding::Nearest => scaled.round(),
+    };
+    let rounded = units * step;
+    if rounded == -0.0 { 0.0 } else { rounded }
+}
+
+fn values_match(left: f64, right: f64, tolerance: f64) -> bool {
+    let tolerance = tolerance.max(f64::EPSILON);
+    (left - right).abs() <= tolerance + f64::EPSILON
 }
 
 #[cfg(test)]
@@ -74,5 +192,14 @@ mod tests {
         assert!(Exposure(0.0).is_zero());
         assert!(!Exposure(1.0).is_zero());
         assert!(!Exposure(-0.001).is_zero());
+    }
+
+    #[test]
+    fn significant_figure_precision_rounds_by_price_magnitude() {
+        let precision = PricePrecision::significant_figures(2, 5);
+
+        assert!((precision.round(1234.56, PriceRounding::Down, 0.0) - 1234.5).abs() < 1e-9);
+        assert!((precision.round(1234.56, PriceRounding::Up, 0.0) - 1234.6).abs() < 1e-9);
+        assert!((precision.round(123456.0, PriceRounding::Nearest, 0.0) - 123460.0).abs() < 1e-9);
     }
 }

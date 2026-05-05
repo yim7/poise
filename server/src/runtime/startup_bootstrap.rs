@@ -874,6 +874,7 @@ mod tests {
                 .unwrap(),
                 ExchangeRules {
                     price_tick: 0.1,
+                    price_precision: Default::default(),
                     quantity_step: 0.001,
                     min_qty: 0.001,
                     min_notional: 5.0,
@@ -1034,6 +1035,7 @@ mod tests {
                 instrument: instrument.clone(),
                 rules: ExchangeRules {
                     price_tick: 0.1,
+                    price_precision: Default::default(),
                     quantity_step: 0.001,
                     min_qty: 0.001,
                     min_notional: 5.0,
