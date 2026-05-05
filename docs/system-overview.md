@@ -55,6 +55,26 @@ server::config::TrackSpec
 
 `TrackSpec::to_track_definition(venue)` 负责把配置字段投影为 `TrackDefinition`，并触发 core 层策略、风险和默认值校验。
 
+## 交易所接入边界
+
+交易所 crate 的公共连接入口是 `connect(config) -> ExchangePorts`。`ExchangePorts` 只是短生命周期的连接结果容器，用于一次性返回 Poise runtime 需要的几个能力 port；它不进入 runtime、read model 或领域层。
+
+当前有效 port 边界：
+
+- `ExecutionPort`：下单、撤单、cancel all、持仓查询、open orders 查询。
+- `MarketDataPort`：订阅当前 track 需要的价格流。
+- `AccountPort`：账户容量快照和 user data 订阅。
+- `AccountSummaryPort`：账户摘要，用于 account monitor 和部分启动资金策略。
+- `MetadataPort`：交易规则和交易所时间。
+
+新增交易所时按下面顺序接入：
+
+1. 在新的 `exchanges/<venue>/` crate 内实现 REST / WebSocket 私有 client、协议模型、签名和 mapper。交易所字段、账户模式、symbol 规则和错误 envelope 不上移到共享层。
+2. 在 `exchanges/<venue>/src/connected.rs` 把私有 client 组装为 `ExchangePorts`。如果 REST / WS client 方法已经直接匹配 port 语义，可以直接为 client 实现 port trait；只有在需要错误语义转换、symbol 转换、REST+WS 组合或测试专用缺省行为时才保留 wrapper。
+3. 在 `core::track::Venue`、`server/src/config.rs` 和 `server/src/assembly.rs` 增加 venue / 配置 / connect 分支。`assembly` 拿到 `ExchangePorts` 后立刻拆给启动准备、account monitor 和 runtime。
+4. 在 `server/src/exchange_startup.rs` 增加启动期窄控制：`SymbolLeverageSetter` 用于按 track 设置 startup-only leverage；`StartupCapacityProbe` 的选择也在这里处理。Binance 使用交易所 account capacity snapshot；Bybit / Hyperliquid / OKX 使用 account summary 的 available balance 乘以 track startup leverage。
+5. 补最小测试：配置解析、`connected::tests::`、关键 mapper、`exchange_startup::tests::`，以及必要的 `assembly::tests::`。如果新增交易所只改某个 crate，优先跑该 crate 的最小测试，再按影响面扩大。
+
 ## 启动与运行时
 
 启动主路径：
@@ -62,8 +82,9 @@ server::config::TrackSpec
 1. `server/src/main.rs` 读取 `--instance-dir` 下的 `config.toml`。
 2. `state_bootstrap::prepare_state_repository(...)` 初始化 SQLite，构造 `TrackDefinitionRegistry`，并检查当前配置与持久业务状态是否兼容。
 3. `assembly::assemble(...)` 构造交易所连接，按 track 执行 startup-only 杠杆设置，加载交易所规则，并把每个 `TrackDefinition` 注册进 `TrackManager`。
-4. `RuntimeStartupDefinition` 把 `TrackDefinition` 和启动容量模式组合成 server runtime 内部输入。
-5. `ServerRuntime::start()` 完成 live exchange state bootstrap，然后启动 market data、user data、recovery、effect worker、account monitor 和 health 相关 task。
+4. `RuntimeStartupDefinition` 把 `TrackDefinition` 和 startup leverage 组合成 server runtime 内部输入。
+5. `StartupCapacityProbe` 在启动恢复时按当前交易所策略计算可增加名义金额。
+6. `ServerRuntime::start()` 完成 live exchange state bootstrap，然后启动 market data、user data、recovery、effect worker、account monitor 和 health 相关 task。
 
 启动遇到持久状态与当前配置不兼容时会失败，操作者应显式处理实例目录或数据库。
 
