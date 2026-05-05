@@ -12,7 +12,7 @@ use poise_core::track::{Instrument, TrackDefinition, TrackId};
 use poise_core::types::Exposure;
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::ports::{
-    AccountCapacitySnapshot, AccountPort, ClockPort, ExecutionPort, MarketDataPort, MetadataPort,
+    AccountPort, AccountSummaryPort, ClockPort, ExecutionPort, MarketDataPort, MetadataPort,
     UserDataEvent,
 };
 use tokio::sync::{mpsc, watch};
@@ -31,15 +31,6 @@ mod user_data;
 
 pub use guards::{AccountMarginGuardStore, TrackReconcileGuards};
 pub(crate) use reconcile::{RecoveryAnomalyDirtyObserver, RecoveryDirtyState};
-
-#[async_trait::async_trait]
-pub(crate) trait StartupCapacityProbe: Send + Sync {
-    async fn probe_startup_capacity(
-        &self,
-        instrument: &Instrument,
-        startup_leverage: u32,
-    ) -> Result<AccountCapacitySnapshot>;
-}
 
 #[derive(Clone)]
 pub(crate) struct RuntimeStartupDefinition {
@@ -82,9 +73,9 @@ pub struct ServerRuntime {
     effect_worker_state: EffectWorkerState,
     execution: Arc<dyn ExecutionPort>,
     market_data: Arc<dyn MarketDataPort>,
+    account_summary: Arc<dyn AccountSummaryPort>,
     account: Arc<dyn AccountPort>,
     metadata: Arc<dyn MetadataPort>,
-    startup_capacity: Arc<dyn StartupCapacityProbe>,
     clock: Arc<dyn ClockPort>,
     startup_definitions: Vec<RuntimeStartupDefinition>,
     recovery_retry_interval: Duration,
@@ -99,9 +90,9 @@ pub struct ServerRuntime {
 pub(crate) struct RuntimePorts {
     execution: Arc<dyn ExecutionPort>,
     market_data: Arc<dyn MarketDataPort>,
+    account_summary: Arc<dyn AccountSummaryPort>,
     account: Arc<dyn AccountPort>,
     metadata: Arc<dyn MetadataPort>,
-    startup_capacity: Arc<dyn StartupCapacityProbe>,
     clock: Arc<dyn ClockPort>,
 }
 
@@ -109,17 +100,17 @@ impl RuntimePorts {
     pub(crate) fn new(
         execution: Arc<dyn ExecutionPort>,
         market_data: Arc<dyn MarketDataPort>,
+        account_summary: Arc<dyn AccountSummaryPort>,
         account: Arc<dyn AccountPort>,
         metadata: Arc<dyn MetadataPort>,
-        startup_capacity: Arc<dyn StartupCapacityProbe>,
         clock: Arc<dyn ClockPort>,
     ) -> Self {
         Self {
             execution,
             market_data,
+            account_summary,
             account,
             metadata,
-            startup_capacity,
             clock,
         }
     }
@@ -229,9 +220,9 @@ impl ServerRuntime {
             effect_worker_state,
             execution: ports.execution,
             market_data: ports.market_data,
+            account_summary: ports.account_summary,
             account: ports.account,
             metadata: ports.metadata,
-            startup_capacity: ports.startup_capacity,
             clock: ports.clock,
             startup_definitions,
             recovery_retry_interval: intervals.recovery_retry_interval,

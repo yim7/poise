@@ -14,8 +14,8 @@ use poise_engine::ports::{
 };
 
 use crate::mapper::{
-    account_summary_from_balance, exchange_info_from_instrument, open_order_from_snapshot,
-    position_from_snapshot, side_to_okx,
+    account_summary_from_balance, available_balance_from_balance, exchange_info_from_instrument,
+    open_order_from_snapshot, position_from_snapshot, side_to_okx,
 };
 use crate::rest::auth::sign_okx_payload;
 use crate::rest::models::{
@@ -93,6 +93,12 @@ impl OkxRestClient {
     pub(crate) async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
         let balance = self.get_balance_snapshot().await?;
         account_summary_from_balance(balance)
+    }
+
+    pub(crate) async fn get_available_balance(&self, symbol: &str) -> Result<f64> {
+        let quote_asset = Instrument::new(Venue::Okx, symbol).quote_asset();
+        let balance = self.get_balance_snapshot().await?;
+        available_balance_from_balance(&balance, &quote_asset)
     }
 
     pub(crate) async fn get_account_capacity_snapshot(
@@ -572,6 +578,26 @@ mod tests {
             requests[1].headers.get("x-simulated-trading"),
             Some(&"1".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn available_balance_uses_quote_asset_from_swap_symbol() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[
+                {"ccy":"USDT","availEq":"9800.25","upl":"-120.75"},
+                {"ccy":"BTC","availEq":"200.0","upl":"10.0"}
+            ]}]}"#,
+        )])
+        .await;
+        let client = test_client(&server, true);
+
+        let available = client.get_available_balance("BTC-USDT-SWAP").await.unwrap();
+
+        assert_eq!(available, 9_800.25);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/api/v5/account/balance");
     }
 
     #[tokio::test]

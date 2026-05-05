@@ -28,9 +28,7 @@ use tokio::time::Duration;
 use crate::account_projector::AccountProjector;
 use crate::config::{Config, ExchangeConfig};
 use crate::exchange_freshness::ExchangeFreshness;
-use crate::exchange_startup::{
-    build_startup_capacity_probe, build_symbol_leverage_setter, build_track_leverage_index,
-};
+use crate::exchange_startup::{build_symbol_leverage_setter, build_track_leverage_index};
 use crate::projector::TrackProjector;
 use crate::runtime::{
     AccountMarginGuardStore, RecoveryAnomalyDirtyObserver, RecoveryDirtyState, RuntimeHandles,
@@ -335,11 +333,6 @@ async fn assemble_with_state_store(
         account_margin_guard.clone(),
         session_effect_queue,
     );
-    let startup_capacity_probe = build_startup_capacity_probe(
-        exchange_venue,
-        exchange_ports.account(),
-        exchange_ports.account_summary(),
-    );
     #[cfg(test)]
     let (runtime_test_context, effect_worker_test_context) =
         build_test_contexts_from_runtime_states(
@@ -364,9 +357,9 @@ async fn assemble_with_state_store(
             RuntimePorts::new(
                 exchange_ports.execution(),
                 exchange_ports.market_data(),
+                exchange_ports.account_summary(),
                 exchange_ports.account(),
                 exchange_ports.metadata(),
-                startup_capacity_probe,
                 clock,
             ),
             startup_definitions,
@@ -1606,17 +1599,6 @@ total_loss_limit = 600.0
         ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl crate::runtime::StartupCapacityProbe for FakeExchange {
-        async fn probe_startup_capacity(
-            &self,
-            instrument: &Instrument,
-            _startup_leverage: u32,
-        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
-            self.get_account_capacity_snapshot(instrument).await
         }
     }
 

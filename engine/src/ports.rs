@@ -218,6 +218,10 @@ impl UserDataEvent {
 #[async_trait]
 pub trait AccountSummaryPort: Send + Sync {
     async fn get_account_summary(&self) -> Result<AccountSummarySnapshot>;
+
+    async fn get_available_balance(&self, _instrument: &Instrument) -> Result<f64> {
+        Ok(self.get_account_summary().await?.available)
+    }
 }
 
 #[async_trait]

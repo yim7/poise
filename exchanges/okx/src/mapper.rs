@@ -53,6 +53,19 @@ pub(crate) fn account_summary_from_balance(
     })
 }
 
+pub(crate) fn available_balance_from_balance(
+    value: &BalanceSnapshot,
+    quote_asset: &str,
+) -> Result<f64> {
+    let detail = value
+        .details
+        .iter()
+        .find(|detail| detail.currency == quote_asset)
+        .with_context(|| format!("missing OKX balance detail for quote asset `{quote_asset}`"))?;
+
+    parse_decimal(&format!("details[{quote_asset}].availEq"), &detail.avail_eq)
+}
+
 pub(crate) fn position_from_snapshot(value: PositionSnapshot) -> Result<Position> {
     if value.pos_side != "net" {
         return Err(anyhow!(
@@ -181,6 +194,34 @@ mod tests {
                 unrealized_pnl: -110.75,
                 observed_at: summary.observed_at,
             }
+        );
+    }
+
+    #[test]
+    fn maps_available_balance_for_quote_asset() {
+        let balance = BalanceSnapshot {
+            total_eq: "12500.5".to_string(),
+            details: vec![
+                BalanceDetail {
+                    currency: "USDT".to_string(),
+                    avail_eq: "9800.25".to_string(),
+                    upl: "-120.75".to_string(),
+                },
+                BalanceDetail {
+                    currency: "BTC".to_string(),
+                    avail_eq: "200.0".to_string(),
+                    upl: "10.0".to_string(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            available_balance_from_balance(&balance, "USDT").unwrap(),
+            9_800.25
+        );
+        assert_eq!(
+            available_balance_from_balance(&balance, "BTC").unwrap(),
+            200.0
         );
     }
 

@@ -72,7 +72,7 @@ server::config::TrackSpec
 1. 在新的 `exchanges/<venue>/` crate 内实现 REST / WebSocket 私有 client、协议模型、签名和 mapper。交易所字段、账户模式、symbol 规则和错误 envelope 不上移到共享层。
 2. 在 `exchanges/<venue>/src/connected.rs` 把私有 client 组装为 `ExchangePorts`。如果 REST / WS client 方法已经直接匹配 port 语义，可以直接为 client 实现 port trait；只有在需要错误语义转换、symbol 转换、REST+WS 组合或测试专用缺省行为时才保留 wrapper。
 3. 在 `core::track::Venue`、`server/src/config.rs` 和 `server/src/assembly.rs` 增加 venue / 配置 / connect 分支。`assembly` 拿到 `ExchangePorts` 后立刻拆给启动准备、account monitor 和 runtime。
-4. 在 `server/src/exchange_startup.rs` 增加启动期窄控制：`SymbolLeverageSetter` 用于按 track 设置 startup-only leverage；`StartupCapacityProbe` 的选择也在这里处理。Binance 使用交易所 account capacity snapshot；Bybit / Hyperliquid / OKX 使用 account summary 的 available balance 乘以 track startup leverage。
+4. 在 `server/src/exchange_startup.rs` 增加启动期窄控制：`SymbolLeverageSetter` 用于按 track 设置 startup-only leverage。启动恢复统一使用 instrument 对应的 available balance 乘以 track startup leverage 计算可增加名义金额，避免按交易所维护两套启动容量策略；单保证金账户可以直接复用账户级 available，OKX 这类多币种账户按 symbol 的 quote asset 取余额。
 5. 补最小测试：配置解析、`connected::tests::`、关键 mapper、`exchange_startup::tests::`，以及必要的 `assembly::tests::`。如果新增交易所只改某个 crate，优先跑该 crate 的最小测试，再按影响面扩大。
 
 ## 启动与运行时
@@ -83,7 +83,7 @@ server::config::TrackSpec
 2. `state_bootstrap::prepare_state_repository(...)` 初始化 SQLite，构造 `TrackDefinitionRegistry`，并检查当前配置与持久业务状态是否兼容。
 3. `assembly::assemble(...)` 构造交易所连接，按 track 执行 startup-only 杠杆设置，加载交易所规则，并把每个 `TrackDefinition` 注册进 `TrackManager`。
 4. `RuntimeStartupDefinition` 把 `TrackDefinition` 和 startup leverage 组合成 server runtime 内部输入。
-5. `StartupCapacityProbe` 在启动恢复时按当前交易所策略计算可增加名义金额。
+5. 启动恢复用 instrument 对应的 available balance 和 track startup leverage 计算可增加名义金额。
 6. `ServerRuntime::start()` 完成 live exchange state bootstrap，然后启动 market data、user data、recovery、effect worker、account monitor 和 health 相关 task。
 
 启动遇到持久状态与当前配置不兼容时会失败，操作者应显式处理实例目录或数据库。

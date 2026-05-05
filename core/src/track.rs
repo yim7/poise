@@ -68,6 +68,13 @@ impl Instrument {
     pub fn quote_asset(&self) -> String {
         match self.venue {
             Venue::Hyperliquid => "USDC".to_string(),
+            Venue::Okx => self
+                .symbol
+                .split('-')
+                .nth(1)
+                .or_else(|| quote_asset_for_symbol(&self.symbol))
+                .unwrap_or(self.symbol.as_str())
+                .to_string(),
             _ => quote_asset_for_symbol(&self.symbol)
                 .unwrap_or(self.symbol.as_str())
                 .to_string(),
@@ -243,6 +250,18 @@ mod tests {
     fn hyperliquid_instrument_quote_asset_is_usdc() {
         assert_eq!(
             Instrument::new(Venue::Hyperliquid, "ETH").quote_asset(),
+            "USDC"
+        );
+    }
+
+    #[test]
+    fn okx_swap_instrument_quote_asset_uses_middle_symbol_segment() {
+        assert_eq!(
+            Instrument::new(Venue::Okx, "BTC-USDT-SWAP").quote_asset(),
+            "USDT"
+        );
+        assert_eq!(
+            Instrument::new(Venue::Okx, "ETH-USDC-SWAP").quote_asset(),
             "USDC"
         );
     }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -258,10 +259,16 @@ async fn probe_startup_account_capacity(
 ) -> Result<AccountCapacitySnapshot> {
     let instrument = track.instrument().clone();
     let startup_leverage = track.startup_leverage();
+    let account_summary = Arc::clone(&runtime.account_summary);
     retry_startup_step("probe_startup_capacity", || {
-        runtime
-            .startup_capacity
-            .probe_startup_capacity(&instrument, startup_leverage)
+        let account_summary = Arc::clone(&account_summary);
+        let instrument = instrument.clone();
+        async move {
+            let available = account_summary.get_available_balance(&instrument).await?;
+            Ok(AccountCapacitySnapshot {
+                max_increase_notional: available * startup_leverage as f64,
+            })
+        }
     })
     .await
 }
@@ -361,8 +368,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
@@ -375,16 +382,16 @@ mod tests {
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
-        AccountCapacitySnapshot, AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder,
-        ExecutionPort, MarketDataTick, MetadataPort, OrderReceipt, OrderStatus, Position,
-        UserDataEvent, UserDataPayload,
+        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort,
+        MarketDataTick, MetadataPort, OrderReceipt, OrderStatus, Position, UserDataEvent,
+        UserDataPayload,
     };
     use poise_engine::runtime::{TerminationCause, TrackStatus};
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
     use crate::assembly::SystemClock;
-    use crate::runtime::{RuntimePorts, RuntimeStartupDefinition, StartupCapacityProbe};
+    use crate::runtime::{RuntimePorts, RuntimeStartupDefinition};
     use crate::test_support::{
         build_runtime_and_effect_worker_test_contexts, build_test_application_services,
         seed_persisted_pending_submit_effect, test_track_definition_registry,
@@ -394,7 +401,7 @@ mod tests {
     use super::complete_startup;
 
     #[tokio::test]
-    async fn startup_capacity_is_probed_through_runtime_strategy_with_track_leverage() {
+    async fn startup_capacity_uses_account_summary_available_with_track_leverage() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let manager = seeded_manager();
         let (notifications, _) = tokio::sync::broadcast::channel(16);
@@ -416,7 +423,7 @@ mod tests {
                 account_monitor,
             );
         let exchange = Arc::new(StartupExchange::with_inherited_order("BTCUSDT"));
-        let startup_capacity = Arc::new(RecordingStartupCapacityProbe::new(10_000.0));
+        exchange.set_available_balance(200.0);
         let runtime = super::ServerRuntime::new(
             runtime_context.runtime_state(),
             effect_worker_context.effect_worker_state,
@@ -425,7 +432,7 @@ mod tests {
                 exchange.clone(),
                 exchange.clone(),
                 exchange.clone(),
-                startup_capacity.clone(),
+                exchange.clone(),
                 Arc::new(SystemClock),
             ),
             vec![RuntimeStartupDefinition::new(
@@ -443,10 +450,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            startup_capacity.calls(),
-            vec![(Instrument::new(Venue::Binance, "BTCUSDT"), 25)]
-        );
+        let constraint = runtime
+            .state
+            .account_margin_guard
+            .constraint_for(&Instrument::new(Venue::Binance, "BTCUSDT"));
+        assert_eq!(constraint.max_increase_notional, Some(5_000.0));
+        assert_eq!(exchange.available_balance_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(exchange.account_summary_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(exchange.account_capacity_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -956,53 +967,11 @@ mod tests {
         cancel_all_calls: AtomicUsize,
         get_position_calls: AtomicUsize,
         get_open_orders_calls: AtomicUsize,
+        available_balance_calls: AtomicUsize,
+        account_summary_calls: AtomicUsize,
+        account_capacity_calls: AtomicUsize,
+        available_balance: std::sync::Mutex<f64>,
         instrument: Instrument,
-    }
-
-    struct RecordingStartupCapacityProbe {
-        max_increase_notional: f64,
-        calls: Mutex<Vec<(Instrument, u32)>>,
-    }
-
-    impl RecordingStartupCapacityProbe {
-        fn new(max_increase_notional: f64) -> Self {
-            Self {
-                max_increase_notional,
-                calls: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn calls(&self) -> Vec<(Instrument, u32)> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl StartupCapacityProbe for RecordingStartupCapacityProbe {
-        async fn probe_startup_capacity(
-            &self,
-            instrument: &Instrument,
-            startup_leverage: u32,
-        ) -> Result<AccountCapacitySnapshot> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((instrument.clone(), startup_leverage));
-            Ok(AccountCapacitySnapshot {
-                max_increase_notional: self.max_increase_notional,
-            })
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl StartupCapacityProbe for StartupExchange {
-        async fn probe_startup_capacity(
-            &self,
-            instrument: &Instrument,
-            _startup_leverage: u32,
-        ) -> Result<AccountCapacitySnapshot> {
-            self.get_account_capacity_snapshot(instrument).await
-        }
     }
 
     impl StartupExchange {
@@ -1012,8 +981,16 @@ mod tests {
                 cancel_all_calls: AtomicUsize::new(0),
                 get_position_calls: AtomicUsize::new(0),
                 get_open_orders_calls: AtomicUsize::new(0),
+                available_balance_calls: AtomicUsize::new(0),
+                account_summary_calls: AtomicUsize::new(0),
+                account_capacity_calls: AtomicUsize::new(0),
+                available_balance: std::sync::Mutex::new(1_000_000.0),
                 instrument: Instrument::new(Venue::Binance, symbol),
             }
+        }
+
+        fn set_available_balance(&self, available: f64) {
+            *self.available_balance.lock().unwrap() = available;
         }
     }
 
@@ -1090,12 +1067,20 @@ mod tests {
     #[async_trait::async_trait]
     impl AccountSummaryPort for StartupExchange {
         async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+            self.account_summary_calls.fetch_add(1, Ordering::SeqCst);
+            let available = *self.available_balance.lock().unwrap();
             Ok(poise_engine::ports::AccountSummarySnapshot {
                 equity: 1_000_000.0,
-                available: 1_000_000.0,
+                available,
                 unrealized_pnl: 0.0,
                 observed_at: Utc::now(),
             })
+        }
+
+        async fn get_available_balance(&self, instrument: &Instrument) -> Result<f64> {
+            assert_eq!(instrument, &self.instrument);
+            self.available_balance_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(*self.available_balance.lock().unwrap())
         }
     }
 
@@ -1106,6 +1091,7 @@ mod tests {
             instrument: &Instrument,
         ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
             assert_eq!(instrument, &self.instrument);
+            self.account_capacity_calls.fetch_add(1, Ordering::SeqCst);
             Ok(poise_engine::ports::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,
             })

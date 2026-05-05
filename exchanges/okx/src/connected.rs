@@ -123,6 +123,10 @@ impl AccountSummaryPort for OkxRestClient {
     async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
         self.get_account_summary().await
     }
+
+    async fn get_available_balance(&self, instrument: &Instrument) -> Result<f64> {
+        self.get_available_balance(&instrument.symbol).await
+    }
 }
 
 #[async_trait]
