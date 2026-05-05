@@ -191,13 +191,13 @@ Commit: `87c8ef978525db7c2c6887fcaad2fad2210dd50a`
 - Delete: `server/src/exchange.rs`
 - Test: `server/src/assembly.rs`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 更新 `server/src/assembly.rs` 的 build exchange 测试：`build_exchange()` 返回 `(Venue, ExchangePorts)`，测试直接断言第一个元素是对应 venue，并能从第二个元素取出所需 ports。`assemble_with_exchange_ports()` 不再构造 `server::Exchange`。
 
 移除 `server/src/exchange.rs` 的测试入口；该文件不再作为 server 层抽象存在。
 
-- [ ] **Step 2: 验证失败**
+- [x] **Step 2: 验证失败**
 
 Run:
 
@@ -207,7 +207,7 @@ cargo test -p poise-server assembly::tests::build_exchange_uses_exchange_deploym
 
 Expected: FAIL 或 compile error，原因是 `build_exchange()` 仍返回 `Exchange`。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `build_exchange()` 改为返回 `Result<(Venue, ExchangePorts)>`。`build_exchange_and_prepare_startup()` 和 `assemble_with_state_store()` 传递 `Venue` 与 `ExchangePorts`，但不再保留 `Exchange` wrapper。
 
@@ -219,7 +219,7 @@ Expected: FAIL 或 compile error，原因是 `build_exchange()` 仍返回 `Excha
 
 删除 `server/src/exchange.rs` 和 `mod exchange;`。同时删除 `ExchangePorts` 的 `*_ref` getter，避免为了已删除的 wrapper 暴露双套访问方式。
 
-- [ ] **Step 4: 验证通过**
+- [x] **Step 4: 验证通过**
 
 Run:
 
@@ -230,14 +230,14 @@ cargo fmt --check
 git diff --check
 ```
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add engine server docs/superpowers/plans/2026-05-05-exchange-design-simplification.md
 git commit -m "refactor: keep exchange ports at assembly boundary"
 ```
 
-Commit: _pending_
+Commit: `e5920302398cfe14a1c7c5e757aa91d05ed86cc4`
 
 ---
 
