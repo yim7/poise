@@ -12,7 +12,7 @@ use poise_core::track::{Instrument, TrackDefinition, TrackId};
 use poise_core::types::Exposure;
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::ports::{
-    AccountPort, AccountSummaryPort, ClockPort, ExecutionPort, MarketDataPort, MetadataPort,
+    AccountCapacitySnapshot, AccountPort, ClockPort, ExecutionPort, MarketDataPort, MetadataPort,
     UserDataEvent,
 };
 use tokio::sync::{mpsc, watch};
@@ -32,23 +32,26 @@ mod user_data;
 pub use guards::{AccountMarginGuardStore, TrackReconcileGuards};
 pub(crate) use reconcile::{RecoveryAnomalyDirtyObserver, RecoveryDirtyState};
 
-#[derive(Clone)]
-pub(crate) enum RuntimeStartupCapacityMode {
-    AccountCapacitySnapshot,
-    AvailableBalanceTimesLeverage { leverage: u32 },
+#[async_trait::async_trait]
+pub(crate) trait StartupCapacityProbe: Send + Sync {
+    async fn probe_startup_capacity(
+        &self,
+        instrument: &Instrument,
+        startup_leverage: u32,
+    ) -> Result<AccountCapacitySnapshot>;
 }
 
 #[derive(Clone)]
 pub(crate) struct RuntimeStartupDefinition {
     track: TrackDefinition,
-    capacity_mode: RuntimeStartupCapacityMode,
+    startup_leverage: u32,
 }
 
 impl RuntimeStartupDefinition {
-    pub(crate) fn new(track: TrackDefinition, capacity_mode: RuntimeStartupCapacityMode) -> Self {
+    pub(crate) fn new(track: TrackDefinition, startup_leverage: u32) -> Self {
         Self {
             track,
-            capacity_mode,
+            startup_leverage,
         }
     }
 
@@ -68,8 +71,8 @@ impl RuntimeStartupDefinition {
         self.track.exposure_from_position_qty(position_qty)
     }
 
-    pub(crate) fn startup_capacity_mode(&self) -> &RuntimeStartupCapacityMode {
-        &self.capacity_mode
+    pub(crate) fn startup_leverage(&self) -> u32 {
+        self.startup_leverage
     }
 }
 
@@ -80,8 +83,8 @@ pub struct ServerRuntime {
     execution: Arc<dyn ExecutionPort>,
     market_data: Arc<dyn MarketDataPort>,
     account: Arc<dyn AccountPort>,
-    account_summary: Arc<dyn AccountSummaryPort>,
     metadata: Arc<dyn MetadataPort>,
+    startup_capacity: Arc<dyn StartupCapacityProbe>,
     clock: Arc<dyn ClockPort>,
     startup_definitions: Vec<RuntimeStartupDefinition>,
     recovery_retry_interval: Duration,
@@ -97,8 +100,8 @@ pub(crate) struct RuntimePorts {
     execution: Arc<dyn ExecutionPort>,
     market_data: Arc<dyn MarketDataPort>,
     account: Arc<dyn AccountPort>,
-    account_summary: Arc<dyn AccountSummaryPort>,
     metadata: Arc<dyn MetadataPort>,
+    startup_capacity: Arc<dyn StartupCapacityProbe>,
     clock: Arc<dyn ClockPort>,
 }
 
@@ -106,17 +109,17 @@ impl RuntimePorts {
     pub(crate) fn new(
         execution: Arc<dyn ExecutionPort>,
         market_data: Arc<dyn MarketDataPort>,
-        account_summary: Arc<dyn AccountSummaryPort>,
         account: Arc<dyn AccountPort>,
         metadata: Arc<dyn MetadataPort>,
+        startup_capacity: Arc<dyn StartupCapacityProbe>,
         clock: Arc<dyn ClockPort>,
     ) -> Self {
         Self {
             execution,
             market_data,
             account,
-            account_summary,
             metadata,
+            startup_capacity,
             clock,
         }
     }
@@ -227,8 +230,8 @@ impl ServerRuntime {
             execution: ports.execution,
             market_data: ports.market_data,
             account: ports.account,
-            account_summary: ports.account_summary,
             metadata: ports.metadata,
+            startup_capacity: ports.startup_capacity,
             clock: ports.clock,
             startup_definitions,
             recovery_retry_interval: intervals.recovery_retry_interval,

@@ -2,9 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use poise_core::track::Instrument;
+use poise_core::track::{Instrument, Venue};
+use poise_engine::ports::{AccountCapacitySnapshot, AccountPort, AccountSummaryPort};
 
 use crate::config::{ExchangeConfig, TrackSpec};
+use crate::runtime::StartupCapacityProbe;
 use crate::startup_preparation::{SymbolLeverageSetter, TrackLeverageIndex};
 
 pub(crate) const DEFAULT_TRACK_LEVERAGE: u32 = 10;
@@ -56,6 +58,52 @@ pub(crate) fn build_symbol_leverage_setter(
     }
 }
 
+pub(crate) fn build_startup_capacity_probe(
+    venue: Venue,
+    account: Arc<dyn AccountPort>,
+    account_summary: Arc<dyn AccountSummaryPort>,
+) -> Arc<dyn StartupCapacityProbe> {
+    match venue {
+        Venue::Binance => Arc::new(ExchangeAccountCapacityProbe { account }),
+        Venue::Bybit | Venue::Hyperliquid | Venue::Okx => {
+            Arc::new(AvailableBalanceStartupCapacityProbe { account_summary })
+        }
+    }
+}
+
+struct ExchangeAccountCapacityProbe {
+    account: Arc<dyn AccountPort>,
+}
+
+#[async_trait::async_trait]
+impl StartupCapacityProbe for ExchangeAccountCapacityProbe {
+    async fn probe_startup_capacity(
+        &self,
+        instrument: &Instrument,
+        _startup_leverage: u32,
+    ) -> Result<AccountCapacitySnapshot> {
+        self.account.get_account_capacity_snapshot(instrument).await
+    }
+}
+
+struct AvailableBalanceStartupCapacityProbe {
+    account_summary: Arc<dyn AccountSummaryPort>,
+}
+
+#[async_trait::async_trait]
+impl StartupCapacityProbe for AvailableBalanceStartupCapacityProbe {
+    async fn probe_startup_capacity(
+        &self,
+        _instrument: &Instrument,
+        startup_leverage: u32,
+    ) -> Result<AccountCapacitySnapshot> {
+        let summary = self.account_summary.get_account_summary().await?;
+        Ok(AccountCapacitySnapshot {
+            max_increase_notional: summary.available * startup_leverage as f64,
+        })
+    }
+}
+
 pub(crate) fn build_track_leverage_index(tracks: &[TrackSpec]) -> Result<TrackLeverageIndex> {
     let mut index = HashMap::with_capacity(tracks.len());
     for track in tracks {
@@ -74,13 +122,22 @@ pub(crate) fn build_track_leverage_index(tracks: &[TrackSpec]) -> Result<TrackLe
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use anyhow::anyhow;
+    use chrono::Utc;
     use poise_application::TrackDefinitionRegistry;
     use poise_core::track::{Instrument, TrackId, Venue};
+    use poise_engine::ports::{
+        AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot,
+        UserDataEvent,
+    };
+    use tokio::sync::mpsc;
 
-    use super::{build_symbol_leverage_setter, build_track_leverage_index};
+    use super::{
+        build_startup_capacity_probe, build_symbol_leverage_setter, build_track_leverage_index,
+    };
     use crate::config::{ExchangeConfig, TrackSpec};
     use crate::startup_preparation::{SymbolLeverageSetter, apply_track_startup_leverage};
 
@@ -197,6 +254,42 @@ mod tests {
         assert!(message.contains("exchange rejected leverage"));
     }
 
+    #[tokio::test]
+    async fn binance_startup_capacity_uses_exchange_account_capacity_snapshot() {
+        let account = Arc::new(RecordingStartupAccount::default());
+        let account_summary = Arc::new(RecordingStartupAccountSummary::default());
+        let probe =
+            build_startup_capacity_probe(Venue::Binance, account.clone(), account_summary.clone());
+
+        let snapshot = probe
+            .probe_startup_capacity(&Instrument::new(Venue::Binance, "BTCUSDT"), 25)
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.max_increase_notional, 777.0);
+        assert_eq!(account.capacity_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(account_summary.summary_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn non_binance_startup_capacity_uses_available_balance_times_track_leverage() {
+        for venue in [Venue::Bybit, Venue::Hyperliquid, Venue::Okx] {
+            let account = Arc::new(RecordingStartupAccount::default());
+            let account_summary = Arc::new(RecordingStartupAccountSummary::default());
+            let probe =
+                build_startup_capacity_probe(venue, account.clone(), account_summary.clone());
+
+            let snapshot = probe
+                .probe_startup_capacity(&Instrument::new(venue, "BTC"), 25)
+                .await
+                .unwrap();
+
+            assert_eq!(snapshot.max_increase_notional, 2_500.0);
+            assert_eq!(account.capacity_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(account_summary.summary_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
     fn track_definition_registry(tracks: &[TrackSpec]) -> TrackDefinitionRegistry {
         let configured = tracks
             .iter()
@@ -229,6 +322,47 @@ mod tests {
     struct RecordingSymbolLeverageSetter {
         calls: Arc<Mutex<Vec<String>>>,
         failure: Option<String>,
+    }
+
+    #[derive(Default)]
+    struct RecordingStartupAccount {
+        capacity_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl AccountPort for RecordingStartupAccount {
+        async fn get_account_capacity_snapshot(
+            &self,
+            _instrument: &Instrument,
+        ) -> anyhow::Result<AccountCapacitySnapshot> {
+            self.capacity_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(AccountCapacitySnapshot {
+                max_increase_notional: 777.0,
+            })
+        }
+
+        async fn subscribe_user_data(&self) -> anyhow::Result<mpsc::Receiver<UserDataEvent>> {
+            let (_sender, receiver) = mpsc::channel(1);
+            Ok(receiver)
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingStartupAccountSummary {
+        summary_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl AccountSummaryPort for RecordingStartupAccountSummary {
+        async fn get_account_summary(&self) -> anyhow::Result<AccountSummarySnapshot> {
+            self.summary_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(AccountSummarySnapshot {
+                equity: 123.0,
+                available: 100.0,
+                unrealized_pnl: 0.0,
+                observed_at: Utc::now(),
+            })
+        }
     }
 
     impl RecordingSymbolLeverageSetter {

@@ -28,12 +28,13 @@ use tokio::time::Duration;
 use crate::account_projector::AccountProjector;
 use crate::config::{Config, ExchangeConfig};
 use crate::exchange_freshness::ExchangeFreshness;
-use crate::exchange_startup::{build_symbol_leverage_setter, build_track_leverage_index};
+use crate::exchange_startup::{
+    build_startup_capacity_probe, build_symbol_leverage_setter, build_track_leverage_index,
+};
 use crate::projector::TrackProjector;
 use crate::runtime::{
     AccountMarginGuardStore, RecoveryAnomalyDirtyObserver, RecoveryDirtyState, RuntimeHandles,
-    RuntimePorts, RuntimeStartupCapacityMode, RuntimeStartupDefinition, ServerRuntime,
-    TrackReconcileGuards,
+    RuntimePorts, RuntimeStartupDefinition, ServerRuntime, TrackReconcileGuards,
 };
 use crate::server_context::{
     EffectWorkerState, HttpState, ReconcileState, RuntimeState, WebSocketState,
@@ -231,10 +232,9 @@ async fn assemble_with_state_store(
             .get(&track_id)
             .copied()
             .ok_or_else(|| anyhow!("missing startup leverage for track `{}`", track_id.as_str()))?;
-        let startup_capacity_mode = build_startup_capacity_mode(&instrument, startup_leverage);
         startup_definitions.push(RuntimeStartupDefinition::new(
             track.clone(),
-            startup_capacity_mode,
+            startup_leverage,
         ));
         manager.add_track(track.clone(), info.rules)?;
     }
@@ -335,6 +335,11 @@ async fn assemble_with_state_store(
         account_margin_guard.clone(),
         session_effect_queue,
     );
+    let startup_capacity_probe = build_startup_capacity_probe(
+        exchange_venue,
+        exchange_ports.account(),
+        exchange_ports.account_summary(),
+    );
     #[cfg(test)]
     let (runtime_test_context, effect_worker_test_context) =
         build_test_contexts_from_runtime_states(
@@ -359,29 +364,15 @@ async fn assemble_with_state_store(
             RuntimePorts::new(
                 exchange_ports.execution(),
                 exchange_ports.market_data(),
-                exchange_ports.account_summary(),
                 exchange_ports.account(),
                 exchange_ports.metadata(),
+                startup_capacity_probe,
                 clock,
             ),
             startup_definitions,
             Duration::from_secs(1),
         ),
     })
-}
-
-fn build_startup_capacity_mode(
-    instrument: &Instrument,
-    startup_leverage: u32,
-) -> RuntimeStartupCapacityMode {
-    match instrument.venue {
-        Venue::Bybit | Venue::Hyperliquid | Venue::Okx => {
-            RuntimeStartupCapacityMode::AvailableBalanceTimesLeverage {
-                leverage: startup_leverage,
-            }
-        }
-        _ => RuntimeStartupCapacityMode::AccountCapacitySnapshot,
-    }
 }
 
 impl ServerPlatform {
@@ -556,7 +547,7 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc};
 
-    use crate::runtime::{AccountMarginGuardStore, RuntimeStartupCapacityMode};
+    use crate::runtime::AccountMarginGuardStore;
     use tokio_tungstenite::connect_async;
 
     use crate::config::{Config, ExchangeConfig, TrackSpec, parse_config};
@@ -571,8 +562,8 @@ mod tests {
     use poise_application::{TrackDebugQueryService, TrackDefinitionRegistry, TrackQueryService};
 
     use super::{
-        ServerPlatform, SystemClock, assemble, build_exchange, build_startup_capacity_mode,
-        validate_registry_venue, validate_unique_instruments, validate_unique_track_ids,
+        ServerPlatform, SystemClock, assemble, build_exchange, validate_registry_venue,
+        validate_unique_instruments, validate_unique_track_ids,
     };
 
     fn test_exchange_rules() -> poise_core::types::ExchangeRules {
@@ -595,32 +586,6 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         Arc::new(TrackDefinitionRegistry::new(configured).unwrap())
-    }
-
-    #[test]
-    fn hyperliquid_startup_capacity_uses_track_leverage() {
-        let mode = build_startup_capacity_mode(&Instrument::new(Venue::Hyperliquid, "BTC"), 25);
-
-        match mode {
-            RuntimeStartupCapacityMode::AvailableBalanceTimesLeverage { leverage } => {
-                assert_eq!(leverage, 25);
-            }
-            RuntimeStartupCapacityMode::AccountCapacitySnapshot => {
-                panic!("expected leverage-based Hyperliquid startup capacity")
-            }
-        }
-    }
-
-    #[test]
-    fn binance_startup_capacity_uses_exchange_snapshot() {
-        let mode = build_startup_capacity_mode(&Instrument::new(Venue::Binance, "BTCUSDT"), 25);
-
-        match mode {
-            RuntimeStartupCapacityMode::AccountCapacitySnapshot => {}
-            RuntimeStartupCapacityMode::AvailableBalanceTimesLeverage { .. } => {
-                panic!("expected Binance exchange-provided startup capacity")
-            }
-        }
     }
 
     #[test]
@@ -1556,7 +1521,7 @@ total_loss_limit = 600.0
                             .get(&TrackId::new("btc-core"))
                             .unwrap()
                             .clone(),
-                        crate::runtime::RuntimeStartupCapacityMode::AccountCapacitySnapshot,
+                        10,
                     )],
                 ),
             },
@@ -1641,6 +1606,17 @@ total_loss_limit = 600.0
         ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::runtime::StartupCapacityProbe for FakeExchange {
+        async fn probe_startup_capacity(
+            &self,
+            instrument: &Instrument,
+            _startup_leverage: u32,
+        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+            self.get_account_capacity_snapshot(instrument).await
         }
     }
 

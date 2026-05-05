@@ -10,8 +10,8 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 use super::{
-    RuntimeStartupCapacityMode, RuntimeStartupDefinition, STARTUP_RETRY_ATTEMPTS,
-    STARTUP_RETRY_DELAY, ServerRuntime, exchange_state,
+    RuntimeStartupDefinition, STARTUP_RETRY_ATTEMPTS, STARTUP_RETRY_DELAY, ServerRuntime,
+    exchange_state,
 };
 
 struct TrackStartupSeed {
@@ -36,8 +36,8 @@ impl TrackStartupSeed {
         self.definition.exposure_from_position_qty(position_qty)
     }
 
-    fn startup_capacity_mode(&self) -> &RuntimeStartupCapacityMode {
-        self.definition.startup_capacity_mode()
+    fn startup_leverage(&self) -> u32 {
+        self.definition.startup_leverage()
     }
 }
 
@@ -256,24 +256,14 @@ async fn probe_startup_account_capacity(
     runtime: &ServerRuntime,
     track: &TrackStartupSeed,
 ) -> Result<AccountCapacitySnapshot> {
-    match track.startup_capacity_mode() {
-        RuntimeStartupCapacityMode::AvailableBalanceTimesLeverage { leverage } => {
-            let summary = retry_startup_step("get_account_summary", || {
-                runtime.account_summary.get_account_summary()
-            })
-            .await?;
-            Ok(AccountCapacitySnapshot {
-                max_increase_notional: summary.available * *leverage as f64,
-            })
-        }
-        RuntimeStartupCapacityMode::AccountCapacitySnapshot => {
-            let instrument = track.instrument().clone();
-            retry_startup_step("get_account_capacity_snapshot", || {
-                runtime.account.get_account_capacity_snapshot(&instrument)
-            })
-            .await
-        }
-    }
+    let instrument = track.instrument().clone();
+    let startup_leverage = track.startup_leverage();
+    retry_startup_step("probe_startup_capacity", || {
+        runtime
+            .startup_capacity
+            .probe_startup_capacity(&instrument, startup_leverage)
+    })
+    .await
 }
 
 async fn collect_startup_replay_events(
@@ -371,8 +361,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
@@ -385,16 +375,16 @@ mod tests {
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
-        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort,
-        MarketDataTick, MetadataPort, OrderReceipt, OrderStatus, Position, UserDataEvent,
-        UserDataPayload,
+        AccountCapacitySnapshot, AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder,
+        ExecutionPort, MarketDataTick, MetadataPort, OrderReceipt, OrderStatus, Position,
+        UserDataEvent, UserDataPayload,
     };
     use poise_engine::runtime::{TerminationCause, TrackStatus};
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
     use crate::assembly::SystemClock;
-    use crate::runtime::{RuntimePorts, RuntimeStartupCapacityMode, RuntimeStartupDefinition};
+    use crate::runtime::{RuntimePorts, RuntimeStartupDefinition, StartupCapacityProbe};
     use crate::test_support::{
         build_runtime_and_effect_worker_test_contexts, build_test_application_services,
         seed_persisted_pending_submit_effect, test_track_definition_registry,
@@ -402,6 +392,62 @@ mod tests {
     };
 
     use super::complete_startup;
+
+    #[tokio::test]
+    async fn startup_capacity_is_probed_through_runtime_strategy_with_track_leverage() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let manager = seeded_manager();
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            manager,
+            repository.clone() as Arc<dyn TrackMutationStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
+            notifications.clone(),
+            account_margin_guard,
+        );
+        let account_monitor = unavailable_account_monitor(notifications.clone());
+        let (runtime_context, effect_worker_context) =
+            build_runtime_and_effect_worker_test_contexts(
+                &services,
+                repository.clone() as Arc<dyn TrackQueryStore>,
+                repository.clone() as Arc<dyn TrackEffectJournal>,
+                account_monitor,
+            );
+        let exchange = Arc::new(StartupExchange::with_inherited_order("BTCUSDT"));
+        let startup_capacity = Arc::new(RecordingStartupCapacityProbe::new(10_000.0));
+        let runtime = super::ServerRuntime::new(
+            runtime_context.runtime_state(),
+            effect_worker_context.effect_worker_state,
+            RuntimePorts::new(
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                startup_capacity.clone(),
+                Arc::new(SystemClock),
+            ),
+            vec![RuntimeStartupDefinition::new(
+                test_track_definition_registry("btc-core")
+                    .get(&TrackId::new("btc-core"))
+                    .unwrap()
+                    .clone(),
+                25,
+            )],
+        );
+        let (_sender, mut receiver) = mpsc::channel(8);
+        let startup_replay_floor = Utc.with_ymd_and_hms(2026, 4, 23, 12, 0, 0).unwrap();
+
+        complete_startup(&runtime, &mut receiver, startup_replay_floor)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            startup_capacity.calls(),
+            vec![(Instrument::new(Venue::Binance, "BTCUSDT"), 25)]
+        );
+    }
 
     #[tokio::test]
     async fn complete_startup_cancels_inherited_orders_and_rebuilds_fresh_executor_state() {
@@ -445,7 +491,7 @@ mod tests {
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
                     .clone(),
-                RuntimeStartupCapacityMode::AccountCapacitySnapshot,
+                10,
             )],
         );
         let (sender, mut receiver) = mpsc::channel(8);
@@ -572,7 +618,7 @@ mod tests {
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
                     .clone(),
-                RuntimeStartupCapacityMode::AccountCapacitySnapshot,
+                10,
             )],
         );
         let (sender, mut receiver) = mpsc::channel(8);
@@ -640,7 +686,7 @@ mod tests {
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
                     .clone(),
-                RuntimeStartupCapacityMode::AccountCapacitySnapshot,
+                10,
             )],
         );
         let (sender, mut receiver) = mpsc::channel(8);
@@ -726,7 +772,7 @@ mod tests {
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
                     .clone(),
-                RuntimeStartupCapacityMode::AccountCapacitySnapshot,
+                10,
             )],
         );
         let (_sender, mut receiver) = mpsc::channel(8);
@@ -786,7 +832,7 @@ mod tests {
                     .get(&TrackId::new("btc-core"))
                     .unwrap()
                     .clone(),
-                RuntimeStartupCapacityMode::AccountCapacitySnapshot,
+                10,
             )],
         );
         let (sender, mut receiver) = mpsc::channel(8);
@@ -911,6 +957,52 @@ mod tests {
         get_position_calls: AtomicUsize,
         get_open_orders_calls: AtomicUsize,
         instrument: Instrument,
+    }
+
+    struct RecordingStartupCapacityProbe {
+        max_increase_notional: f64,
+        calls: Mutex<Vec<(Instrument, u32)>>,
+    }
+
+    impl RecordingStartupCapacityProbe {
+        fn new(max_increase_notional: f64) -> Self {
+            Self {
+                max_increase_notional,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(Instrument, u32)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StartupCapacityProbe for RecordingStartupCapacityProbe {
+        async fn probe_startup_capacity(
+            &self,
+            instrument: &Instrument,
+            startup_leverage: u32,
+        ) -> Result<AccountCapacitySnapshot> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((instrument.clone(), startup_leverage));
+            Ok(AccountCapacitySnapshot {
+                max_increase_notional: self.max_increase_notional,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StartupCapacityProbe for StartupExchange {
+        async fn probe_startup_capacity(
+            &self,
+            instrument: &Instrument,
+            _startup_leverage: u32,
+        ) -> Result<AccountCapacitySnapshot> {
+            self.get_account_capacity_snapshot(instrument).await
+        }
     }
 
     impl StartupExchange {
