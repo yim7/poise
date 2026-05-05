@@ -110,7 +110,7 @@ Commit: `56449f39658f5fa7d1e9a5fb81eae830f31c556a`
 - Test: each exchange `connected::tests::`
 - Test: `server/src/assembly.rs`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 把每个 exchange 的 `connected_exposes_all_required_ports` 测试改成直接接收 `ExchangePorts`：
 
@@ -125,7 +125,7 @@ let _metadata = ports.metadata();
 
 `server/src/assembly.rs` 增加或更新测试，要求 `build_exchange` 不再调用 `connected.execution()` 这类 getter，而是把 `connect_*` 返回的 bundle 传给 `Exchange::new`。
 
-- [ ] **Step 2: 验证失败**
+- [x] **Step 2: 验证失败**
 
 Run:
 
@@ -138,7 +138,7 @@ cargo test -p poise-okx connected::tests::connected_exposes_all_required_ports
 
 Expected: FAIL，原因是 `connect()` 仍返回交易所本地 `Connected`。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 每个 `connect(config)` 改为返回 `Result<ExchangePorts>`。删除本地 `Connected` struct、`from_parts` 和五个 getter。保留目前需要的 port wrapper structs。
 
@@ -156,7 +156,7 @@ let ports = connect_binance(binance_config).await?;
 Exchange::new(Venue::Binance, ports)
 ```
 
-- [ ] **Step 4: 验证通过**
+- [x] **Step 4: 验证通过**
 
 Run:
 
@@ -169,18 +169,18 @@ cargo test -p poise-server assembly::tests::
 cargo check -p poise-server
 ```
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add exchanges server docs/superpowers/plans/2026-05-05-exchange-design-simplification.md
 git commit -m "refactor: return exchange ports from connectors"
 ```
 
-Commit: _pending_
+Commit: `87c8ef978525db7c2c6887fcaad2fad2210dd50a`
 
 ---
 
-### Task 3: 删除纯透传 port wrappers，保留有转换价值的 wrappers
+ 删除纯透传 port wrappers，保留有转换价值的 wrappers
 
 **Files:**
 - Modify: `exchanges/binance/src/connected.rs`
