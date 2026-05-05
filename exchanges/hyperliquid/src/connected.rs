@@ -40,12 +40,16 @@ fn ports_from_rest_client(
     rest: Arc<HyperliquidRestClient>,
     ws: Arc<HyperliquidWsClient>,
 ) -> ExchangePorts {
+    let market_data: Arc<dyn MarketDataPort> = ws.clone();
+    let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
+    let metadata: Arc<dyn MetadataPort> = rest.clone();
+
     ExchangePorts::new(
         Arc::new(HyperliquidExecution::new(Arc::clone(&rest))),
-        Arc::new(HyperliquidMarketData::new(Arc::clone(&ws))),
-        Arc::new(HyperliquidAccountSummary::new(Arc::clone(&rest))),
+        market_data,
+        account_summary,
         Arc::new(HyperliquidAccount::new(Arc::clone(&rest), ws)),
-        Arc::new(HyperliquidMetadata::new(rest)),
+        metadata,
     )
 }
 
@@ -59,26 +63,6 @@ impl HyperliquidExecution {
     }
 }
 
-struct HyperliquidMarketData {
-    ws: Arc<HyperliquidWsClient>,
-}
-
-impl HyperliquidMarketData {
-    fn new(ws: Arc<HyperliquidWsClient>) -> Self {
-        Self { ws }
-    }
-}
-
-struct HyperliquidAccountSummary {
-    rest: Arc<HyperliquidRestClient>,
-}
-
-impl HyperliquidAccountSummary {
-    fn new(rest: Arc<HyperliquidRestClient>) -> Self {
-        Self { rest }
-    }
-}
-
 struct HyperliquidAccount {
     rest: Arc<HyperliquidRestClient>,
     ws: Arc<HyperliquidWsClient>,
@@ -87,16 +71,6 @@ struct HyperliquidAccount {
 impl HyperliquidAccount {
     fn new(rest: Arc<HyperliquidRestClient>, ws: Arc<HyperliquidWsClient>) -> Self {
         Self { rest, ws }
-    }
-}
-
-struct HyperliquidMetadata {
-    rest: Arc<HyperliquidRestClient>,
-}
-
-impl HyperliquidMetadata {
-    fn new(rest: Arc<HyperliquidRestClient>) -> Self {
-        Self { rest }
     }
 }
 
@@ -127,19 +101,19 @@ impl ExecutionPort for HyperliquidExecution {
 }
 
 #[async_trait]
-impl MarketDataPort for HyperliquidMarketData {
+impl MarketDataPort for HyperliquidWsClient {
     async fn subscribe_prices(
         &self,
         instrument: &Instrument,
     ) -> Result<mpsc::Receiver<MarketDataTick>> {
-        self.ws.subscribe_prices(instrument).await
+        self.subscribe_prices(instrument).await
     }
 }
 
 #[async_trait]
-impl AccountSummaryPort for HyperliquidAccountSummary {
+impl AccountSummaryPort for HyperliquidRestClient {
     async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
-        self.rest.get_account_summary().await
+        self.get_account_summary().await
     }
 }
 
@@ -160,9 +134,9 @@ impl AccountPort for HyperliquidAccount {
 }
 
 #[async_trait]
-impl MetadataPort for HyperliquidMetadata {
+impl MetadataPort for HyperliquidRestClient {
     async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
-        self.rest.get_exchange_info(&instrument.symbol).await
+        self.get_exchange_info(&instrument.symbol).await
     }
 
     async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {

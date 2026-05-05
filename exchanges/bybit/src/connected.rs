@@ -27,12 +27,16 @@ pub async fn connect(config: &Config) -> Result<ExchangePorts> {
 }
 
 fn ports_from_clients(rest: Arc<BybitRestClient>, ws: Arc<BybitWsClient>) -> ExchangePorts {
+    let market_data: Arc<dyn MarketDataPort> = ws.clone();
+    let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
+    let metadata: Arc<dyn MetadataPort> = rest.clone();
+
     ExchangePorts::new(
         Arc::new(BybitExecution::new(Arc::clone(&rest))),
-        Arc::new(BybitMarketData::new(Arc::clone(&ws))),
-        Arc::new(BybitAccountSummary::new(Arc::clone(&rest))),
+        market_data,
+        account_summary,
         Arc::new(BybitAccount::new(Arc::clone(&rest), ws)),
-        Arc::new(BybitMetadata::new(rest)),
+        metadata,
     )
 }
 
@@ -41,26 +45,6 @@ struct BybitExecution {
 }
 
 impl BybitExecution {
-    fn new(rest: Arc<BybitRestClient>) -> Self {
-        Self { _rest: rest }
-    }
-}
-
-struct BybitMarketData {
-    _ws: Arc<BybitWsClient>,
-}
-
-impl BybitMarketData {
-    fn new(ws: Arc<BybitWsClient>) -> Self {
-        Self { _ws: ws }
-    }
-}
-
-struct BybitAccountSummary {
-    _rest: Arc<BybitRestClient>,
-}
-
-impl BybitAccountSummary {
     fn new(rest: Arc<BybitRestClient>) -> Self {
         Self { _rest: rest }
     }
@@ -77,16 +61,6 @@ impl BybitAccount {
             _rest: rest,
             _ws: ws,
         }
-    }
-}
-
-struct BybitMetadata {
-    _rest: Arc<BybitRestClient>,
-}
-
-impl BybitMetadata {
-    fn new(rest: Arc<BybitRestClient>) -> Self {
-        Self { _rest: rest }
     }
 }
 
@@ -117,19 +91,19 @@ impl ExecutionPort for BybitExecution {
 }
 
 #[async_trait]
-impl MarketDataPort for BybitMarketData {
+impl MarketDataPort for BybitWsClient {
     async fn subscribe_prices(
         &self,
         instrument: &Instrument,
     ) -> Result<mpsc::Receiver<MarketDataTick>> {
-        self._ws.subscribe_prices(instrument).await
+        self.subscribe_prices(instrument).await
     }
 }
 
 #[async_trait]
-impl AccountSummaryPort for BybitAccountSummary {
+impl AccountSummaryPort for BybitRestClient {
     async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
-        self._rest.get_account_summary().await
+        self.get_account_summary().await
     }
 }
 
@@ -150,13 +124,13 @@ impl AccountPort for BybitAccount {
 }
 
 #[async_trait]
-impl MetadataPort for BybitMetadata {
+impl MetadataPort for BybitRestClient {
     async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
-        self._rest.get_exchange_info(&instrument.symbol).await
+        self.get_exchange_info(&instrument.symbol).await
     }
 
     async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
-        self._rest.get_server_time().await
+        self.get_server_time().await
     }
 }
 
@@ -236,9 +210,9 @@ mod tests {
             std::time::Duration::from_millis(10),
             Arc::new(|| 1_700_000_000_000),
         ));
-        let account_summary = BybitAccountSummary::new(Arc::clone(&rest));
+        let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
         let account = BybitAccount::new(Arc::clone(&rest), Arc::clone(&ws));
-        let metadata = BybitMetadata::new(Arc::clone(&rest));
+        let metadata: Arc<dyn MetadataPort> = rest.clone();
         let instrument = poise_core::track::Instrument::new(Venue::Bybit, "BTCUSDT");
 
         let summary = account_summary.get_account_summary().await.unwrap();
@@ -339,13 +313,7 @@ mod tests {
             Duration::from_millis(10),
             Arc::new(|| 1_700_000_000_000),
         ));
-        let connected = ExchangePorts::new(
-            Arc::new(BybitExecution::new(Arc::clone(&rest))),
-            Arc::new(BybitMarketData::new(Arc::clone(&ws))),
-            Arc::new(BybitAccountSummary::new(Arc::clone(&rest))),
-            Arc::new(BybitAccount::new(Arc::clone(&rest), Arc::clone(&ws))),
-            Arc::new(BybitMetadata::new(rest)),
-        );
+        let connected = ports_from_clients(rest, ws);
         let instrument = Instrument::new(Venue::Bybit, "BTCUSDT");
 
         let mut prices = connected
@@ -428,13 +396,7 @@ mod tests {
             Duration::from_millis(10),
             Arc::new(|| 1_700_000_000_000),
         ));
-        let connected = ExchangePorts::new(
-            Arc::new(BybitExecution::new(Arc::clone(&rest))),
-            Arc::new(BybitMarketData::new(Arc::clone(&ws))),
-            Arc::new(BybitAccountSummary::new(Arc::clone(&rest))),
-            Arc::new(BybitAccount::new(Arc::clone(&rest), Arc::clone(&ws))),
-            Arc::new(BybitMetadata::new(rest)),
-        );
+        let connected = ports_from_clients(rest, ws);
         let instrument = Instrument::new(Venue::Bybit, "BTCUSDT");
 
         let receipt = connected

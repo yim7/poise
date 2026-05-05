@@ -36,12 +36,16 @@ pub async fn connect(config: &Config) -> Result<ExchangePorts> {
 }
 
 fn ports_from_clients(rest: Arc<BinanceRestClient>, ws: Arc<BinanceWsClient>) -> ExchangePorts {
+    let market_data: Arc<dyn MarketDataPort> = ws.clone();
+    let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
+    let metadata: Arc<dyn MetadataPort> = rest.clone();
+
     ExchangePorts::new(
         Arc::new(BinanceExecution::new(Arc::clone(&rest))),
-        Arc::new(BinanceMarketData::new(Arc::clone(&ws))),
-        Arc::new(BinanceAccountSummary::new(Arc::clone(&rest))),
+        market_data,
+        account_summary,
         Arc::new(BinanceAccount::new(Arc::clone(&rest), ws)),
-        Arc::new(BinanceMetadata::new(rest)),
+        metadata,
     )
 }
 
@@ -50,26 +54,6 @@ struct BinanceExecution {
 }
 
 impl BinanceExecution {
-    fn new(rest: Arc<BinanceRestClient>) -> Self {
-        Self { rest }
-    }
-}
-
-struct BinanceMarketData {
-    ws: Arc<BinanceWsClient>,
-}
-
-impl BinanceMarketData {
-    fn new(ws: Arc<BinanceWsClient>) -> Self {
-        Self { ws }
-    }
-}
-
-struct BinanceAccountSummary {
-    rest: Arc<BinanceRestClient>,
-}
-
-impl BinanceAccountSummary {
     fn new(rest: Arc<BinanceRestClient>) -> Self {
         Self { rest }
     }
@@ -86,20 +70,10 @@ impl BinanceAccount {
     }
 }
 
-struct BinanceMetadata {
-    rest: Arc<BinanceRestClient>,
-}
-
-impl BinanceMetadata {
-    fn new(rest: Arc<BinanceRestClient>) -> Self {
-        Self { rest }
-    }
-}
-
 #[async_trait]
-impl AccountSummaryPort for BinanceAccountSummary {
+impl AccountSummaryPort for BinanceRestClient {
     async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
-        self.rest.get_account_summary().await
+        self.get_account_summary().await
     }
 }
 
@@ -157,23 +131,23 @@ impl AccountPort for BinanceAccount {
 }
 
 #[async_trait]
-impl MetadataPort for BinanceMetadata {
+impl MetadataPort for BinanceRestClient {
     async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
-        self.rest.get_exchange_info(&instrument.symbol).await
+        self.get_exchange_info(&instrument.symbol).await
     }
 
     async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
-        self.rest.get_server_time().await
+        self.get_server_time().await
     }
 }
 
 #[async_trait]
-impl MarketDataPort for BinanceMarketData {
+impl MarketDataPort for BinanceWsClient {
     async fn subscribe_prices(
         &self,
         instrument: &Instrument,
     ) -> Result<mpsc::Receiver<MarketDataTick>> {
-        self.ws.subscribe_prices(instrument).await
+        self.subscribe_prices(instrument).await
     }
 }
 

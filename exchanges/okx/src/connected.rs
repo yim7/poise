@@ -36,12 +36,15 @@ fn ports_from_rest_client(rest: Arc<OkxRestClient>) -> ExchangePorts {
 }
 
 fn ports_from_parts(rest: Arc<OkxRestClient>, ws: Option<Arc<OkxWsClient>>) -> ExchangePorts {
+    let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
+    let metadata: Arc<dyn MetadataPort> = rest.clone();
+
     ExchangePorts::new(
         Arc::new(OkxExecution::new(Arc::clone(&rest))),
         Arc::new(OkxMarketData::new(ws.as_ref().map(Arc::clone))),
-        Arc::new(OkxAccountSummary::new(Arc::clone(&rest))),
+        account_summary,
         Arc::new(OkxAccount::new(Arc::clone(&rest), ws)),
-        Arc::new(OkxMetadata::new(rest)),
+        metadata,
     )
 }
 
@@ -52,15 +55,9 @@ struct OkxExecution {
 struct OkxMarketData {
     ws: Option<Arc<OkxWsClient>>,
 }
-struct OkxAccountSummary {
-    rest: Arc<OkxRestClient>,
-}
 struct OkxAccount {
     rest: Arc<OkxRestClient>,
     ws: Option<Arc<OkxWsClient>>,
-}
-struct OkxMetadata {
-    rest: Arc<OkxRestClient>,
 }
 
 impl OkxExecution {
@@ -75,21 +72,9 @@ impl OkxMarketData {
     }
 }
 
-impl OkxAccountSummary {
-    fn new(rest: Arc<OkxRestClient>) -> Self {
-        Self { rest }
-    }
-}
-
 impl OkxAccount {
     fn new(rest: Arc<OkxRestClient>, ws: Option<Arc<OkxWsClient>>) -> Self {
         Self { rest, ws }
-    }
-}
-
-impl OkxMetadata {
-    fn new(rest: Arc<OkxRestClient>) -> Self {
-        Self { rest }
     }
 }
 
@@ -134,9 +119,9 @@ impl MarketDataPort for OkxMarketData {
 }
 
 #[async_trait]
-impl AccountSummaryPort for OkxAccountSummary {
+impl AccountSummaryPort for OkxRestClient {
     async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
-        self.rest.get_account_summary().await
+        self.get_account_summary().await
     }
 }
 
@@ -161,13 +146,13 @@ impl AccountPort for OkxAccount {
 }
 
 #[async_trait]
-impl MetadataPort for OkxMetadata {
+impl MetadataPort for OkxRestClient {
     async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
-        self.rest.get_exchange_info(&instrument.symbol).await
+        self.get_exchange_info(&instrument.symbol).await
     }
 
     async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
-        self.rest.get_server_time().await
+        self.get_server_time().await
     }
 }
 
