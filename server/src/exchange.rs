@@ -2,40 +2,25 @@ use std::sync::Arc;
 
 use poise_core::track::Venue;
 use poise_engine::ports::{
-    AccountPort, AccountSummaryPort, ExecutionPort, MarketDataPort, MetadataPort,
+    AccountPort, AccountSummaryPort, ExchangePorts, ExecutionPort, MarketDataPort, MetadataPort,
 };
 
 #[derive(Clone)]
 pub struct Exchange {
     #[cfg(test)]
     venue: Venue,
-    execution: Arc<dyn ExecutionPort>,
-    market_data: Arc<dyn MarketDataPort>,
-    account_summary: Arc<dyn AccountSummaryPort>,
-    account: Arc<dyn AccountPort>,
-    metadata: Arc<dyn MetadataPort>,
+    ports: ExchangePorts,
 }
 
 impl Exchange {
-    pub fn new(
-        venue: Venue,
-        execution: Arc<dyn ExecutionPort>,
-        market_data: Arc<dyn MarketDataPort>,
-        account_summary: Arc<dyn AccountSummaryPort>,
-        account: Arc<dyn AccountPort>,
-        metadata: Arc<dyn MetadataPort>,
-    ) -> Self {
+    pub fn new(venue: Venue, ports: ExchangePorts) -> Self {
         #[cfg(not(test))]
         let _ = venue;
 
         Self {
             #[cfg(test)]
             venue,
-            execution,
-            market_data,
-            account_summary,
-            account,
-            metadata,
+            ports,
         }
     }
 
@@ -46,46 +31,46 @@ impl Exchange {
 
     #[cfg(test)]
     pub fn execution(&self) -> &dyn ExecutionPort {
-        self.execution.as_ref()
+        self.ports.execution_ref()
     }
 
     #[cfg(test)]
     pub fn market_data(&self) -> &dyn MarketDataPort {
-        self.market_data.as_ref()
+        self.ports.market_data_ref()
     }
 
     #[cfg(test)]
     pub fn account_summary(&self) -> &dyn AccountSummaryPort {
-        self.account_summary.as_ref()
+        self.ports.account_summary_ref()
     }
 
     #[cfg(test)]
     pub fn account(&self) -> &dyn AccountPort {
-        self.account.as_ref()
+        self.ports.account_ref()
     }
 
     pub fn metadata(&self) -> &dyn MetadataPort {
-        self.metadata.as_ref()
+        self.ports.metadata_ref()
     }
 
     pub(crate) fn execution_port(&self) -> Arc<dyn ExecutionPort> {
-        Arc::clone(&self.execution)
+        self.ports.execution()
     }
 
     pub(crate) fn market_data_port(&self) -> Arc<dyn MarketDataPort> {
-        Arc::clone(&self.market_data)
+        self.ports.market_data()
     }
 
     pub(crate) fn account_summary_port(&self) -> Arc<dyn AccountSummaryPort> {
-        Arc::clone(&self.account_summary)
+        self.ports.account_summary()
     }
 
     pub(crate) fn account_port(&self) -> Arc<dyn AccountPort> {
-        Arc::clone(&self.account)
+        self.ports.account()
     }
 
     pub(crate) fn metadata_port(&self) -> Arc<dyn MetadataPort> {
-        Arc::clone(&self.metadata)
+        self.ports.metadata()
     }
 }
 
@@ -99,7 +84,7 @@ mod tests {
     use poise_core::track::Instrument;
     use poise_engine::ports::{
         AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOpenOrderSnapshot,
-        MarketDataTick, OrderReceipt, OrderRequest, Position, UserDataEvent,
+        ExchangePorts, MarketDataTick, OrderReceipt, OrderRequest, Position, UserDataEvent,
     };
 
     use super::*;
@@ -200,15 +185,15 @@ mod tests {
     }
 
     #[test]
-    fn exchange_retains_venue_and_exposes_stable_ports() {
-        let exchange = Exchange::new(
-            Venue::Binance,
+    fn exchange_wraps_exchange_ports_bundle() {
+        let ports = ExchangePorts::new(
             Arc::new(FakeExecutionPort),
             Arc::new(FakeMarketDataPort),
             Arc::new(FakeAccountSummaryPort),
             Arc::new(FakeAccountPort),
             Arc::new(FakeMetadataPort),
         );
+        let exchange = Exchange::new(Venue::Binance, ports);
 
         assert_eq!(exchange.venue(), Venue::Binance);
         let _execution: &dyn ExecutionPort = exchange.execution();

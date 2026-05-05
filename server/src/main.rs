@@ -139,8 +139,9 @@ mod tests {
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::ExchangeRules;
     use poise_engine::ports::{
-        AccountPort, ClockPort, ExchangeInfo, ExchangeOpenOrderSnapshot, ExecutionPort,
-        MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, OrderStatus, Position,
+        AccountPort, ClockPort, ExchangeInfo, ExchangeOpenOrderSnapshot, ExchangePorts,
+        ExecutionPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, OrderStatus,
+        Position,
     };
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
@@ -468,7 +469,7 @@ total_loss_limit = 600.0
         let platform = crate::assembly::assemble_with_exchange_ports(
             &config,
             test_track_definition_registry(&config),
-            crate::assembly::ExchangePorts::new(
+            ExchangePorts::new(
                 exchange.clone(),
                 Arc::new(FakeMarketData::default()),
                 exchange.clone(),
@@ -630,7 +631,7 @@ total_loss_limit = 600.0
         let platform = crate::assembly::assemble_with_exchange_ports(
             &config,
             test_track_definition_registry(&config),
-            crate::assembly::ExchangePorts::new(
+            ExchangePorts::new(
                 exchange.clone(),
                 Arc::new(FailingStartMarketData),
                 exchange.clone(),

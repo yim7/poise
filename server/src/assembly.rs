@@ -17,11 +17,7 @@ use poise_binance::connect as connect_binance;
 use poise_bybit::connect as connect_bybit;
 use poise_core::track::{Instrument, TrackId, Venue};
 use poise_engine::manager::TrackManager;
-use poise_engine::ports::ClockPort;
-#[cfg(test)]
-use poise_engine::ports::MetadataPort;
-#[cfg(test)]
-use poise_engine::ports::{AccountPort, AccountSummaryPort, ExecutionPort, MarketDataPort};
+use poise_engine::ports::{ClockPort, ExchangePorts};
 use poise_hyperliquid::connect as connect_hyperliquid;
 use poise_okx::connect as connect_okx;
 #[cfg(test)]
@@ -117,44 +113,52 @@ pub(crate) async fn build_exchange(config: &ExchangeConfig) -> Result<Exchange> 
             let connected = connect_binance(binance_config).await?;
             Ok(Exchange::new(
                 Venue::Binance,
-                connected.execution(),
-                connected.market_data(),
-                connected.account_summary(),
-                connected.account(),
-                connected.metadata(),
+                ExchangePorts::new(
+                    connected.execution(),
+                    connected.market_data(),
+                    connected.account_summary(),
+                    connected.account(),
+                    connected.metadata(),
+                ),
             ))
         }
         ExchangeConfig::Bybit(bybit_config) => {
             let connected = connect_bybit(bybit_config).await?;
             Ok(Exchange::new(
                 Venue::Bybit,
-                connected.execution(),
-                connected.market_data(),
-                connected.account_summary(),
-                connected.account(),
-                connected.metadata(),
+                ExchangePorts::new(
+                    connected.execution(),
+                    connected.market_data(),
+                    connected.account_summary(),
+                    connected.account(),
+                    connected.metadata(),
+                ),
             ))
         }
         ExchangeConfig::Hyperliquid(hyperliquid_config) => {
             let connected = connect_hyperliquid(hyperliquid_config).await?;
             Ok(Exchange::new(
                 Venue::Hyperliquid,
-                connected.execution(),
-                connected.market_data(),
-                connected.account_summary(),
-                connected.account(),
-                connected.metadata(),
+                ExchangePorts::new(
+                    connected.execution(),
+                    connected.market_data(),
+                    connected.account_summary(),
+                    connected.account(),
+                    connected.metadata(),
+                ),
             ))
         }
         ExchangeConfig::Okx(okx_config) => {
             let connected = connect_okx(okx_config).await?;
             Ok(Exchange::new(
                 Venue::Okx,
-                connected.execution(),
-                connected.market_data(),
-                connected.account_summary(),
-                connected.account(),
-                connected.metadata(),
+                ExchangePorts::new(
+                    connected.execution(),
+                    connected.market_data(),
+                    connected.account_summary(),
+                    connected.account(),
+                    connected.metadata(),
+                ),
             ))
         }
     }
@@ -211,34 +215,6 @@ async fn build_exchange_and_prepare_startup(
 }
 
 #[cfg(test)]
-pub(crate) struct ExchangePorts {
-    execution: Arc<dyn ExecutionPort>,
-    market_data: Arc<dyn MarketDataPort>,
-    account_summary: Arc<dyn AccountSummaryPort>,
-    account: Arc<dyn AccountPort>,
-    metadata: Arc<dyn MetadataPort>,
-}
-
-#[cfg(test)]
-impl ExchangePorts {
-    pub(crate) fn new(
-        execution: Arc<dyn ExecutionPort>,
-        market_data: Arc<dyn MarketDataPort>,
-        account_summary: Arc<dyn AccountSummaryPort>,
-        account: Arc<dyn AccountPort>,
-        metadata: Arc<dyn MetadataPort>,
-    ) -> Self {
-        Self {
-            execution,
-            market_data,
-            account_summary,
-            account,
-            metadata,
-        }
-    }
-}
-
-#[cfg(test)]
 pub(crate) async fn assemble_with_exchange_ports(
     config: &Config,
     track_definition_registry: Arc<TrackDefinitionRegistry>,
@@ -247,14 +223,7 @@ pub(crate) async fn assemble_with_exchange_ports(
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
     let track_leverage_index = build_track_leverage_index(&config.tracks)?;
-    let exchange = Exchange::new(
-        config.exchange.venue(),
-        exchange_ports.execution,
-        exchange_ports.market_data,
-        exchange_ports.account_summary,
-        exchange_ports.account,
-        exchange_ports.metadata,
-    );
+    let exchange = Exchange::new(config.exchange.venue(), exchange_ports);
     assemble_with_state_store(
         config,
         track_definition_registry,
