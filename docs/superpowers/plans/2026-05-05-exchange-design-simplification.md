@@ -251,9 +251,9 @@ Commit: `e5920302398cfe14a1c7c5e757aa91d05ed86cc4`
 - Modify as needed: `exchanges/*/src/rest/client.rs`, `exchanges/*/src/ws/mod.rs`
 - Test: each exchange `connected::tests::`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 补 characterization 验收**
 
-先不写“wrapper 不存在”的脆弱结构性断言。使用现有 connected tests 保证 `connect()` 仍能构造全部 ports；实现阶段只删除确认纯透传、没有错误语义或组合职责的 wrapper。
+不写“wrapper 不存在”的脆弱结构性断言。使用现有 connected tests 保证 `connect()` 仍能构造全部 ports；实现阶段只删除确认纯透传、没有错误语义或组合职责的 wrapper。
 
 期望保留的 wrappers：
 
@@ -266,7 +266,7 @@ Commit: `e5920302398cfe14a1c7c5e757aa91d05ed86cc4`
 - 只调用 `rest.get_account_summary()` 的 `AccountSummary`。
 - 只调用 `rest.get_exchange_info(&instrument.symbol)` / `rest.get_server_time()` 的 `Metadata`，除非该交易所有特殊实现。
 
-- [ ] **Step 2: 验证失败**
+- [x] **Step 2: 验证重构基线**
 
 Run:
 
@@ -274,9 +274,9 @@ Run:
 cargo test -p poise-binance connected::tests::
 ```
 
-Expected: FAIL 或 compile error，直到 REST/WS client 直接实现对应 port。
+Expected: PASS，作为删除 wrapper 前的行为基线。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 为 REST/WS client 直接实现对应 trait。例如：
 
@@ -291,7 +291,7 @@ impl MarketDataPort for BinanceWsClient {
 
 删除纯透传 wrapper struct 及其 `new`。不要把所有 wrapper 一次性强行删除；如果 wrapper 有错误转换或组合职责，保留。
 
-- [ ] **Step 4: 验证通过**
+- [x] **Step 4: 验证通过**
 
 Run:
 
@@ -303,14 +303,14 @@ cargo test -p poise-okx connected::tests::
 RUSTFLAGS="-Dwarnings" cargo check -p poise-server
 ```
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add exchanges docs/superpowers/plans/2026-05-05-exchange-design-simplification.md
 git commit -m "refactor: remove pass-through exchange port wrappers"
 ```
 
-Commit: _pending_
+Commit: `01f36eb5d45b4011e03758e596929a849ce35b82`
 
 ---
 
