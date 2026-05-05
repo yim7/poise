@@ -324,9 +324,11 @@ Commit: `01f36eb5d45b4011e03758e596929a849ce35b82`
 - Test: `server/src/runtime/startup_bootstrap.rs`
 - Test: `server/src/assembly.rs`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
-在 `server/src/assembly.rs` 修改启动资金测试：不再断言 `RuntimeStartupCapacityMode`，改为验证 startup bootstrap 通过 server 私有 `StartupCapacityProbe` 得到 capacity。
+删除 `server/src/assembly.rs` 中直接断言 `RuntimeStartupCapacityMode` 的测试；改为在 `server/src/runtime/startup_bootstrap.rs` 验证 startup bootstrap 通过 server 私有 `StartupCapacityProbe` 得到 capacity。
+
+在 `server/src/exchange_startup.rs` 增加策略选择测试：Binance 调用 `AccountPort::get_account_capacity_snapshot`，Bybit / Hyperliquid / OKX 使用 `AccountSummaryPort::get_account_summary()` 的 `available * startup_leverage`。
 
 在 `server/src/runtime/startup_bootstrap.rs` 增加测试：
 
@@ -338,18 +340,17 @@ async fn startup_capacity_is_probed_through_runtime_strategy_with_track_leverage
 }
 ```
 
-- [ ] **Step 2: 验证失败**
+- [x] **Step 2: 验证失败**
 
 Run:
 
 ```bash
-cargo test -p poise-server assembly::tests::startup_capacity
 cargo test -p poise-server startup_bootstrap::tests::startup_capacity_is_probed_through_runtime_strategy_with_track_leverage
 ```
 
 Expected: FAIL，原因是当前 runtime 仍使用 `RuntimeStartupCapacityMode`。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 新增 server 私有启动策略，放在 `server/src/runtime` 或 `server/src/exchange_startup.rs`，不要放进 `engine/src/ports.rs`：
 
@@ -373,24 +374,27 @@ pub(crate) trait StartupCapacityProbe: Send + Sync {
 
 venue 到策略的选择只保留在 server 组装层或 `exchange_startup` helper 中，不进入 exchange crates，不进入 engine ports。
 
-- [ ] **Step 4: 验证通过**
+- [x] **Step 4: 验证通过**
 
 Run:
 
 ```bash
+cargo test -p poise-server exchange_startup::tests::
 cargo test -p poise-server startup_bootstrap::tests::
 cargo test -p poise-server assembly::tests::
 RUSTFLAGS="-Dwarnings" cargo check -p poise-server
+cargo fmt --check
+git diff --check
 ```
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add server docs/superpowers/plans/2026-05-05-exchange-design-simplification.md
 git commit -m "refactor: move startup capacity probing to runtime strategy"
 ```
 
-Commit: _pending_
+Commit: `b51eb0d53067d7b1c9130d7462fc3267a2cc57aa`
 
 ---
 
