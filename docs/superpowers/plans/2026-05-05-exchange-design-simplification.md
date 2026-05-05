@@ -35,7 +35,7 @@
 - Modify: `server/src/exchange.rs`
 - Test: `server/src/exchange.rs`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `server/src/exchange.rs` 的测试里新增断言：`Exchange::new` 接收一个 `ExchangePorts`，并且 `execution_port()` / `market_data_port()` / `account_summary_port()` / `account_port()` / `metadata_port()` 都来自同一个 bundle。
 
@@ -51,7 +51,7 @@ fn exchange_wraps_exchange_ports_bundle() {
 }
 ```
 
-- [ ] **Step 2: 验证失败**
+- [x] **Step 2: 验证失败**
 
 Run:
 
@@ -61,7 +61,7 @@ cargo test -p poise-server exchange::tests::exchange_wraps_exchange_ports_bundle
 
 Expected: FAIL，原因是 `ExchangePorts` 或新的 `Exchange::new` 签名不存在。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 在 `engine/src/ports.rs` 增加：
 
@@ -78,7 +78,7 @@ pub struct ExchangePorts {
 
 并提供 `new(...)` 和 clone getter。`server/src/exchange.rs` 改为持有 `ports: ExchangePorts`，保留现有 `execution_port()` 等方法，避免 runtime 大面积改动。
 
-- [ ] **Step 4: 验证通过**
+- [x] **Step 4: 验证通过**
 
 Run:
 
@@ -87,14 +87,14 @@ cargo test -p poise-server exchange::tests::
 cargo check -p poise-server
 ```
 
-- [ ] **Step 5: 提交并回写 SHA**
+- [x] **Step 5: 提交并回写 SHA**
 
 ```bash
 git add engine/src/ports.rs server/src/exchange.rs docs/superpowers/plans/2026-05-05-exchange-design-simplification.md
 git commit -m "refactor: add exchange ports bundle"
 ```
 
-Commit: _pending_
+Commit: `56449f39658f5fa7d1e9a5fb81eae830f31c556a`
 
 ---
 
