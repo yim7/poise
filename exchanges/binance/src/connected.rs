@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 use poise_core::track::Instrument;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
-    ExchangeOpenOrderSnapshot, ExecutionPort, ExecutionPortError, MarketDataPort, MarketDataTick,
-    MetadataPort, OrderReceipt, OrderRequest, Position, UserDataEvent,
+    ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, MarketDataPort,
+    MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position, UserDataEvent,
 };
 
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
     ws::BinanceWsClient,
 };
 
-pub async fn connect(config: &Config) -> Result<Connected> {
+pub async fn connect(config: &Config) -> Result<ExchangePorts> {
     let endpoints = config.endpoints();
     let (api_key, api_secret) = config.credentials()?;
     let rest = Arc::new(BinanceRestClient::new(
@@ -32,64 +32,17 @@ pub async fn connect(config: &Config) -> Result<Connected> {
         endpoints.user_ws_base_url(),
     ));
 
-    Ok(Connected::from_clients(rest, ws))
+    Ok(ports_from_clients(rest, ws))
 }
 
-#[derive(Clone)]
-pub struct Connected {
-    execution: Arc<dyn ExecutionPort>,
-    market_data: Arc<dyn MarketDataPort>,
-    account_summary: Arc<dyn AccountSummaryPort>,
-    account: Arc<dyn AccountPort>,
-    metadata: Arc<dyn MetadataPort>,
-}
-
-impl Connected {
-    fn from_clients(rest: Arc<BinanceRestClient>, ws: Arc<BinanceWsClient>) -> Self {
-        Self::from_parts(
-            Arc::new(BinanceExecution::new(Arc::clone(&rest))),
-            Arc::new(BinanceMarketData::new(Arc::clone(&ws))),
-            Arc::new(BinanceAccountSummary::new(Arc::clone(&rest))),
-            Arc::new(BinanceAccount::new(Arc::clone(&rest), ws)),
-            Arc::new(BinanceMetadata::new(rest)),
-        )
-    }
-
-    fn from_parts(
-        execution: Arc<dyn ExecutionPort>,
-        market_data: Arc<dyn MarketDataPort>,
-        account_summary: Arc<dyn AccountSummaryPort>,
-        account: Arc<dyn AccountPort>,
-        metadata: Arc<dyn MetadataPort>,
-    ) -> Self {
-        Self {
-            execution,
-            market_data,
-            account_summary,
-            account,
-            metadata,
-        }
-    }
-
-    pub fn execution(&self) -> Arc<dyn ExecutionPort> {
-        Arc::clone(&self.execution)
-    }
-
-    pub fn market_data(&self) -> Arc<dyn MarketDataPort> {
-        Arc::clone(&self.market_data)
-    }
-
-    pub fn account_summary(&self) -> Arc<dyn AccountSummaryPort> {
-        Arc::clone(&self.account_summary)
-    }
-
-    pub fn account(&self) -> Arc<dyn AccountPort> {
-        Arc::clone(&self.account)
-    }
-
-    pub fn metadata(&self) -> Arc<dyn MetadataPort> {
-        Arc::clone(&self.metadata)
-    }
+fn ports_from_clients(rest: Arc<BinanceRestClient>, ws: Arc<BinanceWsClient>) -> ExchangePorts {
+    ExchangePorts::new(
+        Arc::new(BinanceExecution::new(Arc::clone(&rest))),
+        Arc::new(BinanceMarketData::new(Arc::clone(&ws))),
+        Arc::new(BinanceAccountSummary::new(Arc::clone(&rest))),
+        Arc::new(BinanceAccount::new(Arc::clone(&rest), ws)),
+        Arc::new(BinanceMetadata::new(rest)),
+    )
 }
 
 struct BinanceExecution {
@@ -323,14 +276,14 @@ mod tests {
         }
     }
 
-    fn build_test_connected() -> Connected {
+    fn build_test_connected() -> ExchangePorts {
         build_test_connected_with_urls("http://127.0.0.1:18080", "ws://127.0.0.1:19080")
     }
 
     fn build_test_connected_with_urls(
         rest_base_url: impl Into<String>,
         ws_base_url: impl Into<String>,
-    ) -> Connected {
+    ) -> ExchangePorts {
         let rest = Arc::new(BinanceRestClient::new(
             rest_base_url,
             "api-key",
@@ -343,7 +296,7 @@ mod tests {
             ws_base_url.clone(),
             ws_base_url,
         ));
-        Connected::from_clients(rest, ws)
+        ports_from_clients(rest, ws)
     }
 
     #[test]
@@ -358,8 +311,8 @@ mod tests {
     }
 
     #[test]
-    fn connected_can_be_built_from_distinct_port_components() {
-        let connected = Connected::from_parts(
+    fn exchange_ports_can_be_built_from_distinct_port_components() {
+        let connected = ExchangePorts::new(
             Arc::new(FakeExecutionPort),
             Arc::new(FakeMarketDataPort),
             Arc::new(FakeAccountSummaryPort),

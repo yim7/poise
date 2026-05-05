@@ -8,8 +8,8 @@ use tokio::sync::mpsc;
 use poise_core::track::Instrument;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
-    ExchangeOpenOrderSnapshot, ExecutionPort, MarketDataPort, MarketDataTick, MetadataPort,
-    OrderReceipt, OrderRequest, Position, UserDataEvent,
+    ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, MarketDataPort, MarketDataTick,
+    MetadataPort, OrderReceipt, OrderRequest, Position, UserDataEvent,
 };
 
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
 
 const DEFAULT_CAPACITY_LEVERAGE: u32 = 10;
 
-pub async fn connect(config: &Config) -> Result<Connected> {
+pub async fn connect(config: &Config) -> Result<ExchangePorts> {
     let credentials = config.credentials()?;
     let client_order_ids = ClientOrderIdMapper::shared();
     let ws = Arc::new(HyperliquidWsClient::new_with_client_order_id_mapper(
@@ -27,7 +27,7 @@ pub async fn connect(config: &Config) -> Result<Connected> {
         credentials.wallet_address().to_string(),
         Arc::clone(&client_order_ids),
     ));
-    Ok(Connected::from_rest_client(
+    Ok(ports_from_rest_client(
         Arc::new(HyperliquidRestClient::new_with_client_order_id_mapper(
             config,
             client_order_ids,
@@ -36,61 +36,17 @@ pub async fn connect(config: &Config) -> Result<Connected> {
     ))
 }
 
-#[derive(Clone)]
-pub struct Connected {
-    execution: Arc<dyn ExecutionPort>,
-    market_data: Arc<dyn MarketDataPort>,
-    account_summary: Arc<dyn AccountSummaryPort>,
-    account: Arc<dyn AccountPort>,
-    metadata: Arc<dyn MetadataPort>,
-}
-
-impl Connected {
-    fn from_rest_client(rest: Arc<HyperliquidRestClient>, ws: Arc<HyperliquidWsClient>) -> Self {
-        Self::from_parts(
-            Arc::new(HyperliquidExecution::new(Arc::clone(&rest))),
-            Arc::new(HyperliquidMarketData::new(Arc::clone(&ws))),
-            Arc::new(HyperliquidAccountSummary::new(Arc::clone(&rest))),
-            Arc::new(HyperliquidAccount::new(Arc::clone(&rest), ws)),
-            Arc::new(HyperliquidMetadata::new(rest)),
-        )
-    }
-
-    fn from_parts(
-        execution: Arc<dyn ExecutionPort>,
-        market_data: Arc<dyn MarketDataPort>,
-        account_summary: Arc<dyn AccountSummaryPort>,
-        account: Arc<dyn AccountPort>,
-        metadata: Arc<dyn MetadataPort>,
-    ) -> Self {
-        Self {
-            execution,
-            market_data,
-            account_summary,
-            account,
-            metadata,
-        }
-    }
-
-    pub fn execution(&self) -> Arc<dyn ExecutionPort> {
-        Arc::clone(&self.execution)
-    }
-
-    pub fn market_data(&self) -> Arc<dyn MarketDataPort> {
-        Arc::clone(&self.market_data)
-    }
-
-    pub fn account_summary(&self) -> Arc<dyn AccountSummaryPort> {
-        Arc::clone(&self.account_summary)
-    }
-
-    pub fn account(&self) -> Arc<dyn AccountPort> {
-        Arc::clone(&self.account)
-    }
-
-    pub fn metadata(&self) -> Arc<dyn MetadataPort> {
-        Arc::clone(&self.metadata)
-    }
+fn ports_from_rest_client(
+    rest: Arc<HyperliquidRestClient>,
+    ws: Arc<HyperliquidWsClient>,
+) -> ExchangePorts {
+    ExchangePorts::new(
+        Arc::new(HyperliquidExecution::new(Arc::clone(&rest))),
+        Arc::new(HyperliquidMarketData::new(Arc::clone(&ws))),
+        Arc::new(HyperliquidAccountSummary::new(Arc::clone(&rest))),
+        Arc::new(HyperliquidAccount::new(Arc::clone(&rest), ws)),
+        Arc::new(HyperliquidMetadata::new(rest)),
+    )
 }
 
 struct HyperliquidExecution {
@@ -229,7 +185,7 @@ mod tests {
             vault_address: None,
         };
 
-        let connected = connect(&config).await.unwrap();
+        let connected: ExchangePorts = connect(&config).await.unwrap();
 
         let _execution = connected.execution();
         let _market_data = connected.market_data();

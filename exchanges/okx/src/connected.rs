@@ -7,16 +7,16 @@ use tokio::sync::mpsc;
 use poise_core::track::Instrument;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
-    ExchangeOpenOrderSnapshot, ExecutionPort, MarketDataPort, MarketDataTick, MetadataPort,
-    OrderReceipt, OrderRequest, Position, UserDataEvent,
+    ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, MarketDataPort, MarketDataTick,
+    MetadataPort, OrderReceipt, OrderRequest, Position, UserDataEvent,
 };
 
 use crate::{Config, rest::client::OkxRestClient, ws::OkxWsClient};
 
-pub async fn connect(config: &Config) -> Result<Connected> {
+pub async fn connect(config: &Config) -> Result<ExchangePorts> {
     let credentials = config.credentials()?;
     let endpoints = config.endpoints();
-    Ok(Connected::from_clients(
+    Ok(ports_from_clients(
         Arc::new(OkxRestClient::new(config)?),
         Arc::new(OkxWsClient::new(
             endpoints.public_ws_url(),
@@ -26,72 +26,23 @@ pub async fn connect(config: &Config) -> Result<Connected> {
     ))
 }
 
-#[derive(Clone)]
-pub struct Connected {
-    execution: Arc<dyn ExecutionPort>,
-    market_data: Arc<dyn MarketDataPort>,
-    account_summary: Arc<dyn AccountSummaryPort>,
-    account: Arc<dyn AccountPort>,
-    metadata: Arc<dyn MetadataPort>,
+fn ports_from_clients(rest: Arc<OkxRestClient>, ws: Arc<OkxWsClient>) -> ExchangePorts {
+    ports_from_parts(rest, Some(ws))
 }
 
-impl Connected {
-    fn from_clients(rest: Arc<OkxRestClient>, ws: Arc<OkxWsClient>) -> Self {
-        Self::from_parts(
-            Arc::new(OkxExecution::new(Arc::clone(&rest))),
-            Arc::new(OkxMarketData::new(Some(Arc::clone(&ws)))),
-            Arc::new(OkxAccountSummary::new(Arc::clone(&rest))),
-            Arc::new(OkxAccount::new(Arc::clone(&rest), Some(ws))),
-            Arc::new(OkxMetadata::new(rest)),
-        )
-    }
+#[cfg(test)]
+fn ports_from_rest_client(rest: Arc<OkxRestClient>) -> ExchangePorts {
+    ports_from_parts(rest, None)
+}
 
-    #[cfg(test)]
-    fn from_rest_client(rest: Arc<OkxRestClient>) -> Self {
-        Self::from_parts(
-            Arc::new(OkxExecution::new(Arc::clone(&rest))),
-            Arc::new(OkxMarketData::new(None)),
-            Arc::new(OkxAccountSummary::new(Arc::clone(&rest))),
-            Arc::new(OkxAccount::new(Arc::clone(&rest), None)),
-            Arc::new(OkxMetadata::new(rest)),
-        )
-    }
-
-    fn from_parts(
-        execution: Arc<dyn ExecutionPort>,
-        market_data: Arc<dyn MarketDataPort>,
-        account_summary: Arc<dyn AccountSummaryPort>,
-        account: Arc<dyn AccountPort>,
-        metadata: Arc<dyn MetadataPort>,
-    ) -> Self {
-        Self {
-            execution,
-            market_data,
-            account_summary,
-            account,
-            metadata,
-        }
-    }
-
-    pub fn execution(&self) -> Arc<dyn ExecutionPort> {
-        Arc::clone(&self.execution)
-    }
-
-    pub fn market_data(&self) -> Arc<dyn MarketDataPort> {
-        Arc::clone(&self.market_data)
-    }
-
-    pub fn account_summary(&self) -> Arc<dyn AccountSummaryPort> {
-        Arc::clone(&self.account_summary)
-    }
-
-    pub fn account(&self) -> Arc<dyn AccountPort> {
-        Arc::clone(&self.account)
-    }
-
-    pub fn metadata(&self) -> Arc<dyn MetadataPort> {
-        Arc::clone(&self.metadata)
-    }
+fn ports_from_parts(rest: Arc<OkxRestClient>, ws: Option<Arc<OkxWsClient>>) -> ExchangePorts {
+    ExchangePorts::new(
+        Arc::new(OkxExecution::new(Arc::clone(&rest))),
+        Arc::new(OkxMarketData::new(ws.as_ref().map(Arc::clone))),
+        Arc::new(OkxAccountSummary::new(Arc::clone(&rest))),
+        Arc::new(OkxAccount::new(Arc::clone(&rest), ws)),
+        Arc::new(OkxMetadata::new(rest)),
+    )
 }
 
 struct OkxExecution {
@@ -244,7 +195,7 @@ mod tests {
             passphrase: Some("demo-passphrase".to_string()),
         };
 
-        let connected = connect(&config).await.unwrap();
+        let connected: ExchangePorts = connect(&config).await.unwrap();
 
         let _execution = connected.execution();
         let _market_data = connected.market_data();
@@ -275,7 +226,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         ));
 
-        let connected = Connected::from_rest_client(rest);
+        let connected = ports_from_rest_client(rest);
         let summary = connected
             .account_summary()
             .get_account_summary()

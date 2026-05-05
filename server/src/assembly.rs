@@ -17,7 +17,9 @@ use poise_binance::connect as connect_binance;
 use poise_bybit::connect as connect_bybit;
 use poise_core::track::{Instrument, TrackId, Venue};
 use poise_engine::manager::TrackManager;
-use poise_engine::ports::{ClockPort, ExchangePorts};
+use poise_engine::ports::ClockPort;
+#[cfg(test)]
+use poise_engine::ports::ExchangePorts;
 use poise_hyperliquid::connect as connect_hyperliquid;
 use poise_okx::connect as connect_okx;
 #[cfg(test)]
@@ -110,56 +112,20 @@ fn validate_registry_venue(
 pub(crate) async fn build_exchange(config: &ExchangeConfig) -> Result<Exchange> {
     match config {
         ExchangeConfig::Binance(binance_config) => {
-            let connected = connect_binance(binance_config).await?;
-            Ok(Exchange::new(
-                Venue::Binance,
-                ExchangePorts::new(
-                    connected.execution(),
-                    connected.market_data(),
-                    connected.account_summary(),
-                    connected.account(),
-                    connected.metadata(),
-                ),
-            ))
+            let ports = connect_binance(binance_config).await?;
+            Ok(Exchange::new(Venue::Binance, ports))
         }
         ExchangeConfig::Bybit(bybit_config) => {
-            let connected = connect_bybit(bybit_config).await?;
-            Ok(Exchange::new(
-                Venue::Bybit,
-                ExchangePorts::new(
-                    connected.execution(),
-                    connected.market_data(),
-                    connected.account_summary(),
-                    connected.account(),
-                    connected.metadata(),
-                ),
-            ))
+            let ports = connect_bybit(bybit_config).await?;
+            Ok(Exchange::new(Venue::Bybit, ports))
         }
         ExchangeConfig::Hyperliquid(hyperliquid_config) => {
-            let connected = connect_hyperliquid(hyperliquid_config).await?;
-            Ok(Exchange::new(
-                Venue::Hyperliquid,
-                ExchangePorts::new(
-                    connected.execution(),
-                    connected.market_data(),
-                    connected.account_summary(),
-                    connected.account(),
-                    connected.metadata(),
-                ),
-            ))
+            let ports = connect_hyperliquid(hyperliquid_config).await?;
+            Ok(Exchange::new(Venue::Hyperliquid, ports))
         }
         ExchangeConfig::Okx(okx_config) => {
-            let connected = connect_okx(okx_config).await?;
-            Ok(Exchange::new(
-                Venue::Okx,
-                ExchangePorts::new(
-                    connected.execution(),
-                    connected.market_data(),
-                    connected.account_summary(),
-                    connected.account(),
-                    connected.metadata(),
-                ),
-            ))
+            let ports = connect_okx(okx_config).await?;
+            Ok(Exchange::new(Venue::Okx, ports))
         }
     }
 }

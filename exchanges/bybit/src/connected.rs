@@ -7,13 +7,13 @@ use tokio::sync::mpsc;
 use poise_core::track::Instrument;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
-    ExchangeOpenOrderSnapshot, ExecutionPort, MarketDataPort, MarketDataTick, MetadataPort,
-    OrderReceipt, OrderRequest, Position, UserDataEvent,
+    ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, MarketDataPort, MarketDataTick,
+    MetadataPort, OrderReceipt, OrderRequest, Position, UserDataEvent,
 };
 
 use crate::{Config, rest::BybitRestClient, ws::BybitWsClient};
 
-pub async fn connect(config: &Config) -> Result<Connected> {
+pub async fn connect(config: &Config) -> Result<ExchangePorts> {
     let (api_key, api_secret) = config.credentials()?;
     let deployment = config.deployment.clone();
     let rest = Arc::new(BybitRestClient::new(
@@ -23,64 +23,17 @@ pub async fn connect(config: &Config) -> Result<Connected> {
     ));
     let ws = Arc::new(BybitWsClient::new(deployment, api_key, api_secret));
 
-    Ok(Connected::from_clients(rest, ws))
+    Ok(ports_from_clients(rest, ws))
 }
 
-#[derive(Clone)]
-pub struct Connected {
-    execution: Arc<dyn ExecutionPort>,
-    market_data: Arc<dyn MarketDataPort>,
-    account_summary: Arc<dyn AccountSummaryPort>,
-    account: Arc<dyn AccountPort>,
-    metadata: Arc<dyn MetadataPort>,
-}
-
-impl Connected {
-    fn from_clients(rest: Arc<BybitRestClient>, ws: Arc<BybitWsClient>) -> Self {
-        Self::from_parts(
-            Arc::new(BybitExecution::new(Arc::clone(&rest))),
-            Arc::new(BybitMarketData::new(Arc::clone(&ws))),
-            Arc::new(BybitAccountSummary::new(Arc::clone(&rest))),
-            Arc::new(BybitAccount::new(Arc::clone(&rest), ws)),
-            Arc::new(BybitMetadata::new(rest)),
-        )
-    }
-
-    fn from_parts(
-        execution: Arc<dyn ExecutionPort>,
-        market_data: Arc<dyn MarketDataPort>,
-        account_summary: Arc<dyn AccountSummaryPort>,
-        account: Arc<dyn AccountPort>,
-        metadata: Arc<dyn MetadataPort>,
-    ) -> Self {
-        Self {
-            execution,
-            market_data,
-            account_summary,
-            account,
-            metadata,
-        }
-    }
-
-    pub fn execution(&self) -> Arc<dyn ExecutionPort> {
-        Arc::clone(&self.execution)
-    }
-
-    pub fn market_data(&self) -> Arc<dyn MarketDataPort> {
-        Arc::clone(&self.market_data)
-    }
-
-    pub fn account_summary(&self) -> Arc<dyn AccountSummaryPort> {
-        Arc::clone(&self.account_summary)
-    }
-
-    pub fn account(&self) -> Arc<dyn AccountPort> {
-        Arc::clone(&self.account)
-    }
-
-    pub fn metadata(&self) -> Arc<dyn MetadataPort> {
-        Arc::clone(&self.metadata)
-    }
+fn ports_from_clients(rest: Arc<BybitRestClient>, ws: Arc<BybitWsClient>) -> ExchangePorts {
+    ExchangePorts::new(
+        Arc::new(BybitExecution::new(Arc::clone(&rest))),
+        Arc::new(BybitMarketData::new(Arc::clone(&ws))),
+        Arc::new(BybitAccountSummary::new(Arc::clone(&rest))),
+        Arc::new(BybitAccount::new(Arc::clone(&rest), ws)),
+        Arc::new(BybitMetadata::new(rest)),
+    )
 }
 
 struct BybitExecution {
@@ -234,7 +187,7 @@ mod tests {
             api_secret: Some("demo-secret".to_string()),
         };
 
-        let connected = connect(&config).await.unwrap();
+        let connected: ExchangePorts = connect(&config).await.unwrap();
 
         let _execution = connected.execution();
         let _market_data = connected.market_data();
@@ -386,7 +339,7 @@ mod tests {
             Duration::from_millis(10),
             Arc::new(|| 1_700_000_000_000),
         ));
-        let connected = Connected::from_parts(
+        let connected = ExchangePorts::new(
             Arc::new(BybitExecution::new(Arc::clone(&rest))),
             Arc::new(BybitMarketData::new(Arc::clone(&ws))),
             Arc::new(BybitAccountSummary::new(Arc::clone(&rest))),
@@ -475,7 +428,7 @@ mod tests {
             Duration::from_millis(10),
             Arc::new(|| 1_700_000_000_000),
         ));
-        let connected = Connected::from_parts(
+        let connected = ExchangePorts::new(
             Arc::new(BybitExecution::new(Arc::clone(&rest))),
             Arc::new(BybitMarketData::new(Arc::clone(&ws))),
             Arc::new(BybitAccountSummary::new(Arc::clone(&rest))),
