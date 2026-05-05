@@ -282,40 +282,20 @@ impl ExchangePorts {
         Arc::clone(&self.execution)
     }
 
-    pub fn execution_ref(&self) -> &dyn ExecutionPort {
-        self.execution.as_ref()
-    }
-
     pub fn market_data(&self) -> Arc<dyn MarketDataPort> {
         Arc::clone(&self.market_data)
-    }
-
-    pub fn market_data_ref(&self) -> &dyn MarketDataPort {
-        self.market_data.as_ref()
     }
 
     pub fn account_summary(&self) -> Arc<dyn AccountSummaryPort> {
         Arc::clone(&self.account_summary)
     }
 
-    pub fn account_summary_ref(&self) -> &dyn AccountSummaryPort {
-        self.account_summary.as_ref()
-    }
-
     pub fn account(&self) -> Arc<dyn AccountPort> {
         Arc::clone(&self.account)
     }
 
-    pub fn account_ref(&self) -> &dyn AccountPort {
-        self.account.as_ref()
-    }
-
     pub fn metadata(&self) -> Arc<dyn MetadataPort> {
         Arc::clone(&self.metadata)
-    }
-
-    pub fn metadata_ref(&self) -> &dyn MetadataPort {
-        self.metadata.as_ref()
     }
 }
 

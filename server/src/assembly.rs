@@ -17,9 +17,7 @@ use poise_binance::connect as connect_binance;
 use poise_bybit::connect as connect_bybit;
 use poise_core::track::{Instrument, TrackId, Venue};
 use poise_engine::manager::TrackManager;
-use poise_engine::ports::ClockPort;
-#[cfg(test)]
-use poise_engine::ports::ExchangePorts;
+use poise_engine::ports::{ClockPort, ExchangePorts};
 use poise_hyperliquid::connect as connect_hyperliquid;
 use poise_okx::connect as connect_okx;
 #[cfg(test)]
@@ -29,7 +27,6 @@ use tokio::time::Duration;
 
 use crate::account_projector::AccountProjector;
 use crate::config::{Config, ExchangeConfig};
-use crate::exchange::Exchange;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::exchange_startup::{build_symbol_leverage_setter, build_track_leverage_index};
 use crate::projector::TrackProjector;
@@ -109,23 +106,23 @@ fn validate_registry_venue(
     Ok(())
 }
 
-pub(crate) async fn build_exchange(config: &ExchangeConfig) -> Result<Exchange> {
+pub(crate) async fn build_exchange(config: &ExchangeConfig) -> Result<(Venue, ExchangePorts)> {
     match config {
         ExchangeConfig::Binance(binance_config) => {
             let ports = connect_binance(binance_config).await?;
-            Ok(Exchange::new(Venue::Binance, ports))
+            Ok((Venue::Binance, ports))
         }
         ExchangeConfig::Bybit(bybit_config) => {
             let ports = connect_bybit(bybit_config).await?;
-            Ok(Exchange::new(Venue::Bybit, ports))
+            Ok((Venue::Bybit, ports))
         }
         ExchangeConfig::Hyperliquid(hyperliquid_config) => {
             let ports = connect_hyperliquid(hyperliquid_config).await?;
-            Ok(Exchange::new(Venue::Hyperliquid, ports))
+            Ok((Venue::Hyperliquid, ports))
         }
         ExchangeConfig::Okx(okx_config) => {
             let ports = connect_okx(okx_config).await?;
-            Ok(Exchange::new(Venue::Okx, ports))
+            Ok((Venue::Okx, ports))
         }
     }
 }
@@ -147,7 +144,7 @@ pub async fn assemble(
             .iter()
             .map(|track| track.track_id().clone()),
     )?;
-    let exchange = build_exchange_and_prepare_startup(
+    let (exchange_venue, exchange_ports) = build_exchange_and_prepare_startup(
         config,
         track_definition_registry.as_ref(),
         &track_leverage_index,
@@ -158,7 +155,8 @@ pub async fn assemble(
     assemble_with_state_store(
         config,
         track_definition_registry,
-        exchange,
+        exchange_venue,
+        exchange_ports,
         repositories,
         clock,
         &track_leverage_index,
@@ -170,7 +168,7 @@ async fn build_exchange_and_prepare_startup(
     config: &Config,
     track_definition_registry: &TrackDefinitionRegistry,
     track_leverage_index: &TrackLeverageIndex,
-) -> Result<Exchange> {
+) -> Result<(Venue, ExchangePorts)> {
     prepare_exchange_startup_with(
         track_definition_registry,
         track_leverage_index,
@@ -189,11 +187,11 @@ pub(crate) async fn assemble_with_exchange_ports(
     clock: Arc<dyn ClockPort>,
 ) -> Result<ServerPlatform> {
     let track_leverage_index = build_track_leverage_index(&config.tracks)?;
-    let exchange = Exchange::new(config.exchange.venue(), exchange_ports);
     assemble_with_state_store(
         config,
         track_definition_registry,
-        exchange,
+        config.exchange.venue(),
+        exchange_ports,
         repositories,
         clock,
         &track_leverage_index,
@@ -204,12 +202,13 @@ pub(crate) async fn assemble_with_exchange_ports(
 async fn assemble_with_state_store(
     config: &Config,
     track_definition_registry: Arc<TrackDefinitionRegistry>,
-    exchange: Exchange,
+    exchange_venue: Venue,
+    exchange_ports: ExchangePorts,
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
     track_leverage_index: &TrackLeverageIndex,
 ) -> Result<ServerPlatform> {
-    validate_registry_venue(track_definition_registry.as_ref(), config.exchange.venue())?;
+    validate_registry_venue(track_definition_registry.as_ref(), exchange_venue)?;
     validate_unique_instruments(
         track_definition_registry
             .iter()
@@ -223,10 +222,11 @@ async fn assemble_with_state_store(
 
     let mut manager = TrackManager::new(clock.clone());
     let mut startup_definitions = Vec::new();
+    let metadata = exchange_ports.metadata();
     for track in track_definition_registry.iter() {
         let track_id = track.track_id().clone();
         let instrument = track.instrument().clone();
-        let info = load_exchange_info_with_retry(exchange.metadata(), &instrument).await?;
+        let info = load_exchange_info_with_retry(metadata.as_ref(), &instrument).await?;
         let startup_leverage = track_leverage_index
             .get(&track_id)
             .copied()
@@ -279,7 +279,7 @@ async fn assemble_with_state_store(
     let account_monitor = if let Some(account_store) = repositories.account_monitor_store() {
         Arc::new(
             AccountMonitor::restore(
-                exchange.account_summary_port(),
+                exchange_ports.account_summary(),
                 account_store,
                 notifications.clone(),
                 config.account_monitor.clone(),
@@ -357,11 +357,11 @@ async fn assemble_with_state_store(
             runtime_state,
             effect_worker_state,
             RuntimePorts::new(
-                exchange.execution_port(),
-                exchange.market_data_port(),
-                exchange.account_summary_port(),
-                exchange.account_port(),
-                exchange.metadata_port(),
+                exchange_ports.execution(),
+                exchange_ports.market_data(),
+                exchange_ports.account_summary(),
+                exchange_ports.account(),
+                exchange_ports.metadata(),
                 clock,
             ),
             startup_definitions,
@@ -722,9 +722,10 @@ total_loss_limit = 600.0
         )
         .unwrap();
 
-        let exchange = build_exchange(&config.exchange).await.unwrap();
+        let (venue, ports) = build_exchange(&config.exchange).await.unwrap();
 
-        assert_eq!(exchange.venue(), Venue::Binance);
+        assert_eq!(venue, Venue::Binance);
+        let _metadata = ports.metadata();
     }
 
     #[tokio::test]
@@ -751,9 +752,10 @@ total_loss_limit = 600.0
         )
         .unwrap();
 
-        let exchange = build_exchange(&config.exchange).await.unwrap();
+        let (venue, ports) = build_exchange(&config.exchange).await.unwrap();
 
-        assert_eq!(exchange.venue(), Venue::Bybit);
+        assert_eq!(venue, Venue::Bybit);
+        let _metadata = ports.metadata();
     }
 
     #[tokio::test]
@@ -780,9 +782,10 @@ total_loss_limit = 600.0
         )
         .unwrap();
 
-        let exchange = build_exchange(&config.exchange).await.unwrap();
+        let (venue, ports) = build_exchange(&config.exchange).await.unwrap();
 
-        assert_eq!(exchange.venue(), Venue::Hyperliquid);
+        assert_eq!(venue, Venue::Hyperliquid);
+        let _metadata = ports.metadata();
     }
 
     #[tokio::test]
@@ -810,9 +813,10 @@ total_loss_limit = 600.0
         )
         .unwrap();
 
-        let exchange = build_exchange(&config.exchange).await.unwrap();
+        let (venue, ports) = build_exchange(&config.exchange).await.unwrap();
 
-        assert_eq!(exchange.venue(), Venue::Okx);
+        assert_eq!(venue, Venue::Okx);
+        let _metadata = ports.metadata();
     }
 
     #[tokio::test]
