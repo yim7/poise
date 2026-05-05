@@ -404,7 +404,7 @@ Commit: `b51eb0d53067d7b1c9130d7462fc3267a2cc57aa`
 - Modify: `docs/system-overview.md`
 - Optional Modify: `README.md`
 
-- [ ] **Step 1: 写文档验收清单**
+- [x] **Step 1: 写文档验收清单**
 
 在 `docs/system-overview.md` 增加“新增交易所接入步骤”：
 
@@ -414,7 +414,7 @@ Commit: `b51eb0d53067d7b1c9130d7462fc3267a2cc57aa`
 - 在 server 组装层选择启动资金探测策略。
 - 补 connected / mapper / startup capacity 最小测试。
 
-- [ ] **Step 2: 最小验证**
+- [x] **Step 2: 最小验证**
 
 Run:
 
@@ -423,14 +423,14 @@ rg -n "ExchangePorts|StartupCapacityProbe|新增交易所" docs README.md
 git diff --check
 ```
 
-- [ ] **Step 3: 提交并回写 SHA**
+- [x] **Step 3: 提交并回写 SHA**
 
 ```bash
 git add docs/system-overview.md README.md docs/superpowers/plans/2026-05-05-exchange-design-simplification.md
 git commit -m "docs: document exchange integration boundaries"
 ```
 
-Commit: _pending_
+Commit: `c43df8dabebca17eb2264914fdbab915b004d7bb`
 
 ---
 
