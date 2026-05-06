@@ -37,27 +37,18 @@ pub async fn connect(config: &Config) -> Result<ExchangePorts> {
 }
 
 fn ports_from_clients(rest: Arc<BinanceRestClient>, ws: Arc<BinanceWsClient>) -> ExchangePorts {
+    let execution: Arc<dyn ExecutionPort> = rest.clone();
     let market_data: Arc<dyn MarketDataPort> = ws.clone();
     let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
     let metadata: Arc<dyn MetadataPort> = rest.clone();
 
     ExchangePorts::new(
-        Arc::new(BinanceExecution::new(Arc::clone(&rest))),
+        execution,
         market_data,
         account_summary,
         Arc::new(BinanceAccount::new(Arc::clone(&rest), ws)),
         metadata,
     )
-}
-
-struct BinanceExecution {
-    rest: Arc<BinanceRestClient>,
-}
-
-impl BinanceExecution {
-    fn new(rest: Arc<BinanceRestClient>) -> Self {
-        Self { rest }
-    }
 }
 
 fn map_execution_error(error: anyhow::Error) -> ExecutionPortError {
@@ -90,9 +81,11 @@ impl AccountSummaryPort for BinanceRestClient {
 }
 
 #[async_trait]
-impl ExecutionPort for BinanceExecution {
+impl ExecutionPort for BinanceRestClient {
     async fn submit_order(&self, req: OrderRequest) -> ExecutionResult<OrderReceipt> {
-        self.rest.new_order(&req).await.map_err(map_execution_error)
+        BinanceRestClient::new_order(self, &req)
+            .await
+            .map_err(map_execution_error)
     }
 
     async fn cancel_order(
@@ -100,22 +93,19 @@ impl ExecutionPort for BinanceExecution {
         instrument: &Instrument,
         order_id: &str,
     ) -> ExecutionResult<OrderReceipt> {
-        self.rest
-            .cancel_order(&instrument.symbol, order_id)
+        BinanceRestClient::cancel_order(self, &instrument.symbol, order_id)
             .await
             .map_err(map_execution_error)
     }
 
     async fn cancel_all(&self, instrument: &Instrument) -> ExecutionResult<()> {
-        self.rest
-            .cancel_all_orders(&instrument.symbol)
+        BinanceRestClient::cancel_all_orders(self, &instrument.symbol)
             .await
             .map_err(map_execution_error)
     }
 
     async fn get_position(&self, instrument: &Instrument) -> ExecutionResult<Position> {
-        self.rest
-            .get_position(&instrument.symbol)
+        BinanceRestClient::get_position(self, &instrument.symbol)
             .await
             .map_err(map_execution_error)
     }
@@ -124,8 +114,7 @@ impl ExecutionPort for BinanceExecution {
         &self,
         instrument: &Instrument,
     ) -> ExecutionResult<ExchangeOpenOrderSnapshot> {
-        self.rest
-            .get_open_orders(&instrument.symbol)
+        BinanceRestClient::get_open_orders(self, &instrument.symbol)
             .await
             .map(ExchangeOpenOrderSnapshot::from_complete_exchange_query)
             .map_err(map_execution_error)
@@ -326,6 +315,13 @@ mod tests {
         let _account_summary: Arc<dyn AccountSummaryPort> = connected.account_summary();
         let _account: Arc<dyn AccountPort> = connected.account();
         let _metadata: Arc<dyn MetadataPort> = connected.metadata();
+    }
+
+    #[test]
+    fn rest_client_implements_execution_port_directly() {
+        fn assert_execution_port<T: ExecutionPort>() {}
+
+        assert_execution_port::<BinanceRestClient>();
     }
 
     #[tokio::test]
