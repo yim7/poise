@@ -349,7 +349,10 @@ impl RecordingExecutionPort {
 
 #[async_trait::async_trait]
 impl ExecutionPort for RecordingExecutionPort {
-    async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
+    async fn submit_order(
+        &self,
+        req: OrderRequest,
+    ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
         self.submitted.lock().unwrap().push(req.clone());
         Ok(OrderReceipt {
             order_id: "test-order".into(),
@@ -363,7 +366,7 @@ impl ExecutionPort for RecordingExecutionPort {
         &self,
         _instrument: &poise_core::track::Instrument,
         order_id: &str,
-    ) -> Result<OrderReceipt> {
+    ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
         Ok(OrderReceipt {
             order_id: order_id.to_string(),
             client_order_id: String::new(),
@@ -372,13 +375,19 @@ impl ExecutionPort for RecordingExecutionPort {
         })
     }
 
-    async fn cancel_all(&self, _instrument: &poise_core::track::Instrument) -> Result<()> {
+    async fn cancel_all(
+        &self,
+        _instrument: &poise_core::track::Instrument,
+    ) -> poise_engine::ports::ExecutionResult<()> {
         self.cancel_all_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
-    async fn get_position(&self, instrument: &poise_core::track::Instrument) -> Result<Position> {
+    async fn get_position(
+        &self,
+        instrument: &poise_core::track::Instrument,
+    ) -> poise_engine::ports::ExecutionResult<Position> {
         Ok(Position {
             instrument: instrument.clone(),
             qty: 0.0,
@@ -390,7 +399,7 @@ impl ExecutionPort for RecordingExecutionPort {
     async fn get_open_orders(
         &self,
         _instrument: &poise_core::track::Instrument,
-    ) -> Result<ExchangeOpenOrderSnapshot> {
+    ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
         Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
             Vec::new(),
         ))

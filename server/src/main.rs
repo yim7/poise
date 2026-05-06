@@ -671,7 +671,10 @@ total_loss_limit = 600.0
 
     #[async_trait::async_trait]
     impl ExecutionPort for FakeExchange {
-        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
+        async fn submit_order(
+            &self,
+            _req: OrderRequest,
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
             Ok(OrderReceipt {
                 order_id: "order-1".into(),
                 client_order_id: "client-1".into(),
@@ -684,7 +687,7 @@ total_loss_limit = 600.0
             &self,
             _instrument: &Instrument,
             order_id: &str,
-        ) -> Result<OrderReceipt> {
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
             Ok(OrderReceipt {
                 order_id: order_id.to_string(),
                 client_order_id: String::new(),
@@ -693,11 +696,17 @@ total_loss_limit = 600.0
             })
         }
 
-        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
+        async fn cancel_all(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<()> {
             Ok(())
         }
 
-        async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
+        async fn get_position(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<Position> {
             Ok(Position {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 qty: 0.0,
@@ -709,7 +718,7 @@ total_loss_limit = 600.0
         async fn get_open_orders(
             &self,
             _instrument: &Instrument,
-        ) -> Result<ExchangeOpenOrderSnapshot> {
+        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
             Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
                 Vec::new(),
             ))

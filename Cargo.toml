@@ -56,3 +56,4 @@ tracing-subscriber = { version = "0.3", features = ["fmt"] }
 tempfile = "3"
 native-tls = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "1"

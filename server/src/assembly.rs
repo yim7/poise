@@ -1548,23 +1548,38 @@ total_loss_limit = 600.0
 
     #[async_trait::async_trait]
     impl ExecutionPort for FakeExchange {
-        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
-            Err(anyhow!("not used in tests"))
+        async fn submit_order(
+            &self,
+            _req: OrderRequest,
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            Err(poise_engine::ports::ExecutionPortError::failed(
+                "not used in tests",
+            ))
         }
 
         async fn cancel_order(
             &self,
             _instrument: &Instrument,
             _order_id: &str,
-        ) -> Result<OrderReceipt> {
-            Err(anyhow!("not used in tests"))
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            Err(poise_engine::ports::ExecutionPortError::failed(
+                "not used in tests",
+            ))
         }
 
-        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
-            Err(anyhow!("not used in tests"))
+        async fn cancel_all(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<()> {
+            Err(poise_engine::ports::ExecutionPortError::failed(
+                "not used in tests",
+            ))
         }
 
-        async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
+        async fn get_position(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<Position> {
             Ok(Position {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 qty: 0.0,
@@ -1576,7 +1591,7 @@ total_loss_limit = 600.0
         async fn get_open_orders(
             &self,
             _instrument: &Instrument,
-        ) -> Result<ExchangeOpenOrderSnapshot> {
+        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
             Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
                 Vec::new(),
             ))
@@ -1787,23 +1802,38 @@ total_loss_limit = 600.0
 
     #[async_trait::async_trait]
     impl ExecutionPort for FakeExecutionPort {
-        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
-            Err(anyhow!("not used in tests"))
+        async fn submit_order(
+            &self,
+            _req: OrderRequest,
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            Err(poise_engine::ports::ExecutionPortError::failed(
+                "not used in tests",
+            ))
         }
 
         async fn cancel_order(
             &self,
             _instrument: &Instrument,
             _order_id: &str,
-        ) -> Result<OrderReceipt> {
-            Err(anyhow!("not used in tests"))
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            Err(poise_engine::ports::ExecutionPortError::failed(
+                "not used in tests",
+            ))
         }
 
-        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
-            Err(anyhow!("not used in tests"))
+        async fn cancel_all(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<()> {
+            Err(poise_engine::ports::ExecutionPortError::failed(
+                "not used in tests",
+            ))
         }
 
-        async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
+        async fn get_position(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<Position> {
             Ok(Position {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 qty: 0.0,
@@ -1815,7 +1845,7 @@ total_loss_limit = 600.0
         async fn get_open_orders(
             &self,
             _instrument: &Instrument,
-        ) -> Result<ExchangeOpenOrderSnapshot> {
+        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
             Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
                 Vec::new(),
             ))

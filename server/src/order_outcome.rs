@@ -45,12 +45,8 @@ pub enum OutcomeClass {
     OutcomeUnknown(OutcomeUnknownRecovery),
 }
 
-pub fn classify_cancel_error(error: &Error) -> OutcomeClass {
-    if error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<ExecutionPortError>())
-        .is_some_and(|error| error.kind() == ExecutionPortErrorKind::CancelOutcomeUnknown)
-    {
+pub fn classify_cancel_error(error: &ExecutionPortError) -> OutcomeClass {
+    if error.kind() == ExecutionPortErrorKind::CancelOutcomeUnknown {
         return OutcomeClass::OutcomeUnknown(OutcomeUnknownRecovery {
             freshness_reason: ExchangeFreshnessReason::CancelOutcomeUnknown,
             reconcile_reason: ReconcileReason::SyncAfterCancelOutcomeUnknown,
@@ -97,16 +93,16 @@ pub fn reconcile_execution(
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
-    use poise_engine::ports::ExecutionPortError;
+    use poise_engine::ports::{ExecutionPortError, ExecutionPortErrorKind};
 
     use super::*;
 
     #[test]
     fn classify_cancel_outcome_unknown_port_error_as_unknown() {
-        let error = Error::new(ExecutionPortError::cancel_outcome_unknown(
-            "Unknown order sent.",
-        ))
-        .context("cancel request failed");
+        let error = ExecutionPortError::new(
+            ExecutionPortErrorKind::CancelOutcomeUnknown,
+            anyhow::anyhow!("Unknown order sent."),
+        );
 
         assert_eq!(
             classify_cancel_error(&error),
@@ -119,7 +115,7 @@ mod tests {
 
     #[test]
     fn classify_plain_cancel_error_as_final_failure() {
-        let error = anyhow!("unknown order sent");
+        let error = ExecutionPortError::failed("unknown order sent");
 
         assert_eq!(classify_cancel_error(&error), OutcomeClass::FinalFailure);
     }

@@ -17,8 +17,9 @@ use poise_engine::ports::{
 };
 
 use super::auth::sign_v5_payload;
+use super::error::BybitRestError;
 use super::models::{
-    BybitResponse, CancelAllRequestBody, CancelAllResult, CancelOrderRequestBody,
+    BybitEnvelope, CancelAllRequestBody, CancelAllResult, CancelOrderRequestBody,
     CreateOrderRequestBody, CreateOrderResult, InstrumentInfoResult, OpenOrderListResult,
     PositionListResult, PositionSnapshot, ServerTimeResult, SetLeverageRequestBody,
     WalletBalanceResult,
@@ -263,7 +264,7 @@ impl BybitRestClient {
             buy_leverage: leverage.to_string(),
             sell_leverage: leverage.to_string(),
         };
-        let envelope: BybitResponse<serde_json::Value> = self
+        let envelope = self
             .send_request_envelope(
                 Method::POST,
                 "/v5/position/set-leverage",
@@ -273,11 +274,13 @@ impl BybitRestClient {
             )
             .await?;
         if envelope.ret_code != 0 && envelope.ret_code != RET_CODE_LEVERAGE_NOT_MODIFIED {
-            return Err(anyhow!(
-                "request POST /v5/position/set-leverage failed with retCode {}: {}",
+            return Err(BybitRestError::ret_code(
+                Method::POST,
+                "/v5/position/set-leverage",
                 envelope.ret_code,
-                envelope.ret_msg.unwrap_or_default()
-            ));
+                envelope.ret_msg,
+            )
+            .into());
         }
         Ok(())
     }
@@ -327,29 +330,28 @@ impl BybitRestClient {
             .send_request_envelope(method.clone(), path, params, body, auth_mode)
             .await?;
         if envelope.ret_code != 0 {
-            return Err(anyhow!(
-                "request {} {} failed with retCode {}: {}",
+            return Err(BybitRestError::ret_code(
                 method,
                 path,
                 envelope.ret_code,
-                envelope.ret_msg.unwrap_or_default()
-            ));
+                envelope.ret_msg,
+            )
+            .into());
         }
 
-        Ok(envelope.result)
+        envelope
+            .deserialize_result()
+            .with_context(|| format!("failed to deserialize Bybit result for {} {}", method, path))
     }
 
-    async fn send_request_envelope<T>(
+    async fn send_request_envelope(
         &self,
         method: Method,
         path: &str,
         params: Vec<(&str, String)>,
         body: Option<String>,
         auth_mode: AuthMode,
-    ) -> Result<BybitResponse<T>>
-    where
-        T: DeserializeOwned,
-    {
+    ) -> Result<BybitEnvelope> {
         let query_string = encode_query(&params);
         let url = if query_string.is_empty() {
             format!("{}{}", self.base_url, path)
@@ -391,13 +393,7 @@ impl BybitRestClient {
             .with_context(|| format!("failed to read response body for {path}"))?;
 
         if !status.is_success() {
-            return Err(anyhow!(
-                "request {} {} failed with status {}: {}",
-                method,
-                path,
-                status,
-                body
-            ));
+            return Err(BybitRestError::http_status(method, path, status, body).into());
         }
 
         serde_json::from_str(&body).with_context(|| {
@@ -717,6 +713,45 @@ mod tests {
         let error = client.cancel_all("BTCUSDT").await.unwrap_err().to_string();
 
         assert!(error.contains("did not confirm success"));
+    }
+
+    #[tokio::test]
+    async fn execution_port_maps_insufficient_margin_ret_code_to_execution_kind() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":110007,"retMsg":"available balance is insufficient","result":{}}"#,
+        )])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            OrderRequest {
+                instrument: poise_core::track::Instrument::new(
+                    poise_core::track::Venue::Bybit,
+                    "BTCUSDT",
+                ),
+                side: poise_core::types::Side::Buy,
+                price: 64000.10,
+                quantity: 0.01,
+                client_order_id: "client-1".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::InsufficientMargin
+        );
+        assert!(error.to_string().contains("110007"));
     }
 
     #[test]

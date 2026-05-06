@@ -7,11 +7,16 @@ use tokio::sync::mpsc;
 use poise_core::track::Instrument;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
-    ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, MarketDataPort, MarketDataTick,
-    MetadataPort, OrderReceipt, OrderRequest, Position, UserDataEvent,
+    ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
+    MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position,
+    UserDataEvent,
 };
 
-use crate::{Config, rest::BybitRestClient, ws::BybitWsClient};
+use crate::{
+    Config,
+    rest::{BybitRestClient, BybitRestError},
+    ws::BybitWsClient,
+};
 
 pub async fn connect(config: &Config) -> Result<ExchangePorts> {
     let (api_key, api_secret) = config.credentials()?;
@@ -27,27 +32,18 @@ pub async fn connect(config: &Config) -> Result<ExchangePorts> {
 }
 
 fn ports_from_clients(rest: Arc<BybitRestClient>, ws: Arc<BybitWsClient>) -> ExchangePorts {
+    let execution: Arc<dyn ExecutionPort> = rest.clone();
     let market_data: Arc<dyn MarketDataPort> = ws.clone();
     let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
     let metadata: Arc<dyn MetadataPort> = rest.clone();
 
     ExchangePorts::new(
-        Arc::new(BybitExecution::new(Arc::clone(&rest))),
+        execution,
         market_data,
         account_summary,
         Arc::new(BybitAccount::new(Arc::clone(&rest), ws)),
         metadata,
     )
-}
-
-struct BybitExecution {
-    _rest: Arc<BybitRestClient>,
-}
-
-impl BybitExecution {
-    fn new(rest: Arc<BybitRestClient>) -> Self {
-        Self { _rest: rest }
-    }
 }
 
 struct BybitAccount {
@@ -64,29 +60,55 @@ impl BybitAccount {
     }
 }
 
+fn map_execution_error(error: anyhow::Error) -> ExecutionPortError {
+    if let Some(kind) = error
+        .downcast_ref::<BybitRestError>()
+        .and_then(BybitRestError::execution_error_kind)
+    {
+        return ExecutionPortError::new(kind, error);
+    }
+
+    ExecutionPortError::from(error)
+}
+
 #[async_trait]
-impl ExecutionPort for BybitExecution {
-    async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
-        self._rest.submit_order(req).await
+impl ExecutionPort for BybitRestClient {
+    async fn submit_order(&self, req: OrderRequest) -> ExecutionResult<OrderReceipt> {
+        BybitRestClient::submit_order(self, req)
+            .await
+            .map_err(map_execution_error)
     }
 
-    async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<OrderReceipt> {
-        self._rest.cancel_order(&instrument.symbol, order_id).await
+    async fn cancel_order(
+        &self,
+        instrument: &Instrument,
+        order_id: &str,
+    ) -> ExecutionResult<OrderReceipt> {
+        BybitRestClient::cancel_order(self, &instrument.symbol, order_id)
+            .await
+            .map_err(map_execution_error)
     }
 
-    async fn cancel_all(&self, instrument: &Instrument) -> Result<()> {
-        self._rest.cancel_all(&instrument.symbol).await
+    async fn cancel_all(&self, instrument: &Instrument) -> ExecutionResult<()> {
+        BybitRestClient::cancel_all(self, &instrument.symbol)
+            .await
+            .map_err(map_execution_error)
     }
 
-    async fn get_position(&self, instrument: &Instrument) -> Result<Position> {
-        self._rest.get_position(&instrument.symbol).await
+    async fn get_position(&self, instrument: &Instrument) -> ExecutionResult<Position> {
+        BybitRestClient::get_position(self, &instrument.symbol)
+            .await
+            .map_err(map_execution_error)
     }
 
-    async fn get_open_orders(&self, instrument: &Instrument) -> Result<ExchangeOpenOrderSnapshot> {
-        self._rest
-            .get_open_orders(&instrument.symbol)
+    async fn get_open_orders(
+        &self,
+        instrument: &Instrument,
+    ) -> ExecutionResult<ExchangeOpenOrderSnapshot> {
+        BybitRestClient::get_open_orders(self, &instrument.symbol)
             .await
             .map(ExchangeOpenOrderSnapshot::from_complete_exchange_query)
+            .map_err(map_execution_error)
     }
 }
 
@@ -168,6 +190,13 @@ mod tests {
         let _account_summary = connected.account_summary();
         let _account = connected.account();
         let _metadata = connected.metadata();
+    }
+
+    #[test]
+    fn rest_client_implements_execution_port_directly() {
+        fn assert_execution_port<T: ExecutionPort>() {}
+
+        assert_execution_port::<crate::rest::BybitRestClient>();
     }
 
     #[tokio::test]

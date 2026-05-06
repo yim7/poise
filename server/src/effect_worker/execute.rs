@@ -93,8 +93,7 @@ pub(super) async fn execute_submit(
             Ok(SessionEffectOutcome::Finished)
         }
         Err(error) => {
-            let failure_message = error.to_string();
-            if is_insufficient_margin_failure(&failure_message) {
+            if is_insufficient_margin_failure(&error) {
                 worker
                     .state
                     .account_margin_guard
@@ -123,6 +122,7 @@ pub(super) async fn execute_submit(
                     }
                 }
             }
+            let failure_message = error.to_string();
             match completion.record_failure(&failure_message).await {
                 Ok(()) => Ok(()),
                 Err(clear_error) if is_loaded_track_invariant_violation(&clear_error) => {
@@ -244,7 +244,7 @@ pub(super) async fn execute_cancellation(
                     &error.to_string(),
                 )
                 .await?;
-            Err(error)
+            Err(error.into())
         }
     }
 }

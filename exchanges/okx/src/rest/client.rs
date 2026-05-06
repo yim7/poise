@@ -18,6 +18,7 @@ use crate::mapper::{
     open_order_from_snapshot, position_from_snapshot, side_to_okx,
 };
 use crate::rest::auth::sign_okx_payload;
+use crate::rest::error::OkxRestError;
 use crate::rest::models::{
     BalanceSnapshot, InstrumentInfo, OkxEnvelope, OrderAck, PendingOrderSnapshot, PositionSnapshot,
     ServerTime,
@@ -350,26 +351,16 @@ impl OkxRestClient {
             .with_context(|| format!("failed to read OKX response body for {path}"))?;
 
         if !status.is_success() {
-            return Err(anyhow!(
-                "request {} {} failed with status {}: {}",
-                method,
-                path,
-                status,
-                response_body
-            ));
+            return Err(OkxRestError::http_status(method, path, status, response_body).into());
         }
 
         let envelope: OkxEnvelope<T> = serde_json::from_str(&response_body).with_context(|| {
             format!("failed to deserialize OKX response for {path}: {response_body}")
         })?;
         if envelope.code != "0" {
-            return Err(anyhow!(
-                "request {} {} failed with OKX code {}: {}",
-                method,
-                path,
-                envelope.code,
-                envelope.msg
-            ));
+            return Err(
+                OkxRestError::business_code(method, path, envelope.code, envelope.msg).into(),
+            );
         }
         Ok(envelope.data)
     }
@@ -423,12 +414,12 @@ fn ack_to_receipt(ack: OrderAck, status: OrderStatus) -> Result<OrderReceipt> {
 
 fn ensure_ack_success(ack: &OrderAck) -> Result<()> {
     if ack.s_code != "0" {
-        return Err(anyhow!(
-            "OKX acknowledgement for order `{}` failed with sCode {}: {}",
-            ack.order_id,
-            ack.s_code,
-            ack.s_msg
-        ));
+        return Err(OkxRestError::acknowledgement(
+            ack.order_id.clone(),
+            ack.s_code.clone(),
+            ack.s_msg.clone(),
+        )
+        .into());
     }
     Ok(())
 }
@@ -785,6 +776,36 @@ mod tests {
         assert!(error.contains("GET /api/v5/account/balance"));
         assert!(error.contains("51000"));
         assert!(error.contains("bad request"));
+    }
+
+    #[tokio::test]
+    async fn execution_port_maps_insufficient_margin_code_to_execution_kind() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"code":"51008","msg":"insufficient margin","data":[]}"#,
+        )])
+        .await;
+        let client = test_client(&server, true);
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            OrderRequest {
+                instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
+                side: Side::Buy,
+                price: 64000.10,
+                quantity: 0.01,
+                client_order_id: "client-1".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::InsufficientMargin
+        );
+        assert!(error.to_string().contains("51008"));
     }
 
     fn test_client(server: &MockHttpServer, simulated_trading: bool) -> OkxRestClient {

@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 use poise_core::track::Instrument;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
-    ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, MarketDataPort,
-    MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position, UserDataEvent,
+    ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
+    MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position,
+    UserDataEvent,
 };
 
 use crate::{
@@ -59,6 +60,17 @@ impl BinanceExecution {
     }
 }
 
+fn map_execution_error(error: anyhow::Error) -> ExecutionPortError {
+    if let Some(kind) = error
+        .downcast_ref::<BinanceRestError>()
+        .and_then(BinanceRestError::execution_error_kind)
+    {
+        return ExecutionPortError::new(kind, error);
+    }
+
+    ExecutionPortError::from(error)
+}
+
 struct BinanceAccount {
     rest: Arc<BinanceRestClient>,
     ws: Arc<BinanceWsClient>,
@@ -79,38 +91,44 @@ impl AccountSummaryPort for BinanceRestClient {
 
 #[async_trait]
 impl ExecutionPort for BinanceExecution {
-    async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
-        self.rest.new_order(&req).await
+    async fn submit_order(&self, req: OrderRequest) -> ExecutionResult<OrderReceipt> {
+        self.rest.new_order(&req).await.map_err(map_execution_error)
     }
 
-    async fn cancel_order(&self, instrument: &Instrument, order_id: &str) -> Result<OrderReceipt> {
-        match self.rest.cancel_order(&instrument.symbol, order_id).await {
-            Ok(receipt) => Ok(receipt),
-            Err(error)
-                if error
-                    .downcast_ref::<BinanceRestError>()
-                    .is_some_and(BinanceRestError::is_cancel_outcome_unknown) =>
-            {
-                Err(ExecutionPortError::cancel_outcome_unknown(error.to_string()).into())
-            }
-            Err(error) => Err(error),
-        }
+    async fn cancel_order(
+        &self,
+        instrument: &Instrument,
+        order_id: &str,
+    ) -> ExecutionResult<OrderReceipt> {
+        self.rest
+            .cancel_order(&instrument.symbol, order_id)
+            .await
+            .map_err(map_execution_error)
     }
 
-    async fn cancel_all(&self, instrument: &Instrument) -> Result<()> {
-        self.rest.cancel_all_orders(&instrument.symbol).await?;
-        Ok(())
+    async fn cancel_all(&self, instrument: &Instrument) -> ExecutionResult<()> {
+        self.rest
+            .cancel_all_orders(&instrument.symbol)
+            .await
+            .map_err(map_execution_error)
     }
 
-    async fn get_position(&self, instrument: &Instrument) -> Result<Position> {
-        self.rest.get_position(&instrument.symbol).await
+    async fn get_position(&self, instrument: &Instrument) -> ExecutionResult<Position> {
+        self.rest
+            .get_position(&instrument.symbol)
+            .await
+            .map_err(map_execution_error)
     }
 
-    async fn get_open_orders(&self, instrument: &Instrument) -> Result<ExchangeOpenOrderSnapshot> {
+    async fn get_open_orders(
+        &self,
+        instrument: &Instrument,
+    ) -> ExecutionResult<ExchangeOpenOrderSnapshot> {
         self.rest
             .get_open_orders(&instrument.symbol)
             .await
             .map(ExchangeOpenOrderSnapshot::from_complete_exchange_query)
+            .map_err(map_execution_error)
     }
 }
 
@@ -168,7 +186,7 @@ mod tests {
         track::{Instrument, Venue},
         types::Side,
     };
-    use poise_engine::ports::{ExecutionPortError, ExecutionPortErrorKind};
+    use poise_engine::ports::ExecutionPortErrorKind;
 
     use super::*;
 
@@ -180,7 +198,10 @@ mod tests {
 
     #[async_trait]
     impl ExecutionPort for FakeExecutionPort {
-        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
+        async fn submit_order(
+            &self,
+            _req: OrderRequest,
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
             unreachable!("not used in test")
         }
 
@@ -188,22 +209,28 @@ mod tests {
             &self,
             _instrument: &Instrument,
             _order_id: &str,
-        ) -> Result<OrderReceipt> {
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
             unreachable!("not used in test")
         }
 
-        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
+        async fn cancel_all(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<()> {
             unreachable!("not used in test")
         }
 
-        async fn get_position(&self, _instrument: &Instrument) -> Result<Position> {
+        async fn get_position(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<Position> {
             unreachable!("not used in test")
         }
 
         async fn get_open_orders(
             &self,
             _instrument: &Instrument,
-        ) -> Result<ExchangeOpenOrderSnapshot> {
+        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
             unreachable!("not used in test")
         }
     }
@@ -439,15 +466,35 @@ mod tests {
             .cancel_order(&Instrument::new(Venue::Binance, "BTCUSDT"), "12345")
             .await
             .unwrap_err();
-        let port_error = error
-            .downcast_ref::<ExecutionPortError>()
-            .expect("cancel should map to exchange-neutral execution port error");
 
-        assert_eq!(
-            port_error.kind(),
-            ExecutionPortErrorKind::CancelOutcomeUnknown
-        );
-        assert!(port_error.to_string().contains("Unknown order sent."));
+        assert_eq!(error.kind(), ExecutionPortErrorKind::CancelOutcomeUnknown);
+        assert!(error.to_string().contains("Unknown order sent."));
+    }
+
+    #[tokio::test]
+    async fn submit_order_maps_insufficient_margin_to_execution_kind() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            400,
+            r#"{"code":-2019,"msg":"Margin is insufficient."}"#,
+        )])
+        .await;
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
+
+        let error = execution
+            .submit_order(OrderRequest {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                side: Side::Buy,
+                price: 65000.0,
+                quantity: 0.1,
+                client_order_id: "client-margin".to_string(),
+                reduce_only: false,
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::InsufficientMargin);
+        assert!(error.to_string().contains("Margin is insufficient"));
     }
 
     #[tokio::test]

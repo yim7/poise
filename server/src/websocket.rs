@@ -1807,7 +1807,7 @@ mod tests {
         async fn submit_order(
             &self,
             req: poise_engine::ports::OrderRequest,
-        ) -> Result<poise_engine::ports::OrderReceipt> {
+        ) -> poise_engine::ports::ExecutionResult<poise_engine::ports::OrderReceipt> {
             Ok(poise_engine::ports::OrderReceipt {
                 order_id: "noop-order".into(),
                 client_order_id: req.client_order_id,
@@ -1820,7 +1820,7 @@ mod tests {
             &self,
             _instrument: &poise_core::track::Instrument,
             order_id: &str,
-        ) -> Result<poise_engine::ports::OrderReceipt> {
+        ) -> poise_engine::ports::ExecutionResult<poise_engine::ports::OrderReceipt> {
             Ok(poise_engine::ports::OrderReceipt {
                 order_id: order_id.to_string(),
                 client_order_id: String::new(),
@@ -1829,14 +1829,17 @@ mod tests {
             })
         }
 
-        async fn cancel_all(&self, _instrument: &poise_core::track::Instrument) -> Result<()> {
+        async fn cancel_all(
+            &self,
+            _instrument: &poise_core::track::Instrument,
+        ) -> poise_engine::ports::ExecutionResult<()> {
             Ok(())
         }
 
         async fn get_position(
             &self,
             instrument: &poise_core::track::Instrument,
-        ) -> Result<poise_engine::ports::Position> {
+        ) -> poise_engine::ports::ExecutionResult<poise_engine::ports::Position> {
             Ok(poise_engine::ports::Position {
                 instrument: instrument.clone(),
                 qty: 0.0,
@@ -1848,7 +1851,8 @@ mod tests {
         async fn get_open_orders(
             &self,
             _instrument: &poise_core::track::Instrument,
-        ) -> Result<poise_engine::ports::ExchangeOpenOrderSnapshot> {
+        ) -> poise_engine::ports::ExecutionResult<poise_engine::ports::ExchangeOpenOrderSnapshot>
+        {
             Ok(
                 poise_engine::ports::ExchangeOpenOrderSnapshot::from_complete_exchange_query(
                     Vec::new(),

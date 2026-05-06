@@ -113,7 +113,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use anyhow::{Result, anyhow};
     use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
     use poise_core::track::{Instrument, TrackDefinition, Venue};
     use poise_engine::execution_plan::TrackEffect;
@@ -253,23 +252,38 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ExecutionPort for SyncCountingExchange {
-        async fn submit_order(&self, _req: OrderRequest) -> Result<OrderReceipt> {
-            Err(anyhow!("submit_order is not used in this test"))
+        async fn submit_order(
+            &self,
+            _req: OrderRequest,
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            Err(poise_engine::ports::ExecutionPortError::failed(
+                "submit_order is not used in this test",
+            ))
         }
 
         async fn cancel_order(
             &self,
             _instrument: &Instrument,
             _order_id: &str,
-        ) -> Result<OrderReceipt> {
-            Err(anyhow!("cancel_order is not used in this test"))
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            Err(poise_engine::ports::ExecutionPortError::failed(
+                "cancel_order is not used in this test",
+            ))
         }
 
-        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
-            Err(anyhow!("cancel_all is not used in this test"))
+        async fn cancel_all(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<()> {
+            Err(poise_engine::ports::ExecutionPortError::failed(
+                "cancel_all is not used in this test",
+            ))
         }
 
-        async fn get_position(&self, instrument: &Instrument) -> Result<Position> {
+        async fn get_position(
+            &self,
+            instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<Position> {
             assert_eq!(instrument, &self.position.instrument);
             self.get_position_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.position.clone())
@@ -278,7 +292,7 @@ mod tests {
         async fn get_open_orders(
             &self,
             instrument: &Instrument,
-        ) -> Result<ExchangeOpenOrderSnapshot> {
+        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
             assert_eq!(instrument, &self.position.instrument);
             self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
             Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(

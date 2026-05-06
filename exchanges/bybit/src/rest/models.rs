@@ -1,4 +1,5 @@
 use poise_core::types::Side;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
@@ -7,12 +8,22 @@ use crate::protocol::{
 };
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct BybitResponse<T> {
+pub(crate) struct BybitEnvelope {
     #[serde(rename = "retCode")]
     pub ret_code: i64,
     #[serde(rename = "retMsg")]
     pub ret_msg: Option<String>,
-    pub result: T,
+    #[serde(default)]
+    result: serde_json::Value,
+}
+
+impl BybitEnvelope {
+    pub(crate) fn deserialize_result<T>(self) -> serde_json::Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        serde_json::from_value(self.result)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -247,17 +258,39 @@ mod tests {
 
     #[test]
     fn deserializes_server_time_second_from_bybit_string_response() {
-        let response: BybitResponse<ServerTimeResult> = serde_json::from_str(
+        let response: BybitEnvelope = serde_json::from_str(
             r#"{"retCode":0,"retMsg":"OK","result":{"timeSecond":"1775928345","timeNano":"1775928345295229586"},"retExtInfo":{},"time":1775928345295}"#,
         )
         .unwrap();
 
-        assert_eq!(response.result.time_second, 1_775_928_345);
+        assert_eq!(response.ret_code, 0);
+        assert_eq!(response.ret_msg.as_deref(), Some("OK"));
+        assert_eq!(
+            response
+                .deserialize_result::<ServerTimeResult>()
+                .unwrap()
+                .time_second,
+            1_775_928_345
+        );
+    }
+
+    #[test]
+    fn envelope_defers_result_deserialization_until_success_is_known() {
+        let response: BybitEnvelope = serde_json::from_str(
+            r#"{"retCode":110007,"retMsg":"available balance is insufficient","result":{}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.ret_code, 110007);
+        assert_eq!(
+            response.ret_msg.as_deref(),
+            Some("available balance is insufficient")
+        );
     }
 
     #[test]
     fn deserializes_position_snapshot_into_typed_fields() {
-        let response: BybitResponse<PositionListResult> = serde_json::from_str(
+        let response: BybitEnvelope = serde_json::from_str(
             r#"{
                 "retCode": 0,
                 "retMsg": "OK",
@@ -275,8 +308,9 @@ mod tests {
             }"#,
         )
         .unwrap();
+        let result = response.deserialize_result::<PositionListResult>().unwrap();
 
-        let snapshot = &response.result.list[0];
+        let snapshot = &result.list[0];
         assert_eq!(snapshot.symbol, "BTCUSDT");
         assert_eq!(snapshot.side, None);
         assert_eq!(snapshot.size, 0.0);
@@ -288,7 +322,7 @@ mod tests {
 
     #[test]
     fn deserializes_open_order_snapshot_into_typed_fields() {
-        let response: BybitResponse<OpenOrderListResult> = serde_json::from_str(
+        let response: BybitEnvelope = serde_json::from_str(
             r#"{
                 "retCode": 0,
                 "retMsg": "OK",
@@ -307,8 +341,11 @@ mod tests {
             }"#,
         )
         .unwrap();
+        let result = response
+            .deserialize_result::<OpenOrderListResult>()
+            .unwrap();
 
-        let snapshot = &response.result.list[0];
+        let snapshot = &result.list[0];
         assert_eq!(snapshot.symbol, "BTCUSDT");
         assert_eq!(snapshot.order_id, "12345");
         assert_eq!(snapshot.side, Side::Buy);

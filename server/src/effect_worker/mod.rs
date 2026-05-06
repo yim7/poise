@@ -5,7 +5,9 @@ use anyhow::Result;
 use poise_application::{SessionEffectOutcome, SessionTrackEffect};
 use poise_core::track::Instrument;
 use poise_engine::executor::SubmitRecoveryToken;
-use poise_engine::ports::{AccountPort, ExecutionPort, OrderRequest};
+use poise_engine::ports::{
+    AccountPort, ExecutionPort, ExecutionPortError, ExecutionPortErrorKind, OrderRequest,
+};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -180,8 +182,8 @@ async fn wait_for_backoff_or_shutdown(
     }
 }
 
-fn is_insufficient_margin_failure(message: &str) -> bool {
-    message.contains(r#""code":-2019"#) || message.contains("Margin is insufficient")
+fn is_insufficient_margin_failure(error: &ExecutionPortError) -> bool {
+    error.kind() == ExecutionPortErrorKind::InsufficientMargin
 }
 
 enum Cancellation {
@@ -208,7 +210,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use anyhow::{Result, anyhow};
     use chrono::Utc;
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_engine::ports::{
@@ -220,6 +221,19 @@ mod tests {
 
     use crate::effect_worker::EffectWorker;
     use crate::test_support::{NoopAccountPort, build_effect_worker_context_for_repository};
+
+    #[test]
+    fn insufficient_margin_detection_uses_execution_error_kind_not_message_text() {
+        let typed_error = poise_engine::ports::ExecutionPortError::new(
+            poise_engine::ports::ExecutionPortErrorKind::InsufficientMargin,
+            anyhow::anyhow!("exchange-specific margin rejection"),
+        );
+        let string_only_error =
+            poise_engine::ports::ExecutionPortError::failed(r#"{"code":-2019}"#);
+
+        assert!(super::is_insufficient_margin_failure(&typed_error));
+        assert!(!super::is_insufficient_margin_failure(&string_only_error));
+    }
 
     #[tokio::test]
     async fn worker_continues_after_iteration_error() {
@@ -358,7 +372,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ExecutionPort for ReconcileFailThenRecordExecution {
-        async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
+        async fn submit_order(
+            &self,
+            req: OrderRequest,
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
             Ok(OrderReceipt {
                 order_id: "test-order".into(),
                 client_order_id: req.client_order_id,
@@ -371,33 +388,38 @@ mod tests {
             &self,
             _instrument: &Instrument,
             _order_id: &str,
-        ) -> Result<OrderReceipt> {
-            Err(anyhow::Error::new(
-                poise_engine::ports::ExecutionPortError::cancel_outcome_unknown(
-                    "Unknown order sent.",
-                ),
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            Err(poise_engine::ports::ExecutionPortError::new(
+                poise_engine::ports::ExecutionPortErrorKind::CancelOutcomeUnknown,
+                anyhow::anyhow!("Unknown order sent."),
             ))
         }
 
-        async fn cancel_all(&self, _instrument: &Instrument) -> Result<()> {
+        async fn cancel_all(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<()> {
             self.cancel_all_calls.fetch_add(1, Ordering::SeqCst);
             self.cancel_all_notify.notify_waiters();
             Ok(())
         }
 
-        async fn get_position(&self, instrument: &Instrument) -> Result<Position> {
+        async fn get_position(
+            &self,
+            instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<Position> {
             self.reconcile_attempts.fetch_add(1, Ordering::SeqCst);
             self.reconcile_notify.notify_waiters();
-            Err(anyhow!(
+            Err(poise_engine::ports::ExecutionPortError::failed(format!(
                 "simulated reconcile failure for {}",
                 instrument.symbol
-            ))
+            )))
         }
 
         async fn get_open_orders(
             &self,
             _instrument: &Instrument,
-        ) -> Result<ExchangeOpenOrderSnapshot> {
+        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
             Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
                 Vec::new(),
             ))

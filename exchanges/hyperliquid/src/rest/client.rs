@@ -21,6 +21,7 @@ use crate::rest::actions::{
     CancelAction, CancelRequest, ExchangeAction, LimitOrderType, OrderAction, OrderRequest,
     OrderType, UpdateLeverageAction,
 };
+use crate::rest::error::HyperliquidRestError;
 use crate::rest::models::{
     ClearinghouseStateResponse, MetaResponse, OpenOrderResponse, SpotClearinghouseStateResponse,
 };
@@ -343,9 +344,7 @@ impl HyperliquidRestClient {
             .await
             .with_context(|| format!("failed to read Hyperliquid response body for {path}"))?;
         if status != StatusCode::OK {
-            return Err(anyhow!(
-                "request POST {path} failed with status {status}: {body}"
-            ));
+            return Err(HyperliquidRestError::http_status(path, status, body).into());
         }
         serde_json::from_str(&body).with_context(|| {
             format!("failed to deserialize Hyperliquid response for {path}: {body}")
@@ -385,13 +384,13 @@ fn order_receipt_from_response(
     client_order_id: &str,
 ) -> Result<OrderReceipt> {
     if response["status"] != "ok" {
-        return Err(anyhow!("Hyperliquid exchange error: {response}"));
+        return Err(HyperliquidRestError::exchange_response(response).into());
     }
     let status = response
         .pointer("/response/data/statuses/0")
         .context("missing Hyperliquid order status")?;
     if let Some(error) = status.get("error").and_then(serde_json::Value::as_str) {
-        return Err(anyhow!("Hyperliquid order rejected: {error}"));
+        return Err(HyperliquidRestError::order_rejected(error).into());
     }
     if let Some(resting) = status.get("resting") {
         return Ok(OrderReceipt {
@@ -421,7 +420,7 @@ fn ensure_exchange_ok(response: serde_json::Value) -> Result<()> {
     if response["status"] == "ok" {
         Ok(())
     } else {
-        Err(anyhow!("Hyperliquid exchange error: {response}"))
+        Err(HyperliquidRestError::exchange_response(response).into())
     }
 }
 
@@ -971,6 +970,47 @@ mod tests {
         assert_eq!(requests[4].json_body()["action"]["asset"], 1);
         assert_eq!(requests[4].json_body()["action"]["isCross"], true);
         assert_eq!(requests[4].json_body()["action"]["leverage"], 10);
+    }
+
+    #[tokio::test]
+    async fn execution_port_maps_tick_size_rejection_to_execution_kind() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"ETH","szDecimals":4},{"name":"BTC","szDecimals":5}]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"error":"Price must be divisible by tick size. asset=1"}]}}}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            PortOrderRequest {
+                instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
+                side: Side::Buy,
+                price: 2000.01,
+                quantity: 3.5,
+                client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::InvalidPriceIncrement
+        );
+        assert!(error.to_string().contains("tick size"));
     }
 
     #[derive(Debug, Clone)]

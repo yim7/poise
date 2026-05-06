@@ -265,7 +265,7 @@ async fn probe_startup_account_capacity(
         let instrument = instrument.clone();
         async move {
             let available = account_summary.get_available_balance(&instrument).await?;
-            Ok(AccountCapacitySnapshot {
+            Ok::<AccountCapacitySnapshot, anyhow::Error>(AccountCapacitySnapshot {
                 max_increase_notional: available * startup_leverage as f64,
             })
         }
@@ -333,20 +333,22 @@ async fn apply_startup_replay_events(
     Ok(())
 }
 
-pub(super) async fn retry_startup_step<T, F, Fut>(
+pub(super) async fn retry_startup_step<T, E, F, Fut>(
     step_name: &'static str,
     mut operation: F,
 ) -> Result<T>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T>>,
+    Fut: Future<Output = std::result::Result<T, E>>,
+    E: Into<anyhow::Error>,
 {
-    let mut last_error = None;
+    let mut last_error: Option<anyhow::Error> = None;
 
     for attempt in 0..STARTUP_RETRY_ATTEMPTS {
         match operation().await {
             Ok(value) => return Ok(value),
             Err(error) => {
+                let error = error.into();
                 if attempt + 1 == STARTUP_RETRY_ATTEMPTS {
                     return Err(error);
                 }
@@ -371,7 +373,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use anyhow::{Result, anyhow};
+    use anyhow::Result;
     use chrono::{TimeZone, Utc};
     use poise_application::{
         EffectStatus, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
@@ -999,9 +1001,9 @@ mod tests {
         async fn submit_order(
             &self,
             _req: poise_engine::ports::OrderRequest,
-        ) -> Result<poise_engine::ports::OrderReceipt> {
-            Err(anyhow!(
-                "submit_order is not used during startup bootstrap tests"
+        ) -> poise_engine::ports::ExecutionResult<poise_engine::ports::OrderReceipt> {
+            Err(poise_engine::ports::ExecutionPortError::failed(
+                "submit_order is not used during startup bootstrap tests",
             ))
         }
 
@@ -1009,20 +1011,26 @@ mod tests {
             &self,
             _instrument: &Instrument,
             _order_id: &str,
-        ) -> Result<OrderReceipt> {
-            Err(anyhow!(
-                "cancel_order is not used during startup bootstrap tests"
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            Err(poise_engine::ports::ExecutionPortError::failed(
+                "cancel_order is not used during startup bootstrap tests",
             ))
         }
 
-        async fn cancel_all(&self, instrument: &Instrument) -> Result<()> {
+        async fn cancel_all(
+            &self,
+            instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<()> {
             assert_eq!(instrument, &self.instrument);
             self.cancel_all_calls.fetch_add(1, Ordering::SeqCst);
             self.inherited_order_present.store(false, Ordering::SeqCst);
             Ok(())
         }
 
-        async fn get_position(&self, instrument: &Instrument) -> Result<Position> {
+        async fn get_position(
+            &self,
+            instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<Position> {
             assert_eq!(instrument, &self.instrument);
             self.get_position_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Position {
@@ -1036,7 +1044,8 @@ mod tests {
         async fn get_open_orders(
             &self,
             instrument: &Instrument,
-        ) -> Result<poise_engine::ports::ExchangeOpenOrderSnapshot> {
+        ) -> poise_engine::ports::ExecutionResult<poise_engine::ports::ExchangeOpenOrderSnapshot>
+        {
             assert_eq!(instrument, &self.instrument);
             self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
             if !self.inherited_order_present.load(Ordering::SeqCst) {
