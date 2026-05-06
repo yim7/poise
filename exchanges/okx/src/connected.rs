@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
@@ -28,44 +28,27 @@ pub async fn connect(config: &Config) -> Result<ExchangePorts> {
 }
 
 fn ports_from_clients(rest: Arc<OkxRestClient>, ws: Arc<OkxWsClient>) -> ExchangePorts {
-    ports_from_parts(rest, Some(ws))
-}
-
-#[cfg(test)]
-fn ports_from_rest_client(rest: Arc<OkxRestClient>) -> ExchangePorts {
-    ports_from_parts(rest, None)
-}
-
-fn ports_from_parts(rest: Arc<OkxRestClient>, ws: Option<Arc<OkxWsClient>>) -> ExchangePorts {
     let execution: Arc<dyn ExecutionPort> = rest.clone();
+    let market_data: Arc<dyn MarketDataPort> = ws.clone();
     let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
     let metadata: Arc<dyn MetadataPort> = rest.clone();
 
     ExchangePorts::new(
         execution,
-        Arc::new(OkxMarketData::new(ws.as_ref().map(Arc::clone))),
+        market_data,
         account_summary,
         Arc::new(OkxAccount::new(Arc::clone(&rest), ws)),
         metadata,
     )
 }
 
-struct OkxMarketData {
-    ws: Option<Arc<OkxWsClient>>,
-}
 struct OkxAccount {
     rest: Arc<OkxRestClient>,
-    ws: Option<Arc<OkxWsClient>>,
-}
-
-impl OkxMarketData {
-    fn new(ws: Option<Arc<OkxWsClient>>) -> Self {
-        Self { ws }
-    }
+    ws: Arc<OkxWsClient>,
 }
 
 impl OkxAccount {
-    fn new(rest: Arc<OkxRestClient>, ws: Option<Arc<OkxWsClient>>) -> Self {
+    fn new(rest: Arc<OkxRestClient>, ws: Arc<OkxWsClient>) -> Self {
         Self { rest, ws }
     }
 }
@@ -123,16 +106,12 @@ impl ExecutionPort for OkxRestClient {
 }
 
 #[async_trait]
-impl MarketDataPort for OkxMarketData {
+impl MarketDataPort for OkxWsClient {
     async fn subscribe_prices(
         &self,
         instrument: &Instrument,
     ) -> Result<mpsc::Receiver<MarketDataTick>> {
-        self.ws
-            .as_ref()
-            .ok_or_else(|| anyhow!("OKX market data stream requires WebSocket client"))?
-            .subscribe_prices(instrument)
-            .await
+        self.subscribe_prices(instrument).await
     }
 }
 
@@ -159,11 +138,7 @@ impl AccountPort for OkxAccount {
     }
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
-        self.ws
-            .as_ref()
-            .ok_or_else(|| anyhow!("OKX user data stream requires WebSocket client"))?
-            .subscribe_user_data()
-            .await
+        self.ws.subscribe_user_data().await
     }
 }
 
@@ -187,6 +162,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
+        time::Duration,
     };
 
     use super::*;
@@ -218,6 +194,13 @@ mod tests {
         assert_execution_port::<OkxRestClient>();
     }
 
+    #[test]
+    fn ws_client_implements_market_data_port_directly() {
+        fn assert_market_data_port<T: MarketDataPort>() {}
+
+        assert_market_data_port::<OkxWsClient>();
+    }
+
     #[tokio::test]
     async fn connected_account_summary_port_routes_rest_client() {
         let server = MockHttpServer::spawn(vec![MockResponse::json(
@@ -240,7 +223,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         ));
 
-        let connected = ports_from_rest_client(rest);
+        let connected = ports_from_clients(rest, Arc::new(dummy_ws_client()));
         let summary = connected
             .account_summary()
             .get_account_summary()
@@ -256,6 +239,18 @@ mod tests {
         DateTime::parse_from_rfc3339("2020-12-08T09:08:57.715Z")
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    fn dummy_ws_client() -> OkxWsClient {
+        OkxWsClient::with_test_params(
+            "ws://127.0.0.1:1",
+            "ws://127.0.0.1:1",
+            "api-key",
+            "secret-key",
+            "passphrase",
+            Duration::from_millis(10),
+            Arc::new(|| 1_700_000_000),
+        )
     }
 
     #[derive(Debug, Clone)]
