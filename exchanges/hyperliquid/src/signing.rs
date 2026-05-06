@@ -27,6 +27,7 @@ pub(crate) struct Signature {
 }
 
 impl Signature {
+    #[cfg(test)]
     pub(crate) fn to_compact_hex(&self) -> String {
         let mut bytes = Vec::with_capacity(65);
         bytes.extend_from_slice(&self.r);

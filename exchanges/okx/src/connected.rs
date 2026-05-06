@@ -37,7 +37,10 @@ fn ports_from_clients(rest: Arc<OkxRestClient>, ws: Arc<OkxWsClient>) -> Exchang
         execution,
         market_data,
         account_summary,
-        Arc::new(OkxAccount::new(Arc::clone(&rest), ws)),
+        Arc::new(OkxAccount {
+            rest: Arc::clone(&rest),
+            ws,
+        }),
         metadata,
     )
 }
@@ -45,12 +48,6 @@ fn ports_from_clients(rest: Arc<OkxRestClient>, ws: Arc<OkxWsClient>) -> Exchang
 struct OkxAccount {
     rest: Arc<OkxRestClient>,
     ws: Arc<OkxWsClient>,
-}
-
-impl OkxAccount {
-    fn new(rest: Arc<OkxRestClient>, ws: Arc<OkxWsClient>) -> Self {
-        Self { rest, ws }
-    }
 }
 
 fn map_execution_error(error: anyhow::Error) -> ExecutionPortError {

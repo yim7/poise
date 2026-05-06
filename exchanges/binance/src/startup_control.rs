@@ -1,21 +1,9 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 
 use crate::{Config, rest::BinanceRestClient};
 
 pub struct SymbolLeverageControl {
-    rest: SymbolLeverageRest,
-}
-
-enum SymbolLeverageRest {
-    Live {
-        rest_base_url: String,
-        api_key: String,
-        api_secret: String,
-    },
-    #[allow(dead_code)]
-    Injected(Arc<BinanceRestClient>),
+    rest: BinanceRestClient,
 }
 
 impl SymbolLeverageControl {
@@ -23,34 +11,12 @@ impl SymbolLeverageControl {
         let endpoints = config.endpoints();
         let (api_key, api_secret) = config.credentials()?;
         Ok(Self {
-            rest: SymbolLeverageRest::Live {
-                rest_base_url: endpoints.rest_base_url().to_string(),
-                api_key,
-                api_secret,
-            },
+            rest: BinanceRestClient::new(endpoints.rest_base_url(), api_key, api_secret),
         })
     }
 
-    #[cfg(test)]
-    fn from_rest_client(rest: Arc<BinanceRestClient>) -> Self {
-        Self {
-            rest: SymbolLeverageRest::Injected(rest),
-        }
-    }
-
     pub async fn set_leverage(&self, symbol: &str, leverage: u32) -> Result<()> {
-        match &self.rest {
-            SymbolLeverageRest::Live {
-                rest_base_url,
-                api_key,
-                api_secret,
-            } => {
-                BinanceRestClient::new(rest_base_url.clone(), api_key.clone(), api_secret.clone())
-                    .set_leverage(symbol, leverage)
-                    .await
-            }
-            SymbolLeverageRest::Injected(rest) => rest.set_leverage(symbol, leverage).await,
-        }
+        self.rest.set_leverage(symbol, leverage).await
     }
 }
 
@@ -75,11 +41,9 @@ mod tests {
             r#"{"leverage":10,"maxNotionalValue":"1000000","symbol":"BTCUSDT"}"#,
         )])
         .await;
-        let control = SymbolLeverageControl::from_rest_client(Arc::new(BinanceRestClient::new(
-            server.base_url(),
-            "api-key",
-            "secret-key",
-        )));
+        let control = SymbolLeverageControl {
+            rest: BinanceRestClient::new(server.base_url(), "api-key", "secret-key"),
+        };
 
         control.set_leverage("BTCUSDT", 10).await.unwrap();
 

@@ -41,23 +41,17 @@ fn ports_from_clients(rest: Arc<BybitRestClient>, ws: Arc<BybitWsClient>) -> Exc
         execution,
         market_data,
         account_summary,
-        Arc::new(BybitAccount::new(Arc::clone(&rest), ws)),
+        Arc::new(BybitAccount {
+            rest: Arc::clone(&rest),
+            ws,
+        }),
         metadata,
     )
 }
 
 struct BybitAccount {
-    _rest: Arc<BybitRestClient>,
-    _ws: Arc<BybitWsClient>,
-}
-
-impl BybitAccount {
-    fn new(rest: Arc<BybitRestClient>, ws: Arc<BybitWsClient>) -> Self {
-        Self {
-            _rest: rest,
-            _ws: ws,
-        }
-    }
+    rest: Arc<BybitRestClient>,
+    ws: Arc<BybitWsClient>,
 }
 
 fn map_execution_error(error: anyhow::Error) -> ExecutionPortError {
@@ -135,13 +129,13 @@ impl AccountPort for BybitAccount {
         &self,
         instrument: &Instrument,
     ) -> Result<AccountCapacitySnapshot> {
-        self._rest
+        self.rest
             .get_account_capacity_snapshot(&instrument.symbol)
             .await
     }
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
-        self._ws.subscribe_user_data().await
+        self.ws.subscribe_user_data().await
     }
 }
 
@@ -240,7 +234,10 @@ mod tests {
             Arc::new(|| 1_700_000_000_000),
         ));
         let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
-        let account = BybitAccount::new(Arc::clone(&rest), Arc::clone(&ws));
+        let account = BybitAccount {
+            rest: Arc::clone(&rest),
+            ws: Arc::clone(&ws),
+        };
         let metadata: Arc<dyn MetadataPort> = rest.clone();
         let instrument = poise_core::track::Instrument::new(Venue::Bybit, "BTCUSDT");
 

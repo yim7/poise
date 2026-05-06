@@ -46,7 +46,10 @@ fn ports_from_clients(rest: Arc<BinanceRestClient>, ws: Arc<BinanceWsClient>) ->
         execution,
         market_data,
         account_summary,
-        Arc::new(BinanceAccount::new(Arc::clone(&rest), ws)),
+        Arc::new(BinanceAccount {
+            rest: Arc::clone(&rest),
+            ws,
+        }),
         metadata,
     )
 }
@@ -65,12 +68,6 @@ fn map_execution_error(error: anyhow::Error) -> ExecutionPortError {
 struct BinanceAccount {
     rest: Arc<BinanceRestClient>,
     ws: Arc<BinanceWsClient>,
-}
-
-impl BinanceAccount {
-    fn new(rest: Arc<BinanceRestClient>, ws: Arc<BinanceWsClient>) -> Self {
-        Self { rest, ws }
-    }
 }
 
 #[async_trait]

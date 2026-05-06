@@ -1,55 +1,21 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 
-use crate::{Config, Deployment, rest::BybitRestClient};
+use crate::{Config, rest::BybitRestClient};
 
 pub struct SymbolLeverageControl {
-    rest: SymbolLeverageRest,
-}
-
-enum SymbolLeverageRest {
-    Live {
-        deployment: Deployment,
-        api_key: String,
-        api_secret: String,
-    },
-    #[allow(dead_code)]
-    Injected(Arc<BybitRestClient>),
+    rest: BybitRestClient,
 }
 
 impl SymbolLeverageControl {
     pub fn new(config: &Config) -> Result<Self> {
         let (api_key, api_secret) = config.credentials()?;
         Ok(Self {
-            rest: SymbolLeverageRest::Live {
-                deployment: config.deployment.clone(),
-                api_key,
-                api_secret,
-            },
+            rest: BybitRestClient::new(config.deployment.clone(), api_key, api_secret),
         })
     }
 
-    #[cfg(test)]
-    fn from_rest_client(rest: Arc<BybitRestClient>) -> Self {
-        Self {
-            rest: SymbolLeverageRest::Injected(rest),
-        }
-    }
-
     pub async fn set_leverage(&self, symbol: &str, leverage: u32) -> Result<()> {
-        match &self.rest {
-            SymbolLeverageRest::Live {
-                deployment,
-                api_key,
-                api_secret,
-            } => {
-                BybitRestClient::new(deployment.clone(), api_key.clone(), api_secret.clone())
-                    .set_leverage(symbol, leverage)
-                    .await
-            }
-            SymbolLeverageRest::Injected(rest) => rest.set_leverage(symbol, leverage).await,
-        }
+        self.rest.set_leverage(symbol, leverage).await
     }
 }
 
@@ -73,15 +39,15 @@ mod tests {
             r#"{"retCode":0,"retMsg":"OK","result":{},"retExtInfo":{},"time":1672281607343}"#,
         )])
         .await;
-        let control = SymbolLeverageControl::from_rest_client(Arc::new(
-            BybitRestClient::with_http_client_and_timestamp_provider(
+        let control = SymbolLeverageControl {
+            rest: BybitRestClient::with_http_client_and_timestamp_provider(
                 server.base_url(),
                 "api-key",
                 "secret-key",
                 Arc::new(|| 1_700_000_000_000),
                 reqwest::Client::new(),
             ),
-        ));
+        };
 
         control.set_leverage("BTCUSDT", 10).await.unwrap();
 

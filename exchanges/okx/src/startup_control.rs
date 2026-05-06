@@ -1,23 +1,16 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 
 use crate::{Config, rest::client::OkxRestClient};
 
 pub struct SymbolLeverageControl {
-    rest: Arc<OkxRestClient>,
+    rest: OkxRestClient,
 }
 
 impl SymbolLeverageControl {
     pub fn new(config: &Config) -> Result<Self> {
         Ok(Self {
-            rest: Arc::new(OkxRestClient::new(config)?),
+            rest: OkxRestClient::new(config)?,
         })
-    }
-
-    #[cfg(test)]
-    fn from_rest_client(rest: Arc<OkxRestClient>) -> Self {
-        Self { rest }
     }
 
     pub async fn set_leverage(&self, symbol: &str, leverage: u32) -> Result<()> {
@@ -47,7 +40,7 @@ mod tests {
             r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","lever":"10","mgnMode":"cross"}]}"#,
         )])
         .await;
-        let rest = Arc::new(OkxRestClient::with_http_client_and_timestamp_provider(
+        let rest = OkxRestClient::with_http_client_and_timestamp_provider(
             server.base_url(),
             Config {
                 deployment: Deployment::Demo,
@@ -60,8 +53,8 @@ mod tests {
             true,
             Arc::new(fixed_datetime),
             reqwest::Client::builder().no_proxy().build().unwrap(),
-        ));
-        let control = SymbolLeverageControl::from_rest_client(rest);
+        );
+        let control = SymbolLeverageControl { rest };
 
         control.set_leverage("BTC-USDT-SWAP", 10).await.unwrap();
 

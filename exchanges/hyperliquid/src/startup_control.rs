@@ -1,17 +1,15 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 
 use crate::{Config, rest::client::HyperliquidRestClient};
 
 pub struct SymbolLeverageControl {
-    rest: Arc<HyperliquidRestClient>,
+    rest: HyperliquidRestClient,
 }
 
 impl SymbolLeverageControl {
     pub fn new(config: &Config) -> Result<Self> {
         Ok(Self {
-            rest: Arc::new(HyperliquidRestClient::new(config)?),
+            rest: HyperliquidRestClient::new(config)?,
         })
     }
 

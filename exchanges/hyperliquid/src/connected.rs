@@ -28,42 +28,30 @@ pub async fn connect(config: &Config) -> Result<ExchangePorts> {
         credentials.wallet_address().to_string(),
         Arc::clone(&client_order_ids),
     ));
-    Ok(ports_from_rest_client(
-        Arc::new(HyperliquidRestClient::new_with_client_order_id_mapper(
-            config,
-            client_order_ids,
-        )?),
-        ws,
-    ))
-}
-
-fn ports_from_rest_client(
-    rest: Arc<HyperliquidRestClient>,
-    ws: Arc<HyperliquidWsClient>,
-) -> ExchangePorts {
+    let rest = Arc::new(HyperliquidRestClient::new_with_client_order_id_mapper(
+        config,
+        client_order_ids,
+    )?);
     let execution: Arc<dyn ExecutionPort> = rest.clone();
     let market_data: Arc<dyn MarketDataPort> = ws.clone();
     let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
     let metadata: Arc<dyn MetadataPort> = rest.clone();
 
-    ExchangePorts::new(
+    Ok(ExchangePorts::new(
         execution,
         market_data,
         account_summary,
-        Arc::new(HyperliquidAccount::new(Arc::clone(&rest), ws)),
+        Arc::new(HyperliquidAccount {
+            rest: Arc::clone(&rest),
+            ws,
+        }),
         metadata,
-    )
+    ))
 }
 
 struct HyperliquidAccount {
     rest: Arc<HyperliquidRestClient>,
     ws: Arc<HyperliquidWsClient>,
-}
-
-impl HyperliquidAccount {
-    fn new(rest: Arc<HyperliquidRestClient>, ws: Arc<HyperliquidWsClient>) -> Self {
-        Self { rest, ws }
-    }
 }
 
 fn map_execution_error(error: anyhow::Error) -> ExecutionPortError {
