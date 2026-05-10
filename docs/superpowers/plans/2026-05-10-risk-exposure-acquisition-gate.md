@@ -1381,13 +1381,15 @@ Record commit SHA here after committing: `8e8a563`
 **Files:**
 - Modify: `protocol/src/lib.rs`
 - Modify: `application/src/read_model.rs`
+- Modify: `application/src/track_control_state.rs`
 - Modify: `server/src/projector.rs`
 - Modify: `tui/src/views/instance.rs`
+- Modify: `tui/src/views/instance_layout.rs`
 - Modify: `tui/tests/fixtures/track_detail_view.json`
 - Test: `protocol/src/lib.rs`
 - Test: `server/src/projector.rs`
 
-- [ ] **Step 1: Write protocol serialization test**
+- [x] **Step 1: Write protocol serialization test**
 
 Add a protocol test that expects `strategy.risk_increase_delay`:
 
@@ -1410,7 +1412,7 @@ fn track_detail_serializes_risk_increase_delay() {
 
 Use the existing protocol fixture construction style in `protocol/src/lib.rs`; add the risk config only to the fixture for this test.
 
-- [ ] **Step 2: Run protocol test to verify it fails**
+- [x] **Step 2: Run protocol test to verify it fails**
 
 Run:
 
@@ -1420,7 +1422,7 @@ cargo test -p poise-protocol track_detail_serializes_risk_increase_delay
 
 Expected: FAIL because protocol view lacks `risk_increase_delay`.
 
-- [ ] **Step 3: Add protocol view type and projector mapping**
+- [x] **Step 3: Add protocol view type and projector mapping**
 
 In `protocol/src/lib.rs`, add:
 
@@ -1446,7 +1448,7 @@ In `application/src/read_model.rs`, add `risk_increase_delay: Option<RiskIncreas
 
 In `server/src/projector.rs`, map `RiskIncreaseDelayConfig` to `RiskIncreaseDelayView`.
 
-- [ ] **Step 4: Run protocol test to verify it passes**
+- [x] **Step 4: Run protocol test to verify it passes**
 
 Run:
 
@@ -1456,7 +1458,7 @@ cargo test -p poise-protocol track_detail_serializes_risk_increase_delay
 
 Expected: PASS.
 
-- [ ] **Step 5: Add TUI display**
+- [x] **Step 5: Add TUI display**
 
 In `tui/src/views/instance.rs`, add one compact line in the strategy/config panel:
 
@@ -1472,7 +1474,7 @@ risk delay: off
 
 Update `tui/tests/fixtures/track_detail_view.json` to include the serialized config for one track fixture.
 
-- [ ] **Step 6: Run server projector focused tests**
+- [x] **Step 6: Run server projector focused tests**
 
 Run:
 
@@ -1482,7 +1484,7 @@ cargo test -p poise-server projector::tests::
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit Task 5**
+- [x] **Step 7: Commit Task 5**
 
 Run:
 
@@ -1491,7 +1493,7 @@ git add protocol/src/lib.rs application/src/read_model.rs server/src/projector.r
 git commit -m "feat: expose risk increase delay views"
 ```
 
-Record commit SHA here after committing: ``
+Record commit SHA here after committing: `b2e81aa`
 
 ## Task 6: Workbench Config Editing
 
