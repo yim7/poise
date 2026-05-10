@@ -38,7 +38,7 @@
 - Test: `core/src/strategy.rs`
 - Test: `server/src/config.rs`
 
-- [ ] **Step 1: Write core config tests**
+- [x] **Step 1: Write core config tests**
 
 Add these tests to `core/src/strategy.rs` inside `#[cfg(test)] mod tests`:
 
@@ -90,7 +90,7 @@ fn validate_rejects_step_bounds_that_cannot_release() {
 }
 ```
 
-- [ ] **Step 2: Run core test to verify it fails**
+- [x] **Step 2: Run core test to verify it fails**
 
 Run:
 
@@ -102,7 +102,7 @@ cargo test -p poise-core strategy::tests::validate_rejects_step_bounds_that_cann
 
 Expected: FAIL because `RiskIncreaseDelayConfig` and `TrackConfig::risk_increase_delay` do not exist.
 
-- [ ] **Step 3: Implement core config type and validation**
+- [x] **Step 3: Implement core config type and validation**
 
 In `core/src/strategy.rs`, add the config struct near `TrackConfig`:
 
@@ -215,7 +215,7 @@ fn validate_risk_increase_delay(config: RiskIncreaseDelayConfig) -> Result<(), S
 
 Use `rg -n "TrackConfig \\{" core engine application server protocol tui tools/track-tuning-workbench/src-tauri` to locate existing `TrackConfig` literals. Add `risk_increase_delay: None` to each literal that constructs a normal track config, except tests that explicitly set a concrete `Some(RiskIncreaseDelayConfig { startup_initial_ratio: 0.3, advantage_min_rebalance_multiples: 2.0, base_step_min_rebalance_multiples: 1.0, max_step_min_rebalance_multiples: 4.0, catchup_ratio: 0.25 })`.
 
-- [ ] **Step 4: Run core test to verify it passes**
+- [x] **Step 4: Run core test to verify it passes**
 
 Run:
 
@@ -227,7 +227,7 @@ cargo test -p poise-core strategy::tests::validate_rejects_step_bounds_that_cann
 
 Expected: PASS.
 
-- [ ] **Step 5: Write server config parsing test**
+- [x] **Step 5: Write server config parsing test**
 
 Add this test to `server/src/config.rs` inside `mod tests`:
 
@@ -286,7 +286,7 @@ catchup_ratio = 0.25
 }
 ```
 
-- [ ] **Step 6: Run server config test to verify it fails**
+- [x] **Step 6: Run server config test to verify it fails**
 
 Run:
 
@@ -296,7 +296,7 @@ cargo test -p poise-server config::tests::parses_risk_increase_delay_config
 
 Expected: FAIL because `TrackSpec` does not yet accept `risk_increase_delay`.
 
-- [ ] **Step 7: Implement server config parsing**
+- [x] **Step 7: Implement server config parsing**
 
 In `server/src/config.rs`, import `RiskIncreaseDelayConfig`, add this field to `TrackSpec`, and pass it into `TrackConfig`:
 
@@ -308,7 +308,7 @@ pub risk_increase_delay: Option<RiskIncreaseDelayConfig>,
 risk_increase_delay: self.risk_increase_delay,
 ```
 
-- [ ] **Step 8: Run server config test to verify it passes**
+- [x] **Step 8: Run server config test to verify it passes**
 
 Run:
 
@@ -318,7 +318,7 @@ cargo test -p poise-server config::tests::parses_risk_increase_delay_config
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit Task 1**
+- [x] **Step 9: Commit Task 1**
 
 Run:
 
@@ -327,7 +327,7 @@ git add core/src/strategy.rs server/src/config.rs
 git commit -m "feat: add risk increase delay config"
 ```
 
-Record commit SHA here after committing: ``
+Record commit SHA here after committing: `c4ef42c`
 
 ## Task 2: Pure Risk Exposure Gate Module
 
