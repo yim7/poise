@@ -150,6 +150,7 @@ fn market_lines(
             detail.status.strategy_price,
             detail.position.current_exposure,
             detail.position.desired_exposure,
+            detail.execution.risk_acquisition.as_ref(),
         )];
     }
 
@@ -172,6 +173,7 @@ fn market_lines(
             detail.status.strategy_price,
             detail.position.current_exposure,
             detail.position.desired_exposure,
+            detail.execution.risk_acquisition.as_ref(),
         ),
     ]
 }
@@ -223,21 +225,8 @@ fn strategy_lines(
                 detail.strategy.shape_family,
                 detail.strategy.out_of_band_policy
             )),
-            Line::from(format_risk_delay_line(detail)),
         ]
     }
-}
-
-fn format_risk_delay_line(detail: &crate::protocol::TrackDetailView) -> String {
-    let delay = detail.strategy.risk_acquisition;
-    format!(
-        "acq: init {:.0}% | adv {:.1}x | release {:.1}-{:.1}x | catchup {:.0}%",
-        delay.initial_ratio * 100.0,
-        delay.advantage_steps,
-        delay.min_release_steps,
-        delay.max_release_steps,
-        delay.catchup_ratio * 100.0
-    )
 }
 
 fn pnl_lines(detail: &crate::protocol::TrackDetailView) -> Vec<Line<'static>> {
@@ -612,6 +601,7 @@ fn format_exposure_line(
     _strategy_price: Option<f64>,
     current: f64,
     target: Option<f64>,
+    risk_acquisition: Option<&RiskAcquisitionView>,
 ) -> Line<'static> {
     let signal = exposure_signal(current, target);
     let annotation = instance_exposure_annotation(signal);
@@ -619,10 +609,22 @@ fn format_exposure_line(
         .map(|value| format!("{value:.4}"))
         .unwrap_or_else(|| "-".to_string());
 
-    Line::from(vec![
+    let mut spans = vec![
         Span::raw(format!("exposure: {current:.4} → {target_text} ")),
         Span::styled(annotation.text, annotation.style),
-    ])
+    ];
+    if let Some(risk_acquisition) = risk_acquisition {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!(
+                "[acq backlog {}]",
+                format_signed_exposure(risk_acquisition.backlog_units)
+            ),
+            Theme::signal_flip(),
+        ));
+    }
+
+    Line::from(spans)
 }
 
 fn format_pnl_summary_line(
@@ -953,6 +955,19 @@ mod tests {
     }
 
     #[test]
+    fn hides_risk_acquisition_config_when_backlog_is_absent() {
+        let detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+
+        assert!(detail.execution.risk_acquisition.is_none());
+        let text = render_text_with_size(detail, 180, 36);
+
+        assert!(!text.contains("acq: init"));
+        assert!(!text.contains("acq: long"));
+    }
+
+    #[test]
     fn renders_risk_acquisition_backlog_observability() {
         let mut value: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
@@ -973,6 +988,7 @@ mod tests {
 
         let text = render_text_with_size(detail, 180, 36);
 
+        assert!(text.contains("exposure: 3.5000 → 4.0000 [↑ +0.5000] [acq backlog +3.6250]"));
         assert!(text.contains("acq: long | curve +6.0000 | allow +2.3750 | backlog +3.6250"));
         assert!(text.contains("anchor 100.0000 / +4.0000 | advantage +6.0000 @ 92.5000"));
         assert!(text.contains("release +0.8750 -> +3.2500"));

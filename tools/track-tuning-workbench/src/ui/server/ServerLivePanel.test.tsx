@@ -83,15 +83,45 @@ describe('ServerLivePanel', () => {
     expect(within(panel).getByText('标记价 103.25')).toBeInTheDocument();
     expect(within(panel).getByText('目标 4.0000')).toBeInTheDocument();
   });
+
+  it('shows risk acquisition backlog separately from the allowed target', async () => {
+    const detail = trackDetail();
+    detail.position.desired_exposure = 1.5;
+    detail.execution.inventory_gap = 0;
+    detail.execution.risk_acquisition = {
+      direction: 'long',
+      curve_target: 4.8235,
+      allowed_target: 4.8,
+      backlog_units: 0.0235,
+      anchor_price: 1518.3,
+      anchor_curve_target: 4.817,
+      next_advantage_target: 5.517,
+      next_advantage_price: 1448.3,
+      next_release_units: 0.0235,
+      next_release_target: 4.8235,
+    };
+    const { client } = createFakeServerClient(detail);
+
+    render(<ServerLivePanel enabled client={client} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '连接 Server' }));
+    });
+
+    const panel = screen.getByRole('region', { name: 'Server live inspector' });
+    expect(within(panel).getByText('允许 4.8000 · 曲线 4.8235')).toBeInTheDocument();
+    expect(within(panel).getByText('backlog +0.0235')).toBeInTheDocument();
+    expect(within(panel).getByText('next +0.0235 → 4.8235')).toBeInTheDocument();
+  });
 });
 
-function createFakeServerClient() {
+function createFakeServerClient(detail = trackDetail()) {
   let onEvent: ((event: StreamEvent) => void) | null = null;
   const client: PoiseServerClient = {
     listTracks: vi.fn(async () => ({
       items: [trackListItem()],
     })),
-    getTrackDetail: vi.fn(async () => trackDetail()),
+    getTrackDetail: vi.fn(async () => detail),
     getTrackDiagnostics: vi.fn(async () => trackDiagnostics()),
     connectEvents: vi.fn((_baseUrl, nextOnEvent) => {
       onEvent = nextOnEvent;

@@ -101,6 +101,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: observed_at(),
+                risk_acquisition_gate_active: true,
                 risk_acquisition: Some(RiskAcquisitionRelease {
                     direction: RiskIncreaseDirection::Long,
                     release_target: Exposure(2.375),
@@ -147,6 +148,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: observed_at(),
+                risk_acquisition_gate_active: true,
                 risk_acquisition: Some(RiskAcquisitionRelease {
                     direction: RiskIncreaseDirection::Long,
                     release_target: Exposure(1.875),
@@ -180,6 +182,48 @@ mod tests {
             })
             .expect("reduce-risk maker should remain planned while increasing risk is gated");
         assert_eq!(reduce_risk_maker.request.price, 100.0);
+    }
+
+    #[test]
+    fn risk_acquisition_gate_without_release_suppresses_increase_maker() {
+        let config = config();
+        let mut rules = rules();
+        rules.quantity_step = 0.001;
+        let instrument = instrument();
+        let state = ExecutorState::empty(observed_at()).ensure_revision(&config, Exposure(1.0));
+        let plan = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: &instrument,
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: config.min_rebalance_units,
+                current_exposure: Exposure(1.0),
+                desired_exposure: Exposure(1.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: observed_at(),
+                risk_acquisition_gate_active: true,
+                risk_acquisition: Default::default(),
+            },
+            Some(&state),
+        ));
+
+        assert!(!plan.state.bindings.iter().any(|binding| {
+            binding.proposal_key.policy == PolicyKind::CurveMaker
+                && binding.request.side == Side::Buy
+                && !binding.request.reduce_only
+        }));
+        assert!(plan.state.bindings.iter().any(|binding| {
+            binding.proposal_key.policy == PolicyKind::CurveMaker
+                && binding.request.side == Side::Sell
+                && binding.request.reduce_only
+        }));
     }
 
     fn input<'a>(
@@ -227,6 +271,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: observed_at(),
+                risk_acquisition_gate_active: false,
                 risk_acquisition: Default::default(),
             },
             state,

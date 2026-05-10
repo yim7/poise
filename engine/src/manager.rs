@@ -1052,6 +1052,7 @@ impl TrackManager {
         &self,
         track: &'a TrackRuntime,
         desired_exposure: poise_core::types::Exposure,
+        risk_acquisition_gate_active: bool,
         risk_acquisition: Option<RiskAcquisitionRelease>,
         observed_at: chrono::DateTime<chrono::Utc>,
     ) -> executor::SubmitIntentInput<'a> {
@@ -1069,6 +1070,7 @@ impl TrackManager {
             price_execution_gate: track.price_execution_gate,
             submit_purpose,
             observed_at,
+            risk_acquisition_gate_active,
             risk_acquisition,
         }
     }
@@ -1084,6 +1086,15 @@ impl TrackManager {
             | TrackState::Terminated { .. } => executor::PolicyContext::ReduceOnly,
             _ => executor::PolicyContext::Normal,
         }
+    }
+
+    fn risk_acquisition_gate_active(track: &TrackRuntime, next_state: &Option<TrackState>) -> bool {
+        matches!(
+            next_state.as_ref().unwrap_or(&track.track_state),
+            TrackState::Running(ControlState::Automatic(
+                AutoState::AcquiringRiskExposure { .. }
+            ))
+        )
     }
 
     fn plan_inventory_execution_for_track(
@@ -1107,7 +1118,9 @@ impl TrackManager {
             });
         }
         let observed_at = self.clock.now();
-        if target.suppress_execution && target.risk_acquisition.is_none() {
+        let risk_acquisition_gate_active =
+            Self::risk_acquisition_gate_active(track, &target.new_runtime_state);
+        if target.suppress_execution && !risk_acquisition_gate_active {
             let executor_state = executor::refresh_state(
                 &track.executor_state,
                 track.config(),
@@ -1131,6 +1144,7 @@ impl TrackManager {
         let submit_intent = self.submit_intent_input(
             track,
             target.desired_exposure.clone(),
+            risk_acquisition_gate_active,
             target.risk_acquisition.clone(),
             observed_at,
         );

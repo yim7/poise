@@ -52,6 +52,7 @@ pub(super) struct PolicyPlanningInput<'a> {
     pub desired_exposure: &'a Exposure,
     pub execution_quote: Option<ExecutionQuote>,
     pub submit_purpose: SubmitPurpose,
+    pub risk_acquisition_gate_active: bool,
     pub risk_acquisition: Option<&'a RiskAcquisitionRelease>,
     pub exposure_epsilon: f64,
     pub curve_maker_levels_per_side: usize,
@@ -107,17 +108,21 @@ fn plan_normal_policy_bindings(input: &PolicyPlanningInput<'_>) -> Vec<DesiredBi
         desired_bindings.push(binding);
     }
     covered_operations.extend(catch_up_operations.iter().cloned());
-    if let Some(release) = input.risk_acquisition {
-        if let Some(binding) =
-            plan_risk_acquisition_maker_binding(input, release, &covered_operations)
-        {
-            covered_operations.extend(
-                binding
-                    .allocations
-                    .iter()
-                    .map(|allocation| allocation.operation.clone()),
-            );
-            desired_bindings.push(binding);
+    let risk_acquisition_gate_active =
+        input.risk_acquisition_gate_active || input.risk_acquisition.is_some();
+    if risk_acquisition_gate_active {
+        if let Some(release) = input.risk_acquisition {
+            if let Some(binding) =
+                plan_risk_acquisition_maker_binding(input, release, &covered_operations)
+            {
+                covered_operations.extend(
+                    binding
+                        .allocations
+                        .iter()
+                        .map(|allocation| allocation.operation.clone()),
+                );
+                desired_bindings.push(binding);
+            }
         }
         desired_bindings.extend(
             select_reduce_risk_curve_maker_operations(input, &covered_operations)
@@ -1090,6 +1095,7 @@ mod tests {
                     best_ask: 100.1,
                 }),
                 submit_purpose: SubmitPurpose::AutoReconcile,
+                risk_acquisition_gate_active: false,
                 risk_acquisition: Default::default(),
                 exposure_epsilon: 1e-9,
                 curve_maker_levels_per_side: 1,

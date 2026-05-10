@@ -75,6 +75,7 @@ export interface TrackStrategyView {
   min_rebalance_units: number;
   shape_family: ShapeFamily;
   out_of_band_policy: unknown;
+  risk_acquisition?: RiskAcquisitionConfigView;
 }
 
 export interface TrackLossLimitsView {
@@ -95,6 +96,7 @@ export interface TrackLiveView {
   best_bid: number | null;
   best_ask: number | null;
   desired_exposure: number | null;
+  risk_acquisition?: RiskAcquisitionView | null;
   price_execution_block_reason: PriceExecutionBlockReasonView | null;
 }
 
@@ -119,7 +121,29 @@ export interface TrackExecutionView {
   attention_reasons: string[];
   inventory_gap: number;
   active_binding_count: number;
+  risk_acquisition?: RiskAcquisitionView | null;
   bindings: ExecutionBindingView[];
+}
+
+export interface RiskAcquisitionConfigView {
+  initial_ratio: number;
+  advantage_steps: number;
+  min_release_steps: number;
+  max_release_steps: number;
+  catchup_ratio: number;
+}
+
+export interface RiskAcquisitionView {
+  direction: RiskAcquisitionDirectionView;
+  curve_target: number;
+  allowed_target: number;
+  backlog_units: number;
+  anchor_price: number;
+  anchor_curve_target: number;
+  next_advantage_target: number;
+  next_advantage_price?: number | null;
+  next_release_units: number;
+  next_release_target: number;
 }
 
 export interface ExecutionBindingView {
@@ -212,6 +236,7 @@ export type Side = 'buy' | 'sell';
 export type ActivityLevelView = 'info' | 'warn' | 'error';
 export type TrackCommandType = 'pause' | 'resume' | 'terminate' | 'flatten';
 export type RiskSignalView = 'normal' | 'attention' | 'critical';
+export type RiskAcquisitionDirectionView = 'long' | 'short';
 
 export interface PoiseServerClient {
   listTracks(baseUrl: string): Promise<TrackListResponse>;

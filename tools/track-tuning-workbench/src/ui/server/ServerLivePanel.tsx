@@ -253,9 +253,21 @@ function TrackRuntimeSummary({
   const markPrice = live?.mark_price ?? detail?.market.mark_price ?? null;
   const currentExposure = detail?.position.current_exposure ?? track.exposure.current;
   const desiredExposure = live?.desired_exposure ?? detail?.position.desired_exposure ?? track.exposure.target ?? null;
+  const riskAcquisition = live
+    ? live.risk_acquisition ?? null
+    : detail?.execution.risk_acquisition ?? null;
   const inventoryGap = detail?.execution.inventory_gap ?? (
     desiredExposure === null ? null : desiredExposure - currentExposure
   );
+  const exposureNote = riskAcquisition
+    ? `允许 ${formatExposure(riskAcquisition.allowed_target)} · 曲线 ${formatExposure(riskAcquisition.curve_target)}`
+    : `目标 ${formatExposure(desiredExposure)}`;
+  const gapValue = riskAcquisition
+    ? `backlog ${formatSignedExposure(riskAcquisition.backlog_units)}`
+    : `差额 ${formatExposure(inventoryGap)}`;
+  const gapNote = riskAcquisition
+    ? `next ${formatSignedExposure(riskAcquisition.next_release_units)} → ${formatExposure(riskAcquisition.next_release_target)}`
+    : `${detail?.execution.active_binding_count ?? track.execution.active_binding_count} 个 active binding`;
   const firstBinding = detail?.execution.bindings[0] ?? null;
   const latestActivity = [
     ...(detail?.activity ?? []),
@@ -267,8 +279,8 @@ function TrackRuntimeSummary({
       <div className="server-live__summary-grid">
         <RuntimeMetric label="Track" value={track.id} note={track.instrument.symbol} />
         <RuntimeMetric label="价格" value={`策略价 ${formatPrice(strategyPrice)}`} note={`标记价 ${formatPrice(markPrice)}`} />
-        <RuntimeMetric label="仓位" value={`当前 ${formatExposure(currentExposure)}`} note={`目标 ${formatExposure(desiredExposure)}`} />
-        <RuntimeMetric label="差额" value={`差额 ${formatExposure(inventoryGap)}`} note={`${detail?.execution.active_binding_count ?? track.execution.active_binding_count} 个 active binding`} />
+        <RuntimeMetric label="仓位" value={`当前 ${formatExposure(currentExposure)}`} note={exposureNote} />
+        <RuntimeMetric label="差额" value={gapValue} note={gapNote} />
       </div>
 
       <div className="server-live__section">
@@ -395,6 +407,13 @@ function formatExposure(value: number | null | undefined) {
     return '--';
   }
   return value.toFixed(4);
+}
+
+function formatSignedExposure(value: number | null | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '--';
+  }
+  return `${value >= 0 ? '+' : ''}${formatExposure(value)}`;
 }
 
 function formatOrder(order: { side: string; price: number; quantity: number }) {
