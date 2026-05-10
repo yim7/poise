@@ -1012,7 +1012,7 @@ Record commit SHA here after committing: `111f93b`
 - Test: `engine/src/executor/policy.rs`
 - Test: `engine/src/manager.rs`
 
-- [ ] **Step 1: Write executor tests for budgeted maker**
+- [x] **Step 1: Write executor tests for budgeted maker**
 
 Add this test to `engine/src/executor/mod.rs`:
 
@@ -1020,7 +1020,8 @@ Add this test to `engine/src/executor/mod.rs`:
 #[test]
 fn risk_acquisition_maker_uses_advantage_price_and_release_budget() {
     let config = config();
-    let rules = rules();
+    let mut rules = rules();
+    rules.quantity_step = 0.001;
     let instrument = instrument();
     let state = ExecutorState::empty(observed_at()).ensure_revision(&config, Exposure(1.5));
     let plan = plan(ExecutorInput::new(
@@ -1072,7 +1073,7 @@ pub fn quantity_as_exposure_for_test(&self, config: &TrackConfig) -> f64 {
 }
 ```
 
-- [ ] **Step 2: Run executor maker test to verify it fails**
+- [x] **Step 2: Run executor maker test to verify it fails**
 
 Run:
 
@@ -1082,7 +1083,7 @@ cargo test -p poise-engine executor::tests::risk_acquisition_maker_uses_advantag
 
 Expected: FAIL because `SubmitIntentInput::risk_acquisition` and budgeted maker planning do not exist.
 
-- [ ] **Step 3: Add risk acquisition field to executor input**
+- [x] **Step 3: Add risk acquisition field to executor input**
 
 In `engine/src/executor/planning.rs`, import `RiskAcquisitionRelease` and add this field:
 
@@ -1129,7 +1130,7 @@ fn submit_intent_input<'a>(
 }
 ```
 
-- [ ] **Step 4: Implement one budgeted risk acquisition CurveMaker**
+- [x] **Step 4: Implement one budgeted risk acquisition CurveMaker**
 
 In `engine/src/executor/policy.rs`, keep `CatchUp` planning unchanged so it only sees `desired_exposure = allowed_target`.
 
@@ -1246,7 +1247,7 @@ fn boundary_direction_for_risk_increase_direction(
 
 Import `RiskAcquisitionRelease` and `RiskIncreaseDirection` from `crate::risk_exposure_gate`.
 
-- [ ] **Step 5: Keep manager planning when only the risk acquisition maker is due**
+- [x] **Step 5: Keep manager planning when only the risk acquisition maker is due**
 
 In `engine/src/manager.rs`, keep the no-op suppress path only when no risk acquisition maker budget exists:
 
@@ -1283,7 +1284,7 @@ let submit_intent = self.submit_intent_input(
 );
 ```
 
-- [ ] **Step 6: Write manager test for maker-only planning**
+- [x] **Step 6: Write manager test for maker-only planning**
 
 Add imports to `engine/src/manager.rs` tests:
 
@@ -1331,7 +1332,7 @@ fn reconcile_track_plans_risk_acquisition_maker_when_allowed_target_is_current_e
 }
 ```
 
-- [ ] **Step 7: Run executor maker test to verify it passes**
+- [x] **Step 7: Run executor maker test to verify it passes**
 
 Run:
 
@@ -1341,7 +1342,7 @@ cargo test -p poise-engine executor::tests::risk_acquisition_maker_uses_advantag
 
 Expected: PASS.
 
-- [ ] **Step 8: Write test that normal CurveMaker still works when gate is disabled**
+- [x] **Step 8: Write test that normal CurveMaker still works when gate is disabled**
 
 Run existing test:
 
@@ -1351,7 +1352,7 @@ cargo test -p poise-engine executor::tests::curve_maker_policy_emits_future_oper
 
 Expected before implementation changes are complete: PASS. If it fails after Step 4, fix only the disabled-gate path so it keeps the old behavior.
 
-- [ ] **Step 9: Run focused Task 4 tests**
+- [x] **Step 9: Run focused Task 4 tests**
 
 Run:
 
@@ -1364,7 +1365,7 @@ cargo test -p poise-engine manager::tests::reconcile_track_plans_risk_acquisitio
 
 Expected: PASS.
 
-- [ ] **Step 10: Commit Task 4**
+- [x] **Step 10: Commit Task 4**
 
 Run:
 
@@ -1373,7 +1374,7 @@ git add engine/src/executor/planning.rs engine/src/executor/policy.rs engine/src
 git commit -m "feat: budget risk acquisition curve makers"
 ```
 
-Record commit SHA here after committing: ``
+Record commit SHA here after committing: `8e8a563`
 
 ## Task 5: Protocol, Read Model, TUI Visibility
 
