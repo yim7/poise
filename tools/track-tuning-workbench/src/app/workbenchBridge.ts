@@ -10,6 +10,7 @@ import type {
 import {
   createTrackDraft,
   type BandProtectionPolicyPayload,
+  DEFAULT_RISK_INCREASE_DELAY_DRAFT,
   type RiskIncreaseDelayDraft,
   type TrackDraft,
   type TrackDraftFieldKey,
@@ -44,6 +45,7 @@ export interface WorkbenchBridge {
   loadConfigFile(configPath: string): Promise<WorkbenchBridgeLoadedConfig>;
   loadSavedDraft(configPath: string): Promise<WorkbenchSnapshot | null>;
   saveDraft(configPath: string, snapshot: WorkbenchSnapshot): Promise<void>;
+  loadRiskIncreaseDelayDefaults(): Promise<RiskIncreaseDelayDraft>;
   exportCurrentTrack(draft: TrackDraft): Promise<string>;
   exportAllTracks(drafts: TrackDraft[]): Promise<string>;
   copyText(text: string): Promise<void>;
@@ -90,6 +92,14 @@ interface TauriQuotePayload {
   retrieved_at: number;
   error_kind: RemoteQuoteErrorKind | null;
   error_message: string | null;
+}
+
+interface RiskIncreaseDelayPayload {
+  startup_initial_ratio: number;
+  advantage_min_rebalance_multiples: number;
+  base_step_min_rebalance_multiples: number;
+  max_step_min_rebalance_multiples: number;
+  catchup_ratio: number;
 }
 
 export function createWorkbenchBridge(): WorkbenchBridge {
@@ -192,23 +202,7 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
               quotePriceInput: '',
             },
             riskIncreaseDelay: track.fields.risk_increase_delay
-              ? {
-                  startupInitialRatio: formatRawNumber(
-                    track.fields.risk_increase_delay.startup_initial_ratio,
-                  ),
-                  advantageMinRebalanceMultiples: formatRawNumber(
-                    track.fields.risk_increase_delay.advantage_min_rebalance_multiples,
-                  ),
-                  baseStepMinRebalanceMultiples: formatRawNumber(
-                    track.fields.risk_increase_delay.base_step_min_rebalance_multiples,
-                  ),
-                  maxStepMinRebalanceMultiples: formatRawNumber(
-                    track.fields.risk_increase_delay.max_step_min_rebalance_multiples,
-                  ),
-                  catchupRatio: formatRawNumber(
-                    track.fields.risk_increase_delay.catchup_ratio,
-                  ),
-                }
+              ? fromRiskIncreaseDelayPayload(track.fields.risk_increase_delay)
               : undefined,
             attachments: {
               exchangeVenue,
@@ -225,6 +219,12 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
     },
     async saveDraft(configPath, snapshot) {
       await tauriInvoke('save_draft', { configPath, draftSnapshot: snapshot });
+    },
+    async loadRiskIncreaseDelayDefaults() {
+      const payload = await tauriInvoke<RiskIncreaseDelayPayload>(
+        'risk_increase_delay_defaults',
+      );
+      return fromRiskIncreaseDelayPayload(payload);
     },
     async exportCurrentTrack(draft) {
       return tauriInvoke<string>('export_current_track', {
@@ -267,6 +267,9 @@ function createBrowserWorkbenchBridge(): WorkbenchBridge {
       return null;
     },
     async saveDraft() {},
+    async loadRiskIncreaseDelayDefaults() {
+      return { ...DEFAULT_RISK_INCREASE_DELAY_DRAFT };
+    },
     async exportCurrentTrack() {
       throw new Error('浏览器开发模式不支持导出命令，请在 Tauri 桌面应用中使用。');
     },
@@ -302,7 +305,7 @@ async function tauriInvoke<T>(
   const { invoke } = await import('@tauri-apps/api/core');
 
   try {
-    return await invoke<T>(command, args);
+    return args === undefined ? await invoke<T>(command) : await invoke<T>(command, args);
   } catch (error) {
     throw normalizeWorkbenchBridgeError(error);
   }
@@ -327,6 +330,24 @@ function isCommandError(error: unknown): error is WorkbenchBridgeCommandError {
     && 'message' in error
     && typeof (error as { message?: unknown }).message === 'string'
   );
+}
+
+function fromRiskIncreaseDelayPayload(
+  payload: RiskIncreaseDelayPayload,
+): RiskIncreaseDelayDraft {
+  return {
+    startupInitialRatio: formatRawNumber(payload.startup_initial_ratio),
+    advantageMinRebalanceMultiples: formatRawNumber(
+      payload.advantage_min_rebalance_multiples,
+    ),
+    baseStepMinRebalanceMultiples: formatRawNumber(
+      payload.base_step_min_rebalance_multiples,
+    ),
+    maxStepMinRebalanceMultiples: formatRawNumber(
+      payload.max_step_min_rebalance_multiples,
+    ),
+    catchupRatio: formatRawNumber(payload.catchup_ratio),
+  };
 }
 
 function toTrackDraftPayload(draft: TrackDraft) {

@@ -214,6 +214,28 @@ describe('createWorkbenchBridge', () => {
     });
   });
 
+  it('loads risk increase delay defaults from the backend', async () => {
+    invokeMock.mockResolvedValueOnce({
+      startup_initial_ratio: 0.4,
+      advantage_min_rebalance_multiples: 1.5,
+      base_step_min_rebalance_multiples: 0.75,
+      max_step_min_rebalance_multiples: 3,
+      catchup_ratio: 0.2,
+    });
+
+    const bridge = createWorkbenchBridge();
+    const defaults = await bridge.loadRiskIncreaseDelayDefaults();
+
+    expect(invokeMock).toHaveBeenCalledWith('risk_increase_delay_defaults');
+    expect(defaults).toEqual({
+      startupInitialRatio: '0.4',
+      advantageMinRebalanceMultiples: '1.5',
+      baseStepMinRebalanceMultiples: '0.75',
+      maxStepMinRebalanceMultiples: '3',
+      catchupRatio: '0.2',
+    });
+  });
+
   it('keeps browser preview out of real config loading', async () => {
     delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     const createElementSpy = vi.spyOn(document, 'createElement');

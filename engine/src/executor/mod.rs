@@ -123,6 +123,65 @@ mod tests {
         assert!((maker.quantity_as_exposure_for_test(&config) - 0.875).abs() < 1e-9);
     }
 
+    #[test]
+    fn risk_acquisition_maker_keeps_reduce_risk_curve_maker() {
+        let config = config();
+        let mut rules = rules();
+        rules.quantity_step = 0.001;
+        let instrument = instrument();
+        let state = ExecutorState::empty(observed_at()).ensure_revision(&config, Exposure(1.0));
+        let plan = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: &instrument,
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: config.min_rebalance_units,
+                current_exposure: Exposure(1.0),
+                desired_exposure: Exposure(1.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: observed_at(),
+                risk_acquisition: Some(RiskAcquisitionRelease {
+                    direction: RiskIncreaseDirection::Long,
+                    release_target: Exposure(1.875),
+                    release_units: 0.875,
+                    advantage_target: Exposure(6.0),
+                }),
+            },
+            Some(&state),
+        ));
+
+        let risk_increase_maker = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.proposal_key.policy == PolicyKind::CurveMaker
+                    && binding.request.side == Side::Buy
+                    && !binding.request.reduce_only
+            })
+            .expect("risk acquisition maker should be planned");
+        assert_eq!(risk_increase_maker.request.price, 92.5);
+
+        let reduce_risk_maker = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.proposal_key.policy == PolicyKind::CurveMaker
+                    && binding.request.side == Side::Sell
+                    && binding.request.reduce_only
+            })
+            .expect("reduce-risk maker should remain planned while increasing risk is gated");
+        assert_eq!(reduce_risk_maker.request.price, 100.0);
+    }
+
     fn input<'a>(
         config: &'a TrackConfig,
         rules: &'a ExchangeRules,

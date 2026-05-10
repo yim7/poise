@@ -142,6 +142,11 @@ pub fn save_draft(
 }
 
 #[tauri::command]
+pub fn risk_increase_delay_defaults() -> RiskIncreaseDelayConfig {
+    RiskIncreaseDelayConfig::default()
+}
+
+#[tauri::command]
 pub fn copy_text(app: AppHandle, text: String) -> Result<(), CommandError> {
     app.clipboard().write_text(text).map_err(|error| {
         CommandError::new(

@@ -105,6 +105,13 @@ function createMockBridge(
     loadConfigFile: vi.fn(),
     loadSavedDraft: vi.fn(async () => null),
     saveDraft: vi.fn(async () => {}),
+    loadRiskIncreaseDelayDefaults: vi.fn(async () => ({
+      startupInitialRatio: '0.3',
+      advantageMinRebalanceMultiples: '2',
+      baseStepMinRebalanceMultiples: '1',
+      maxStepMinRebalanceMultiples: '4',
+      catchupRatio: '0.25',
+    })),
     exportCurrentTrack: vi.fn(async () => '[[tracks]]\ntrack_id = "silver"'),
     exportAllTracks: vi.fn(async () => '[[tracks]]\ntrack_id = "silver"\n\n[[tracks]]\ntrack_id = "gold"'),
     copyText: vi.fn(async () => {}),
@@ -286,6 +293,49 @@ describe('AppShell', () => {
 
     expect(store.getState().drafts[0].riskIncreaseDelay?.advantageMinRebalanceMultiples)
       .toBe('3');
+  });
+
+  it('uses bridge risk increase delay defaults when enabling the section', async () => {
+    const bridge = createMockBridge({
+      loadRiskIncreaseDelayDefaults: vi.fn(async () => ({
+        startupInitialRatio: '0.4',
+        advantageMinRebalanceMultiples: '1.5',
+        baseStepMinRebalanceMultiples: '0.75',
+        maxStepMinRebalanceMultiples: '3',
+        catchupRatio: '0.2',
+      })),
+    });
+    const store = createWorkbenchStore({
+      initialSnapshot: {
+        selectedDraftId: 'draft-silver',
+        drafts: [makeDraft('draft-silver')],
+        temporaryPriceOverrides: {},
+      },
+    });
+
+    await act(async () => {
+      await store.load('/tmp/strategies/metals.toml', store.getState());
+    });
+
+    render(
+      <WorkbenchStoreProvider store={store}>
+        <AppShell bridge={bridge} />
+      </WorkbenchStoreProvider>,
+    );
+
+    await waitFor(() => {
+      expect(bridge.loadRiskIncreaseDelayDefaults).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByLabelText('启用增加风险延迟'));
+
+    expect(store.getState().drafts[0].riskIncreaseDelay).toEqual({
+      startupInitialRatio: '0.4',
+      advantageMinRebalanceMultiples: '1.5',
+      baseStepMinRebalanceMultiples: '0.75',
+      maxStepMinRebalanceMultiples: '3',
+      catchupRatio: '0.2',
+    });
   });
 
   it('recomputes min rebalance metrics when the min rebalance units field changes', async () => {

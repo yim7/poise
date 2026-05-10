@@ -10,6 +10,7 @@ import {
   createTrackDraft,
   defaultBandProtectionPolicy,
   riskIncreaseDelayFieldKey,
+  type RiskIncreaseDelayDraft,
   type TrackBandProtectionKind,
   type TrackDraft,
 } from '@/domain/trackDraft';
@@ -39,6 +40,10 @@ export function AppShell({ bridge }: AppShellProps) {
   const store = useWorkbenchStore();
   const snapshot = useWorkbenchSnapshot();
   const [notice, setNotice] = useState<NoticeState | null>(null);
+  const [riskIncreaseDelayDefaults, setRiskIncreaseDelayDefaults] =
+    useState<RiskIncreaseDelayDraft>({
+      ...DEFAULT_RISK_INCREASE_DELAY_DRAFT,
+    });
   const {
     selectedDraft,
     selectedValidation,
@@ -51,6 +56,37 @@ export function AppShell({ bridge }: AppShellProps) {
   const selectedDraftId = selectedDraft?.draftId ?? null;
   const selectedSymbol = selectedDraft?.additional.symbol.trim() ?? '';
   const selectedExchangeVenue = selectedDraft?.attachments.exchangeVenue?.trim() || 'binance';
+
+  useEffect(() => {
+    if (!resolvedBridge || !selectedDraftId) {
+      setRiskIncreaseDelayDefaults({ ...DEFAULT_RISK_INCREASE_DELAY_DRAFT });
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadDefaults = async () => {
+      try {
+        const defaults = await resolvedBridge.loadRiskIncreaseDelayDefaults();
+        if (!cancelled) {
+          setRiskIncreaseDelayDefaults(defaults);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setNotice({
+            tone: 'warning',
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    };
+
+    void loadDefaults();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [resolvedBridge, selectedDraftId]);
 
   useEffect(() => {
     if (!resolvedBridge || !selectedDraftId) {
@@ -330,7 +366,7 @@ export function AppShell({ bridge }: AppShellProps) {
                 store.updateDraft(selectedDraft.draftId, (draft) => {
                   if (enabled) {
                     draft.riskIncreaseDelay = {
-                      ...DEFAULT_RISK_INCREASE_DELAY_DRAFT,
+                      ...riskIncreaseDelayDefaults,
                     };
                   } else {
                     delete draft.riskIncreaseDelay;
@@ -346,7 +382,7 @@ export function AppShell({ bridge }: AppShellProps) {
                 }
                 store.updateDraft(selectedDraft.draftId, (draft) => {
                   draft.riskIncreaseDelay ??= {
-                    ...DEFAULT_RISK_INCREASE_DELAY_DRAFT,
+                    ...riskIncreaseDelayDefaults,
                   };
                   draft.riskIncreaseDelay[field] = value;
                   clearResolvedLoadIssues(draft, riskIncreaseDelayFieldKey(field));

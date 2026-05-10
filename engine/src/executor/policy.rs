@@ -111,8 +111,19 @@ fn plan_normal_policy_bindings(input: &PolicyPlanningInput<'_>) -> Vec<DesiredBi
         if let Some(binding) =
             plan_risk_acquisition_maker_binding(input, release, &covered_operations)
         {
+            covered_operations.extend(
+                binding
+                    .allocations
+                    .iter()
+                    .map(|allocation| allocation.operation.clone()),
+            );
             desired_bindings.push(binding);
         }
+        desired_bindings.extend(
+            select_reduce_risk_curve_maker_operations(input, &covered_operations)
+                .into_iter()
+                .filter_map(|operation| plan_curve_maker_binding(input, operation)),
+        );
     } else {
         desired_bindings.extend(
             select_curve_maker_operations(
@@ -305,6 +316,40 @@ fn select_catch_up_operations(
     );
     up.extend(down);
     up.retain(|operation| Some(operation.direction) == gap_direction);
+    up
+}
+
+fn select_reduce_risk_curve_maker_operations(
+    input: &PolicyPlanningInput<'_>,
+    covered_operations: &BTreeSet<BoundaryOperation>,
+) -> Vec<BoundaryOperation> {
+    let mut up = input
+        .view
+        .operations
+        .iter()
+        .filter(|operation| !operation.due)
+        .filter(|operation| operation.remaining > input.exposure_epsilon)
+        .filter(|operation| operation.operation.direction == BoundaryDirection::Up)
+        .filter(|operation| !covered_operations.contains(&operation.operation))
+        .filter(|operation| operation_reduces_inventory(input.boundaries, &operation.operation))
+        .map(|operation| operation.operation.clone())
+        .take(input.curve_maker_levels_per_side)
+        .collect::<Vec<_>>();
+    let mut down = input
+        .view
+        .operations
+        .iter()
+        .rev()
+        .filter(|operation| !operation.due)
+        .filter(|operation| operation.remaining > input.exposure_epsilon)
+        .filter(|operation| operation.operation.direction == BoundaryDirection::Down)
+        .filter(|operation| !covered_operations.contains(&operation.operation))
+        .filter(|operation| operation_reduces_inventory(input.boundaries, &operation.operation))
+        .map(|operation| operation.operation.clone())
+        .take(input.curve_maker_levels_per_side)
+        .collect::<Vec<_>>();
+
+    up.append(&mut down);
     up
 }
 
@@ -747,6 +792,15 @@ fn reduce_only_for_operation(boundary: &BoundaryBlueprint, direction: BoundaryDi
         BoundaryDirection::Down => (boundary.upper_exposure.0, boundary.lower_exposure.0),
     };
     to.abs() + f64::EPSILON < from.abs()
+}
+
+fn operation_reduces_inventory(
+    boundaries: &[BoundaryBlueprint],
+    operation: &BoundaryOperation,
+) -> bool {
+    boundary_for_operation(boundaries, operation)
+        .map(|boundary| reduce_only_for_operation(boundary, operation.direction))
+        .unwrap_or(false)
 }
 
 fn side_for_direction(direction: BoundaryDirection) -> Side {
