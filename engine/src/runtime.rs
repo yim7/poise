@@ -21,6 +21,7 @@ use crate::price_gate::{
     PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
 };
 use crate::reconciler;
+use crate::risk_exposure_gate::RiskExposureGateState;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackStatus {
@@ -69,6 +70,9 @@ pub enum ControlState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AutoState {
     FollowingBand,
+    AcquiringRiskExposure {
+        gate: RiskExposureGateState,
+    },
     Frozen {
         target_anchor: Exposure,
     },
@@ -103,7 +107,9 @@ impl TrackState {
     pub fn status(&self) -> TrackStatus {
         match self {
             Self::WaitingMarketData => TrackStatus::WaitingMarketData,
-            Self::Running(ControlState::Automatic(AutoState::FollowingBand)) => TrackStatus::Active,
+            Self::Running(ControlState::Automatic(
+                AutoState::FollowingBand | AutoState::AcquiringRiskExposure { .. },
+            )) => TrackStatus::Active,
             Self::Running(ControlState::Automatic(AutoState::Frozen { .. }))
             | Self::Running(ControlState::Automatic(AutoState::FlattenPending { .. })) => {
                 TrackStatus::Frozen

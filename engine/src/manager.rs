@@ -19,6 +19,7 @@ use crate::observation::{
 use crate::ports::{ClockPort, ExchangeOrder, ExecutionQuote, OrderReceipt, OrderRequest};
 use crate::price_gate::{SubmitPurpose, evaluate_price_execution_gate};
 use crate::reconciler;
+use crate::risk_exposure_gate::RiskAcquisitionRelease;
 use crate::runtime::{
     AutoState, ControlState, ExecutorState, FreshSessionExternalInputs, ManualState,
     QuoteHealthView, StrategyPriceStatus, StrategyTargetView, TerminationCause, TrackLiveView,
@@ -990,8 +991,10 @@ impl TrackManager {
             applied_risk_cap,
             new_runtime_state,
             execution_gate_decision,
+            risk_acquisition,
             executor_state,
         } = self.plan_inventory_execution_for_track(track, strategy_price)?;
+        let _ = risk_acquisition;
         let effects = planned_effects;
 
         let track = self.tracks.get_mut(id).unwrap();
@@ -1097,6 +1100,7 @@ impl TrackManager {
                 applied_risk_cap: target.applied_risk_cap,
                 new_runtime_state: target.new_runtime_state,
                 execution_gate_decision: target.execution_gate_decision,
+                risk_acquisition: target.risk_acquisition,
                 executor_state: track.executor_state.clone(),
             });
         }
@@ -1117,6 +1121,7 @@ impl TrackManager {
                 applied_risk_cap: target.applied_risk_cap,
                 new_runtime_state: target.new_runtime_state,
                 execution_gate_decision: target.execution_gate_decision,
+                risk_acquisition: target.risk_acquisition,
                 executor_state,
             });
         }
@@ -1132,6 +1137,7 @@ impl TrackManager {
             applied_risk_cap: target.applied_risk_cap,
             new_runtime_state: target.new_runtime_state,
             execution_gate_decision: target.execution_gate_decision,
+            risk_acquisition: target.risk_acquisition,
             executor_state: plan.state,
         })
     }
@@ -1156,6 +1162,7 @@ struct PlannedInventoryExecution {
     applied_risk_cap: Option<crate::runtime::AppliedRiskCap>,
     new_runtime_state: Option<TrackState>,
     execution_gate_decision: ExecutionGateDecision,
+    risk_acquisition: Option<RiskAcquisitionRelease>,
     executor_state: ExecutorState,
 }
 

@@ -5,6 +5,9 @@ use poise_core::types::Exposure;
 
 use crate::execution_gate::{AccountCapacityGate, AccountCapacityGateInput, ExecutionGateDecision};
 use crate::loss_guard::build_loss_guard_snapshot;
+use crate::risk_exposure_gate::{
+    self, RiskAcquisitionRelease, RiskExposureGateInput, RiskExposureGateState,
+};
 use crate::runtime::{
     AppliedRiskCap, AutoState, BandTerminationCause, ControlState, ManualState, TerminationCause,
     TrackRuntime, TrackState,
@@ -17,6 +20,7 @@ pub struct TargetReconcileResult {
     pub new_runtime_state: Option<TrackState>,
     pub execution_gate_decision: ExecutionGateDecision,
     pub suppress_execution: bool,
+    pub risk_acquisition: Option<RiskAcquisitionRelease>,
 }
 
 pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReconcileResult {
@@ -32,6 +36,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
             new_runtime_state: Some(track.track_state.clone()),
             execution_gate_decision: ExecutionGateDecision::Open,
             suppress_execution: delta.is_zero(),
+            risk_acquisition: None,
         };
     }
 
@@ -50,6 +55,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
             new_runtime_state: Some(track.track_state.clone()),
             execution_gate_decision: ExecutionGateDecision::Open,
             suppress_execution: delta.is_zero(),
+            risk_acquisition: None,
         };
     }
 
@@ -95,9 +101,13 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
                 }),
                 execution_gate_decision: ExecutionGateDecision::Open,
                 suppress_execution: delta.is_zero(),
+                risk_acquisition: None,
             };
         }
     };
+
+    let (approved_target, new_runtime_state, risk_acquisition) =
+        apply_risk_exposure_gate(track, strategy_price, approved_target, new_runtime_state);
 
     if should_suppress_protected_risk_increase(track, &new_runtime_state, &approved_target) {
         return TargetReconcileResult {
@@ -107,6 +117,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
             new_runtime_state,
             execution_gate_decision: ExecutionGateDecision::Open,
             suppress_execution: true,
+            risk_acquisition,
         };
     }
 
@@ -133,6 +144,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
             new_runtime_state,
             execution_gate_decision,
             suppress_execution: true,
+            risk_acquisition,
         };
     }
 
@@ -145,6 +157,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
             new_runtime_state,
             execution_gate_decision,
             suppress_execution: true,
+            risk_acquisition,
         };
     }
 
@@ -159,6 +172,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
         new_runtime_state,
         execution_gate_decision,
         suppress_execution: false,
+        risk_acquisition,
     }
 }
 
@@ -186,6 +200,69 @@ fn risk_cap_applied_event(
             capped: applied_risk_cap.capped.clone(),
         },
     )
+}
+
+fn apply_risk_exposure_gate(
+    track: &TrackRuntime,
+    strategy_price: f64,
+    approved_target: Exposure,
+    new_runtime_state: Option<TrackState>,
+) -> (Exposure, Option<TrackState>, Option<RiskAcquisitionRelease>) {
+    if track.config().risk_increase_delay.is_none() {
+        return (approved_target, new_runtime_state, None);
+    }
+
+    let effective_state = effective_runtime_state(track, &new_runtime_state);
+    let gate_state = match effective_state {
+        TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)) => None,
+        TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure { gate })) => {
+            Some(gate)
+        }
+        _ => return (approved_target, new_runtime_state, None),
+    };
+
+    let decision = risk_exposure_gate::apply(RiskExposureGateInput {
+        config: track.config().risk_increase_delay,
+        min_rebalance_units: track.config().min_rebalance_units,
+        state: gate_state,
+        current_exposure: track.current_exposure.clone(),
+        curve_target: approved_target,
+        strategy_price,
+    });
+    let next_state = merge_gate_state(
+        new_runtime_state,
+        &track.track_state,
+        decision.state.clone(),
+    );
+
+    (decision.allowed_target, next_state, decision.next_release)
+}
+
+fn merge_gate_state(
+    base_state: Option<TrackState>,
+    current_state: &TrackState,
+    gate_state: Option<RiskExposureGateState>,
+) -> Option<TrackState> {
+    match gate_state {
+        Some(gate) => Some(TrackState::Running(ControlState::Automatic(
+            AutoState::AcquiringRiskExposure { gate },
+        ))),
+        None => {
+            let was_acquiring = matches!(
+                base_state.as_ref().unwrap_or(current_state),
+                TrackState::Running(ControlState::Automatic(
+                    AutoState::AcquiringRiskExposure { .. }
+                ))
+            );
+            if was_acquiring {
+                Some(TrackState::Running(ControlState::Automatic(
+                    AutoState::FollowingBand,
+                )))
+            } else {
+                base_state
+            }
+        }
+    }
 }
 
 fn resolve_in_band(
@@ -381,6 +458,7 @@ fn should_suppress_protected_risk_increase(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::risk_exposure_gate::RiskExposureGateState;
     use crate::runtime::{
         AutoState, ControlState, ManualState, TerminationCause, TrackState, TrackStatus,
     };
@@ -475,6 +553,17 @@ mod tests {
         );
     }
 
+    fn enable_risk_increase_delay(track: &mut TrackRuntime) {
+        let mut config = track.config().clone();
+        config.risk_increase_delay = Some(RiskIncreaseDelayConfig::default());
+        replace_definition(
+            track,
+            config,
+            track.max_notional(),
+            track.loss_limits().clone(),
+        );
+    }
+
     fn test_max_notional() -> f64 {
         3000.0
     }
@@ -544,6 +633,78 @@ mod tests {
 
         assert!(result.suppress_execution);
         assert_eq!(result.desired_exposure, Exposure(0.0));
+    }
+
+    #[test]
+    fn risk_increase_delay_startup_exposes_allowed_target_not_curve_target() {
+        let mut track = test_runtime();
+        enable_risk_increase_delay(&mut track);
+
+        let result = reconcile_target(&track, 93.75);
+
+        assert_eq!(result.desired_exposure, Exposure(1.5));
+        assert!(matches!(
+            result.new_runtime_state,
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::AcquiringRiskExposure { .. }
+            )))
+        ));
+        assert!(!result.suppress_execution);
+        assert!(result.risk_acquisition.is_some());
+    }
+
+    #[test]
+    fn risk_increase_delay_reduces_allowed_target_when_curve_reenters_inside() {
+        let mut track = test_runtime();
+        enable_risk_increase_delay(&mut track);
+        track.current_exposure = Exposure(1.5);
+        track.desired_exposure = Some(Exposure(1.5));
+        track.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
+                gate: RiskExposureGateState {
+                    allowed_target: Exposure(1.5),
+                    anchor_price: 93.75,
+                    anchor_curve_target: Exposure(5.0),
+                },
+            }));
+
+        let result = reconcile_target(&track, 98.75);
+
+        assert_eq!(result.desired_exposure, Exposure(1.0));
+        assert!(matches!(
+            result.new_runtime_state,
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::FollowingBand
+            )))
+        ));
+        assert!(!result.suppress_execution);
+    }
+
+    #[test]
+    fn risk_increase_delay_cross_zero_reduces_to_flat_first() {
+        let mut track = test_runtime();
+        enable_risk_increase_delay(&mut track);
+        track.current_exposure = Exposure(1.5);
+        track.desired_exposure = Some(Exposure(1.5));
+        track.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
+                gate: RiskExposureGateState {
+                    allowed_target: Exposure(1.5),
+                    anchor_price: 93.75,
+                    anchor_curve_target: Exposure(5.0),
+                },
+            }));
+
+        let result = reconcile_target(&track, 101.25);
+
+        assert_eq!(result.desired_exposure, Exposure(0.0));
+        assert!(matches!(
+            result.new_runtime_state,
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::FollowingBand
+            )))
+        ));
+        assert!(!result.suppress_execution);
     }
 
     #[test]
