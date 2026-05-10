@@ -131,6 +131,16 @@ allowed_target -> +1.0
 
 这样不会因为小幅反弹就快速平掉已经用成本优势获得的仓位。
 
+如果 `allowed_target` 和 `curve_target` 异号，不能直接把 `allowed_target` 调整到 `curve_target`。这同时包含“降低旧方向风险”和“增加新方向风险”。第一版必须先把旧方向风险降到 0：
+
+```text
+allowed_target = +1.5
+curve_target = -1.0
+allowed_target -> 0.0
+```
+
+实际仓位回到 0 后，再按新方向的启动建仓规则处理 `curve_target = -1.0`。这样不会在一次重新评估里绕过新方向的成本优势门控。
+
 ## 时间语义
 
 第一版不设置时间过期。
@@ -157,6 +167,8 @@ CatchUp 只能补到 +1.5
 ```
 
 如果 `allowed_target` 被释放后，实际仓位还没跟上，`CatchUp` 可以按现有 `min_rebalance_units` 规则补齐 `allowed_target` 内的缺口。
+
+如果 `allowed_target == current_exposure`，但仍存在下一次成本优势释放预算，系统仍需要进入 executor 规划 `CurveMaker`。不能因为没有 `CatchUp` 缺口就跳过 executor，否则等待阶段无法提前挂出下一次优势价限价单。
 
 ## CurveMaker 语义
 
@@ -249,6 +261,7 @@ CurveMaker 最多挂 +0.875 的买入风险获取单
 
 - `allowed_target = +1.5`，`curve_target` 从 `+5` 回到 `+4` 时，不减仓。
 - `allowed_target = +1.5`，`curve_target` 回到 `+1` 时，立即把 `allowed_target` 降到 `+1`。
+- `allowed_target = +1.5`，`curve_target` 回到 `-1` 时，先把 `allowed_target` 降到 `0`，不直接开空。
 
 `CatchUp`：
 
