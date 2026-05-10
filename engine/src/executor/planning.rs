@@ -11,6 +11,7 @@ use crate::price_gate::{
     PriceExecutionGate, SubmitPurpose, WorkingOrderGateAction, allows_submit,
     working_order_gate_action,
 };
+use crate::risk_exposure_gate::RiskAcquisitionRelease;
 use crate::runtime::ExecutorState;
 use poise_core::track::Instrument;
 
@@ -52,6 +53,7 @@ pub struct SubmitIntentInput<'a> {
     pub price_execution_gate: PriceExecutionGate,
     pub submit_purpose: SubmitPurpose,
     pub observed_at: DateTime<Utc>,
+    pub risk_acquisition: Option<RiskAcquisitionRelease>,
 }
 
 pub struct ExecutorPlan {
@@ -151,6 +153,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         desired_exposure: &submit_intent.desired_exposure,
         execution_quote: submit_intent.execution_quote,
         submit_purpose: submit_intent.submit_purpose,
+        risk_acquisition: submit_intent.risk_acquisition.as_ref(),
         exposure_epsilon,
         curve_maker_levels_per_side: CURVE_MAKER_LEVELS_PER_SIDE,
     };
@@ -477,6 +480,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             None,
         )
@@ -507,6 +511,7 @@ mod tests {
                 price_execution_gate,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             Some(previous_state),
         )
@@ -599,6 +604,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             Some(&previous),
         ));
@@ -674,6 +680,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             Some(&previous),
         ));
@@ -740,6 +747,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             Some(&previous),
         ));
@@ -778,6 +786,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             Some(&replacing.state),
         ));
@@ -973,6 +982,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             Some(&previous),
         ));
@@ -1029,6 +1039,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             Some(&previous),
         ));
@@ -1089,6 +1100,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             Some(&previous),
         ));
@@ -1134,6 +1146,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             Some(&previous),
         ));
@@ -1172,6 +1185,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             Some(&previous),
         ));
@@ -1249,6 +1263,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             Some(&state),
         ));
@@ -1283,6 +1298,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             Some(&previous),
         ));
@@ -1325,6 +1341,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             Some(&state),
         ));

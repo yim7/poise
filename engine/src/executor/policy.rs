@@ -18,6 +18,7 @@ use crate::executor::boundary::{
 use crate::executor::ledger::BoundaryLedgerView;
 use crate::ports::{ExecutionQuote, OrderRequest};
 use crate::price_gate::SubmitPurpose;
+use crate::risk_exposure_gate::{RiskAcquisitionRelease, RiskIncreaseDirection};
 use poise_core::track::Instrument;
 
 static CLIENT_ORDER_SESSION_PREFIX: OnceLock<String> = OnceLock::new();
@@ -51,6 +52,7 @@ pub(super) struct PolicyPlanningInput<'a> {
     pub desired_exposure: &'a Exposure,
     pub execution_quote: Option<ExecutionQuote>,
     pub submit_purpose: SubmitPurpose,
+    pub risk_acquisition: Option<&'a RiskAcquisitionRelease>,
     pub exposure_epsilon: f64,
     pub curve_maker_levels_per_side: usize,
 }
@@ -105,16 +107,24 @@ fn plan_normal_policy_bindings(input: &PolicyPlanningInput<'_>) -> Vec<DesiredBi
         desired_bindings.push(binding);
     }
     covered_operations.extend(catch_up_operations.iter().cloned());
-    desired_bindings.extend(
-        select_curve_maker_operations(
-            input.view,
-            &covered_operations,
-            input.exposure_epsilon,
-            input.curve_maker_levels_per_side,
-        )
-        .into_iter()
-        .filter_map(|operation| plan_curve_maker_binding(input, operation)),
-    );
+    if let Some(release) = input.risk_acquisition {
+        if let Some(binding) =
+            plan_risk_acquisition_maker_binding(input, release, &covered_operations)
+        {
+            desired_bindings.push(binding);
+        }
+    } else {
+        desired_bindings.extend(
+            select_curve_maker_operations(
+                input.view,
+                &covered_operations,
+                input.exposure_epsilon,
+                input.curve_maker_levels_per_side,
+            )
+            .into_iter()
+            .filter_map(|operation| plan_curve_maker_binding(input, operation)),
+        );
+    }
 
     desired_bindings
 }
@@ -587,6 +597,77 @@ fn plan_curve_maker_binding(
     })
 }
 
+fn plan_risk_acquisition_maker_binding(
+    input: &PolicyPlanningInput<'_>,
+    release: &RiskAcquisitionRelease,
+    covered_operations: &BTreeSet<BoundaryOperation>,
+) -> Option<DesiredBinding> {
+    let direction = boundary_direction_for_risk_increase_direction(release.direction);
+    let selected = select_target_operations(
+        input.view,
+        covered_operations,
+        direction,
+        input.exposure_epsilon,
+        false,
+    );
+    let allocations = allocate_operations(input.view, selected, release.release_units);
+    if allocations.is_empty() {
+        return None;
+    }
+    let price = risk_acquisition_price(input, release)?;
+    let exposure_qty = allocations
+        .iter()
+        .map(|allocation| allocation.exposure_qty)
+        .sum::<f64>();
+    let quantity = round_to_step(
+        exposure_qty * input.base_qty_per_unit,
+        input.exchange_rules.quantity_step,
+    );
+    if quantity <= f64::EPSILON || !is_meetable_minimum(price, quantity, input.exchange_rules) {
+        return None;
+    }
+
+    let request = OrderRequest {
+        instrument: input.instrument.clone(),
+        side: side_for_direction(direction),
+        price,
+        quantity,
+        client_order_id: next_client_order_id(PolicyKind::CurveMaker),
+        reduce_only: false,
+    };
+    let proposal = proposal_for_allocations(PolicyKind::CurveMaker, &allocations);
+    Some(DesiredBinding {
+        proposal,
+        allocations,
+        request,
+        desired_exposure: release.release_target.clone(),
+        submit_purpose: input.submit_purpose,
+        policy_state: BindingPolicyState::CurveMaker {
+            due_grace_started_at: None,
+        },
+    })
+}
+
+fn risk_acquisition_price(
+    input: &PolicyPlanningInput<'_>,
+    release: &RiskAcquisitionRelease,
+) -> Option<f64> {
+    let direction = boundary_direction_for_risk_increase_direction(release.direction);
+    let raw_price = trigger_price_for_boundary(release.advantage_target.0, input.config);
+    raw_price
+        .is_finite()
+        .then(|| round_passive_price(raw_price, input.exchange_rules, direction))
+}
+
+fn boundary_direction_for_risk_increase_direction(
+    direction: RiskIncreaseDirection,
+) -> BoundaryDirection {
+    match direction {
+        RiskIncreaseDirection::Long => BoundaryDirection::Up,
+        RiskIncreaseDirection::Short => BoundaryDirection::Down,
+    }
+}
+
 fn allocate_operations(
     view: &BoundaryLedgerView,
     operations: Vec<BoundaryOperation>,
@@ -955,6 +1036,7 @@ mod tests {
                     best_ask: 100.1,
                 }),
                 submit_purpose: SubmitPurpose::AutoReconcile,
+                risk_acquisition: None,
                 exposure_epsilon: 1e-9,
                 curve_maker_levels_per_side: 1,
             },

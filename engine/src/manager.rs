@@ -1052,6 +1052,7 @@ impl TrackManager {
         &self,
         track: &'a TrackRuntime,
         desired_exposure: poise_core::types::Exposure,
+        risk_acquisition: Option<RiskAcquisitionRelease>,
         observed_at: chrono::DateTime<chrono::Utc>,
     ) -> executor::SubmitIntentInput<'a> {
         let submit_purpose = self.submit_purpose_for_track(track, &desired_exposure);
@@ -1068,6 +1069,7 @@ impl TrackManager {
             price_execution_gate: track.price_execution_gate,
             submit_purpose,
             observed_at,
+            risk_acquisition,
         }
     }
 
@@ -1105,7 +1107,7 @@ impl TrackManager {
             });
         }
         let observed_at = self.clock.now();
-        if target.suppress_execution {
+        if target.suppress_execution && target.risk_acquisition.is_none() {
             let executor_state = executor::refresh_state(
                 &track.executor_state,
                 track.config(),
@@ -1126,8 +1128,12 @@ impl TrackManager {
             });
         }
         let executor_state = Some(&track.executor_state);
-        let submit_intent =
-            self.submit_intent_input(track, target.desired_exposure.clone(), observed_at);
+        let submit_intent = self.submit_intent_input(
+            track,
+            target.desired_exposure.clone(),
+            target.risk_acquisition.clone(),
+            observed_at,
+        );
         let plan = executor::plan(executor::ExecutorInput::new(submit_intent, executor_state));
 
         Ok(PlannedInventoryExecution {
@@ -1207,7 +1213,9 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use poise_core::risk::LossLimits;
-    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
+    use poise_core::strategy::{
+        BandProtectionPolicy, RiskIncreaseDelayConfig, ShapeFamily, TrackConfig,
+    };
     use poise_core::track::TrackDefinition;
     use poise_core::types::{ExchangeRules, Side};
 
@@ -1216,6 +1224,7 @@ mod tests {
     use crate::executor::{PolicyContext, policy::PolicyKind};
     use crate::ledger::TrackPnlStats;
     use crate::ports::ExecutionQuote;
+    use crate::risk_exposure_gate::RiskExposureGateState;
     use crate::runtime::{CurrentMarketData, TrackStatus};
     use poise_core::track::Venue;
 
@@ -1317,6 +1326,40 @@ mod tests {
         assert!((request.price - 95.1).abs() < 1e-9);
         assert!((request.quantity - 1.0).abs() < 1e-9);
         assert_eq!(catch_up_binding.allocations.len(), 1);
+    }
+
+    #[test]
+    fn reconcile_track_plans_risk_acquisition_maker_when_allowed_target_is_current_exposure() {
+        let (mut manager, id) = manager();
+        {
+            let track = manager.tracks.get_mut(&id).unwrap();
+            let mut config = track.config().clone();
+            config.min_rebalance_units = 0.5;
+            config.risk_increase_delay = Some(RiskIncreaseDelayConfig::default());
+            track.replace_definition_for_test(
+                config,
+                track.max_notional(),
+                track.loss_limits().clone(),
+            );
+            track.current_exposure = Exposure(1.5);
+            track.desired_exposure = Some(Exposure(1.5));
+            track.track_state =
+                TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
+                    gate: RiskExposureGateState {
+                        allowed_target: Exposure(1.5),
+                        anchor_price: 93.75,
+                        anchor_curve_target: Exposure(5.0),
+                    },
+                }));
+        }
+
+        let transition = manager.observe(&id, market(93.75)).unwrap();
+
+        assert!(transition.effects.iter().any(|effect| matches!(
+            effect,
+            TrackEffect::SubmitOrder { request, .. }
+                if request.side == Side::Buy && (request.price - 92.5).abs() < 1e-9
+        )));
     }
 
     #[test]

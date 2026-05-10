@@ -383,6 +383,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             None,
         ));
@@ -444,6 +445,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             None,
         ));
@@ -512,6 +514,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             None,
         ));
@@ -574,6 +577,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             None,
         ));
@@ -606,6 +610,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             Some(&applied.state),
         ));
@@ -661,6 +666,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             None,
         ));
@@ -721,6 +727,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
+                risk_acquisition: None,
             },
             None,
         ));
