@@ -193,12 +193,13 @@ function resolvePriceStatus(
     };
   }
 
+  const venueName = exchangeVenueDisplayName(selectedDraft);
   const override = snapshot.temporaryPriceOverrides[selectedDraft.draftId];
   if (typeof override === 'number' && Number.isFinite(override)) {
     return {
       tone: 'accent' as const,
       badge: '临时价格覆盖',
-      note: '当前试算优先使用临时输入价格；清空输入框后会恢复 Binance 自动报价。',
+      note: `当前试算优先使用临时输入价格；清空输入框后会恢复 ${venueName} 自动报价。`,
     };
   }
 
@@ -207,7 +208,7 @@ function resolvePriceStatus(
     return {
       tone: 'accent' as const,
       badge: '临时价格覆盖',
-      note: '当前试算优先使用临时输入价格；清空输入框后会恢复 Binance 自动报价。',
+      note: `当前试算优先使用临时输入价格；清空输入框后会恢复 ${venueName} 自动报价。`,
     };
   }
 
@@ -215,19 +216,19 @@ function resolvePriceStatus(
   if (remoteQuote?.status === 'live') {
     return {
       tone: 'accent' as const,
-      badge: 'Binance 实时',
+      badge: `${venueName} 实时`,
       note: `最新合约报价已接通，更新时间 ${formatRetrievedAt(remoteQuote.retrievedAt)}。`,
     };
   }
 
   if (remoteQuote?.status === 'error') {
-    return describeRemoteQuoteError(remoteQuote);
+    return describeRemoteQuoteError(remoteQuote, venueName);
   }
 
   if (remoteQuote?.status === 'loading') {
     return {
       tone: 'warning' as const,
-      badge: '等待 Binance',
+      badge: `等待 ${venueName}`,
       note: `正在刷新 ${remoteQuote.symbol} 的合约报价。`,
     };
   }
@@ -242,12 +243,15 @@ function resolvePriceStatus(
 
   return {
     tone: 'warning' as const,
-    badge: '等待 Binance',
-    note: '当前还没有可用的 Binance 合约报价。',
+    badge: `等待 ${venueName}`,
+    note: `当前还没有可用的 ${venueName} 合约报价。`,
   };
 }
 
-function describeRemoteQuoteError(remoteQuote: Extract<RemoteQuoteState, { status: 'error' }>) {
+function describeRemoteQuoteError(
+  remoteQuote: Extract<RemoteQuoteState, { status: 'error' }>,
+  venueName: string,
+) {
   if (remoteQuote.errorKind === 'unsupported_symbol') {
     return {
       tone: 'danger' as const,
@@ -259,7 +263,7 @@ function describeRemoteQuoteError(remoteQuote: Extract<RemoteQuoteState, { statu
   if (remoteQuote.errorKind === 'rate_limited') {
     return {
       tone: 'warning' as const,
-      badge: 'Binance 限流',
+      badge: `${venueName} 限流`,
       note: remoteQuote.message,
     };
   }
@@ -277,6 +281,12 @@ function describeRemoteQuoteError(remoteQuote: Extract<RemoteQuoteState, { statu
     badge: '报价失败',
     note: remoteQuote.message,
   };
+}
+
+function exchangeVenueDisplayName(draft: TrackDraft) {
+  return draft.attachments.exchangeVenue?.trim().toLowerCase() === 'okx'
+    ? 'OKX'
+    : 'Binance';
 }
 
 function formatRetrievedAt(retrievedAt: number) {

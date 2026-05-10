@@ -33,6 +33,30 @@ export interface TrackDraftRawNumericFields {
   totalLossLimit: string;
 }
 
+export interface RiskIncreaseDelayDraft {
+  startupInitialRatio: string;
+  advantageMinRebalanceMultiples: string;
+  baseStepMinRebalanceMultiples: string;
+  maxStepMinRebalanceMultiples: string;
+  catchupRatio: string;
+}
+
+export interface RiskIncreaseDelayParsed {
+  startupInitialRatio: number;
+  advantageMinRebalanceMultiples: number;
+  baseStepMinRebalanceMultiples: number;
+  maxStepMinRebalanceMultiples: number;
+  catchupRatio: number;
+}
+
+export type RiskIncreaseDelayDraftField = keyof RiskIncreaseDelayDraft;
+export type RiskIncreaseDelayFieldKey =
+  | 'riskIncreaseDelay.startupInitialRatio'
+  | 'riskIncreaseDelay.advantageMinRebalanceMultiples'
+  | 'riskIncreaseDelay.baseStepMinRebalanceMultiples'
+  | 'riskIncreaseDelay.maxStepMinRebalanceMultiples'
+  | 'riskIncreaseDelay.catchupRatio';
+
 export interface TrackDraftEnumFields {
   shapeFamily: TrackShapeFamily;
   bandProtectionPolicy: BandProtectionPolicyPayload;
@@ -49,7 +73,8 @@ export type TrackDraftFieldKey =
   | 'symbol'
   | 'shapeFamily'
   | 'bandProtectionKind'
-  | 'quotePriceInput';
+  | 'quotePriceInput'
+  | RiskIncreaseDelayFieldKey;
 
 export interface TrackDraftLoadIssue {
   field: TrackDraftFieldKey;
@@ -96,6 +121,7 @@ export interface TrackDraft {
   draftId: string;
   additional: TrackDraftAdditionalFields;
   rawNumbers: TrackDraftRawNumericFields;
+  riskIncreaseDelay?: RiskIncreaseDelayDraft;
   parsedNumbers: Partial<TrackDraftNumericFields>;
   enums: TrackDraftEnumFields;
   ui: TrackDraftUiState;
@@ -106,6 +132,7 @@ export interface TrackDraftParsedSnapshot {
   draftId: string;
   additional: TrackDraftAdditionalFields;
   parsedNumbers: TrackDraftNumericFields;
+  riskIncreaseDelay?: RiskIncreaseDelayParsed;
   enums: TrackDraftEnumFields;
   ui: TrackDraftResolvedUiState;
   attachments: TrackDraftAttachments;
@@ -119,6 +146,7 @@ export interface CreateTrackDraftInput {
       bandProtectionPolicy: BandProtectionPolicyPayload;
     };
   parsedNumbers?: Partial<TrackDraftNumericFields>;
+  riskIncreaseDelay?: RiskIncreaseDelayDraft;
   enums?: TrackDraftEnumFields;
   additional?: TrackDraftAdditionalFields;
   ui?: Partial<TrackDraftUiState>;
@@ -140,6 +168,33 @@ export const TRACK_NUMERIC_FIELD_KEYS = [
 
 type TrackNumericFieldKey = (typeof TRACK_NUMERIC_FIELD_KEYS)[number];
 
+export const RISK_INCREASE_DELAY_FIELD_KEYS = [
+  'startupInitialRatio',
+  'advantageMinRebalanceMultiples',
+  'baseStepMinRebalanceMultiples',
+  'maxStepMinRebalanceMultiples',
+  'catchupRatio',
+] as const satisfies readonly RiskIncreaseDelayDraftField[];
+
+const RISK_INCREASE_DELAY_FIELD_KEY_BY_DRAFT_FIELD: Record<
+  RiskIncreaseDelayDraftField,
+  RiskIncreaseDelayFieldKey
+> = {
+  startupInitialRatio: 'riskIncreaseDelay.startupInitialRatio',
+  advantageMinRebalanceMultiples: 'riskIncreaseDelay.advantageMinRebalanceMultiples',
+  baseStepMinRebalanceMultiples: 'riskIncreaseDelay.baseStepMinRebalanceMultiples',
+  maxStepMinRebalanceMultiples: 'riskIncreaseDelay.maxStepMinRebalanceMultiples',
+  catchupRatio: 'riskIncreaseDelay.catchupRatio',
+};
+
+export const DEFAULT_RISK_INCREASE_DELAY_DRAFT: RiskIncreaseDelayDraft = Object.freeze({
+  startupInitialRatio: '0.3',
+  advantageMinRebalanceMultiples: '2',
+  baseStepMinRebalanceMultiples: '1',
+  maxStepMinRebalanceMultiples: '4',
+  catchupRatio: '0.25',
+});
+
 export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {
   const rawNumbers = extractRawNumbers(input.raw);
   const bandProtectionPolicy = input.enums?.bandProtectionPolicy ?? input.raw.bandProtectionPolicy;
@@ -151,6 +206,9 @@ export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {
       symbol: input.raw.symbol,
     },
     rawNumbers,
+    riskIncreaseDelay: input.riskIncreaseDelay
+      ? { ...input.riskIncreaseDelay }
+      : undefined,
     parsedNumbers: input.parsedNumbers ?? parseTrackDraftRawNumbers(rawNumbers),
     enums: {
       shapeFamily: input.enums?.shapeFamily ?? input.raw.shapeFamily,
@@ -199,6 +257,12 @@ export function defaultBandProtectionPolicy(
     case 'terminate':
       return 'terminate';
   }
+}
+
+export function riskIncreaseDelayFieldKey(
+  field: RiskIncreaseDelayDraftField,
+): RiskIncreaseDelayFieldKey {
+  return RISK_INCREASE_DELAY_FIELD_KEY_BY_DRAFT_FIELD[field];
 }
 
 export function refreshTrackDraftParsedNumbers(draft: TrackDraft) {

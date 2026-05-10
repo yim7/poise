@@ -12,6 +12,7 @@ interface DraftOverrides {
   additional?: TrackDraft['additional'];
   enums?: TrackDraft['enums'];
   rawNumbers?: Partial<TrackDraft['rawNumbers']>;
+  riskIncreaseDelay?: TrackDraft['riskIncreaseDelay'];
   ui?: Partial<TrackDraft['ui']>;
   attachments?: TrackDraft['attachments'];
 }
@@ -37,6 +38,7 @@ function makeDraft(draftId: string, overrides: DraftOverrides = {}): TrackDraft 
     },
     additional: overrides.additional,
     enums: overrides.enums,
+    riskIncreaseDelay: overrides.riskIncreaseDelay,
     ui: {
       quotePriceInput: overrides.ui?.quotePriceInput ?? '100',
     },
@@ -243,6 +245,47 @@ describe('AppShell', () => {
     expect(
       within(screen.getByRole('region', { name: '关键指标区' })).getByText('当前价格'),
     ).toBeInTheDocument();
+  });
+
+  it('edits optional risk increase delay settings in the selected draft', async () => {
+    const store = createWorkbenchStore({
+      initialSnapshot: {
+        selectedDraftId: 'draft-silver',
+        drafts: [
+          makeDraft('draft-silver', {
+            riskIncreaseDelay: {
+              startupInitialRatio: '0.3',
+              advantageMinRebalanceMultiples: '2',
+              baseStepMinRebalanceMultiples: '1',
+              maxStepMinRebalanceMultiples: '4',
+              catchupRatio: '0.25',
+            },
+          }),
+        ],
+        temporaryPriceOverrides: {},
+      },
+    });
+
+    await act(async () => {
+      await store.load('/tmp/strategies/metals.toml', store.getState());
+    });
+
+    render(
+      <WorkbenchStoreProvider store={store}>
+        <AppShell />
+      </WorkbenchStoreProvider>,
+    );
+
+    const editorRegion = screen.getByRole('region', { name: '参数编辑区' });
+    expect(within(editorRegion).getByText('增加风险延迟')).toBeInTheDocument();
+    expect(screen.getByLabelText('启用增加风险延迟')).toBeChecked();
+
+    fireEvent.change(screen.getByLabelText('优势倍数'), {
+      target: { value: '3' },
+    });
+
+    expect(store.getState().drafts[0].riskIncreaseDelay?.advantageMinRebalanceMultiples)
+      .toBe('3');
   });
 
   it('recomputes min rebalance metrics when the min rebalance units field changes', async () => {

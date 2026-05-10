@@ -2,6 +2,9 @@ import type { KeyboardEvent } from 'react';
 
 import {
   bandProtectionKindFromPolicy,
+  riskIncreaseDelayFieldKey,
+  type RiskIncreaseDelayDraft,
+  type RiskIncreaseDelayDraftField,
   type TrackBandProtectionKind,
   type TrackDraft,
   type TrackDraftRawNumericFields,
@@ -12,6 +15,7 @@ import { CurveSection } from '@/ui/editor/sections/CurveSection';
 import { ExposureSection } from '@/ui/editor/sections/ExposureSection';
 import { IdentitySection } from '@/ui/editor/sections/IdentitySection';
 import { PriceBandSection } from '@/ui/editor/sections/PriceBandSection';
+import { RiskIncreaseDelaySection } from '@/ui/editor/sections/RiskIncreaseDelaySection';
 import { RiskSection } from '@/ui/editor/sections/RiskSection';
 
 export interface TrackEditorProps {
@@ -20,6 +24,8 @@ export interface TrackEditorProps {
   onAdditionalChange(field: 'trackId' | 'symbol', value: string): void;
   onNumericChange(field: keyof TrackDraftRawNumericFields, value: string): void;
   onEnumChange(field: 'shapeFamily' | 'bandProtectionKind', value: string): void;
+  onRiskIncreaseDelayToggle(enabled: boolean): void;
+  onRiskIncreaseDelayChange(field: RiskIncreaseDelayDraftField, value: string): void;
   onQuotePriceChange(value: string): void;
   onCommit(): void;
 }
@@ -79,9 +85,19 @@ export interface RiskSectionProps {
   onCommit(): void;
 }
 
+export interface RiskIncreaseDelaySectionProps {
+  enabled: boolean;
+  values: RiskIncreaseDelayDraft | undefined;
+  issuesByField: Record<RiskIncreaseDelayDraftField, string[]>;
+  onEnabledChange(value: boolean): void;
+  onDelayFieldChange(field: RiskIncreaseDelayDraftField, value: string): void;
+  onCommit(): void;
+}
+
 export interface CurveSectionProps {
   shapeFamily: TrackDraft['enums']['shapeFamily'];
   quotePriceInput: string;
+  exchangeVenue: string;
   quoteIssues: string[];
   onShapeFamilyChange(value: TrackDraft['enums']['shapeFamily']): void;
   onQuotePriceChange(value: string): void;
@@ -94,6 +110,8 @@ export function TrackEditor({
   onAdditionalChange,
   onNumericChange,
   onEnumChange,
+  onRiskIncreaseDelayToggle,
+  onRiskIncreaseDelayChange,
   onQuotePriceChange,
   onCommit,
 }: TrackEditorProps) {
@@ -186,9 +204,39 @@ export function TrackEditor({
           onTotalLossLimitChange={(value) => onNumericChange('totalLossLimit', value)}
           onCommit={onCommit}
         />
+        <RiskIncreaseDelaySection
+          enabled={Boolean(draft.riskIncreaseDelay)}
+          values={draft.riskIncreaseDelay}
+          issuesByField={{
+            startupInitialRatio: fieldIssues(
+              issuesByField,
+              riskIncreaseDelayFieldKey('startupInitialRatio'),
+            ),
+            advantageMinRebalanceMultiples: fieldIssues(
+              issuesByField,
+              riskIncreaseDelayFieldKey('advantageMinRebalanceMultiples'),
+            ),
+            baseStepMinRebalanceMultiples: fieldIssues(
+              issuesByField,
+              riskIncreaseDelayFieldKey('baseStepMinRebalanceMultiples'),
+            ),
+            maxStepMinRebalanceMultiples: fieldIssues(
+              issuesByField,
+              riskIncreaseDelayFieldKey('maxStepMinRebalanceMultiples'),
+            ),
+            catchupRatio: fieldIssues(
+              issuesByField,
+              riskIncreaseDelayFieldKey('catchupRatio'),
+            ),
+          }}
+          onEnabledChange={onRiskIncreaseDelayToggle}
+          onDelayFieldChange={onRiskIncreaseDelayChange}
+          onCommit={onCommit}
+        />
         <CurveSection
           shapeFamily={draft.enums.shapeFamily}
           quotePriceInput={draft.ui.quotePriceInput}
+          exchangeVenue={draft.attachments.exchangeVenue?.trim() || 'binance'}
           quoteIssues={fieldIssues(issuesByField, 'quotePriceInput')}
           onShapeFamilyChange={(value) => onEnumChange('shapeFamily', value)}
           onQuotePriceChange={onQuotePriceChange}

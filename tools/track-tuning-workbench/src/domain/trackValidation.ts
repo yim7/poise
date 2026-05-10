@@ -3,8 +3,14 @@ import type {
   TrackDraftFieldKey,
   TrackDraftNumericFields,
   TrackDraftParsedSnapshot,
+  RiskIncreaseDelayDraftField,
+  RiskIncreaseDelayParsed,
 } from '@/domain/trackDraft';
-import { TRACK_NUMERIC_FIELD_KEYS } from '@/domain/trackDraft';
+import {
+  RISK_INCREASE_DELAY_FIELD_KEYS,
+  TRACK_NUMERIC_FIELD_KEYS,
+  riskIncreaseDelayFieldKey,
+} from '@/domain/trackDraft';
 
 const FIELD_LABELS: Record<
   TrackDraftFieldKey,
@@ -25,6 +31,14 @@ const FIELD_LABELS: Record<
   shapeFamily: 'shape_family',
   bandProtectionKind: 'out_of_band_policy',
   quotePriceInput: 'quote_price',
+  'riskIncreaseDelay.startupInitialRatio': 'risk_increase_delay.startup_initial_ratio',
+  'riskIncreaseDelay.advantageMinRebalanceMultiples':
+    'risk_increase_delay.advantage_min_rebalance_multiples',
+  'riskIncreaseDelay.baseStepMinRebalanceMultiples':
+    'risk_increase_delay.base_step_min_rebalance_multiples',
+  'riskIncreaseDelay.maxStepMinRebalanceMultiples':
+    'risk_increase_delay.max_step_min_rebalance_multiples',
+  'riskIncreaseDelay.catchupRatio': 'risk_increase_delay.catchup_ratio',
 };
 
 export interface TrackDraftIssue {
@@ -41,6 +55,7 @@ export interface TrackDraftValidationResult {
 export function validateTrackDraft(draft: TrackDraft): TrackDraftValidationResult {
   const issues: TrackDraftIssue[] = [];
   const parsedNumbers = {} as TrackDraftNumericFields;
+  let riskIncreaseDelay: RiskIncreaseDelayParsed | undefined;
 
   for (const issue of draft.attachments.loadIssues ?? []) {
     issues.push({
@@ -75,6 +90,10 @@ export function validateTrackDraft(draft: TrackDraft): TrackDraftValidationResul
     parsedNumbers[field] = value;
   }
 
+  if (draft.riskIncreaseDelay) {
+    riskIncreaseDelay = resolveRiskIncreaseDelay(draft, issues);
+  }
+
   const hasQuoteInput = draft.ui.quotePriceInput.trim().length > 0;
   const quotePrice = parseFiniteNumber(draft.ui.quotePriceInput);
   if (hasQuoteInput && quotePrice === null) {
@@ -102,6 +121,7 @@ export function validateTrackDraft(draft: TrackDraft): TrackDraftValidationResul
       draftId: draft.draftId,
       additional: draft.additional,
       parsedNumbers,
+      riskIncreaseDelay,
       enums: draft.enums,
       ui: {
         quotePriceInput: draft.ui.quotePriceInput,
@@ -212,6 +232,96 @@ function validateStrategySemantics(
     issues.push({
       field: 'totalLossLimit',
       message: 'total_loss_limit 必须大于 0',
+    });
+  }
+}
+
+function resolveRiskIncreaseDelay(
+  draft: TrackDraft,
+  issues: TrackDraftIssue[],
+): RiskIncreaseDelayParsed | undefined {
+  const parsed = {} as RiskIncreaseDelayParsed;
+
+  for (const field of RISK_INCREASE_DELAY_FIELD_KEYS) {
+    const issueField = riskIncreaseDelayFieldKey(field);
+    const value = parseFiniteNumber(draft.riskIncreaseDelay?.[field] ?? '');
+    if (value === null) {
+      issues.push({
+        field: issueField,
+        message: `${FIELD_LABELS[issueField]} 必须是有限数字`,
+      });
+      continue;
+    }
+    parsed[field] = value;
+  }
+
+  if (hasRiskIncreaseDelayParseIssue(issues)) {
+    return undefined;
+  }
+
+  validateRiskIncreaseDelaySemantics(parsed, issues);
+  return parsed;
+}
+
+function hasRiskIncreaseDelayParseIssue(issues: TrackDraftIssue[]): boolean {
+  return issues.some((issue) =>
+    issue.field.startsWith('riskIncreaseDelay.'),
+  );
+}
+
+function validateRiskIncreaseDelaySemantics(
+  delay: RiskIncreaseDelayParsed,
+  issues: TrackDraftIssue[],
+) {
+  requireRatioInUnitInterval(
+    delay.startupInitialRatio,
+    'startupInitialRatio',
+    issues,
+  );
+  requirePositive(
+    delay.advantageMinRebalanceMultiples,
+    'advantageMinRebalanceMultiples',
+    issues,
+  );
+  requirePositive(
+    delay.baseStepMinRebalanceMultiples,
+    'baseStepMinRebalanceMultiples',
+    issues,
+  );
+  if (delay.maxStepMinRebalanceMultiples < delay.baseStepMinRebalanceMultiples) {
+    const field = riskIncreaseDelayFieldKey('maxStepMinRebalanceMultiples');
+    issues.push({
+      field,
+      message: `${FIELD_LABELS[field]} 必须大于等于 ${FIELD_LABELS[riskIncreaseDelayFieldKey('baseStepMinRebalanceMultiples')]}`,
+    });
+  }
+  requireRatioInUnitInterval(delay.catchupRatio, 'catchupRatio', issues);
+}
+
+function requireRatioInUnitInterval(
+  value: number,
+  field: RiskIncreaseDelayDraftField,
+  issues: TrackDraftIssue[],
+) {
+  if (value <= 0 || value > 1) {
+    const issueField = riskIncreaseDelayFieldKey(field);
+    issues.push({
+      field: issueField,
+      message: `${FIELD_LABELS[issueField]} 必须在 (0, 1] 内`,
+    });
+  }
+}
+
+function requirePositive(
+  value: number,
+  field: RiskIncreaseDelayDraftField,
+  issues: TrackDraftIssue[],
+) {
+  if (value <= 0) {
+    const issueField = riskIncreaseDelayFieldKey(field);
+    issues.push({
+      field: issueField,
+      message: `${FIELD_LABELS[issueField]} 必须大于 0`,
     });
   }
 }

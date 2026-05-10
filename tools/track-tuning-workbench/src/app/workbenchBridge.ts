@@ -10,6 +10,7 @@ import type {
 import {
   createTrackDraft,
   type BandProtectionPolicyPayload,
+  type RiskIncreaseDelayDraft,
   type TrackDraft,
   type TrackDraftFieldKey,
   type TrackDraftLoadIssue,
@@ -69,6 +70,13 @@ interface LoadedConfigFilePayload {
       daily_loss_limit: number;
       total_loss_limit: number;
       shape_family: string;
+      risk_increase_delay?: {
+        startup_initial_ratio: number;
+        advantage_min_rebalance_multiples: number;
+        base_step_min_rebalance_multiples: number;
+        max_step_min_rebalance_multiples: number;
+        catchup_ratio: number;
+      } | null;
     };
     load_issues: Array<{
       field_key: string;
@@ -183,6 +191,25 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
             ui: {
               quotePriceInput: '',
             },
+            riskIncreaseDelay: track.fields.risk_increase_delay
+              ? {
+                  startupInitialRatio: formatRawNumber(
+                    track.fields.risk_increase_delay.startup_initial_ratio,
+                  ),
+                  advantageMinRebalanceMultiples: formatRawNumber(
+                    track.fields.risk_increase_delay.advantage_min_rebalance_multiples,
+                  ),
+                  baseStepMinRebalanceMultiples: formatRawNumber(
+                    track.fields.risk_increase_delay.base_step_min_rebalance_multiples,
+                  ),
+                  maxStepMinRebalanceMultiples: formatRawNumber(
+                    track.fields.risk_increase_delay.max_step_min_rebalance_multiples,
+                  ),
+                  catchupRatio: formatRawNumber(
+                    track.fields.risk_increase_delay.catchup_ratio,
+                  ),
+                }
+              : undefined,
             attachments: {
               exchangeVenue,
               ...(track.load_issues.length > 0
@@ -321,8 +348,26 @@ function toTrackDraftPayload(draft: TrackDraft) {
       daily_loss_limit: parseRequiredNumber(draft.rawNumbers.dailyLossLimit),
       total_loss_limit: parseRequiredNumber(draft.rawNumbers.totalLossLimit),
       shape_family: draft.enums.shapeFamily,
+      risk_increase_delay: toRiskIncreaseDelayPayload(draft.riskIncreaseDelay),
     },
     load_issues: [],
+  };
+}
+
+function toRiskIncreaseDelayPayload(delay: RiskIncreaseDelayDraft | undefined) {
+  if (!delay) {
+    return null;
+  }
+
+  return {
+    startup_initial_ratio: parseRequiredNumber(delay.startupInitialRatio),
+    advantage_min_rebalance_multiples:
+      parseRequiredNumber(delay.advantageMinRebalanceMultiples),
+    base_step_min_rebalance_multiples:
+      parseRequiredNumber(delay.baseStepMinRebalanceMultiples),
+    max_step_min_rebalance_multiples:
+      parseRequiredNumber(delay.maxStepMinRebalanceMultiples),
+    catchup_ratio: parseRequiredNumber(delay.catchupRatio),
   };
 }
 
@@ -363,6 +408,18 @@ function normalizeLoadIssueField(fieldKey: string): TrackDraftFieldKey {
       return 'shapeFamily';
     case 'out_of_band_policy':
       return 'bandProtectionKind';
+    case 'risk_increase_delay':
+      return 'riskIncreaseDelay.startupInitialRatio';
+    case 'risk_increase_delay.startup_initial_ratio':
+      return 'riskIncreaseDelay.startupInitialRatio';
+    case 'risk_increase_delay.advantage_min_rebalance_multiples':
+      return 'riskIncreaseDelay.advantageMinRebalanceMultiples';
+    case 'risk_increase_delay.base_step_min_rebalance_multiples':
+      return 'riskIncreaseDelay.baseStepMinRebalanceMultiples';
+    case 'risk_increase_delay.max_step_min_rebalance_multiples':
+      return 'riskIncreaseDelay.maxStepMinRebalanceMultiples';
+    case 'risk_increase_delay.catchup_ratio':
+      return 'riskIncreaseDelay.catchupRatio';
     default:
       return 'trackId';
   }

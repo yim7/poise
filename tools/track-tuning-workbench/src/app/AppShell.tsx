@@ -5,8 +5,11 @@ import {
   type WorkbenchBridge,
 } from '@/app/workbenchBridge';
 import {
+  DEFAULT_RISK_INCREASE_DELAY_DRAFT,
+  RISK_INCREASE_DELAY_FIELD_KEYS,
   createTrackDraft,
   defaultBandProtectionPolicy,
+  riskIncreaseDelayFieldKey,
   type TrackBandProtectionKind,
   type TrackDraft,
 } from '@/domain/trackDraft';
@@ -318,6 +321,35 @@ export function AppShell({ bridge }: AppShellProps) {
                     draft.enums.bandProtectionPolicy = defaultBandProtectionPolicy(nextKind);
                   }
                   clearResolvedLoadIssues(draft, field);
+                });
+              }}
+              onRiskIncreaseDelayToggle={(enabled) => {
+                if (!selectedDraft) {
+                  return;
+                }
+                store.updateDraft(selectedDraft.draftId, (draft) => {
+                  if (enabled) {
+                    draft.riskIncreaseDelay = {
+                      ...DEFAULT_RISK_INCREASE_DELAY_DRAFT,
+                    };
+                  } else {
+                    delete draft.riskIncreaseDelay;
+                  }
+                  for (const field of RISK_INCREASE_DELAY_FIELD_KEYS) {
+                    clearResolvedLoadIssues(draft, riskIncreaseDelayFieldKey(field));
+                  }
+                });
+              }}
+              onRiskIncreaseDelayChange={(field, value) => {
+                if (!selectedDraft) {
+                  return;
+                }
+                store.updateDraft(selectedDraft.draftId, (draft) => {
+                  draft.riskIncreaseDelay ??= {
+                    ...DEFAULT_RISK_INCREASE_DELAY_DRAFT,
+                  };
+                  draft.riskIncreaseDelay[field] = value;
+                  clearResolvedLoadIssues(draft, riskIncreaseDelayFieldKey(field));
                 });
               }}
               onQuotePriceChange={(value) => {

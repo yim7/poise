@@ -16,7 +16,7 @@ pub fn export_all_tracks(drafts: &[TrackDraft]) -> String {
 
 fn export_track(draft: &TrackDraft) -> String {
     let fields = &draft.fields;
-    [
+    let mut lines = vec![
         "[[tracks]]".to_string(),
         format!("track_id = {}", quote_string(&fields.track_id)),
         format!("symbol = {}", quote_string(&fields.symbol)),
@@ -50,8 +50,33 @@ fn export_track(draft: &TrackDraft) -> String {
             "shape_family = {}",
             quote_string(fields.shape_family.as_str())
         ),
-    ]
-    .join("\n")
+    ];
+
+    if let Some(delay) = fields.risk_increase_delay {
+        lines.extend([
+            String::new(),
+            "[tracks.risk_increase_delay]".to_string(),
+            format!(
+                "startup_initial_ratio = {}",
+                format_f64(delay.startup_initial_ratio)
+            ),
+            format!(
+                "advantage_min_rebalance_multiples = {}",
+                format_f64(delay.advantage_min_rebalance_multiples)
+            ),
+            format!(
+                "base_step_min_rebalance_multiples = {}",
+                format_f64(delay.base_step_min_rebalance_multiples)
+            ),
+            format!(
+                "max_step_min_rebalance_multiples = {}",
+                format_f64(delay.max_step_min_rebalance_multiples)
+            ),
+            format!("catchup_ratio = {}", format_f64(delay.catchup_ratio)),
+        ]);
+    }
+
+    lines.join("\n")
 }
 
 fn quote_string(value: &str) -> String {

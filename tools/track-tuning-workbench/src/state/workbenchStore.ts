@@ -526,6 +526,9 @@ function toExportBaselineDraft(draft: TrackDraft): TrackDraft {
     draftId: draft.draftId,
     additional: structuredClone(draft.additional),
     rawNumbers: structuredClone(draft.rawNumbers),
+    riskIncreaseDelay: draft.riskIncreaseDelay
+      ? structuredClone(draft.riskIncreaseDelay)
+      : undefined,
     parsedNumbers: {},
     enums: structuredClone(draft.enums),
     ui: {

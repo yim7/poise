@@ -150,6 +150,70 @@ describe('createWorkbenchBridge', () => {
     });
   });
 
+  it('keeps risk increase delay parameters when loading and exporting the same draft', async () => {
+    invokeMock
+      .mockResolvedValueOnce({
+        config_path: '/tmp/strategies/grid.toml',
+        projected_tracks: [
+          {
+            draft_id: 'draft-btc',
+            fields: {
+              track_id: 'btc',
+              symbol: 'BTCUSDT',
+              lower_price: 65000,
+              upper_price: 70000,
+              long_exposure_units: 8,
+              short_exposure_units: 8,
+              notional_per_unit: 250,
+              max_notional: 3000,
+              min_rebalance_units: 0.5,
+              leverage: 10,
+              out_of_band_policy: 'freeze',
+              daily_loss_limit: 120,
+              total_loss_limit: 500,
+              shape_family: 'linear',
+              risk_increase_delay: {
+                startup_initial_ratio: 0.3,
+                advantage_min_rebalance_multiples: 2,
+                base_step_min_rebalance_multiples: 1,
+                max_step_min_rebalance_multiples: 4,
+                catchup_ratio: 0.25,
+              },
+            },
+            load_issues: [],
+          },
+        ],
+      })
+      .mockResolvedValueOnce('[[tracks]]');
+
+    const bridge = createWorkbenchBridge();
+    const loaded = await bridge.loadConfigFile('/tmp/strategies/grid.toml');
+
+    expect(loaded.projectedTracks[0].riskIncreaseDelay).toEqual({
+      startupInitialRatio: '0.3',
+      advantageMinRebalanceMultiples: '2',
+      baseStepMinRebalanceMultiples: '1',
+      maxStepMinRebalanceMultiples: '4',
+      catchupRatio: '0.25',
+    });
+
+    await bridge.exportCurrentTrack(loaded.projectedTracks[0]);
+
+    expect(invokeMock).toHaveBeenLastCalledWith('export_current_track', {
+      draft: expect.objectContaining({
+        fields: expect.objectContaining({
+          risk_increase_delay: {
+            startup_initial_ratio: 0.3,
+            advantage_min_rebalance_multiples: 2,
+            base_step_min_rebalance_multiples: 1,
+            max_step_min_rebalance_multiples: 4,
+            catchup_ratio: 0.25,
+          },
+        }),
+      }),
+    });
+  });
+
   it('keeps browser preview out of real config loading', async () => {
     delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     const createElementSpy = vi.spyOn(document, 'createElement');

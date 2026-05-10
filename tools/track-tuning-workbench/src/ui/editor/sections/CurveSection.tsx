@@ -4,11 +4,14 @@ import { commitOnEnter, type CurveSectionProps } from '@/ui/editor/TrackEditor';
 export function CurveSection({
   shapeFamily,
   quotePriceInput,
+  exchangeVenue,
   quoteIssues,
   onShapeFamilyChange,
   onQuotePriceChange,
   onCommit,
 }: CurveSectionProps) {
+  const venueName = exchangeVenue.trim().toLowerCase() === 'okx' ? 'OKX' : 'Binance';
+
   return (
     <section className="editor-section">
       <div className="editor-section__header">
@@ -53,7 +56,7 @@ export function CurveSection({
         </InlineNotice>
       ) : (
         <InlineNotice title="预览说明">
-          默认使用 Binance 合约实时价格；这里填入数字后，会只在本地试算里临时覆盖当前价格，不会写进导出配置。
+          默认使用 {venueName} 合约实时价格；这里填入数字后，会只在本地试算里临时覆盖当前价格，不会写进导出配置。
         </InlineNotice>
       )}
     </section>
