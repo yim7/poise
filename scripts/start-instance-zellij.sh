@@ -10,16 +10,24 @@ LAYOUT_PATH="${REPO_ROOT}/ops/zellij/poise-instance.kdl"
 RAW_INSTANCE_DIR="${POISE_INSTANCE_DIR:-}"
 BASE_URL="${POISE_BASE_URL:-http://127.0.0.1:8000}"
 DRY_RUN=0
+MODE="recreate"
+
+if [[ "${POISE_ZELLIJ_ATTACH:-0}" == "1" ]]; then
+  MODE="attach"
+elif [[ "${POISE_ZELLIJ_RECREATE:-0}" == "1" ]]; then
+  MODE="recreate"
+fi
 
 usage() {
   cat <<'EOF'
 用法:
-  scripts/start-instance-zellij.sh [--dry-run]
+  scripts/start-instance-zellij.sh [--dry-run] [--attach]
 
 环境变量:
   POISE_INSTANCE_DIR         实例目录，必须包含 config.toml
   POISE_BASE_URL             实例 HTTP 服务基地址，默认 http://127.0.0.1:8000
   POISE_ZELLIJ_SESSION_NAME  zellij session 名称，可选；默认从实例目录 basename 推导
+  POISE_ZELLIJ_ATTACH        设为 1 时只附加同名活跃 session，不重建
 EOF
 }
 
@@ -27,6 +35,14 @@ while (($# > 0)); do
   case "$1" in
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --attach)
+      MODE="attach"
+      shift
+      ;;
+    --recreate)
+      MODE="recreate"
       shift
       ;;
     -h|--help)
@@ -69,6 +85,17 @@ export POISE_SERVER_LOG="${POISE_SERVER_LOG:-${LOG_DIR}/poise-server.log}"
 export POISE_HEALTH_LOG="${POISE_HEALTH_LOG:-${LOG_DIR}/health-probe.log}"
 export POISE_TUI_LOG="${POISE_TUI_LOG:-${LOG_DIR}/poise-tui.log}"
 
+zellij_session_is_active() {
+  local candidate
+  while IFS= read -r candidate; do
+    if [[ "$candidate" == "$SESSION_NAME" ]]; then
+      return 0
+    fi
+  done < <(zellij list-sessions --short --no-formatting 2>/dev/null || true)
+
+  return 1
+}
+
 if [[ "$DRY_RUN" -eq 1 ]]; then
   cat <<EOF
 repo_root=$REPO_ROOT
@@ -77,7 +104,8 @@ layout_path=$LAYOUT_PATH
 session_name=$SESSION_NAME
 base_url=$POISE_BASE_URL
 log_dir=$POISE_LOG_DIR
-create_command=zellij attach --create-background $SESSION_NAME options --default-layout $LAYOUT_PATH
+mode=$MODE
+create_command=zellij attach --forget --create-background $SESSION_NAME options --default-layout $LAYOUT_PATH
 attach_command=zellij attach $SESSION_NAME
 EOF
   exit 0
@@ -88,9 +116,15 @@ if ! command -v zellij >/dev/null 2>&1; then
   exit 1
 fi
 
-if zellij attach "$SESSION_NAME" 2>/dev/null; then
-  exit 0
+if [[ "$MODE" == "attach" ]]; then
+  if ! zellij_session_is_active; then
+    echo "zellij session is not active: $SESSION_NAME" >&2
+    echo "run without --attach to recreate it" >&2
+    exit 1
+  fi
+  exec zellij attach "$SESSION_NAME"
 fi
 
-zellij attach --create-background "$SESSION_NAME" options --default-layout "$LAYOUT_PATH"
+zellij delete-session --force "$SESSION_NAME" >/dev/null 2>&1 || true
+zellij attach --forget --create-background "$SESSION_NAME" options --default-layout "$LAYOUT_PATH"
 exec zellij attach "$SESSION_NAME"

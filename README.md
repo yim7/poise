@@ -305,6 +305,14 @@ export POISE_ZELLIJ_SESSION_NAME=poise-testnet
 ./scripts/start-instance-zellij.sh
 ```
 
+脚本默认每次都会重建同名 zellij session：先删除同名 session，再 `--forget` 旧保存态，并按当前 layout 新建。这样可以避免电脑重启后复活旧 pane 命令。若只是想附加到当前活跃 session：
+
+```bash
+./scripts/start-instance-zellij.sh --attach
+# 或
+POISE_ZELLIJ_ATTACH=1 ./scripts/start-instance-zellij.sh
+```
+
 日志默认写到 `<instance-dir>/.logs/`：
 
 - `poise-server.log`
