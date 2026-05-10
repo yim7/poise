@@ -23,11 +23,11 @@
     "min_rebalance_units": 0.5,
     "shape_family": "linear",
     "out_of_band_policy": "freeze",
-    "risk_increase_delay": {
-      "startup_initial_ratio": 0.3,
-      "advantage_min_rebalance_multiples": 2.0,
-      "base_step_min_rebalance_multiples": 1.0,
-      "max_step_min_rebalance_multiples": 4.0,
+    "risk_acquisition": {
+      "initial_ratio": 0.3,
+      "advantage_steps": 2.0,
+      "min_release_steps": 1.0,
+      "max_release_steps": 4.0,
       "catchup_ratio": 0.25
     }
   },

@@ -87,6 +87,13 @@ function makeSnapshot(
       symbol: 'BTCUSDT',
     },
     parsedNumbers: numericFields,
+    riskAcquisition: overrides.riskAcquisition ?? {
+      initialRatio: 0.3,
+      advantageSteps: 2,
+      minReleaseSteps: 1,
+      maxReleaseSteps: 4,
+      catchupRatio: 0.25,
+    },
     enums: {
       shapeFamily: overrides.enums?.shapeFamily ?? 'linear',
       bandProtectionPolicy: overrides.enums?.bandProtectionPolicy ?? 'freeze',

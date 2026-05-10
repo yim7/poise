@@ -13,7 +13,7 @@ pub fn run() -> tauri::Result<()> {
             commands::load_config_file,
             commands::load_saved_draft,
             commands::save_draft,
-            commands::risk_increase_delay_defaults,
+            commands::risk_acquisition_defaults,
             commands::copy_text,
             commands::fetch_binance_quote,
             commands::export_current_track,

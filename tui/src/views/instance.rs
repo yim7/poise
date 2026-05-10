@@ -229,17 +229,15 @@ fn strategy_lines(
 }
 
 fn format_risk_delay_line(detail: &crate::protocol::TrackDetailView) -> String {
-    match detail.strategy.risk_increase_delay {
-        Some(delay) => format!(
-            "risk delay: startup {:.0}%, advantage {:.1}x, step {:.1}x-{:.1}x, catchup {:.0}%",
-            delay.startup_initial_ratio * 100.0,
-            delay.advantage_min_rebalance_multiples,
-            delay.base_step_min_rebalance_multiples,
-            delay.max_step_min_rebalance_multiples,
-            delay.catchup_ratio * 100.0
-        ),
-        None => "risk delay: off".to_string(),
-    }
+    let delay = detail.strategy.risk_acquisition;
+    format!(
+        "acq: init {:.0}% | adv {:.1}x | release {:.1}-{:.1}x | catchup {:.0}%",
+        delay.initial_ratio * 100.0,
+        delay.advantage_steps,
+        delay.min_release_steps,
+        delay.max_release_steps,
+        delay.catchup_ratio * 100.0
+    )
 }
 
 fn pnl_lines(detail: &crate::protocol::TrackDetailView) -> Vec<Line<'static>> {
@@ -526,7 +524,7 @@ fn compact_binding_label(binding: &poise_protocol::ExecutionBindingView) -> Stri
 fn format_risk_acquisition_lines(risk_acquisition: &RiskAcquisitionView) -> Vec<Line<'static>> {
     vec![
         Line::from(format!(
-            "risk acquisition: {} | curve {} | allowed {} | backlog {}",
+            "acq: {} | curve {} | allow {} | backlog {}",
             format_risk_direction(risk_acquisition.direction),
             format_signed_exposure(risk_acquisition.curve_target),
             format_signed_exposure(risk_acquisition.allowed_target),
@@ -540,7 +538,7 @@ fn format_risk_acquisition_lines(risk_acquisition: &RiskAcquisitionView) -> Vec<
             format_optional_price(risk_acquisition.next_advantage_price),
         )),
         Line::from(format!(
-            "next release {} -> {}",
+            "release {} -> {}",
             format_signed_exposure(risk_acquisition.next_release_units),
             format_signed_exposure(risk_acquisition.next_release_target),
         )),
@@ -549,7 +547,7 @@ fn format_risk_acquisition_lines(risk_acquisition: &RiskAcquisitionView) -> Vec<
 
 fn format_compact_risk_acquisition(risk_acquisition: &RiskAcquisitionView) -> String {
     format!(
-        "risk acquisition: {} backlog {} | next {} -> {}",
+        "acq: {} backlog {} | release {} -> {}",
         format_risk_direction(risk_acquisition.direction),
         format_signed_exposure(risk_acquisition.backlog_units),
         format_signed_exposure(risk_acquisition.next_release_units),
@@ -975,11 +973,9 @@ mod tests {
 
         let text = render_text_with_size(detail, 180, 36);
 
-        assert!(text.contains(
-            "risk acquisition: long | curve +6.0000 | allowed +2.3750 | backlog +3.6250"
-        ));
+        assert!(text.contains("acq: long | curve +6.0000 | allow +2.3750 | backlog +3.6250"));
         assert!(text.contains("anchor 100.0000 / +4.0000 | advantage +6.0000 @ 92.5000"));
-        assert!(text.contains("next release +0.8750 -> +3.2500"));
+        assert!(text.contains("release +0.8750 -> +3.2500"));
     }
 
     #[test]

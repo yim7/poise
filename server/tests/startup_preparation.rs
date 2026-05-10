@@ -140,7 +140,7 @@ fn track_definition_registry(track_id: &str, symbol: &str) -> TrackDefinitionReg
                 min_rebalance_units: 0.5,
                 shape_family: ShapeFamily::Linear,
                 out_of_band_policy: BandProtectionPolicy::Freeze,
-                risk_increase_delay: None,
+                risk_acquisition: Default::default(),
             },
             Some(3_000.0),
             LossLimits {

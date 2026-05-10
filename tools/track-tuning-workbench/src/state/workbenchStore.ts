@@ -14,6 +14,7 @@ import type {
 } from '@/state/sessionSync';
 import { createSessionSync } from '@/state/sessionSync';
 import {
+  DEFAULT_RISK_ACQUISITION_DRAFT,
   refreshTrackDraftParsedNumbers,
   type TrackDraft,
 } from '@/domain/trackDraft';
@@ -410,12 +411,20 @@ function prepareLoadedSnapshot(snapshot: WorkbenchSnapshot): WorkbenchSnapshot {
 
 function prepareLoadedDraft(draft: TrackDraft): TrackDraft {
   const nextDraft = withBinanceFuturesDefaults(cloneDraft(draft));
+  nextDraft.riskAcquisition = {
+    ...DEFAULT_RISK_ACQUISITION_DRAFT,
+    ...(nextDraft.riskAcquisition ?? {}),
+  };
   refreshTrackDraftParsedNumbers(nextDraft);
   return nextDraft;
 }
 
 function normalizeDraft(draft: TrackDraft): TrackDraft {
   const nextDraft = cloneDraft(draft);
+  nextDraft.riskAcquisition = {
+    ...DEFAULT_RISK_ACQUISITION_DRAFT,
+    ...(nextDraft.riskAcquisition ?? {}),
+  };
   refreshTrackDraftParsedNumbers(nextDraft);
   return nextDraft;
 }
@@ -526,9 +535,7 @@ function toExportBaselineDraft(draft: TrackDraft): TrackDraft {
     draftId: draft.draftId,
     additional: structuredClone(draft.additional),
     rawNumbers: structuredClone(draft.rawNumbers),
-    riskIncreaseDelay: draft.riskIncreaseDelay
-      ? structuredClone(draft.riskIncreaseDelay)
-      : undefined,
+    riskAcquisition: structuredClone(draft.riskAcquisition),
     parsedNumbers: {},
     enums: structuredClone(draft.enums),
     ui: {

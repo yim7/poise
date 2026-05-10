@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use poise_core::strategy::{BandProtectionPolicy, RiskIncreaseDelayConfig};
+use poise_core::strategy::{BandProtectionPolicy, RiskAcquisitionConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
@@ -44,7 +44,7 @@ pub struct EditableTrackFieldsPayload {
     pub daily_loss_limit: f64,
     pub total_loss_limit: f64,
     pub shape_family: String,
-    pub risk_increase_delay: Option<RiskIncreaseDelayConfig>,
+    pub risk_acquisition: RiskAcquisitionConfig,
 }
 
 pub(crate) fn load_config_file_from_path(
@@ -142,8 +142,8 @@ pub fn save_draft(
 }
 
 #[tauri::command]
-pub fn risk_increase_delay_defaults() -> RiskIncreaseDelayConfig {
-    RiskIncreaseDelayConfig::default()
+pub fn risk_acquisition_defaults() -> RiskAcquisitionConfig {
+    RiskAcquisitionConfig::default()
 }
 
 #[tauri::command]
@@ -218,7 +218,7 @@ impl From<&EditableTrackFields> for EditableTrackFieldsPayload {
             daily_loss_limit: value.daily_loss_limit,
             total_loss_limit: value.total_loss_limit,
             shape_family: value.shape_family.as_str().to_string(),
-            risk_increase_delay: value.risk_increase_delay,
+            risk_acquisition: value.risk_acquisition,
         }
     }
 }
@@ -272,7 +272,7 @@ impl TryFrom<EditableTrackFieldsPayload> for EditableTrackFields {
                     ));
                 }
             },
-            risk_increase_delay: value.risk_increase_delay,
+            risk_acquisition: value.risk_acquisition,
         })
     }
 }
@@ -623,7 +623,7 @@ total_loss_limit = 160.0
                 daily_loss_limit: 100.0,
                 total_loss_limit: 200.0,
                 shape_family: "linear".to_string(),
-                risk_increase_delay: None,
+                risk_acquisition: Default::default(),
             },
             load_issues: Vec::new(),
         };
@@ -654,7 +654,7 @@ total_loss_limit = 160.0
                 daily_loss_limit: 100.0,
                 total_loss_limit: 200.0,
                 shape_family: "linear".to_string(),
-                risk_increase_delay: None,
+                risk_acquisition: Default::default(),
             },
             load_issues: Vec::new(),
         };
@@ -684,7 +684,7 @@ total_loss_limit = 160.0
                 daily_loss_limit: 80.0,
                 total_loss_limit: 160.0,
                 shape_family: "responsive".to_string(),
-                risk_increase_delay: None,
+                risk_acquisition: Default::default(),
             },
             load_issues: Vec::new(),
         };
@@ -841,7 +841,7 @@ total_loss_limit = 160.0
                 daily_loss_limit: 120.0,
                 total_loss_limit: 500.0,
                 shape_family: "linear".to_string(),
-                risk_increase_delay: None,
+                risk_acquisition: Default::default(),
             },
             load_issues: Vec::new(),
         }

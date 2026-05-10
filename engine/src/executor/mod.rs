@@ -53,7 +53,7 @@ mod tests {
             min_rebalance_units: 1.0,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
-            risk_increase_delay: None,
+            risk_acquisition: Default::default(),
         }
     }
 
@@ -227,7 +227,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: observed_at(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             state,
         )

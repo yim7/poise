@@ -10,8 +10,8 @@ import type {
 import {
   createTrackDraft,
   type BandProtectionPolicyPayload,
-  DEFAULT_RISK_INCREASE_DELAY_DRAFT,
-  type RiskIncreaseDelayDraft,
+  DEFAULT_RISK_ACQUISITION_DRAFT,
+  type RiskAcquisitionDraft,
   type TrackDraft,
   type TrackDraftFieldKey,
   type TrackDraftLoadIssue,
@@ -45,7 +45,7 @@ export interface WorkbenchBridge {
   loadConfigFile(configPath: string): Promise<WorkbenchBridgeLoadedConfig>;
   loadSavedDraft(configPath: string): Promise<WorkbenchSnapshot | null>;
   saveDraft(configPath: string, snapshot: WorkbenchSnapshot): Promise<void>;
-  loadRiskIncreaseDelayDefaults(): Promise<RiskIncreaseDelayDraft>;
+  loadRiskAcquisitionDefaults(): Promise<RiskAcquisitionDraft>;
   exportCurrentTrack(draft: TrackDraft): Promise<string>;
   exportAllTracks(drafts: TrackDraft[]): Promise<string>;
   copyText(text: string): Promise<void>;
@@ -72,13 +72,13 @@ interface LoadedConfigFilePayload {
       daily_loss_limit: number;
       total_loss_limit: number;
       shape_family: string;
-      risk_increase_delay?: {
-        startup_initial_ratio: number;
-        advantage_min_rebalance_multiples: number;
-        base_step_min_rebalance_multiples: number;
-        max_step_min_rebalance_multiples: number;
+      risk_acquisition: {
+        initial_ratio: number;
+        advantage_steps: number;
+        min_release_steps: number;
+        max_release_steps: number;
         catchup_ratio: number;
-      } | null;
+      };
     };
     load_issues: Array<{
       field_key: string;
@@ -94,11 +94,11 @@ interface TauriQuotePayload {
   error_message: string | null;
 }
 
-interface RiskIncreaseDelayPayload {
-  startup_initial_ratio: number;
-  advantage_min_rebalance_multiples: number;
-  base_step_min_rebalance_multiples: number;
-  max_step_min_rebalance_multiples: number;
+interface RiskAcquisitionPayload {
+  initial_ratio: number;
+  advantage_steps: number;
+  min_release_steps: number;
+  max_release_steps: number;
   catchup_ratio: number;
 }
 
@@ -201,9 +201,7 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
             ui: {
               quotePriceInput: '',
             },
-            riskIncreaseDelay: track.fields.risk_increase_delay
-              ? fromRiskIncreaseDelayPayload(track.fields.risk_increase_delay)
-              : undefined,
+            riskAcquisition: fromRiskAcquisitionPayload(track.fields.risk_acquisition),
             attachments: {
               exchangeVenue,
               ...(track.load_issues.length > 0
@@ -220,11 +218,11 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
     async saveDraft(configPath, snapshot) {
       await tauriInvoke('save_draft', { configPath, draftSnapshot: snapshot });
     },
-    async loadRiskIncreaseDelayDefaults() {
-      const payload = await tauriInvoke<RiskIncreaseDelayPayload>(
-        'risk_increase_delay_defaults',
+    async loadRiskAcquisitionDefaults() {
+      const payload = await tauriInvoke<RiskAcquisitionPayload>(
+        'risk_acquisition_defaults',
       );
-      return fromRiskIncreaseDelayPayload(payload);
+      return fromRiskAcquisitionPayload(payload);
     },
     async exportCurrentTrack(draft) {
       return tauriInvoke<string>('export_current_track', {
@@ -267,8 +265,8 @@ function createBrowserWorkbenchBridge(): WorkbenchBridge {
       return null;
     },
     async saveDraft() {},
-    async loadRiskIncreaseDelayDefaults() {
-      return { ...DEFAULT_RISK_INCREASE_DELAY_DRAFT };
+    async loadRiskAcquisitionDefaults() {
+      return { ...DEFAULT_RISK_ACQUISITION_DRAFT };
     },
     async exportCurrentTrack() {
       throw new Error('浏览器开发模式不支持导出命令，请在 Tauri 桌面应用中使用。');
@@ -332,19 +330,19 @@ function isCommandError(error: unknown): error is WorkbenchBridgeCommandError {
   );
 }
 
-function fromRiskIncreaseDelayPayload(
-  payload: RiskIncreaseDelayPayload,
-): RiskIncreaseDelayDraft {
+function fromRiskAcquisitionPayload(
+  payload: RiskAcquisitionPayload,
+): RiskAcquisitionDraft {
   return {
-    startupInitialRatio: formatRawNumber(payload.startup_initial_ratio),
-    advantageMinRebalanceMultiples: formatRawNumber(
-      payload.advantage_min_rebalance_multiples,
+    initialRatio: formatRawNumber(payload.initial_ratio),
+    advantageSteps: formatRawNumber(
+      payload.advantage_steps,
     ),
-    baseStepMinRebalanceMultiples: formatRawNumber(
-      payload.base_step_min_rebalance_multiples,
+    minReleaseSteps: formatRawNumber(
+      payload.min_release_steps,
     ),
-    maxStepMinRebalanceMultiples: formatRawNumber(
-      payload.max_step_min_rebalance_multiples,
+    maxReleaseSteps: formatRawNumber(
+      payload.max_release_steps,
     ),
     catchupRatio: formatRawNumber(payload.catchup_ratio),
   };
@@ -369,25 +367,21 @@ function toTrackDraftPayload(draft: TrackDraft) {
       daily_loss_limit: parseRequiredNumber(draft.rawNumbers.dailyLossLimit),
       total_loss_limit: parseRequiredNumber(draft.rawNumbers.totalLossLimit),
       shape_family: draft.enums.shapeFamily,
-      risk_increase_delay: toRiskIncreaseDelayPayload(draft.riskIncreaseDelay),
+      risk_acquisition: toRiskAcquisitionPayload(draft.riskAcquisition),
     },
     load_issues: [],
   };
 }
 
-function toRiskIncreaseDelayPayload(delay: RiskIncreaseDelayDraft | undefined) {
-  if (!delay) {
-    return null;
-  }
-
+function toRiskAcquisitionPayload(delay: RiskAcquisitionDraft) {
   return {
-    startup_initial_ratio: parseRequiredNumber(delay.startupInitialRatio),
-    advantage_min_rebalance_multiples:
-      parseRequiredNumber(delay.advantageMinRebalanceMultiples),
-    base_step_min_rebalance_multiples:
-      parseRequiredNumber(delay.baseStepMinRebalanceMultiples),
-    max_step_min_rebalance_multiples:
-      parseRequiredNumber(delay.maxStepMinRebalanceMultiples),
+    initial_ratio: parseRequiredNumber(delay.initialRatio),
+    advantage_steps:
+      parseRequiredNumber(delay.advantageSteps),
+    min_release_steps:
+      parseRequiredNumber(delay.minReleaseSteps),
+    max_release_steps:
+      parseRequiredNumber(delay.maxReleaseSteps),
     catchup_ratio: parseRequiredNumber(delay.catchupRatio),
   };
 }
@@ -429,18 +423,18 @@ function normalizeLoadIssueField(fieldKey: string): TrackDraftFieldKey {
       return 'shapeFamily';
     case 'out_of_band_policy':
       return 'bandProtectionKind';
-    case 'risk_increase_delay':
-      return 'riskIncreaseDelay.startupInitialRatio';
-    case 'risk_increase_delay.startup_initial_ratio':
-      return 'riskIncreaseDelay.startupInitialRatio';
-    case 'risk_increase_delay.advantage_min_rebalance_multiples':
-      return 'riskIncreaseDelay.advantageMinRebalanceMultiples';
-    case 'risk_increase_delay.base_step_min_rebalance_multiples':
-      return 'riskIncreaseDelay.baseStepMinRebalanceMultiples';
-    case 'risk_increase_delay.max_step_min_rebalance_multiples':
-      return 'riskIncreaseDelay.maxStepMinRebalanceMultiples';
-    case 'risk_increase_delay.catchup_ratio':
-      return 'riskIncreaseDelay.catchupRatio';
+    case 'risk_acquisition':
+      return 'riskAcquisition.initialRatio';
+    case 'risk_acquisition.initial_ratio':
+      return 'riskAcquisition.initialRatio';
+    case 'risk_acquisition.advantage_steps':
+      return 'riskAcquisition.advantageSteps';
+    case 'risk_acquisition.min_release_steps':
+      return 'riskAcquisition.minReleaseSteps';
+    case 'risk_acquisition.max_release_steps':
+      return 'riskAcquisition.maxReleaseSteps';
+    case 'risk_acquisition.catchup_ratio':
+      return 'riskAcquisition.catchupRatio';
     default:
       return 'trackId';
   }

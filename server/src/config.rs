@@ -6,7 +6,7 @@ use poise_binance as binance;
 use poise_bybit as bybit;
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{
-    BandProtectionPolicy, DEFAULT_MIN_REBALANCE_UNITS, RiskIncreaseDelayConfig, ShapeFamily,
+    BandProtectionPolicy, DEFAULT_MIN_REBALANCE_UNITS, RiskAcquisitionConfig, ShapeFamily,
     TrackConfig,
 };
 use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
@@ -46,7 +46,8 @@ pub struct TrackSpec {
     pub daily_loss_limit: f64,
     pub total_loss_limit: f64,
     pub tick_timeout_secs: Option<u64>,
-    pub risk_increase_delay: Option<RiskIncreaseDelayConfig>,
+    #[serde(default)]
+    pub risk_acquisition: RiskAcquisitionConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -113,7 +114,7 @@ impl TrackSpec {
             out_of_band_policy: self
                 .out_of_band_policy
                 .unwrap_or(BandProtectionPolicy::Freeze),
-            risk_increase_delay: self.risk_increase_delay,
+            risk_acquisition: self.risk_acquisition,
         };
         let loss_limits = LossLimits {
             daily_loss_limit: self.daily_loss_limit,
@@ -224,7 +225,7 @@ total_loss_limit = 600.0
     }
 
     #[test]
-    fn parses_risk_increase_delay_config() {
+    fn parses_risk_acquisition_config() {
         let config = parse_config(
             r#"
 bind_address = "127.0.0.1:8000"
@@ -252,11 +253,11 @@ daily_loss_limit = 100.0
 total_loss_limit = 200.0
 tick_timeout_secs = 30
 
-[tracks.risk_increase_delay]
-startup_initial_ratio = 0.3
-advantage_min_rebalance_multiples = 2.0
-base_step_min_rebalance_multiples = 1.0
-max_step_min_rebalance_multiples = 4.0
+[tracks.risk_acquisition]
+initial_ratio = 0.3
+advantage_steps = 2.0
+min_release_steps = 1.0
+max_release_steps = 4.0
 catchup_ratio = 0.25
 "#,
         )
@@ -266,13 +267,12 @@ catchup_ratio = 0.25
             .to_track_definition(config.exchange.venue())
             .unwrap()
             .track_config()
-            .risk_increase_delay
-            .unwrap();
+            .risk_acquisition;
 
-        assert_eq!(delay.startup_initial_ratio, 0.3);
-        assert_eq!(delay.advantage_min_rebalance_multiples, 2.0);
-        assert_eq!(delay.base_step_min_rebalance_multiples, 1.0);
-        assert_eq!(delay.max_step_min_rebalance_multiples, 4.0);
+        assert_eq!(delay.initial_ratio, 0.3);
+        assert_eq!(delay.advantage_steps, 2.0);
+        assert_eq!(delay.min_release_steps, 1.0);
+        assert_eq!(delay.max_release_steps, 4.0);
         assert_eq!(delay.catchup_ratio, 0.25);
     }
 
@@ -452,6 +452,40 @@ out_of_band_policy = "freeze"
     }
 
     #[test]
+    fn parses_binance_custom_deployment_toml_shape() {
+        let config = parse_config(
+            r#"
+[exchange]
+venue = "binance"
+deployment = { custom = { rest_base_url = "http://127.0.0.1:8080", ws_root_base_url = "ws://127.0.0.1:9000" } }
+api_key = "demo-key"
+api_secret = "demo-secret"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 3000.0
+daily_loss_limit = 1200.0
+total_loss_limit = 2400.0
+"#,
+        )
+        .unwrap();
+
+        if let ExchangeConfig::Binance(exchange) = &config.exchange {
+            assert!(matches!(
+                exchange.deployment,
+                poise_binance::Deployment::Custom { .. }
+            ));
+        } else {
+            panic!("expected Binance fixture to parse as ExchangeConfig::Binance");
+        }
+    }
+
+    #[test]
     fn config_toml_parses_flatten_trigger_and_reentry_confirm_policy() {
         let config = parse_config(
             r#"
@@ -589,7 +623,7 @@ total_loss_limit = 600.0
         }
         assert_eq!(config.tracks.len(), 1);
         assert_eq!(config.tracks[0].track_id(), TrackId::new("btc-core"));
-        assert_eq!(config.tracks[0].leverage, Some(10));
+        assert_eq!(config.tracks[0].leverage, None);
     }
 
     #[test]
@@ -909,14 +943,16 @@ total_loss_limit = 600.0
     }
 
     #[test]
-    fn demo_config_explicitly_lists_complete_track_parameters() {
+    fn demo_config_keeps_optional_defaults_implicit() {
         let raw = include_str!("../../configs/demo.toml");
 
-        assert!(raw.contains("min_rebalance_units ="));
-        assert!(raw.contains("shape_family ="));
-        assert!(raw.contains("out_of_band_policy ="));
-        assert!(raw.contains("tick_timeout_secs ="));
-        assert!(raw.contains("max_notional ="));
+        assert!(!raw.contains("min_rebalance_units ="));
+        assert!(!raw.contains("shape_family ="));
+        assert!(!raw.contains("out_of_band_policy ="));
+        assert!(!raw.contains("tick_timeout_secs ="));
+        assert!(!raw.contains("max_notional ="));
+        assert!(!raw.contains("leverage ="));
+        assert!(!raw.contains("[tracks.risk_acquisition]"));
         assert!(raw.contains("daily_loss_limit ="));
         assert!(raw.contains("total_loss_limit ="));
     }

@@ -1214,7 +1214,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{
-        BandProtectionPolicy, RiskIncreaseDelayConfig, ShapeFamily, TrackConfig,
+        BandProtectionPolicy, RiskAcquisitionConfig, ShapeFamily, TrackConfig,
     };
     use poise_core::track::TrackDefinition;
     use poise_core::types::{ExchangeRules, Side};
@@ -1265,7 +1265,7 @@ mod tests {
             min_rebalance_units: 1.0,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
-            risk_increase_delay: None,
+            risk_acquisition: Default::default(),
         }
     }
 
@@ -1335,7 +1335,7 @@ mod tests {
             let track = manager.tracks.get_mut(&id).unwrap();
             let mut config = track.config().clone();
             config.min_rebalance_units = 0.5;
-            config.risk_increase_delay = Some(RiskIncreaseDelayConfig::default());
+            config.risk_acquisition = RiskAcquisitionConfig::default();
             track.replace_definition_for_test(
                 config,
                 track.max_notional(),

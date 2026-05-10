@@ -2,9 +2,9 @@ import type { KeyboardEvent } from 'react';
 
 import {
   bandProtectionKindFromPolicy,
-  riskIncreaseDelayFieldKey,
-  type RiskIncreaseDelayDraft,
-  type RiskIncreaseDelayDraftField,
+  riskAcquisitionFieldKey,
+  type RiskAcquisitionDraft,
+  type RiskAcquisitionDraftField,
   type TrackBandProtectionKind,
   type TrackDraft,
   type TrackDraftRawNumericFields,
@@ -15,7 +15,7 @@ import { CurveSection } from '@/ui/editor/sections/CurveSection';
 import { ExposureSection } from '@/ui/editor/sections/ExposureSection';
 import { IdentitySection } from '@/ui/editor/sections/IdentitySection';
 import { PriceBandSection } from '@/ui/editor/sections/PriceBandSection';
-import { RiskIncreaseDelaySection } from '@/ui/editor/sections/RiskIncreaseDelaySection';
+import { RiskAcquisitionSection } from '@/ui/editor/sections/RiskAcquisitionSection';
 import { RiskSection } from '@/ui/editor/sections/RiskSection';
 
 export interface TrackEditorProps {
@@ -24,8 +24,7 @@ export interface TrackEditorProps {
   onAdditionalChange(field: 'trackId' | 'symbol', value: string): void;
   onNumericChange(field: keyof TrackDraftRawNumericFields, value: string): void;
   onEnumChange(field: 'shapeFamily' | 'bandProtectionKind', value: string): void;
-  onRiskIncreaseDelayToggle(enabled: boolean): void;
-  onRiskIncreaseDelayChange(field: RiskIncreaseDelayDraftField, value: string): void;
+  onRiskAcquisitionChange(field: RiskAcquisitionDraftField, value: string): void;
   onQuotePriceChange(value: string): void;
   onCommit(): void;
 }
@@ -85,12 +84,10 @@ export interface RiskSectionProps {
   onCommit(): void;
 }
 
-export interface RiskIncreaseDelaySectionProps {
-  enabled: boolean;
-  values: RiskIncreaseDelayDraft | undefined;
-  issuesByField: Record<RiskIncreaseDelayDraftField, string[]>;
-  onEnabledChange(value: boolean): void;
-  onDelayFieldChange(field: RiskIncreaseDelayDraftField, value: string): void;
+export interface RiskAcquisitionSectionProps {
+  values: RiskAcquisitionDraft;
+  issuesByField: Record<RiskAcquisitionDraftField, string[]>;
+  onFieldChange(field: RiskAcquisitionDraftField, value: string): void;
   onCommit(): void;
 }
 
@@ -110,8 +107,7 @@ export function TrackEditor({
   onAdditionalChange,
   onNumericChange,
   onEnumChange,
-  onRiskIncreaseDelayToggle,
-  onRiskIncreaseDelayChange,
+  onRiskAcquisitionChange,
   onQuotePriceChange,
   onCommit,
 }: TrackEditorProps) {
@@ -204,33 +200,31 @@ export function TrackEditor({
           onTotalLossLimitChange={(value) => onNumericChange('totalLossLimit', value)}
           onCommit={onCommit}
         />
-        <RiskIncreaseDelaySection
-          enabled={Boolean(draft.riskIncreaseDelay)}
-          values={draft.riskIncreaseDelay}
+        <RiskAcquisitionSection
+          values={draft.riskAcquisition}
           issuesByField={{
-            startupInitialRatio: fieldIssues(
+            initialRatio: fieldIssues(
               issuesByField,
-              riskIncreaseDelayFieldKey('startupInitialRatio'),
+              riskAcquisitionFieldKey('initialRatio'),
             ),
-            advantageMinRebalanceMultiples: fieldIssues(
+            advantageSteps: fieldIssues(
               issuesByField,
-              riskIncreaseDelayFieldKey('advantageMinRebalanceMultiples'),
+              riskAcquisitionFieldKey('advantageSteps'),
             ),
-            baseStepMinRebalanceMultiples: fieldIssues(
+            minReleaseSteps: fieldIssues(
               issuesByField,
-              riskIncreaseDelayFieldKey('baseStepMinRebalanceMultiples'),
+              riskAcquisitionFieldKey('minReleaseSteps'),
             ),
-            maxStepMinRebalanceMultiples: fieldIssues(
+            maxReleaseSteps: fieldIssues(
               issuesByField,
-              riskIncreaseDelayFieldKey('maxStepMinRebalanceMultiples'),
+              riskAcquisitionFieldKey('maxReleaseSteps'),
             ),
             catchupRatio: fieldIssues(
               issuesByField,
-              riskIncreaseDelayFieldKey('catchupRatio'),
+              riskAcquisitionFieldKey('catchupRatio'),
             ),
           }}
-          onEnabledChange={onRiskIncreaseDelayToggle}
-          onDelayFieldChange={onRiskIncreaseDelayChange}
+          onFieldChange={onRiskAcquisitionChange}
           onCommit={onCommit}
         />
         <CurveSection

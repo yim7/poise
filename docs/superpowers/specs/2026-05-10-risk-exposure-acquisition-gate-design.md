@@ -17,35 +17,70 @@
 
 ## 配置参数
 
-建议第一版配置：
+`risk_acquisition` 是每个 track 的参数组，不是全局配置。它默认启用；如果某个 track 没写该子表，系统使用默认值。
+
+配置必须写在对应的 `[[tracks]]` 后面，使用 `[tracks.risk_acquisition]` 子表。不要使用 `risk_acquisition = { ... }` 行内对象形式。
+
+完整示例：
 
 ```toml
-risk_increase_delay = {
-  startup_initial_ratio = 0.3,
-  advantage_min_rebalance_multiples = 2.0,
-  base_step_min_rebalance_multiples = 1.0,
-  max_step_min_rebalance_multiples = 4.0,
-  catchup_ratio = 0.25
-}
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90000.0
+upper_price = 110000.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+min_rebalance_units = 0.5
+shape_family = "linear"
+out_of_band_policy = "freeze"
+max_notional = 3000.0
+leverage = 10
+daily_loss_limit = 120.0
+total_loss_limit = 500.0
+
+[tracks.risk_acquisition]
+initial_ratio = 0.3
+advantage_steps = 2.0
+min_release_steps = 1.0
+max_release_steps = 4.0
+catchup_ratio = 0.25
 ```
 
-- `startup_initial_ratio`：启动或从零建立方向性仓位时，先允许建立目标仓位的比例。
-- `advantage_min_rebalance_multiples`：价格需要让曲线目标从 anchor 继续走出多少个最小调仓单位，才算获得一次成本优势。
-- `base_step_min_rebalance_multiples`：每次释放的最小步长倍数。
-- `max_step_min_rebalance_multiples`：每次释放的最大步长倍数。
-- `catchup_ratio`：根据当前 backlog 动态计算释放量的比例。
+如果有多个 `[[tracks]]`，每个 track 都可以有自己的 `[tracks.risk_acquisition]` 子表；子表归属于它前面最近的那个 `[[tracks]]`。
+
+`out_of_band_policy` 仍然保持单字段形式，因为它是“选择一种带外策略”的枚举：
+
+```toml
+out_of_band_policy = "freeze"
+out_of_band_policy = "flatten"
+out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }, recover = "back_in_band" } }
+```
+
+`risk_acquisition` 是一组同时生效的调参项，所以使用子表。
+
+默认值：
+
+| 字段 | 默认值 | 含义 |
+| --- | ---: | --- |
+| `initial_ratio` | `0.3` | 启动或从零建立方向性仓位时，先允许建立目标仓位的比例。 |
+| `advantage_steps` | `2.0` | 价格需要让曲线目标从 anchor 继续走出多少个最小调仓单位，才算获得一次成本优势。 |
+| `min_release_steps` | `1.0` | 每次释放的最小步长倍数。 |
+| `max_release_steps` | `4.0` | 每次释放的最大步长倍数。 |
+| `catchup_ratio` | `0.25` | 根据当前 backlog 动态计算释放量的比例。 |
 
 派生量：
 
 ```text
-advantage_units = min_rebalance_units * advantage_min_rebalance_multiples
-base_step_units = min_rebalance_units * base_step_min_rebalance_multiples
-max_step_units = min_rebalance_units * max_step_min_rebalance_multiples
+advantage_units = min_rebalance_units * advantage_steps
+base_step_units = min_rebalance_units * min_release_steps
+max_step_units = min_rebalance_units * max_release_steps
 release_units = clamp(backlog_units * catchup_ratio, base_step_units, max_step_units)
 release_units = min(release_units, backlog_units)
 ```
 
-其中 `*_multiples` 和 `startup_initial_ratio`、`catchup_ratio` 都是无量纲参数；它们不能和 `curve_target`、`min_rebalance_units` 混用为乘积，除非其中一边是倍数或比例。
+其中 `*_steps` 和 `initial_ratio`、`catchup_ratio` 都是无量纲参数；它们不能和 `curve_target`、`min_rebalance_units` 混用为乘积，除非其中一边是倍数或比例。
 
 ## 启动建仓
 
@@ -53,7 +88,7 @@ release_units = min(release_units, backlog_units)
 
 ```text
 target_units = abs(curve_target)
-ratio_units = target_units * startup_initial_ratio
+ratio_units = target_units * initial_ratio
 
 if target_units < min_rebalance_units:
     initial_units = target_units
@@ -69,7 +104,7 @@ allowed_target = sign(curve_target) * initial_units
 ```text
 curve_target = +5.0
 min_rebalance_units = 0.5
-startup_initial_ratio = 0.3
+initial_ratio = 0.3
 
 allowed_target = +1.5
 backlog = +3.5
@@ -179,7 +214,7 @@ CatchUp 只能补到 +1.5
 ```text
 backlog = curve_target - allowed_target
 release_units = next_release_units(abs(backlog))
-advantage_units = min_rebalance_units * advantage_min_rebalance_multiples
+advantage_units = min_rebalance_units * advantage_steps
 
 下一次优势目标：
   加多：anchor_curve_target + advantage_units
@@ -245,7 +280,7 @@ CurveMaker 最多挂 +0.875 的买入风险获取单
 
 启动建仓：
 
-- 当前仓位为 0，`curve_target = +5`，`startup_initial_ratio = 0.3` 时，`allowed_target = +1.5`。
+- 当前仓位为 0，`curve_target = +5`，`initial_ratio = 0.3` 时，`allowed_target = +1.5`。
 - 剩余 `+3.5` 进入 backlog，不立即追满。
 
 优势释放：

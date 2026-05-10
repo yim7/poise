@@ -814,7 +814,7 @@ mod tests {
     #[test]
     fn live_view_exposes_risk_acquisition_backlog() {
         let mut config = test_config();
-        config.risk_increase_delay = Some(poise_core::strategy::RiskIncreaseDelayConfig::default());
+        config.risk_acquisition = poise_core::strategy::RiskAcquisitionConfig::default();
         let mut runtime = TrackRuntime::new(
             test_definition_with_config(config),
             test_rules(0.1),
@@ -984,7 +984,7 @@ mod tests {
             min_rebalance_units: 1.0,
             shape_family: poise_core::strategy::ShapeFamily::Linear,
             out_of_band_policy: poise_core::strategy::BandProtectionPolicy::Freeze,
-            risk_increase_delay: None,
+            risk_acquisition: Default::default(),
         }
     }
 

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use poise_core::strategy::{
-    BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy, RiskIncreaseDelayConfig,
+    BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy, RiskAcquisitionConfig,
 };
 use serde::{Deserialize, Serialize};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
@@ -53,7 +53,7 @@ pub struct EditableTrackFields {
     pub daily_loss_limit: f64,
     pub total_loss_limit: f64,
     pub shape_family: TrackShapeFamily,
-    pub risk_increase_delay: Option<RiskIncreaseDelayConfig>,
+    pub risk_acquisition: RiskAcquisitionConfig,
 }
 
 impl Default for EditableTrackFields {
@@ -73,7 +73,7 @@ impl Default for EditableTrackFields {
             daily_loss_limit: 0.0,
             total_loss_limit: 0.0,
             shape_family: TrackShapeFamily::Linear,
-            risk_increase_delay: None,
+            risk_acquisition: RiskAcquisitionConfig::default(),
         }
     }
 }
@@ -303,7 +303,7 @@ fn project_track_fields_lossy(table: &Table) -> (EditableTrackFields, Vec<TrackL
             }
         })
         .unwrap_or(TrackShapeFamily::Linear);
-    let risk_increase_delay = optional_risk_increase_delay_lossy(table, &mut issues);
+    let risk_acquisition = optional_risk_acquisition_lossy(table, &mut issues);
 
     (
         EditableTrackFields {
@@ -321,7 +321,7 @@ fn project_track_fields_lossy(table: &Table) -> (EditableTrackFields, Vec<TrackL
             daily_loss_limit,
             total_loss_limit,
             shape_family,
-            risk_increase_delay,
+            risk_acquisition,
         },
         issues,
     )
@@ -360,57 +360,59 @@ fn optional_u32(table: &Table, key: &str) -> Result<Option<u32>> {
     Ok(Some(value))
 }
 
-fn optional_risk_increase_delay_lossy(
+fn optional_risk_acquisition_lossy(
     table: &Table,
     issues: &mut Vec<TrackLoadIssue>,
-) -> Option<RiskIncreaseDelayConfig> {
-    let item = table.get("risk_increase_delay")?;
+) -> RiskAcquisitionConfig {
+    let defaults = RiskAcquisitionConfig::default();
+    let Some(item) = table.get("risk_acquisition") else {
+        return defaults;
+    };
     let Some(delay_table) = item.as_table() else {
         issues.push(load_issue(
-            "risk_increase_delay",
-            "field `risk_increase_delay` must be a table".to_string(),
+            "risk_acquisition",
+            "field `risk_acquisition` must be a table".to_string(),
         ));
-        return None;
+        return defaults;
     };
 
-    let defaults = RiskIncreaseDelayConfig::default();
-    Some(RiskIncreaseDelayConfig {
-        startup_initial_ratio: optional_nested_f64_lossy(
+    RiskAcquisitionConfig {
+        initial_ratio: optional_nested_f64_lossy(
             delay_table,
-            "startup_initial_ratio",
-            "risk_increase_delay.startup_initial_ratio",
+            "initial_ratio",
+            "risk_acquisition.initial_ratio",
             issues,
         )
-        .unwrap_or(defaults.startup_initial_ratio),
-        advantage_min_rebalance_multiples: optional_nested_f64_lossy(
+        .unwrap_or(defaults.initial_ratio),
+        advantage_steps: optional_nested_f64_lossy(
             delay_table,
-            "advantage_min_rebalance_multiples",
-            "risk_increase_delay.advantage_min_rebalance_multiples",
+            "advantage_steps",
+            "risk_acquisition.advantage_steps",
             issues,
         )
-        .unwrap_or(defaults.advantage_min_rebalance_multiples),
-        base_step_min_rebalance_multiples: optional_nested_f64_lossy(
+        .unwrap_or(defaults.advantage_steps),
+        min_release_steps: optional_nested_f64_lossy(
             delay_table,
-            "base_step_min_rebalance_multiples",
-            "risk_increase_delay.base_step_min_rebalance_multiples",
+            "min_release_steps",
+            "risk_acquisition.min_release_steps",
             issues,
         )
-        .unwrap_or(defaults.base_step_min_rebalance_multiples),
-        max_step_min_rebalance_multiples: optional_nested_f64_lossy(
+        .unwrap_or(defaults.min_release_steps),
+        max_release_steps: optional_nested_f64_lossy(
             delay_table,
-            "max_step_min_rebalance_multiples",
-            "risk_increase_delay.max_step_min_rebalance_multiples",
+            "max_release_steps",
+            "risk_acquisition.max_release_steps",
             issues,
         )
-        .unwrap_or(defaults.max_step_min_rebalance_multiples),
+        .unwrap_or(defaults.max_release_steps),
         catchup_ratio: optional_nested_f64_lossy(
             delay_table,
             "catchup_ratio",
-            "risk_increase_delay.catchup_ratio",
+            "risk_acquisition.catchup_ratio",
             issues,
         )
         .unwrap_or(defaults.catchup_ratio),
-    })
+    }
 }
 
 fn required_string_lossy(table: &Table, key: &str, issues: &mut Vec<TrackLoadIssue>) -> String {
@@ -548,17 +550,12 @@ fn stable_draft_id(fields: &EditableTrackFields) -> String {
     hasher.write_u64(fields.daily_loss_limit.to_bits());
     hasher.write_u64(fields.total_loss_limit.to_bits());
     hasher.write_str(fields.shape_family.as_str());
-    match fields.risk_increase_delay {
-        Some(delay) => {
-            hasher.write_str("risk_increase_delay");
-            hasher.write_u64(delay.startup_initial_ratio.to_bits());
-            hasher.write_u64(delay.advantage_min_rebalance_multiples.to_bits());
-            hasher.write_u64(delay.base_step_min_rebalance_multiples.to_bits());
-            hasher.write_u64(delay.max_step_min_rebalance_multiples.to_bits());
-            hasher.write_u64(delay.catchup_ratio.to_bits());
-        }
-        None => hasher.write_str("no_risk_increase_delay"),
-    }
+    hasher.write_str("risk_acquisition");
+    hasher.write_u64(fields.risk_acquisition.initial_ratio.to_bits());
+    hasher.write_u64(fields.risk_acquisition.advantage_steps.to_bits());
+    hasher.write_u64(fields.risk_acquisition.min_release_steps.to_bits());
+    hasher.write_u64(fields.risk_acquisition.max_release_steps.to_bits());
+    hasher.write_u64(fields.risk_acquisition.catchup_ratio.to_bits());
     format!("draft-{:016x}", hasher.finish())
 }
 
@@ -879,7 +876,7 @@ total_loss_limit = 750.0
     }
 
     #[test]
-    fn loads_and_projects_risk_increase_delay() {
+    fn loads_and_projects_risk_acquisition() {
         let document = parse_track_document(
             r#"
 [exchange]
@@ -901,27 +898,27 @@ daily_loss_limit = 100.0
 total_loss_limit = 200.0
 shape_family = "linear"
 
-[tracks.risk_increase_delay]
-startup_initial_ratio = 0.3
-advantage_min_rebalance_multiples = 2.0
-base_step_min_rebalance_multiples = 1.0
-max_step_min_rebalance_multiples = 4.0
+[tracks.risk_acquisition]
+initial_ratio = 0.3
+advantage_steps = 2.0
+min_release_steps = 1.0
+max_release_steps = 4.0
 catchup_ratio = 0.25
 "#,
         )
         .unwrap();
 
         let track = &document.drafts()[0].fields;
-        let delay = track.risk_increase_delay.unwrap();
+        let delay = track.risk_acquisition;
         let exported = crate::config_projection::export_current_track(&document.drafts()[0]);
 
-        assert_eq!(delay.startup_initial_ratio, 0.3);
-        assert_eq!(delay.advantage_min_rebalance_multiples, 2.0);
-        assert_eq!(delay.base_step_min_rebalance_multiples, 1.0);
-        assert_eq!(delay.max_step_min_rebalance_multiples, 4.0);
+        assert_eq!(delay.initial_ratio, 0.3);
+        assert_eq!(delay.advantage_steps, 2.0);
+        assert_eq!(delay.min_release_steps, 1.0);
+        assert_eq!(delay.max_release_steps, 4.0);
         assert_eq!(delay.catchup_ratio, 0.25);
-        assert!(exported.contains("[tracks.risk_increase_delay]"));
-        assert!(exported.contains("startup_initial_ratio = 0.3"));
+        assert!(exported.contains("[tracks.risk_acquisition]"));
+        assert!(exported.contains("initial_ratio = 0.3"));
     }
 
     #[test]

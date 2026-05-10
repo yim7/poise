@@ -38,7 +38,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
             new_runtime_state: Some(track.track_state.clone()),
             execution_gate_decision: ExecutionGateDecision::Open,
             suppress_execution: delta.is_zero(),
-            risk_acquisition: None,
+            risk_acquisition: Default::default(),
         };
     }
 
@@ -58,7 +58,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
             new_runtime_state: Some(track.track_state.clone()),
             execution_gate_decision: ExecutionGateDecision::Open,
             suppress_execution: delta.is_zero(),
-            risk_acquisition: None,
+            risk_acquisition: Default::default(),
         };
     }
 
@@ -105,7 +105,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
                 }),
                 execution_gate_decision: ExecutionGateDecision::Open,
                 suppress_execution: delta.is_zero(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             };
         }
     };
@@ -217,10 +217,6 @@ fn apply_risk_exposure_gate(
     approved_target: Exposure,
     new_runtime_state: Option<TrackState>,
 ) -> (Exposure, Option<TrackState>, Option<RiskAcquisitionRelease>) {
-    if track.config().risk_increase_delay.is_none() {
-        return (approved_target, new_runtime_state, None);
-    }
-
     let effective_state = effective_runtime_state(track, &new_runtime_state);
     let gate_state = match effective_state {
         TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)) => None,
@@ -231,7 +227,7 @@ fn apply_risk_exposure_gate(
     };
 
     let decision = risk_exposure_gate::apply(RiskExposureGateInput {
-        config: track.config().risk_increase_delay,
+        config: track.config().risk_acquisition,
         min_rebalance_units: track.config().min_rebalance_units,
         state: gate_state,
         current_exposure: track.current_exposure.clone(),
@@ -486,7 +482,7 @@ mod tests {
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
-            risk_increase_delay: None,
+            risk_acquisition: Default::default(),
         }
     }
 
@@ -562,9 +558,9 @@ mod tests {
         );
     }
 
-    fn enable_risk_increase_delay(track: &mut TrackRuntime) {
+    fn enable_risk_acquisition(track: &mut TrackRuntime) {
         let mut config = track.config().clone();
-        config.risk_increase_delay = Some(RiskIncreaseDelayConfig::default());
+        config.risk_acquisition = RiskAcquisitionConfig::default();
         replace_definition(
             track,
             config,
@@ -645,9 +641,9 @@ mod tests {
     }
 
     #[test]
-    fn risk_increase_delay_startup_exposes_allowed_target_not_curve_target() {
+    fn risk_acquisition_startup_exposes_allowed_target_not_curve_target() {
         let mut track = test_runtime();
-        enable_risk_increase_delay(&mut track);
+        enable_risk_acquisition(&mut track);
 
         let result = reconcile_target(&track, 93.75);
 
@@ -663,9 +659,9 @@ mod tests {
     }
 
     #[test]
-    fn risk_increase_delay_reduces_allowed_target_when_curve_reenters_inside() {
+    fn risk_acquisition_reduces_allowed_target_when_curve_reenters_inside() {
         let mut track = test_runtime();
-        enable_risk_increase_delay(&mut track);
+        enable_risk_acquisition(&mut track);
         track.current_exposure = Exposure(1.5);
         track.desired_exposure = Some(Exposure(1.5));
         track.track_state =
@@ -690,9 +686,9 @@ mod tests {
     }
 
     #[test]
-    fn risk_increase_delay_cross_zero_reduces_to_flat_first() {
+    fn risk_acquisition_cross_zero_reduces_to_flat_first() {
         let mut track = test_runtime();
-        enable_risk_increase_delay(&mut track);
+        enable_risk_acquisition(&mut track);
         track.current_exposure = Exposure(1.5);
         track.desired_exposure = Some(Exposure(1.5));
         track.track_state =

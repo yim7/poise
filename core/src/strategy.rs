@@ -3,11 +3,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::types::Exposure;
 
 pub const DEFAULT_MIN_REBALANCE_UNITS: f64 = 0.5;
-pub const DEFAULT_RISK_INCREASE_STARTUP_INITIAL_RATIO: f64 = 0.3;
-pub const DEFAULT_RISK_INCREASE_ADVANTAGE_MIN_REBALANCE_MULTIPLES: f64 = 2.0;
-pub const DEFAULT_RISK_INCREASE_BASE_STEP_MIN_REBALANCE_MULTIPLES: f64 = 1.0;
-pub const DEFAULT_RISK_INCREASE_MAX_STEP_MIN_REBALANCE_MULTIPLES: f64 = 4.0;
-pub const DEFAULT_RISK_INCREASE_CATCHUP_RATIO: f64 = 0.25;
+pub const DEFAULT_RISK_ACQUISITION_INITIAL_RATIO: f64 = 0.3;
+pub const DEFAULT_RISK_ACQUISITION_ADVANTAGE_STEPS: f64 = 2.0;
+pub const DEFAULT_RISK_ACQUISITION_MIN_RELEASE_STEPS: f64 = 1.0;
+pub const DEFAULT_RISK_ACQUISITION_MAX_RELEASE_STEPS: f64 = 4.0;
+pub const DEFAULT_RISK_ACQUISITION_CATCHUP_RATIO: f64 = 0.25;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackConfig {
@@ -21,34 +21,31 @@ pub struct TrackConfig {
     pub shape_family: ShapeFamily,
     pub out_of_band_policy: BandProtectionPolicy,
     #[serde(default)]
-    pub risk_increase_delay: Option<RiskIncreaseDelayConfig>,
+    pub risk_acquisition: RiskAcquisitionConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct RiskIncreaseDelayConfig {
-    #[serde(default = "default_risk_increase_startup_initial_ratio")]
-    pub startup_initial_ratio: f64,
-    #[serde(default = "default_risk_increase_advantage_min_rebalance_multiples")]
-    pub advantage_min_rebalance_multiples: f64,
-    #[serde(default = "default_risk_increase_base_step_min_rebalance_multiples")]
-    pub base_step_min_rebalance_multiples: f64,
-    #[serde(default = "default_risk_increase_max_step_min_rebalance_multiples")]
-    pub max_step_min_rebalance_multiples: f64,
-    #[serde(default = "default_risk_increase_catchup_ratio")]
+pub struct RiskAcquisitionConfig {
+    #[serde(default = "default_risk_acquisition_initial_ratio")]
+    pub initial_ratio: f64,
+    #[serde(default = "default_risk_acquisition_advantage_steps")]
+    pub advantage_steps: f64,
+    #[serde(default = "default_risk_acquisition_min_release_steps")]
+    pub min_release_steps: f64,
+    #[serde(default = "default_risk_acquisition_max_release_steps")]
+    pub max_release_steps: f64,
+    #[serde(default = "default_risk_acquisition_catchup_ratio")]
     pub catchup_ratio: f64,
 }
 
-impl Default for RiskIncreaseDelayConfig {
+impl Default for RiskAcquisitionConfig {
     fn default() -> Self {
         Self {
-            startup_initial_ratio: DEFAULT_RISK_INCREASE_STARTUP_INITIAL_RATIO,
-            advantage_min_rebalance_multiples:
-                DEFAULT_RISK_INCREASE_ADVANTAGE_MIN_REBALANCE_MULTIPLES,
-            base_step_min_rebalance_multiples:
-                DEFAULT_RISK_INCREASE_BASE_STEP_MIN_REBALANCE_MULTIPLES,
-            max_step_min_rebalance_multiples:
-                DEFAULT_RISK_INCREASE_MAX_STEP_MIN_REBALANCE_MULTIPLES,
-            catchup_ratio: DEFAULT_RISK_INCREASE_CATCHUP_RATIO,
+            initial_ratio: DEFAULT_RISK_ACQUISITION_INITIAL_RATIO,
+            advantage_steps: DEFAULT_RISK_ACQUISITION_ADVANTAGE_STEPS,
+            min_release_steps: DEFAULT_RISK_ACQUISITION_MIN_RELEASE_STEPS,
+            max_release_steps: DEFAULT_RISK_ACQUISITION_MAX_RELEASE_STEPS,
+            catchup_ratio: DEFAULT_RISK_ACQUISITION_CATCHUP_RATIO,
         }
     }
 }
@@ -122,9 +119,7 @@ pub fn validate_config(config: &TrackConfig) -> Result<(), String> {
     if config.min_rebalance_units < 0.0 {
         return Err("min_rebalance_units must not be negative".into());
     }
-    if let Some(delay) = config.risk_increase_delay {
-        validate_risk_increase_delay(delay)?;
-    }
+    validate_risk_acquisition(config.risk_acquisition)?;
     Ok(())
 }
 
@@ -132,48 +127,43 @@ fn default_min_rebalance_units() -> f64 {
     DEFAULT_MIN_REBALANCE_UNITS
 }
 
-fn default_risk_increase_startup_initial_ratio() -> f64 {
-    DEFAULT_RISK_INCREASE_STARTUP_INITIAL_RATIO
+fn default_risk_acquisition_initial_ratio() -> f64 {
+    DEFAULT_RISK_ACQUISITION_INITIAL_RATIO
 }
 
-fn default_risk_increase_advantage_min_rebalance_multiples() -> f64 {
-    DEFAULT_RISK_INCREASE_ADVANTAGE_MIN_REBALANCE_MULTIPLES
+fn default_risk_acquisition_advantage_steps() -> f64 {
+    DEFAULT_RISK_ACQUISITION_ADVANTAGE_STEPS
 }
 
-fn default_risk_increase_base_step_min_rebalance_multiples() -> f64 {
-    DEFAULT_RISK_INCREASE_BASE_STEP_MIN_REBALANCE_MULTIPLES
+fn default_risk_acquisition_min_release_steps() -> f64 {
+    DEFAULT_RISK_ACQUISITION_MIN_RELEASE_STEPS
 }
 
-fn default_risk_increase_max_step_min_rebalance_multiples() -> f64 {
-    DEFAULT_RISK_INCREASE_MAX_STEP_MIN_REBALANCE_MULTIPLES
+fn default_risk_acquisition_max_release_steps() -> f64 {
+    DEFAULT_RISK_ACQUISITION_MAX_RELEASE_STEPS
 }
 
-fn default_risk_increase_catchup_ratio() -> f64 {
-    DEFAULT_RISK_INCREASE_CATCHUP_RATIO
+fn default_risk_acquisition_catchup_ratio() -> f64 {
+    DEFAULT_RISK_ACQUISITION_CATCHUP_RATIO
 }
 
-fn validate_risk_increase_delay(config: RiskIncreaseDelayConfig) -> Result<(), String> {
-    if !config.startup_initial_ratio.is_finite()
-        || config.startup_initial_ratio <= 0.0
-        || config.startup_initial_ratio > 1.0
+fn validate_risk_acquisition(config: RiskAcquisitionConfig) -> Result<(), String> {
+    if !config.initial_ratio.is_finite()
+        || config.initial_ratio <= 0.0
+        || config.initial_ratio > 1.0
     {
-        return Err("startup_initial_ratio must be finite and in (0, 1]".into());
+        return Err("initial_ratio must be finite and in (0, 1]".into());
     }
-    if !config.advantage_min_rebalance_multiples.is_finite()
-        || config.advantage_min_rebalance_multiples <= 0.0
-    {
-        return Err("advantage_min_rebalance_multiples must be finite and positive".into());
+    if !config.advantage_steps.is_finite() || config.advantage_steps <= 0.0 {
+        return Err("advantage_steps must be finite and positive".into());
     }
-    if !config.base_step_min_rebalance_multiples.is_finite()
-        || config.base_step_min_rebalance_multiples <= 0.0
-    {
-        return Err("base_step_min_rebalance_multiples must be finite and positive".into());
+    if !config.min_release_steps.is_finite() || config.min_release_steps <= 0.0 {
+        return Err("min_release_steps must be finite and positive".into());
     }
-    if !config.max_step_min_rebalance_multiples.is_finite()
-        || config.max_step_min_rebalance_multiples < config.base_step_min_rebalance_multiples
+    if !config.max_release_steps.is_finite() || config.max_release_steps < config.min_release_steps
     {
         return Err(
-            "max_step_min_rebalance_multiples must be finite and greater than or equal to base_step_min_rebalance_multiples"
+            "max_release_steps must be finite and greater than or equal to min_release_steps"
                 .into(),
         );
     }
@@ -445,7 +435,7 @@ mod tests {
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
-            risk_increase_delay: None,
+            risk_acquisition: Default::default(),
         }
     }
 
@@ -630,7 +620,7 @@ mod tests {
                 trigger: BandFlattenTrigger::FlattenConfirm { bps: 500 },
                 recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
             },
-            risk_increase_delay: None,
+            risk_acquisition: Default::default(),
         };
 
         assert!(matches!(
@@ -667,49 +657,49 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_risk_increase_delay_config() {
+    fn validate_accepts_risk_acquisition_config() {
         let mut config = neutral_config();
-        config.risk_increase_delay = Some(RiskIncreaseDelayConfig {
-            startup_initial_ratio: 0.3,
-            advantage_min_rebalance_multiples: 2.0,
-            base_step_min_rebalance_multiples: 1.0,
-            max_step_min_rebalance_multiples: 4.0,
+        config.risk_acquisition = RiskAcquisitionConfig {
+            initial_ratio: 0.3,
+            advantage_steps: 2.0,
+            min_release_steps: 1.0,
+            max_release_steps: 4.0,
             catchup_ratio: 0.25,
-        });
+        };
 
         assert_eq!(validate_config(&config), Ok(()));
     }
 
     #[test]
-    fn validate_rejects_invalid_risk_increase_delay_config() {
+    fn validate_rejects_invalid_risk_acquisition_config() {
         let mut config = neutral_config();
-        config.risk_increase_delay = Some(RiskIncreaseDelayConfig {
-            startup_initial_ratio: 1.2,
-            advantage_min_rebalance_multiples: 2.0,
-            base_step_min_rebalance_multiples: 1.0,
-            max_step_min_rebalance_multiples: 4.0,
+        config.risk_acquisition = RiskAcquisitionConfig {
+            initial_ratio: 1.2,
+            advantage_steps: 2.0,
+            min_release_steps: 1.0,
+            max_release_steps: 4.0,
             catchup_ratio: 0.25,
-        });
+        };
 
         let error = validate_config(&config).unwrap_err();
 
-        assert!(error.contains("startup_initial_ratio"));
+        assert!(error.contains("initial_ratio"));
     }
 
     #[test]
     fn validate_rejects_step_bounds_that_cannot_release() {
         let mut config = neutral_config();
-        config.risk_increase_delay = Some(RiskIncreaseDelayConfig {
-            startup_initial_ratio: 0.3,
-            advantage_min_rebalance_multiples: 2.0,
-            base_step_min_rebalance_multiples: 5.0,
-            max_step_min_rebalance_multiples: 4.0,
+        config.risk_acquisition = RiskAcquisitionConfig {
+            initial_ratio: 0.3,
+            advantage_steps: 2.0,
+            min_release_steps: 5.0,
+            max_release_steps: 4.0,
             catchup_ratio: 0.25,
-        });
+        };
 
         let error = validate_config(&config).unwrap_err();
 
-        assert!(error.contains("max_step_min_rebalance_multiples"));
+        assert!(error.contains("max_release_steps"));
     }
 
     #[test]

@@ -5,12 +5,11 @@ import {
   type WorkbenchBridge,
 } from '@/app/workbenchBridge';
 import {
-  DEFAULT_RISK_INCREASE_DELAY_DRAFT,
-  RISK_INCREASE_DELAY_FIELD_KEYS,
+  DEFAULT_RISK_ACQUISITION_DRAFT,
   createTrackDraft,
   defaultBandProtectionPolicy,
-  riskIncreaseDelayFieldKey,
-  type RiskIncreaseDelayDraft,
+  riskAcquisitionFieldKey,
+  type RiskAcquisitionDraft,
   type TrackBandProtectionKind,
   type TrackDraft,
 } from '@/domain/trackDraft';
@@ -40,9 +39,9 @@ export function AppShell({ bridge }: AppShellProps) {
   const store = useWorkbenchStore();
   const snapshot = useWorkbenchSnapshot();
   const [notice, setNotice] = useState<NoticeState | null>(null);
-  const [riskIncreaseDelayDefaults, setRiskIncreaseDelayDefaults] =
-    useState<RiskIncreaseDelayDraft>({
-      ...DEFAULT_RISK_INCREASE_DELAY_DRAFT,
+  const [riskAcquisitionDefaults, setRiskAcquisitionDefaults] =
+    useState<RiskAcquisitionDraft>({
+      ...DEFAULT_RISK_ACQUISITION_DRAFT,
     });
   const {
     selectedDraft,
@@ -59,7 +58,7 @@ export function AppShell({ bridge }: AppShellProps) {
 
   useEffect(() => {
     if (!resolvedBridge || !selectedDraftId) {
-      setRiskIncreaseDelayDefaults({ ...DEFAULT_RISK_INCREASE_DELAY_DRAFT });
+      setRiskAcquisitionDefaults({ ...DEFAULT_RISK_ACQUISITION_DRAFT });
       return;
     }
 
@@ -67,9 +66,9 @@ export function AppShell({ bridge }: AppShellProps) {
 
     const loadDefaults = async () => {
       try {
-        const defaults = await resolvedBridge.loadRiskIncreaseDelayDefaults();
+        const defaults = await resolvedBridge.loadRiskAcquisitionDefaults();
         if (!cancelled) {
-          setRiskIncreaseDelayDefaults(defaults);
+          setRiskAcquisitionDefaults(defaults);
         }
       } catch (error) {
         if (!cancelled) {
@@ -277,7 +276,10 @@ export function AppShell({ bridge }: AppShellProps) {
               setNotice(null);
             }}
             onAddBlank={() => {
-              const blankDraft = createBlankDraft(snapshot.drafts.length);
+              const blankDraft = createBlankDraft(
+                snapshot.drafts.length,
+                riskAcquisitionDefaults,
+              );
               store.addDraft(blankDraft);
               setNotice({
                 tone: 'info',
@@ -359,33 +361,16 @@ export function AppShell({ bridge }: AppShellProps) {
                   clearResolvedLoadIssues(draft, field);
                 });
               }}
-              onRiskIncreaseDelayToggle={(enabled) => {
+              onRiskAcquisitionChange={(field, value) => {
                 if (!selectedDraft) {
                   return;
                 }
                 store.updateDraft(selectedDraft.draftId, (draft) => {
-                  if (enabled) {
-                    draft.riskIncreaseDelay = {
-                      ...riskIncreaseDelayDefaults,
-                    };
-                  } else {
-                    delete draft.riskIncreaseDelay;
-                  }
-                  for (const field of RISK_INCREASE_DELAY_FIELD_KEYS) {
-                    clearResolvedLoadIssues(draft, riskIncreaseDelayFieldKey(field));
-                  }
-                });
-              }}
-              onRiskIncreaseDelayChange={(field, value) => {
-                if (!selectedDraft) {
-                  return;
-                }
-                store.updateDraft(selectedDraft.draftId, (draft) => {
-                  draft.riskIncreaseDelay ??= {
-                    ...riskIncreaseDelayDefaults,
+                  draft.riskAcquisition ??= {
+                    ...riskAcquisitionDefaults,
                   };
-                  draft.riskIncreaseDelay[field] = value;
-                  clearResolvedLoadIssues(draft, riskIncreaseDelayFieldKey(field));
+                  draft.riskAcquisition[field] = value;
+                  clearResolvedLoadIssues(draft, riskAcquisitionFieldKey(field));
                 });
               }}
               onQuotePriceChange={(value) => {
@@ -412,7 +397,7 @@ export function AppShell({ bridge }: AppShellProps) {
   );
 }
 
-function createBlankDraft(index: number) {
+function createBlankDraft(index: number, riskAcquisition: RiskAcquisitionDraft) {
   const suffix = index + 1;
   return createTrackDraft({
     draftId: `draft-${Date.now().toString(36)}-${suffix}`,
@@ -435,6 +420,7 @@ function createBlankDraft(index: number) {
     ui: {
       quotePriceInput: '',
     },
+    riskAcquisition,
   });
 }
 

@@ -50,6 +50,8 @@ server::config::TrackSpec
 - 同一实例内 `Instrument { venue, symbol }` 必须唯一。
 - `leverage` 是 server-owned startup-only 配置，不进入 `TrackDefinition` 或 `TrackConfig`。
 - 未配置 `leverage` 时默认 `10`。
+- `out_of_band_policy` 是每个 track 的单字段枚举配置，默认 `freeze`；`flatten` 可以用简写，也可以用对象形式配置 `trigger` 和 `recover`。
+- `risk_acquisition` 是每个 track 的参数子表，TOML 写作 `[tracks.risk_acquisition]`，归属于它前面最近的 `[[tracks]]`；省略子表时使用默认参数，不支持 `risk_acquisition = { ... }` 行内对象形式。
 
 当前交易所接入只覆盖 Poise 运行需要的合约能力。Hyperliquid 适配器只接入 perpetuals，不提供 spot、提现、划转、TWAP 或 vault 运维功能；可选 `vault_address` 只作为 Hyperliquid action 签名上下文进入适配器内部。Hyperliquid standard mode 使用 perps `clearinghouseState.withdrawable` 作为可用保证金口径；unified account / portfolio margin 使用 `spotClearinghouseState` 的 USDC 可用余额作为启动容量口径。OKX 适配器只接入 `SWAP` 永续合约，REST 覆盖规则查询、账户摘要、持仓、open orders、下单、撤单、cancel all 和启动期杠杆设置；WebSocket 覆盖 ticker、mark price、订单更新、成交 PNL、持仓更新、断线重连和重订阅。OKX 当前只支持 `cross` 保证金模式和 `net` 持仓模式，不提供 spot、期权、划转、提现或资金账户操作。
 
@@ -107,6 +109,14 @@ server::config::TrackSpec
 - `min_rebalance_units` 表示触发下一次执行动作的最小目标变化。
 - 没有活动生命周期时，参考点是 `current_exposure`。
 - 存在 `SubmitPending` 或 `Working` 时，参考点是当前执行目标。
+
+风险暴露获取：
+
+- `risk_acquisition` 默认启用，只约束增加风险暴露；降低风险暴露时直接重新评估并优先执行到曲线目标。
+- 从零启动或进入新的同方向 backlog 时，系统先释放 `initial_ratio` 对应的目标暴露；如果曲线目标不小于 `min_rebalance_units`，至少释放一个最小调仓单位。
+- 增加风险暴露后，系统记录 `anchor_price` 和 `anchor_curve_target`。只有曲线目标相对锚点继续走出 `advantage_steps * min_rebalance_units`，才释放一部分 backlog。
+- 每次释放量由 backlog、`catchup_ratio`、`min_release_steps` 和 `max_release_steps` 共同决定：先按 backlog 比例计算，再限制在最小/最大释放单位之间。
+- 运行时公开 `allowed_target`、`backlog_units`、`next_advantage_price` 和 `next_release_units` 等观测字段；TUI 的 Execution 区会展示 backlog 和下一次释放信息。
 
 带外策略：
 

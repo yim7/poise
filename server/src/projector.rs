@@ -4,7 +4,7 @@ use poise_protocol::{
     ExecutionBadgeView, ExecutionBindingIntentView, ExecutionBindingOrderView,
     ExecutionBindingPolicyView, ExecutionBindingStatusView, ExecutionBindingView,
     ExecutionStateView, ExecutionStatusView, ExposureSummaryView, InstrumentView,
-    RiskAcquisitionDirectionView, RiskAcquisitionView, RiskIncreaseDelayView,
+    RiskAcquisitionConfigView, RiskAcquisitionDirectionView, RiskAcquisitionView,
     ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, StrategyPriceStatusView,
     TrackActivityItemView, TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionView,
     TrackIdentityView, TrackLifecycleView, TrackListItemView, TrackListPnlView,
@@ -90,7 +90,7 @@ impl TrackProjector {
                 min_rebalance_units: source.min_rebalance_units,
                 shape_family: project_shape_family(source.shape_family),
                 out_of_band_policy: project_out_of_band_policy(source.out_of_band_policy),
-                risk_increase_delay: source.risk_increase_delay.map(project_risk_increase_delay),
+                risk_acquisition: project_risk_acquisition_config(source.risk_acquisition_config),
             },
             max_notional: source.max_notional,
             loss_limits: TrackLossLimitsView {
@@ -127,7 +127,7 @@ impl TrackProjector {
                 risk_acquisition: source
                     .risk_acquisition
                     .as_ref()
-                    .map(project_risk_acquisition),
+                    .map(project_risk_acquisition_runtime),
                 bindings: project_execution_bindings(source),
             },
             activity: self.project_activity(source),
@@ -210,7 +210,7 @@ fn project_track_status(value: &TrackReadStatus) -> ProtocolTrackStatus {
     }
 }
 
-fn project_risk_acquisition(source: &TrackRiskAcquisitionReadModel) -> RiskAcquisitionView {
+fn project_risk_acquisition_runtime(source: &TrackRiskAcquisitionReadModel) -> RiskAcquisitionView {
     RiskAcquisitionView {
         direction: match source.direction {
             TrackRiskAcquisitionDirection::Long => RiskAcquisitionDirectionView::Long,
@@ -243,14 +243,14 @@ fn project_shape_family(value: poise_core::strategy::ShapeFamily) -> ProtocolSha
     }
 }
 
-fn project_risk_increase_delay(
-    value: poise_core::strategy::RiskIncreaseDelayConfig,
-) -> RiskIncreaseDelayView {
-    RiskIncreaseDelayView {
-        startup_initial_ratio: value.startup_initial_ratio,
-        advantage_min_rebalance_multiples: value.advantage_min_rebalance_multiples,
-        base_step_min_rebalance_multiples: value.base_step_min_rebalance_multiples,
-        max_step_min_rebalance_multiples: value.max_step_min_rebalance_multiples,
+fn project_risk_acquisition_config(
+    value: poise_core::strategy::RiskAcquisitionConfig,
+) -> RiskAcquisitionConfigView {
+    RiskAcquisitionConfigView {
+        initial_ratio: value.initial_ratio,
+        advantage_steps: value.advantage_steps,
+        min_release_steps: value.min_release_steps,
+        max_release_steps: value.max_release_steps,
         catchup_ratio: value.catchup_ratio,
     }
 }
@@ -492,9 +492,7 @@ mod tests {
         TrackRecoveryIssue, TrackRiskAcquisitionDirection, TrackRiskAcquisitionReadModel,
         TrackStrategyPriceStatus,
     };
-    use poise_core::strategy::{
-        BandProtectionPolicy, BandRecoverPolicy, RiskIncreaseDelayConfig, ShapeFamily,
-    };
+    use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily};
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
     use poise_protocol::{
@@ -604,8 +602,7 @@ mod tests {
 
     #[test]
     fn project_detail_includes_available_commands_and_activity() {
-        let mut source = source_with_failed_effect_and_recent_event();
-        source.risk_increase_delay = Some(RiskIncreaseDelayConfig::default());
+        let source = source_with_failed_effect_and_recent_event();
         let detail = TrackProjector::new().project_detail(&source);
         let detail_json = serde_json::to_value(&detail).unwrap();
 
@@ -626,7 +623,7 @@ mod tests {
             Some(0.5)
         );
         assert_eq!(
-            detail_json["strategy"]["risk_increase_delay"]["startup_initial_ratio"].as_f64(),
+            detail_json["strategy"]["risk_acquisition"]["initial_ratio"].as_f64(),
             Some(0.3)
         );
         assert!(!detail.available_commands.is_empty());
@@ -1133,7 +1130,7 @@ mod tests {
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
-            risk_increase_delay: None,
+            risk_acquisition_config: Default::default(),
             max_notional: 3000.0,
             loss_limits: poise_core::risk::LossLimits {
                 daily_loss_limit: 100.0,
@@ -1147,7 +1144,7 @@ mod tests {
             current_exposure: 3.5,
             position_qty: 13.125,
             desired_exposure: Some(4.0),
-            risk_acquisition: None,
+            risk_acquisition: Default::default(),
             pnl_stats: TrackReadPnlStats {
                 gross_realized_pnl_today: 980.1,
                 gross_realized_pnl_cumulative: 980.1,

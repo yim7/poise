@@ -98,7 +98,7 @@ passphrase = ""
 
 ### 3. 配置 track
 
-一份最小可读的配置形状如下：
+一份最小可读的配置形状如下。示例刻意不列出默认项，完整可调字段见后面的配置参考。
 
 ```toml
 bind_address = "127.0.0.1:8000"
@@ -117,34 +117,123 @@ upper_price = 67500.0
 long_exposure_units = 10.0
 short_exposure_units = 10.0
 notional_per_unit = 375.0
-min_rebalance_units = 0.5
-shape_family = "linear"
-out_of_band_policy = "freeze"
-max_notional = 3750.0
-leverage = 10
 daily_loss_limit = 375.0
 total_loss_limit = 750.0
-tick_timeout_secs = 30
 ```
 
-当前配置语义：
+配置由一个 `[exchange]`、一个或多个 `[[tracks]]`，以及可选的 `[account_monitor]` 组成。`[tracks.risk_acquisition]` 是某个 track 的子表，必须紧跟它所属的 `[[tracks]]` 后面；不需要调默认值时不要写。
 
-- `exchange.venue` 支持 `binance`、`bybit`、`hyperliquid` 和 `okx`。
-- Binance / Bybit / Hyperliquid 的 `exchange.deployment` 支持 `testnet` 和 `mainnet`；OKX 支持 `demo` 和 `mainnet`。
-- Binance / Bybit 使用 `api_key` 和 `api_secret`。
-- Hyperliquid 使用 `private_key` 和 `wallet_address`，可选 `vault_address`；这些字段必须是 `0x` 前缀 hex。
-- OKX 使用 `api_key`、`api_secret` 和 `passphrase`。
-- Binance / Bybit 的 `symbol` 使用交易所合约符号，例如 `BTCUSDT`。
-- Hyperliquid 只接入 perpetuals，`symbol` 使用 coin 名称，例如 `BTC` 或 `ETH`，不是 `BTCUSDT`。
-- Hyperliquid unified account / portfolio margin 下，Poise 使用 `spotClearinghouseState` 的 USDC 可用余额作为启动保证金口径；standard mode 下使用 perps `clearinghouseState.withdrawable`。
-- OKX 只接入 `SWAP` 永续合约，`symbol` 使用 OKX instrument id，例如 `BTC-USDT-SWAP`；当前只支持 `cross` 保证金模式和 `net` 持仓模式。
-- Hyperliquid 当前不支持 spot、提现、划转、TWAP 或 vault 运维功能。
-- OKX 当前不支持 spot、期权、划转、提现或资金账户操作。
-- `leverage` 不写时默认 `10`，启动时会按 track 下发到交易所。
-- `shape_family` 支持 `linear`、`inertial`、`responsive`。
-- `out_of_band_policy` 支持 `freeze`、`flatten`、`terminate`。
-- `flatten` 可用对象形式配置 `trigger` 和 `recover`。
-- `min_rebalance_units` 是触发下一次执行动作的最小目标变化。
+顶层配置：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `bind_address` | `127.0.0.1:8000` | HTTP / WebSocket 监听地址。 |
+| `[exchange]` | 必填 | 当前实例连接的交易所；一个实例只能连接一个交易所。 |
+| `[[tracks]]` | 必填 | 策略 track 列表；同一实例内 `track_id` 必须唯一，`venue + symbol` 必须唯一。 |
+| `[account_monitor]` | 全部字段有默认值 | 账户级风险提示阈值。 |
+
+`[exchange]` 配置：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `venue` | 必填 | 支持 `binance`、`bybit`、`hyperliquid`、`okx`。 |
+| `deployment` | Binance / Bybit / Hyperliquid 默认 `testnet`；OKX 默认 `demo` | Binance / Bybit / Hyperliquid 支持 `testnet`、`mainnet`；OKX 支持 `demo`、`mainnet`。Binance 还支持 `{ custom = { rest_base_url = "...", ws_root_base_url = "..." } }`。 |
+| `api_key` | 无 | Binance / Bybit / OKX 必填，空字符串会被视为缺失。 |
+| `api_secret` | 无 | Binance / Bybit / OKX 必填，空字符串会被视为缺失。 |
+| `passphrase` | 无 | OKX 必填。 |
+| `private_key` | 无 | Hyperliquid 必填，必须是 `0x` 加 64 个 hex 字符。 |
+| `wallet_address` | 无 | Hyperliquid 必填，必须是 `0x` 加 40 个 hex 字符。 |
+| `vault_address` | 无 | Hyperliquid 可选，必须是 `0x` 加 40 个 hex 字符。 |
+
+`[[tracks]]` 配置：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `track_id` | 必填 | 稳定业务标识，不由 `symbol` 派生。 |
+| `symbol` | 必填 | Binance / Bybit 使用 `BTCUSDT` 这类合约符号；Hyperliquid perpetuals 使用 `BTC`、`ETH` 这类 coin 名称；OKX SWAP 使用 `BTC-USDT-SWAP` 这类 instrument id。 |
+| `lower_price` | 必填 | 价格带下沿，必须小于 `upper_price`。 |
+| `upper_price` | 必填 | 价格带上沿。 |
+| `long_exposure_units` | 必填 | 价格到达下沿时的多头目标容量，必须非负。 |
+| `short_exposure_units` | 必填 | 价格到达上沿时的空头目标容量，必须非负；多空容量不能同时为 `0`。 |
+| `notional_per_unit` | 必填 | 每个 exposure unit 对应的名义金额，必须大于 `0`。 |
+| `daily_loss_limit` | 必填 | 当日亏损终止阈值，必须大于 `0`。 |
+| `total_loss_limit` | 必填 | 累计亏损终止阈值，必须大于 `0`。 |
+| `min_rebalance_units` | `0.5` | 最小调仓单位；目标变化小于该值时不触发新的执行动作。 |
+| `shape_family` | `linear` | 曲线形状，支持 `linear`、`inertial`、`responsive`。旧名 `concave` / `convex` 不再接受。 |
+| `out_of_band_policy` | `freeze` | 价格离开主价格带后的处理策略，见下面的带外配置。 |
+| `max_notional` | `max(long_exposure_units, short_exposure_units) * notional_per_unit` | track 最大绝对名义金额，必须大于 `0`。 |
+| `leverage` | `10` | 启动时按 track 下发到交易所；这是 server-owned startup-only 配置，不进入策略曲线。 |
+| `tick_timeout_secs` | `30` | 策略价格超过该秒数未更新时视为 stale，自动执行会等待新价格。 |
+| `[tracks.risk_acquisition]` | 全部字段有默认值 | 增加风险暴露时的延迟获取参数，见下面的风险暴露获取配置。 |
+
+`out_of_band_policy` 是单字段枚举，支持三种策略：
+
+- `freeze`：离开主价格带后冻结目标，价格回到主带后恢复跟随曲线。
+- `flatten`：离开主价格带后自动降到 `0`，可配置触发和恢复确认。
+- `terminate`：离开主价格带后进入终态，目标收敛到 `0`，不会自动恢复。
+
+常用写法：
+
+```toml
+out_of_band_policy = "freeze"
+out_of_band_policy = "terminate"
+
+# flatten 简写等价于 trigger/recover 都使用 500 bps 确认
+out_of_band_policy = "flatten"
+
+# flatten 完整对象形式
+out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }, recover = { reentry_confirm = { bps = 500 } } } }
+
+# 也可以使用立即触发和回到主带即恢复
+out_of_band_policy = { flatten = { trigger = "immediate", recover = "back_in_band" } }
+```
+
+`flatten.trigger` 支持 `immediate` 和 `{ flatten_confirm = { bps = <整数> } }`。确认距离按价格带宽度计算，例如 `bps = 500` 表示离开边界后再走出价格带宽度的 `5%` 才触发 flatten。
+
+`flatten.recover` 支持 `back_in_band` 和 `{ reentry_confirm = { bps = <整数> } }`。`back_in_band` 是回到主价格带就恢复；`reentry_confirm` 是回到主带后还要再进入价格带宽度的对应比例才恢复。
+
+`[tracks.risk_acquisition]` 默认启用，但默认值不需要写进配置。它只影响增加风险暴露：增加时允许等待价格优势，降低风险暴露时优先执行。
+
+```toml
+[[tracks]]
+track_id = "btc-core"
+# ...这个 track 的其他字段...
+
+[tracks.risk_acquisition]
+initial_ratio = 0.3
+advantage_steps = 2.0
+min_release_steps = 1.0
+max_release_steps = 4.0
+catchup_ratio = 0.25
+```
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `initial_ratio` | `0.3` | 从零启动或重新进入同方向 backlog 时，先允许建立目标暴露的一部分；如果目标不小于 `min_rebalance_units`，至少释放一个最小调仓单位。取值范围是 `(0, 1]`。 |
+| `advantage_steps` | `2.0` | 等待曲线目标相对锚点多走多少个 `min_rebalance_units` 后释放 backlog。 |
+| `min_release_steps` | `1.0` | 每次释放 backlog 的最小单位倍数。 |
+| `max_release_steps` | `4.0` | 每次释放 backlog 的最大单位倍数，必须大于等于 `min_release_steps`。 |
+| `catchup_ratio` | `0.25` | backlog 较大时，每次按 backlog 的这个比例尝试追赶，再受最小/最大释放单位限制。取值范围是 `(0, 1]`。 |
+
+注意 `risk_acquisition` 必须写成 `[tracks.risk_acquisition]` 子表，不要写成 `risk_acquisition = { ... }` 行内对象。多个 `[[tracks]]` 时，每个 track 都可以有自己的 `[tracks.risk_acquisition]`，子表归属于它前面最近的那个 `[[tracks]]`。
+
+`[account_monitor]` 可选配置：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `day_change_attention_pct` | `-3.0` | 当日权益变化比例低于该值时进入 attention。 |
+| `day_change_critical_pct` | `-5.0` | 当日权益变化比例低于该值时进入 critical。 |
+| `available_ratio_attention_pct` | `30.0` | 可用保证金比例低于该值时进入 attention。 |
+| `available_ratio_critical_pct` | `15.0` | 可用保证金比例低于该值时进入 critical。 |
+| `unrealized_loss_attention_pct` | `-5.0` | 未实现盈亏比例低于该值时进入 attention。 |
+| `unrealized_loss_critical_pct` | `-10.0` | 未实现盈亏比例低于该值时进入 critical。 |
+
+每组 account monitor 阈值都要求 attention 大于等于 critical。
+
+当前交易所边界：
+
+- Hyperliquid 当前只接入 perpetuals，不支持 spot、提现、划转、TWAP 或 vault 运维功能。unified account / portfolio margin 下，Poise 使用 `spotClearinghouseState` 的 USDC 可用余额作为启动保证金口径；standard mode 下使用 perps `clearinghouseState.withdrawable`。
+- OKX 当前只接入 `SWAP` 永续合约，只支持 `cross` 保证金模式和 `net` 持仓模式，不支持 spot、期权、划转、提现或资金账户操作。
 
 详细边界见 [docs/system-overview.md](docs/system-overview.md)。
 

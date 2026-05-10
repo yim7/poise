@@ -105,16 +105,28 @@ pub struct TrackStrategyView {
     pub shape_family: ShapeFamily,
     pub out_of_band_policy: BandProtectionPolicy,
     #[serde(default)]
-    pub risk_increase_delay: Option<RiskIncreaseDelayView>,
+    pub risk_acquisition: RiskAcquisitionConfigView,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct RiskIncreaseDelayView {
-    pub startup_initial_ratio: f64,
-    pub advantage_min_rebalance_multiples: f64,
-    pub base_step_min_rebalance_multiples: f64,
-    pub max_step_min_rebalance_multiples: f64,
+pub struct RiskAcquisitionConfigView {
+    pub initial_ratio: f64,
+    pub advantage_steps: f64,
+    pub min_release_steps: f64,
+    pub max_release_steps: f64,
     pub catchup_ratio: f64,
+}
+
+impl Default for RiskAcquisitionConfigView {
+    fn default() -> Self {
+        Self {
+            initial_ratio: 0.3,
+            advantage_steps: 2.0,
+            min_release_steps: 1.0,
+            max_release_steps: 4.0,
+            catchup_ratio: 0.25,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -757,7 +769,7 @@ mod tests {
             attention_reasons: Vec::new(),
             inventory_gap: 0.0,
             active_binding_count: 0,
-            risk_acquisition: None,
+            risk_acquisition: Default::default(),
             bindings: Vec::new(),
         };
 
@@ -777,7 +789,7 @@ mod tests {
             attention_reasons: Vec::new(),
             inventory_gap: 0.0,
             active_binding_count: 1,
-            risk_acquisition: None,
+            risk_acquisition: Default::default(),
             bindings: vec![ExecutionBindingView {
                 id: "binding-instance-1".into(),
                 policy: ExecutionBindingPolicyView::CurveMaker,
@@ -890,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn track_detail_serializes_risk_increase_delay() {
+    fn track_detail_serializes_risk_acquisition_config() {
         let detail: TrackDetailView = serde_json::from_str(
             r#"{
                 "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
@@ -899,7 +911,7 @@ mod tests {
                     "strategy_price":64000.0,
                     "strategy_price_status":"live"
                 },
-                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze","risk_increase_delay":{"startup_initial_ratio":0.3,"advantage_min_rebalance_multiples":2.0,"base_step_min_rebalance_multiples":1.0,"max_step_min_rebalance_multiples":4.0,"catchup_ratio":0.25}},
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze","risk_acquisition":{"initial_ratio":0.3,"advantage_steps":2.0,"min_release_steps":1.0,"max_release_steps":4.0,"catchup_ratio":0.25}},
                 "max_notional":3000.0,
                 "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
@@ -914,11 +926,11 @@ mod tests {
         let json = serde_json::to_value(&detail).unwrap();
 
         assert_eq!(
-            json["strategy"]["risk_increase_delay"]["startup_initial_ratio"].as_f64(),
+            json["strategy"]["risk_acquisition"]["initial_ratio"].as_f64(),
             Some(0.3)
         );
         assert_eq!(
-            json["strategy"]["risk_increase_delay"]["advantage_min_rebalance_multiples"].as_f64(),
+            json["strategy"]["risk_acquisition"]["advantage_steps"].as_f64(),
             Some(2.0)
         );
     }

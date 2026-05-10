@@ -1561,7 +1561,7 @@ mod tests {
                     best_bid: Some(111.0),
                     best_ask: Some(112.0),
                     desired_exposure: Some(4.5),
-                    risk_acquisition: None,
+                    risk_acquisition: Default::default(),
                     price_execution_block_reason: None,
                 },
             },

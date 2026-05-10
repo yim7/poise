@@ -435,7 +435,7 @@ mod tests {
             min_rebalance_units: 1.0,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
-            risk_increase_delay: None,
+            risk_acquisition: Default::default(),
         }
     }
 
@@ -480,7 +480,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             None,
         )
@@ -511,7 +511,7 @@ mod tests {
                 price_execution_gate,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             Some(previous_state),
         )
@@ -604,7 +604,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -680,7 +680,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -747,7 +747,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -786,7 +786,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             Some(&replacing.state),
         ));
@@ -982,7 +982,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -1039,7 +1039,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -1100,7 +1100,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -1146,7 +1146,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -1185,7 +1185,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -1263,7 +1263,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             Some(&state),
         ));
@@ -1298,7 +1298,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -1341,7 +1341,7 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
             },
             Some(&state),
         ));

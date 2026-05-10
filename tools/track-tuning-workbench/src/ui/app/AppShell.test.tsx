@@ -12,7 +12,7 @@ interface DraftOverrides {
   additional?: TrackDraft['additional'];
   enums?: TrackDraft['enums'];
   rawNumbers?: Partial<TrackDraft['rawNumbers']>;
-  riskIncreaseDelay?: TrackDraft['riskIncreaseDelay'];
+  riskAcquisition?: TrackDraft['riskAcquisition'];
   ui?: Partial<TrackDraft['ui']>;
   attachments?: TrackDraft['attachments'];
 }
@@ -38,7 +38,7 @@ function makeDraft(draftId: string, overrides: DraftOverrides = {}): TrackDraft 
     },
     additional: overrides.additional,
     enums: overrides.enums,
-    riskIncreaseDelay: overrides.riskIncreaseDelay,
+    riskAcquisition: overrides.riskAcquisition,
     ui: {
       quotePriceInput: overrides.ui?.quotePriceInput ?? '100',
     },
@@ -105,11 +105,11 @@ function createMockBridge(
     loadConfigFile: vi.fn(),
     loadSavedDraft: vi.fn(async () => null),
     saveDraft: vi.fn(async () => {}),
-    loadRiskIncreaseDelayDefaults: vi.fn(async () => ({
-      startupInitialRatio: '0.3',
-      advantageMinRebalanceMultiples: '2',
-      baseStepMinRebalanceMultiples: '1',
-      maxStepMinRebalanceMultiples: '4',
+    loadRiskAcquisitionDefaults: vi.fn(async () => ({
+      initialRatio: '0.3',
+      advantageSteps: '2',
+      minReleaseSteps: '1',
+      maxReleaseSteps: '4',
       catchupRatio: '0.25',
     })),
     exportCurrentTrack: vi.fn(async () => '[[tracks]]\ntrack_id = "silver"'),
@@ -254,17 +254,17 @@ describe('AppShell', () => {
     ).toBeInTheDocument();
   });
 
-  it('edits optional risk increase delay settings in the selected draft', async () => {
+  it('edits risk acquisition settings in the selected draft', async () => {
     const store = createWorkbenchStore({
       initialSnapshot: {
         selectedDraftId: 'draft-silver',
         drafts: [
           makeDraft('draft-silver', {
-            riskIncreaseDelay: {
-              startupInitialRatio: '0.3',
-              advantageMinRebalanceMultiples: '2',
-              baseStepMinRebalanceMultiples: '1',
-              maxStepMinRebalanceMultiples: '4',
+            riskAcquisition: {
+              initialRatio: '0.3',
+              advantageSteps: '2',
+              minReleaseSteps: '1',
+              maxReleaseSteps: '4',
               catchupRatio: '0.25',
             },
           }),
@@ -284,24 +284,22 @@ describe('AppShell', () => {
     );
 
     const editorRegion = screen.getByRole('region', { name: '参数编辑区' });
-    expect(within(editorRegion).getByText('增加风险延迟')).toBeInTheDocument();
-    expect(screen.getByLabelText('启用增加风险延迟')).toBeChecked();
+    expect(within(editorRegion).getByText('风险暴露获取')).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('优势倍数'), {
       target: { value: '3' },
     });
 
-    expect(store.getState().drafts[0].riskIncreaseDelay?.advantageMinRebalanceMultiples)
-      .toBe('3');
+    expect(store.getState().drafts[0].riskAcquisition.advantageSteps).toBe('3');
   });
 
-  it('uses bridge risk increase delay defaults when enabling the section', async () => {
+  it('uses bridge risk acquisition defaults when creating a blank draft', async () => {
     const bridge = createMockBridge({
-      loadRiskIncreaseDelayDefaults: vi.fn(async () => ({
-        startupInitialRatio: '0.4',
-        advantageMinRebalanceMultiples: '1.5',
-        baseStepMinRebalanceMultiples: '0.75',
-        maxStepMinRebalanceMultiples: '3',
+      loadRiskAcquisitionDefaults: vi.fn(async () => ({
+        initialRatio: '0.4',
+        advantageSteps: '1.5',
+        minReleaseSteps: '0.75',
+        maxReleaseSteps: '3',
         catchupRatio: '0.2',
       })),
     });
@@ -324,16 +322,19 @@ describe('AppShell', () => {
     );
 
     await waitFor(() => {
-      expect(bridge.loadRiskIncreaseDelayDefaults).toHaveBeenCalledTimes(1);
+      expect(bridge.loadRiskAcquisitionDefaults).toHaveBeenCalledTimes(1);
     });
 
-    fireEvent.click(screen.getByLabelText('启用增加风险延迟'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '空白新建' }));
+    });
 
-    expect(store.getState().drafts[0].riskIncreaseDelay).toEqual({
-      startupInitialRatio: '0.4',
-      advantageMinRebalanceMultiples: '1.5',
-      baseStepMinRebalanceMultiples: '0.75',
-      maxStepMinRebalanceMultiples: '3',
+    const createdDraft = store.getState().drafts.at(-1);
+    expect(createdDraft?.riskAcquisition).toEqual({
+      initialRatio: '0.4',
+      advantageSteps: '1.5',
+      minReleaseSteps: '0.75',
+      maxReleaseSteps: '3',
       catchupRatio: '0.2',
     });
   });

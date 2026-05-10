@@ -73,6 +73,13 @@ describe('createWorkbenchBridge', () => {
             daily_loss_limit: 120,
             total_loss_limit: 500,
             shape_family: 'linear',
+            risk_acquisition: {
+              initial_ratio: 0.3,
+              advantage_steps: 2,
+              min_release_steps: 1,
+              max_release_steps: 4,
+              catchup_ratio: 0.25,
+            },
           },
           load_issues: [],
         },
@@ -123,6 +130,13 @@ describe('createWorkbenchBridge', () => {
               daily_loss_limit: 120,
               total_loss_limit: 500,
               shape_family: 'linear',
+              risk_acquisition: {
+                initial_ratio: 0.3,
+                advantage_steps: 2,
+                min_release_steps: 1,
+                max_release_steps: 4,
+                catchup_ratio: 0.25,
+              },
             },
             load_issues: [],
           },
@@ -150,7 +164,7 @@ describe('createWorkbenchBridge', () => {
     });
   });
 
-  it('keeps risk increase delay parameters when loading and exporting the same draft', async () => {
+  it('keeps risk acquisition parameters when loading and exporting the same draft', async () => {
     invokeMock
       .mockResolvedValueOnce({
         config_path: '/tmp/strategies/grid.toml',
@@ -172,11 +186,11 @@ describe('createWorkbenchBridge', () => {
               daily_loss_limit: 120,
               total_loss_limit: 500,
               shape_family: 'linear',
-              risk_increase_delay: {
-                startup_initial_ratio: 0.3,
-                advantage_min_rebalance_multiples: 2,
-                base_step_min_rebalance_multiples: 1,
-                max_step_min_rebalance_multiples: 4,
+              risk_acquisition: {
+                initial_ratio: 0.3,
+                advantage_steps: 2,
+                min_release_steps: 1,
+                max_release_steps: 4,
                 catchup_ratio: 0.25,
               },
             },
@@ -189,11 +203,11 @@ describe('createWorkbenchBridge', () => {
     const bridge = createWorkbenchBridge();
     const loaded = await bridge.loadConfigFile('/tmp/strategies/grid.toml');
 
-    expect(loaded.projectedTracks[0].riskIncreaseDelay).toEqual({
-      startupInitialRatio: '0.3',
-      advantageMinRebalanceMultiples: '2',
-      baseStepMinRebalanceMultiples: '1',
-      maxStepMinRebalanceMultiples: '4',
+    expect(loaded.projectedTracks[0].riskAcquisition).toEqual({
+      initialRatio: '0.3',
+      advantageSteps: '2',
+      minReleaseSteps: '1',
+      maxReleaseSteps: '4',
       catchupRatio: '0.25',
     });
 
@@ -202,11 +216,11 @@ describe('createWorkbenchBridge', () => {
     expect(invokeMock).toHaveBeenLastCalledWith('export_current_track', {
       draft: expect.objectContaining({
         fields: expect.objectContaining({
-          risk_increase_delay: {
-            startup_initial_ratio: 0.3,
-            advantage_min_rebalance_multiples: 2,
-            base_step_min_rebalance_multiples: 1,
-            max_step_min_rebalance_multiples: 4,
+          risk_acquisition: {
+            initial_ratio: 0.3,
+            advantage_steps: 2,
+            min_release_steps: 1,
+            max_release_steps: 4,
             catchup_ratio: 0.25,
           },
         }),
@@ -214,24 +228,24 @@ describe('createWorkbenchBridge', () => {
     });
   });
 
-  it('loads risk increase delay defaults from the backend', async () => {
+  it('loads risk acquisition defaults from the backend', async () => {
     invokeMock.mockResolvedValueOnce({
-      startup_initial_ratio: 0.4,
-      advantage_min_rebalance_multiples: 1.5,
-      base_step_min_rebalance_multiples: 0.75,
-      max_step_min_rebalance_multiples: 3,
+      initial_ratio: 0.4,
+      advantage_steps: 1.5,
+      min_release_steps: 0.75,
+      max_release_steps: 3,
       catchup_ratio: 0.2,
     });
 
     const bridge = createWorkbenchBridge();
-    const defaults = await bridge.loadRiskIncreaseDelayDefaults();
+    const defaults = await bridge.loadRiskAcquisitionDefaults();
 
-    expect(invokeMock).toHaveBeenCalledWith('risk_increase_delay_defaults');
+    expect(invokeMock).toHaveBeenCalledWith('risk_acquisition_defaults');
     expect(defaults).toEqual({
-      startupInitialRatio: '0.4',
-      advantageMinRebalanceMultiples: '1.5',
-      baseStepMinRebalanceMultiples: '0.75',
-      maxStepMinRebalanceMultiples: '3',
+      initialRatio: '0.4',
+      advantageSteps: '1.5',
+      minReleaseSteps: '0.75',
+      maxReleaseSteps: '3',
       catchupRatio: '0.2',
     });
   });

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use poise_core::events::{DomainEvent, ExecutionGateReason};
 use poise_core::risk::LossLimits;
-use poise_core::strategy::{BandProtectionPolicy, RiskIncreaseDelayConfig, ShapeFamily};
+use poise_core::strategy::{BandProtectionPolicy, RiskAcquisitionConfig, ShapeFamily};
 use poise_core::track::{Instrument, TrackDefinition};
 use poise_core::types::Side;
 use poise_engine::execution_plan::TrackEffect;
@@ -67,7 +67,7 @@ pub struct TrackReadModel {
     pub min_rebalance_units: f64,
     pub shape_family: ShapeFamily,
     pub out_of_band_policy: BandProtectionPolicy,
-    pub risk_increase_delay: Option<RiskIncreaseDelayConfig>,
+    pub risk_acquisition_config: RiskAcquisitionConfig,
     pub max_notional: f64,
     pub loss_limits: LossLimits,
     pub strategy_price: Option<f64>,
@@ -290,7 +290,7 @@ impl TrackReadModel {
             min_rebalance_units: track_config.min_rebalance_units,
             shape_family: track_config.shape_family,
             out_of_band_policy: track_config.out_of_band_policy,
-            risk_increase_delay: track_config.risk_increase_delay,
+            risk_acquisition_config: track_config.risk_acquisition,
             max_notional: definition.max_notional(),
             loss_limits: definition.loss_limits().clone(),
             strategy_price: list_view.strategy_price,
@@ -597,7 +597,7 @@ mod tests {
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
-            risk_increase_delay: None,
+            risk_acquisition: Default::default(),
         }
     }
 
@@ -625,7 +625,7 @@ mod tests {
                 current_exposure: Exposure(3.5),
                 position_qty: 0.42,
                 desired_exposure: Some(Exposure(4.0)),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
                 manual_target_override: None,
                 executor: ExecutorView::default(),
                 pnl_stats: Default::default(),
@@ -706,7 +706,7 @@ mod tests {
                 current_exposure: Exposure(1.0),
                 position_qty: 1.0,
                 desired_exposure: Some(Exposure(2.0)),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
                 manual_target_override: None,
                 executor: ExecutorView::default(),
                 pnl_stats: Default::default(),
@@ -751,7 +751,7 @@ mod tests {
                 current_exposure: Exposure(1.0),
                 position_qty: 1.0,
                 desired_exposure: Some(Exposure(2.0)),
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
                 manual_target_override: None,
                 executor: ExecutorView::default(),
                 pnl_stats: Default::default(),
@@ -849,7 +849,7 @@ mod tests {
             current_exposure: Exposure(1.0),
             position_qty: 1.0,
             desired_exposure: Some(Exposure(0.0)),
-            risk_acquisition: None,
+            risk_acquisition: Default::default(),
             manual_target_override: None,
             executor: ExecutorView {
                 bindings: vec![BindingView {

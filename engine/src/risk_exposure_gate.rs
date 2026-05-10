@@ -1,4 +1,4 @@
-use poise_core::strategy::RiskIncreaseDelayConfig;
+use poise_core::strategy::RiskAcquisitionConfig;
 use poise_core::types::Exposure;
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +26,7 @@ pub struct RiskAcquisitionRelease {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RiskExposureGateInput {
-    pub config: Option<RiskIncreaseDelayConfig>,
+    pub config: RiskAcquisitionConfig,
     pub min_rebalance_units: f64,
     pub state: Option<RiskExposureGateState>,
     pub current_exposure: Exposure,
@@ -42,9 +42,7 @@ pub struct RiskExposureGateDecision {
 }
 
 pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
-    let Some(config) = input.config else {
-        return follow_curve(input.curve_target);
-    };
+    let config = input.config;
 
     let previous_allowed = input
         .state
@@ -94,7 +92,7 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
         );
     }
 
-    let advantage_units = input.min_rebalance_units * config.advantage_min_rebalance_multiples;
+    let advantage_units = input.min_rebalance_units * config.advantage_steps;
     let reached_advantage = match direction {
         RiskIncreaseDirection::Long => {
             input.curve_target.0 >= state.anchor_curve_target.0 + advantage_units
@@ -134,23 +132,15 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
     }
 }
 
-fn follow_curve(curve_target: Exposure) -> RiskExposureGateDecision {
-    RiskExposureGateDecision {
-        allowed_target: curve_target,
-        state: None,
-        next_release: None,
-    }
-}
-
 fn startup_state(
-    config: RiskIncreaseDelayConfig,
+    config: RiskAcquisitionConfig,
     min_rebalance_units: f64,
     current_exposure: Exposure,
     curve_target: Exposure,
     strategy_price: f64,
 ) -> RiskExposureGateState {
     let target_units = curve_target.0.abs();
-    let ratio_units = target_units * config.startup_initial_ratio;
+    let ratio_units = target_units * config.initial_ratio;
     let initial_units = if target_units < min_rebalance_units {
         target_units
     } else {
@@ -170,14 +160,14 @@ fn startup_state(
 }
 
 fn release_units(
-    config: RiskIncreaseDelayConfig,
+    config: RiskAcquisitionConfig,
     min_rebalance_units: f64,
     allowed: f64,
     curve: f64,
 ) -> f64 {
     let backlog_units = (curve - allowed).abs();
-    let base_step_units = min_rebalance_units * config.base_step_min_rebalance_multiples;
-    let max_step_units = min_rebalance_units * config.max_step_min_rebalance_multiples;
+    let base_step_units = min_rebalance_units * config.min_release_steps;
+    let max_step_units = min_rebalance_units * config.max_release_steps;
     let dynamic_units = backlog_units * config.catchup_ratio;
     dynamic_units
         .clamp(base_step_units, max_step_units)
@@ -185,7 +175,7 @@ fn release_units(
 }
 
 fn next_release(
-    config: RiskIncreaseDelayConfig,
+    config: RiskAcquisitionConfig,
     min_rebalance_units: f64,
     state: &RiskExposureGateState,
     curve_target: Exposure,
@@ -206,7 +196,7 @@ fn next_release(
     if release_units <= f64::EPSILON {
         return None;
     }
-    let advantage_units = min_rebalance_units * config.advantage_min_rebalance_multiples;
+    let advantage_units = min_rebalance_units * config.advantage_steps;
     let advantage_target = match direction {
         RiskIncreaseDirection::Long => Exposure(state.anchor_curve_target.0 + advantage_units),
         RiskIncreaseDirection::Short => Exposure(state.anchor_curve_target.0 - advantage_units),
@@ -255,17 +245,17 @@ fn same_direction_backlog(
 
 #[cfg(test)]
 mod tests {
-    use poise_core::strategy::RiskIncreaseDelayConfig;
+    use poise_core::strategy::RiskAcquisitionConfig;
     use poise_core::types::Exposure;
 
     use super::*;
 
-    fn config() -> RiskIncreaseDelayConfig {
-        RiskIncreaseDelayConfig {
-            startup_initial_ratio: 0.3,
-            advantage_min_rebalance_multiples: 2.0,
-            base_step_min_rebalance_multiples: 1.0,
-            max_step_min_rebalance_multiples: 4.0,
+    fn config() -> RiskAcquisitionConfig {
+        RiskAcquisitionConfig {
+            initial_ratio: 0.3,
+            advantage_steps: 2.0,
+            min_release_steps: 1.0,
+            max_release_steps: 4.0,
             catchup_ratio: 0.25,
         }
     }
@@ -277,7 +267,7 @@ mod tests {
         price: f64,
     ) -> RiskExposureGateInput {
         RiskExposureGateInput {
-            config: Some(config()),
+            config: config(),
             min_rebalance_units: 0.5,
             state,
             current_exposure: Exposure(current_exposure),
@@ -377,22 +367,6 @@ mod tests {
         let decision = apply(input(Some(state), 1.5, -1.0, 105.0));
 
         assert_eq!(decision.allowed_target, Exposure(0.0));
-        assert_eq!(decision.state, None);
-        assert_eq!(decision.next_release, None);
-    }
-
-    #[test]
-    fn disabled_config_follows_curve_target() {
-        let decision = apply(RiskExposureGateInput {
-            config: None,
-            min_rebalance_units: 0.5,
-            state: None,
-            current_exposure: Exposure(0.0),
-            curve_target: Exposure(5.0),
-            strategy_price: 100.0,
-        });
-
-        assert_eq!(decision.allowed_target, Exposure(5.0));
         assert_eq!(decision.state, None);
         assert_eq!(decision.next_release, None);
     }

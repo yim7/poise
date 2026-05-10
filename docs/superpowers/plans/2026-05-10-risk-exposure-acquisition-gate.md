@@ -20,15 +20,15 @@
 
 ## File Structure
 
-- `core/src/strategy.rs`: Owns `RiskIncreaseDelayConfig`, default values, serde shape, and validation.
-- `server/src/config.rs`: Accepts TOML `risk_increase_delay` in `TrackSpec` and passes it into `TrackConfig`.
+- `core/src/strategy.rs`: Owns `RiskAcquisitionConfig`, default values, serde shape, and validation.
+- `server/src/config.rs`: Accepts TOML `risk_acquisition` in `TrackSpec` and passes it into `TrackConfig`.
 - `engine/src/risk_exposure_gate.rs`: New focused pure module for startup allocation, backlog release, anchor updates, and next maker budget.
 - `engine/src/runtime.rs`: Stores gate state inside automatic runtime state.
 - `engine/src/reconciler.rs`: Applies gate after risk cap and before account capacity / executor planning.
 - `engine/src/manager.rs`: Carries reconciler maker budget into executor input.
 - `engine/src/executor/planning.rs` and `engine/src/executor/policy.rs`: Restrict `CatchUp` to `allowed_target`; plan one next-release `CurveMaker` at the advantage price.
 - `protocol/src/lib.rs`, `application/src/read_model.rs`, `server/src/projector.rs`, `tui/src/views/instance.rs`: Expose and display risk increase delay config.
-- `tools/track-tuning-workbench/src-tauri/src/config_document.rs`, `tools/track-tuning-workbench/src-tauri/src/commands.rs`, `tools/track-tuning-workbench/src/domain/trackDraft.ts`, `tools/track-tuning-workbench/src/app/workbenchBridge.ts`, `tools/track-tuning-workbench/src/ui/editor/sections/RiskIncreaseDelaySection.tsx`: Preserve and edit the new config in workbench.
+- `tools/track-tuning-workbench/src-tauri/src/config_document.rs`, `tools/track-tuning-workbench/src-tauri/src/commands.rs`, `tools/track-tuning-workbench/src/domain/trackDraft.ts`, `tools/track-tuning-workbench/src/app/workbenchBridge.ts`, `tools/track-tuning-workbench/src/ui/editor/sections/RiskAcquisitionSection.tsx`: Preserve and edit the new config in workbench.
 
 ## Task 1: Core Config And Server TOML Parsing
 
@@ -44,13 +44,13 @@ Add these tests to `core/src/strategy.rs` inside `#[cfg(test)] mod tests`:
 
 ```rust
 #[test]
-fn validate_accepts_risk_increase_delay_config() {
+fn validate_accepts_risk_acquisition_config() {
     let mut config = neutral_config();
-    config.risk_increase_delay = Some(RiskIncreaseDelayConfig {
-        startup_initial_ratio: 0.3,
-        advantage_min_rebalance_multiples: 2.0,
-        base_step_min_rebalance_multiples: 1.0,
-        max_step_min_rebalance_multiples: 4.0,
+    config.risk_acquisition = Some(RiskAcquisitionConfig {
+        initial_ratio: 0.3,
+        advantage_steps: 2.0,
+        min_release_steps: 1.0,
+        max_release_steps: 4.0,
         catchup_ratio: 0.25,
     });
 
@@ -58,35 +58,35 @@ fn validate_accepts_risk_increase_delay_config() {
 }
 
 #[test]
-fn validate_rejects_invalid_risk_increase_delay_config() {
+fn validate_rejects_invalid_risk_acquisition_config() {
     let mut config = neutral_config();
-    config.risk_increase_delay = Some(RiskIncreaseDelayConfig {
-        startup_initial_ratio: 1.2,
-        advantage_min_rebalance_multiples: 2.0,
-        base_step_min_rebalance_multiples: 1.0,
-        max_step_min_rebalance_multiples: 4.0,
+    config.risk_acquisition = Some(RiskAcquisitionConfig {
+        initial_ratio: 1.2,
+        advantage_steps: 2.0,
+        min_release_steps: 1.0,
+        max_release_steps: 4.0,
         catchup_ratio: 0.25,
     });
 
     let error = validate_config(&config).unwrap_err();
 
-    assert!(error.contains("startup_initial_ratio"));
+    assert!(error.contains("initial_ratio"));
 }
 
 #[test]
 fn validate_rejects_step_bounds_that_cannot_release() {
     let mut config = neutral_config();
-    config.risk_increase_delay = Some(RiskIncreaseDelayConfig {
-        startup_initial_ratio: 0.3,
-        advantage_min_rebalance_multiples: 2.0,
-        base_step_min_rebalance_multiples: 5.0,
-        max_step_min_rebalance_multiples: 4.0,
+    config.risk_acquisition = Some(RiskAcquisitionConfig {
+        initial_ratio: 0.3,
+        advantage_steps: 2.0,
+        min_release_steps: 5.0,
+        max_release_steps: 4.0,
         catchup_ratio: 0.25,
     });
 
     let error = validate_config(&config).unwrap_err();
 
-    assert!(error.contains("max_step_min_rebalance_multiples"));
+    assert!(error.contains("max_release_steps"));
 }
 ```
 
@@ -95,113 +95,113 @@ fn validate_rejects_step_bounds_that_cannot_release() {
 Run:
 
 ```bash
-cargo test -p poise-core strategy::tests::validate_accepts_risk_increase_delay_config
-cargo test -p poise-core strategy::tests::validate_rejects_invalid_risk_increase_delay_config
+cargo test -p poise-core strategy::tests::validate_accepts_risk_acquisition_config
+cargo test -p poise-core strategy::tests::validate_rejects_invalid_risk_acquisition_config
 cargo test -p poise-core strategy::tests::validate_rejects_step_bounds_that_cannot_release
 ```
 
-Expected: FAIL because `RiskIncreaseDelayConfig` and `TrackConfig::risk_increase_delay` do not exist.
+Expected: FAIL because `RiskAcquisitionConfig` and `TrackConfig::risk_acquisition` do not exist.
 
 - [x] **Step 3: Implement core config type and validation**
 
 In `core/src/strategy.rs`, add the config struct near `TrackConfig`:
 
 ```rust
-pub const DEFAULT_RISK_INCREASE_STARTUP_INITIAL_RATIO: f64 = 0.3;
-pub const DEFAULT_RISK_INCREASE_ADVANTAGE_MIN_REBALANCE_MULTIPLES: f64 = 2.0;
-pub const DEFAULT_RISK_INCREASE_BASE_STEP_MIN_REBALANCE_MULTIPLES: f64 = 1.0;
-pub const DEFAULT_RISK_INCREASE_MAX_STEP_MIN_REBALANCE_MULTIPLES: f64 = 4.0;
-pub const DEFAULT_RISK_INCREASE_CATCHUP_RATIO: f64 = 0.25;
+pub const DEFAULT_RISK_ACQUISITION_INITIAL_RATIO: f64 = 0.3;
+pub const DEFAULT_RISK_ACQUISITION_ADVANTAGE_STEPS: f64 = 2.0;
+pub const DEFAULT_RISK_ACQUISITION_MIN_RELEASE_STEPS: f64 = 1.0;
+pub const DEFAULT_RISK_ACQUISITION_MAX_RELEASE_STEPS: f64 = 4.0;
+pub const DEFAULT_RISK_ACQUISITION_CATCHUP_RATIO: f64 = 0.25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct RiskIncreaseDelayConfig {
-    #[serde(default = "default_risk_increase_startup_initial_ratio")]
-    pub startup_initial_ratio: f64,
-    #[serde(default = "default_risk_increase_advantage_min_rebalance_multiples")]
-    pub advantage_min_rebalance_multiples: f64,
-    #[serde(default = "default_risk_increase_base_step_min_rebalance_multiples")]
-    pub base_step_min_rebalance_multiples: f64,
-    #[serde(default = "default_risk_increase_max_step_min_rebalance_multiples")]
-    pub max_step_min_rebalance_multiples: f64,
-    #[serde(default = "default_risk_increase_catchup_ratio")]
+pub struct RiskAcquisitionConfig {
+    #[serde(default = "default_risk_acquisition_initial_ratio")]
+    pub initial_ratio: f64,
+    #[serde(default = "default_risk_acquisition_advantage_steps")]
+    pub advantage_steps: f64,
+    #[serde(default = "default_risk_acquisition_min_release_steps")]
+    pub min_release_steps: f64,
+    #[serde(default = "default_risk_acquisition_max_release_steps")]
+    pub max_release_steps: f64,
+    #[serde(default = "default_risk_acquisition_catchup_ratio")]
     pub catchup_ratio: f64,
 }
 
-impl Default for RiskIncreaseDelayConfig {
+impl Default for RiskAcquisitionConfig {
     fn default() -> Self {
         Self {
-            startup_initial_ratio: DEFAULT_RISK_INCREASE_STARTUP_INITIAL_RATIO,
-            advantage_min_rebalance_multiples:
-                DEFAULT_RISK_INCREASE_ADVANTAGE_MIN_REBALANCE_MULTIPLES,
-            base_step_min_rebalance_multiples:
-                DEFAULT_RISK_INCREASE_BASE_STEP_MIN_REBALANCE_MULTIPLES,
-            max_step_min_rebalance_multiples:
-                DEFAULT_RISK_INCREASE_MAX_STEP_MIN_REBALANCE_MULTIPLES,
-            catchup_ratio: DEFAULT_RISK_INCREASE_CATCHUP_RATIO,
+            initial_ratio: DEFAULT_RISK_ACQUISITION_INITIAL_RATIO,
+            advantage_steps:
+                DEFAULT_RISK_ACQUISITION_ADVANTAGE_STEPS,
+            min_release_steps:
+                DEFAULT_RISK_ACQUISITION_MIN_RELEASE_STEPS,
+            max_release_steps:
+                DEFAULT_RISK_ACQUISITION_MAX_RELEASE_STEPS,
+            catchup_ratio: DEFAULT_RISK_ACQUISITION_CATCHUP_RATIO,
         }
     }
 }
 ```
 
-Add `#[serde(default)] pub risk_increase_delay: Option<RiskIncreaseDelayConfig>,` to `TrackConfig`.
+Add `#[serde(default)] pub risk_acquisition: Option<RiskAcquisitionConfig>,` to `TrackConfig`.
 
 Add these default helpers near `default_min_rebalance_units()`:
 
 ```rust
-fn default_risk_increase_startup_initial_ratio() -> f64 {
-    DEFAULT_RISK_INCREASE_STARTUP_INITIAL_RATIO
+fn default_risk_acquisition_initial_ratio() -> f64 {
+    DEFAULT_RISK_ACQUISITION_INITIAL_RATIO
 }
 
-fn default_risk_increase_advantage_min_rebalance_multiples() -> f64 {
-    DEFAULT_RISK_INCREASE_ADVANTAGE_MIN_REBALANCE_MULTIPLES
+fn default_risk_acquisition_advantage_steps() -> f64 {
+    DEFAULT_RISK_ACQUISITION_ADVANTAGE_STEPS
 }
 
-fn default_risk_increase_base_step_min_rebalance_multiples() -> f64 {
-    DEFAULT_RISK_INCREASE_BASE_STEP_MIN_REBALANCE_MULTIPLES
+fn default_risk_acquisition_min_release_steps() -> f64 {
+    DEFAULT_RISK_ACQUISITION_MIN_RELEASE_STEPS
 }
 
-fn default_risk_increase_max_step_min_rebalance_multiples() -> f64 {
-    DEFAULT_RISK_INCREASE_MAX_STEP_MIN_REBALANCE_MULTIPLES
+fn default_risk_acquisition_max_release_steps() -> f64 {
+    DEFAULT_RISK_ACQUISITION_MAX_RELEASE_STEPS
 }
 
-fn default_risk_increase_catchup_ratio() -> f64 {
-    DEFAULT_RISK_INCREASE_CATCHUP_RATIO
+fn default_risk_acquisition_catchup_ratio() -> f64 {
+    DEFAULT_RISK_ACQUISITION_CATCHUP_RATIO
 }
 ```
 
 Add validation from `validate_config()`:
 
 ```rust
-if let Some(delay) = config.risk_increase_delay {
-    validate_risk_increase_delay(delay)?;
+if let Some(delay) = config.risk_acquisition {
+    validate_risk_acquisition(delay)?;
 }
 ```
 
 Add the validator:
 
 ```rust
-fn validate_risk_increase_delay(config: RiskIncreaseDelayConfig) -> Result<(), String> {
-    if !config.startup_initial_ratio.is_finite()
-        || config.startup_initial_ratio <= 0.0
-        || config.startup_initial_ratio > 1.0
+fn validate_risk_acquisition(config: RiskAcquisitionConfig) -> Result<(), String> {
+    if !config.initial_ratio.is_finite()
+        || config.initial_ratio <= 0.0
+        || config.initial_ratio > 1.0
     {
-        return Err("startup_initial_ratio must be finite and in (0, 1]".into());
+        return Err("initial_ratio must be finite and in (0, 1]".into());
     }
-    if !config.advantage_min_rebalance_multiples.is_finite()
-        || config.advantage_min_rebalance_multiples <= 0.0
+    if !config.advantage_steps.is_finite()
+        || config.advantage_steps <= 0.0
     {
-        return Err("advantage_min_rebalance_multiples must be finite and positive".into());
+        return Err("advantage_steps must be finite and positive".into());
     }
-    if !config.base_step_min_rebalance_multiples.is_finite()
-        || config.base_step_min_rebalance_multiples <= 0.0
+    if !config.min_release_steps.is_finite()
+        || config.min_release_steps <= 0.0
     {
-        return Err("base_step_min_rebalance_multiples must be finite and positive".into());
+        return Err("min_release_steps must be finite and positive".into());
     }
-    if !config.max_step_min_rebalance_multiples.is_finite()
-        || config.max_step_min_rebalance_multiples < config.base_step_min_rebalance_multiples
+    if !config.max_release_steps.is_finite()
+        || config.max_release_steps < config.min_release_steps
     {
         return Err(
-            "max_step_min_rebalance_multiples must be finite and greater than or equal to base_step_min_rebalance_multiples"
+            "max_release_steps must be finite and greater than or equal to min_release_steps"
                 .into(),
         );
     }
@@ -213,15 +213,15 @@ fn validate_risk_increase_delay(config: RiskIncreaseDelayConfig) -> Result<(), S
 }
 ```
 
-Use `rg -n "TrackConfig \\{" core engine application server protocol tui tools/track-tuning-workbench/src-tauri` to locate existing `TrackConfig` literals. Add `risk_increase_delay: None` to each literal that constructs a normal track config, except tests that explicitly set a concrete `Some(RiskIncreaseDelayConfig { startup_initial_ratio: 0.3, advantage_min_rebalance_multiples: 2.0, base_step_min_rebalance_multiples: 1.0, max_step_min_rebalance_multiples: 4.0, catchup_ratio: 0.25 })`.
+Use `rg -n "TrackConfig \\{" core engine application server protocol tui tools/track-tuning-workbench/src-tauri` to locate existing `TrackConfig` literals. Add `risk_acquisition: None` to each literal that constructs a normal track config, except tests that explicitly set a concrete `Some(RiskAcquisitionConfig { initial_ratio: 0.3, advantage_steps: 2.0, min_release_steps: 1.0, max_release_steps: 4.0, catchup_ratio: 0.25 })`.
 
 - [x] **Step 4: Run core test to verify it passes**
 
 Run:
 
 ```bash
-cargo test -p poise-core strategy::tests::validate_accepts_risk_increase_delay_config
-cargo test -p poise-core strategy::tests::validate_rejects_invalid_risk_increase_delay_config
+cargo test -p poise-core strategy::tests::validate_accepts_risk_acquisition_config
+cargo test -p poise-core strategy::tests::validate_rejects_invalid_risk_acquisition_config
 cargo test -p poise-core strategy::tests::validate_rejects_step_bounds_that_cannot_release
 ```
 
@@ -233,7 +233,7 @@ Add this test to `server/src/config.rs` inside `mod tests`:
 
 ```rust
 #[test]
-fn parses_risk_increase_delay_config() {
+fn parses_risk_acquisition_config() {
     let config = parse_config(
         r#"
 bind_address = "127.0.0.1:8000"
@@ -261,11 +261,11 @@ daily_loss_limit = 100.0
 total_loss_limit = 200.0
 tick_timeout_secs = 30
 
-[tracks.risk_increase_delay]
-startup_initial_ratio = 0.3
-advantage_min_rebalance_multiples = 2.0
-base_step_min_rebalance_multiples = 1.0
-max_step_min_rebalance_multiples = 4.0
+[tracks.risk_acquisition]
+initial_ratio = 0.3
+advantage_steps = 2.0
+min_release_steps = 1.0
+max_release_steps = 4.0
 catchup_ratio = 0.25
 "#,
     )
@@ -275,13 +275,13 @@ catchup_ratio = 0.25
         .to_track_definition(config.exchange.venue())
         .unwrap()
         .track_config()
-        .risk_increase_delay
+        .risk_acquisition
         .unwrap();
 
-    assert_eq!(delay.startup_initial_ratio, 0.3);
-    assert_eq!(delay.advantage_min_rebalance_multiples, 2.0);
-    assert_eq!(delay.base_step_min_rebalance_multiples, 1.0);
-    assert_eq!(delay.max_step_min_rebalance_multiples, 4.0);
+    assert_eq!(delay.initial_ratio, 0.3);
+    assert_eq!(delay.advantage_steps, 2.0);
+    assert_eq!(delay.min_release_steps, 1.0);
+    assert_eq!(delay.max_release_steps, 4.0);
     assert_eq!(delay.catchup_ratio, 0.25);
 }
 ```
@@ -291,21 +291,21 @@ catchup_ratio = 0.25
 Run:
 
 ```bash
-cargo test -p poise-server config::tests::parses_risk_increase_delay_config
+cargo test -p poise-server config::tests::parses_risk_acquisition_config
 ```
 
-Expected: FAIL because `TrackSpec` does not yet accept `risk_increase_delay`.
+Expected: FAIL because `TrackSpec` does not yet accept `risk_acquisition`.
 
 - [x] **Step 7: Implement server config parsing**
 
-In `server/src/config.rs`, import `RiskIncreaseDelayConfig`, add this field to `TrackSpec`, and pass it into `TrackConfig`:
+In `server/src/config.rs`, import `RiskAcquisitionConfig`, add this field to `TrackSpec`, and pass it into `TrackConfig`:
 
 ```rust
-pub risk_increase_delay: Option<RiskIncreaseDelayConfig>,
+pub risk_acquisition: Option<RiskAcquisitionConfig>,
 ```
 
 ```rust
-risk_increase_delay: self.risk_increase_delay,
+risk_acquisition: self.risk_acquisition,
 ```
 
 - [x] **Step 8: Run server config test to verify it passes**
@@ -313,7 +313,7 @@ risk_increase_delay: self.risk_increase_delay,
 Run:
 
 ```bash
-cargo test -p poise-server config::tests::parses_risk_increase_delay_config
+cargo test -p poise-server config::tests::parses_risk_acquisition_config
 ```
 
 Expected: PASS.
@@ -343,17 +343,17 @@ Create `engine/src/risk_exposure_gate.rs` with only tests first. Use the public 
 ```rust
 #[cfg(test)]
 mod tests {
-    use poise_core::strategy::RiskIncreaseDelayConfig;
+    use poise_core::strategy::RiskAcquisitionConfig;
     use poise_core::types::Exposure;
 
     use super::*;
 
-    fn config() -> RiskIncreaseDelayConfig {
-        RiskIncreaseDelayConfig {
-            startup_initial_ratio: 0.3,
-            advantage_min_rebalance_multiples: 2.0,
-            base_step_min_rebalance_multiples: 1.0,
-            max_step_min_rebalance_multiples: 4.0,
+    fn config() -> RiskAcquisitionConfig {
+        RiskAcquisitionConfig {
+            initial_ratio: 0.3,
+            advantage_steps: 2.0,
+            min_release_steps: 1.0,
+            max_release_steps: 4.0,
             catchup_ratio: 0.25,
         }
     }
@@ -502,7 +502,7 @@ Expected: FAIL because module types and `apply()` are missing.
 Add this module shape above the tests in `engine/src/risk_exposure_gate.rs`:
 
 ```rust
-use poise_core::strategy::RiskIncreaseDelayConfig;
+use poise_core::strategy::RiskAcquisitionConfig;
 use poise_core::types::Exposure;
 use serde::{Deserialize, Serialize};
 
@@ -530,7 +530,7 @@ pub struct RiskAcquisitionRelease {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RiskExposureGateInput {
-    pub config: Option<RiskIncreaseDelayConfig>,
+    pub config: Option<RiskAcquisitionConfig>,
     pub min_rebalance_units: f64,
     pub state: Option<RiskExposureGateState>,
     pub current_exposure: Exposure,
@@ -600,7 +600,7 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
         );
     }
 
-    let advantage_units = input.min_rebalance_units * config.advantage_min_rebalance_multiples;
+    let advantage_units = input.min_rebalance_units * config.advantage_steps;
     let reached_advantage = match direction {
         RiskIncreaseDirection::Long => {
             input.curve_target.0 >= state.anchor_curve_target.0 + advantage_units
@@ -639,14 +639,14 @@ fn follow_curve(curve_target: Exposure) -> RiskExposureGateDecision {
 }
 
 fn startup_state(
-    config: RiskIncreaseDelayConfig,
+    config: RiskAcquisitionConfig,
     min_rebalance_units: f64,
     current_exposure: Exposure,
     curve_target: Exposure,
     strategy_price: f64,
 ) -> RiskExposureGateState {
     let target_units = curve_target.0.abs();
-    let ratio_units = target_units * config.startup_initial_ratio;
+    let ratio_units = target_units * config.initial_ratio;
     let initial_units = if target_units < min_rebalance_units {
         target_units
     } else {
@@ -666,14 +666,14 @@ fn startup_state(
 }
 
 fn release_units(
-    config: RiskIncreaseDelayConfig,
+    config: RiskAcquisitionConfig,
     min_rebalance_units: f64,
     allowed: f64,
     curve: f64,
 ) -> f64 {
     let backlog_units = (curve - allowed).abs();
-    let base_step_units = min_rebalance_units * config.base_step_min_rebalance_multiples;
-    let max_step_units = min_rebalance_units * config.max_step_min_rebalance_multiples;
+    let base_step_units = min_rebalance_units * config.min_release_steps;
+    let max_step_units = min_rebalance_units * config.max_release_steps;
     let dynamic_units = backlog_units * config.catchup_ratio;
     dynamic_units
         .clamp(base_step_units, max_step_units)
@@ -681,7 +681,7 @@ fn release_units(
 }
 
 fn next_release(
-    config: RiskIncreaseDelayConfig,
+    config: RiskAcquisitionConfig,
     min_rebalance_units: f64,
     state: &RiskExposureGateState,
     curve_target: Exposure,
@@ -702,7 +702,7 @@ fn next_release(
     if release_units <= f64::EPSILON {
         return None;
     }
-    let advantage_units = min_rebalance_units * config.advantage_min_rebalance_multiples;
+    let advantage_units = min_rebalance_units * config.advantage_steps;
     let advantage_target = match direction {
         RiskIncreaseDirection::Long => Exposure(state.anchor_curve_target.0 + advantage_units),
         RiskIncreaseDirection::Short => Exposure(state.anchor_curve_target.0 - advantage_units),
@@ -789,9 +789,9 @@ Add these tests to `engine/src/reconciler.rs`:
 
 ```rust
 #[test]
-fn risk_increase_delay_startup_exposes_allowed_target_not_curve_target() {
+fn risk_acquisition_startup_exposes_allowed_target_not_curve_target() {
     let mut track = test_runtime();
-    enable_risk_increase_delay(&mut track);
+    enable_risk_acquisition(&mut track);
 
     let result = reconcile_target(&track, 93.75);
 
@@ -807,9 +807,9 @@ fn risk_increase_delay_startup_exposes_allowed_target_not_curve_target() {
 }
 
 #[test]
-fn risk_increase_delay_reduces_allowed_target_when_curve_reenters_inside() {
+fn risk_acquisition_reduces_allowed_target_when_curve_reenters_inside() {
     let mut track = test_runtime();
-    enable_risk_increase_delay(&mut track);
+    enable_risk_acquisition(&mut track);
     track.current_exposure = Exposure(1.5);
     track.desired_exposure = Some(Exposure(1.5));
     track.track_state = TrackState::Running(ControlState::Automatic(
@@ -833,9 +833,9 @@ fn risk_increase_delay_reduces_allowed_target_when_curve_reenters_inside() {
 }
 
 #[test]
-fn risk_increase_delay_cross_zero_reduces_to_flat_first() {
+fn risk_acquisition_cross_zero_reduces_to_flat_first() {
     let mut track = test_runtime();
-    enable_risk_increase_delay(&mut track);
+    enable_risk_acquisition(&mut track);
     track.current_exposure = Exposure(1.5);
     track.desired_exposure = Some(Exposure(1.5));
     track.track_state = TrackState::Running(ControlState::Automatic(
@@ -864,9 +864,9 @@ Add test helpers:
 ```rust
 use crate::risk_exposure_gate::RiskExposureGateState;
 
-fn enable_risk_increase_delay(track: &mut TrackRuntime) {
+fn enable_risk_acquisition(track: &mut TrackRuntime) {
     let mut config = track.config().clone();
-    config.risk_increase_delay = Some(RiskIncreaseDelayConfig::default());
+    config.risk_acquisition = Some(RiskAcquisitionConfig::default());
     replace_definition(
         track,
         config,
@@ -881,7 +881,7 @@ fn enable_risk_increase_delay(track: &mut TrackRuntime) {
 Run:
 
 ```bash
-cargo test -p poise-engine reconciler::tests::risk_increase_delay_
+cargo test -p poise-engine reconciler::tests::risk_acquisition_
 ```
 
 Expected: FAIL because `RiskExposureGateState`, `AutoState::AcquiringRiskExposure`, reconciler gate wiring, and result `risk_acquisition` do not exist.
@@ -915,7 +915,7 @@ pub risk_acquisition: Option<RiskAcquisitionRelease>,
 
 All early returns must set `risk_acquisition: None`.
 
-After risk outcome returns `approved_target`, apply the gate only for automatic in-band following/acquiring states and only when `track.config().risk_increase_delay.is_some()`:
+After risk outcome returns `approved_target`, apply the gate only for automatic in-band following/acquiring states and only when `track.config().risk_acquisition.is_some()`:
 
 ```rust
 let gate_state = match &track.track_state {
@@ -926,7 +926,7 @@ let gate_state = match &track.track_state {
 };
 
 let gate_decision = risk_exposure_gate::apply(RiskExposureGateInput {
-    config: track.config().risk_increase_delay,
+    config: track.config().risk_acquisition,
     min_rebalance_units: track.config().min_rebalance_units,
     state: gate_state,
     current_exposure: track.current_exposure.clone(),
@@ -975,7 +975,7 @@ Import `RiskAcquisitionRelease` from `crate::risk_exposure_gate`.
 Run:
 
 ```bash
-cargo test -p poise-engine reconciler::tests::risk_increase_delay_
+cargo test -p poise-engine reconciler::tests::risk_acquisition_
 ```
 
 Expected: PASS.
@@ -1290,7 +1290,7 @@ Add imports to `engine/src/manager.rs` tests:
 
 ```rust
 use crate::risk_exposure_gate::RiskExposureGateState;
-use poise_core::strategy::RiskIncreaseDelayConfig;
+use poise_core::strategy::RiskAcquisitionConfig;
 ```
 
 Add this test:
@@ -1303,7 +1303,7 @@ fn reconcile_track_plans_risk_acquisition_maker_when_allowed_target_is_current_e
         let track = manager.tracks.get_mut(&id).unwrap();
         let mut config = track.config().clone();
         config.min_rebalance_units = 0.5;
-        config.risk_increase_delay = Some(RiskIncreaseDelayConfig::default());
+        config.risk_acquisition = Some(RiskAcquisitionConfig::default());
         track.replace_definition_for_test(
             config,
             track.max_notional(),
@@ -1391,20 +1391,20 @@ Record commit SHA here after committing: `8e8a563`
 
 - [x] **Step 1: Write protocol serialization test**
 
-Add a protocol test that expects `strategy.risk_increase_delay`:
+Add a protocol test that expects `strategy.risk_acquisition`:
 
 ```rust
 #[test]
-fn track_detail_serializes_risk_increase_delay() {
-    let detail = track_detail_fixture_with_risk_increase_delay();
+fn track_detail_serializes_risk_acquisition() {
+    let detail = track_detail_fixture_with_risk_acquisition();
     let json = serde_json::to_value(&detail).unwrap();
 
     assert_eq!(
-        json["strategy"]["risk_increase_delay"]["startup_initial_ratio"].as_f64(),
+        json["strategy"]["risk_acquisition"]["initial_ratio"].as_f64(),
         Some(0.3)
     );
     assert_eq!(
-        json["strategy"]["risk_increase_delay"]["advantage_min_rebalance_multiples"].as_f64(),
+        json["strategy"]["risk_acquisition"]["advantage_steps"].as_f64(),
         Some(2.0)
     );
 }
@@ -1417,10 +1417,10 @@ Use the existing protocol fixture construction style in `protocol/src/lib.rs`; a
 Run:
 
 ```bash
-cargo test -p poise-protocol track_detail_serializes_risk_increase_delay
+cargo test -p poise-protocol track_detail_serializes_risk_acquisition
 ```
 
-Expected: FAIL because protocol view lacks `risk_increase_delay`.
+Expected: FAIL because protocol view lacks `risk_acquisition`.
 
 - [x] **Step 3: Add protocol view type and projector mapping**
 
@@ -1428,11 +1428,11 @@ In `protocol/src/lib.rs`, add:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct RiskIncreaseDelayView {
-    pub startup_initial_ratio: f64,
-    pub advantage_min_rebalance_multiples: f64,
-    pub base_step_min_rebalance_multiples: f64,
-    pub max_step_min_rebalance_multiples: f64,
+pub struct RiskAcquisitionConfigView {
+    pub initial_ratio: f64,
+    pub advantage_steps: f64,
+    pub min_release_steps: f64,
+    pub max_release_steps: f64,
     pub catchup_ratio: f64,
 }
 ```
@@ -1441,19 +1441,19 @@ Add to `TrackStrategyView`:
 
 ```rust
 #[serde(default)]
-pub risk_increase_delay: Option<RiskIncreaseDelayView>,
+pub risk_acquisition: Option<RiskAcquisitionConfigView>,
 ```
 
-In `application/src/read_model.rs`, add `risk_increase_delay: Option<RiskIncreaseDelayConfig>` to `TrackReadModel`.
+In `application/src/read_model.rs`, add `risk_acquisition: Option<RiskAcquisitionConfig>` to `TrackReadModel`.
 
-In `server/src/projector.rs`, map `RiskIncreaseDelayConfig` to `RiskIncreaseDelayView`.
+In `server/src/projector.rs`, map `RiskAcquisitionConfig` to `RiskAcquisitionConfigView`.
 
 - [x] **Step 4: Run protocol test to verify it passes**
 
 Run:
 
 ```bash
-cargo test -p poise-protocol track_detail_serializes_risk_increase_delay
+cargo test -p poise-protocol track_detail_serializes_risk_acquisition
 ```
 
 Expected: PASS.
@@ -1466,7 +1466,7 @@ In `tui/src/views/instance.rs`, add one compact line in the strategy/config pane
 risk delay: startup 30%, advantage 2.0x, step 1.0x-4.0x, catchup 25%
 ```
 
-If `risk_increase_delay` is `None`, render:
+If `risk_acquisition` is `None`, render:
 
 ```text
 risk delay: off
@@ -1508,7 +1508,7 @@ Record commit SHA here after committing: `b2e81aa`
 - Modify: `tools/track-tuning-workbench/src/state/workbenchStore.ts`
 - Modify: `tools/track-tuning-workbench/src/styles/base.css`
 - Modify: `tools/track-tuning-workbench/src/ui/app/useSelectedTrackWorkbench.ts`
-- Create: `tools/track-tuning-workbench/src/ui/editor/sections/RiskIncreaseDelaySection.tsx`
+- Create: `tools/track-tuning-workbench/src/ui/editor/sections/RiskAcquisitionSection.tsx`
 - Modify: `tools/track-tuning-workbench/src/ui/editor/TrackEditor.tsx`
 - Modify: `tools/track-tuning-workbench/src/ui/editor/sections/CurveSection.tsx`
 - Test: `tools/track-tuning-workbench/src-tauri/src/config_document.rs`
@@ -1521,7 +1521,7 @@ Add a test in `tools/track-tuning-workbench/src-tauri/src/config_document.rs`:
 
 ```rust
 #[test]
-fn loads_and_projects_risk_increase_delay() {
+fn loads_and_projects_risk_acquisition() {
     let document = load_from_str(
         r#"
 [exchange]
@@ -1546,20 +1546,20 @@ daily_loss_limit = 100.0
 total_loss_limit = 200.0
 shape_family = "linear"
 
-[tracks.risk_increase_delay]
-startup_initial_ratio = 0.3
-advantage_min_rebalance_multiples = 2.0
-base_step_min_rebalance_multiples = 1.0
-max_step_min_rebalance_multiples = 4.0
+[tracks.risk_acquisition]
+initial_ratio = 0.3
+advantage_steps = 2.0
+min_release_steps = 1.0
+max_release_steps = 4.0
 catchup_ratio = 0.25
 "#,
     )
     .unwrap();
 
     let track = &document.drafts()[0].fields;
-    let delay = track.risk_increase_delay.unwrap();
+    let delay = track.risk_acquisition.unwrap();
 
-    assert_eq!(delay.startup_initial_ratio, 0.3);
+    assert_eq!(delay.initial_ratio, 0.3);
     assert_eq!(delay.catchup_ratio, 0.25);
 }
 ```
@@ -1569,10 +1569,10 @@ catchup_ratio = 0.25
 Run:
 
 ```bash
-cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml config_document::tests::loads_and_projects_risk_increase_delay
+cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml config_document::tests::loads_and_projects_risk_acquisition
 ```
 
-Expected: FAIL because workbench config fields do not include `risk_increase_delay`.
+Expected: FAIL because workbench config fields do not include `risk_acquisition`.
 
 - [x] **Step 3: Implement Tauri config fields**
 
@@ -1580,25 +1580,25 @@ Add a Rust payload struct mirroring core config:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct RiskIncreaseDelayFields {
-    pub startup_initial_ratio: f64,
-    pub advantage_min_rebalance_multiples: f64,
-    pub base_step_min_rebalance_multiples: f64,
-    pub max_step_min_rebalance_multiples: f64,
+pub struct RiskAcquisitionFields {
+    pub initial_ratio: f64,
+    pub advantage_steps: f64,
+    pub min_release_steps: f64,
+    pub max_release_steps: f64,
     pub catchup_ratio: f64,
 }
 ```
 
-Add `pub risk_increase_delay: Option<RiskIncreaseDelayFields>` to editable fields, payloads, hash/projection, parse, and save paths.
+Add `pub risk_acquisition: Option<RiskAcquisitionFields>` to editable fields, payloads, hash/projection, parse, and save paths.
 
 Projection must emit:
 
 ```toml
-[tracks.risk_increase_delay]
-startup_initial_ratio = 0.3
-advantage_min_rebalance_multiples = 2.0
-base_step_min_rebalance_multiples = 1.0
-max_step_min_rebalance_multiples = 4.0
+[tracks.risk_acquisition]
+initial_ratio = 0.3
+advantage_steps = 2.0
+min_release_steps = 1.0
+max_release_steps = 4.0
 catchup_ratio = 0.25
 ```
 
@@ -1609,7 +1609,7 @@ only when the option is `Some`.
 Run:
 
 ```bash
-cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml config_document::tests::loads_and_projects_risk_increase_delay
+cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml config_document::tests::loads_and_projects_risk_acquisition
 ```
 
 Expected: PASS.
@@ -1642,11 +1642,11 @@ it('maps risk increase delay fields through editable payloads', async () => {
           daily_loss_limit: 100,
           total_loss_limit: 200,
           shape_family: 'linear',
-          risk_increase_delay: {
-            startup_initial_ratio: 0.3,
-            advantage_min_rebalance_multiples: 2,
-            base_step_min_rebalance_multiples: 1,
-            max_step_min_rebalance_multiples: 4,
+          risk_acquisition: {
+            initial_ratio: 0.3,
+            advantage_steps: 2,
+            min_release_steps: 1,
+            max_release_steps: 4,
             catchup_ratio: 0.25,
           },
         },
@@ -1656,8 +1656,8 @@ it('maps risk increase delay fields through editable payloads', async () => {
 
   const loaded = await bridge.loadConfigFile('/tmp/demo.toml');
 
-  expect(loaded.tracks[0].riskIncreaseDelay?.startupInitialRatio).toBe('0.3');
-  expect(loaded.tracks[0].riskIncreaseDelay?.catchupRatio).toBe('0.25');
+  expect(loaded.tracks[0].riskAcquisition?.initialRatio).toBe('0.3');
+  expect(loaded.tracks[0].riskAcquisition?.catchupRatio).toBe('0.25');
 });
 ```
 
@@ -1678,18 +1678,18 @@ Expected: FAIL because TypeScript draft state lacks risk delay fields.
 Add TypeScript draft shape:
 
 ```typescript
-export interface RiskIncreaseDelayDraft {
-  startupInitialRatio: string;
-  advantageMinRebalanceMultiples: string;
-  baseStepMinRebalanceMultiples: string;
-  maxStepMinRebalanceMultiples: string;
+export interface RiskAcquisitionDraft {
+  initialRatio: string;
+  advantageSteps: string;
+  minReleaseSteps: string;
+  maxReleaseSteps: string;
   catchupRatio: string;
 }
 ```
 
-Add optional `riskIncreaseDelay?: RiskIncreaseDelayDraft` to the track draft model, load/save bridge, validation, and payload mapping.
+Add optional `riskAcquisition?: RiskAcquisitionDraft` to the track draft model, load/save bridge, validation, and payload mapping.
 
-Create `RiskIncreaseDelaySection.tsx` with five numeric inputs and one enable checkbox. Labels:
+Create `RiskAcquisitionSection.tsx` with five numeric inputs and one enable checkbox. Labels:
 
 ```text
 增加风险延迟
@@ -1717,7 +1717,7 @@ Expected: PASS.
 Run:
 
 ```bash
-git add tools/track-tuning-workbench/src-tauri/src/config_document.rs tools/track-tuning-workbench/src-tauri/src/commands.rs tools/track-tuning-workbench/src-tauri/src/config_projection.rs tools/track-tuning-workbench/src/domain/trackDraft.ts tools/track-tuning-workbench/src/domain/trackValidation.ts tools/track-tuning-workbench/src/app/workbenchBridge.ts tools/track-tuning-workbench/src/app/workbenchBridge.test.ts tools/track-tuning-workbench/src/ui/editor/TrackEditor.tsx tools/track-tuning-workbench/src/ui/editor/sections/RiskIncreaseDelaySection.tsx tools/track-tuning-workbench/src/ui/app/AppShell.test.tsx
+git add tools/track-tuning-workbench/src-tauri/src/config_document.rs tools/track-tuning-workbench/src-tauri/src/commands.rs tools/track-tuning-workbench/src-tauri/src/config_projection.rs tools/track-tuning-workbench/src/domain/trackDraft.ts tools/track-tuning-workbench/src/domain/trackValidation.ts tools/track-tuning-workbench/src/app/workbenchBridge.ts tools/track-tuning-workbench/src/app/workbenchBridge.test.ts tools/track-tuning-workbench/src/ui/editor/TrackEditor.tsx tools/track-tuning-workbench/src/ui/editor/sections/RiskAcquisitionSection.tsx tools/track-tuning-workbench/src/ui/app/AppShell.test.tsx
 git commit -m "feat: edit risk increase delay in workbench"
 ```
 
@@ -1725,11 +1725,11 @@ Record commit SHA here after committing: `75f0a3b`
 
 Notes:
 - Used the existing `parse_track_document` helper instead of the plan's placeholder `load_from_str`.
-- Reused `poise_core::strategy::RiskIncreaseDelayConfig` in Tauri payloads instead of duplicating a separate `RiskIncreaseDelayFields` type.
+- Reused `poise_core::strategy::RiskAcquisitionConfig` in Tauri payloads instead of duplicating a separate `RiskAcquisitionFields` type.
 - `pnpm` was not available in this environment, so equivalent workbench commands were run with `npm --prefix tools/track-tuning-workbench`.
 - Additional files were touched to wire editor state, dirty tracking, checkbox styling, and existing OKX venue labels used by the workbench test suite.
 - Verification:
-  - `cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml config_document::tests::loads_and_projects_risk_increase_delay`
+  - `cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml config_document::tests::loads_and_projects_risk_acquisition`
   - `cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml config_document::tests::`
   - `cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml commands::tests::export_`
   - `cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml commands::tests::load_config_file_`
@@ -1748,18 +1748,18 @@ Notes:
 Run:
 
 ```bash
-cargo test -p poise-core strategy::tests::validate_accepts_risk_increase_delay_config
-cargo test -p poise-core strategy::tests::validate_rejects_invalid_risk_increase_delay_config
+cargo test -p poise-core strategy::tests::validate_accepts_risk_acquisition_config
+cargo test -p poise-core strategy::tests::validate_rejects_invalid_risk_acquisition_config
 cargo test -p poise-core strategy::tests::validate_rejects_step_bounds_that_cannot_release
 cargo test -p poise-engine risk_exposure_gate::tests::
-cargo test -p poise-engine reconciler::tests::risk_increase_delay_startup_exposes_allowed_target_not_curve_target
-cargo test -p poise-engine reconciler::tests::risk_increase_delay_reduces_allowed_target_when_curve_reenters_inside
-cargo test -p poise-engine reconciler::tests::risk_increase_delay_cross_zero_reduces_to_flat_first
+cargo test -p poise-engine reconciler::tests::risk_acquisition_startup_exposes_allowed_target_not_curve_target
+cargo test -p poise-engine reconciler::tests::risk_acquisition_reduces_allowed_target_when_curve_reenters_inside
+cargo test -p poise-engine reconciler::tests::risk_acquisition_cross_zero_reduces_to_flat_first
 cargo test -p poise-engine executor::tests::risk_acquisition_maker_uses_advantage_price_and_release_budget
 cargo test -p poise-engine executor::tests::curve_maker_policy_emits_future_operations_near_spot
 cargo test -p poise-engine executor::tests::catch_up_policy_cancels_stale_curve_maker_and_takes_over_operation_in_same_round
 cargo test -p poise-engine manager::tests::reconcile_track_plans_risk_acquisition_maker_when_allowed_target_is_current_exposure
-cargo test -p poise-server config::tests::parses_risk_increase_delay_config
+cargo test -p poise-server config::tests::parses_risk_acquisition_config
 cargo test -p poise-server projector::tests::
 ```
 
@@ -1770,7 +1770,7 @@ Expected: all commands PASS.
 Run:
 
 ```bash
-cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml config_document::tests::loads_and_projects_risk_increase_delay
+cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml config_document::tests::loads_and_projects_risk_acquisition
 pnpm --dir tools/track-tuning-workbench test -- workbenchBridge.test.ts AppShell.test.tsx
 ```
 
@@ -1803,20 +1803,20 @@ Record commit SHA here after committing: `5cd5db8`
 Notes:
 - `pnpm` was not available in this environment, so the workbench commands were run with `npm --prefix tools/track-tuning-workbench`.
 - Final focused verification passed:
-  - `cargo test -p poise-core strategy::tests::validate_accepts_risk_increase_delay_config`
-  - `cargo test -p poise-core strategy::tests::validate_rejects_invalid_risk_increase_delay_config`
+  - `cargo test -p poise-core strategy::tests::validate_accepts_risk_acquisition_config`
+  - `cargo test -p poise-core strategy::tests::validate_rejects_invalid_risk_acquisition_config`
   - `cargo test -p poise-core strategy::tests::validate_rejects_step_bounds_that_cannot_release`
   - `cargo test -p poise-engine risk_exposure_gate::tests::`
-  - `cargo test -p poise-engine reconciler::tests::risk_increase_delay_startup_exposes_allowed_target_not_curve_target`
-  - `cargo test -p poise-engine reconciler::tests::risk_increase_delay_reduces_allowed_target_when_curve_reenters_inside`
-  - `cargo test -p poise-engine reconciler::tests::risk_increase_delay_cross_zero_reduces_to_flat_first`
+  - `cargo test -p poise-engine reconciler::tests::risk_acquisition_startup_exposes_allowed_target_not_curve_target`
+  - `cargo test -p poise-engine reconciler::tests::risk_acquisition_reduces_allowed_target_when_curve_reenters_inside`
+  - `cargo test -p poise-engine reconciler::tests::risk_acquisition_cross_zero_reduces_to_flat_first`
   - `cargo test -p poise-engine executor::tests::risk_acquisition_maker_uses_advantage_price_and_release_budget`
   - `cargo test -p poise-engine executor::tests::curve_maker_policy_emits_future_operations_near_spot`
   - `cargo test -p poise-engine executor::tests::catch_up_policy_cancels_stale_curve_maker_and_takes_over_operation_in_same_round`
   - `cargo test -p poise-engine manager::tests::reconcile_track_plans_risk_acquisition_maker_when_allowed_target_is_current_exposure`
-  - `cargo test -p poise-server config::tests::parses_risk_increase_delay_config`
+  - `cargo test -p poise-server config::tests::parses_risk_acquisition_config`
   - `cargo test -p poise-server projector::tests::`
-  - `cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml config_document::tests::loads_and_projects_risk_increase_delay`
+  - `cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml config_document::tests::loads_and_projects_risk_acquisition`
   - `npm --prefix tools/track-tuning-workbench test -- workbenchBridge.test.ts AppShell.test.tsx`
   - `cargo fmt --check`
   - `npm --prefix tools/track-tuning-workbench run build`

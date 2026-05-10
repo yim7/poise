@@ -895,7 +895,7 @@ mod tests {
             min_rebalance_units: 1.0,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
-            risk_increase_delay: None,
+            risk_acquisition: Default::default(),
         }
     }
 
@@ -1090,7 +1090,7 @@ mod tests {
                     best_ask: 100.1,
                 }),
                 submit_purpose: SubmitPurpose::AutoReconcile,
-                risk_acquisition: None,
+                risk_acquisition: Default::default(),
                 exposure_epsilon: 1e-9,
                 curve_maker_levels_per_side: 1,
             },

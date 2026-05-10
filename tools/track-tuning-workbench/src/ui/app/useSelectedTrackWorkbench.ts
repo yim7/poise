@@ -3,6 +3,7 @@ import {
   type TrackDraft,
   type TrackDraftNumericFields,
   type TrackDraftParsedSnapshot,
+  type RiskAcquisitionParsed,
 } from '@/domain/trackDraft';
 import { computeTrackMetrics } from '@/domain/trackMetrics';
 import { parseFiniteNumber, validateTrackDraft } from '@/domain/trackValidation';
@@ -126,12 +127,23 @@ function resolveVisualSnapshot(
     draftId: draft.draftId,
     additional: draft.additional,
     parsedNumbers: fallbackNumbers,
+    riskAcquisition: fallbackRiskAcquisition(draft),
     enums: draft.enums,
     ui: {
       quotePriceInput: draft.ui.quotePriceInput,
       quotePrice,
     },
     attachments: draft.attachments,
+  };
+}
+
+function fallbackRiskAcquisition(draft: TrackDraft): RiskAcquisitionParsed {
+  return {
+    initialRatio: parseFiniteNumber(draft.riskAcquisition.initialRatio) ?? 0.3,
+    advantageSteps: parseFiniteNumber(draft.riskAcquisition.advantageSteps) ?? 2,
+    minReleaseSteps: parseFiniteNumber(draft.riskAcquisition.minReleaseSteps) ?? 1,
+    maxReleaseSteps: parseFiniteNumber(draft.riskAcquisition.maxReleaseSteps) ?? 4,
+    catchupRatio: parseFiniteNumber(draft.riskAcquisition.catchupRatio) ?? 0.25,
   };
 }
 

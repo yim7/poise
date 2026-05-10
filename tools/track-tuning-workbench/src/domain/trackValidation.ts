@@ -3,13 +3,13 @@ import type {
   TrackDraftFieldKey,
   TrackDraftNumericFields,
   TrackDraftParsedSnapshot,
-  RiskIncreaseDelayDraftField,
-  RiskIncreaseDelayParsed,
+  RiskAcquisitionDraftField,
+  RiskAcquisitionParsed,
 } from '@/domain/trackDraft';
 import {
-  RISK_INCREASE_DELAY_FIELD_KEYS,
+  RISK_ACQUISITION_FIELD_KEYS,
   TRACK_NUMERIC_FIELD_KEYS,
-  riskIncreaseDelayFieldKey,
+  riskAcquisitionFieldKey,
 } from '@/domain/trackDraft';
 
 const FIELD_LABELS: Record<
@@ -31,14 +31,14 @@ const FIELD_LABELS: Record<
   shapeFamily: 'shape_family',
   bandProtectionKind: 'out_of_band_policy',
   quotePriceInput: 'quote_price',
-  'riskIncreaseDelay.startupInitialRatio': 'risk_increase_delay.startup_initial_ratio',
-  'riskIncreaseDelay.advantageMinRebalanceMultiples':
-    'risk_increase_delay.advantage_min_rebalance_multiples',
-  'riskIncreaseDelay.baseStepMinRebalanceMultiples':
-    'risk_increase_delay.base_step_min_rebalance_multiples',
-  'riskIncreaseDelay.maxStepMinRebalanceMultiples':
-    'risk_increase_delay.max_step_min_rebalance_multiples',
-  'riskIncreaseDelay.catchupRatio': 'risk_increase_delay.catchup_ratio',
+  'riskAcquisition.initialRatio': 'risk_acquisition.initial_ratio',
+  'riskAcquisition.advantageSteps':
+    'risk_acquisition.advantage_steps',
+  'riskAcquisition.minReleaseSteps':
+    'risk_acquisition.min_release_steps',
+  'riskAcquisition.maxReleaseSteps':
+    'risk_acquisition.max_release_steps',
+  'riskAcquisition.catchupRatio': 'risk_acquisition.catchup_ratio',
 };
 
 export interface TrackDraftIssue {
@@ -55,7 +55,7 @@ export interface TrackDraftValidationResult {
 export function validateTrackDraft(draft: TrackDraft): TrackDraftValidationResult {
   const issues: TrackDraftIssue[] = [];
   const parsedNumbers = {} as TrackDraftNumericFields;
-  let riskIncreaseDelay: RiskIncreaseDelayParsed | undefined;
+  let riskAcquisition: RiskAcquisitionParsed | undefined;
 
   for (const issue of draft.attachments.loadIssues ?? []) {
     issues.push({
@@ -90,9 +90,7 @@ export function validateTrackDraft(draft: TrackDraft): TrackDraftValidationResul
     parsedNumbers[field] = value;
   }
 
-  if (draft.riskIncreaseDelay) {
-    riskIncreaseDelay = resolveRiskIncreaseDelay(draft, issues);
-  }
+  riskAcquisition = resolveRiskAcquisition(draft, issues);
 
   const hasQuoteInput = draft.ui.quotePriceInput.trim().length > 0;
   const quotePrice = parseFiniteNumber(draft.ui.quotePriceInput);
@@ -121,7 +119,7 @@ export function validateTrackDraft(draft: TrackDraft): TrackDraftValidationResul
       draftId: draft.draftId,
       additional: draft.additional,
       parsedNumbers,
-      riskIncreaseDelay,
+      riskAcquisition: riskAcquisition!,
       enums: draft.enums,
       ui: {
         quotePriceInput: draft.ui.quotePriceInput,
@@ -236,15 +234,15 @@ function validateStrategySemantics(
   }
 }
 
-function resolveRiskIncreaseDelay(
+function resolveRiskAcquisition(
   draft: TrackDraft,
   issues: TrackDraftIssue[],
-): RiskIncreaseDelayParsed | undefined {
-  const parsed = {} as RiskIncreaseDelayParsed;
+): RiskAcquisitionParsed | undefined {
+  const parsed = {} as RiskAcquisitionParsed;
 
-  for (const field of RISK_INCREASE_DELAY_FIELD_KEYS) {
-    const issueField = riskIncreaseDelayFieldKey(field);
-    const value = parseFiniteNumber(draft.riskIncreaseDelay?.[field] ?? '');
+  for (const field of RISK_ACQUISITION_FIELD_KEYS) {
+    const issueField = riskAcquisitionFieldKey(field);
+    const value = parseFiniteNumber(draft.riskAcquisition[field]);
     if (value === null) {
       issues.push({
         field: issueField,
@@ -255,44 +253,44 @@ function resolveRiskIncreaseDelay(
     parsed[field] = value;
   }
 
-  if (hasRiskIncreaseDelayParseIssue(issues)) {
+  if (hasRiskAcquisitionParseIssue(issues)) {
     return undefined;
   }
 
-  validateRiskIncreaseDelaySemantics(parsed, issues);
+  validateRiskAcquisitionSemantics(parsed, issues);
   return parsed;
 }
 
-function hasRiskIncreaseDelayParseIssue(issues: TrackDraftIssue[]): boolean {
+function hasRiskAcquisitionParseIssue(issues: TrackDraftIssue[]): boolean {
   return issues.some((issue) =>
-    issue.field.startsWith('riskIncreaseDelay.'),
+    issue.field.startsWith('riskAcquisition.'),
   );
 }
 
-function validateRiskIncreaseDelaySemantics(
-  delay: RiskIncreaseDelayParsed,
+function validateRiskAcquisitionSemantics(
+  delay: RiskAcquisitionParsed,
   issues: TrackDraftIssue[],
 ) {
   requireRatioInUnitInterval(
-    delay.startupInitialRatio,
-    'startupInitialRatio',
+    delay.initialRatio,
+    'initialRatio',
     issues,
   );
   requirePositive(
-    delay.advantageMinRebalanceMultiples,
-    'advantageMinRebalanceMultiples',
+    delay.advantageSteps,
+    'advantageSteps',
     issues,
   );
   requirePositive(
-    delay.baseStepMinRebalanceMultiples,
-    'baseStepMinRebalanceMultiples',
+    delay.minReleaseSteps,
+    'minReleaseSteps',
     issues,
   );
-  if (delay.maxStepMinRebalanceMultiples < delay.baseStepMinRebalanceMultiples) {
-    const field = riskIncreaseDelayFieldKey('maxStepMinRebalanceMultiples');
+  if (delay.maxReleaseSteps < delay.minReleaseSteps) {
+    const field = riskAcquisitionFieldKey('maxReleaseSteps');
     issues.push({
       field,
-      message: `${FIELD_LABELS[field]} 必须大于等于 ${FIELD_LABELS[riskIncreaseDelayFieldKey('baseStepMinRebalanceMultiples')]}`,
+      message: `${FIELD_LABELS[field]} 必须大于等于 ${FIELD_LABELS[riskAcquisitionFieldKey('minReleaseSteps')]}`,
     });
   }
   requireRatioInUnitInterval(delay.catchupRatio, 'catchupRatio', issues);
@@ -300,11 +298,11 @@ function validateRiskIncreaseDelaySemantics(
 
 function requireRatioInUnitInterval(
   value: number,
-  field: RiskIncreaseDelayDraftField,
+  field: RiskAcquisitionDraftField,
   issues: TrackDraftIssue[],
 ) {
   if (value <= 0 || value > 1) {
-    const issueField = riskIncreaseDelayFieldKey(field);
+    const issueField = riskAcquisitionFieldKey(field);
     issues.push({
       field: issueField,
       message: `${FIELD_LABELS[issueField]} 必须在 (0, 1] 内`,
@@ -314,11 +312,11 @@ function requireRatioInUnitInterval(
 
 function requirePositive(
   value: number,
-  field: RiskIncreaseDelayDraftField,
+  field: RiskAcquisitionDraftField,
   issues: TrackDraftIssue[],
 ) {
   if (value <= 0) {
-    const issueField = riskIncreaseDelayFieldKey(field);
+    const issueField = riskAcquisitionFieldKey(field);
     issues.push({
       field: issueField,
       message: `${FIELD_LABELS[issueField]} 必须大于 0`,

@@ -52,29 +52,22 @@ fn export_track(draft: &TrackDraft) -> String {
         ),
     ];
 
-    if let Some(delay) = fields.risk_increase_delay {
-        lines.extend([
-            String::new(),
-            "[tracks.risk_increase_delay]".to_string(),
-            format!(
-                "startup_initial_ratio = {}",
-                format_f64(delay.startup_initial_ratio)
-            ),
-            format!(
-                "advantage_min_rebalance_multiples = {}",
-                format_f64(delay.advantage_min_rebalance_multiples)
-            ),
-            format!(
-                "base_step_min_rebalance_multiples = {}",
-                format_f64(delay.base_step_min_rebalance_multiples)
-            ),
-            format!(
-                "max_step_min_rebalance_multiples = {}",
-                format_f64(delay.max_step_min_rebalance_multiples)
-            ),
-            format!("catchup_ratio = {}", format_f64(delay.catchup_ratio)),
-        ]);
-    }
+    let delay = fields.risk_acquisition;
+    lines.extend([
+        String::new(),
+        "[tracks.risk_acquisition]".to_string(),
+        format!("initial_ratio = {}", format_f64(delay.initial_ratio)),
+        format!("advantage_steps = {}", format_f64(delay.advantage_steps)),
+        format!(
+            "min_release_steps = {}",
+            format_f64(delay.min_release_steps)
+        ),
+        format!(
+            "max_release_steps = {}",
+            format_f64(delay.max_release_steps)
+        ),
+        format!("catchup_ratio = {}", format_f64(delay.catchup_ratio)),
+    ]);
 
     lines.join("\n")
 }
