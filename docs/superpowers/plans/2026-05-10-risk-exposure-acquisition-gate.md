@@ -783,7 +783,7 @@ Record commit SHA here after committing: `713a701`
 - Test: `engine/src/reconciler.rs`
 - Test: `engine/src/manager.rs`
 
-- [ ] **Step 1: Write reconciler tests for gated desired target**
+- [x] **Step 1: Write reconciler tests for gated desired target**
 
 Add these tests to `engine/src/reconciler.rs`:
 
@@ -876,7 +876,7 @@ fn enable_risk_increase_delay(track: &mut TrackRuntime) {
 }
 ```
 
-- [ ] **Step 2: Run reconciler tests to verify they fail**
+- [x] **Step 2: Run reconciler tests to verify they fail**
 
 Run:
 
@@ -886,7 +886,7 @@ cargo test -p poise-engine reconciler::tests::risk_increase_delay_
 
 Expected: FAIL because `RiskExposureGateState`, `AutoState::AcquiringRiskExposure`, reconciler gate wiring, and result `risk_acquisition` do not exist.
 
-- [ ] **Step 3: Add runtime state**
+- [x] **Step 3: Add runtime state**
 
 In `engine/src/runtime.rs`, import `RiskExposureGateState` and add this variant:
 
@@ -905,7 +905,7 @@ Self::Running(ControlState::Automatic(AutoState::FollowingBand))
 }
 ```
 
-- [ ] **Step 4: Wire reconciler gate after risk cap and before account capacity**
+- [x] **Step 4: Wire reconciler gate after risk cap and before account capacity**
 
 In `engine/src/reconciler.rs`, import the gate types and add this field to `TargetReconcileResult`:
 
@@ -962,7 +962,7 @@ fn merge_gate_state(
 }
 ```
 
-- [ ] **Step 5: Carry risk acquisition through manager planning result**
+- [x] **Step 5: Carry risk acquisition through manager planning result**
 
 In `engine/src/manager.rs`, add `risk_acquisition: Option<RiskAcquisitionRelease>` to `PlannedInventoryExecution` and copy `target.risk_acquisition` into that field in every `PlannedInventoryExecution` return.
 
@@ -970,7 +970,7 @@ Do not add `risk_acquisition` to `SubmitIntentInput` in this task. That happens 
 
 Import `RiskAcquisitionRelease` from `crate::risk_exposure_gate`.
 
-- [ ] **Step 6: Run reconciler tests to verify they pass**
+- [x] **Step 6: Run reconciler tests to verify they pass**
 
 Run:
 
@@ -980,7 +980,7 @@ cargo test -p poise-engine reconciler::tests::risk_increase_delay_
 
 Expected: PASS.
 
-- [ ] **Step 7: Run manager compile-focused test**
+- [x] **Step 7: Run manager compile-focused test**
 
 Run:
 
@@ -990,7 +990,7 @@ cargo test -p poise-engine manager::tests::reconcile_track_submits_catch_up_acti
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit Task 3**
+- [x] **Step 8: Commit Task 3**
 
 Run:
 
@@ -999,7 +999,7 @@ git add engine/src/runtime.rs engine/src/reconciler.rs engine/src/manager.rs eng
 git commit -m "feat: wire risk exposure gate into reconciliation"
 ```
 
-Record commit SHA here after committing: ``
+Record commit SHA here after committing: `111f93b`
 
 ## Task 4: Executor CatchUp And CurveMaker Budgeting
 
