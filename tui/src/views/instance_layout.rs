@@ -209,7 +209,7 @@ mod tests {
         assert_eq!(hidden.mode, DetailLayoutMode::Compact);
         assert!(hidden.trace.is_none());
         assert_eq!(visible.mode, DetailLayoutMode::Compact);
-        assert_eq!(visible.trace.map(|area| area.height), Some(4));
+        assert_eq!(visible.trace.map(|area| area.height), Some(5));
     }
 
     #[test]

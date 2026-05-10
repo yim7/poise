@@ -2467,6 +2467,7 @@ mod tests {
             )));
             updated.set_exposure_state(poise_core::types::Exposure(4.0), None);
             let mut pnl_stats = updated.pnl_stats().clone();
+            pnl_stats.pnl_utc_day = chrono::Utc::now().date_naive();
             pnl_stats.gross_realized_pnl_today = -290.0;
             pnl_stats.gross_realized_pnl_cumulative = -290.0;
             updated.replace_pnl_stats(pnl_stats);

@@ -1689,7 +1689,7 @@ mod tests {
             submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             recovery_token: SubmitRecoveryToken::empty(),
         }];
-        let persisted = commit_test_transition(&storage, "test-1", &[], &effects).await;
+        let persisted = commit_test_transition(&storage, "test-1", &[test_event()], &effects).await;
         let effect_id = persisted.effects[0].effect_id.clone();
         let fixed_updated_at = Utc.with_ymd_and_hms(2026, 4, 23, 1, 2, 3).unwrap();
         overwrite_track_presence_updated_at(&storage, "test-1", &fixed_updated_at.to_rfc3339());
