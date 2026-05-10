@@ -4,10 +4,10 @@ use poise_protocol::{
     ExecutionBadgeView, ExecutionBindingIntentView, ExecutionBindingOrderView,
     ExecutionBindingPolicyView, ExecutionBindingStatusView, ExecutionBindingView,
     ExecutionStateView, ExecutionStatusView, ExposureSummaryView, InstrumentView,
-    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, StrategyPriceStatusView,
-    TrackActivityItemView, TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionView,
-    TrackIdentityView, TrackLifecycleView, TrackListItemView, TrackListPnlView,
-    TrackLossLimitsView, TrackMarketView, TrackPnlView, TrackPositionView,
+    RiskIncreaseDelayView, ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
+    StrategyPriceStatusView, TrackActivityItemView, TrackCommandType, TrackCommandView,
+    TrackDetailView, TrackExecutionView, TrackIdentityView, TrackLifecycleView, TrackListItemView,
+    TrackListPnlView, TrackLossLimitsView, TrackMarketView, TrackPnlView, TrackPositionView,
     TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
 };
 
@@ -88,6 +88,7 @@ impl TrackProjector {
                 min_rebalance_units: source.min_rebalance_units,
                 shape_family: project_shape_family(source.shape_family),
                 out_of_band_policy: project_out_of_band_policy(source.out_of_band_policy),
+                risk_increase_delay: source.risk_increase_delay.map(project_risk_increase_delay),
             },
             max_notional: source.max_notional,
             loss_limits: TrackLossLimitsView {
@@ -215,6 +216,18 @@ fn project_shape_family(value: poise_core::strategy::ShapeFamily) -> ProtocolSha
         poise_core::strategy::ShapeFamily::Linear => ProtocolShapeFamily::Linear,
         poise_core::strategy::ShapeFamily::Inertial => ProtocolShapeFamily::Inertial,
         poise_core::strategy::ShapeFamily::Responsive => ProtocolShapeFamily::Responsive,
+    }
+}
+
+fn project_risk_increase_delay(
+    value: poise_core::strategy::RiskIncreaseDelayConfig,
+) -> RiskIncreaseDelayView {
+    RiskIncreaseDelayView {
+        startup_initial_ratio: value.startup_initial_ratio,
+        advantage_min_rebalance_multiples: value.advantage_min_rebalance_multiples,
+        base_step_min_rebalance_multiples: value.base_step_min_rebalance_multiples,
+        max_step_min_rebalance_multiples: value.max_step_min_rebalance_multiples,
+        catchup_ratio: value.catchup_ratio,
     }
 }
 
@@ -454,7 +467,9 @@ mod tests {
         TrackReadBindingStatus, TrackReadModel, TrackReadPnlStats, TrackReadStatus,
         TrackRecoveryIssue, TrackStrategyPriceStatus,
     };
-    use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily};
+    use poise_core::strategy::{
+        BandProtectionPolicy, BandRecoverPolicy, RiskIncreaseDelayConfig, ShapeFamily,
+    };
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
     use poise_protocol::{
@@ -564,7 +579,8 @@ mod tests {
 
     #[test]
     fn project_detail_includes_available_commands_and_activity() {
-        let source = source_with_failed_effect_and_recent_event();
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.risk_increase_delay = Some(RiskIncreaseDelayConfig::default());
         let detail = TrackProjector::new().project_detail(&source);
         let detail_json = serde_json::to_value(&detail).unwrap();
 
@@ -583,6 +599,10 @@ mod tests {
         assert_eq!(
             detail_json["strategy"]["min_rebalance_units"].as_f64(),
             Some(0.5)
+        );
+        assert_eq!(
+            detail_json["strategy"]["risk_increase_delay"]["startup_initial_ratio"].as_f64(),
+            Some(0.3)
         );
         assert!(!detail.available_commands.is_empty());
         assert_eq!(
@@ -1057,6 +1077,7 @@ mod tests {
             min_rebalance_units: 0.5,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
+            risk_increase_delay: None,
             max_notional: 3000.0,
             loss_limits: poise_core::risk::LossLimits {
                 daily_loss_limit: 100.0,

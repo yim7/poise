@@ -222,7 +222,22 @@ fn strategy_lines(
                 detail.strategy.shape_family,
                 detail.strategy.out_of_band_policy
             )),
+            Line::from(format_risk_delay_line(detail)),
         ]
+    }
+}
+
+fn format_risk_delay_line(detail: &crate::protocol::TrackDetailView) -> String {
+    match detail.strategy.risk_increase_delay {
+        Some(delay) => format!(
+            "risk delay: startup {:.0}%, advantage {:.1}x, step {:.1}x-{:.1}x, catchup {:.0}%",
+            delay.startup_initial_ratio * 100.0,
+            delay.advantage_min_rebalance_multiples,
+            delay.base_step_min_rebalance_multiples,
+            delay.max_step_min_rebalance_multiples,
+            delay.catchup_ratio * 100.0
+        ),
+        None => "risk delay: off".to_string(),
     }
 }
 

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use poise_core::events::{DomainEvent, ExecutionGateReason};
 use poise_core::risk::LossLimits;
-use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
+use poise_core::strategy::{BandProtectionPolicy, RiskIncreaseDelayConfig, ShapeFamily};
 use poise_core::track::{Instrument, TrackDefinition};
 use poise_core::types::Side;
 use poise_engine::execution_plan::TrackEffect;
@@ -63,6 +63,7 @@ pub struct TrackReadModel {
     pub min_rebalance_units: f64,
     pub shape_family: ShapeFamily,
     pub out_of_band_policy: BandProtectionPolicy,
+    pub risk_increase_delay: Option<RiskIncreaseDelayConfig>,
     pub max_notional: f64,
     pub loss_limits: LossLimits,
     pub strategy_price: Option<f64>,
@@ -264,6 +265,7 @@ impl TrackReadModel {
             min_rebalance_units: track_config.min_rebalance_units,
             shape_family: track_config.shape_family,
             out_of_band_policy: track_config.out_of_band_policy,
+            risk_increase_delay: track_config.risk_increase_delay,
             max_notional: definition.max_notional(),
             loss_limits: definition.loss_limits().clone(),
             strategy_price: list_view.strategy_price,

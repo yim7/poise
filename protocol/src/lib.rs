@@ -104,6 +104,17 @@ pub struct TrackStrategyView {
     pub min_rebalance_units: f64,
     pub shape_family: ShapeFamily,
     pub out_of_band_policy: BandProtectionPolicy,
+    #[serde(default)]
+    pub risk_increase_delay: Option<RiskIncreaseDelayView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RiskIncreaseDelayView {
+    pub startup_initial_ratio: f64,
+    pub advantage_min_rebalance_multiples: f64,
+    pub base_step_min_rebalance_multiples: f64,
+    pub max_step_min_rebalance_multiples: f64,
+    pub catchup_ratio: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -809,6 +820,40 @@ mod tests {
             Some(100.0)
         );
         assert!(json.get("budget").is_none());
+    }
+
+    #[test]
+    fn track_detail_serializes_risk_increase_delay() {
+        let detail: TrackDetailView = serde_json::from_str(
+            r#"{
+                "identity":{"id":"btc-core","instrument":{"venue":"binance_futures","symbol":"BTCUSDT"}},
+                "status":{
+                    "lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},
+                    "strategy_price":64000.0,
+                    "strategy_price_status":"live"
+                },
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze","risk_increase_delay":{"startup_initial_ratio":0.3,"advantage_min_rebalance_multiples":2.0,"base_step_min_rebalance_multiples":1.0,"max_step_min_rebalance_multiples":4.0,"catchup_ratio":0.25}},
+                "max_notional":3000.0,
+                "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
+                "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
+                "position":{"current_exposure":0.5,"desired_exposure":0.75,"quantity":0.0029296875,"notional":187.5,"notional_asset":"USDT"},
+                "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
+                "execution":{"state":"open","execution_status":"normal","attention_reasons":[],"inventory_gap":0.0,"active_binding_count":0,"bindings":[]},
+                "activity":[],
+                "available_commands":[]
+            }"#,
+        )
+        .unwrap();
+        let json = serde_json::to_value(&detail).unwrap();
+
+        assert_eq!(
+            json["strategy"]["risk_increase_delay"]["startup_initial_ratio"].as_f64(),
+            Some(0.3)
+        );
+        assert_eq!(
+            json["strategy"]["risk_increase_delay"]["advantage_min_rebalance_multiples"].as_f64(),
+            Some(2.0)
+        );
     }
 
     #[test]

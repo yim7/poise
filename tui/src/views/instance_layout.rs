@@ -76,7 +76,7 @@ pub fn resolve_detail_layout(area: Rect, execution_body_lines: usize) -> DetailS
                     Constraint::Length(3),
                     Constraint::Length(5),
                     Constraint::Length(4),
-                    Constraint::Length(4),
+                    Constraint::Length(3),
                     Constraint::Min(0),
                 ])
                 .split(area);
