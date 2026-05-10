@@ -8,12 +8,17 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone)]
 pub struct BinanceQuoteClient {
     client: reqwest::Client,
-    base_url: String,
+    binance_base_url: String,
+    okx_base_url: String,
 }
 
 impl Default for BinanceQuoteClient {
     fn default() -> Self {
-        Self::for_base_url_and_timeout("https://fapi.binance.com", DEFAULT_REQUEST_TIMEOUT)
+        Self::for_base_urls_and_timeout(
+            "https://fapi.binance.com",
+            "https://www.okx.com",
+            DEFAULT_REQUEST_TIMEOUT,
+        )
     }
 }
 
@@ -23,26 +28,50 @@ impl BinanceQuoteClient {
     }
 
     pub fn for_base_url_and_timeout(base_url: impl Into<String>, timeout: Duration) -> Self {
+        let base_url = base_url.into();
+        Self::for_base_urls_and_timeout(base_url.clone(), base_url, timeout)
+    }
+
+    pub fn for_base_urls_and_timeout(
+        binance_base_url: impl Into<String>,
+        okx_base_url: impl Into<String>,
+        timeout: Duration,
+    ) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .timeout(timeout)
                 .build()
                 .expect("reqwest client should build"),
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            binance_base_url: binance_base_url.into().trim_end_matches('/').to_string(),
+            okx_base_url: okx_base_url.into().trim_end_matches('/').to_string(),
         }
     }
 
     pub async fn fetch_quote(&self, symbol: &str) -> BinanceQuotePayload {
-        let normalized_symbol = symbol.trim().to_ascii_uppercase();
-        if normalized_symbol.is_empty() {
-            return BinanceQuotePayload::failure(
-                None,
-                QuoteErrorKind::UnsupportedSymbol,
-                "symbol 不能为空".to_string(),
-            );
+        self.fetch_quote_for_exchange(Some("binance"), symbol).await
+    }
+
+    pub async fn fetch_quote_for_exchange(
+        &self,
+        exchange_venue: Option<&str>,
+        symbol: &str,
+    ) -> BinanceQuotePayload {
+        if normalized_exchange_venue(exchange_venue).as_str() == "okx" {
+            return self.fetch_okx_quote(symbol).await;
         }
 
-        let url = format!("{}/fapi/v1/ticker/price", self.base_url);
+        let normalized_symbol = match translate_to_binance_futures_symbol(exchange_venue, symbol) {
+            Ok(symbol) => symbol,
+            Err(message) => {
+                return BinanceQuotePayload::failure(
+                    None,
+                    QuoteErrorKind::UnsupportedSymbol,
+                    message,
+                );
+            }
+        };
+
+        let url = format!("{}/fapi/v1/ticker/price", self.binance_base_url);
         let response = match self
             .client
             .get(url)
@@ -101,6 +130,189 @@ impl BinanceQuoteClient {
             ),
         }
     }
+
+    async fn fetch_okx_quote(&self, symbol: &str) -> BinanceQuotePayload {
+        let symbol = symbol.trim();
+        if symbol.is_empty() {
+            return BinanceQuotePayload::failure(
+                None,
+                QuoteErrorKind::UnsupportedSymbol,
+                "symbol 不能为空".to_string(),
+            );
+        }
+
+        let url = format!("{}/api/v5/market/ticker", self.okx_base_url);
+        let response = match self
+            .client
+            .get(url)
+            .query(&[("instId", symbol)])
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return BinanceQuotePayload::failure(
+                    None,
+                    if error.is_timeout() {
+                        QuoteErrorKind::TimedOut
+                    } else {
+                        QuoteErrorKind::Network
+                    },
+                    if error.is_timeout() {
+                        "请求 OKX 合约报价超时".to_string()
+                    } else {
+                        format!("请求 OKX 合约报价失败: {error}")
+                    },
+                );
+            }
+        };
+
+        let status = response.status();
+        let body = match response.bytes().await {
+            Ok(body) => body,
+            Err(error) => {
+                return BinanceQuotePayload::failure(
+                    None,
+                    if error.is_timeout() {
+                        QuoteErrorKind::TimedOut
+                    } else {
+                        QuoteErrorKind::InvalidResponse
+                    },
+                    if error.is_timeout() {
+                        "读取 OKX 合约报价响应超时".to_string()
+                    } else {
+                        format!("读取 OKX 合约报价响应失败: {error}")
+                    },
+                );
+            }
+        };
+
+        if !status.is_success() {
+            return BinanceQuotePayload::failure(
+                None,
+                QuoteErrorKind::Upstream,
+                format!("OKX 合约报价请求失败 ({status})"),
+            );
+        }
+
+        let payload = match serde_json::from_slice::<OkxTickerEnvelope>(&body) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return BinanceQuotePayload::failure(
+                    None,
+                    QuoteErrorKind::InvalidResponse,
+                    format!("解析 OKX 合约报价失败: {error}"),
+                );
+            }
+        };
+
+        if payload.code != "0" {
+            let kind = if payload.code == "51001" {
+                QuoteErrorKind::UnsupportedSymbol
+            } else {
+                QuoteErrorKind::Upstream
+            };
+            return BinanceQuotePayload::failure(
+                None,
+                kind,
+                format!(
+                    "OKX 合约报价请求失败 code {}: {}",
+                    payload.code,
+                    payload.msg.unwrap_or_else(|| "unknown error".to_string())
+                ),
+            );
+        }
+
+        match payload.data.into_iter().next() {
+            Some(ticker) => BinanceQuotePayload::success(ticker.last),
+            None => BinanceQuotePayload::failure(
+                None,
+                QuoteErrorKind::UnsupportedSymbol,
+                format!("OKX 合约不支持 symbol `{symbol}`"),
+            ),
+        }
+    }
+}
+
+fn normalized_exchange_venue(exchange_venue: Option<&str>) -> String {
+    exchange_venue
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("binance")
+        .to_ascii_lowercase()
+        .replace('-', "_")
+}
+
+fn translate_to_binance_futures_symbol(
+    exchange_venue: Option<&str>,
+    symbol: &str,
+) -> Result<String, String> {
+    let normalized_venue = normalized_exchange_venue(exchange_venue);
+    let raw_symbol = symbol.trim();
+
+    if raw_symbol.is_empty() {
+        return Err("symbol 不能为空".to_string());
+    }
+
+    match normalized_venue.as_str() {
+        "binance" | "binance_futures" | "binance_usds_futures" | "bybit" | "hyperliquid" => {
+            translate_delimited_or_bare_symbol(raw_symbol)
+        }
+        "okx" => translate_okx_symbol(raw_symbol),
+        other => Err(format!(
+            "暂不支持将交易所 `{other}` 的 symbol 转成 Binance 合约格式"
+        )),
+    }
+}
+
+fn translate_okx_symbol(symbol: &str) -> Result<String, String> {
+    let parts = split_symbol_parts(symbol);
+    if parts.len() >= 2 && parts.last().is_some_and(|value| value == "SWAP") {
+        return Ok(format!("{}{}", parts[0], parts[1]));
+    }
+    translate_delimited_or_bare_symbol(symbol)
+}
+
+fn translate_delimited_or_bare_symbol(symbol: &str) -> Result<String, String> {
+    let parts = split_symbol_parts(symbol);
+    if parts.is_empty() {
+        return Err("symbol 不能为空".to_string());
+    }
+
+    if parts.len() >= 2 && is_quote_asset(&parts[1]) {
+        return Ok(format!("{}{}", parts[0], parts[1]));
+    }
+
+    let collapsed = parts.join("");
+    if has_known_quote_suffix(&collapsed) {
+        return Ok(collapsed);
+    }
+
+    Ok(format!("{collapsed}USDT"))
+}
+
+fn split_symbol_parts(symbol: &str) -> Vec<String> {
+    symbol
+        .trim()
+        .to_ascii_uppercase()
+        .split(['-', '_', '/', ':'])
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn has_known_quote_suffix(symbol: &str) -> bool {
+    known_quote_assets()
+        .iter()
+        .any(|quote| symbol.len() > quote.len() && symbol.ends_with(quote))
+}
+
+fn is_quote_asset(value: &str) -> bool {
+    known_quote_assets().contains(&value)
+}
+
+fn known_quote_assets() -> [&'static str; 4] {
+    ["USDT", "USDC", "BUSD", "USD"]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -146,6 +358,18 @@ impl BinanceQuotePayload {
 #[derive(Debug, Deserialize)]
 struct BinanceTickerPriceBody {
     price: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OkxTickerEnvelope {
+    code: String,
+    msg: Option<String>,
+    data: Vec<OkxTickerBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OkxTickerBody {
+    last: String,
 }
 
 #[derive(Debug, Deserialize)]

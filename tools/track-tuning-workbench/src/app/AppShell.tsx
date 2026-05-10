@@ -17,6 +17,7 @@ import { useSelectedTrackWorkbench } from '@/ui/app/useSelectedTrackWorkbench';
 import { InlineNotice } from '@/ui/common/InlineNotice';
 import { TrackEditor } from '@/ui/editor/TrackEditor';
 import { MetricCards } from '@/ui/metrics/MetricCards';
+import { ServerLivePanel } from '@/ui/server/ServerLivePanel';
 import { FilePanel } from '@/ui/sidebar/FilePanel';
 import { TrackList } from '@/ui/sidebar/TrackList';
 
@@ -45,7 +46,8 @@ export function AppShell({ bridge }: AppShellProps) {
   } = useSelectedTrackWorkbench(snapshot);
   const resolvedBridge = bridge;
   const selectedDraftId = selectedDraft?.draftId ?? null;
-  const selectedSymbol = selectedDraft?.additional.symbol.trim().toUpperCase() ?? '';
+  const selectedSymbol = selectedDraft?.additional.symbol.trim() ?? '';
+  const selectedExchangeVenue = selectedDraft?.attachments.exchangeVenue?.trim() || 'binance';
 
   useEffect(() => {
     if (!resolvedBridge || !selectedDraftId) {
@@ -69,7 +71,10 @@ export function AppShell({ bridge }: AppShellProps) {
       }
 
       try {
-        const quote = await resolvedBridge.fetchBinanceQuote(selectedSymbol);
+        const quote = await resolvedBridge.fetchBinanceQuote({
+          exchangeVenue: selectedExchangeVenue,
+          symbol: selectedSymbol,
+        });
         if (cancelled) {
           return;
         }
@@ -118,7 +123,7 @@ export function AppShell({ bridge }: AppShellProps) {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [resolvedBridge, selectedDraftId, selectedSymbol, store]);
+  }, [resolvedBridge, selectedDraftId, selectedExchangeVenue, selectedSymbol, store]);
 
   return (
     <div className="app-shell">
@@ -267,6 +272,7 @@ export function AppShell({ bridge }: AppShellProps) {
 
         <div className="app-shell__main">
           <div className="app-shell__analysis">
+            <ServerLivePanel enabled={Boolean(resolvedBridge?.isTauriEnvironment())} />
             <MetricCards
               snapshot={selectedVisualSnapshot}
               metrics={selectedMetrics}

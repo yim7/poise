@@ -426,6 +426,146 @@ a {
   justify-content: end;
 }
 
+.server-live__body {
+  display: grid;
+  gap: var(--space-4);
+  padding: 0 var(--space-5) var(--space-5);
+}
+
+.server-live__connect {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: end;
+}
+
+.server-live__layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.server-live__tracks {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.server-live__track {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-3);
+  border: 1px solid rgba(22, 38, 48, 0.08);
+  border-radius: var(--radius-md);
+  background: rgba(245, 241, 235, 0.72);
+}
+
+.server-live__track--selected {
+  border-color: rgba(13, 108, 103, 0.2);
+  background: rgba(13, 108, 103, 0.1);
+}
+
+.server-live__track-button {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+  background: transparent;
+}
+
+.server-live__track-id,
+.server-live__binding-title {
+  font-weight: 700;
+}
+
+.server-live__track-symbol,
+.server-live__metric-value {
+  font-family: var(--font-mono);
+}
+
+.server-live__track-symbol,
+.server-live__muted,
+.server-live__metric-note {
+  color: var(--color-muted);
+}
+
+.server-live__detail,
+.server-live__summary-grid {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.server-live__summary-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.server-live__metric,
+.server-live__section {
+  padding: var(--space-3);
+  border: 1px solid rgba(22, 38, 48, 0.08);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.server-live__metric-label,
+.server-live__section-title,
+.server-live__metric-value,
+.server-live__metric-note,
+.server-live__binding-title,
+.server-live__muted {
+  margin: 0;
+}
+
+.server-live__metric-label,
+.server-live__section-title {
+  margin-bottom: var(--space-2);
+  color: var(--color-faint);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.server-live__metric-value {
+  margin-bottom: var(--space-1);
+  font-size: var(--text-md);
+  font-weight: 700;
+}
+
+.server-live__metric-note,
+.server-live__muted {
+  font-size: var(--text-xs);
+}
+
+.server-live__binding {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.server-live__activity {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.server-live__activity-item {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
 .metric-cards__status {
   display: grid;
   justify-items: end;
@@ -726,7 +866,10 @@ a {
   .metric-cards,
   .field-grid--two,
   .field-grid--three,
-  .track-list__toolbar {
+  .track-list__toolbar,
+  .server-live__connect,
+  .server-live__layout,
+  .server-live__summary-grid {
     grid-template-columns: 1fr;
   }
 
@@ -735,7 +878,8 @@ a {
   .file-panel__actions,
   .file-panel__footer,
   .metric-cards,
-  .editor-sections {
+  .editor-sections,
+  .server-live__body {
     padding-left: var(--space-4);
     padding-right: var(--space-4);
   }

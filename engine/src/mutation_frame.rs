@@ -33,6 +33,7 @@ pub struct TrackMutationFrame {
     pub(crate) frame_revision: TrackMutationFrameRevision,
     pub(crate) runtime_state: TrackState,
     pub(crate) current_exposure: Exposure,
+    pub(crate) current_position_qty: f64,
     pub(crate) desired_exposure: Option<Exposure>,
     pub(crate) executor_state: ExecutorState,
     pub(crate) execution_gate_state: ExecutionGateState,

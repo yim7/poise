@@ -168,6 +168,7 @@ pub struct CurrentMarketData {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FreshSessionExternalInputs {
     pub current_exposure: Exposure,
+    pub position_qty: f64,
     pub market_data: Option<CurrentMarketData>,
     pub exchange_rules: ExchangeRules,
 }
@@ -216,6 +217,7 @@ pub struct BindingView {
 pub struct TrackRuntimeView {
     pub status: TrackStatus,
     pub current_exposure: Exposure,
+    pub position_qty: f64,
     pub desired_exposure: Option<Exposure>,
     pub manual_target_override: Option<Exposure>,
     pub executor: ExecutorView,
@@ -324,6 +326,7 @@ pub struct TrackRuntime {
     pub(crate) exchange_rules: ExchangeRules,
     pub(crate) track_state: TrackState,
     pub(crate) current_exposure: Exposure,
+    pub(crate) current_position_qty: f64,
     // Reconcile owns desired_exposure; exchange sync/restore own observed order and risk fields.
     pub(crate) desired_exposure: Option<Exposure>,
     pub(crate) active_risk_cap: Option<AppliedRiskCap>,
@@ -368,6 +371,7 @@ impl TrackRuntime {
             exchange_rules,
             track_state: TrackState::WaitingMarketData,
             current_exposure: Exposure(0.0),
+            current_position_qty: 0.0,
             desired_exposure: None,
             active_risk_cap: None,
             executor_state: ExecutorState::empty(started_at),
@@ -464,6 +468,7 @@ impl TrackRuntime {
     ) -> Self {
         let FreshSessionExternalInputs {
             current_exposure,
+            position_qty,
             market_data,
             exchange_rules,
         } = external_inputs;
@@ -475,6 +480,7 @@ impl TrackRuntime {
         );
         fresh.track_state = track_state.clone();
         fresh.current_exposure = current_exposure.clone();
+        fresh.current_position_qty = position_qty;
         fresh.desired_exposure = track_state.manual_target_override();
         fresh.executor_state =
             ExecutorState::empty(started_at).ensure_revision(fresh.config(), current_exposure);
@@ -503,6 +509,7 @@ impl TrackRuntime {
             frame_revision: TrackMutationFrameRevision::for_track(self.instrument(), self.config()),
             runtime_state: self.track_state.clone(),
             current_exposure: self.current_exposure.clone(),
+            current_position_qty: self.current_position_qty,
             desired_exposure: self.desired_exposure.clone(),
             executor_state: self.executor_state.clone(),
             execution_gate_state: self.execution_gate_state.clone(),
@@ -533,6 +540,7 @@ impl TrackRuntime {
 
         self.track_state = frame.runtime_state.clone();
         self.current_exposure = frame.current_exposure.clone();
+        self.current_position_qty = frame.current_position_qty;
         self.desired_exposure = frame.desired_exposure.clone();
         self.active_risk_cap = None;
         self.executor_state = frame.executor_state.clone();
@@ -618,6 +626,7 @@ impl TrackRuntime {
         TrackRuntimeView {
             status: self.status(),
             current_exposure: self.current_exposure.clone(),
+            position_qty: self.current_position_qty,
             desired_exposure: live
                 .desired_exposure
                 .as_ref()
@@ -728,6 +737,7 @@ mod tests {
             },
             FreshSessionExternalInputs {
                 current_exposure: Exposure(2.5),
+                position_qty: 2.5,
                 market_data: Some(CurrentMarketData {
                     strategy_price: 96.0,
                     mark_price: Some(95.8),
@@ -792,6 +802,7 @@ mod tests {
             TrackPnlStats::default(),
             FreshSessionExternalInputs {
                 current_exposure: Exposure(1.0),
+                position_qty: 1.0,
                 market_data: None,
                 exchange_rules: test_rules(1.0),
             },

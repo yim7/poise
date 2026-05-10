@@ -155,8 +155,13 @@ fn parse_orders(data: Vec<serde_json::Value>) -> Result<Vec<UserDataEvent>> {
         let trade_id = optional_str(&value, "tradeId");
         if fill_size > f64::EPSILON || trade_id.is_some() {
             let fill_price = optional_decimal(&value, "fillPx")?.unwrap_or(order.price);
-            let realized_pnl = optional_decimal(&value, "fillPnl")?.unwrap_or(0.0);
-            let trading_fee = optional_decimal(&value, "fee")?.unwrap_or(0.0);
+            let realized_pnl = optional_decimal(&value, "fillPnl")?
+                .or(optional_decimal(&value, "pnl")?)
+                .unwrap_or(0.0);
+            let raw_fee = optional_decimal(&value, "fillFee")?
+                .or(optional_decimal(&value, "fee")?)
+                .unwrap_or(0.0);
+            let trading_fee = -raw_fee;
             let trade_id = trade_id.map(ToString::to_string);
             let source_key = trade_id.as_ref().map(|trade_id| {
                 format!(

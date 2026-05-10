@@ -191,6 +191,7 @@ async fn rebuild_fresh_sessions(
                 current_utc_day,
                 FreshSessionExternalInputs {
                     current_exposure: seed.exposure_from_position_qty(position.qty),
+                    position_qty: position.qty,
                     market_data: None,
                     exchange_rules: exchange_info.rules,
                 },

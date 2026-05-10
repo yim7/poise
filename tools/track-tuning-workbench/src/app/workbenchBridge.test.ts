@@ -54,6 +54,7 @@ describe('createWorkbenchBridge', () => {
   it('hydrates loaded tracks with default Binance futures fee rates', async () => {
     invokeMock.mockResolvedValueOnce({
       config_path: '/tmp/strategies/grid.toml',
+      exchange_venue: 'okx',
       projected_tracks: [
         {
           draft_id: 'draft-btc',
@@ -90,6 +91,7 @@ describe('createWorkbenchBridge', () => {
       makerFeeRate: 0.0002,
       takerFeeRate: 0.0005,
     });
+    expect(loaded.projectedTracks[0].attachments.exchangeVenue).toBe('okx');
   });
 
   it('keeps non-default flatten parameters when loading and exporting the same draft', async () => {
@@ -146,5 +148,39 @@ describe('createWorkbenchBridge', () => {
         }),
       }),
     });
+  });
+
+  it('keeps browser preview out of real config loading', async () => {
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    const createElementSpy = vi.spyOn(document, 'createElement');
+
+    const bridge = createWorkbenchBridge();
+    const selectedPath = await bridge.openConfigFile();
+
+    expect(selectedPath).toBeNull();
+    expect(createElementSpy).not.toHaveBeenCalled();
+    await expect(bridge.loadConfigFile('grid.toml')).rejects.toThrow(
+      '浏览器预览不读取真实配置文件',
+    );
+
+    createElementSpy.mockRestore();
+  });
+
+  it('keeps browser preview out of real exchange quotes', async () => {
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+
+    const bridge = createWorkbenchBridge();
+    const quote = await bridge.fetchBinanceQuote({
+      exchangeVenue: 'binance',
+      symbol: 'ETH',
+    });
+
+    expect(quote.price).toBeNull();
+    expect(quote.errorKind).toBe('temporarily_unavailable');
+    expect(quote.errorMessage).toContain('浏览器预览不连接交易所报价');
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    fetchMock.mockRestore();
   });
 });

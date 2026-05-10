@@ -150,6 +150,12 @@ pub struct TrackPositionView {
     pub current_exposure: f64,
     #[serde(default)]
     pub desired_exposure: Option<f64>,
+    #[serde(default)]
+    pub quantity: f64,
+    #[serde(default)]
+    pub notional: f64,
+    #[serde(default)]
+    pub notional_asset: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -769,7 +775,7 @@ mod tests {
                 "max_notional":3000.0,
                 "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
-                "position":{"current_exposure":0.5,"desired_exposure":0.75},
+                "position":{"current_exposure":0.5,"desired_exposure":0.75,"quantity":0.0029296875,"notional":187.5,"notional_asset":"USDT"},
                 "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
                 "execution":{"state":"open","execution_status":"attention_required","attention_reasons":["missing execution quote"],"inventory_gap":0.0,"active_binding_count":0,"bindings":[]},
                 "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
@@ -794,6 +800,9 @@ mod tests {
         assert_eq!(json["market"]["mark_price"].as_f64(), Some(64123.4));
         assert_eq!(json["market"]["best_bid"].as_f64(), Some(64120.1));
         assert_eq!(json["market"]["best_ask"].as_f64(), Some(64124.5));
+        assert_eq!(json["position"]["quantity"].as_f64(), Some(0.0029296875));
+        assert_eq!(json["position"]["notional"].as_f64(), Some(187.5));
+        assert_eq!(json["position"]["notional_asset"].as_str(), Some("USDT"));
         assert_eq!(json["max_notional"].as_f64(), Some(3000.0));
         assert_eq!(
             json["loss_limits"]["daily_loss_limit"].as_f64(),

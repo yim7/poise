@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom/vitest';
 
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { AppShell } from '@/app/AppShell';
@@ -122,6 +122,7 @@ describe('AppShell', () => {
 
     expect(screen.getByRole('region', { name: '文件操作区' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Track 列表区' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Server live inspector' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: '关键指标区' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: '主图区' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: '参数编辑区' })).toBeInTheDocument();
@@ -140,6 +141,37 @@ describe('AppShell', () => {
     expect(within(metricRegion).getByText('从 0 建仓到边缘均价')).toBeInTheDocument();
     expect(within(metricRegion).getByText('从 0 到边缘理论浮亏')).toBeInTheDocument();
     expect(within(metricRegion).getByText('从 0 到边缘净亏估算')).toBeInTheDocument();
+  });
+
+  it('keeps server live disabled outside the Tauri bridge', async () => {
+    await renderShell();
+
+    const serverPanel = screen.getByRole('region', { name: 'Server live inspector' });
+    expect(within(serverPanel).getByText('浏览器预览模式')).toBeInTheDocument();
+    expect(within(serverPanel).getByText('server live 只在 Tauri 桌面版启用。')).toBeInTheDocument();
+  });
+
+  it('enables server live when AppShell receives a Tauri bridge', () => {
+    const bridge = createMockBridge({
+      isTauriEnvironment: () => true,
+    });
+    const store = createWorkbenchStore({
+      initialSnapshot: {
+        selectedDraftId: '',
+        drafts: [],
+        temporaryPriceOverrides: {},
+      },
+    });
+
+    render(
+      <WorkbenchStoreProvider store={store}>
+        <AppShell bridge={bridge} />
+      </WorkbenchStoreProvider>,
+    );
+
+    const serverPanel = screen.getByRole('region', { name: 'Server live inspector' });
+    expect(within(serverPanel).queryByText('浏览器预览模式')).toBeNull();
+    expect(within(serverPanel).getByRole('button', { name: '连接 Server' })).toBeEnabled();
   });
 
   it('keeps analysis panels and the editor in separate workspace rails', async () => {
@@ -301,5 +333,81 @@ describe('AppShell', () => {
 
     expect(await screen.findByText('Binance 合约不支持 symbol `BADPAIR`')).toBeInTheDocument();
     expect(screen.getByText('symbol 不支持')).toBeInTheDocument();
+  });
+
+  it('passes the loaded exchange venue when refreshing remote quotes', async () => {
+    const bridge = createMockBridge();
+    const store = createWorkbenchStore({
+      initialSnapshot: {
+        selectedDraftId: 'draft-okx',
+        drafts: [
+          makeDraft('draft-okx', {
+            additional: {
+              trackId: 'okx-eth',
+              symbol: 'ETH-USDT-SWAP',
+            },
+            ui: {
+              quotePriceInput: '',
+            },
+            attachments: {
+              exchangeVenue: 'okx',
+            },
+          }),
+        ],
+        temporaryPriceOverrides: {},
+      },
+    });
+
+    await act(async () => {
+      await store.load('/tmp/strategies/okx.toml', store.getState());
+    });
+
+    render(
+      <WorkbenchStoreProvider store={store}>
+        <AppShell bridge={bridge} />
+      </WorkbenchStoreProvider>,
+    );
+
+    await waitFor(() => {
+      expect(bridge.fetchBinanceQuote).toHaveBeenCalledWith({
+        exchangeVenue: 'okx',
+        symbol: 'ETH-USDT-SWAP',
+      });
+    });
+  });
+
+  it('describes the temporary price override using the selected exchange venue', async () => {
+    const draft = makeDraft('draft-okx', {
+      additional: {
+        trackId: 'okx-anthropic',
+        symbol: 'ANTHROPIC-USDT-SWAP',
+      },
+      ui: {
+        quotePriceInput: '',
+      },
+      attachments: {
+        exchangeVenue: 'okx',
+      },
+    });
+    const store = createWorkbenchStore({
+      initialSnapshot: {
+        selectedDraftId: draft.draftId,
+        drafts: [draft],
+        temporaryPriceOverrides: {},
+      },
+    });
+
+    await act(async () => {
+      await store.load('/tmp/strategies/okx.toml', store.getState());
+    });
+
+    render(
+      <WorkbenchStoreProvider store={store}>
+        <AppShell />
+      </WorkbenchStoreProvider>,
+    );
+
+    expect(screen.getByText(/默认使用 OKX 合约实时价格/)).toBeInTheDocument();
+    expect(screen.queryByText(/默认使用 Binance 合约实时价格/)).toBeNull();
   });
 });

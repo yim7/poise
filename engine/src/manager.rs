@@ -825,6 +825,7 @@ impl TrackManager {
         } else {
             poise_core::types::Exposure(observation.qty / unit_qty)
         };
+        track.current_position_qty = observation.qty;
         track.risk_state.unrealized_pnl = observation.unrealized_pnl;
         Ok(())
     }
@@ -1306,8 +1307,8 @@ mod tests {
             .expect("catch-up submit effect should exist");
         assert_eq!(request.side, Side::Buy);
         assert!((request.price - 95.1).abs() < 1e-9);
-        assert!((request.quantity - 4.0).abs() < 1e-9);
-        assert_eq!(catch_up_binding.allocations.len(), 4);
+        assert!((request.quantity - 1.0).abs() < 1e-9);
+        assert_eq!(catch_up_binding.allocations.len(), 1);
     }
 
     #[test]
@@ -1410,6 +1411,7 @@ mod tests {
             .unwrap();
 
         let track = manager.tracks.get(&id).unwrap();
+        assert_eq!(track.current_position_qty, -0.2);
         assert_eq!(track.current_exposure, Exposure(-0.2));
         assert!((track.risk_state.unrealized_pnl - 5.0).abs() < f64::EPSILON);
         assert!((track.pnl_stats.gross_realized_pnl_today - 20.0).abs() < f64::EPSILON);
@@ -1527,6 +1529,7 @@ mod tests {
                 },
                 FreshSessionExternalInputs {
                     current_exposure: Exposure(1.5),
+                    position_qty: 1.5,
                     market_data: Some(CurrentMarketData {
                         strategy_price: 96.0,
                         mark_price: Some(95.9),

@@ -161,6 +161,12 @@ fn market_lines(
             format_optional_price(detail.market.best_bid),
             format_optional_price(detail.market.best_ask)
         )),
+        Line::from(format!(
+            "position: qty {:.6} | notional {} {}",
+            detail.position.quantity,
+            format_amount(detail.position.notional),
+            detail.position.notional_asset
+        )),
         format_exposure_line(
             detail.status.strategy_price,
             detail.position.current_exposure,
@@ -513,6 +519,27 @@ fn format_optional_price(value: Option<f64>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+fn format_amount(value: f64) -> String {
+    let sign = if value.is_sign_negative() { "-" } else { "" };
+    let absolute = format!("{:.2}", value.abs());
+    let (integer, fraction) = absolute
+        .split_once('.')
+        .expect("fixed precision amount should contain decimal point");
+
+    format!("{sign}{}.{fraction}", group_digits(integer))
+}
+
+fn group_digits(value: &str) -> String {
+    let mut grouped_reversed = String::with_capacity(value.len() + value.len() / 3);
+    for (index, ch) in value.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            grouped_reversed.push(',');
+        }
+        grouped_reversed.push(ch);
+    }
+    grouped_reversed.chars().rev().collect()
+}
+
 fn format_exposure_line(
     _strategy_price: Option<f64>,
     current: f64,
@@ -847,6 +874,7 @@ mod tests {
         assert!(text.contains(
             "prices: strategy 101.2500 (live) | mark 101.3000 | bid 101.2000 | ask 101.4000"
         ));
+        assert!(text.contains("position: qty 0.420000 | notional 42.55 USDT"));
         assert!(text.contains("exposure: 3.5000 → 4.0000 [↑ +0.5000]"));
         assert!(text.contains("lower/upper: 90.0000 / 110.0000"));
         assert!(text.contains("units 8.0000/8.0000 | notional 375.0000"));

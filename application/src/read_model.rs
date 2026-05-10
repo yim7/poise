@@ -38,6 +38,7 @@ pub struct TrackListReadModel {
     pub strategy_price: Option<f64>,
     pub strategy_price_status: TrackStrategyPriceStatus,
     pub current_exposure: f64,
+    pub position_qty: f64,
     pub desired_exposure: Option<f64>,
     pub pnl_stats: TrackReadPnlStats,
     pub unrealized_pnl: f64,
@@ -70,6 +71,7 @@ pub struct TrackReadModel {
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
     pub current_exposure: f64,
+    pub position_qty: f64,
     pub desired_exposure: Option<f64>,
     pub pnl_stats: TrackReadPnlStats,
     pub unrealized_pnl: f64,
@@ -270,6 +272,7 @@ impl TrackReadModel {
             best_bid: runtime.best_bid,
             best_ask: runtime.best_ask,
             current_exposure: list_view.current_exposure,
+            position_qty: list_view.position_qty,
             desired_exposure: list_view.desired_exposure,
             pnl_stats: list_view.pnl_stats.clone(),
             unrealized_pnl: list_view.unrealized_pnl,
@@ -300,6 +303,7 @@ impl TrackListReadModel {
             strategy_price: runtime.strategy_price,
             strategy_price_status: TrackStrategyPriceStatus::from(runtime.strategy_price_status),
             current_exposure: runtime.current_exposure.0,
+            position_qty: runtime.position_qty,
             desired_exposure: runtime.desired_exposure.clone().map(|value| value.0),
             pnl_stats: TrackReadPnlStats::from(runtime.pnl_stats.clone()),
             unrealized_pnl: runtime.unrealized_pnl,
@@ -328,6 +332,7 @@ impl From<&TrackReadModel> for TrackListReadModel {
             strategy_price: value.strategy_price,
             strategy_price_status: value.strategy_price_status,
             current_exposure: value.current_exposure,
+            position_qty: value.position_qty,
             desired_exposure: value.desired_exposure,
             pnl_stats: value.pnl_stats.clone(),
             unrealized_pnl: value.unrealized_pnl,
@@ -557,6 +562,7 @@ mod tests {
             runtime: TrackRuntimeView {
                 status: TrackStatus::Active,
                 current_exposure: Exposure(3.5),
+                position_qty: 0.42,
                 desired_exposure: Some(Exposure(4.0)),
                 manual_target_override: None,
                 executor: ExecutorView::default(),
@@ -614,6 +620,7 @@ mod tests {
             Instrument::new(Venue::Binance, "BTCUSDT")
         );
         assert_eq!(read_model.status, TrackReadStatus::Active);
+        assert_eq!(read_model.position_qty, 0.42);
         assert_eq!(read_model.recovery_issue, None);
         assert_eq!(read_model.active_binding_count, 0);
         assert!(read_model.bindings.is_empty());
@@ -635,6 +642,7 @@ mod tests {
             runtime: TrackRuntimeView {
                 status: TrackStatus::Active,
                 current_exposure: Exposure(1.0),
+                position_qty: 1.0,
                 desired_exposure: Some(Exposure(2.0)),
                 manual_target_override: None,
                 executor: ExecutorView::default(),
@@ -678,6 +686,7 @@ mod tests {
             runtime: TrackRuntimeView {
                 status: TrackStatus::Active,
                 current_exposure: Exposure(1.0),
+                position_qty: 1.0,
                 desired_exposure: Some(Exposure(2.0)),
                 manual_target_override: None,
                 executor: ExecutorView::default(),
@@ -720,6 +729,7 @@ mod tests {
         let runtime = TrackRuntimeView {
             status: TrackStatus::Active,
             current_exposure: Exposure(1.0),
+            position_qty: 1.0,
             desired_exposure: Some(Exposure(0.0)),
             manual_target_override: None,
             executor: ExecutorView {

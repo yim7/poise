@@ -285,7 +285,7 @@ impl OkxRestClient {
 
     async fn send_ack_request(&self, method: Method, path: &str, body: String) -> Result<OrderAck> {
         let acknowledgements: Vec<OrderAck> = self
-            .send_request(method, path, Vec::new(), Some(body), AuthMode::Signed)
+            .send_request_allowing_ack_failure(method, path, body)
             .await?;
         let ack = acknowledgements
             .into_iter()
@@ -293,6 +293,33 @@ impl OkxRestClient {
             .with_context(|| format!("missing OKX acknowledgement for {path}"))?;
         ensure_ack_success(&ack)?;
         Ok(ack)
+    }
+
+    async fn send_request_allowing_ack_failure(
+        &self,
+        method: Method,
+        path: &str,
+        body: String,
+    ) -> Result<Vec<OrderAck>> {
+        let response_body = self
+            .send_raw_request(
+                method.clone(),
+                path,
+                Vec::new(),
+                Some(body),
+                AuthMode::Signed,
+            )
+            .await?;
+        let envelope: OkxEnvelope<OrderAck> =
+            serde_json::from_str(&response_body).with_context(|| {
+                format!("failed to deserialize OKX response for {path}: {response_body}")
+            })?;
+        if envelope.code != "0" && envelope.data.is_empty() {
+            return Err(
+                OkxRestError::business_code(method, path, envelope.code, envelope.msg).into(),
+            );
+        }
+        Ok(envelope.data)
     }
 
     async fn send_request<T>(
@@ -306,6 +333,28 @@ impl OkxRestClient {
     where
         T: DeserializeOwned,
     {
+        let response_body = self
+            .send_raw_request(method.clone(), path, params, body, auth_mode)
+            .await?;
+        let envelope: OkxEnvelope<T> = serde_json::from_str(&response_body).with_context(|| {
+            format!("failed to deserialize OKX response for {path}: {response_body}")
+        })?;
+        if envelope.code != "0" {
+            return Err(
+                OkxRestError::business_code(method, path, envelope.code, envelope.msg).into(),
+            );
+        }
+        Ok(envelope.data)
+    }
+
+    async fn send_raw_request(
+        &self,
+        method: Method,
+        path: &str,
+        params: Vec<(&str, String)>,
+        body: Option<String>,
+        auth_mode: AuthMode,
+    ) -> Result<String> {
         let query = encode_query(&params);
         let request_path = if query.is_empty() {
             path.to_string()
@@ -353,16 +402,7 @@ impl OkxRestClient {
         if !status.is_success() {
             return Err(OkxRestError::http_status(method, path, status, response_body).into());
         }
-
-        let envelope: OkxEnvelope<T> = serde_json::from_str(&response_body).with_context(|| {
-            format!("failed to deserialize OKX response for {path}: {response_body}")
-        })?;
-        if envelope.code != "0" {
-            return Err(
-                OkxRestError::business_code(method, path, envelope.code, envelope.msg).into(),
-            );
-        }
-        Ok(envelope.data)
+        Ok(response_body)
     }
 }
 
@@ -806,6 +846,56 @@ mod tests {
             poise_engine::ports::ExecutionPortErrorKind::InsufficientMargin
         );
         assert!(error.to_string().contains("51008"));
+    }
+
+    #[tokio::test]
+    async fn submit_order_surfaces_ack_failure_when_envelope_reports_all_operations_failed() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"code":"1","msg":"All operations failed","data":[{"ordId":"","clOrdId":"client-1","sCode":"51000","sMsg":"Parameter posSide error"}]}"#,
+        )])
+        .await;
+        let client = test_client(&server, true);
+
+        let error = client
+            .submit_order(OrderRequest {
+                instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
+                side: Side::Buy,
+                price: 64000.10,
+                quantity: 0.01,
+                client_order_id: "client-1".to_string(),
+                reduce_only: false,
+            })
+            .await
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("sCode 51000"), "{message}");
+        assert!(message.contains("Parameter posSide error"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn execution_port_maps_okx_cancel_race_to_cancel_outcome_unknown() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"code":"0","msg":"","data":[{"ordId":"123","clOrdId":"client-1","sCode":"51400","sMsg":"Order cancellation failed as the order has been filled, canceled or does not exist"}]}"#,
+        )])
+        .await;
+        let client = test_client(&server, true);
+
+        let error = poise_engine::ports::ExecutionPort::cancel_order(
+            &client,
+            &Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
+            "123",
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::CancelOutcomeUnknown
+        );
+        assert!(error.to_string().contains("51400"));
     }
 
     fn test_client(server: &MockHttpServer, simulated_trading: bool) -> OkxRestClient {

@@ -1,4 +1,6 @@
 use std::collections::BTreeSet;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use poise_core::strategy::TrackConfig;
 use poise_core::types::{ExchangeRules, Exposure, PriceRounding, Side};
@@ -17,6 +19,9 @@ use crate::executor::ledger::BoundaryLedgerView;
 use crate::ports::{ExecutionQuote, OrderRequest};
 use crate::price_gate::SubmitPurpose;
 use poise_core::track::Instrument;
+
+static CLIENT_ORDER_SESSION_PREFIX: OnceLock<String> = OnceLock::new();
+static CLIENT_ORDER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -184,6 +189,11 @@ pub(super) fn classify_binding_reconciliation(
     if let Some(index) =
         find_reusable_binding_by_proposal_key(bindings, &desired.proposal.proposal_key())
     {
+        if bindings[index].status == BindingStatus::SubmitPending {
+            return BindingReconciliationDecision::CoveredByExisting {
+                indexes: vec![index],
+            };
+        }
         return if binding_request_matches_desired(&bindings[index], desired, exchange_rules) {
             BindingReconciliationDecision::ReuseExisting { index }
         } else {
@@ -218,7 +228,13 @@ pub(super) fn plan_target_binding(
 
     let direction = direction_for_gap(&inventory_gap)?;
     let price = execution_price(direction, input.execution_quote)?;
-    let allocations = allocate_operations(input.view, selected, inventory_gap.0.abs());
+    let max_exposure_qty = match policy {
+        PolicyKind::CatchUp => inventory_gap.0.abs().min(input.min_rebalance_units),
+        PolicyKind::ManualOverride | PolicyKind::ReduceOnly | PolicyKind::CurveMaker => {
+            inventory_gap.0.abs()
+        }
+    };
+    let allocations = allocate_operations(input.view, selected, max_exposure_qty);
     if allocations.is_empty() {
         return None;
     }
@@ -688,12 +704,23 @@ fn proposal_for_allocations(
 }
 
 fn next_client_order_id(policy: PolicyKind) -> String {
-    let instance_id = Uuid::new_v4().simple();
+    let session_prefix = CLIENT_ORDER_SESSION_PREFIX
+        .get_or_init(|| Uuid::new_v4().simple().to_string()[..8].to_string());
+    let sequence = CLIENT_ORDER_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
+    format!(
+        "{}{}{:022}",
+        client_order_policy_prefix(policy),
+        session_prefix,
+        sequence
+    )
+}
+
+fn client_order_policy_prefix(policy: PolicyKind) -> &'static str {
     match policy {
-        PolicyKind::ManualOverride => format!("bo-{instance_id}"),
-        PolicyKind::ReduceOnly => format!("br-{instance_id}"),
-        PolicyKind::CatchUp => format!("bc-{instance_id}"),
-        PolicyKind::CurveMaker => format!("bk-{instance_id}"),
+        PolicyKind::ManualOverride => "bo",
+        PolicyKind::ReduceOnly => "br",
+        PolicyKind::CatchUp => "bc",
+        PolicyKind::CurveMaker => "bk",
     }
 }
 
@@ -954,22 +981,43 @@ mod tests {
     #[test]
     fn policy_uses_exchange_safe_client_order_id_prefixes() {
         for (policy, expected_prefix) in [
-            (PolicyKind::ManualOverride, "bo-"),
-            (PolicyKind::ReduceOnly, "br-"),
-            (PolicyKind::CatchUp, "bc-"),
-            (PolicyKind::CurveMaker, "bk-"),
+            (PolicyKind::ManualOverride, "bo"),
+            (PolicyKind::ReduceOnly, "br"),
+            (PolicyKind::CatchUp, "bc"),
+            (PolicyKind::CurveMaker, "bk"),
         ] {
             let client_order_id = next_client_order_id(policy);
             assert!(
-                client_order_id.len() < 36,
-                "Binance requires client order ids shorter than 36 chars, got `{}` with len {}",
+                client_order_id.len() <= 32,
+                "OKX requires client order ids no longer than 32 chars, got `{}` with len {}",
                 client_order_id,
                 client_order_id.len()
+            );
+            assert!(
+                client_order_id.chars().all(|ch| ch.is_ascii_alphanumeric()),
+                "OKX client order ids should use only ASCII letters and digits, got `{client_order_id}`"
             );
             assert!(
                 client_order_id.starts_with(expected_prefix),
                 "client order id should keep a compact policy prefix"
             );
+            assert_eq!(
+                &client_order_id[10..],
+                &format!("{:022}", client_order_id[10..].parse::<u64>().unwrap()),
+                "client order id should end with a 22-digit sequence"
+            );
         }
+    }
+
+    #[test]
+    fn policy_client_order_ids_share_session_prefix_and_increment_sequence() {
+        let first = next_client_order_id(PolicyKind::CatchUp);
+        let second = next_client_order_id(PolicyKind::CurveMaker);
+
+        assert_eq!(&first[2..10], &second[2..10]);
+        assert_eq!(
+            second[10..].parse::<u64>().unwrap(),
+            first[10..].parse::<u64>().unwrap() + 1
+        );
     }
 }

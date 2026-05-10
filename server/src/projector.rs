@@ -102,6 +102,9 @@ impl TrackProjector {
             position: TrackPositionView {
                 current_exposure: source.current_exposure,
                 desired_exposure: source.desired_exposure,
+                quantity: source.position_qty,
+                notional: project_position_notional(source),
+                notional_asset: source.instrument.quote_asset(),
             },
             pnl: TrackPnlView {
                 pnl_asset: pnl.pnl_asset,
@@ -179,6 +182,13 @@ fn project_instrument(instrument: &Instrument) -> InstrumentView {
         venue: instrument.venue.as_str().to_string(),
         symbol: instrument.symbol.clone(),
     }
+}
+
+fn project_position_notional(source: &TrackReadModel) -> f64 {
+    source
+        .mark_price
+        .or(source.strategy_price)
+        .map_or(0.0, |price| source.position_qty * price)
 }
 
 fn project_track_status(value: &TrackReadStatus) -> ProtocolTrackStatus {
@@ -950,6 +960,18 @@ mod tests {
     }
 
     #[test]
+    fn projects_position_quantity_from_observed_position_qty() {
+        let mut source = source_with_submitting_effect();
+        source.position_qty = 0.42;
+        source.strategy_price = Some(101.25);
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert!((detail.position.quantity - 0.42).abs() < 1e-9);
+        assert!((detail.position.notional - 42.63).abs() < 1e-9);
+        assert_eq!(detail.position.notional_asset, "USDT");
+    }
+
+    #[test]
     fn projects_hyperliquid_perp_pnl_asset_as_usdc() {
         let mut source = source_with_submitting_effect();
         source.instrument = Instrument::new(Venue::Hyperliquid, "ETH");
@@ -1046,6 +1068,7 @@ mod tests {
             best_bid: Some(101.0),
             best_ask: Some(101.5),
             current_exposure: 3.5,
+            position_qty: 13.125,
             desired_exposure: Some(4.0),
             pnl_stats: TrackReadPnlStats {
                 gross_realized_pnl_today: 980.1,

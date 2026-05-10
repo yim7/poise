@@ -73,6 +73,7 @@ export interface TrackLossGuardDraft {
 
 export interface TrackDraftAttachments {
   currentExposure?: number;
+  exchangeVenue?: string;
   exchangeRules?: TrackExchangeRulesDraft;
   lossGuard?: TrackLossGuardDraft;
   loadIssues?: TrackDraftLoadIssue[];

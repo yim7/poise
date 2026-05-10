@@ -7,6 +7,7 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
 
 const DEFAULT_MIN_REBALANCE_UNITS: f64 = 0.5;
 const DEFAULT_LEVERAGE: u32 = 10;
+const DEFAULT_EXCHANGE_VENUE: &str = "binance";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrackShapeFamily {
@@ -86,12 +87,26 @@ pub struct TrackLoadIssue {
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TrackDocument {
+    exchange_venue: String,
     drafts: Vec<TrackDraft>,
 }
 
+impl Default for TrackDocument {
+    fn default() -> Self {
+        Self {
+            exchange_venue: DEFAULT_EXCHANGE_VENUE.to_string(),
+            drafts: Vec::new(),
+        }
+    }
+}
+
 impl TrackDocument {
+    pub fn exchange_venue(&self) -> &str {
+        &self.exchange_venue
+    }
+
     pub fn drafts(&self) -> &[TrackDraft] {
         &self.drafts
     }
@@ -179,6 +194,7 @@ pub fn parse_track_document(input: &str) -> Result<TrackDocument> {
     let document = input
         .parse::<DocumentMut>()
         .context("failed to parse TOML config")?;
+    let exchange_venue = read_exchange_venue(&document)?;
     let mut drafts: Vec<TrackDraft> = Vec::new();
     let track_tables = read_track_tables(&document)?;
 
@@ -203,7 +219,27 @@ pub fn parse_track_document(input: &str) -> Result<TrackDocument> {
         });
     }
 
-    Ok(TrackDocument { drafts })
+    Ok(TrackDocument {
+        exchange_venue,
+        drafts,
+    })
+}
+
+fn read_exchange_venue(document: &DocumentMut) -> Result<String> {
+    let Some(item) = document.get("exchange") else {
+        return Ok(DEFAULT_EXCHANGE_VENUE.to_string());
+    };
+    let Some(table) = item.as_table() else {
+        return Err(anyhow!("`exchange` must be a table"));
+    };
+    let Some(venue) = table.get("venue") else {
+        return Ok(DEFAULT_EXCHANGE_VENUE.to_string());
+    };
+    venue
+        .as_str()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("field `exchange.venue` must be a non-empty string"))
 }
 
 fn read_track_tables(document: &DocumentMut) -> Result<&ArrayOfTables> {

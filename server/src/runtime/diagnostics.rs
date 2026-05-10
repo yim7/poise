@@ -61,6 +61,7 @@ mod tests {
         let runtime = TrackRuntimeView {
             status: TrackStatus::Active,
             current_exposure: Exposure(0.0),
+            position_qty: 0.0,
             desired_exposure: None,
             manual_target_override: None,
             executor: ExecutorView {

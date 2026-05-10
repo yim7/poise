@@ -32,7 +32,7 @@ function makeDraft(draftId: string, overrides: Partial<TrackDraft> = {}): TrackD
 
 
 describe('useSelectedTrackWorkbench', () => {
-  it('uses the live Binance quote when there is no temporary override', () => {
+  it('uses the live exchange quote when there is no temporary override', () => {
     const draft = makeDraft('draft-a', {
       ui: {
         quotePriceInput: '',
@@ -60,6 +60,44 @@ describe('useSelectedTrackWorkbench', () => {
 
     expect(model.selectedVisualSnapshot?.ui.quotePrice).toBe(101.25);
     expect(model.priceStatus.badge).toBe('Binance 实时');
+  });
+
+  it('labels live OKX quotes with the OKX venue', () => {
+    const draft = makeDraft('draft-a', {
+      additional: {
+        trackId: 'anthropic',
+        symbol: 'ANTHROPIC-USDT-SWAP',
+      },
+      ui: {
+        quotePriceInput: '',
+      },
+      attachments: {
+        exchangeVenue: 'okx',
+      },
+    });
+
+    const model = useSelectedTrackWorkbench({
+      selectedDraftId: draft.draftId,
+      drafts: [draft],
+      sourceDrafts: [draft],
+      temporaryPriceOverrides: {},
+      remoteQuotes: {
+        [draft.draftId]: {
+          status: 'live',
+          symbol: 'ANTHROPIC-USDT-SWAP',
+          price: 1515.8,
+          retrievedAt: 1_713_400_000_000,
+        },
+      },
+      currentFilePath: '/tmp/config.toml',
+      dirty: false,
+      canUndo: false,
+      canRedo: false,
+    });
+
+    expect(model.selectedVisualSnapshot?.ui.quotePrice).toBe(1515.8);
+    expect(model.priceStatus.badge).toBe('OKX 实时');
+    expect(model.priceStatus.note).not.toContain('Binance');
   });
 
   it('prefers the temporary price override over the live Binance quote', () => {

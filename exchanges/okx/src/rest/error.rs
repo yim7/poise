@@ -76,6 +76,9 @@ impl OkxRestError {
         if self.is_rate_limited() {
             return Some(ExecutionPortErrorKind::RateLimited);
         }
+        if self.is_cancel_outcome_unknown() {
+            return Some(ExecutionPortErrorKind::CancelOutcomeUnknown);
+        }
         None
     }
 
@@ -97,6 +100,11 @@ impl OkxRestError {
 
     fn is_rate_limited(&self) -> bool {
         self.status() == Some(StatusCode::TOO_MANY_REQUESTS) || self.error_code() == Some("50011")
+    }
+
+    fn is_cancel_outcome_unknown(&self) -> bool {
+        self.error_code() == Some("51400")
+            && normalized(self.message()).contains("order cancellation failed")
     }
 
     fn status(&self) -> Option<StatusCode> {

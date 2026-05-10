@@ -538,8 +538,8 @@ mod tests {
             .expect("catch-up submit effect should exist");
         assert_eq!(request.side, Side::Buy);
         assert_eq!(request.price, 100.1);
-        assert!((request.quantity - 2.0).abs() < 1e-9);
-        assert_eq!(catch_up_binding.allocations.len(), 2);
+        assert!((request.quantity - 1.0).abs() < 1e-9);
+        assert_eq!(catch_up_binding.allocations.len(), 1);
     }
 
     #[test]
@@ -556,15 +556,63 @@ mod tests {
             .filter(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
             .collect::<Vec<_>>();
         assert_eq!(catch_up_bindings.len(), 1);
-        assert_eq!(catch_up_bindings[0].allocations.len(), 3);
-        assert!((catch_up_bindings[0].request.quantity - 3.0).abs() < 1e-9);
+        assert_eq!(catch_up_bindings[0].allocations.len(), 1);
+        assert!((catch_up_bindings[0].request.quantity - 1.0).abs() < 1e-9);
         assert_eq!(
             plan.effects
                 .iter()
-                .filter(|effect| matches!(effect, TrackEffect::SubmitOrder { request, .. } if request.client_order_id.starts_with("bc-")))
+                .filter(|effect| matches!(effect, TrackEffect::SubmitOrder { request, .. } if request.client_order_id.starts_with("bc")))
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn submit_pending_catch_up_blocks_replacement_until_receipt_arrives() {
+        let config = config();
+        let rules = rules();
+        let previous = plan(input(&config, &rules, Exposure(0.0), Exposure(2.0))).state;
+        let pending_client_order_id = previous
+            .bindings
+            .iter()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .expect("catch-up binding should be submit pending")
+            .request
+            .client_order_id
+            .clone();
+
+        let next = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: instrument(),
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: config.min_rebalance_units,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(2.0),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 100.0,
+                    best_ask: 100.2,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            Some(&previous),
+        ));
+
+        assert!(
+            !next
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, TrackEffect::SubmitOrder { .. })),
+            "a submit-pending catch-up must hold the operation while its exchange receipt is unknown"
+        );
+        assert!(next.state.bindings.iter().any(|binding| {
+            binding.status == BindingStatus::SubmitPending
+                && binding.request.client_order_id == pending_client_order_id
+        }));
     }
 
     #[test]
@@ -1053,7 +1101,7 @@ mod tests {
             !plan
                 .effects
                 .iter()
-                .any(|effect| matches!(effect, TrackEffect::SubmitOrder { request, .. } if request.client_order_id.starts_with("bc-")))
+                .any(|effect| matches!(effect, TrackEffect::SubmitOrder { request, .. } if request.client_order_id.starts_with("bc")))
         );
         assert!(plan.state.bindings.iter().any(|binding| {
             binding.order_id.as_deref() == Some("near-maker-order")

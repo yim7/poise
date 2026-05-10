@@ -36,7 +36,10 @@
   },
   "position": {
     "current_exposure": 3.5,
-    "desired_exposure": 4.0
+    "desired_exposure": 4.0,
+    "quantity": 0.42,
+    "notional": 42.546,
+    "notional_asset": "USDT"
   },
   "pnl": {
     "pnl_asset": "USDT",

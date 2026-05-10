@@ -272,6 +272,7 @@ mod tests {
                     Utc::now().date_naive(),
                     FreshSessionExternalInputs {
                         current_exposure: Exposure(1.5),
+                        position_qty: 1.5,
                         market_data: Some(CurrentMarketData {
                             strategy_price: 96.0,
                             mark_price: Some(95.9),

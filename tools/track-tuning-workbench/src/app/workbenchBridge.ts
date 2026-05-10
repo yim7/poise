@@ -32,6 +32,11 @@ export interface WorkbenchBridgeQuotePayload {
   errorMessage: string | null;
 }
 
+export interface WorkbenchBridgeQuoteRequest {
+  symbol: string;
+  exchangeVenue?: string | null;
+}
+
 export interface WorkbenchBridge {
   isTauriEnvironment(): boolean;
   openConfigFile(): Promise<string | null>;
@@ -41,11 +46,12 @@ export interface WorkbenchBridge {
   exportCurrentTrack(draft: TrackDraft): Promise<string>;
   exportAllTracks(drafts: TrackDraft[]): Promise<string>;
   copyText(text: string): Promise<void>;
-  fetchBinanceQuote(symbol: string): Promise<WorkbenchBridgeQuotePayload>;
+  fetchBinanceQuote(request: WorkbenchBridgeQuoteRequest): Promise<WorkbenchBridgeQuotePayload>;
 }
 
 interface LoadedConfigFilePayload {
   config_path: string;
+  exchange_venue?: string;
   projected_tracks: Array<{
     draft_id: string;
     fields: {
@@ -76,11 +82,6 @@ interface TauriQuotePayload {
   retrieved_at: number;
   error_kind: RemoteQuoteErrorKind | null;
   error_message: string | null;
-}
-
-interface BrowserQuoteErrorBody {
-  code?: number;
-  msg?: string;
 }
 
 export function createWorkbenchBridge(): WorkbenchBridge {
@@ -157,6 +158,7 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
       const payload = await tauriInvoke<LoadedConfigFilePayload>('load_config_file', {
         configPath,
       });
+      const exchangeVenue = payload.exchange_venue ?? 'binance';
       return {
         configPath: payload.config_path,
         projectedTracks: payload.projected_tracks.map((track) =>
@@ -181,11 +183,12 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
             ui: {
               quotePriceInput: '',
             },
-            attachments: track.load_issues.length > 0
-              ? {
-                  loadIssues: track.load_issues.map(normalizeLoadIssue),
-                }
-              : undefined,
+            attachments: {
+              exchangeVenue,
+              ...(track.load_issues.length > 0
+                ? { loadIssues: track.load_issues.map(normalizeLoadIssue) }
+                : {}),
+            },
           }),
         ),
       };
@@ -209,9 +212,10 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
     async copyText(text) {
       await tauriInvoke('copy_text', { text });
     },
-    async fetchBinanceQuote(symbol) {
+    async fetchBinanceQuote(request) {
       const payload = await tauriInvoke<TauriQuotePayload>('fetch_binance_quote', {
-        symbol,
+        symbol: request.symbol,
+        exchangeVenue: request.exchangeVenue ?? null,
       });
       return {
         price: payload.price,
@@ -230,7 +234,7 @@ function createBrowserWorkbenchBridge(): WorkbenchBridge {
       return null;
     },
     async loadConfigFile() {
-      throw new Error('浏览器开发模式不支持直接读取外部配置文件，请在 Tauri 桌面应用中使用。');
+      throw new Error('浏览器预览不读取真实配置文件，请在 Tauri 桌面应用中使用。');
     },
     async loadSavedDraft() {
       return null;
@@ -249,59 +253,13 @@ function createBrowserWorkbenchBridge(): WorkbenchBridge {
       }
       throw new Error('当前环境不支持剪贴板写入。');
     },
-    async fetchBinanceQuote(symbol) {
-      const normalizedSymbol = symbol.trim().toUpperCase();
-      if (!normalizedSymbol) {
-        return {
-          price: null,
-          retrievedAt: Date.now(),
-          errorKind: 'unsupported_symbol',
-          errorMessage: 'symbol 不能为空',
-        };
-      }
-
-      try {
-        const response = await fetch(
-          `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${encodeURIComponent(normalizedSymbol)}`,
-        );
-        const retrievedAt = Date.now();
-        const body = (await response.json().catch(() => null)) as
-          | { price?: string }
-          | BrowserQuoteErrorBody
-          | null;
-
-        if (!response.ok) {
-          return {
-            price: null,
-            retrievedAt,
-            errorKind: classifyBrowserQuoteError(response.status, body),
-            errorMessage: buildBrowserQuoteErrorMessage(response.status, normalizedSymbol, body),
-          };
-        }
-
-        if (!hasBrowserQuotePrice(body)) {
-          return {
-            price: null,
-            retrievedAt,
-            errorKind: 'invalid_response',
-            errorMessage: '解析 Binance 合约报价失败',
-          };
-        }
-
-        return {
-          price: body.price,
-          retrievedAt,
-          errorKind: null,
-          errorMessage: null,
-        };
-      } catch (error) {
-        return {
-          price: null,
-          retrievedAt: Date.now(),
-          errorKind: 'network',
-          errorMessage: `请求 Binance 合约报价失败: ${String(error)}`,
-        };
-      }
+    async fetchBinanceQuote() {
+      return {
+        price: null,
+        retrievedAt: Date.now(),
+        errorKind: 'temporarily_unavailable',
+        errorMessage: '浏览器预览不连接交易所报价，请在 Tauri 桌面应用中使用实时数据。',
+      };
     },
   };
 }
@@ -423,48 +381,4 @@ function formatRawNumber(value: number) {
     return String(value);
   }
   return String(value);
-}
-
-function classifyBrowserQuoteError(
-  status: number,
-  body: BrowserQuoteErrorBody | { price?: string } | null,
-): RemoteQuoteErrorKind {
-  if (status === 400 && body && 'code' in body && body.code === -1121) {
-    return 'unsupported_symbol';
-  }
-  if (status === 429 || status === 418 || (body && 'code' in body && body.code === -1003)) {
-    return 'rate_limited';
-  }
-  if (status === 503) {
-    return 'temporarily_unavailable';
-  }
-  return 'upstream';
-}
-
-function buildBrowserQuoteErrorMessage(
-  status: number,
-  symbol: string,
-  body: BrowserQuoteErrorBody | { price?: string } | null,
-) {
-  const upstreamMessage =
-    body && typeof body === 'object' && 'msg' in body && typeof body.msg === 'string'
-      ? body.msg
-      : 'unknown error';
-
-  if (status === 400 && body && 'code' in body && body.code === -1121) {
-    return `Binance 合约不支持 symbol \`${symbol}\`: ${upstreamMessage}`;
-  }
-  if (status === 429 || status === 418 || (body && 'code' in body && body.code === -1003)) {
-    return `Binance 合约限流中，请稍后重试: ${upstreamMessage}`;
-  }
-  if (status === 503) {
-    return `Binance 合约暂时不可用: ${upstreamMessage}`;
-  }
-  return `Binance 合约报价请求失败 (${status}): ${upstreamMessage}`;
-}
-
-function hasBrowserQuotePrice(
-  body: BrowserQuoteErrorBody | { price?: string } | null,
-): body is { price: string } {
-  return Boolean(body && typeof body === 'object' && 'price' in body && typeof body.price === 'string');
 }

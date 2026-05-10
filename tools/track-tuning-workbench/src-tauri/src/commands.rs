@@ -17,6 +17,7 @@ use crate::{
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LoadedConfigFilePayload {
     pub config_path: String,
+    pub exchange_venue: String,
     pub projected_tracks: Vec<TrackDraftPayload>,
 }
 
@@ -58,6 +59,7 @@ pub(crate) fn load_config_file_from_path(
 
     Ok(LoadedConfigFilePayload {
         config_path: config_path.to_string_lossy().into_owned(),
+        exchange_venue: document.exchange_venue().to_string(),
         projected_tracks: document
             .drafts()
             .iter()
@@ -70,7 +72,17 @@ pub(crate) async fn fetch_binance_quote_with_client(
     client: &BinanceQuoteClient,
     symbol: &str,
 ) -> BinanceQuotePayload {
-    client.fetch_quote(symbol).await
+    fetch_binance_quote_for_exchange_with_client(client, Some("binance"), symbol).await
+}
+
+pub(crate) async fn fetch_binance_quote_for_exchange_with_client(
+    client: &BinanceQuoteClient,
+    exchange_venue: Option<&str>,
+    symbol: &str,
+) -> BinanceQuotePayload {
+    client
+        .fetch_quote_for_exchange(exchange_venue, symbol)
+        .await
 }
 
 pub(crate) fn load_saved_draft_from_store(
@@ -139,8 +151,17 @@ pub fn copy_text(app: AppHandle, text: String) -> Result<(), CommandError> {
 }
 
 #[tauri::command]
-pub async fn fetch_binance_quote(symbol: String) -> BinanceQuotePayload {
-    fetch_binance_quote_with_client(&BinanceQuoteClient::default(), &symbol).await
+pub async fn fetch_binance_quote(
+    symbol: String,
+    exchange_venue: Option<String>,
+) -> BinanceQuotePayload {
+    let client = BinanceQuoteClient::default();
+    match exchange_venue.as_deref() {
+        Some(venue) => {
+            fetch_binance_quote_for_exchange_with_client(&client, Some(venue), &symbol).await
+        }
+        None => fetch_binance_quote_with_client(&client, &symbol).await,
+    }
 }
 
 #[tauri::command]
@@ -276,8 +297,9 @@ mod tests {
 
     use super::{
         BinanceQuoteClient, EditableTrackFieldsPayload, export_all_tracks_text,
-        export_current_track_text, fetch_binance_quote_with_client, load_config_file_from_path,
-        load_saved_draft_from_store, save_draft_to_store,
+        export_current_track_text, fetch_binance_quote_for_exchange_with_client,
+        fetch_binance_quote_with_client, load_config_file_from_path, load_saved_draft_from_store,
+        save_draft_to_store,
     };
 
     #[test]
@@ -304,9 +326,40 @@ total_loss_limit = 200.0
         let payload = load_config_file_from_path(&config_path).unwrap();
 
         assert_eq!(payload.config_path, config_path.to_string_lossy());
+        assert_eq!(payload.exchange_venue, "binance");
         assert_eq!(payload.projected_tracks.len(), 1);
         assert_eq!(payload.projected_tracks[0].fields.track_id, "btc-core");
         assert_eq!(payload.projected_tracks[0].fields.symbol, "BTCUSDT");
+    }
+
+    #[test]
+    fn load_config_file_preserves_service_exchange_venue() {
+        let temp_dir = tempdir().unwrap();
+        let config_path = temp_dir.path().join("grid.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[exchange]
+venue = "okx"
+
+[[tracks]]
+track_id = "eth-core"
+symbol = "ETH-USDT-SWAP"
+lower_price = 3000.0
+upper_price = 3600.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 250.0
+daily_loss_limit = 100.0
+total_loss_limit = 200.0
+"#,
+        )
+        .unwrap();
+
+        let payload = load_config_file_from_path(&config_path).unwrap();
+
+        assert_eq!(payload.exchange_venue, "okx");
+        assert_eq!(payload.projected_tracks[0].fields.symbol, "ETH-USDT-SWAP");
     }
 
     #[test]
@@ -402,6 +455,48 @@ total_loss_limit = 160.0
         assert_eq!(
             requests.recv().unwrap(),
             "GET /fapi/v1/ticker/price?symbol=BTCUSDT HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn fetch_binance_quote_translates_bare_binance_asset_to_usdt_symbol() {
+        let (server_url, requests) = spawn_http_server(
+            "HTTP/1.1 200 OK",
+            "{\"symbol\":\"ETHUSDT\",\"price\":\"3000.10\"}",
+        );
+        let client = BinanceQuoteClient::for_base_url(server_url);
+
+        let quote = tauri::async_runtime::block_on(fetch_binance_quote_for_exchange_with_client(
+            &client,
+            Some("binance"),
+            "ETH",
+        ));
+
+        assert_eq!(quote.price.as_deref(), Some("3000.10"));
+        assert_eq!(
+            requests.recv().unwrap(),
+            "GET /fapi/v1/ticker/price?symbol=ETHUSDT HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn fetch_quote_uses_okx_ticker_endpoint_for_okx_venue() {
+        let (server_url, requests) = spawn_http_server(
+            "HTTP/1.1 200 OK",
+            r#"{"code":"0","msg":"","data":[{"instId":"ANTHROPIC-USDT-SWAP","last":"1515.8"}]}"#,
+        );
+        let client = BinanceQuoteClient::for_base_url(server_url);
+
+        let quote = tauri::async_runtime::block_on(fetch_binance_quote_for_exchange_with_client(
+            &client,
+            Some("okx"),
+            "ANTHROPIC-USDT-SWAP",
+        ));
+
+        assert_eq!(quote.price.as_deref(), Some("1515.8"));
+        assert_eq!(
+            requests.recv().unwrap(),
+            "GET /api/v5/market/ticker?instId=ANTHROPIC-USDT-SWAP HTTP/1.1"
         );
     }
 

@@ -51,7 +51,7 @@ pub fn resolve_detail_layout(area: Rect, execution_body_lines: usize) -> DetailS
                 .constraints([
                     Constraint::Length(5),
                     Constraint::Length(3),
-                    Constraint::Length(4),
+                    Constraint::Length(5),
                     Constraint::Length(5),
                     Constraint::Length(execution_height),
                     Constraint::Min(0),
@@ -74,7 +74,7 @@ pub fn resolve_detail_layout(area: Rect, execution_body_lines: usize) -> DetailS
                 .constraints([
                     Constraint::Length(5),
                     Constraint::Length(3),
-                    Constraint::Length(4),
+                    Constraint::Length(5),
                     Constraint::Length(4),
                     Constraint::Length(4),
                     Constraint::Min(0),
@@ -120,7 +120,7 @@ fn standard_execution_height(area_height: u16, execution_body_lines: usize) -> u
     let requested = (execution_body_lines as u16)
         .saturating_add(2)
         .clamp(STANDARD_EXECUTION_MIN_HEIGHT, STANDARD_EXECUTION_MAX_HEIGHT);
-    let fixed_height = 5 + 3 + 4 + 5;
+    let fixed_height = 5 + 3 + 5 + 5;
     let available_after_fixed = area_height.saturating_sub(fixed_height);
     let max_without_hiding_trace = available_after_fixed.saturating_sub(MIN_TRACE_SECTION_HEIGHT);
     requested
@@ -175,7 +175,7 @@ mod tests {
 
         assert_eq!(layout.mode, DetailLayoutMode::Standard);
         assert_eq!(layout.track.height, 5);
-        assert_eq!(layout.market.height, 4);
+        assert_eq!(layout.market.height, 5);
         assert!(layout.pnl.is_some());
     }
 
@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn keeps_compact_trace_hidden_until_panel_body_fits() {
         let hidden = resolve_detail_layout(Rect::new(0, 0, 100, 23), 6);
-        let visible = resolve_detail_layout(Rect::new(0, 0, 100, 24), 6);
+        let visible = resolve_detail_layout(Rect::new(0, 0, 100, 25), 6);
 
         assert_eq!(hidden.mode, DetailLayoutMode::Compact);
         assert!(hidden.trace.is_none());
