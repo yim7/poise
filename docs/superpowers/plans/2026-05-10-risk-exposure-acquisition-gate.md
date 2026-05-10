@@ -336,7 +336,7 @@ Record commit SHA here after committing: `c4ef42c`
 - Modify: `engine/src/lib.rs`
 - Test: `engine/src/risk_exposure_gate.rs`
 
-- [ ] **Step 1: Create failing pure gate tests**
+- [x] **Step 1: Create failing pure gate tests**
 
 Create `engine/src/risk_exposure_gate.rs` with only tests first. Use the public API shown in Step 3 so the tests fail before implementation:
 
@@ -487,7 +487,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run pure gate tests to verify they fail**
+- [x] **Step 2: Run pure gate tests to verify they fail**
 
 Run:
 
@@ -497,7 +497,7 @@ cargo test -p poise-engine risk_exposure_gate::tests::
 
 Expected: FAIL because module types and `apply()` are missing.
 
-- [ ] **Step 3: Implement pure gate module**
+- [x] **Step 3: Implement pure gate module**
 
 Add this module shape above the tests in `engine/src/risk_exposure_gate.rs`:
 
@@ -752,7 +752,7 @@ fn same_direction_backlog(
 
 Add `pub(crate) mod risk_exposure_gate;` to `engine/src/lib.rs`.
 
-- [ ] **Step 4: Run pure gate tests to verify they pass**
+- [x] **Step 4: Run pure gate tests to verify they pass**
 
 Run:
 
@@ -762,7 +762,7 @@ cargo test -p poise-engine risk_exposure_gate::tests::
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit Task 2**
+- [x] **Step 5: Commit Task 2**
 
 Run:
 
@@ -771,7 +771,7 @@ git add engine/src/risk_exposure_gate.rs engine/src/lib.rs
 git commit -m "feat: add risk exposure gate"
 ```
 
-Record commit SHA here after committing: ``
+Record commit SHA here after committing: `713a701`
 
 ## Task 3: Reconciler Runtime Wiring
 
