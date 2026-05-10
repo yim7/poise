@@ -1798,7 +1798,7 @@ git add docs/superpowers/plans/2026-05-10-risk-exposure-acquisition-gate.md
 git commit -m "docs: record risk exposure gate implementation completion"
 ```
 
-Record commit SHA here after committing: ``
+Record commit SHA here after committing: `5cd5db8`
 
 Notes:
 - `pnpm` was not available in this environment, so the workbench commands were run with `npm --prefix tools/track-tuning-workbench`.
