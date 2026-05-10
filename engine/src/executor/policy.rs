@@ -336,7 +336,7 @@ fn select_reduce_risk_curve_maker_operations(
         .filter(|operation| operation.remaining > input.exposure_epsilon)
         .filter(|operation| operation.operation.direction == BoundaryDirection::Up)
         .filter(|operation| !covered_operations.contains(&operation.operation))
-        .filter(|operation| operation_reduces_inventory(input.boundaries, &operation.operation))
+        .filter(|operation| operation_reduces_current_inventory(input, &operation.operation))
         .map(|operation| operation.operation.clone())
         .take(input.curve_maker_levels_per_side)
         .collect::<Vec<_>>();
@@ -349,7 +349,7 @@ fn select_reduce_risk_curve_maker_operations(
         .filter(|operation| operation.remaining > input.exposure_epsilon)
         .filter(|operation| operation.operation.direction == BoundaryDirection::Down)
         .filter(|operation| !covered_operations.contains(&operation.operation))
-        .filter(|operation| operation_reduces_inventory(input.boundaries, &operation.operation))
+        .filter(|operation| operation_reduces_current_inventory(input, &operation.operation))
         .map(|operation| operation.operation.clone())
         .take(input.curve_maker_levels_per_side)
         .collect::<Vec<_>>();
@@ -799,13 +799,31 @@ fn reduce_only_for_operation(boundary: &BoundaryBlueprint, direction: BoundaryDi
     to.abs() + f64::EPSILON < from.abs()
 }
 
-fn operation_reduces_inventory(
-    boundaries: &[BoundaryBlueprint],
+fn operation_reduces_current_inventory(
+    input: &PolicyPlanningInput<'_>,
     operation: &BoundaryOperation,
 ) -> bool {
-    boundary_for_operation(boundaries, operation)
-        .map(|boundary| reduce_only_for_operation(boundary, operation.direction))
-        .unwrap_or(false)
+    let Some(boundary) = boundary_for_operation(input.boundaries, operation) else {
+        return false;
+    };
+    if !reduce_only_for_operation(boundary, operation.direction) {
+        return false;
+    }
+
+    let target = Exposure(operation_target_exposure(boundary, operation.direction));
+    let reduction_direction = direction_for_gap(&input.current_exposure.delta(&target));
+    if reduction_direction != Some(operation.direction) {
+        return false;
+    }
+
+    target.0.abs() + input.exposure_epsilon < input.current_exposure.0.abs()
+}
+
+fn operation_target_exposure(boundary: &BoundaryBlueprint, direction: BoundaryDirection) -> f64 {
+    match direction {
+        BoundaryDirection::Up => boundary.upper_exposure.0,
+        BoundaryDirection::Down => boundary.lower_exposure.0,
+    }
 }
 
 fn side_for_direction(direction: BoundaryDirection) -> Side {
@@ -1038,6 +1056,62 @@ mod tests {
         let selected = select_curve_maker_operations(&view, &BTreeSet::new(), 1e-9, 1);
 
         assert_eq!(selected, vec![future_up_near, future_down_near]);
+    }
+
+    #[test]
+    fn reduce_risk_curve_maker_requires_candidate_target_to_lower_current_risk() {
+        let config = config();
+        let rules = rules();
+        let boundaries = discretize_boundaries(&config, ProfileRevision("rev-1".to_string()));
+        let blocked_buy = operation(-10_000, 0, BoundaryDirection::Up);
+        let allowed_sell = operation(0, 10_000, BoundaryDirection::Down);
+        let blocked_sell = operation(10_000, 20_000, BoundaryDirection::Down);
+        let view = BoundaryLedgerView {
+            operations: vec![
+                BoundaryOperationView {
+                    operation: blocked_buy,
+                    remaining: 1.0,
+                    due: false,
+                },
+                BoundaryOperationView {
+                    operation: allowed_sell.clone(),
+                    remaining: 0.5,
+                    due: false,
+                },
+                BoundaryOperationView {
+                    operation: blocked_sell,
+                    remaining: 1.0,
+                    due: false,
+                },
+            ],
+        };
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+        let current = Exposure(0.5);
+        let desired = Exposure(0.5);
+        let input = PolicyPlanningInput {
+            view: &view,
+            boundaries: &boundaries,
+            instrument: &instrument,
+            config: &config,
+            exchange_rules: &rules,
+            base_qty_per_unit: 1.0,
+            min_rebalance_units: 1.0,
+            current_exposure: &current,
+            desired_exposure: &desired,
+            execution_quote: Some(ExecutionQuote {
+                best_bid: 99.9,
+                best_ask: 100.1,
+            }),
+            submit_purpose: SubmitPurpose::AutoReconcile,
+            risk_acquisition_gate_active: true,
+            risk_acquisition: Default::default(),
+            exposure_epsilon: 1e-9,
+            curve_maker_levels_per_side: 2,
+        };
+
+        let selected = select_reduce_risk_curve_maker_operations(&input, &BTreeSet::new());
+
+        assert_eq!(selected, vec![allowed_sell]);
     }
 
     #[test]
