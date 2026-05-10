@@ -614,6 +614,7 @@ total_loss_limit = 600.0
                 daily_loss_limit: 300.0,
                 total_loss_limit: 600.0,
                 tick_timeout_secs: None,
+                risk_increase_delay: None,
             }],
             exchange: crate::config::ExchangeConfig::Binance(poise_binance::Config {
                 api_key: Some("demo-key".into()),

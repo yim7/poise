@@ -327,6 +327,7 @@ mod tests {
                 daily_loss_limit: 300.0,
                 total_loss_limit: 600.0,
                 tick_timeout_secs: None,
+                risk_increase_delay: None,
             }],
             exchange: ExchangeConfig::default(),
             account_monitor: Default::default(),

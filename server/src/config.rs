@@ -6,7 +6,8 @@ use poise_binance as binance;
 use poise_bybit as bybit;
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{
-    BandProtectionPolicy, DEFAULT_MIN_REBALANCE_UNITS, ShapeFamily, TrackConfig,
+    BandProtectionPolicy, DEFAULT_MIN_REBALANCE_UNITS, RiskIncreaseDelayConfig, ShapeFamily,
+    TrackConfig,
 };
 use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
 use poise_hyperliquid as hyperliquid;
@@ -45,6 +46,7 @@ pub struct TrackSpec {
     pub daily_loss_limit: f64,
     pub total_loss_limit: f64,
     pub tick_timeout_secs: Option<u64>,
+    pub risk_increase_delay: Option<RiskIncreaseDelayConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -111,6 +113,7 @@ impl TrackSpec {
             out_of_band_policy: self
                 .out_of_band_policy
                 .unwrap_or(BandProtectionPolicy::Freeze),
+            risk_increase_delay: self.risk_increase_delay,
         };
         let loss_limits = LossLimits {
             daily_loss_limit: self.daily_loss_limit,
@@ -218,6 +221,59 @@ total_loss_limit = 600.0
         .unwrap();
 
         assert_eq!(config.tracks[0].leverage, Some(20));
+    }
+
+    #[test]
+    fn parses_risk_increase_delay_config() {
+        let config = parse_config(
+            r#"
+bind_address = "127.0.0.1:8000"
+
+[exchange]
+venue = "binance"
+deployment = "testnet"
+api_key = ""
+api_secret = ""
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 100.0
+min_rebalance_units = 0.5
+shape_family = "linear"
+out_of_band_policy = "freeze"
+max_notional = 800.0
+leverage = 10
+daily_loss_limit = 100.0
+total_loss_limit = 200.0
+tick_timeout_secs = 30
+
+[tracks.risk_increase_delay]
+startup_initial_ratio = 0.3
+advantage_min_rebalance_multiples = 2.0
+base_step_min_rebalance_multiples = 1.0
+max_step_min_rebalance_multiples = 4.0
+catchup_ratio = 0.25
+"#,
+        )
+        .unwrap();
+
+        let delay = config.tracks[0]
+            .to_track_definition(config.exchange.venue())
+            .unwrap()
+            .track_config()
+            .risk_increase_delay
+            .unwrap();
+
+        assert_eq!(delay.startup_initial_ratio, 0.3);
+        assert_eq!(delay.advantage_min_rebalance_multiples, 2.0);
+        assert_eq!(delay.base_step_min_rebalance_multiples, 1.0);
+        assert_eq!(delay.max_step_min_rebalance_multiples, 4.0);
+        assert_eq!(delay.catchup_ratio, 0.25);
     }
 
     #[test]

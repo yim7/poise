@@ -1249,6 +1249,7 @@ mod tests {
             min_rebalance_units: 1.0,
             shape_family: ShapeFamily::Linear,
             out_of_band_policy: BandProtectionPolicy::Freeze,
+            risk_increase_delay: None,
         }
     }
 

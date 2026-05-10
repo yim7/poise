@@ -50,6 +50,7 @@ mod tests {
                 min_rebalance_units: 0.5,
                 shape_family: ShapeFamily::Linear,
                 out_of_band_policy: BandProtectionPolicy::Freeze,
+                risk_increase_delay: None,
             },
             Some(3_000.0),
             LossLimits {
