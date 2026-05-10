@@ -1743,7 +1743,7 @@ Notes:
 **Files:**
 - Modify: `docs/superpowers/plans/2026-05-10-risk-exposure-acquisition-gate.md`
 
-- [ ] **Step 1: Run focused Rust tests**
+- [x] **Step 1: Run focused Rust tests**
 
 Run:
 
@@ -1765,7 +1765,7 @@ cargo test -p poise-server projector::tests::
 
 Expected: all commands PASS.
 
-- [ ] **Step 2: Run workbench focused tests**
+- [x] **Step 2: Run workbench focused tests**
 
 Run:
 
@@ -1776,7 +1776,7 @@ pnpm --dir tools/track-tuning-workbench test -- workbenchBridge.test.ts AppShell
 
 Expected: all commands PASS.
 
-- [ ] **Step 3: Check formatting/lint surfaces used by changed files**
+- [x] **Step 3: Check formatting/lint surfaces used by changed files**
 
 Run:
 
@@ -1787,7 +1787,7 @@ pnpm --dir tools/track-tuning-workbench build
 
 Expected: both commands PASS.
 
-- [ ] **Step 4: Update plan checkboxes and commit verification record**
+- [x] **Step 4: Update plan checkboxes and commit verification record**
 
 After all prior tasks have their commit SHAs recorded, update this plan file so all completed task checkboxes are checked.
 
@@ -1799,3 +1799,24 @@ git commit -m "docs: record risk exposure gate implementation completion"
 ```
 
 Record commit SHA here after committing: ``
+
+Notes:
+- `pnpm` was not available in this environment, so the workbench commands were run with `npm --prefix tools/track-tuning-workbench`.
+- Final focused verification passed:
+  - `cargo test -p poise-core strategy::tests::validate_accepts_risk_increase_delay_config`
+  - `cargo test -p poise-core strategy::tests::validate_rejects_invalid_risk_increase_delay_config`
+  - `cargo test -p poise-core strategy::tests::validate_rejects_step_bounds_that_cannot_release`
+  - `cargo test -p poise-engine risk_exposure_gate::tests::`
+  - `cargo test -p poise-engine reconciler::tests::risk_increase_delay_startup_exposes_allowed_target_not_curve_target`
+  - `cargo test -p poise-engine reconciler::tests::risk_increase_delay_reduces_allowed_target_when_curve_reenters_inside`
+  - `cargo test -p poise-engine reconciler::tests::risk_increase_delay_cross_zero_reduces_to_flat_first`
+  - `cargo test -p poise-engine executor::tests::risk_acquisition_maker_uses_advantage_price_and_release_budget`
+  - `cargo test -p poise-engine executor::tests::curve_maker_policy_emits_future_operations_near_spot`
+  - `cargo test -p poise-engine executor::tests::catch_up_policy_cancels_stale_curve_maker_and_takes_over_operation_in_same_round`
+  - `cargo test -p poise-engine manager::tests::reconcile_track_plans_risk_acquisition_maker_when_allowed_target_is_current_exposure`
+  - `cargo test -p poise-server config::tests::parses_risk_increase_delay_config`
+  - `cargo test -p poise-server projector::tests::`
+  - `cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml config_document::tests::loads_and_projects_risk_increase_delay`
+  - `npm --prefix tools/track-tuning-workbench test -- workbenchBridge.test.ts AppShell.test.tsx`
+  - `cargo fmt --check`
+  - `npm --prefix tools/track-tuning-workbench run build`
