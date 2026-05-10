@@ -1504,13 +1504,18 @@ Record commit SHA here after committing: `b2e81aa`
 - Modify: `tools/track-tuning-workbench/src/domain/trackDraft.ts`
 - Modify: `tools/track-tuning-workbench/src/domain/trackValidation.ts`
 - Modify: `tools/track-tuning-workbench/src/app/workbenchBridge.ts`
+- Modify: `tools/track-tuning-workbench/src/app/AppShell.tsx`
+- Modify: `tools/track-tuning-workbench/src/state/workbenchStore.ts`
+- Modify: `tools/track-tuning-workbench/src/styles/base.css`
+- Modify: `tools/track-tuning-workbench/src/ui/app/useSelectedTrackWorkbench.ts`
 - Create: `tools/track-tuning-workbench/src/ui/editor/sections/RiskIncreaseDelaySection.tsx`
 - Modify: `tools/track-tuning-workbench/src/ui/editor/TrackEditor.tsx`
+- Modify: `tools/track-tuning-workbench/src/ui/editor/sections/CurveSection.tsx`
 - Test: `tools/track-tuning-workbench/src-tauri/src/config_document.rs`
 - Test: `tools/track-tuning-workbench/src/app/workbenchBridge.test.ts`
 - Test: `tools/track-tuning-workbench/src/ui/app/AppShell.test.tsx`
 
-- [ ] **Step 1: Write Tauri config document test**
+- [x] **Step 1: Write Tauri config document test**
 
 Add a test in `tools/track-tuning-workbench/src-tauri/src/config_document.rs`:
 
@@ -1559,7 +1564,7 @@ catchup_ratio = 0.25
 }
 ```
 
-- [ ] **Step 2: Run Tauri config test to verify it fails**
+- [x] **Step 2: Run Tauri config test to verify it fails**
 
 Run:
 
@@ -1569,7 +1574,7 @@ cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml con
 
 Expected: FAIL because workbench config fields do not include `risk_increase_delay`.
 
-- [ ] **Step 3: Implement Tauri config fields**
+- [x] **Step 3: Implement Tauri config fields**
 
 Add a Rust payload struct mirroring core config:
 
@@ -1599,7 +1604,7 @@ catchup_ratio = 0.25
 
 only when the option is `Some`.
 
-- [ ] **Step 4: Run Tauri config test to verify it passes**
+- [x] **Step 4: Run Tauri config test to verify it passes**
 
 Run:
 
@@ -1609,7 +1614,7 @@ cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml con
 
 Expected: PASS.
 
-- [ ] **Step 5: Write frontend bridge test**
+- [x] **Step 5: Write frontend bridge test**
 
 Add a test in `tools/track-tuning-workbench/src/app/workbenchBridge.test.ts`:
 
@@ -1658,7 +1663,7 @@ it('maps risk increase delay fields through editable payloads', async () => {
 
 Use the existing fake invoker helper names from the file; if the helper name differs, keep the existing helper and only change this test body.
 
-- [ ] **Step 6: Run frontend bridge test to verify it fails**
+- [x] **Step 6: Run frontend bridge test to verify it fails**
 
 Run:
 
@@ -1668,7 +1673,7 @@ pnpm --dir tools/track-tuning-workbench test -- workbenchBridge.test.ts
 
 Expected: FAIL because TypeScript draft state lacks risk delay fields.
 
-- [ ] **Step 7: Implement frontend draft state and editor section**
+- [x] **Step 7: Implement frontend draft state and editor section**
 
 Add TypeScript draft shape:
 
@@ -1697,7 +1702,7 @@ Create `RiskIncreaseDelaySection.tsx` with five numeric inputs and one enable ch
 
 `TrackEditor.tsx` must render this section near the existing risk section.
 
-- [ ] **Step 8: Run frontend tests to verify they pass**
+- [x] **Step 8: Run frontend tests to verify they pass**
 
 Run:
 
@@ -1707,7 +1712,7 @@ pnpm --dir tools/track-tuning-workbench test -- workbenchBridge.test.ts AppShell
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit Task 6**
+- [x] **Step 9: Commit Task 6**
 
 Run:
 
@@ -1716,7 +1721,22 @@ git add tools/track-tuning-workbench/src-tauri/src/config_document.rs tools/trac
 git commit -m "feat: edit risk increase delay in workbench"
 ```
 
-Record commit SHA here after committing: ``
+Record commit SHA here after committing: `75f0a3b`
+
+Notes:
+- Used the existing `parse_track_document` helper instead of the plan's placeholder `load_from_str`.
+- Reused `poise_core::strategy::RiskIncreaseDelayConfig` in Tauri payloads instead of duplicating a separate `RiskIncreaseDelayFields` type.
+- `pnpm` was not available in this environment, so equivalent workbench commands were run with `npm --prefix tools/track-tuning-workbench`.
+- Additional files were touched to wire editor state, dirty tracking, checkbox styling, and existing OKX venue labels used by the workbench test suite.
+- Verification:
+  - `cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml config_document::tests::loads_and_projects_risk_increase_delay`
+  - `cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml config_document::tests::`
+  - `cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml commands::tests::export_`
+  - `cargo test --manifest-path tools/track-tuning-workbench/src-tauri/Cargo.toml commands::tests::load_config_file_`
+  - `npm --prefix tools/track-tuning-workbench test -- workbenchBridge.test.ts`
+  - `npm --prefix tools/track-tuning-workbench test -- AppShell.test.tsx`
+  - `npm --prefix tools/track-tuning-workbench test`
+  - `npm --prefix tools/track-tuning-workbench run build`
 
 ## Task 7: Final Focused Verification
 
