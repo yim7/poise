@@ -10,5 +10,6 @@ pub mod observation;
 pub mod ports;
 pub mod price_gate;
 pub mod reconciler;
+pub(crate) mod risk_exposure_gate;
 pub mod runtime;
 pub mod transition;
