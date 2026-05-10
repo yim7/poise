@@ -11,6 +11,7 @@ use poise_core::types::{ExchangeRules, Exposure, Side};
 use crate::execution_gate::{ExecutionGateDecision, ExecutionGateState};
 use crate::executor::RecoveryAnomaly;
 use crate::executor::binding::{BindingStatus, LiveOrderBinding};
+use crate::executor::boundary::trigger_price_for_boundary;
 use crate::executor::boundary::{ProfileRevision, profile_revision_for_config};
 use crate::executor::ledger::BoundaryLedgerState;
 use crate::executor::policy::PolicyKind;
@@ -21,7 +22,9 @@ use crate::price_gate::{
     PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
 };
 use crate::reconciler;
-use crate::risk_exposure_gate::RiskExposureGateState;
+use crate::risk_exposure_gate::{
+    RiskAcquisitionRelease, RiskExposureGateState, RiskIncreaseDirection,
+};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackStatus {
@@ -185,6 +188,32 @@ pub struct StrategyTargetView {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct RiskAcquisitionRuntimeView {
+    pub direction: RiskAcquisitionDirection,
+    pub curve_target: Exposure,
+    pub allowed_target: Exposure,
+    pub backlog_units: f64,
+    pub anchor_price: f64,
+    pub anchor_curve_target: Exposure,
+    pub next_advantage_target: Exposure,
+    pub next_advantage_price: Option<f64>,
+    pub next_release_units: f64,
+    pub next_release_target: Exposure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiskAcquisitionDirection {
+    Long,
+    Short,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+struct LiveTargetProjection {
+    desired_exposure: Option<Exposure>,
+    risk_acquisition: Option<RiskAcquisitionRuntimeView>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct QuoteHealthView {
     pub strategy_price_status: StrategyPriceStatus,
     pub price_execution_gate: PriceExecutionGate,
@@ -198,6 +227,7 @@ pub struct TrackLiveView {
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
     pub desired_exposure: Option<f64>,
+    pub risk_acquisition: Option<RiskAcquisitionRuntimeView>,
     pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
 }
 
@@ -225,6 +255,7 @@ pub struct TrackRuntimeView {
     pub current_exposure: Exposure,
     pub position_qty: f64,
     pub desired_exposure: Option<Exposure>,
+    pub risk_acquisition: Option<RiskAcquisitionRuntimeView>,
     pub manual_target_override: Option<Exposure>,
     pub executor: ExecutorView,
     pub pnl_stats: TrackPnlStats,
@@ -604,21 +635,23 @@ impl TrackRuntime {
     }
 
     pub fn strategy_target_view(&self) -> StrategyTargetView {
+        let live_target = self.live_target_projection();
         StrategyTargetView {
-            desired_exposure: self.live_desired_exposure(),
+            desired_exposure: live_target.desired_exposure,
         }
     }
 
     pub fn live_view(&self) -> TrackLiveView {
         let quote_health = self.quote_health_view();
-        let live_desired_exposure = self.live_desired_exposure();
+        let live_target = self.live_target_projection();
         TrackLiveView {
             strategy_price: self.strategy_price,
             strategy_price_status: quote_health.strategy_price_status,
             mark_price: self.mark_price,
             best_bid: self.best_bid,
             best_ask: self.best_ask,
-            desired_exposure: live_desired_exposure.map(|value| value.0),
+            desired_exposure: live_target.desired_exposure.map(|value| value.0),
+            risk_acquisition: live_target.risk_acquisition,
             price_execution_block_reason: match quote_health.price_execution_gate {
                 PriceExecutionGate::Open => None,
                 PriceExecutionGate::ManualRiskReductionOnly { reason }
@@ -638,6 +671,7 @@ impl TrackRuntime {
                 .as_ref()
                 .map(|value| Exposure(*value))
                 .or_else(|| self.desired_exposure.clone()),
+            risk_acquisition: live.risk_acquisition,
             manual_target_override: self.manual_target_override(),
             executor: self.executor_state.view(),
             pnl_stats: self.pnl_stats.clone(),
@@ -661,16 +695,77 @@ impl TrackRuntime {
         }
     }
 
-    fn live_desired_exposure(&self) -> Option<Exposure> {
+    fn live_target_projection(&self) -> LiveTargetProjection {
         if self.track_state.is_paused() {
-            return None;
+            return LiveTargetProjection::default();
         }
 
-        let strategy_price = matches!(self.strategy_price_status, StrategyPriceStatus::Live)
+        let Some(strategy_price) = matches!(self.strategy_price_status, StrategyPriceStatus::Live)
             .then_some(self.strategy_price)
-            .flatten()?;
+            .flatten()
+        else {
+            return LiveTargetProjection::default();
+        };
 
-        Some(reconciler::reconcile_target(self, strategy_price).desired_exposure)
+        let target = reconciler::reconcile_target(self, strategy_price);
+        let risk_acquisition = target.risk_acquisition.as_ref().and_then(|release| {
+            let gate = gate_state_from_track_state(target.new_runtime_state.as_ref())
+                .or_else(|| gate_state_from_track_state(Some(&self.track_state)))?;
+            Some(self.risk_acquisition_view(
+                &target.curve_target,
+                &target.desired_exposure,
+                gate,
+                release,
+            ))
+        });
+
+        LiveTargetProjection {
+            desired_exposure: Some(target.desired_exposure),
+            risk_acquisition,
+        }
+    }
+
+    fn risk_acquisition_view(
+        &self,
+        curve_target: &Exposure,
+        allowed_target: &Exposure,
+        gate: &RiskExposureGateState,
+        release: &RiskAcquisitionRelease,
+    ) -> RiskAcquisitionRuntimeView {
+        let next_advantage_price =
+            trigger_price_for_boundary(release.advantage_target.0, self.config());
+        RiskAcquisitionRuntimeView {
+            direction: RiskAcquisitionDirection::from(release.direction),
+            curve_target: curve_target.clone(),
+            allowed_target: allowed_target.clone(),
+            backlog_units: curve_target.delta(allowed_target).0.abs(),
+            anchor_price: gate.anchor_price,
+            anchor_curve_target: gate.anchor_curve_target.clone(),
+            next_advantage_target: release.advantage_target.clone(),
+            next_advantage_price: next_advantage_price
+                .is_finite()
+                .then_some(next_advantage_price),
+            next_release_units: release.release_units,
+            next_release_target: release.release_target.clone(),
+        }
+    }
+}
+
+impl From<RiskIncreaseDirection> for RiskAcquisitionDirection {
+    fn from(value: RiskIncreaseDirection) -> Self {
+        match value {
+            RiskIncreaseDirection::Long => Self::Long,
+            RiskIncreaseDirection::Short => Self::Short,
+        }
+    }
+}
+
+fn gate_state_from_track_state(state: Option<&TrackState>) -> Option<&RiskExposureGateState> {
+    match state {
+        Some(TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
+            gate,
+        }))) => Some(gate),
+        _ => None,
     }
 }
 
@@ -714,6 +809,39 @@ mod tests {
                 .is_empty(),
             "runtime clones must preserve current-session progress"
         );
+    }
+
+    #[test]
+    fn live_view_exposes_risk_acquisition_backlog() {
+        let mut config = test_config();
+        config.risk_increase_delay = Some(poise_core::strategy::RiskIncreaseDelayConfig::default());
+        let mut runtime = TrackRuntime::new(
+            test_definition_with_config(config),
+            test_rules(0.1),
+            Utc::now(),
+        );
+        runtime.current_exposure = Exposure(0.0);
+        runtime.strategy_price = Some(95.0);
+        runtime.strategy_price_status = StrategyPriceStatus::Live;
+        runtime.mark_price = Some(95.0);
+        runtime.best_bid = Some(94.9);
+        runtime.best_ask = Some(95.1);
+
+        let live = runtime.live_view();
+        let risk_acquisition = live
+            .risk_acquisition
+            .expect("risk acquisition observability should be present while backlog exists");
+
+        assert_eq!(risk_acquisition.direction, RiskAcquisitionDirection::Long);
+        assert!((risk_acquisition.curve_target.0 - 4.0).abs() < 1e-9);
+        assert!((risk_acquisition.allowed_target.0 - 1.2).abs() < 1e-9);
+        assert!((risk_acquisition.backlog_units - 2.8).abs() < 1e-9);
+        assert!((risk_acquisition.anchor_price - 95.0).abs() < 1e-9);
+        assert!((risk_acquisition.anchor_curve_target.0 - 4.0).abs() < 1e-9);
+        assert!((risk_acquisition.next_advantage_target.0 - 6.0).abs() < 1e-9);
+        assert_eq!(risk_acquisition.next_advantage_price, Some(92.5));
+        assert!((risk_acquisition.next_release_units - 1.0).abs() < 1e-9);
+        assert!((risk_acquisition.next_release_target.0 - 2.2).abs() < 1e-9);
     }
 
     #[test]
@@ -880,10 +1008,14 @@ mod tests {
     }
 
     fn test_definition() -> TrackDefinition {
+        test_definition_with_config(test_config())
+    }
+
+    fn test_definition_with_config(config: TrackConfig) -> TrackDefinition {
         TrackDefinition::try_new(
             "test".into(),
             Instrument::new(Venue::Binance, "BTCUSDT"),
-            test_config(),
+            config,
             Some(10_000.0),
             test_loss_limits(),
             None,

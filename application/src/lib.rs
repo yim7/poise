@@ -38,7 +38,7 @@ pub use read_model::{
     ReadModelBinding, TrackActivityEntry, TrackActivityLevel, TrackListReadModel,
     TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadBindingPolicy,
     TrackReadBindingStatus, TrackReadModel, TrackReadPnlStats, TrackReadStatus, TrackRecoveryIssue,
-    TrackStrategyPriceStatus,
+    TrackRiskAcquisitionDirection, TrackRiskAcquisitionReadModel, TrackStrategyPriceStatus,
 };
 pub use runtime_lifecycle_service::{TrackRecoverySummary, TrackRuntimeLifecycleService};
 pub use session_effect_queue::{

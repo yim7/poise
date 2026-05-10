@@ -4,10 +4,11 @@ use poise_protocol::{
     ExecutionBadgeView, ExecutionBindingIntentView, ExecutionBindingOrderView,
     ExecutionBindingPolicyView, ExecutionBindingStatusView, ExecutionBindingView,
     ExecutionStateView, ExecutionStatusView, ExposureSummaryView, InstrumentView,
-    RiskIncreaseDelayView, ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide,
-    StrategyPriceStatusView, TrackActivityItemView, TrackCommandType, TrackCommandView,
-    TrackDetailView, TrackExecutionView, TrackIdentityView, TrackLifecycleView, TrackListItemView,
-    TrackListPnlView, TrackLossLimitsView, TrackMarketView, TrackPnlView, TrackPositionView,
+    RiskAcquisitionDirectionView, RiskAcquisitionView, RiskIncreaseDelayView,
+    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, StrategyPriceStatusView,
+    TrackActivityItemView, TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionView,
+    TrackIdentityView, TrackLifecycleView, TrackListItemView, TrackListPnlView,
+    TrackLossLimitsView, TrackMarketView, TrackPnlView, TrackPositionView,
     TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
 };
 
@@ -16,7 +17,8 @@ use poise_core::track::Instrument;
 use poise_application::{
     TrackActivityLevel, TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent,
     TrackReadBindingPolicy, TrackReadBindingStatus, TrackReadModel, TrackReadStatus,
-    TrackRecoveryIssue, TrackStrategyPriceStatus,
+    TrackRecoveryIssue, TrackRiskAcquisitionDirection, TrackRiskAcquisitionReadModel,
+    TrackStrategyPriceStatus,
 };
 
 pub struct TrackProjector;
@@ -122,6 +124,10 @@ impl TrackProjector {
                 attention_reasons: project_attention_reasons(source),
                 inventory_gap: source.inventory_gap,
                 active_binding_count: source.active_binding_count,
+                risk_acquisition: source
+                    .risk_acquisition
+                    .as_ref()
+                    .map(project_risk_acquisition),
                 bindings: project_execution_bindings(source),
             },
             activity: self.project_activity(source),
@@ -201,6 +207,24 @@ fn project_track_status(value: &TrackReadStatus) -> ProtocolTrackStatus {
         TrackReadStatus::ManualFlattening => ProtocolTrackStatus::ManualFlattening,
         TrackReadStatus::Terminated => ProtocolTrackStatus::Terminated,
         TrackReadStatus::Paused => ProtocolTrackStatus::Paused,
+    }
+}
+
+fn project_risk_acquisition(source: &TrackRiskAcquisitionReadModel) -> RiskAcquisitionView {
+    RiskAcquisitionView {
+        direction: match source.direction {
+            TrackRiskAcquisitionDirection::Long => RiskAcquisitionDirectionView::Long,
+            TrackRiskAcquisitionDirection::Short => RiskAcquisitionDirectionView::Short,
+        },
+        curve_target: source.curve_target,
+        allowed_target: source.allowed_target,
+        backlog_units: source.backlog_units,
+        anchor_price: source.anchor_price,
+        anchor_curve_target: source.anchor_curve_target,
+        next_advantage_target: source.next_advantage_target,
+        next_advantage_price: source.next_advantage_price,
+        next_release_units: source.next_release_units,
+        next_release_target: source.next_release_target,
     }
 }
 
@@ -465,7 +489,8 @@ mod tests {
         ReadModelBinding, TrackActivityEntry, TrackActivityLevel, TrackListReadModel,
         TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadBindingPolicy,
         TrackReadBindingStatus, TrackReadModel, TrackReadPnlStats, TrackReadStatus,
-        TrackRecoveryIssue, TrackStrategyPriceStatus,
+        TrackRecoveryIssue, TrackRiskAcquisitionDirection, TrackRiskAcquisitionReadModel,
+        TrackStrategyPriceStatus,
     };
     use poise_core::strategy::{
         BandProtectionPolicy, BandRecoverPolicy, RiskIncreaseDelayConfig, ShapeFamily,
@@ -970,6 +995,37 @@ mod tests {
     }
 
     #[test]
+    fn projects_risk_acquisition_observability() {
+        let mut source = source_with_submitting_effect();
+        source.risk_acquisition = Some(TrackRiskAcquisitionReadModel {
+            direction: TrackRiskAcquisitionDirection::Long,
+            curve_target: 6.0,
+            allowed_target: 2.375,
+            backlog_units: 3.625,
+            anchor_price: 100.0,
+            anchor_curve_target: 4.0,
+            next_advantage_target: 6.0,
+            next_advantage_price: Some(92.5),
+            next_release_units: 0.875,
+            next_release_target: 3.25,
+        });
+
+        let detail = TrackProjector::new().project_detail(&source);
+        let risk_acquisition = detail
+            .execution
+            .risk_acquisition
+            .expect("risk acquisition should be projected");
+
+        assert_eq!(
+            risk_acquisition.direction,
+            poise_protocol::RiskAcquisitionDirectionView::Long
+        );
+        assert!((risk_acquisition.curve_target - 6.0).abs() < f64::EPSILON);
+        assert!((risk_acquisition.backlog_units - 3.625).abs() < f64::EPSILON);
+        assert_eq!(risk_acquisition.next_advantage_price, Some(92.5));
+    }
+
+    #[test]
     fn projects_execution_pnl_observability() {
         let detail = TrackProjector::new().project_detail(&source_with_submitting_effect());
 
@@ -1091,6 +1147,7 @@ mod tests {
             current_exposure: 3.5,
             position_qty: 13.125,
             desired_exposure: Some(4.0),
+            risk_acquisition: None,
             pnl_stats: TrackReadPnlStats {
                 gross_realized_pnl_today: 980.1,
                 gross_realized_pnl_cumulative: 980.1,

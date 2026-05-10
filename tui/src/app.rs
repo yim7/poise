@@ -176,6 +176,7 @@ impl App {
             detail.market.best_bid = live.best_bid;
             detail.market.best_ask = live.best_ask;
             detail.position.desired_exposure = live.desired_exposure;
+            detail.execution.risk_acquisition = live.risk_acquisition;
         }
     }
 

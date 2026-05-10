@@ -152,6 +152,8 @@ pub struct TrackLiveView {
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
     pub desired_exposure: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_acquisition: Option<RiskAcquisitionView>,
     pub price_execution_block_reason: Option<PriceExecutionBlockReasonView>,
 }
 
@@ -192,8 +194,31 @@ pub struct TrackExecutionView {
     pub inventory_gap: f64,
     #[serde(default)]
     pub active_binding_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_acquisition: Option<RiskAcquisitionView>,
     #[serde(default)]
     pub bindings: Vec<ExecutionBindingView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RiskAcquisitionView {
+    pub direction: RiskAcquisitionDirectionView,
+    pub curve_target: f64,
+    pub allowed_target: f64,
+    pub backlog_units: f64,
+    pub anchor_price: f64,
+    pub anchor_curve_target: f64,
+    pub next_advantage_target: f64,
+    pub next_advantage_price: Option<f64>,
+    pub next_release_units: f64,
+    pub next_release_target: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskAcquisitionDirectionView {
+    Long,
+    Short,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -561,9 +586,10 @@ mod tests {
         AccountSummaryView, BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy,
         ExecutionBindingIntentView, ExecutionBindingOrderView, ExecutionBindingPolicyView,
         ExecutionBindingStatusView, ExecutionBindingView, ExecutionStateView, ExecutionStatusView,
-        RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView, StreamEvent,
-        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
-        TrackDiagnosticsView, TrackExecutionView, TrackListResponse, TrackStatus,
+        RiskAcquisitionDirectionView, RiskAcquisitionView, RiskSignalView, ShapeFamily, Side,
+        StrategyPriceStatusView, StreamEvent, TrackCommandAccepted, TrackCommandRequest,
+        TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackExecutionView,
+        TrackListResponse, TrackStatus,
     };
 
     #[test]
@@ -731,6 +757,7 @@ mod tests {
             attention_reasons: Vec::new(),
             inventory_gap: 0.0,
             active_binding_count: 0,
+            risk_acquisition: None,
             bindings: Vec::new(),
         };
 
@@ -750,6 +777,7 @@ mod tests {
             attention_reasons: Vec::new(),
             inventory_gap: 0.0,
             active_binding_count: 1,
+            risk_acquisition: None,
             bindings: vec![ExecutionBindingView {
                 id: "binding-instance-1".into(),
                 policy: ExecutionBindingPolicyView::CurveMaker,
@@ -770,6 +798,45 @@ mod tests {
         assert_eq!(binding["id"].as_str(), Some("binding-instance-1"));
         assert_eq!(binding["policy"].as_str(), Some("curve_maker"));
         assert_eq!(binding["label"].as_str(), Some("maker 1"));
+    }
+
+    #[test]
+    fn execution_view_serializes_risk_acquisition_observability() {
+        let execution = TrackExecutionView {
+            state: ExecutionStateView::Open,
+            execution_status: ExecutionStatusView::Normal,
+            attention_reasons: Vec::new(),
+            inventory_gap: 0.0,
+            active_binding_count: 0,
+            risk_acquisition: Some(RiskAcquisitionView {
+                direction: RiskAcquisitionDirectionView::Long,
+                curve_target: 6.0,
+                allowed_target: 2.375,
+                backlog_units: 3.625,
+                anchor_price: 100.0,
+                anchor_curve_target: 4.0,
+                next_advantage_target: 6.0,
+                next_advantage_price: Some(92.5),
+                next_release_units: 0.875,
+                next_release_target: 3.25,
+            }),
+            bindings: Vec::new(),
+        };
+
+        let payload = serde_json::to_value(&execution).unwrap();
+
+        assert_eq!(
+            payload["risk_acquisition"]["direction"].as_str(),
+            Some("long")
+        );
+        assert_eq!(
+            payload["risk_acquisition"]["backlog_units"].as_f64(),
+            Some(3.625)
+        );
+        assert_eq!(
+            payload["risk_acquisition"]["next_advantage_price"].as_f64(),
+            Some(92.5)
+        );
     }
 
     #[test]

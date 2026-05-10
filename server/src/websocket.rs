@@ -2,7 +2,8 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use poise_application::{ApplicationNotification, TrackListReadModel};
 use poise_protocol::{
-    PriceExecutionBlockReasonView, StreamEvent, TrackLiveView as ProtocolTrackLiveView,
+    PriceExecutionBlockReasonView, RiskAcquisitionDirectionView, RiskAcquisitionView, StreamEvent,
+    TrackLiveView as ProtocolTrackLiveView,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -640,9 +641,36 @@ fn project_live_view(live_view: poise_engine::runtime::TrackLiveView) -> Protoco
         best_bid: live_view.best_bid,
         best_ask: live_view.best_ask,
         desired_exposure: live_view.desired_exposure,
+        risk_acquisition: live_view
+            .risk_acquisition
+            .map(project_live_risk_acquisition),
         price_execution_block_reason: live_view
             .price_execution_block_reason
             .map(project_price_execution_block_reason),
+    }
+}
+
+fn project_live_risk_acquisition(
+    source: poise_engine::runtime::RiskAcquisitionRuntimeView,
+) -> RiskAcquisitionView {
+    RiskAcquisitionView {
+        direction: match source.direction {
+            poise_engine::runtime::RiskAcquisitionDirection::Long => {
+                RiskAcquisitionDirectionView::Long
+            }
+            poise_engine::runtime::RiskAcquisitionDirection::Short => {
+                RiskAcquisitionDirectionView::Short
+            }
+        },
+        curve_target: source.curve_target.0,
+        allowed_target: source.allowed_target.0,
+        backlog_units: source.backlog_units,
+        anchor_price: source.anchor_price,
+        anchor_curve_target: source.anchor_curve_target.0,
+        next_advantage_target: source.next_advantage_target.0,
+        next_advantage_price: source.next_advantage_price,
+        next_release_units: source.next_release_units,
+        next_release_target: source.next_release_target.0,
     }
 }
 
@@ -718,11 +746,14 @@ mod tests {
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-    use poise_core::types::ExchangeRules;
+    use poise_core::types::{ExchangeRules, Exposure};
     use poise_engine::command::TrackCommand;
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{AccountSummarySnapshot, ClockPort};
+    use poise_engine::runtime::{
+        RiskAcquisitionDirection, RiskAcquisitionRuntimeView, StrategyPriceStatus, TrackLiveView,
+    };
     use poise_protocol::{
         ExecutionStateView, ExecutionStatusView, RiskSignalView, StreamEvent, TrackStatus,
     };
@@ -778,6 +809,43 @@ mod tests {
         let (client, _) = connect_async(format!("ws://{address}/ws")).await.unwrap();
         let (mut sink, _) = client.split();
         sink.close().await.unwrap();
+    }
+
+    #[test]
+    fn projects_live_risk_acquisition_observability() {
+        let live = super::project_live_view(TrackLiveView {
+            strategy_price: Some(95.0),
+            strategy_price_status: StrategyPriceStatus::Live,
+            mark_price: Some(95.0),
+            best_bid: Some(94.9),
+            best_ask: Some(95.1),
+            desired_exposure: Some(1.2),
+            risk_acquisition: Some(RiskAcquisitionRuntimeView {
+                direction: RiskAcquisitionDirection::Long,
+                curve_target: Exposure(4.0),
+                allowed_target: Exposure(1.2),
+                backlog_units: 2.8,
+                anchor_price: 95.0,
+                anchor_curve_target: Exposure(4.0),
+                next_advantage_target: Exposure(6.0),
+                next_advantage_price: Some(92.5),
+                next_release_units: 1.0,
+                next_release_target: Exposure(2.2),
+            }),
+            price_execution_block_reason: None,
+        });
+
+        let risk_acquisition = live
+            .risk_acquisition
+            .expect("risk acquisition should be projected");
+
+        assert_eq!(
+            risk_acquisition.direction,
+            poise_protocol::RiskAcquisitionDirectionView::Long
+        );
+        assert!((risk_acquisition.curve_target - 4.0).abs() < f64::EPSILON);
+        assert!((risk_acquisition.backlog_units - 2.8).abs() < f64::EPSILON);
+        assert_eq!(risk_acquisition.next_advantage_price, Some(92.5));
     }
 
     async fn spawn_server_with_capacity(

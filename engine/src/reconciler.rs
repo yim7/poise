@@ -15,6 +15,7 @@ use crate::runtime::{
 
 pub struct TargetReconcileResult {
     pub events: Vec<DomainEvent>,
+    pub curve_target: Exposure,
     pub desired_exposure: Exposure,
     pub applied_risk_cap: Option<AppliedRiskCap>,
     pub new_runtime_state: Option<TrackState>,
@@ -31,6 +32,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
             events: exposure_target_change_event(track, &target)
                 .into_iter()
                 .collect(),
+            curve_target: target.clone(),
             desired_exposure: target,
             applied_risk_cap: None,
             new_runtime_state: Some(track.track_state.clone()),
@@ -50,6 +52,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
             events: exposure_target_change_event(track, &target_override)
                 .into_iter()
                 .collect(),
+            curve_target: target_override.clone(),
             desired_exposure: target_override,
             applied_risk_cap: None,
             new_runtime_state: Some(track.track_state.clone()),
@@ -94,6 +97,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
                 events: exposure_target_change_event(track, &target)
                     .into_iter()
                     .collect(),
+                curve_target: target.clone(),
                 desired_exposure: target,
                 applied_risk_cap: None,
                 new_runtime_state: Some(TrackState::Terminated {
@@ -106,12 +110,14 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
         }
     };
 
+    let curve_target = approved_target.clone();
     let (approved_target, new_runtime_state, risk_acquisition) =
         apply_risk_exposure_gate(track, strategy_price, approved_target, new_runtime_state);
 
     if should_suppress_protected_risk_increase(track, &new_runtime_state, &approved_target) {
         return TargetReconcileResult {
             events,
+            curve_target,
             desired_exposure: approved_target,
             applied_risk_cap,
             new_runtime_state,
@@ -139,6 +145,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
         }
         return TargetReconcileResult {
             events,
+            curve_target,
             desired_exposure: approved_target,
             applied_risk_cap,
             new_runtime_state,
@@ -152,6 +159,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
     if delta.is_zero() {
         return TargetReconcileResult {
             events,
+            curve_target,
             desired_exposure: approved_target,
             applied_risk_cap,
             new_runtime_state,
@@ -167,6 +175,7 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
 
     TargetReconcileResult {
         events,
+        curve_target,
         desired_exposure: approved_target,
         applied_risk_cap,
         new_runtime_state,

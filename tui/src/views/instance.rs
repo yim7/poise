@@ -7,7 +7,8 @@ use crate::app::App;
 use crate::exposure_presentation::instance_exposure_annotation;
 use crate::protocol::{
     ActivityLevelView, ExecutionBindingIntentView, ExecutionBindingStatusView, ExecutionStateView,
-    ExecutionStatusView, TrackCommandType, TrackCommandView, TrackExecutionView,
+    ExecutionStatusView, RiskAcquisitionDirectionView, RiskAcquisitionView, TrackCommandType,
+    TrackCommandView, TrackExecutionView,
 };
 use crate::signal::{exposure_signal, pnl_signal};
 use crate::theme::Theme;
@@ -369,12 +370,13 @@ fn execution_body_line_count(execution: &TrackExecutionView) -> usize {
         execution.execution_status,
         ExecutionStatusView::AttentionRequired
     ));
+    let risk_acquisition_lines = execution.risk_acquisition.as_ref().map_or(0, |_| 3);
     let binding_lines = execution.bindings.len();
 
-    match (alert_lines, binding_lines) {
+    match (alert_lines + risk_acquisition_lines, binding_lines) {
         (0, 0) => 1,
-        (alerts, 0) => alerts + 1,
-        (alerts, bindings) => alerts + bindings,
+        (non_binding, 0) => non_binding,
+        (non_binding, bindings) => non_binding + bindings,
     }
 }
 
@@ -410,6 +412,10 @@ fn execution_lines(
                 execution.attention_reasons.join(" | ")
             )));
         }
+    }
+
+    if let Some(risk_acquisition) = &execution.risk_acquisition {
+        lines.extend(format_risk_acquisition_lines(risk_acquisition));
     }
 
     if lines.is_empty() && binding_details.is_empty() {
@@ -470,7 +476,11 @@ fn minimal_execution_lines(
 }
 
 fn format_compact_execution_summary(execution: &TrackExecutionView) -> Option<String> {
-    compact_binding_summary(execution)
+    execution
+        .risk_acquisition
+        .as_ref()
+        .map(format_compact_risk_acquisition)
+        .or_else(|| compact_binding_summary(execution))
 }
 
 fn compact_binding_summary(execution: &TrackExecutionView) -> Option<String> {
@@ -511,6 +521,51 @@ fn compact_binding_label(binding: &poise_protocol::ExecutionBindingView) -> Stri
         .map(|order| format!("{} {:.4} @ {:.4}", order.side, order.quantity, order.price))
         .unwrap_or_else(|| "no order".to_string());
     format!("{} {order}", binding.label)
+}
+
+fn format_risk_acquisition_lines(risk_acquisition: &RiskAcquisitionView) -> Vec<Line<'static>> {
+    vec![
+        Line::from(format!(
+            "risk acquisition: {} | curve {} | allowed {} | backlog {}",
+            format_risk_direction(risk_acquisition.direction),
+            format_signed_exposure(risk_acquisition.curve_target),
+            format_signed_exposure(risk_acquisition.allowed_target),
+            format_signed_exposure(risk_acquisition.backlog_units),
+        )),
+        Line::from(format!(
+            "anchor {:.4} / {} | advantage {} @ {}",
+            risk_acquisition.anchor_price,
+            format_signed_exposure(risk_acquisition.anchor_curve_target),
+            format_signed_exposure(risk_acquisition.next_advantage_target),
+            format_optional_price(risk_acquisition.next_advantage_price),
+        )),
+        Line::from(format!(
+            "next release {} -> {}",
+            format_signed_exposure(risk_acquisition.next_release_units),
+            format_signed_exposure(risk_acquisition.next_release_target),
+        )),
+    ]
+}
+
+fn format_compact_risk_acquisition(risk_acquisition: &RiskAcquisitionView) -> String {
+    format!(
+        "risk acquisition: {} backlog {} | next {} -> {}",
+        format_risk_direction(risk_acquisition.direction),
+        format_signed_exposure(risk_acquisition.backlog_units),
+        format_signed_exposure(risk_acquisition.next_release_units),
+        format_signed_exposure(risk_acquisition.next_release_target),
+    )
+}
+
+fn format_risk_direction(direction: RiskAcquisitionDirectionView) -> &'static str {
+    match direction {
+        RiskAcquisitionDirectionView::Long => "long",
+        RiskAcquisitionDirectionView::Short => "short",
+    }
+}
+
+fn format_signed_exposure(value: f64) -> String {
+    format!("{value:+.4}")
 }
 
 fn format_binding_status(value: ExecutionBindingStatusView) -> &'static str {
@@ -897,6 +952,34 @@ mod tests {
         assert!(!text.contains("replacement gate"));
         assert!(!text.contains("Diagnostics"));
         assert!(!text.contains("client-1"));
+    }
+
+    #[test]
+    fn renders_risk_acquisition_backlog_observability() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        value["execution"]["risk_acquisition"] = serde_json::json!({
+            "direction": "long",
+            "curve_target": 6.0,
+            "allowed_target": 2.375,
+            "backlog_units": 3.625,
+            "anchor_price": 100.0,
+            "anchor_curve_target": 4.0,
+            "next_advantage_target": 6.0,
+            "next_advantage_price": 92.5,
+            "next_release_units": 0.875,
+            "next_release_target": 3.25
+        });
+        let detail: TrackDetailView = serde_json::from_value(value).unwrap();
+
+        let text = render_text_with_size(detail, 180, 36);
+
+        assert!(text.contains(
+            "risk acquisition: long | curve +6.0000 | allowed +2.3750 | backlog +3.6250"
+        ));
+        assert!(text.contains("anchor 100.0000 / +4.0000 | advantage +6.0000 @ 92.5000"));
+        assert!(text.contains("next release +0.8750 -> +3.2500"));
     }
 
     #[test]
