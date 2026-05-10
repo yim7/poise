@@ -113,8 +113,8 @@ impl BybitRestClient {
             symbol: req.instrument.symbol.clone(),
             side: side_to_bybit(req.side).to_string(),
             order_type: "Limit",
-            qty: req.quantity.to_string(),
-            price: req.price.to_string(),
+            qty: format_decimal(req.quantity),
+            price: format_decimal(req.price),
             time_in_force: "GTC",
             position_idx: 0,
             order_link_id: req.client_order_id.clone(),
@@ -438,6 +438,16 @@ fn should_bypass_proxy(base_url: &str) -> bool {
     }
 }
 
+fn format_decimal(value: f64) -> String {
+    let formatted = format!("{value:.12}");
+    let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() || trimmed == "-0" {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, VecDeque};
@@ -563,6 +573,42 @@ mod tests {
         assert!(request.body.contains(r#""orderType":"Limit""#));
         assert!(request.body.contains(r#""timeInForce":"GTC""#));
         assert!(request.body.contains(r#""positionIdx":0"#));
+    }
+
+    #[tokio::test]
+    async fn submit_order_formats_decimal_fields_without_float_artifacts() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":0,"retMsg":"OK","result":{"orderId":"12345","orderLinkId":"client-1"}}"#,
+        )])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        client
+            .submit_order(OrderRequest {
+                instrument: poise_core::track::Instrument::new(
+                    poise_core::track::Venue::Bybit,
+                    "LINKUSDT",
+                ),
+                side: poise_core::types::Side::Sell,
+                price: 12.900000000000002,
+                quantity: 0.30000000000000004,
+                client_order_id: "client-1".to_string(),
+                reduce_only: false,
+            })
+            .await
+            .unwrap();
+
+        let request = &server.requests()[0];
+        assert!(request.body.contains(r#""qty":"0.3""#));
+        assert!(request.body.contains(r#""price":"12.9""#));
+        assert!(!request.body.contains("0.30000000000000004"));
     }
 
     #[tokio::test]
