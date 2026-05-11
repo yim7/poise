@@ -46,6 +46,7 @@ advantage_steps = 2.0
 min_release_steps = 1.0
 max_release_steps = 4.0
 catchup_ratio = 0.25
+stale_release_minutes = 30.0
 ```
 
 如果有多个 `[[tracks]]`，每个 track 都可以有自己的 `[tracks.risk_acquisition]` 子表；子表归属于它前面最近的那个 `[[tracks]]`。
@@ -69,6 +70,7 @@ out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }
 | `min_release_steps` | `1.0` | 每次释放的最小步长倍数。 |
 | `max_release_steps` | `4.0` | 每次释放的最大步长倍数。 |
 | `catchup_ratio` | `0.25` | 根据当前 backlog 动态计算释放量的比例。 |
+| `stale_release_minutes` | `30.0` | 同一个 anchor 等待达到这个分钟数后，即使价格还没走到优势阈值，也释放一批 backlog；设为 `0` 表示关闭时间释放。 |
 
 派生量：
 
@@ -114,7 +116,7 @@ backlog = +3.5
 
 ## 增加风险
 
-如果 `curve_target` 在 `allowed_target` 外侧，说明仍有未释放的风险暴露。价格必须从 anchor 继续朝增加该方向风险的方向移动，并让曲线目标至少多走出 `advantage_units`，才释放一次。
+如果 `curve_target` 在 `allowed_target` 外侧，说明仍有未释放的风险暴露。系统满足任一条件时释放一次：价格从 anchor 继续朝增加该方向风险的方向移动，并让曲线目标至少多走出 `advantage_units`；或同一个 anchor 等待达到 `stale_release_minutes`。
 
 加多：
 
@@ -139,9 +141,12 @@ release_units = min(release_units, backlog_units)
 allowed_target = move_toward(allowed_target, curve_target, release_units)
 anchor_price = current_price
 anchor_curve_target = current_curve_target
+anchor_started_at = current_time
 ```
 
 新的价格位置产生的曲线新增需求也进入同一个 backlog，不单独立即释放。也就是说，每到一次更优价格，只释放一次预算；如果 `allowed_target` 仍未追到 `curve_target`，剩余差值继续等待下一次成本优势。
+
+释放前还要确认上一批允许目标已经基本成交：`abs(current_exposure - allowed_target) < min_rebalance_units`。如果实际仓位还没追到上一批 `allowed_target`，系统先让 `CatchUp` 补齐，不继续释放下一批 backlog。
 
 ## 降低风险
 
@@ -178,15 +183,16 @@ allowed_target -> 0.0
 
 ## 时间语义
 
-第一版不设置时间过期。
+默认设置时间释放：`stale_release_minutes = 30.0`。
 
-backlog 只由价格和曲线目标变化驱动：
+backlog 主要由价格和曲线目标变化驱动，但同一个 anchor 等待过久时允许释放一批，避免价格长期没有走到优势阈值导致目标永远追不满：
 
 - 价格继续给出成本优势：释放一次。
+- 同一个 anchor 等待达到 `stale_release_minutes`：释放一次。
 - 价格回到降低风险方向：backlog 缩小，必要时立即降风险。
-- 价格横盘：backlog 保留但不释放。
+- 价格横盘：backlog 保留；达到时间阈值后释放一批。
 
-不引入时间过期，是为了保持规则目标单一：没有成本优势就不自动释放风险暴露。
+时间释放和价格优势释放使用同一套 `release_units` 计算，不另设数量规则。每次释放都会重置 `anchor_price`、`anchor_curve_target` 和 `anchor_started_at`。如果 `stale_release_minutes = 0`，时间释放关闭，只保留价格优势释放。
 
 ## CatchUp 语义
 

@@ -252,6 +252,7 @@ fn project_risk_acquisition_config(
         min_release_steps: value.min_release_steps,
         max_release_steps: value.max_release_steps,
         catchup_ratio: value.catchup_ratio,
+        stale_release_minutes: value.stale_release_minutes,
     }
 }
 
@@ -625,6 +626,10 @@ mod tests {
         assert_eq!(
             detail_json["strategy"]["risk_acquisition"]["initial_ratio"].as_f64(),
             Some(0.3)
+        );
+        assert_eq!(
+            detail_json["strategy"]["risk_acquisition"]["stale_release_minutes"].as_f64(),
+            Some(30.0)
         );
         assert!(!detail.available_commands.is_empty());
         assert_eq!(

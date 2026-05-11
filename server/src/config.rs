@@ -259,6 +259,7 @@ advantage_steps = 2.0
 min_release_steps = 1.0
 max_release_steps = 4.0
 catchup_ratio = 0.25
+stale_release_minutes = 30.0
 "#,
         )
         .unwrap();
@@ -274,6 +275,7 @@ catchup_ratio = 0.25
         assert_eq!(delay.min_release_steps, 1.0);
         assert_eq!(delay.max_release_steps, 4.0);
         assert_eq!(delay.catchup_ratio, 0.25);
+        assert_eq!(delay.stale_release_minutes, 30.0);
     }
 
     #[test]

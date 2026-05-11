@@ -39,6 +39,8 @@ const FIELD_LABELS: Record<
   'riskAcquisition.maxReleaseSteps':
     'risk_acquisition.max_release_steps',
   'riskAcquisition.catchupRatio': 'risk_acquisition.catchup_ratio',
+  'riskAcquisition.staleReleaseMinutes':
+    'risk_acquisition.stale_release_minutes',
 };
 
 export interface TrackDraftIssue {
@@ -294,6 +296,7 @@ function validateRiskAcquisitionSemantics(
     });
   }
   requireRatioInUnitInterval(delay.catchupRatio, 'catchupRatio', issues);
+  requireNonNegative(delay.staleReleaseMinutes, 'staleReleaseMinutes', issues);
 }
 
 function requireRatioInUnitInterval(
@@ -320,6 +323,20 @@ function requirePositive(
     issues.push({
       field: issueField,
       message: `${FIELD_LABELS[issueField]} 必须大于 0`,
+    });
+  }
+}
+
+function requireNonNegative(
+  value: number,
+  field: RiskAcquisitionDraftField,
+  issues: TrackDraftIssue[],
+) {
+  if (value < 0) {
+    const issueField = riskAcquisitionFieldKey(field);
+    issues.push({
+      field: issueField,
+      message: `${FIELD_LABELS[issueField]} 不能为负数`,
     });
   }
 }

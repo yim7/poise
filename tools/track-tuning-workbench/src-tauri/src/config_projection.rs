@@ -67,6 +67,10 @@ fn export_track(draft: &TrackDraft) -> String {
             format_f64(delay.max_release_steps)
         ),
         format!("catchup_ratio = {}", format_f64(delay.catchup_ratio)),
+        format!(
+            "stale_release_minutes = {}",
+            format_f64(delay.stale_release_minutes)
+        ),
     ]);
 
     lines.join("\n")

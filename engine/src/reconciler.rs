@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use poise_core::events::DomainEvent;
 use poise_core::risk::{self, ExposureIntent, RiskOutcome};
 use poise_core::strategy::{self, BandBoundary, BandProtectionPolicy, BandStatus};
@@ -25,6 +26,14 @@ pub struct TargetReconcileResult {
 }
 
 pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReconcileResult {
+    reconcile_target_at(track, strategy_price, Utc::now())
+}
+
+pub fn reconcile_target_at(
+    track: &TrackRuntime,
+    strategy_price: f64,
+    observed_at: DateTime<Utc>,
+) -> TargetReconcileResult {
     if let TrackState::Terminated { .. } = &track.track_state {
         let target = Exposure(0.0);
         let delta = track.current_exposure.delta(&target);
@@ -111,8 +120,13 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
     };
 
     let curve_target = approved_target.clone();
-    let (approved_target, new_runtime_state, risk_acquisition) =
-        apply_risk_exposure_gate(track, strategy_price, approved_target, new_runtime_state);
+    let (approved_target, new_runtime_state, risk_acquisition) = apply_risk_exposure_gate(
+        track,
+        strategy_price,
+        approved_target,
+        new_runtime_state,
+        observed_at,
+    );
 
     if should_suppress_protected_risk_increase(track, &new_runtime_state, &approved_target) {
         return TargetReconcileResult {
@@ -216,6 +230,7 @@ fn apply_risk_exposure_gate(
     strategy_price: f64,
     approved_target: Exposure,
     new_runtime_state: Option<TrackState>,
+    observed_at: DateTime<Utc>,
 ) -> (Exposure, Option<TrackState>, Option<RiskAcquisitionRelease>) {
     let effective_state = effective_runtime_state(track, &new_runtime_state);
     let gate_state = match effective_state {
@@ -233,6 +248,7 @@ fn apply_risk_exposure_gate(
         current_exposure: track.current_exposure.clone(),
         curve_target: approved_target,
         strategy_price,
+        observed_at,
     });
     let next_state = merge_gate_state(
         new_runtime_state,
@@ -569,6 +585,19 @@ mod tests {
         );
     }
 
+    fn risk_exposure_gate_state(
+        allowed_target: f64,
+        anchor_price: f64,
+        anchor_curve_target: f64,
+    ) -> RiskExposureGateState {
+        RiskExposureGateState {
+            allowed_target: Exposure(allowed_target),
+            anchor_price,
+            anchor_curve_target: Exposure(anchor_curve_target),
+            anchor_started_at: Utc::now(),
+        }
+    }
+
     fn test_max_notional() -> f64 {
         3000.0
     }
@@ -666,11 +695,7 @@ mod tests {
         track.desired_exposure = Some(Exposure(1.5));
         track.track_state =
             TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
-                gate: RiskExposureGateState {
-                    allowed_target: Exposure(1.5),
-                    anchor_price: 93.75,
-                    anchor_curve_target: Exposure(5.0),
-                },
+                gate: risk_exposure_gate_state(1.5, 93.75, 5.0),
             }));
 
         let result = reconcile_target(&track, 98.75);
@@ -693,11 +718,7 @@ mod tests {
         track.desired_exposure = Some(Exposure(1.5));
         track.track_state =
             TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
-                gate: RiskExposureGateState {
-                    allowed_target: Exposure(1.5),
-                    anchor_price: 93.75,
-                    anchor_curve_target: Exposure(5.0),
-                },
+                gate: risk_exposure_gate_state(1.5, 93.75, 5.0),
             }));
 
         let result = reconcile_target(&track, 101.25);

@@ -39,6 +39,7 @@ export interface RiskAcquisitionDraft {
   minReleaseSteps: string;
   maxReleaseSteps: string;
   catchupRatio: string;
+  staleReleaseMinutes: string;
 }
 
 export interface RiskAcquisitionParsed {
@@ -47,6 +48,7 @@ export interface RiskAcquisitionParsed {
   minReleaseSteps: number;
   maxReleaseSteps: number;
   catchupRatio: number;
+  staleReleaseMinutes: number;
 }
 
 export type RiskAcquisitionDraftField = keyof RiskAcquisitionDraft;
@@ -55,7 +57,8 @@ export type RiskAcquisitionFieldKey =
   | 'riskAcquisition.advantageSteps'
   | 'riskAcquisition.minReleaseSteps'
   | 'riskAcquisition.maxReleaseSteps'
-  | 'riskAcquisition.catchupRatio';
+  | 'riskAcquisition.catchupRatio'
+  | 'riskAcquisition.staleReleaseMinutes';
 
 export interface TrackDraftEnumFields {
   shapeFamily: TrackShapeFamily;
@@ -174,6 +177,7 @@ export const RISK_ACQUISITION_FIELD_KEYS = [
   'minReleaseSteps',
   'maxReleaseSteps',
   'catchupRatio',
+  'staleReleaseMinutes',
 ] as const satisfies readonly RiskAcquisitionDraftField[];
 
 const RISK_ACQUISITION_FIELD_KEY_BY_DRAFT_FIELD: Record<
@@ -185,6 +189,7 @@ const RISK_ACQUISITION_FIELD_KEY_BY_DRAFT_FIELD: Record<
   minReleaseSteps: 'riskAcquisition.minReleaseSteps',
   maxReleaseSteps: 'riskAcquisition.maxReleaseSteps',
   catchupRatio: 'riskAcquisition.catchupRatio',
+  staleReleaseMinutes: 'riskAcquisition.staleReleaseMinutes',
 };
 
 export const DEFAULT_RISK_ACQUISITION_DRAFT: RiskAcquisitionDraft = Object.freeze({
@@ -193,6 +198,7 @@ export const DEFAULT_RISK_ACQUISITION_DRAFT: RiskAcquisitionDraft = Object.freez
   minReleaseSteps: '1',
   maxReleaseSteps: '4',
   catchupRatio: '0.25',
+  staleReleaseMinutes: '30',
 });
 
 export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {

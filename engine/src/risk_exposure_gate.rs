@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use poise_core::strategy::RiskAcquisitionConfig;
 use poise_core::types::Exposure;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,8 @@ pub struct RiskExposureGateState {
     pub allowed_target: Exposure,
     pub anchor_price: f64,
     pub anchor_curve_target: Exposure,
+    #[serde(default = "default_anchor_started_at")]
+    pub anchor_started_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +35,7 @@ pub struct RiskExposureGateInput {
     pub current_exposure: Exposure,
     pub curve_target: Exposure,
     pub strategy_price: f64,
+    pub observed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,6 +83,7 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
             input.current_exposure.clone(),
             input.curve_target.clone(),
             input.strategy_price,
+            input.observed_at,
         )
     });
 
@@ -89,6 +94,7 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
             input.current_exposure.clone(),
             input.curve_target.clone(),
             input.strategy_price,
+            input.observed_at,
         );
     }
 
@@ -102,7 +108,13 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
         }
     };
 
-    if reached_advantage {
+    let reached_stale_release = stale_release_due(config, &state, input.observed_at);
+    if release_budget_is_available(
+        &input.current_exposure,
+        &state.allowed_target,
+        input.min_rebalance_units,
+    ) && (reached_advantage || reached_stale_release)
+    {
         let release_units = release_units(
             config,
             input.min_rebalance_units,
@@ -116,6 +128,7 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
         );
         state.anchor_price = input.strategy_price;
         state.anchor_curve_target = input.curve_target.clone();
+        state.anchor_started_at = input.observed_at;
     }
 
     let next_release = next_release(
@@ -138,6 +151,7 @@ fn startup_state(
     current_exposure: Exposure,
     curve_target: Exposure,
     strategy_price: f64,
+    observed_at: DateTime<Utc>,
 ) -> RiskExposureGateState {
     let target_units = curve_target.0.abs();
     let ratio_units = target_units * config.initial_ratio;
@@ -156,6 +170,7 @@ fn startup_state(
         allowed_target: Exposure(curve_target.0.signum() * allowed_units),
         anchor_price: strategy_price,
         anchor_curve_target: curve_target,
+        anchor_started_at: observed_at,
     }
 }
 
@@ -209,12 +224,39 @@ fn next_release(
     })
 }
 
+fn stale_release_due(
+    config: RiskAcquisitionConfig,
+    state: &RiskExposureGateState,
+    observed_at: DateTime<Utc>,
+) -> bool {
+    if config.stale_release_minutes <= f64::EPSILON {
+        return false;
+    }
+    let elapsed_minutes = observed_at
+        .signed_duration_since(state.anchor_started_at)
+        .num_milliseconds() as f64
+        / 60_000.0;
+    elapsed_minutes + f64::EPSILON >= config.stale_release_minutes
+}
+
+fn release_budget_is_available(
+    current_exposure: &Exposure,
+    allowed_target: &Exposure,
+    min_rebalance_units: f64,
+) -> bool {
+    current_exposure.delta(allowed_target).0.abs() < min_rebalance_units
+}
+
 fn move_toward(from: Exposure, to: Exposure, units: f64) -> Exposure {
     if to.0 > from.0 {
         Exposure((from.0 + units).min(to.0))
     } else {
         Exposure((from.0 - units).max(to.0))
     }
+}
+
+fn default_anchor_started_at() -> DateTime<Utc> {
+    Utc::now()
 }
 
 fn crosses_zero(allowed_target: f64, curve_target: f64) -> bool {
@@ -245,6 +287,7 @@ fn same_direction_backlog(
 
 #[cfg(test)]
 mod tests {
+    use chrono::{Duration, TimeZone};
     use poise_core::strategy::RiskAcquisitionConfig;
     use poise_core::types::Exposure;
 
@@ -257,6 +300,20 @@ mod tests {
             min_release_steps: 1.0,
             max_release_steps: 4.0,
             catchup_ratio: 0.25,
+            stale_release_minutes: 30.0,
+        }
+    }
+
+    fn observed_at() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 11, 9, 0, 0).unwrap()
+    }
+
+    fn gate_state(allowed: f64, anchor_price: f64, anchor_curve: f64) -> RiskExposureGateState {
+        RiskExposureGateState {
+            allowed_target: Exposure(allowed),
+            anchor_price,
+            anchor_curve_target: Exposure(anchor_curve),
+            anchor_started_at: observed_at(),
         }
     }
 
@@ -273,6 +330,20 @@ mod tests {
             current_exposure: Exposure(current_exposure),
             curve_target: Exposure(curve_target),
             strategy_price: price,
+            observed_at: observed_at(),
+        }
+    }
+
+    fn input_at(
+        state: Option<RiskExposureGateState>,
+        current_exposure: f64,
+        curve_target: f64,
+        price: f64,
+        observed_at: DateTime<Utc>,
+    ) -> RiskExposureGateInput {
+        RiskExposureGateInput {
+            observed_at,
+            ..input(state, current_exposure, curve_target, price)
         }
     }
 
@@ -287,6 +358,7 @@ mod tests {
                 allowed_target: Exposure(1.5),
                 anchor_price: 100.0,
                 anchor_curve_target: Exposure(5.0),
+                anchor_started_at: observed_at(),
             })
         );
         assert!(decision.next_release.is_some());
@@ -294,11 +366,7 @@ mod tests {
 
     #[test]
     fn does_not_release_before_advantage_target() {
-        let state = RiskExposureGateState {
-            allowed_target: Exposure(1.5),
-            anchor_price: 100.0,
-            anchor_curve_target: Exposure(5.0),
-        };
+        let state = gate_state(1.5, 100.0, 5.0);
 
         let decision = apply(input(Some(state.clone()), 1.5, 5.9, 99.6));
 
@@ -308,11 +376,7 @@ mod tests {
 
     #[test]
     fn releases_dynamic_step_after_advantage() {
-        let state = RiskExposureGateState {
-            allowed_target: Exposure(1.5),
-            anchor_price: 100.0,
-            anchor_curve_target: Exposure(5.0),
-        };
+        let state = gate_state(1.5, 100.0, 5.0);
 
         let decision = apply(input(Some(state), 1.5, 6.0, 99.5));
 
@@ -323,17 +387,57 @@ mod tests {
                 allowed_target: Exposure(2.625),
                 anchor_price: 99.5,
                 anchor_curve_target: Exposure(6.0),
+                anchor_started_at: observed_at(),
             })
         );
     }
 
     #[test]
+    fn releases_dynamic_step_after_stale_wait_without_price_advantage() {
+        let state = gate_state(1.5, 100.0, 5.0);
+        let later = observed_at() + Duration::minutes(30);
+
+        let decision = apply(input_at(Some(state), 1.5, 5.5, 99.8, later));
+
+        assert_eq!(decision.allowed_target, Exposure(2.5));
+        assert_eq!(
+            decision.state,
+            Some(RiskExposureGateState {
+                allowed_target: Exposure(2.5),
+                anchor_price: 99.8,
+                anchor_curve_target: Exposure(5.5),
+                anchor_started_at: later,
+            })
+        );
+    }
+
+    #[test]
+    fn stale_wait_does_not_release_when_previous_release_is_unfilled() {
+        let state = gate_state(1.5, 100.0, 5.0);
+        let later = observed_at() + Duration::minutes(30);
+
+        let decision = apply(input_at(Some(state.clone()), 0.75, 5.5, 99.8, later));
+
+        assert_eq!(decision.allowed_target, Exposure(1.5));
+        assert_eq!(decision.state, Some(state));
+    }
+
+    #[test]
+    fn zero_stale_release_minutes_disables_time_release() {
+        let state = gate_state(1.5, 100.0, 5.0);
+        let later = observed_at() + Duration::minutes(60);
+        let mut input = input_at(Some(state.clone()), 1.5, 5.5, 99.8, later);
+        input.config.stale_release_minutes = 0.0;
+
+        let decision = apply(input);
+
+        assert_eq!(decision.allowed_target, Exposure(1.5));
+        assert_eq!(decision.state, Some(state));
+    }
+
+    #[test]
     fn smaller_backlog_does_not_reduce_allowed_target() {
-        let state = RiskExposureGateState {
-            allowed_target: Exposure(1.5),
-            anchor_price: 100.0,
-            anchor_curve_target: Exposure(5.0),
-        };
+        let state = gate_state(1.5, 100.0, 5.0);
 
         let decision = apply(input(Some(state.clone()), 1.5, 4.0, 101.0));
 
@@ -343,11 +447,7 @@ mod tests {
 
     #[test]
     fn curve_target_inside_allowed_target_reduces_immediately() {
-        let state = RiskExposureGateState {
-            allowed_target: Exposure(1.5),
-            anchor_price: 100.0,
-            anchor_curve_target: Exposure(5.0),
-        };
+        let state = gate_state(1.5, 100.0, 5.0);
 
         let decision = apply(input(Some(state), 1.5, 1.0, 102.0));
 
@@ -358,11 +458,7 @@ mod tests {
 
     #[test]
     fn cross_zero_reduces_to_flat_before_new_direction() {
-        let state = RiskExposureGateState {
-            allowed_target: Exposure(1.5),
-            anchor_price: 100.0,
-            anchor_curve_target: Exposure(5.0),
-        };
+        let state = gate_state(1.5, 100.0, 5.0);
 
         let decision = apply(input(Some(state), 1.5, -1.0, 105.0));
 

@@ -144,6 +144,8 @@ function fallbackRiskAcquisition(draft: TrackDraft): RiskAcquisitionParsed {
     minReleaseSteps: parseFiniteNumber(draft.riskAcquisition.minReleaseSteps) ?? 1,
     maxReleaseSteps: parseFiniteNumber(draft.riskAcquisition.maxReleaseSteps) ?? 4,
     catchupRatio: parseFiniteNumber(draft.riskAcquisition.catchupRatio) ?? 0.25,
+    staleReleaseMinutes:
+      parseFiniteNumber(draft.riskAcquisition.staleReleaseMinutes) ?? 30,
   };
 }
 

@@ -8,6 +8,7 @@ pub const DEFAULT_RISK_ACQUISITION_ADVANTAGE_STEPS: f64 = 2.0;
 pub const DEFAULT_RISK_ACQUISITION_MIN_RELEASE_STEPS: f64 = 1.0;
 pub const DEFAULT_RISK_ACQUISITION_MAX_RELEASE_STEPS: f64 = 4.0;
 pub const DEFAULT_RISK_ACQUISITION_CATCHUP_RATIO: f64 = 0.25;
+pub const DEFAULT_RISK_ACQUISITION_STALE_RELEASE_MINUTES: f64 = 30.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackConfig {
@@ -36,6 +37,8 @@ pub struct RiskAcquisitionConfig {
     pub max_release_steps: f64,
     #[serde(default = "default_risk_acquisition_catchup_ratio")]
     pub catchup_ratio: f64,
+    #[serde(default = "default_risk_acquisition_stale_release_minutes")]
+    pub stale_release_minutes: f64,
 }
 
 impl Default for RiskAcquisitionConfig {
@@ -46,6 +49,7 @@ impl Default for RiskAcquisitionConfig {
             min_release_steps: DEFAULT_RISK_ACQUISITION_MIN_RELEASE_STEPS,
             max_release_steps: DEFAULT_RISK_ACQUISITION_MAX_RELEASE_STEPS,
             catchup_ratio: DEFAULT_RISK_ACQUISITION_CATCHUP_RATIO,
+            stale_release_minutes: DEFAULT_RISK_ACQUISITION_STALE_RELEASE_MINUTES,
         }
     }
 }
@@ -147,6 +151,10 @@ fn default_risk_acquisition_catchup_ratio() -> f64 {
     DEFAULT_RISK_ACQUISITION_CATCHUP_RATIO
 }
 
+fn default_risk_acquisition_stale_release_minutes() -> f64 {
+    DEFAULT_RISK_ACQUISITION_STALE_RELEASE_MINUTES
+}
+
 fn validate_risk_acquisition(config: RiskAcquisitionConfig) -> Result<(), String> {
     if !config.initial_ratio.is_finite()
         || config.initial_ratio <= 0.0
@@ -172,6 +180,9 @@ fn validate_risk_acquisition(config: RiskAcquisitionConfig) -> Result<(), String
         || config.catchup_ratio > 1.0
     {
         return Err("catchup_ratio must be finite and in (0, 1]".into());
+    }
+    if !config.stale_release_minutes.is_finite() || config.stale_release_minutes < 0.0 {
+        return Err("stale_release_minutes must be finite and non-negative".into());
     }
     Ok(())
 }
@@ -665,6 +676,7 @@ mod tests {
             min_release_steps: 1.0,
             max_release_steps: 4.0,
             catchup_ratio: 0.25,
+            stale_release_minutes: 30.0,
         };
 
         assert_eq!(validate_config(&config), Ok(()));
@@ -679,6 +691,7 @@ mod tests {
             min_release_steps: 1.0,
             max_release_steps: 4.0,
             catchup_ratio: 0.25,
+            stale_release_minutes: 30.0,
         };
 
         let error = validate_config(&config).unwrap_err();
@@ -695,11 +708,25 @@ mod tests {
             min_release_steps: 5.0,
             max_release_steps: 4.0,
             catchup_ratio: 0.25,
+            stale_release_minutes: 30.0,
         };
 
         let error = validate_config(&config).unwrap_err();
 
         assert!(error.contains("max_release_steps"));
+    }
+
+    #[test]
+    fn validate_rejects_negative_stale_release_minutes() {
+        let mut config = neutral_config();
+        config.risk_acquisition = RiskAcquisitionConfig {
+            stale_release_minutes: -1.0,
+            ..RiskAcquisitionConfig::default()
+        };
+
+        let error = validate_config(&config).unwrap_err();
+
+        assert!(error.contains("stale_release_minutes"));
     }
 
     #[test]

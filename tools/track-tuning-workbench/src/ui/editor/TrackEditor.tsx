@@ -223,6 +223,10 @@ export function TrackEditor({
               issuesByField,
               riskAcquisitionFieldKey('catchupRatio'),
             ),
+            staleReleaseMinutes: fieldIssues(
+              issuesByField,
+              riskAcquisitionFieldKey('staleReleaseMinutes'),
+            ),
           }}
           onFieldChange={onRiskAcquisitionChange}
           onCommit={onCommit}

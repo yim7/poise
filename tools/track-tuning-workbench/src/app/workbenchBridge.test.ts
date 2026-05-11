@@ -79,6 +79,7 @@ describe('createWorkbenchBridge', () => {
               min_release_steps: 1,
               max_release_steps: 4,
               catchup_ratio: 0.25,
+              stale_release_minutes: 30,
             },
           },
           load_issues: [],
@@ -136,6 +137,7 @@ describe('createWorkbenchBridge', () => {
                 min_release_steps: 1,
                 max_release_steps: 4,
                 catchup_ratio: 0.25,
+                stale_release_minutes: 30,
               },
             },
             load_issues: [],
@@ -192,6 +194,7 @@ describe('createWorkbenchBridge', () => {
                 min_release_steps: 1,
                 max_release_steps: 4,
                 catchup_ratio: 0.25,
+                stale_release_minutes: 30,
               },
             },
             load_issues: [],
@@ -209,6 +212,7 @@ describe('createWorkbenchBridge', () => {
       minReleaseSteps: '1',
       maxReleaseSteps: '4',
       catchupRatio: '0.25',
+      staleReleaseMinutes: '30',
     });
 
     await bridge.exportCurrentTrack(loaded.projectedTracks[0]);
@@ -222,6 +226,7 @@ describe('createWorkbenchBridge', () => {
             min_release_steps: 1,
             max_release_steps: 4,
             catchup_ratio: 0.25,
+            stale_release_minutes: 30,
           },
         }),
       }),
@@ -235,6 +240,7 @@ describe('createWorkbenchBridge', () => {
       min_release_steps: 0.75,
       max_release_steps: 3,
       catchup_ratio: 0.2,
+      stale_release_minutes: 20,
     });
 
     const bridge = createWorkbenchBridge();
@@ -247,6 +253,7 @@ describe('createWorkbenchBridge', () => {
       minReleaseSteps: '0.75',
       maxReleaseSteps: '3',
       catchupRatio: '0.2',
+      staleReleaseMinutes: '20',
     });
   });
 

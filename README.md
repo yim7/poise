@@ -205,6 +205,7 @@ advantage_steps = 2.0
 min_release_steps = 1.0
 max_release_steps = 4.0
 catchup_ratio = 0.25
+stale_release_minutes = 30.0
 ```
 
 | 字段 | 默认 | 说明 |
@@ -214,6 +215,7 @@ catchup_ratio = 0.25
 | `min_release_steps` | `1.0` | 每次释放 backlog 的最小单位倍数。 |
 | `max_release_steps` | `4.0` | 每次释放 backlog 的最大单位倍数，必须大于等于 `min_release_steps`。 |
 | `catchup_ratio` | `0.25` | backlog 较大时，每次按 backlog 的这个比例尝试追赶，再受最小/最大释放单位限制。取值范围是 `(0, 1]`。 |
+| `stale_release_minutes` | `30.0` | 同一个锚点等待达到这个分钟数后，即使价格还没走到优势阈值，也按同一套释放数量规则释放一批 backlog。设为 `0` 表示关闭时间释放。 |
 
 注意 `risk_acquisition` 必须写成 `[tracks.risk_acquisition]` 子表，不要写成 `risk_acquisition = { ... }` 行内对象。多个 `[[tracks]]` 时，每个 track 都可以有自己的 `[tracks.risk_acquisition]`，子表归属于它前面最近的那个 `[[tracks]]`。
 

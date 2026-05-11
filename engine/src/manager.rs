@@ -1104,7 +1104,8 @@ impl TrackManager {
     ) -> Result<PlannedInventoryExecution> {
         let normalized_track = self.track_with_current_pnl_day(track);
         let track = &normalized_track;
-        let target = reconciler::reconcile_target(track, strategy_price);
+        let observed_at = self.clock.now();
+        let target = reconciler::reconcile_target_at(track, strategy_price, observed_at);
         if track.executor_state.recovery_anomaly.is_some() {
             return Ok(PlannedInventoryExecution {
                 events: target.events,
@@ -1117,7 +1118,6 @@ impl TrackManager {
                 executor_state: track.executor_state.clone(),
             });
         }
-        let observed_at = self.clock.now();
         let risk_acquisition_gate_active =
             Self::risk_acquisition_gate_active(track, &target.new_runtime_state);
         if target.suppress_execution && !risk_acquisition_gate_active {
@@ -1363,6 +1363,7 @@ mod tests {
                         allowed_target: Exposure(1.5),
                         anchor_price: 93.75,
                         anchor_curve_target: Exposure(5.0),
+                        anchor_started_at: chrono::Utc::now(),
                     },
                 }));
         }

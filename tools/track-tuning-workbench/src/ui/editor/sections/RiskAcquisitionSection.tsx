@@ -10,6 +10,7 @@ const FIELDS = [
   { key: 'minReleaseSteps', label: '最小释放倍数' },
   { key: 'maxReleaseSteps', label: '最大释放倍数' },
   { key: 'catchupRatio', label: '追补比例' },
+  { key: 'staleReleaseMinutes', label: '时间释放分钟' },
 ] as const;
 
 export function RiskAcquisitionSection({

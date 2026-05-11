@@ -111,6 +111,7 @@ function createMockBridge(
       minReleaseSteps: '1',
       maxReleaseSteps: '4',
       catchupRatio: '0.25',
+      staleReleaseMinutes: '30',
     })),
     exportCurrentTrack: vi.fn(async () => '[[tracks]]\ntrack_id = "silver"'),
     exportAllTracks: vi.fn(async () => '[[tracks]]\ntrack_id = "silver"\n\n[[tracks]]\ntrack_id = "gold"'),
@@ -266,6 +267,7 @@ describe('AppShell', () => {
               minReleaseSteps: '1',
               maxReleaseSteps: '4',
               catchupRatio: '0.25',
+              staleReleaseMinutes: '30',
             },
           }),
         ],
@@ -301,6 +303,7 @@ describe('AppShell', () => {
         minReleaseSteps: '0.75',
         maxReleaseSteps: '3',
         catchupRatio: '0.2',
+        staleReleaseMinutes: '20',
       })),
     });
     const store = createWorkbenchStore({
@@ -336,6 +339,7 @@ describe('AppShell', () => {
       minReleaseSteps: '0.75',
       maxReleaseSteps: '3',
       catchupRatio: '0.2',
+      staleReleaseMinutes: '20',
     });
   });
 

@@ -115,6 +115,8 @@ pub struct RiskAcquisitionConfigView {
     pub min_release_steps: f64,
     pub max_release_steps: f64,
     pub catchup_ratio: f64,
+    #[serde(default = "default_risk_acquisition_config_stale_release_minutes")]
+    pub stale_release_minutes: f64,
 }
 
 impl Default for RiskAcquisitionConfigView {
@@ -125,8 +127,13 @@ impl Default for RiskAcquisitionConfigView {
             min_release_steps: 1.0,
             max_release_steps: 4.0,
             catchup_ratio: 0.25,
+            stale_release_minutes: 30.0,
         }
     }
+}
+
+fn default_risk_acquisition_config_stale_release_minutes() -> f64 {
+    30.0
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -911,7 +918,7 @@ mod tests {
                     "strategy_price":64000.0,
                     "strategy_price_status":"live"
                 },
-                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze","risk_acquisition":{"initial_ratio":0.3,"advantage_steps":2.0,"min_release_steps":1.0,"max_release_steps":4.0,"catchup_ratio":0.25}},
+                "strategy":{"lower_price":60000.0,"upper_price":68000.0,"long_exposure_units":8.0,"short_exposure_units":8.0,"notional_per_unit":375.0,"min_rebalance_units":0.5,"shape_family":"linear","out_of_band_policy":"freeze","risk_acquisition":{"initial_ratio":0.3,"advantage_steps":2.0,"min_release_steps":1.0,"max_release_steps":4.0,"catchup_ratio":0.25,"stale_release_minutes":30.0}},
                 "max_notional":3000.0,
                 "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
@@ -932,6 +939,10 @@ mod tests {
         assert_eq!(
             json["strategy"]["risk_acquisition"]["advantage_steps"].as_f64(),
             Some(2.0)
+        );
+        assert_eq!(
+            json["strategy"]["risk_acquisition"]["stale_release_minutes"].as_f64(),
+            Some(30.0)
         );
     }
 

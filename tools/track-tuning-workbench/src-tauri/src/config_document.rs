@@ -412,6 +412,13 @@ fn optional_risk_acquisition_lossy(
             issues,
         )
         .unwrap_or(defaults.catchup_ratio),
+        stale_release_minutes: optional_nested_f64_lossy(
+            delay_table,
+            "stale_release_minutes",
+            "risk_acquisition.stale_release_minutes",
+            issues,
+        )
+        .unwrap_or(defaults.stale_release_minutes),
     }
 }
 
@@ -556,6 +563,7 @@ fn stable_draft_id(fields: &EditableTrackFields) -> String {
     hasher.write_u64(fields.risk_acquisition.min_release_steps.to_bits());
     hasher.write_u64(fields.risk_acquisition.max_release_steps.to_bits());
     hasher.write_u64(fields.risk_acquisition.catchup_ratio.to_bits());
+    hasher.write_u64(fields.risk_acquisition.stale_release_minutes.to_bits());
     format!("draft-{:016x}", hasher.finish())
 }
 
@@ -904,6 +912,7 @@ advantage_steps = 2.0
 min_release_steps = 1.0
 max_release_steps = 4.0
 catchup_ratio = 0.25
+stale_release_minutes = 30.0
 "#,
         )
         .unwrap();
@@ -917,8 +926,10 @@ catchup_ratio = 0.25
         assert_eq!(delay.min_release_steps, 1.0);
         assert_eq!(delay.max_release_steps, 4.0);
         assert_eq!(delay.catchup_ratio, 0.25);
+        assert_eq!(delay.stale_release_minutes, 30.0);
         assert!(exported.contains("[tracks.risk_acquisition]"));
         assert!(exported.contains("initial_ratio = 0.3"));
+        assert!(exported.contains("stale_release_minutes = 30"));
     }
 
     #[test]

@@ -93,6 +93,7 @@ function makeSnapshot(
       minReleaseSteps: 1,
       maxReleaseSteps: 4,
       catchupRatio: 0.25,
+      staleReleaseMinutes: 30,
     },
     enums: {
       shapeFamily: overrides.enums?.shapeFamily ?? 'linear',

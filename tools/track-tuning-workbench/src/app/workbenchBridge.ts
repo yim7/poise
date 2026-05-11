@@ -78,6 +78,7 @@ interface LoadedConfigFilePayload {
         min_release_steps: number;
         max_release_steps: number;
         catchup_ratio: number;
+        stale_release_minutes: number;
       };
     };
     load_issues: Array<{
@@ -100,6 +101,7 @@ interface RiskAcquisitionPayload {
   min_release_steps: number;
   max_release_steps: number;
   catchup_ratio: number;
+  stale_release_minutes: number;
 }
 
 export function createWorkbenchBridge(): WorkbenchBridge {
@@ -345,6 +347,7 @@ function fromRiskAcquisitionPayload(
       payload.max_release_steps,
     ),
     catchupRatio: formatRawNumber(payload.catchup_ratio),
+    staleReleaseMinutes: formatRawNumber(payload.stale_release_minutes),
   };
 }
 
@@ -383,6 +386,7 @@ function toRiskAcquisitionPayload(delay: RiskAcquisitionDraft) {
     max_release_steps:
       parseRequiredNumber(delay.maxReleaseSteps),
     catchup_ratio: parseRequiredNumber(delay.catchupRatio),
+    stale_release_minutes: parseRequiredNumber(delay.staleReleaseMinutes),
   };
 }
 
@@ -435,6 +439,8 @@ function normalizeLoadIssueField(fieldKey: string): TrackDraftFieldKey {
       return 'riskAcquisition.maxReleaseSteps';
     case 'risk_acquisition.catchup_ratio':
       return 'riskAcquisition.catchupRatio';
+    case 'risk_acquisition.stale_release_minutes':
+      return 'riskAcquisition.staleReleaseMinutes';
     default:
       return 'trackId';
   }

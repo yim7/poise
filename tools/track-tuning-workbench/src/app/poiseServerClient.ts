@@ -131,6 +131,7 @@ export interface RiskAcquisitionConfigView {
   min_release_steps: number;
   max_release_steps: number;
   catchup_ratio: number;
+  stale_release_minutes: number;
 }
 
 export interface RiskAcquisitionView {
