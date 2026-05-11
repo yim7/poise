@@ -63,6 +63,8 @@ pub(crate) struct PendingOrderSnapshot {
     pub side: String,
     #[serde(rename = "px")]
     pub price: String,
+    #[serde(rename = "fillPx", default)]
+    pub fill_price: Option<String>,
     #[serde(rename = "sz")]
     pub size: String,
     #[serde(rename = "accFillSz")]

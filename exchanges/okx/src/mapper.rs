@@ -84,12 +84,18 @@ pub(crate) fn position_from_snapshot(value: PositionSnapshot) -> Result<Position
 }
 
 pub(crate) fn open_order_from_snapshot(value: PendingOrderSnapshot) -> Result<ExchangeOrder> {
+    let price = value
+        .fill_price
+        .as_deref()
+        .filter(|fill_price| value.price.is_empty() && !fill_price.is_empty())
+        .unwrap_or(&value.price);
+
     Ok(ExchangeOrder {
         instrument: Instrument::new(Venue::Okx, value.inst_id),
         order_id: value.order_id,
         client_order_id: value.client_order_id,
         side: side_from_okx(&value.side)?,
-        price: parse_decimal("px", &value.price)?,
+        price: parse_decimal("px", price)?,
         qty: parse_decimal("sz", &value.size)?,
         filled_qty: parse_decimal("accFillSz", &value.acc_fill_sz)?,
         status: order_status_from_okx_state(&value.state)?,
@@ -271,6 +277,7 @@ mod tests {
             client_order_id: "client-123".to_string(),
             side: "buy".to_string(),
             price: "65000.1".to_string(),
+            fill_price: None,
             size: "0.2".to_string(),
             acc_fill_sz: "0.05".to_string(),
             state: "partially_filled".to_string(),

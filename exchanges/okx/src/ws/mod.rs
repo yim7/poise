@@ -285,6 +285,33 @@ mod tests {
     }
 
     #[test]
+    fn orders_message_accepts_market_fill_with_empty_order_price() {
+        let events = account::parse_user_data_message(
+            r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"ANTHROPIC-USDT-SWAP","ordId":"123","clOrdId":"","side":"sell","px":"","sz":"0.06","accFillSz":"0.06","state":"filled","fillPx":"1666.6","fillSz":"0.06","fillPnl":"5.4390778138112309","fillFee":"-0.049998","fillFeeCcy":"USDT","tradeId":"445492","uTime":"1778456817451"}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(events.len(), 2);
+        match &events[0].payload {
+            UserDataPayload::OrderUpdate(order) => {
+                assert_eq!(order.client_order_id, "");
+                assert_eq!(order.price, 1666.6);
+                assert_eq!(order.status, OrderStatus::Filled);
+            }
+            other => panic!("expected order update, got {other:?}"),
+        }
+        match &events[1].payload {
+            UserDataPayload::TrackPnl(record) => {
+                assert_eq!(record.trade_id.as_deref(), Some("445492"));
+                assert_eq!(record.price, Some(1666.6));
+                assert_eq!(record.realized_pnl, 5.4390778138112309);
+                assert_eq!(record.trading_fee, 0.049998);
+            }
+            other => panic!("expected trade pnl, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn orders_message_accepts_legacy_order_pnl_and_fee_fields() {
         let events = account::parse_user_data_message(
             r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"ANTHROPIC-USDT-SWAP","ordId":"123","clOrdId":"client-1","side":"sell","px":"1500.1","sz":"0.16","accFillSz":"0.16","state":"filled","fillPx":"1498.0","fillSz":"0.16","pnl":"-2.34","fee":"-0.12","feeCcy":"USDT","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
