@@ -195,6 +195,8 @@ pub struct RiskAcquisitionRuntimeView {
     pub backlog_units: f64,
     pub anchor_price: f64,
     pub anchor_curve_target: Exposure,
+    pub stale_release_elapsed_minutes: f64,
+    pub stale_release_minutes: f64,
     pub next_advantage_target: Exposure,
     pub next_advantage_price: Option<f64>,
     pub next_release_units: f64,
@@ -707,7 +709,8 @@ impl TrackRuntime {
             return LiveTargetProjection::default();
         };
 
-        let target = reconciler::reconcile_target(self, strategy_price);
+        let observed_at = Utc::now();
+        let target = reconciler::reconcile_target_at(self, strategy_price, observed_at);
         let risk_acquisition = target.risk_acquisition.as_ref().and_then(|release| {
             let gate = gate_state_from_track_state(target.new_runtime_state.as_ref())
                 .or_else(|| gate_state_from_track_state(Some(&self.track_state)))?;
@@ -716,6 +719,7 @@ impl TrackRuntime {
                 &target.desired_exposure,
                 gate,
                 release,
+                observed_at,
             ))
         });
 
@@ -731,9 +735,15 @@ impl TrackRuntime {
         allowed_target: &Exposure,
         gate: &RiskExposureGateState,
         release: &RiskAcquisitionRelease,
+        observed_at: DateTime<Utc>,
     ) -> RiskAcquisitionRuntimeView {
         let next_advantage_price =
             trigger_price_for_boundary(release.advantage_target.0, self.config());
+        let stale_release_elapsed_minutes = observed_at
+            .signed_duration_since(gate.anchor_started_at)
+            .num_milliseconds()
+            .max(0) as f64
+            / 60_000.0;
         RiskAcquisitionRuntimeView {
             direction: RiskAcquisitionDirection::from(release.direction),
             curve_target: curve_target.clone(),
@@ -741,6 +751,8 @@ impl TrackRuntime {
             backlog_units: curve_target.delta(allowed_target).0.abs(),
             anchor_price: gate.anchor_price,
             anchor_curve_target: gate.anchor_curve_target.clone(),
+            stale_release_elapsed_minutes,
+            stale_release_minutes: self.config().risk_acquisition.stale_release_minutes,
             next_advantage_target: release.advantage_target.clone(),
             next_advantage_price: next_advantage_price
                 .is_finite()

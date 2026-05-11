@@ -527,21 +527,47 @@ fn format_risk_acquisition_lines(risk_acquisition: &RiskAcquisitionView) -> Vec<
             format_optional_price(risk_acquisition.next_advantage_price),
         )),
         Line::from(format!(
-            "release {} -> {}",
+            "release {} -> {}{}",
             format_signed_exposure(risk_acquisition.next_release_units),
             format_signed_exposure(risk_acquisition.next_release_target),
+            format_stale_release_suffix(risk_acquisition),
         )),
     ]
 }
 
 fn format_compact_risk_acquisition(risk_acquisition: &RiskAcquisitionView) -> String {
     format!(
-        "acq: {} backlog {} | release {} -> {}",
+        "acq: {} backlog {} | release {} -> {}{}",
         format_risk_direction(risk_acquisition.direction),
         format_signed_exposure(risk_acquisition.backlog_units),
         format_signed_exposure(risk_acquisition.next_release_units),
         format_signed_exposure(risk_acquisition.next_release_target),
+        format_stale_release_suffix(risk_acquisition),
     )
+}
+
+fn format_stale_release_suffix(risk_acquisition: &RiskAcquisitionView) -> String {
+    if risk_acquisition.stale_release_minutes <= f64::EPSILON {
+        return String::new();
+    }
+
+    let elapsed = risk_acquisition
+        .stale_release_elapsed_minutes
+        .max(0.0)
+        .min(risk_acquisition.stale_release_minutes);
+    format!(
+        " | stale {}/{}m",
+        format_minutes(elapsed),
+        format_minutes(risk_acquisition.stale_release_minutes)
+    )
+}
+
+fn format_minutes(value: f64) -> String {
+    if (value - value.round()).abs() < 0.05 {
+        format!("{:.0}", value)
+    } else {
+        format!("{:.1}", value)
+    }
 }
 
 fn format_risk_direction(direction: RiskAcquisitionDirectionView) -> &'static str {
@@ -979,6 +1005,8 @@ mod tests {
             "backlog_units": 3.625,
             "anchor_price": 100.0,
             "anchor_curve_target": 4.0,
+            "stale_release_elapsed_minutes": 12.0,
+            "stale_release_minutes": 30.0,
             "next_advantage_target": 6.0,
             "next_advantage_price": 92.5,
             "next_release_units": 0.875,
@@ -991,7 +1019,7 @@ mod tests {
         assert!(text.contains("exposure: 3.5000 → 4.0000 [↑ +0.5000] [acq backlog +3.6250]"));
         assert!(text.contains("acq: long | curve +6.0000 | allow +2.3750 | backlog +3.6250"));
         assert!(text.contains("anchor 100.0000 / +4.0000 | advantage +6.0000 @ 92.5000"));
-        assert!(text.contains("release +0.8750 -> +3.2500"));
+        assert!(text.contains("release +0.8750 -> +3.2500 | stale 12/30m"));
     }
 
     #[test]

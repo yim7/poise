@@ -227,6 +227,10 @@ pub struct RiskAcquisitionView {
     pub backlog_units: f64,
     pub anchor_price: f64,
     pub anchor_curve_target: f64,
+    #[serde(default)]
+    pub stale_release_elapsed_minutes: f64,
+    #[serde(default)]
+    pub stale_release_minutes: f64,
     pub next_advantage_target: f64,
     pub next_advantage_price: Option<f64>,
     pub next_release_units: f64,
@@ -834,6 +838,8 @@ mod tests {
                 backlog_units: 3.625,
                 anchor_price: 100.0,
                 anchor_curve_target: 4.0,
+                stale_release_elapsed_minutes: 12.0,
+                stale_release_minutes: 30.0,
                 next_advantage_target: 6.0,
                 next_advantage_price: Some(92.5),
                 next_release_units: 0.875,
