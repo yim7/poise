@@ -1561,6 +1561,7 @@ mod tests {
                     best_bid: Some(111.0),
                     best_ask: Some(112.0),
                     desired_exposure: Some(4.5),
+                    execution_target_exposure: Some(3.75),
                     risk_acquisition: Default::default(),
                     price_execution_block_reason: None,
                 },
@@ -1569,7 +1570,7 @@ mod tests {
         .await;
 
         assert_eq!(app.tracks[0].strategy_price, Some(111.5));
-        assert_eq!(app.tracks[0].exposure.target, Some(4.5));
+        assert_eq!(app.tracks[0].exposure.target, Some(3.75));
         assert_eq!(
             app.current_track.as_ref().unwrap().status.strategy_price,
             Some(111.5)
@@ -1594,6 +1595,15 @@ mod tests {
                 .desired_exposure,
             Some(4.5)
         );
+        assert_eq!(
+            app.current_track
+                .as_ref()
+                .unwrap()
+                .execution
+                .execution_target_exposure,
+            Some(3.75)
+        );
+        assert!((app.current_track.as_ref().unwrap().execution.inventory_gap - 1.75).abs() < 1e-9);
         assert!(
             state.requests.lock().await.is_empty(),
             "live patch should not trigger an extra HTTP reload"

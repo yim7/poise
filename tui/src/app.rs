@@ -162,7 +162,7 @@ impl App {
         if let Some(item) = self.tracks.iter_mut().find(|track| track.id == track_id) {
             item.strategy_price = live.strategy_price;
             item.strategy_price_status = live.strategy_price_status;
-            item.exposure.target = live.desired_exposure;
+            item.exposure.target = live.execution_target_exposure.or(live.desired_exposure);
         }
 
         if let Some(detail) = self
@@ -176,6 +176,10 @@ impl App {
             detail.market.best_bid = live.best_bid;
             detail.market.best_ask = live.best_ask;
             detail.position.desired_exposure = live.desired_exposure;
+            detail.execution.execution_target_exposure = live.execution_target_exposure;
+            detail.execution.inventory_gap = live
+                .execution_target_exposure
+                .map_or(0.0, |target| target - detail.position.current_exposure);
             detail.execution.risk_acquisition = live.risk_acquisition;
         }
     }

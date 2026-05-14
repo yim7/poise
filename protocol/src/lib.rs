@@ -172,6 +172,8 @@ pub struct TrackLiveView {
     pub best_ask: Option<f64>,
     pub desired_exposure: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_target_exposure: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk_acquisition: Option<RiskAcquisitionView>,
     pub price_execution_block_reason: Option<PriceExecutionBlockReasonView>,
 }
@@ -211,6 +213,8 @@ pub struct TrackExecutionView {
     pub attention_reasons: Vec<String>,
     #[serde(default)]
     pub inventory_gap: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_target_exposure: Option<f64>,
     #[serde(default)]
     pub active_binding_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -779,6 +783,7 @@ mod tests {
             execution_status: ExecutionStatusView::Normal,
             attention_reasons: Vec::new(),
             inventory_gap: 0.0,
+            execution_target_exposure: None,
             active_binding_count: 0,
             risk_acquisition: Default::default(),
             bindings: Vec::new(),
@@ -799,6 +804,7 @@ mod tests {
             execution_status: ExecutionStatusView::Normal,
             attention_reasons: Vec::new(),
             inventory_gap: 0.0,
+            execution_target_exposure: None,
             active_binding_count: 1,
             risk_acquisition: Default::default(),
             bindings: vec![ExecutionBindingView {
@@ -829,7 +835,8 @@ mod tests {
             state: ExecutionStateView::Open,
             execution_status: ExecutionStatusView::Normal,
             attention_reasons: Vec::new(),
-            inventory_gap: 0.0,
+            inventory_gap: 0.25,
+            execution_target_exposure: Some(2.75),
             active_binding_count: 0,
             risk_acquisition: Some(RiskAcquisitionView {
                 direction: RiskAcquisitionDirectionView::Long,
@@ -858,6 +865,8 @@ mod tests {
             payload["risk_acquisition"]["backlog_units"].as_f64(),
             Some(3.625)
         );
+        assert_eq!(payload["execution_target_exposure"].as_f64(), Some(2.75));
+        assert_eq!(payload["inventory_gap"].as_f64(), Some(0.25));
         assert_eq!(
             payload["risk_acquisition"]["next_advantage_price"].as_f64(),
             Some(92.5)

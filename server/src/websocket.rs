@@ -641,6 +641,7 @@ fn project_live_view(live_view: poise_engine::runtime::TrackLiveView) -> Protoco
         best_bid: live_view.best_bid,
         best_ask: live_view.best_ask,
         desired_exposure: live_view.desired_exposure,
+        execution_target_exposure: live_view.execution_target_exposure,
         risk_acquisition: live_view
             .risk_acquisition
             .map(project_live_risk_acquisition),
@@ -822,6 +823,7 @@ mod tests {
             best_bid: Some(94.9),
             best_ask: Some(95.1),
             desired_exposure: Some(1.2),
+            execution_target_exposure: Some(1.2),
             risk_acquisition: Some(RiskAcquisitionRuntimeView {
                 direction: RiskAcquisitionDirection::Long,
                 curve_target: Exposure(4.0),
@@ -849,6 +851,7 @@ mod tests {
         );
         assert!((risk_acquisition.curve_target - 4.0).abs() < f64::EPSILON);
         assert!((risk_acquisition.backlog_units - 2.8).abs() < f64::EPSILON);
+        assert_eq!(live.execution_target_exposure, Some(1.2));
         assert_eq!(risk_acquisition.next_advantage_price, Some(92.5));
     }
 

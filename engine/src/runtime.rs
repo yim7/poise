@@ -212,6 +212,7 @@ pub enum RiskAcquisitionDirection {
 #[derive(Debug, Clone, PartialEq, Default)]
 struct LiveTargetProjection {
     desired_exposure: Option<Exposure>,
+    execution_target_exposure: Option<Exposure>,
     risk_acquisition: Option<RiskAcquisitionRuntimeView>,
 }
 
@@ -229,6 +230,7 @@ pub struct TrackLiveView {
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
     pub desired_exposure: Option<f64>,
+    pub execution_target_exposure: Option<f64>,
     pub risk_acquisition: Option<RiskAcquisitionRuntimeView>,
     pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
 }
@@ -257,6 +259,7 @@ pub struct TrackRuntimeView {
     pub current_exposure: Exposure,
     pub position_qty: f64,
     pub desired_exposure: Option<Exposure>,
+    pub execution_target_exposure: Option<Exposure>,
     pub risk_acquisition: Option<RiskAcquisitionRuntimeView>,
     pub manual_target_override: Option<Exposure>,
     pub executor: ExecutorView,
@@ -653,6 +656,7 @@ impl TrackRuntime {
             best_bid: self.best_bid,
             best_ask: self.best_ask,
             desired_exposure: live_target.desired_exposure.map(|value| value.0),
+            execution_target_exposure: live_target.execution_target_exposure.map(|value| value.0),
             risk_acquisition: live_target.risk_acquisition,
             price_execution_block_reason: match quote_health.price_execution_gate {
                 PriceExecutionGate::Open => None,
@@ -673,6 +677,7 @@ impl TrackRuntime {
                 .as_ref()
                 .map(|value| Exposure(*value))
                 .or_else(|| self.desired_exposure.clone()),
+            execution_target_exposure: live.execution_target_exposure.map(Exposure),
             risk_acquisition: live.risk_acquisition,
             manual_target_override: self.manual_target_override(),
             executor: self.executor_state.view(),
@@ -725,6 +730,7 @@ impl TrackRuntime {
 
         LiveTargetProjection {
             desired_exposure: Some(target.desired_exposure),
+            execution_target_exposure: Some(target.execution_target_exposure),
             risk_acquisition,
         }
     }
@@ -840,6 +846,7 @@ mod tests {
         runtime.best_ask = Some(95.1);
 
         let live = runtime.live_view();
+        assert!((live.execution_target_exposure.unwrap() - 2.0).abs() < 1e-9);
         let risk_acquisition = live
             .risk_acquisition
             .expect("risk acquisition observability should be present while backlog exists");

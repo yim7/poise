@@ -51,7 +51,7 @@ impl TrackProjector {
             strategy_price_status: project_strategy_price_status(source.strategy_price_status),
             exposure: ExposureSummaryView {
                 current: source.current_exposure,
-                target: source.desired_exposure,
+                target: source.execution_target_exposure.or(source.desired_exposure),
             },
             execution: ExecutionBadgeView {
                 state: project_list_execution_state(source),
@@ -123,6 +123,7 @@ impl TrackProjector {
                 execution_status: project_execution_status(source),
                 attention_reasons: project_attention_reasons(source),
                 inventory_gap: source.inventory_gap,
+                execution_target_exposure: source.execution_target_exposure,
                 active_binding_count: source.active_binding_count,
                 risk_acquisition: source
                     .risk_acquisition
@@ -552,6 +553,18 @@ mod tests {
     }
 
     #[test]
+    fn projects_list_item_exposure_target_from_execution_target() {
+        let mut source = list_source_with_submitting_effect();
+        source.desired_exposure = Some(4.0);
+        source.execution_target_exposure = Some(3.75);
+
+        let item = TrackProjector::new().project_list_item(&source);
+
+        assert_eq!(item.exposure.current, 3.5);
+        assert_eq!(item.exposure.target, Some(3.75));
+    }
+
+    #[test]
     fn projects_list_item_lightweight_pnl_view() {
         let source = list_source_with_submitting_effect();
         let item_json =
@@ -972,6 +985,7 @@ mod tests {
             ExecutionStatusView::Normal
         );
         assert!((detail.execution.inventory_gap - 0.5).abs() < f64::EPSILON);
+        assert_eq!(detail.execution.execution_target_exposure, Some(4.0));
         assert_eq!(detail.execution.active_binding_count, 1);
         assert_eq!(
             detail.execution.active_binding_count,
@@ -1153,6 +1167,7 @@ mod tests {
             current_exposure: 3.5,
             position_qty: 13.125,
             desired_exposure: Some(4.0),
+            execution_target_exposure: Some(4.0),
             risk_acquisition: Default::default(),
             pnl_stats: TrackReadPnlStats {
                 gross_realized_pnl_today: 980.1,

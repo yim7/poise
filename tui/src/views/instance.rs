@@ -149,7 +149,10 @@ fn market_lines(
         return vec![format_exposure_line(
             detail.status.strategy_price,
             detail.position.current_exposure,
-            detail.position.desired_exposure,
+            detail
+                .execution
+                .execution_target_exposure
+                .or(detail.position.desired_exposure),
             detail.execution.risk_acquisition.as_ref(),
         )];
     }
@@ -172,7 +175,10 @@ fn market_lines(
         format_exposure_line(
             detail.status.strategy_price,
             detail.position.current_exposure,
-            detail.position.desired_exposure,
+            detail
+                .execution
+                .execution_target_exposure
+                .or(detail.position.desired_exposure),
             detail.execution.risk_acquisition.as_ref(),
         ),
     ]
@@ -1048,11 +1054,12 @@ mod tests {
             "next_release_units": 0.875,
             "next_release_target": 3.25
         });
+        value["execution"]["execution_target_exposure"] = serde_json::json!(3.75);
         let detail: TrackDetailView = serde_json::from_value(value).unwrap();
 
         let text = render_text_with_size(detail, 180, 36);
 
-        assert!(text.contains("exposure: 3.5000 → 4.0000 [↑ +0.5000] [acq backlog +3.6250]"));
+        assert!(text.contains("exposure: 3.5000 → 3.7500 [↑ +0.2500] [acq backlog +3.6250]"));
         assert!(text.contains("acq: long | curve +6.0000 | release +2.3750 | backlog +3.6250"));
         assert!(text.contains("anchor 100.0000 / +4.0000 | advantage +6.0000 @ 92.5000"));
         assert!(text.contains("release +0.8750 -> +3.2500 | stale 12/30m"));

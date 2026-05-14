@@ -43,6 +43,7 @@ pub struct TrackListReadModel {
     pub current_exposure: f64,
     pub position_qty: f64,
     pub desired_exposure: Option<f64>,
+    pub execution_target_exposure: Option<f64>,
     pub risk_acquisition: Option<TrackRiskAcquisitionReadModel>,
     pub pnl_stats: TrackReadPnlStats,
     pub unrealized_pnl: f64,
@@ -78,6 +79,7 @@ pub struct TrackReadModel {
     pub current_exposure: f64,
     pub position_qty: f64,
     pub desired_exposure: Option<f64>,
+    pub execution_target_exposure: Option<f64>,
     pub risk_acquisition: Option<TrackRiskAcquisitionReadModel>,
     pub pnl_stats: TrackReadPnlStats,
     pub unrealized_pnl: f64,
@@ -274,10 +276,12 @@ impl TrackReadModel {
         let recent_activity = project_recent_activity(recent_track_events, recent_effects);
 
         let bindings = project_bindings(&runtime);
-        let inventory_gap = runtime
-            .desired_exposure
+        let execution_target_exposure = runtime
+            .execution_target_exposure
             .as_ref()
-            .map_or(0.0, |target| target.0 - runtime.current_exposure.0);
+            .map(|target| target.0);
+        let inventory_gap =
+            execution_target_exposure.map_or(0.0, |target| target - runtime.current_exposure.0);
 
         Self {
             track_id: list_view.track_id.clone(),
@@ -303,6 +307,7 @@ impl TrackReadModel {
             current_exposure: list_view.current_exposure,
             position_qty: list_view.position_qty,
             desired_exposure: list_view.desired_exposure,
+            execution_target_exposure,
             risk_acquisition: list_view.risk_acquisition.clone(),
             pnl_stats: list_view.pnl_stats.clone(),
             unrealized_pnl: list_view.unrealized_pnl,
@@ -335,6 +340,10 @@ impl TrackListReadModel {
             current_exposure: runtime.current_exposure.0,
             position_qty: runtime.position_qty,
             desired_exposure: runtime.desired_exposure.clone().map(|value| value.0),
+            execution_target_exposure: runtime
+                .execution_target_exposure
+                .clone()
+                .map(|value| value.0),
             risk_acquisition: runtime
                 .risk_acquisition
                 .clone()
@@ -368,6 +377,7 @@ impl From<&TrackReadModel> for TrackListReadModel {
             current_exposure: value.current_exposure,
             position_qty: value.position_qty,
             desired_exposure: value.desired_exposure,
+            execution_target_exposure: value.execution_target_exposure,
             risk_acquisition: value.risk_acquisition.clone(),
             pnl_stats: value.pnl_stats.clone(),
             unrealized_pnl: value.unrealized_pnl,
@@ -629,6 +639,7 @@ mod tests {
                 current_exposure: Exposure(3.5),
                 position_qty: 0.42,
                 desired_exposure: Some(Exposure(4.0)),
+                execution_target_exposure: Some(Exposure(4.0)),
                 risk_acquisition: Default::default(),
                 manual_target_override: None,
                 executor: ExecutorView::default(),
@@ -710,6 +721,7 @@ mod tests {
                 current_exposure: Exposure(1.0),
                 position_qty: 1.0,
                 desired_exposure: Some(Exposure(2.0)),
+                execution_target_exposure: Some(Exposure(2.0)),
                 risk_acquisition: Default::default(),
                 manual_target_override: None,
                 executor: ExecutorView::default(),
@@ -755,6 +767,7 @@ mod tests {
                 current_exposure: Exposure(1.0),
                 position_qty: 1.0,
                 desired_exposure: Some(Exposure(2.0)),
+                execution_target_exposure: Some(Exposure(2.0)),
                 risk_acquisition: Default::default(),
                 manual_target_override: None,
                 executor: ExecutorView::default(),
@@ -798,9 +811,10 @@ mod tests {
             definition: test_track_definition(),
             runtime: TrackRuntimeView {
                 status: TrackStatus::Active,
-                current_exposure: Exposure(1.2),
-                position_qty: 1.2,
-                desired_exposure: Some(Exposure(1.2)),
+                current_exposure: Exposure(1.0),
+                position_qty: 1.0,
+                desired_exposure: Some(Exposure(4.0)),
+                execution_target_exposure: Some(Exposure(1.2)),
                 risk_acquisition: Some(RiskAcquisitionRuntimeView {
                     direction: RiskAcquisitionDirection::Long,
                     curve_target: Exposure(4.0),
@@ -838,6 +852,9 @@ mod tests {
             .risk_acquisition
             .expect("risk acquisition should be projected");
 
+        assert_eq!(read_model.desired_exposure, Some(4.0));
+        assert_eq!(read_model.execution_target_exposure, Some(1.2));
+        assert!((read_model.inventory_gap - 0.2).abs() < 1e-9);
         assert_eq!(
             risk_acquisition.direction,
             TrackRiskAcquisitionDirection::Long
@@ -855,6 +872,7 @@ mod tests {
             current_exposure: Exposure(1.0),
             position_qty: 1.0,
             desired_exposure: Some(Exposure(0.0)),
+            execution_target_exposure: Some(Exposure(0.0)),
             risk_acquisition: Default::default(),
             manual_target_override: None,
             executor: ExecutorView {
