@@ -223,7 +223,7 @@ pub struct TrackExecutionView {
 pub struct RiskAcquisitionView {
     pub direction: RiskAcquisitionDirectionView,
     pub curve_target: f64,
-    pub allowed_target: f64,
+    pub risk_release_frontier: f64,
     pub backlog_units: f64,
     pub anchor_price: f64,
     pub anchor_curve_target: f64,
@@ -834,7 +834,7 @@ mod tests {
             risk_acquisition: Some(RiskAcquisitionView {
                 direction: RiskAcquisitionDirectionView::Long,
                 curve_target: 6.0,
-                allowed_target: 2.375,
+                risk_release_frontier: 2.375,
                 backlog_units: 3.625,
                 anchor_price: 100.0,
                 anchor_curve_target: 4.0,

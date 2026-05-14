@@ -39,7 +39,6 @@ mod tests {
     use crate::executor::policy::PolicyKind;
     use crate::ports::{ExecutionQuote, OrderRequest};
     use crate::price_gate::{PriceExecutionGate, SubmitPurpose};
-    use crate::risk_exposure_gate::{RiskAcquisitionRelease, RiskIncreaseDirection};
     use crate::runtime::ExecutorState;
     use poise_core::track::{Instrument, Venue};
 
@@ -78,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn risk_acquisition_maker_uses_advantage_price_and_release_budget() {
+    fn normal_policy_does_not_plan_increase_maker() {
         let config = config();
         let mut rules = rules();
         rules.quantity_step = 0.001;
@@ -93,6 +92,7 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.5),
                 desired_exposure: Exposure(1.5),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -101,31 +101,19 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: observed_at(),
-                risk_acquisition_gate_active: true,
-                risk_acquisition: Some(RiskAcquisitionRelease {
-                    direction: RiskIncreaseDirection::Long,
-                    release_target: Exposure(2.375),
-                    release_units: 0.875,
-                    advantage_target: Exposure(6.0),
-                }),
             },
             Some(&state),
         ));
 
-        let maker = plan
-            .state
-            .bindings
-            .iter()
-            .find(|binding| binding.proposal_key.policy == PolicyKind::CurveMaker)
-            .expect("risk acquisition maker should be planned");
-
-        assert_eq!(maker.request.side, Side::Buy);
-        assert!((maker.request.price - 92.5).abs() < 1e-9);
-        assert!((maker.quantity_as_exposure_for_test(&config) - 0.875).abs() < 1e-9);
+        assert!(!plan.state.bindings.iter().any(|binding| {
+            binding.proposal_key.policy == PolicyKind::CurveMaker
+                && binding.request.side == Side::Buy
+                && !binding.request.reduce_only
+        }));
     }
 
     #[test]
-    fn risk_acquisition_maker_keeps_reduce_risk_curve_maker() {
+    fn normal_policy_keeps_reduce_risk_curve_maker_without_increase_maker() {
         let config = config();
         let mut rules = rules();
         rules.quantity_step = 0.001;
@@ -140,6 +128,7 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
                 desired_exposure: Exposure(1.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -148,28 +137,15 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: observed_at(),
-                risk_acquisition_gate_active: true,
-                risk_acquisition: Some(RiskAcquisitionRelease {
-                    direction: RiskIncreaseDirection::Long,
-                    release_target: Exposure(1.875),
-                    release_units: 0.875,
-                    advantage_target: Exposure(6.0),
-                }),
             },
             Some(&state),
         ));
 
-        let risk_increase_maker = plan
-            .state
-            .bindings
-            .iter()
-            .find(|binding| {
-                binding.proposal_key.policy == PolicyKind::CurveMaker
-                    && binding.request.side == Side::Buy
-                    && !binding.request.reduce_only
-            })
-            .expect("risk acquisition maker should be planned");
-        assert_eq!(risk_increase_maker.request.price, 92.5);
+        assert!(!plan.state.bindings.iter().any(|binding| {
+            binding.proposal_key.policy == PolicyKind::CurveMaker
+                && binding.request.side == Side::Buy
+                && !binding.request.reduce_only
+        }));
 
         let reduce_risk_maker = plan
             .state
@@ -180,12 +156,12 @@ mod tests {
                     && binding.request.side == Side::Sell
                     && binding.request.reduce_only
             })
-            .expect("reduce-risk maker should remain planned while increasing risk is gated");
+            .expect("reduce-risk maker should remain planned");
         assert_eq!(reduce_risk_maker.request.price, 100.0);
     }
 
     #[test]
-    fn risk_acquisition_gate_without_release_suppresses_increase_maker() {
+    fn normal_policy_suppresses_increase_maker_without_release_context() {
         let config = config();
         let mut rules = rules();
         rules.quantity_step = 0.001;
@@ -200,6 +176,7 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
                 desired_exposure: Exposure(1.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -208,8 +185,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: observed_at(),
-                risk_acquisition_gate_active: true,
-                risk_acquisition: Default::default(),
             },
             Some(&state),
         ));
@@ -263,6 +238,7 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,
                 desired_exposure,
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -271,8 +247,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: observed_at(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             state,
         )
@@ -358,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn curve_maker_policy_emits_future_operations_near_spot() {
+    fn curve_maker_policy_does_not_emit_increase_makers_at_flat_inventory() {
         let config = config();
         let rules = rules();
         let instrument = instrument();
@@ -378,27 +352,7 @@ mod tests {
             .iter()
             .filter(|binding| binding.proposal_key.policy == PolicyKind::CurveMaker)
             .collect::<Vec<_>>();
-        assert_eq!(maker_bindings.len(), 6);
-        assert_eq!(
-            maker_bindings
-                .iter()
-                .filter(|binding| binding.request.side == Side::Buy)
-                .count(),
-            3
-        );
-        assert_eq!(
-            maker_bindings
-                .iter()
-                .filter(|binding| binding.request.side == Side::Sell)
-                .count(),
-            3
-        );
-        assert!(maker_bindings.iter().all(|binding| matches!(
-            binding.policy_state,
-            BindingPolicyState::CurveMaker {
-                due_grace_started_at: None
-            }
-        )));
+        assert!(maker_bindings.is_empty());
     }
 
     #[test]
@@ -451,8 +405,8 @@ mod tests {
             &config,
             &rules,
             &instrument,
-            Exposure(0.0),
-            Exposure(0.0),
+            Exposure(1.0),
+            Exposure(1.0),
             None,
         ));
 
@@ -461,7 +415,7 @@ mod tests {
             .bindings
             .iter()
             .find(|binding| binding.proposal_key.policy == PolicyKind::CurveMaker)
-            .expect("maker binding should exist");
+            .expect("reduce maker binding should exist");
         let json = serde_json::to_value(binding).unwrap();
         assert!(json.get("due_grace_started_at").is_none());
         assert_eq!(

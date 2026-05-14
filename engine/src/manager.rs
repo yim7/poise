@@ -993,6 +993,7 @@ impl TrackManager {
             execution_gate_decision,
             risk_acquisition,
             executor_state,
+            ..
         } = self.plan_inventory_execution_for_track(track, strategy_price)?;
         let _ = risk_acquisition;
         let effects = planned_effects;
@@ -1052,8 +1053,7 @@ impl TrackManager {
         &self,
         track: &'a TrackRuntime,
         desired_exposure: poise_core::types::Exposure,
-        risk_acquisition_gate_active: bool,
-        risk_acquisition: Option<RiskAcquisitionRelease>,
+        risk_release_frontier: Option<poise_core::types::Exposure>,
         observed_at: chrono::DateTime<chrono::Utc>,
     ) -> executor::SubmitIntentInput<'a> {
         let submit_purpose = self.submit_purpose_for_track(track, &desired_exposure);
@@ -1065,13 +1065,12 @@ impl TrackManager {
             min_rebalance_units: track.config().min_rebalance_units,
             current_exposure: track.current_exposure.clone(),
             desired_exposure,
+            risk_release_frontier,
             execution_quote: Self::execution_quote_for_track(track),
             policy_context: Self::policy_context_for_track(track),
             price_execution_gate: track.price_execution_gate,
             submit_purpose,
             observed_at,
-            risk_acquisition_gate_active,
-            risk_acquisition,
         }
     }
 
@@ -1144,8 +1143,7 @@ impl TrackManager {
         let submit_intent = self.submit_intent_input(
             track,
             target.desired_exposure.clone(),
-            risk_acquisition_gate_active,
-            target.risk_acquisition.clone(),
+            target.risk_release_frontier.clone(),
             observed_at,
         );
         let plan = executor::plan(executor::ExecutorInput::new(submit_intent, executor_state));
@@ -1343,7 +1341,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_track_plans_risk_acquisition_maker_when_allowed_target_is_current_exposure() {
+    fn reconcile_track_does_not_plan_risk_acquisition_maker_from_next_release() {
         let (mut manager, id) = manager();
         {
             let track = manager.tracks.get_mut(&id).unwrap();
@@ -1360,7 +1358,7 @@ mod tests {
             track.track_state =
                 TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
                     gate: RiskExposureGateState {
-                        allowed_target: Exposure(1.5),
+                        risk_release_frontier: Exposure(1.5),
                         anchor_price: 93.75,
                         anchor_curve_target: Exposure(5.0),
                         anchor_started_at: chrono::Utc::now(),
@@ -1370,7 +1368,7 @@ mod tests {
 
         let transition = manager.observe(&id, market(93.75)).unwrap();
 
-        assert!(transition.effects.iter().any(|effect| matches!(
+        assert!(!transition.effects.iter().any(|effect| matches!(
             effect,
             TrackEffect::SubmitOrder { request, .. }
                 if request.side == Side::Buy && (request.price - 92.5).abs() < 1e-9

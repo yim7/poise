@@ -18,7 +18,6 @@ use crate::executor::boundary::{
 use crate::executor::ledger::BoundaryLedgerView;
 use crate::ports::{ExecutionQuote, OrderRequest};
 use crate::price_gate::SubmitPurpose;
-use crate::risk_exposure_gate::{RiskAcquisitionRelease, RiskIncreaseDirection};
 use poise_core::track::Instrument;
 
 static CLIENT_ORDER_SESSION_PREFIX: OnceLock<String> = OnceLock::new();
@@ -41,7 +40,8 @@ pub enum PolicyContext {
 }
 
 pub(super) struct PolicyPlanningInput<'a> {
-    pub view: &'a BoundaryLedgerView,
+    pub execution_view: &'a BoundaryLedgerView,
+    pub desired_view: &'a BoundaryLedgerView,
     pub boundaries: &'a [BoundaryBlueprint],
     pub instrument: &'a Instrument,
     pub config: &'a TrackConfig,
@@ -49,11 +49,10 @@ pub(super) struct PolicyPlanningInput<'a> {
     pub base_qty_per_unit: f64,
     pub min_rebalance_units: f64,
     pub current_exposure: &'a Exposure,
+    pub execution_target_exposure: &'a Exposure,
     pub desired_exposure: &'a Exposure,
     pub execution_quote: Option<ExecutionQuote>,
     pub submit_purpose: SubmitPurpose,
-    pub risk_acquisition_gate_active: bool,
-    pub risk_acquisition: Option<&'a RiskAcquisitionRelease>,
     pub exposure_epsilon: f64,
     pub curve_maker_levels_per_side: usize,
 }
@@ -92,9 +91,13 @@ pub(super) fn plan_policy_bindings(
 fn plan_normal_policy_bindings(input: &PolicyPlanningInput<'_>) -> Vec<DesiredBinding> {
     let mut covered_operations = BTreeSet::new();
     let mut desired_bindings = Vec::new();
-    let gap_direction = direction_for_gap(&input.current_exposure.delta(input.desired_exposure));
+    let gap_direction = direction_for_gap(
+        &input
+            .current_exposure
+            .delta(input.execution_target_exposure),
+    );
     let catch_up_operations = select_catch_up_operations(
-        input.view,
+        input.execution_view,
         &covered_operations,
         input.exposure_epsilon,
         gap_direction,
@@ -108,47 +111,23 @@ fn plan_normal_policy_bindings(input: &PolicyPlanningInput<'_>) -> Vec<DesiredBi
         desired_bindings.push(binding);
     }
     covered_operations.extend(catch_up_operations.iter().cloned());
-    let risk_acquisition_gate_active =
-        input.risk_acquisition_gate_active || input.risk_acquisition.is_some();
-    if risk_acquisition_gate_active {
-        if let Some(release) = input.risk_acquisition {
-            if let Some(binding) =
-                plan_risk_acquisition_maker_binding(input, release, &covered_operations)
-            {
-                covered_operations.extend(
-                    binding
-                        .allocations
-                        .iter()
-                        .map(|allocation| allocation.operation.clone()),
-                );
-                desired_bindings.push(binding);
-            }
-        }
-        desired_bindings.extend(
-            select_reduce_risk_curve_maker_operations(input, &covered_operations)
-                .into_iter()
-                .filter_map(|operation| plan_curve_maker_binding(input, operation)),
-        );
-    } else {
-        desired_bindings.extend(
-            select_curve_maker_operations(
-                input.view,
-                &covered_operations,
-                input.exposure_epsilon,
-                input.curve_maker_levels_per_side,
-            )
+    desired_bindings.extend(
+        select_reduce_risk_curve_maker_operations(input, &covered_operations)
             .into_iter()
             .filter_map(|operation| plan_curve_maker_binding(input, operation)),
-        );
-    }
+    );
 
     desired_bindings
 }
 
 fn plan_manual_override_binding(input: &PolicyPlanningInput<'_>) -> Option<DesiredBinding> {
-    let direction = direction_for_gap(&input.current_exposure.delta(input.desired_exposure))?;
+    let direction = direction_for_gap(
+        &input
+            .current_exposure
+            .delta(input.execution_target_exposure),
+    )?;
     let selected = select_target_operations(
-        input.view,
+        input.execution_view,
         &BTreeSet::new(),
         direction,
         input.exposure_epsilon,
@@ -163,12 +142,16 @@ fn plan_manual_override_binding(input: &PolicyPlanningInput<'_>) -> Option<Desir
 }
 
 fn plan_reduce_only_binding(input: &PolicyPlanningInput<'_>) -> Option<DesiredBinding> {
-    if !target_change_decreases_inventory(input.current_exposure, input.desired_exposure) {
+    if !target_change_decreases_inventory(input.current_exposure, input.execution_target_exposure) {
         return None;
     }
-    let direction = direction_for_gap(&input.current_exposure.delta(input.desired_exposure))?;
+    let direction = direction_for_gap(
+        &input
+            .current_exposure
+            .delta(input.execution_target_exposure),
+    )?;
     let selected = select_target_operations(
-        input.view,
+        input.execution_view,
         &BTreeSet::new(),
         direction,
         input.exposure_epsilon,
@@ -247,20 +230,24 @@ pub(super) fn plan_target_binding(
     selected: Vec<BoundaryOperation>,
     policy_state: BindingPolicyState,
 ) -> Option<DesiredBinding> {
-    let inventory_gap = input.current_exposure.delta(input.desired_exposure);
+    let inventory_gap = input
+        .current_exposure
+        .delta(input.execution_target_exposure);
     if inventory_gap.0.abs() < input.min_rebalance_units {
         return None;
     }
 
     let direction = direction_for_gap(&inventory_gap)?;
     let price = execution_price(direction, input.execution_quote)?;
+    let decreases_inventory =
+        target_change_decreases_inventory(input.current_exposure, input.execution_target_exposure);
     let max_exposure_qty = match policy {
         PolicyKind::CatchUp => inventory_gap.0.abs().min(input.min_rebalance_units),
         PolicyKind::ManualOverride | PolicyKind::ReduceOnly | PolicyKind::CurveMaker => {
             inventory_gap.0.abs()
         }
     };
-    let allocations = allocate_operations(input.view, selected, max_exposure_qty);
+    let allocations = allocate_operations(input.execution_view, selected, max_exposure_qty);
     if allocations.is_empty() {
         return None;
     }
@@ -283,17 +270,14 @@ pub(super) fn plan_target_binding(
         price,
         quantity,
         client_order_id: next_client_order_id(policy),
-        reduce_only: target_change_decreases_inventory(
-            input.current_exposure,
-            input.desired_exposure,
-        ),
+        reduce_only: decreases_inventory,
     };
     let proposal = proposal_for_allocations(policy, &allocations);
     Some(DesiredBinding {
         proposal,
         allocations,
         request,
-        desired_exposure: input.desired_exposure.clone(),
+        desired_exposure: input.execution_target_exposure.clone(),
         submit_purpose: input.submit_purpose,
         policy_state,
     })
@@ -329,7 +313,7 @@ fn select_reduce_risk_curve_maker_operations(
     covered_operations: &BTreeSet<BoundaryOperation>,
 ) -> Vec<BoundaryOperation> {
     let mut up = input
-        .view
+        .desired_view
         .operations
         .iter()
         .filter(|operation| !operation.due)
@@ -341,7 +325,7 @@ fn select_reduce_risk_curve_maker_operations(
         .take(input.curve_maker_levels_per_side)
         .collect::<Vec<_>>();
     let mut down = input
-        .view
+        .desired_view
         .operations
         .iter()
         .rev()
@@ -352,42 +336,6 @@ fn select_reduce_risk_curve_maker_operations(
         .filter(|operation| operation_reduces_current_inventory(input, &operation.operation))
         .map(|operation| operation.operation.clone())
         .take(input.curve_maker_levels_per_side)
-        .collect::<Vec<_>>();
-
-    up.append(&mut down);
-    up
-}
-
-fn select_curve_maker_operations(
-    view: &BoundaryLedgerView,
-    covered_operations: &BTreeSet<BoundaryOperation>,
-    exposure_epsilon: f64,
-    levels_per_side: usize,
-) -> Vec<BoundaryOperation> {
-    let mut up = view
-        .operations
-        .iter()
-        .filter(|operation| !operation.due)
-        .filter(|operation| operation.remaining > exposure_epsilon)
-        .filter(|operation| {
-            operation.operation.direction == crate::executor::boundary::BoundaryDirection::Up
-        })
-        .filter(|operation| !covered_operations.contains(&operation.operation))
-        .map(|operation| operation.operation.clone())
-        .take(levels_per_side)
-        .collect::<Vec<_>>();
-    let mut down = view
-        .operations
-        .iter()
-        .rev()
-        .filter(|operation| !operation.due)
-        .filter(|operation| operation.remaining > exposure_epsilon)
-        .filter(|operation| {
-            operation.operation.direction == crate::executor::boundary::BoundaryDirection::Down
-        })
-        .filter(|operation| !covered_operations.contains(&operation.operation))
-        .map(|operation| operation.operation.clone())
-        .take(levels_per_side)
         .collect::<Vec<_>>();
 
     up.append(&mut down);
@@ -610,7 +558,7 @@ fn plan_curve_maker_binding(
     let boundary = boundary_for_operation(input.boundaries, &operation)?;
     let price = maker_price_for_operation(boundary, &operation, input)?;
     let operation_view = input
-        .view
+        .desired_view
         .operations
         .iter()
         .find(|candidate| candidate.operation == operation)?;
@@ -645,77 +593,6 @@ fn plan_curve_maker_binding(
             due_grace_started_at: None,
         },
     })
-}
-
-fn plan_risk_acquisition_maker_binding(
-    input: &PolicyPlanningInput<'_>,
-    release: &RiskAcquisitionRelease,
-    covered_operations: &BTreeSet<BoundaryOperation>,
-) -> Option<DesiredBinding> {
-    let direction = boundary_direction_for_risk_increase_direction(release.direction);
-    let selected = select_target_operations(
-        input.view,
-        covered_operations,
-        direction,
-        input.exposure_epsilon,
-        false,
-    );
-    let allocations = allocate_operations(input.view, selected, release.release_units);
-    if allocations.is_empty() {
-        return None;
-    }
-    let price = risk_acquisition_price(input, release)?;
-    let exposure_qty = allocations
-        .iter()
-        .map(|allocation| allocation.exposure_qty)
-        .sum::<f64>();
-    let quantity = round_to_step(
-        exposure_qty * input.base_qty_per_unit,
-        input.exchange_rules.quantity_step,
-    );
-    if quantity <= f64::EPSILON || !is_meetable_minimum(price, quantity, input.exchange_rules) {
-        return None;
-    }
-
-    let request = OrderRequest {
-        instrument: input.instrument.clone(),
-        side: side_for_direction(direction),
-        price,
-        quantity,
-        client_order_id: next_client_order_id(PolicyKind::CurveMaker),
-        reduce_only: false,
-    };
-    let proposal = proposal_for_allocations(PolicyKind::CurveMaker, &allocations);
-    Some(DesiredBinding {
-        proposal,
-        allocations,
-        request,
-        desired_exposure: release.release_target.clone(),
-        submit_purpose: input.submit_purpose,
-        policy_state: BindingPolicyState::CurveMaker {
-            due_grace_started_at: None,
-        },
-    })
-}
-
-fn risk_acquisition_price(
-    input: &PolicyPlanningInput<'_>,
-    release: &RiskAcquisitionRelease,
-) -> Option<f64> {
-    let direction = boundary_direction_for_risk_increase_direction(release.direction);
-    let raw_price = trigger_price_for_boundary(release.advantage_target.0, input.config);
-    raw_price
-        .is_finite()
-        .then(|| round_passive_price(raw_price, input.exchange_rules, direction))
-}
-
-fn boundary_direction_for_risk_increase_direction(
-    direction: RiskIncreaseDirection,
-) -> BoundaryDirection {
-    match direction {
-        RiskIncreaseDirection::Long => BoundaryDirection::Up,
-        RiskIncreaseDirection::Short => BoundaryDirection::Down,
-    }
 }
 
 fn allocate_operations(
@@ -1017,48 +894,6 @@ mod tests {
     }
 
     #[test]
-    fn curve_maker_policy_selects_nearest_future_operations_per_side() {
-        let future_up_near = operation(0, 10_000, BoundaryDirection::Up);
-        let future_up_far = operation(10_000, 20_000, BoundaryDirection::Up);
-        let future_down_far = operation(-20_000, -10_000, BoundaryDirection::Down);
-        let future_down_near = operation(-10_000, 0, BoundaryDirection::Down);
-        let due = operation(20_000, 30_000, BoundaryDirection::Up);
-        let view = BoundaryLedgerView {
-            operations: vec![
-                BoundaryOperationView {
-                    operation: future_down_far,
-                    remaining: 1.0,
-                    due: false,
-                },
-                BoundaryOperationView {
-                    operation: future_down_near.clone(),
-                    remaining: 1.0,
-                    due: false,
-                },
-                BoundaryOperationView {
-                    operation: future_up_near.clone(),
-                    remaining: 1.0,
-                    due: false,
-                },
-                BoundaryOperationView {
-                    operation: future_up_far,
-                    remaining: 1.0,
-                    due: false,
-                },
-                BoundaryOperationView {
-                    operation: due,
-                    remaining: 1.0,
-                    due: true,
-                },
-            ],
-        };
-
-        let selected = select_curve_maker_operations(&view, &BTreeSet::new(), 1e-9, 1);
-
-        assert_eq!(selected, vec![future_up_near, future_down_near]);
-    }
-
-    #[test]
     fn reduce_risk_curve_maker_requires_candidate_target_to_lower_current_risk() {
         let config = config();
         let rules = rules();
@@ -1089,7 +924,8 @@ mod tests {
         let current = Exposure(0.5);
         let desired = Exposure(0.5);
         let input = PolicyPlanningInput {
-            view: &view,
+            execution_view: &view,
+            desired_view: &view,
             boundaries: &boundaries,
             instrument: &instrument,
             config: &config,
@@ -1097,14 +933,13 @@ mod tests {
             base_qty_per_unit: 1.0,
             min_rebalance_units: 1.0,
             current_exposure: &current,
+            execution_target_exposure: &desired,
             desired_exposure: &desired,
             execution_quote: Some(ExecutionQuote {
                 best_bid: 99.9,
                 best_ask: 100.1,
             }),
             submit_purpose: SubmitPurpose::AutoReconcile,
-            risk_acquisition_gate_active: true,
-            risk_acquisition: Default::default(),
             exposure_epsilon: 1e-9,
             curve_maker_levels_per_side: 2,
         };
@@ -1115,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn boundary_policy_plans_catch_up_before_curve_maker_bindings() {
+    fn boundary_policy_plans_catch_up_without_increase_maker() {
         let config = config();
         let rules = rules();
         let boundaries = discretize_boundaries(&config, ProfileRevision("rev-1".to_string()));
@@ -1123,39 +958,20 @@ mod tests {
             boundary_id: boundaries[2].id.clone(),
             direction: BoundaryDirection::Up,
         };
-        let future_up = BoundaryOperation {
-            boundary_id: boundaries[3].id.clone(),
-            direction: BoundaryDirection::Up,
-        };
-        let future_down = BoundaryOperation {
-            boundary_id: boundaries[1].id.clone(),
-            direction: BoundaryDirection::Down,
-        };
         let view = BoundaryLedgerView {
-            operations: vec![
-                BoundaryOperationView {
-                    operation: due_up.clone(),
-                    remaining: 1.0,
-                    due: true,
-                },
-                BoundaryOperationView {
-                    operation: future_up.clone(),
-                    remaining: 1.0,
-                    due: false,
-                },
-                BoundaryOperationView {
-                    operation: future_down.clone(),
-                    remaining: 1.0,
-                    due: false,
-                },
-            ],
+            operations: vec![BoundaryOperationView {
+                operation: due_up.clone(),
+                remaining: 1.0,
+                due: true,
+            }],
         };
         let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
 
         let desired = plan_policy_bindings(
             PolicyContext::Normal,
             &PolicyPlanningInput {
-                view: &view,
+                execution_view: &view,
+                desired_view: &view,
                 boundaries: &boundaries,
                 instrument: &instrument,
                 config: &config,
@@ -1163,14 +979,13 @@ mod tests {
                 base_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: &Exposure(0.0),
+                execution_target_exposure: &Exposure(1.0),
                 desired_exposure: &Exposure(1.0),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
                 }),
                 submit_purpose: SubmitPurpose::AutoReconcile,
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
                 exposure_epsilon: 1e-9,
                 curve_maker_levels_per_side: 1,
             },
@@ -1181,18 +996,10 @@ mod tests {
                 .iter()
                 .map(|binding| binding.proposal.policy)
                 .collect::<Vec<_>>(),
-            vec![
-                PolicyKind::CatchUp,
-                PolicyKind::CurveMaker,
-                PolicyKind::CurveMaker
-            ]
+            vec![PolicyKind::CatchUp]
         );
         assert_eq!(desired[0].allocations[0].operation, due_up);
-        assert_eq!(desired[1].allocations[0].operation, future_up);
-        assert_eq!(desired[2].allocations[0].operation, future_down);
         assert_eq!(desired[0].allocations.len(), 1);
-        assert_eq!(desired[1].allocations.len(), 1);
-        assert_eq!(desired[2].allocations.len(), 1);
     }
 
     #[test]

@@ -375,6 +375,7 @@ mod tests {
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(1.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -383,8 +384,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             None,
         ));
@@ -438,6 +437,7 @@ mod tests {
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(1.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -446,8 +446,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             None,
         ));
@@ -508,6 +506,7 @@ mod tests {
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(1.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -516,8 +515,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             None,
         ));
@@ -541,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_fill_then_cancel_plans_only_remaining_boundary_qty() {
+    fn partial_fill_then_cancel_waits_when_remaining_gap_is_below_min_rebalance() {
         let config = TrackConfig {
             lower_price: 90.0,
             upper_price: 110.0,
@@ -572,6 +569,7 @@ mod tests {
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(1.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -580,8 +578,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             None,
         ));
@@ -604,8 +600,9 @@ mod tests {
                 exchange_rules: &rules,
                 base_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
-                current_exposure: Exposure(0.0),
+                current_exposure: Exposure(0.4),
                 desired_exposure: Exposure(1.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -614,21 +611,15 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             Some(&applied.state),
         ));
 
-        let replacement = next
-            .effects
-            .iter()
-            .find_map(|effect| match effect {
-                TrackEffect::SubmitOrder { request, .. } => Some(request),
-                _ => None,
-            })
-            .expect("remaining boundary qty should be submitted");
-        assert!((replacement.quantity - 0.6).abs() < 1e-9);
+        assert!(!next.effects.iter().any(|effect| matches!(
+            effect,
+            TrackEffect::SubmitOrder { request, .. }
+                if request.client_order_id.starts_with("bc")
+        )));
     }
 
     #[test]
@@ -663,6 +654,7 @@ mod tests {
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(1.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -671,8 +663,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             None,
         ));
@@ -725,6 +715,7 @@ mod tests {
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(1.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -733,8 +724,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             None,
         ));

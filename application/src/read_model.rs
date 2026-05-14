@@ -108,7 +108,7 @@ pub struct ReadModelBinding {
 pub struct TrackRiskAcquisitionReadModel {
     pub direction: TrackRiskAcquisitionDirection,
     pub curve_target: f64,
-    pub allowed_target: f64,
+    pub risk_release_frontier: f64,
     pub backlog_units: f64,
     pub anchor_price: f64,
     pub anchor_curve_target: f64,
@@ -385,7 +385,7 @@ impl From<RiskAcquisitionRuntimeView> for TrackRiskAcquisitionReadModel {
         Self {
             direction: TrackRiskAcquisitionDirection::from(value.direction),
             curve_target: value.curve_target.0,
-            allowed_target: value.allowed_target.0,
+            risk_release_frontier: value.risk_release_frontier.0,
             backlog_units: value.backlog_units,
             anchor_price: value.anchor_price,
             anchor_curve_target: value.anchor_curve_target.0,
@@ -804,7 +804,7 @@ mod tests {
                 risk_acquisition: Some(RiskAcquisitionRuntimeView {
                     direction: RiskAcquisitionDirection::Long,
                     curve_target: Exposure(4.0),
-                    allowed_target: Exposure(1.2),
+                    risk_release_frontier: Exposure(1.2),
                     backlog_units: 2.8,
                     anchor_price: 95.0,
                     anchor_curve_target: Exposure(4.0),
@@ -843,7 +843,7 @@ mod tests {
             TrackRiskAcquisitionDirection::Long
         );
         assert!((risk_acquisition.curve_target - 4.0).abs() < 1e-9);
-        assert!((risk_acquisition.allowed_target - 1.2).abs() < 1e-9);
+        assert!((risk_acquisition.risk_release_frontier - 1.2).abs() < 1e-9);
         assert!((risk_acquisition.backlog_units - 2.8).abs() < 1e-9);
         assert_eq!(risk_acquisition.next_advantage_price, Some(92.5));
     }

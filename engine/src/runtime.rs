@@ -191,7 +191,7 @@ pub struct StrategyTargetView {
 pub struct RiskAcquisitionRuntimeView {
     pub direction: RiskAcquisitionDirection,
     pub curve_target: Exposure,
-    pub allowed_target: Exposure,
+    pub risk_release_frontier: Exposure,
     pub backlog_units: f64,
     pub anchor_price: f64,
     pub anchor_curve_target: Exposure,
@@ -716,7 +716,7 @@ impl TrackRuntime {
                 .or_else(|| gate_state_from_track_state(Some(&self.track_state)))?;
             Some(self.risk_acquisition_view(
                 &target.curve_target,
-                &target.desired_exposure,
+                &gate.risk_release_frontier,
                 gate,
                 release,
                 observed_at,
@@ -732,7 +732,7 @@ impl TrackRuntime {
     fn risk_acquisition_view(
         &self,
         curve_target: &Exposure,
-        allowed_target: &Exposure,
+        risk_release_frontier: &Exposure,
         gate: &RiskExposureGateState,
         release: &RiskAcquisitionRelease,
         observed_at: DateTime<Utc>,
@@ -747,8 +747,8 @@ impl TrackRuntime {
         RiskAcquisitionRuntimeView {
             direction: RiskAcquisitionDirection::from(release.direction),
             curve_target: curve_target.clone(),
-            allowed_target: allowed_target.clone(),
-            backlog_units: curve_target.delta(allowed_target).0.abs(),
+            risk_release_frontier: risk_release_frontier.clone(),
+            backlog_units: curve_target.delta(risk_release_frontier).0.abs(),
             anchor_price: gate.anchor_price,
             anchor_curve_target: gate.anchor_curve_target.clone(),
             stale_release_elapsed_minutes,
@@ -846,14 +846,14 @@ mod tests {
 
         assert_eq!(risk_acquisition.direction, RiskAcquisitionDirection::Long);
         assert!((risk_acquisition.curve_target.0 - 4.0).abs() < 1e-9);
-        assert!((risk_acquisition.allowed_target.0 - 1.2).abs() < 1e-9);
-        assert!((risk_acquisition.backlog_units - 2.8).abs() < 1e-9);
+        assert!((risk_acquisition.risk_release_frontier.0 - 2.0).abs() < 1e-9);
+        assert!((risk_acquisition.backlog_units - 2.0).abs() < 1e-9);
         assert!((risk_acquisition.anchor_price - 95.0).abs() < 1e-9);
         assert!((risk_acquisition.anchor_curve_target.0 - 4.0).abs() < 1e-9);
         assert!((risk_acquisition.next_advantage_target.0 - 6.0).abs() < 1e-9);
         assert_eq!(risk_acquisition.next_advantage_price, Some(92.5));
         assert!((risk_acquisition.next_release_units - 1.0).abs() < 1e-9);
-        assert!((risk_acquisition.next_release_target.0 - 2.2).abs() < 1e-9);
+        assert!((risk_acquisition.next_release_target.0 - 3.0).abs() < 1e-9);
     }
 
     #[test]

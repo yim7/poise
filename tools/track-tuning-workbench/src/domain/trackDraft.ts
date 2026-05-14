@@ -193,12 +193,12 @@ const RISK_ACQUISITION_FIELD_KEY_BY_DRAFT_FIELD: Record<
 };
 
 export const DEFAULT_RISK_ACQUISITION_DRAFT: RiskAcquisitionDraft = Object.freeze({
-  initialRatio: '0.3',
+  initialRatio: '0.5',
   advantageSteps: '2',
   minReleaseSteps: '1',
   maxReleaseSteps: '4',
   catchupRatio: '0.25',
-  staleReleaseMinutes: '30',
+  staleReleaseMinutes: '60',
 });
 
 export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {

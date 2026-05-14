@@ -137,7 +137,7 @@ export interface RiskAcquisitionConfigView {
 export interface RiskAcquisitionView {
   direction: RiskAcquisitionDirectionView;
   curve_target: number;
-  allowed_target: number;
+  risk_release_frontier: number;
   backlog_units: number;
   anchor_price: number;
   anchor_curve_target: number;

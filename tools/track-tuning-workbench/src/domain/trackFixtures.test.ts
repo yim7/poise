@@ -88,12 +88,12 @@ function makeSnapshot(
     },
     parsedNumbers: numericFields,
     riskAcquisition: overrides.riskAcquisition ?? {
-      initialRatio: 0.3,
+      initialRatio: 0.5,
       advantageSteps: 2,
       minReleaseSteps: 1,
       maxReleaseSteps: 4,
       catchupRatio: 0.25,
-      staleReleaseMinutes: 30,
+      staleReleaseMinutes: 60,
     },
     enums: {
       shapeFamily: overrides.enums?.shapeFamily ?? 'linear',

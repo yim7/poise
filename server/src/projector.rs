@@ -217,7 +217,7 @@ fn project_risk_acquisition_runtime(source: &TrackRiskAcquisitionReadModel) -> R
             TrackRiskAcquisitionDirection::Short => RiskAcquisitionDirectionView::Short,
         },
         curve_target: source.curve_target,
-        allowed_target: source.allowed_target,
+        risk_release_frontier: source.risk_release_frontier,
         backlog_units: source.backlog_units,
         anchor_price: source.anchor_price,
         anchor_curve_target: source.anchor_curve_target,
@@ -1004,7 +1004,7 @@ mod tests {
         source.risk_acquisition = Some(TrackRiskAcquisitionReadModel {
             direction: TrackRiskAcquisitionDirection::Long,
             curve_target: 6.0,
-            allowed_target: 2.375,
+            risk_release_frontier: 2.375,
             backlog_units: 3.625,
             anchor_price: 100.0,
             anchor_curve_target: 4.0,

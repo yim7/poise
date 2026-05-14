@@ -18,10 +18,12 @@ pub struct TargetReconcileResult {
     pub events: Vec<DomainEvent>,
     pub curve_target: Exposure,
     pub desired_exposure: Exposure,
+    pub execution_target_exposure: Exposure,
     pub applied_risk_cap: Option<AppliedRiskCap>,
     pub new_runtime_state: Option<TrackState>,
     pub execution_gate_decision: ExecutionGateDecision,
     pub suppress_execution: bool,
+    pub risk_release_frontier: Option<Exposure>,
     pub risk_acquisition: Option<RiskAcquisitionRelease>,
 }
 
@@ -42,11 +44,13 @@ pub fn reconcile_target_at(
                 .into_iter()
                 .collect(),
             curve_target: target.clone(),
+            execution_target_exposure: target.clone(),
             desired_exposure: target,
             applied_risk_cap: None,
             new_runtime_state: Some(track.track_state.clone()),
             execution_gate_decision: ExecutionGateDecision::Open,
             suppress_execution: delta.is_zero(),
+            risk_release_frontier: None,
             risk_acquisition: Default::default(),
         };
     }
@@ -62,11 +66,13 @@ pub fn reconcile_target_at(
                 .into_iter()
                 .collect(),
             curve_target: target_override.clone(),
+            execution_target_exposure: target_override.clone(),
             desired_exposure: target_override,
             applied_risk_cap: None,
             new_runtime_state: Some(track.track_state.clone()),
             execution_gate_decision: ExecutionGateDecision::Open,
             suppress_execution: delta.is_zero(),
+            risk_release_frontier: None,
             risk_acquisition: Default::default(),
         };
     }
@@ -107,6 +113,7 @@ pub fn reconcile_target_at(
                     .into_iter()
                     .collect(),
                 curve_target: target.clone(),
+                execution_target_exposure: target.clone(),
                 desired_exposure: target,
                 applied_risk_cap: None,
                 new_runtime_state: Some(TrackState::Terminated {
@@ -114,36 +121,48 @@ pub fn reconcile_target_at(
                 }),
                 execution_gate_decision: ExecutionGateDecision::Open,
                 suppress_execution: delta.is_zero(),
+                risk_release_frontier: None,
                 risk_acquisition: Default::default(),
             };
         }
     };
 
-    let curve_target = approved_target.clone();
-    let (approved_target, new_runtime_state, risk_acquisition) = apply_risk_exposure_gate(
+    let desired_exposure = approved_target.clone();
+    let (risk_release_frontier, new_runtime_state, risk_acquisition) = apply_risk_exposure_gate(
         track,
         strategy_price,
-        approved_target,
+        desired_exposure.clone(),
         new_runtime_state,
         observed_at,
     );
+    let execution_target_exposure = risk_exposure_gate::execution_target_exposure(
+        &track.current_exposure,
+        &desired_exposure,
+        risk_release_frontier.as_ref(),
+    );
 
-    if should_suppress_protected_risk_increase(track, &new_runtime_state, &approved_target) {
+    if should_suppress_protected_risk_increase(
+        track,
+        &new_runtime_state,
+        &execution_target_exposure,
+    ) {
         return TargetReconcileResult {
             events,
-            curve_target,
-            desired_exposure: approved_target,
+            curve_target: desired_exposure.clone(),
+            desired_exposure,
+            execution_target_exposure,
             applied_risk_cap,
             new_runtime_state,
             execution_gate_decision: ExecutionGateDecision::Open,
             suppress_execution: true,
+            risk_release_frontier,
             risk_acquisition,
         };
     }
 
     let execution_gate_decision = AccountCapacityGate::evaluate(AccountCapacityGateInput {
         current: track.current_exposure.clone(),
-        approved_target: approved_target.clone(),
+        approved_target: execution_target_exposure.clone(),
         unit_notional: track.config().notional_per_unit,
         available_notional: track
             .execution_gate_state
@@ -159,42 +178,48 @@ pub fn reconcile_target_at(
         }
         return TargetReconcileResult {
             events,
-            curve_target,
-            desired_exposure: approved_target,
+            curve_target: desired_exposure.clone(),
+            desired_exposure,
+            execution_target_exposure,
             applied_risk_cap,
             new_runtime_state,
             execution_gate_decision,
             suppress_execution: true,
+            risk_release_frontier,
             risk_acquisition,
         };
     }
 
-    let delta = track.current_exposure.delta(&approved_target);
+    let delta = track.current_exposure.delta(&execution_target_exposure);
     if delta.is_zero() {
         return TargetReconcileResult {
             events,
-            curve_target,
-            desired_exposure: approved_target,
+            curve_target: desired_exposure.clone(),
+            desired_exposure,
+            execution_target_exposure,
             applied_risk_cap,
             new_runtime_state,
             execution_gate_decision,
             suppress_execution: true,
+            risk_release_frontier,
             risk_acquisition,
         };
     }
 
-    if let Some(event) = exposure_target_change_event(track, &approved_target) {
+    if let Some(event) = exposure_target_change_event(track, &desired_exposure) {
         events.push(event);
     }
 
     TargetReconcileResult {
         events,
-        curve_target,
-        desired_exposure: approved_target,
+        curve_target: desired_exposure.clone(),
+        desired_exposure,
+        execution_target_exposure,
         applied_risk_cap,
         new_runtime_state,
         execution_gate_decision,
         suppress_execution: false,
+        risk_release_frontier,
         risk_acquisition,
     }
 }
@@ -231,14 +256,18 @@ fn apply_risk_exposure_gate(
     approved_target: Exposure,
     new_runtime_state: Option<TrackState>,
     observed_at: DateTime<Utc>,
-) -> (Exposure, Option<TrackState>, Option<RiskAcquisitionRelease>) {
+) -> (
+    Option<Exposure>,
+    Option<TrackState>,
+    Option<RiskAcquisitionRelease>,
+) {
     let effective_state = effective_runtime_state(track, &new_runtime_state);
     let gate_state = match effective_state {
         TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)) => None,
         TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure { gate })) => {
             Some(gate)
         }
-        _ => return (approved_target, new_runtime_state, None),
+        _ => return (None, new_runtime_state, None),
     };
 
     let decision = risk_exposure_gate::apply(RiskExposureGateInput {
@@ -246,7 +275,7 @@ fn apply_risk_exposure_gate(
         min_rebalance_units: track.config().min_rebalance_units,
         state: gate_state,
         current_exposure: track.current_exposure.clone(),
-        curve_target: approved_target,
+        curve_target: approved_target.clone(),
         strategy_price,
         observed_at,
     });
@@ -255,8 +284,16 @@ fn apply_risk_exposure_gate(
         &track.track_state,
         decision.state.clone(),
     );
+    let risk_release_frontier = decision
+        .state
+        .as_ref()
+        .map(|state| state.risk_release_frontier.clone())
+        .or_else(|| {
+            (decision.risk_release_frontier != approved_target)
+                .then_some(decision.risk_release_frontier.clone())
+        });
 
-    (decision.allowed_target, next_state, decision.next_release)
+    (risk_release_frontier, next_state, decision.next_release)
 }
 
 fn merge_gate_state(
@@ -586,12 +623,12 @@ mod tests {
     }
 
     fn risk_exposure_gate_state(
-        allowed_target: f64,
+        risk_release_frontier: f64,
         anchor_price: f64,
         anchor_curve_target: f64,
     ) -> RiskExposureGateState {
         RiskExposureGateState {
-            allowed_target: Exposure(allowed_target),
+            risk_release_frontier: Exposure(risk_release_frontier),
             anchor_price,
             anchor_curve_target: Exposure(anchor_curve_target),
             anchor_started_at: Utc::now(),
@@ -670,13 +707,15 @@ mod tests {
     }
 
     #[test]
-    fn risk_acquisition_startup_exposes_allowed_target_not_curve_target() {
+    fn risk_acquisition_startup_keeps_desired_and_limits_execution_target() {
         let mut track = test_runtime();
         enable_risk_acquisition(&mut track);
 
         let result = reconcile_target(&track, 93.75);
 
-        assert_eq!(result.desired_exposure, Exposure(1.5));
+        assert_eq!(result.desired_exposure, Exposure(5.0));
+        assert_eq!(result.execution_target_exposure, Exposure(2.5));
+        assert_eq!(result.risk_release_frontier, Some(Exposure(2.5)));
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
@@ -688,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn risk_acquisition_reduces_allowed_target_when_curve_reenters_inside() {
+    fn risk_acquisition_reduces_to_desired_when_curve_reenters_inside_frontier() {
         let mut track = test_runtime();
         enable_risk_acquisition(&mut track);
         track.current_exposure = Exposure(1.5);
@@ -701,6 +740,8 @@ mod tests {
         let result = reconcile_target(&track, 98.75);
 
         assert_eq!(result.desired_exposure, Exposure(1.0));
+        assert_eq!(result.execution_target_exposure, Exposure(1.0));
+        assert_eq!(result.risk_release_frontier, None);
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
@@ -708,6 +749,25 @@ mod tests {
             )))
         ));
         assert!(!result.suppress_execution);
+    }
+
+    #[test]
+    fn risk_acquisition_current_past_frontier_does_not_create_reduce_target() {
+        let mut track = test_runtime();
+        enable_risk_acquisition(&mut track);
+        track.current_exposure = Exposure(2.0);
+        track.desired_exposure = Some(Exposure(5.0));
+        track.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
+                gate: risk_exposure_gate_state(1.5, 93.75, 5.0),
+            }));
+
+        let result = reconcile_target(&track, 93.125);
+
+        assert_eq!(result.desired_exposure, Exposure(5.5));
+        assert_eq!(result.execution_target_exposure, Exposure(2.0));
+        assert_eq!(result.risk_release_frontier, Some(Exposure(2.0)));
+        assert!(result.suppress_execution);
     }
 
     #[test]
@@ -723,7 +783,9 @@ mod tests {
 
         let result = reconcile_target(&track, 101.25);
 
-        assert_eq!(result.desired_exposure, Exposure(0.0));
+        assert_eq!(result.desired_exposure, Exposure(-1.0));
+        assert_eq!(result.execution_target_exposure, Exposure(0.0));
+        assert_eq!(result.risk_release_frontier, Some(Exposure(0.0)));
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
@@ -776,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_reentry_clears_target_anchor_and_follows_current_strategy_target_on_reentry_tick() {
+    fn frozen_reentry_clears_target_anchor_and_enters_risk_acquisition() {
         let mut track = test_runtime();
         track.track_state = TrackState::Running(ControlState::Automatic(AutoState::Frozen {
             target_anchor: Exposure(4.0),
@@ -785,13 +847,14 @@ mod tests {
 
         let result = reconcile_target(&track, 105.0);
 
-        assert_eq!(
+        assert_eq!(result.desired_exposure, strategy_target_at(105.0));
+        assert_eq!(result.execution_target_exposure, Exposure(-2.0));
+        assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
-                AutoState::FollowingBand,
-            ))),
-        );
-        assert_eq!(result.desired_exposure, strategy_target_at(105.0));
+                AutoState::AcquiringRiskExposure { .. }
+            )))
+        ));
     }
 
     #[test]
@@ -821,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn flatten_pending_reentry_clears_target_anchor_and_follows_current_strategy_target() {
+    fn flatten_pending_reentry_clears_target_anchor_and_enters_risk_acquisition() {
         let mut track = test_runtime_with_strategy_target(Exposure(2.0));
         track.track_state =
             TrackState::Running(ControlState::Automatic(AutoState::FlattenPending {
@@ -838,13 +901,14 @@ mod tests {
 
         let result = reconcile_target(&track, 105.0);
 
-        assert_eq!(
+        assert_eq!(result.desired_exposure, strategy_target_at(105.0));
+        assert_eq!(result.execution_target_exposure, Exposure(-2.0));
+        assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
-                AutoState::FollowingBand,
-            ))),
-        );
-        assert_eq!(result.desired_exposure, strategy_target_at(105.0));
+                AutoState::AcquiringRiskExposure { .. }
+            )))
+        ));
     }
 
     #[test]
@@ -1426,7 +1490,7 @@ mod tests {
             result.execution_gate_decision,
             ExecutionGateDecision::NoSubmit {
                 reason: poise_core::events::ExecutionGateReason::AccountCapacityInsufficient {
-                    required_notional: 2_625.0,
+                    required_notional: 1_125.0,
                     available_notional: 0.0,
                 },
             }
@@ -1435,7 +1499,7 @@ mod tests {
             result.events,
             vec![DomainEvent::ExecutionGateApplied {
                 reason: poise_core::events::ExecutionGateReason::AccountCapacityInsufficient {
-                    required_notional: 2_625.0,
+                    required_notional: 1_125.0,
                     available_notional: 0.0,
                 },
             }]
@@ -1459,7 +1523,7 @@ mod tests {
             result.execution_gate_decision,
             ExecutionGateDecision::NoSubmit {
                 reason: poise_core::events::ExecutionGateReason::AccountCapacityInsufficient {
-                    required_notional: 2_625.0,
+                    required_notional: 1_125.0,
                     available_notional: 500.0,
                 },
             }

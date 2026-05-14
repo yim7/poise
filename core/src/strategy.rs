@@ -3,12 +3,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::types::Exposure;
 
 pub const DEFAULT_MIN_REBALANCE_UNITS: f64 = 0.5;
-pub const DEFAULT_RISK_ACQUISITION_INITIAL_RATIO: f64 = 0.3;
+pub const DEFAULT_RISK_ACQUISITION_INITIAL_RATIO: f64 = 0.5;
 pub const DEFAULT_RISK_ACQUISITION_ADVANTAGE_STEPS: f64 = 2.0;
 pub const DEFAULT_RISK_ACQUISITION_MIN_RELEASE_STEPS: f64 = 1.0;
 pub const DEFAULT_RISK_ACQUISITION_MAX_RELEASE_STEPS: f64 = 4.0;
 pub const DEFAULT_RISK_ACQUISITION_CATCHUP_RATIO: f64 = 0.25;
-pub const DEFAULT_RISK_ACQUISITION_STALE_RELEASE_MINUTES: f64 = 30.0;
+pub const DEFAULT_RISK_ACQUISITION_STALE_RELEASE_MINUTES: f64 = 60.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackConfig {
@@ -671,12 +671,12 @@ mod tests {
     fn validate_accepts_risk_acquisition_config() {
         let mut config = neutral_config();
         config.risk_acquisition = RiskAcquisitionConfig {
-            initial_ratio: 0.3,
+            initial_ratio: 0.5,
             advantage_steps: 2.0,
             min_release_steps: 1.0,
             max_release_steps: 4.0,
             catchup_ratio: 0.25,
-            stale_release_minutes: 30.0,
+            stale_release_minutes: 60.0,
         };
 
         assert_eq!(validate_config(&config), Ok(()));
@@ -691,7 +691,7 @@ mod tests {
             min_release_steps: 1.0,
             max_release_steps: 4.0,
             catchup_ratio: 0.25,
-            stale_release_minutes: 30.0,
+            stale_release_minutes: 60.0,
         };
 
         let error = validate_config(&config).unwrap_err();
@@ -703,12 +703,12 @@ mod tests {
     fn validate_rejects_step_bounds_that_cannot_release() {
         let mut config = neutral_config();
         config.risk_acquisition = RiskAcquisitionConfig {
-            initial_ratio: 0.3,
+            initial_ratio: 0.5,
             advantage_steps: 2.0,
             min_release_steps: 5.0,
             max_release_steps: 4.0,
             catchup_ratio: 0.25,
-            stale_release_minutes: 30.0,
+            stale_release_minutes: 60.0,
         };
 
         let error = validate_config(&config).unwrap_err();

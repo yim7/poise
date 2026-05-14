@@ -260,7 +260,7 @@ function TrackRuntimeSummary({
     desiredExposure === null ? null : desiredExposure - currentExposure
   );
   const exposureNote = riskAcquisition
-    ? `允许 ${formatExposure(riskAcquisition.allowed_target)} · 曲线 ${formatExposure(riskAcquisition.curve_target)}`
+    ? `释放 ${formatExposure(riskAcquisition.risk_release_frontier)} · 曲线 ${formatExposure(riskAcquisition.curve_target)}`
     : `目标 ${formatExposure(desiredExposure)}`;
   const gapValue = riskAcquisition
     ? `backlog ${formatSignedExposure(riskAcquisition.backlog_units)}`

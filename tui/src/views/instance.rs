@@ -18,7 +18,7 @@ use crate::views::instance_layout::{
 };
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let Some(detail) = app.current_track_detail().or(app.current_track.as_ref()) else {
+    let Some(detail) = app.current_track_detail() else {
         let empty = Paragraph::new("No track detail loaded")
             .block(Block::default().title("Instance").borders(Borders::ALL));
         frame.render_widget(empty, area);
@@ -513,10 +513,10 @@ fn compact_binding_label(binding: &poise_protocol::ExecutionBindingView) -> Stri
 fn format_risk_acquisition_lines(risk_acquisition: &RiskAcquisitionView) -> Vec<Line<'static>> {
     vec![
         Line::from(format!(
-            "acq: {} | curve {} | allow {} | backlog {}",
+            "acq: {} | curve {} | release {} | backlog {}",
             format_risk_direction(risk_acquisition.direction),
             format_signed_exposure(risk_acquisition.curve_target),
-            format_signed_exposure(risk_acquisition.allowed_target),
+            format_signed_exposure(risk_acquisition.risk_release_frontier),
             format_signed_exposure(risk_acquisition.backlog_units),
         )),
         Line::from(format!(
@@ -779,6 +779,17 @@ mod tests {
         render_text_with_size(detail, 100, 36)
     }
 
+    fn render_app_text(app: &App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), app))
+            .unwrap();
+
+        buffer_text(&terminal)
+    }
+
     fn line_text(line: &ratatui::text::Line<'_>) -> String {
         line.spans
             .iter()
@@ -839,6 +850,31 @@ mod tests {
         assert!(!text.contains("Commands"));
         assert!(text.contains("commands: p pause"));
         assert!(text.contains("min"));
+    }
+
+    #[test]
+    fn does_not_render_stale_detail_for_a_different_selection() {
+        let response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
+        let mut tracks = response.items;
+        let mut other = tracks[0].clone();
+        other.id = "eth-core".into();
+        tracks.push(other);
+
+        let detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        let mut app = App::new(tracks);
+        app.current_view = View::Instance;
+        app.apply_track_detail(detail);
+        app.select_next();
+
+        let text = render_app_text(&app, 100, 36);
+
+        assert!(text.contains("No track detail loaded"));
+        assert!(!text.contains("commands: p pause"));
     }
 
     #[test]
@@ -1001,7 +1037,7 @@ mod tests {
         value["execution"]["risk_acquisition"] = serde_json::json!({
             "direction": "long",
             "curve_target": 6.0,
-            "allowed_target": 2.375,
+            "risk_release_frontier": 2.375,
             "backlog_units": 3.625,
             "anchor_price": 100.0,
             "anchor_curve_target": 4.0,
@@ -1017,7 +1053,7 @@ mod tests {
         let text = render_text_with_size(detail, 180, 36);
 
         assert!(text.contains("exposure: 3.5000 → 4.0000 [↑ +0.5000] [acq backlog +3.6250]"));
-        assert!(text.contains("acq: long | curve +6.0000 | allow +2.3750 | backlog +3.6250"));
+        assert!(text.contains("acq: long | curve +6.0000 | release +2.3750 | backlog +3.6250"));
         assert!(text.contains("anchor 100.0000 / +4.0000 | advantage +6.0000 @ 92.5000"));
         assert!(text.contains("release +0.8750 -> +3.2500 | stale 12/30m"));
     }

@@ -907,12 +907,12 @@ total_loss_limit = 200.0
 shape_family = "linear"
 
 [tracks.risk_acquisition]
-initial_ratio = 0.3
+initial_ratio = 0.5
 advantage_steps = 2.0
 min_release_steps = 1.0
 max_release_steps = 4.0
 catchup_ratio = 0.25
-stale_release_minutes = 30.0
+stale_release_minutes = 60.0
 "#,
         )
         .unwrap();
@@ -921,15 +921,15 @@ stale_release_minutes = 30.0
         let delay = track.risk_acquisition;
         let exported = crate::config_projection::export_current_track(&document.drafts()[0]);
 
-        assert_eq!(delay.initial_ratio, 0.3);
+        assert_eq!(delay.initial_ratio, 0.5);
         assert_eq!(delay.advantage_steps, 2.0);
         assert_eq!(delay.min_release_steps, 1.0);
         assert_eq!(delay.max_release_steps, 4.0);
         assert_eq!(delay.catchup_ratio, 0.25);
-        assert_eq!(delay.stale_release_minutes, 30.0);
+        assert_eq!(delay.stale_release_minutes, 60.0);
         assert!(exported.contains("[tracks.risk_acquisition]"));
-        assert!(exported.contains("initial_ratio = 0.3"));
-        assert!(exported.contains("stale_release_minutes = 30"));
+        assert!(exported.contains("initial_ratio = 0.5"));
+        assert!(exported.contains("stale_release_minutes = 60"));
     }
 
     #[test]

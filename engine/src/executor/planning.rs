@@ -11,7 +11,7 @@ use crate::price_gate::{
     PriceExecutionGate, SubmitPurpose, WorkingOrderGateAction, allows_submit,
     working_order_gate_action,
 };
-use crate::risk_exposure_gate::RiskAcquisitionRelease;
+use crate::risk_exposure_gate::execution_target_exposure;
 use crate::runtime::ExecutorState;
 use poise_core::track::Instrument;
 
@@ -48,13 +48,12 @@ pub struct SubmitIntentInput<'a> {
     pub min_rebalance_units: f64,
     pub current_exposure: Exposure,
     pub desired_exposure: Exposure,
+    pub risk_release_frontier: Option<Exposure>,
     pub execution_quote: Option<ExecutionQuote>,
     pub policy_context: PolicyContext,
     pub price_execution_gate: PriceExecutionGate,
     pub submit_purpose: SubmitPurpose,
     pub observed_at: DateTime<Utc>,
-    pub risk_acquisition_gate_active: bool,
-    pub risk_acquisition: Option<RiskAcquisitionRelease>,
 }
 
 pub struct ExecutorPlan {
@@ -106,7 +105,24 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         profile_revision_for_config(submit_intent.config),
     );
     let exposure_epsilon = exposure_epsilon(&submit_intent);
-    let view = match BoundaryLedgerView::try_from_boundaries(
+    let execution_target = execution_target_exposure(
+        &submit_intent.current_exposure,
+        &submit_intent.desired_exposure,
+        submit_intent.risk_release_frontier.as_ref(),
+    );
+    let execution_view = match BoundaryLedgerView::try_from_boundaries(
+        &boundaries,
+        &state.ledger_state,
+        execution_target.clone(),
+        exposure_epsilon,
+    ) {
+        Ok(view) => view,
+        Err(_error) => {
+            state.recovery_anomaly = Some(RecoveryAnomaly::BoundaryProgressOutOfRange);
+            return noop_plan(state);
+        }
+    };
+    let desired_view = match BoundaryLedgerView::try_from_boundaries(
         &boundaries,
         &state.ledger_state,
         submit_intent.desired_exposure.clone(),
@@ -140,10 +156,11 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     if submit_intent.policy_context == PolicyContext::Normal {
         // This only starts or clears the due grace timer. Reconciliation owns
         // the later choice to keep, cancel, or replace an existing maker.
-        refresh_curve_maker_due_grace_start(&mut state, &view, submit_intent.observed_at);
+        refresh_curve_maker_due_grace_start(&mut state, &desired_view, submit_intent.observed_at);
     }
     let policy_input = PolicyPlanningInput {
-        view: &view,
+        execution_view: &execution_view,
+        desired_view: &desired_view,
         boundaries: &boundaries,
         instrument: submit_intent.instrument,
         config: submit_intent.config,
@@ -151,11 +168,10 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         base_qty_per_unit: submit_intent.base_qty_per_unit,
         min_rebalance_units: submit_intent.min_rebalance_units,
         current_exposure: &submit_intent.current_exposure,
+        execution_target_exposure: &execution_target,
         desired_exposure: &submit_intent.desired_exposure,
         execution_quote: submit_intent.execution_quote,
         submit_purpose: submit_intent.submit_purpose,
-        risk_acquisition_gate_active: submit_intent.risk_acquisition_gate_active,
-        risk_acquisition: submit_intent.risk_acquisition.as_ref(),
         exposure_epsilon,
         curve_maker_levels_per_side: CURVE_MAKER_LEVELS_PER_SIDE,
     };
@@ -474,6 +490,7 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,
                 desired_exposure,
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -482,11 +499,21 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             None,
         )
+    }
+
+    fn input_with_frontier<'a>(
+        config: &'a TrackConfig,
+        rules: &'a ExchangeRules,
+        current_exposure: Exposure,
+        desired_exposure: Exposure,
+        risk_release_frontier: Exposure,
+    ) -> ExecutorInput<'a> {
+        let mut input = input(config, rules, current_exposure, desired_exposure);
+        input.submit_intent.risk_release_frontier = Some(risk_release_frontier);
+        input
     }
 
     fn input_with_gate<'a>(
@@ -506,6 +533,7 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,
                 desired_exposure,
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -514,8 +542,6 @@ mod tests {
                 price_execution_gate,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             Some(previous_state),
         )
@@ -578,6 +604,73 @@ mod tests {
     }
 
     #[test]
+    fn risk_release_frontier_limits_catch_up_increase() {
+        let config = config();
+        let rules = rules();
+
+        let plan = plan(input_with_frontier(
+            &config,
+            &rules,
+            Exposure(0.0),
+            Exposure(-4.0),
+            Exposure(-2.0),
+        ));
+
+        let catch_up_binding = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .expect("catch-up binding should be planned toward the release frontier");
+
+        assert_eq!(catch_up_binding.request.side, Side::Sell);
+        assert!(!catch_up_binding.request.reduce_only);
+        assert_eq!(catch_up_binding.desired_exposure, Exposure(-2.0));
+        assert!((catch_up_binding.request.quantity - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn risk_release_frontier_does_not_make_catch_up_reduce_advantage_position() {
+        let config = config();
+        let rules = rules();
+
+        let plan = plan(input_with_frontier(
+            &config,
+            &rules,
+            Exposure(-3.0),
+            Exposure(-4.0),
+            Exposure(-2.0),
+        ));
+
+        assert!(
+            !plan
+                .state
+                .bindings
+                .iter()
+                .any(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+        );
+    }
+
+    #[test]
+    fn catch_up_reduce_only_keeps_min_rebalance_pace() {
+        let config = config();
+        let rules = rules();
+
+        let plan = plan(input(&config, &rules, Exposure(-6.0), Exposure(-1.0)));
+        let catch_up_binding = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .expect("catch-up binding should be planned");
+
+        assert_eq!(catch_up_binding.request.side, Side::Buy);
+        assert!(catch_up_binding.request.reduce_only);
+        assert!((catch_up_binding.request.quantity - 1.0).abs() < 1e-9);
+        assert_eq!(catch_up_binding.allocations.len(), 1);
+    }
+
+    #[test]
     fn submit_pending_catch_up_blocks_replacement_until_receipt_arrives() {
         let config = config();
         let rules = rules();
@@ -600,6 +693,7 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(2.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 100.0,
                     best_ask: 100.2,
@@ -608,8 +702,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -632,7 +724,7 @@ mod tests {
         let config = config();
         let rules = rules();
 
-        let plan = plan(input(&config, &rules, Exposure(0.0), Exposure(0.0)));
+        let plan = plan(input(&config, &rules, Exposure(1.0), Exposure(1.0)));
 
         let maker_bindings = plan
             .state
@@ -649,12 +741,17 @@ mod tests {
                     .map(|allocation| allocation.operation.clone())
             })
             .collect::<BTreeSet<_>>();
-        assert_eq!(maker_bindings.len(), 6);
-        assert_eq!(operations.len(), 6);
+        assert_eq!(maker_bindings.len(), 1);
+        assert_eq!(operations.len(), 1);
         assert!(
             maker_bindings
                 .iter()
                 .all(|binding| binding.allocations.len() == 1)
+        );
+        assert!(
+            maker_bindings.iter().all(|binding| {
+                binding.request.side == Side::Sell && binding.request.reduce_only
+            })
         );
     }
 
@@ -677,6 +774,7 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(2.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -685,8 +783,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -745,6 +841,7 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(2.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -753,8 +850,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -785,6 +880,7 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(2.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 100.0,
                     best_ask: 100.2,
@@ -793,8 +889,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             Some(&replacing.state),
         ));
@@ -960,7 +1054,7 @@ mod tests {
     fn catch_up_policy_takes_over_due_curve_maker_in_same_round() {
         let config = config();
         let rules = rules();
-        let initial = plan(input(&config, &rules, Exposure(0.0), Exposure(0.0))).state;
+        let initial = plan(input(&config, &rules, Exposure(1.0), Exposure(1.0))).state;
         let mut previous = initial.clone();
         let maker = previous
             .bindings
@@ -980,8 +1074,9 @@ mod tests {
                 exchange_rules: &rules,
                 base_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
-                current_exposure: Exposure(0.0),
-                desired_exposure: Exposure(1.0),
+                current_exposure: Exposure(1.0),
+                desired_exposure: Exposure(0.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -990,8 +1085,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -1002,7 +1095,7 @@ mod tests {
         )));
         assert!(plan.effects.iter().any(|effect| matches!(
             effect,
-            TrackEffect::SubmitOrder { request, .. } if request.side == Side::Buy
+            TrackEffect::SubmitOrder { request, .. } if request.side == Side::Sell
         )));
         assert!(plan.state.bindings.iter().any(|binding| {
             binding.proposal_key.policy == PolicyKind::CurveMaker
@@ -1018,7 +1111,7 @@ mod tests {
     fn catch_up_takes_over_far_due_curve_maker_at_threshold() {
         let config = config();
         let rules = rules();
-        let initial = plan(input(&config, &rules, Exposure(0.0), Exposure(0.0))).state;
+        let initial = plan(input(&config, &rules, Exposure(1.0), Exposure(1.0))).state;
         let mut previous = initial.clone();
         let maker = previous
             .bindings
@@ -1027,6 +1120,7 @@ mod tests {
             .expect("maker binding should exist");
         maker.status = BindingStatus::Working;
         maker.order_id = Some("maker-order".to_string());
+        maker.request.price = 100.2;
         maker.policy_state = BindingPolicyState::CurveMaker {
             due_grace_started_at: None,
         };
@@ -1038,8 +1132,9 @@ mod tests {
                 exchange_rules: &rules,
                 base_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
-                current_exposure: Exposure(0.0),
-                desired_exposure: Exposure(1.0),
+                current_exposure: Exposure(1.0),
+                desired_exposure: Exposure(0.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1048,8 +1143,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -1060,7 +1153,7 @@ mod tests {
         )));
         assert!(plan.effects.iter().any(|effect| matches!(
             effect,
-            TrackEffect::SubmitOrder { request, .. } if request.side == Side::Buy
+            TrackEffect::SubmitOrder { request, .. } if request.side == Side::Sell
         )));
         assert!(plan.state.bindings.iter().any(|binding| {
             binding.proposal_key.policy == PolicyKind::CurveMaker
@@ -1076,19 +1169,19 @@ mod tests {
     fn catch_up_keeps_nearby_working_curve_maker_that_can_cover_gap() {
         let config = config();
         let rules = rules();
-        let initial = plan(input(&config, &rules, Exposure(0.0), Exposure(0.0))).state;
+        let initial = plan(input(&config, &rules, Exposure(1.0), Exposure(1.0))).state;
         let mut previous = initial.clone();
         let maker = previous
             .bindings
             .iter_mut()
             .find(|binding| {
                 binding.proposal_key.policy == PolicyKind::CurveMaker
-                    && binding.request.side == Side::Buy
+                    && binding.request.side == Side::Sell
             })
-            .expect("buy maker binding should exist");
+            .expect("sell maker binding should exist");
         maker.status = BindingStatus::Working;
         maker.order_id = Some("near-maker-order".to_string());
-        maker.request.price = 100.1;
+        maker.request.price = 99.9;
         maker.policy_state = BindingPolicyState::CurveMaker {
             due_grace_started_at: None,
         };
@@ -1100,8 +1193,9 @@ mod tests {
                 exchange_rules: &rules,
                 base_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
-                current_exposure: Exposure(0.0),
-                desired_exposure: Exposure(1.0),
+                current_exposure: Exposure(1.0),
+                desired_exposure: Exposure(0.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1110,8 +1204,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -1149,6 +1241,7 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(0.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1157,8 +1250,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -1189,6 +1280,7 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(0.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1197,8 +1289,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -1268,6 +1358,7 @@ mod tests {
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(1.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1276,8 +1367,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             Some(&state),
         ));
@@ -1304,6 +1393,7 @@ mod tests {
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.6),
                 desired_exposure: Exposure(1.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1312,8 +1402,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             Some(&previous),
         ));
@@ -1348,6 +1436,7 @@ mod tests {
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(1.2),
                 desired_exposure: Exposure(1.0),
+                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1356,8 +1445,6 @@ mod tests {
                 price_execution_gate: PriceExecutionGate::Open,
                 submit_purpose: SubmitPurpose::AutoReconcile,
                 observed_at: Utc::now(),
-                risk_acquisition_gate_active: false,
-                risk_acquisition: Default::default(),
             },
             Some(&state),
         ));

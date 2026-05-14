@@ -84,14 +84,14 @@ describe('ServerLivePanel', () => {
     expect(within(panel).getByText('目标 4.0000')).toBeInTheDocument();
   });
 
-  it('shows risk acquisition backlog separately from the allowed target', async () => {
+  it('shows risk acquisition backlog separately from the release frontier', async () => {
     const detail = trackDetail();
     detail.position.desired_exposure = 1.5;
     detail.execution.inventory_gap = 0;
     detail.execution.risk_acquisition = {
       direction: 'long',
       curve_target: 4.8235,
-      allowed_target: 4.8,
+      risk_release_frontier: 4.8,
       backlog_units: 0.0235,
       anchor_price: 1518.3,
       anchor_curve_target: 4.817,
@@ -109,7 +109,7 @@ describe('ServerLivePanel', () => {
     });
 
     const panel = screen.getByRole('region', { name: 'Server live inspector' });
-    expect(within(panel).getByText('允许 4.8000 · 曲线 4.8235')).toBeInTheDocument();
+    expect(within(panel).getByText('释放 4.8000 · 曲线 4.8235')).toBeInTheDocument();
     expect(within(panel).getByText('backlog +0.0235')).toBeInTheDocument();
     expect(within(panel).getByText('next +0.0235 → 4.8235')).toBeInTheDocument();
   });

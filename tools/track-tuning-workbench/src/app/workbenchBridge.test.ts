@@ -74,12 +74,12 @@ describe('createWorkbenchBridge', () => {
             total_loss_limit: 500,
             shape_family: 'linear',
             risk_acquisition: {
-              initial_ratio: 0.3,
+              initial_ratio: 0.5,
               advantage_steps: 2,
               min_release_steps: 1,
               max_release_steps: 4,
               catchup_ratio: 0.25,
-              stale_release_minutes: 30,
+              stale_release_minutes: 60,
             },
           },
           load_issues: [],
@@ -132,12 +132,12 @@ describe('createWorkbenchBridge', () => {
               total_loss_limit: 500,
               shape_family: 'linear',
               risk_acquisition: {
-                initial_ratio: 0.3,
+              initial_ratio: 0.5,
                 advantage_steps: 2,
                 min_release_steps: 1,
                 max_release_steps: 4,
                 catchup_ratio: 0.25,
-                stale_release_minutes: 30,
+              stale_release_minutes: 60,
               },
             },
             load_issues: [],
@@ -189,12 +189,12 @@ describe('createWorkbenchBridge', () => {
               total_loss_limit: 500,
               shape_family: 'linear',
               risk_acquisition: {
-                initial_ratio: 0.3,
+                initial_ratio: 0.5,
                 advantage_steps: 2,
                 min_release_steps: 1,
                 max_release_steps: 4,
                 catchup_ratio: 0.25,
-                stale_release_minutes: 30,
+                stale_release_minutes: 60,
               },
             },
             load_issues: [],
@@ -207,12 +207,12 @@ describe('createWorkbenchBridge', () => {
     const loaded = await bridge.loadConfigFile('/tmp/strategies/grid.toml');
 
     expect(loaded.projectedTracks[0].riskAcquisition).toEqual({
-      initialRatio: '0.3',
+      initialRatio: '0.5',
       advantageSteps: '2',
       minReleaseSteps: '1',
       maxReleaseSteps: '4',
       catchupRatio: '0.25',
-      staleReleaseMinutes: '30',
+      staleReleaseMinutes: '60',
     });
 
     await bridge.exportCurrentTrack(loaded.projectedTracks[0]);
@@ -221,12 +221,12 @@ describe('createWorkbenchBridge', () => {
       draft: expect.objectContaining({
         fields: expect.objectContaining({
           risk_acquisition: {
-            initial_ratio: 0.3,
+            initial_ratio: 0.5,
             advantage_steps: 2,
             min_release_steps: 1,
             max_release_steps: 4,
             catchup_ratio: 0.25,
-            stale_release_minutes: 30,
+            stale_release_minutes: 60,
           },
         }),
       }),

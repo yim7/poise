@@ -4,8 +4,6 @@ use crate::executor::boundary::{BoundaryDirection, BoundaryOperation};
 use crate::executor::policy::PolicyKind;
 use crate::ports::OrderRequest;
 use crate::price_gate::SubmitPurpose;
-#[cfg(test)]
-use poise_core::strategy::TrackConfig;
 use poise_core::types::Exposure;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -143,11 +141,6 @@ impl LiveOrderBinding {
             .iter()
             .map(|allocation| allocation.exposure_qty)
             .sum()
-    }
-
-    #[cfg(test)]
-    pub fn quantity_as_exposure_for_test(&self, config: &TrackConfig) -> f64 {
-        self.request.quantity / config.base_qty_per_unit()
     }
 
     pub fn is_active(&self) -> bool {

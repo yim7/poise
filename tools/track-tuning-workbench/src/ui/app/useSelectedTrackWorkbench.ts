@@ -139,13 +139,13 @@ function resolveVisualSnapshot(
 
 function fallbackRiskAcquisition(draft: TrackDraft): RiskAcquisitionParsed {
   return {
-    initialRatio: parseFiniteNumber(draft.riskAcquisition.initialRatio) ?? 0.3,
+    initialRatio: parseFiniteNumber(draft.riskAcquisition.initialRatio) ?? 0.5,
     advantageSteps: parseFiniteNumber(draft.riskAcquisition.advantageSteps) ?? 2,
     minReleaseSteps: parseFiniteNumber(draft.riskAcquisition.minReleaseSteps) ?? 1,
     maxReleaseSteps: parseFiniteNumber(draft.riskAcquisition.maxReleaseSteps) ?? 4,
     catchupRatio: parseFiniteNumber(draft.riskAcquisition.catchupRatio) ?? 0.25,
     staleReleaseMinutes:
-      parseFiniteNumber(draft.riskAcquisition.staleReleaseMinutes) ?? 30,
+      parseFiniteNumber(draft.riskAcquisition.staleReleaseMinutes) ?? 60,
   };
 }
 

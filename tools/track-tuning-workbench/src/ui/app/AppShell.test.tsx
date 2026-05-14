@@ -106,12 +106,12 @@ function createMockBridge(
     loadSavedDraft: vi.fn(async () => null),
     saveDraft: vi.fn(async () => {}),
     loadRiskAcquisitionDefaults: vi.fn(async () => ({
-      initialRatio: '0.3',
+      initialRatio: '0.5',
       advantageSteps: '2',
       minReleaseSteps: '1',
       maxReleaseSteps: '4',
       catchupRatio: '0.25',
-      staleReleaseMinutes: '30',
+      staleReleaseMinutes: '60',
     })),
     exportCurrentTrack: vi.fn(async () => '[[tracks]]\ntrack_id = "silver"'),
     exportAllTracks: vi.fn(async () => '[[tracks]]\ntrack_id = "silver"\n\n[[tracks]]\ntrack_id = "gold"'),
@@ -262,12 +262,12 @@ describe('AppShell', () => {
         drafts: [
           makeDraft('draft-silver', {
             riskAcquisition: {
-              initialRatio: '0.3',
+              initialRatio: '0.5',
               advantageSteps: '2',
               minReleaseSteps: '1',
               maxReleaseSteps: '4',
               catchupRatio: '0.25',
-              staleReleaseMinutes: '30',
+              staleReleaseMinutes: '60',
             },
           }),
         ],

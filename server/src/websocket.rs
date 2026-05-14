@@ -663,7 +663,7 @@ fn project_live_risk_acquisition(
             }
         },
         curve_target: source.curve_target.0,
-        allowed_target: source.allowed_target.0,
+        risk_release_frontier: source.risk_release_frontier.0,
         backlog_units: source.backlog_units,
         anchor_price: source.anchor_price,
         anchor_curve_target: source.anchor_curve_target.0,
@@ -825,7 +825,7 @@ mod tests {
             risk_acquisition: Some(RiskAcquisitionRuntimeView {
                 direction: RiskAcquisitionDirection::Long,
                 curve_target: Exposure(4.0),
-                allowed_target: Exposure(1.2),
+                risk_release_frontier: Exposure(1.2),
                 backlog_units: 2.8,
                 anchor_price: 95.0,
                 anchor_curve_target: Exposure(4.0),
