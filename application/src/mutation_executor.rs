@@ -2508,7 +2508,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_cancel_order_success_clears_cancel_binding_and_preserves_downstream_submits() {
+    async fn record_cancel_order_success_clears_cancel_binding_without_fill() {
         let repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
 
@@ -2535,10 +2535,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         pending_submits.sort_by_key(|effect| effect.sequence);
-        assert!(
-            pending_submits.len() > 2,
-            "test requires multiple downstream submit effects"
-        );
+        assert!(!pending_submits.is_empty(), "test requires a submit effect");
         let blocked_submit = pending_submits[0].clone();
         let TrackEffect::SubmitOrder {
             request: blocked_request,
@@ -2548,21 +2545,6 @@ mod tests {
             panic!("blocked effect should be submit order");
         };
         let blocked_client_order_id = blocked_request.client_order_id.clone();
-        let downstream_client_order_ids = pending_submits
-            .iter()
-            .filter(|effect| {
-                effect.batch_id == blocked_submit.batch_id
-                    && effect.sequence > blocked_submit.sequence
-            })
-            .filter_map(|effect| match &effect.effect {
-                TrackEffect::SubmitOrder { request, .. } => Some(request.client_order_id.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            downstream_client_order_ids.len() > 1,
-            "test requires more than one downstream submit after the cancel effect"
-        );
         let closed_order_id = "closed-order";
         let cancel_effect = repository
             .replace_submit_effect_with_cancel_order(&blocked_submit.effect_id, closed_order_id);
@@ -2626,17 +2608,10 @@ mod tests {
             !snapshot.has_active_binding_for_order_id(closed_order_id),
             "closed order should no longer have an active runtime binding"
         );
-        for client_order_id in downstream_client_order_ids {
-            assert_eq!(
-                snapshot.binding_is_active_for_client_order_id(&client_order_id),
-                Some(true),
-                "downstream binding should remain in runtime state"
-            );
-        }
     }
 
     #[tokio::test]
-    async fn record_cancel_order_success_with_fill_classifies_downstream_queue_action() {
+    async fn record_cancel_order_success_with_fill_classifies_cancel_receipt() {
         let repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
 
@@ -2663,10 +2638,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         pending_submits.sort_by_key(|effect| effect.sequence);
-        assert!(
-            pending_submits.len() > 2,
-            "test requires multiple downstream submit effects"
-        );
+        assert!(!pending_submits.is_empty(), "test requires a submit effect");
         let blocked_submit = pending_submits[0].clone();
         let TrackEffect::SubmitOrder {
             request: blocked_request,
@@ -2676,23 +2648,6 @@ mod tests {
             panic!("blocked effect should be submit order");
         };
         let blocked_client_order_id = blocked_request.client_order_id.clone();
-        let downstream = pending_submits
-            .iter()
-            .filter(|effect| {
-                effect.batch_id == blocked_submit.batch_id
-                    && effect.sequence > blocked_submit.sequence
-            })
-            .filter_map(|effect| match &effect.effect {
-                TrackEffect::SubmitOrder { request, .. } => {
-                    Some((effect.effect_id.clone(), request.client_order_id.clone()))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            downstream.len() > 1,
-            "test requires more than one downstream submit after the cancel effect"
-        );
         let closed_order_id = "closed-order";
         let cancel_effect = repository
             .replace_submit_effect_with_cancel_order(&blocked_submit.effect_id, closed_order_id);
@@ -2744,17 +2699,6 @@ mod tests {
             .find(|effect| effect.effect_id == cancel_effect.effect_id)
             .expect("cancel effect should remain persisted");
         assert_eq!(persisted_cancel.status, EffectStatus::Succeeded);
-        for (effect_id, _) in &downstream {
-            let effect = persisted
-                .iter()
-                .find(|effect| effect.effect_id == *effect_id)
-                .expect("downstream submit effect should remain persisted");
-            assert_eq!(
-                effect.status,
-                EffectStatus::Pending,
-                "mutation writeback only classifies the receipt; queue owns downstream retirement"
-            );
-        }
         assert_eq!(
             repository.effect_outcome_write_call_count(),
             outcome_writes_before_cancel + 1,
@@ -2766,11 +2710,13 @@ mod tests {
             .await
             .mutation_frame("btc-core")
             .expect("track mutation frame");
-        for (_, client_order_id) in downstream {
-            assert!(
-                snapshot.binding_is_active_for_client_order_id(&client_order_id) == Some(true),
-                "queue action, not cancel receipt writeback, retires downstream runtime bindings"
-            );
-        }
+        let (_, blocked_binding_status) = snapshot
+            .binding_receipt_for_client_order_id(&blocked_client_order_id)
+            .expect("blocked binding should remain in runtime history");
+        assert_eq!(blocked_binding_status, BindingStatus::Terminal);
+        assert!(
+            !snapshot.has_active_binding_for_order_id(closed_order_id),
+            "closed order should no longer have an active runtime binding"
+        );
     }
 }

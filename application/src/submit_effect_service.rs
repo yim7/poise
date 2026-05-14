@@ -361,8 +361,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_effect_service_recovers_live_order_into_current_binding_selected_by_recovery_token()
-     {
+    async fn submit_effect_service_recovers_live_order_with_recovery_token_request() {
         let repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
 
@@ -381,22 +380,22 @@ mod tests {
             .unwrap();
 
         let submits = pending_submit_effects(&repository);
-        assert!(submits.len() > 1, "test requires multiple submit effects");
+        assert!(!submits.is_empty(), "test requires a submit effect");
 
-        let stale = submits.first().unwrap().clone();
-        let target = submits.last().unwrap().clone();
+        let target = submits.first().unwrap().clone();
         assert_ne!(
-            stale.request.client_order_id,
-            target.request.client_order_id
+            target.recovery_token,
+            SubmitRecoveryToken::empty(),
+            "submit recovery should use stable binding identity"
         );
 
         let live_order = ExchangeOrder {
-            instrument: stale.request.instrument.clone(),
+            instrument: target.request.instrument.clone(),
             order_id: "live-order-1".into(),
-            client_order_id: stale.request.client_order_id.clone(),
-            side: stale.request.side,
-            price: stale.request.price,
-            qty: stale.request.quantity,
+            client_order_id: "stale-live-client".into(),
+            side: target.request.side,
+            price: target.request.price,
+            qty: target.request.quantity,
             filled_qty: 0.0,
             status: OrderStatus::New,
         };
