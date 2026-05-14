@@ -136,6 +136,9 @@ mod tests {
             universe: vec![PerpAssetMeta {
                 name: "BTC".to_string(),
                 sz_decimals: 5,
+                max_leverage: Some(40),
+                only_isolated: None,
+                margin_mode: None,
             }],
         };
 
@@ -162,6 +165,9 @@ mod tests {
             universe: vec![PerpAssetMeta {
                 name: "ETH".to_string(),
                 sz_decimals: 4,
+                max_leverage: Some(25),
+                only_isolated: None,
+                margin_mode: None,
             }],
         };
 

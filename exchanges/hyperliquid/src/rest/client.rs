@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex as AsyncMutex, OnceCell};
 
 use poise_core::types::PriceRounding;
 use poise_engine::ports::{
@@ -23,7 +24,8 @@ use crate::rest::actions::{
 };
 use crate::rest::error::HyperliquidRestError;
 use crate::rest::models::{
-    ClearinghouseStateResponse, MetaResponse, OpenOrderResponse, SpotClearinghouseStateResponse,
+    ClearinghouseStateResponse, MetaResponse, OpenOrderResponse, PerpAssetMeta, PerpDexMeta,
+    SpotClearinghouseStateResponse,
 };
 use crate::rules::normalize_perp_price;
 use crate::signing::{HyperliquidChain, action_hash, sign_l1_action};
@@ -36,15 +38,39 @@ pub(crate) struct HyperliquidRestClient {
     credentials: Credentials,
     timestamp_provider: Arc<dyn Fn() -> u64 + Send + Sync>,
     chain: HyperliquidChain,
-    meta_cache: OnceCell<MetaResponse>,
+    meta_cache: AsyncMutex<HashMap<PerpDexKey, MetaResponse>>,
+    perp_dex_index_cache: AsyncMutex<HashMap<String, u32>>,
     uses_spot_margin_balance_cache: OnceCell<bool>,
     client_order_ids: Arc<ClientOrderIdMapper>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PerpDexRef<'a> {
+    Default,
+    Hip3 { dex: &'a str },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PerpDexKey {
+    Default,
+    Hip3(String),
+}
+
+impl PerpDexKey {
+    fn from_ref(dex_ref: PerpDexRef<'_>) -> Self {
+        match dex_ref {
+            PerpDexRef::Default => Self::Default,
+            PerpDexRef::Hip3 { dex } => Self::Hip3(dex.to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AssetDescriptor {
     id: u32,
     sz_decimals: u32,
+    max_leverage: Option<u32>,
+    leverage_is_cross: bool,
 }
 
 impl HyperliquidRestClient {
@@ -106,20 +132,22 @@ impl HyperliquidRestClient {
             credentials,
             timestamp_provider,
             chain,
-            meta_cache: OnceCell::new(),
+            meta_cache: AsyncMutex::new(HashMap::new()),
+            perp_dex_index_cache: AsyncMutex::new(HashMap::new()),
             uses_spot_margin_balance_cache: OnceCell::new(),
             client_order_ids,
         }
     }
 
     pub(crate) async fn get_exchange_info(&self, symbol: &str) -> Result<ExchangeInfo> {
-        let meta = self.meta().await?;
+        let dex_ref = parse_perp_dex(symbol)?;
+        let meta = self.meta(dex_ref).await?;
         build_exchange_info(&meta, symbol)
     }
 
     pub(crate) async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
         let uses_spot_margin_balance = self.uses_spot_margin_balance().await?;
-        let state = self.user_state().await?;
+        let state = self.account_state().await?;
         let mut summary = account_summary_from_state(&state)?;
         if uses_spot_margin_balance {
             let spot_state = self.spot_user_state().await?;
@@ -141,7 +169,7 @@ impl HyperliquidRestClient {
             });
         }
 
-        let state = self.user_state().await?;
+        let state = self.account_state().await?;
         let withdrawable = state
             .withdrawable
             .parse::<f64>()
@@ -152,17 +180,20 @@ impl HyperliquidRestClient {
     }
 
     pub(crate) async fn get_position(&self, symbol: &str) -> Result<Position> {
-        let state = self.user_state().await?;
+        let state = self.user_state_for_symbol(symbol).await?;
         position_from_state(&state, symbol)
     }
 
     pub(crate) async fn get_open_orders(&self, symbol: &str) -> Result<Vec<ExchangeOrder>> {
-        let orders: Vec<OpenOrderResponse> = self
-            .post_info(&json!({
+        let dex_ref = parse_perp_dex(symbol)?;
+        let body = with_perp_dex(
+            json!({
                 "type": "openOrders",
                 "user": self.credentials.wallet_address(),
-            }))
-            .await?;
+            }),
+            dex_ref,
+        );
+        let orders: Vec<OpenOrderResponse> = self.post_info(&body).await?;
         orders
             .into_iter()
             .filter(|order| order.coin == symbol)
@@ -239,29 +270,55 @@ impl HyperliquidRestClient {
     }
 
     pub(crate) async fn set_leverage(&self, symbol: &str, leverage: u32) -> Result<()> {
-        let asset = self.asset_id(symbol).await?;
+        let asset = self.asset_descriptor(symbol).await?;
+        if let Some(max_leverage) = asset.max_leverage {
+            if leverage > max_leverage {
+                return Err(anyhow!(
+                    "Hyperliquid leverage {}x exceeds maxLeverage {}x for asset `{symbol}`",
+                    leverage,
+                    max_leverage
+                ));
+            }
+        }
         let action = ExchangeAction::UpdateLeverage(UpdateLeverageAction {
-            asset,
-            is_cross: true,
+            asset: asset.id,
+            is_cross: asset.leverage_is_cross,
             leverage,
         });
         let response = self.post_exchange(&action).await?;
         ensure_exchange_ok(response)
     }
 
-    async fn meta(&self) -> Result<MetaResponse> {
-        self.meta_cache
-            .get_or_try_init(|| async { self.post_info(&json!({ "type": "meta" })).await })
-            .await
-            .cloned()
+    async fn meta(&self, dex_ref: PerpDexRef<'_>) -> Result<MetaResponse> {
+        let key = PerpDexKey::from_ref(dex_ref);
+        if let Some(meta) = self.meta_cache.lock().await.get(&key).cloned() {
+            return Ok(meta);
+        }
+
+        let body = with_perp_dex(json!({ "type": "meta" }), dex_ref);
+        let meta: MetaResponse = self.post_info(&body).await?;
+        self.meta_cache.lock().await.insert(key, meta.clone());
+        Ok(meta)
     }
 
-    async fn user_state(&self) -> Result<ClearinghouseStateResponse> {
+    async fn account_state(&self) -> Result<ClearinghouseStateResponse> {
         self.post_info(&json!({
             "type": "clearinghouseState",
             "user": self.credentials.wallet_address(),
         }))
         .await
+    }
+
+    async fn user_state_for_symbol(&self, symbol: &str) -> Result<ClearinghouseStateResponse> {
+        let dex_ref = parse_perp_dex(symbol)?;
+        let body = with_perp_dex(
+            json!({
+                "type": "clearinghouseState",
+                "user": self.credentials.wallet_address(),
+            }),
+            dex_ref,
+        );
+        self.post_info(&body).await
     }
 
     async fn spot_user_state(&self) -> Result<SpotClearinghouseStateResponse> {
@@ -295,16 +352,56 @@ impl HyperliquidRestClient {
     }
 
     async fn asset_descriptor(&self, symbol: &str) -> Result<AssetDescriptor> {
-        let meta = self.meta().await?;
-        meta.universe
+        let dex_ref = parse_perp_dex(symbol)?;
+        let meta = self.meta(dex_ref).await?;
+        let (index, asset) = meta
+            .universe
             .iter()
             .enumerate()
             .find(|(_, asset)| asset.name == symbol)
-            .map(|(index, asset)| AssetDescriptor {
-                id: index as u32,
-                sz_decimals: asset.sz_decimals,
+            .ok_or_else(|| match dex_ref {
+                PerpDexRef::Default => anyhow!("missing Hyperliquid asset `{symbol}`"),
+                PerpDexRef::Hip3 { dex } => {
+                    anyhow!("missing Hyperliquid asset `{symbol}` in perp dex `{dex}`")
+                }
+            })?;
+        let leverage_is_cross = leverage_is_cross(symbol, dex_ref, asset)?;
+        let id = match dex_ref {
+            PerpDexRef::Default => index as u32,
+            PerpDexRef::Hip3 { dex } => {
+                hip3_asset_id(self.perp_dex_index(dex).await?, index as u32)
+            }
+        };
+        Ok(AssetDescriptor {
+            id,
+            sz_decimals: asset.sz_decimals,
+            max_leverage: asset.max_leverage,
+            leverage_is_cross,
+        })
+    }
+
+    async fn perp_dex_index(&self, dex: &str) -> Result<u32> {
+        if let Some(index) = self.perp_dex_index_cache.lock().await.get(dex).copied() {
+            return Ok(index);
+        }
+
+        let dexes: Vec<Option<PerpDexMeta>> =
+            self.post_info(&json!({ "type": "perpDexs" })).await?;
+        let index = dexes
+            .iter()
+            .enumerate()
+            .find_map(|(index, entry)| {
+                entry
+                    .as_ref()
+                    .filter(|entry| entry.name == dex)
+                    .map(|_| index as u32)
             })
-            .ok_or_else(|| anyhow!("missing Hyperliquid asset `{symbol}`"))
+            .ok_or_else(|| anyhow!("missing Hyperliquid perp dex `{dex}`"))?;
+        self.perp_dex_index_cache
+            .lock()
+            .await
+            .insert(dex.to_string(), index);
+        Ok(index)
     }
 
     async fn post_info<T: DeserializeOwned>(&self, body: &serde_json::Value) -> Result<T> {
@@ -355,6 +452,54 @@ impl HyperliquidRestClient {
 
 fn usdc_total_balance(state: &SpotClearinghouseStateResponse) -> Result<f64> {
     parse_decimal("USDC.total", &usdc_balance(state)?.total)
+}
+
+fn parse_perp_dex(symbol: &str) -> Result<PerpDexRef<'_>> {
+    match symbol.split_once(':') {
+        None => Ok(PerpDexRef::Default),
+        Some((dex, coin)) => {
+            if coin.contains(':') || dex.is_empty() || coin.is_empty() {
+                return Err(anyhow!(
+                    "invalid Hyperliquid HIP-3 symbol `{symbol}`: expected `{{dex}}:{{coin}}`"
+                ));
+            }
+            if !dex.chars().all(|value| value.is_ascii_graphic()) {
+                return Err(anyhow!(
+                    "invalid Hyperliquid HIP-3 symbol `{symbol}`: dex must contain only visible ASCII characters"
+                ));
+            }
+            Ok(PerpDexRef::Hip3 { dex })
+        }
+    }
+}
+
+fn with_perp_dex(mut body: serde_json::Value, dex_ref: PerpDexRef<'_>) -> serde_json::Value {
+    if let PerpDexRef::Hip3 { dex } = dex_ref {
+        body["dex"] = json!(dex);
+    }
+    body
+}
+
+fn hip3_asset_id(perp_dex_index: u32, index_in_meta: u32) -> u32 {
+    100_000 + perp_dex_index * 10_000 + index_in_meta
+}
+
+fn leverage_is_cross(symbol: &str, dex_ref: PerpDexRef<'_>, asset: &PerpAssetMeta) -> Result<bool> {
+    if matches!(dex_ref, PerpDexRef::Default) {
+        return Ok(true);
+    }
+
+    if asset.only_isolated.unwrap_or(false) {
+        return Ok(false);
+    }
+
+    match asset.margin_mode.as_deref() {
+        None => Ok(true),
+        Some("noCross" | "strictIsolated") => Ok(false),
+        Some(other) => Err(anyhow!(
+            "unsupported Hyperliquid marginMode `{other}` for asset `{symbol}`"
+        )),
+    }
 }
 
 fn usdc_available_after_maintenance(state: &SpotClearinghouseStateResponse) -> Result<f64> {
@@ -509,7 +654,7 @@ mod tests {
         sync::Mutex,
     };
 
-    use super::HyperliquidRestClient;
+    use super::{HyperliquidRestClient, PerpDexRef, parse_perp_dex};
     use crate::config::Credentials;
 
     fn credentials() -> Credentials {
@@ -523,6 +668,24 @@ mod tests {
         }
         .credentials()
         .unwrap()
+    }
+
+    #[test]
+    fn parses_hyperliquid_default_and_hip3_symbols() {
+        assert_eq!(parse_perp_dex("BTC").unwrap(), PerpDexRef::Default);
+        assert_eq!(
+            parse_perp_dex("xyz:CBRS").unwrap(),
+            PerpDexRef::Hip3 { dex: "xyz" }
+        );
+
+        for symbol in ["xyz:", ":CBRS", "a:b:c"] {
+            let error = parse_perp_dex(symbol).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid Hyperliquid HIP-3 symbol")
+            );
+        }
     }
 
     #[tokio::test]
@@ -711,6 +874,237 @@ mod tests {
                 "meta",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn meta_cache_is_scoped_by_perp_dex() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"BTC","szDecimals":5,"maxLeverage":40}]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"xyz:CBRS","szDecimals":2,"maxLeverage":10,"onlyIsolated":true,"marginMode":"noCross"}]}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_000_000_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let default_info = client.get_exchange_info("BTC").await.unwrap();
+        let hip3_info = client.get_exchange_info("xyz:CBRS").await.unwrap();
+        client.get_exchange_info("BTC").await.unwrap();
+        client.get_exchange_info("xyz:CBRS").await.unwrap();
+
+        assert_eq!(
+            default_info.instrument,
+            Instrument::new(Venue::Hyperliquid, "BTC")
+        );
+        assert_eq!(
+            hip3_info.instrument,
+            Instrument::new(Venue::Hyperliquid, "xyz:CBRS")
+        );
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].json_body()["type"], "meta");
+        assert!(requests[0].json_body().get("dex").is_none());
+        assert_eq!(requests[1].json_body()["type"], "meta");
+        assert_eq!(requests[1].json_body()["dex"], "xyz");
+    }
+
+    #[tokio::test]
+    async fn hip3_leverage_uses_builder_asset_id_margin_mode_and_max_leverage() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"xyz:XYZ100","szDecimals":2,"maxLeverage":10},{"name":"xyz:CBRS","szDecimals":2,"maxLeverage":10,"onlyIsolated":true,"marginMode":"noCross"}]}"#,
+            ),
+            MockResponse::json(200, r#"[null,{"name":"xyz","fullName":"XYZ"}]"#),
+            MockResponse::json(
+                200,
+                r#"{"status":"ok","response":{"type":"updateLeverage"}}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        client.set_leverage("xyz:CBRS", 3).await.unwrap();
+        let error = client.set_leverage("xyz:CBRS", 11).await.unwrap_err();
+
+        assert!(error.to_string().contains("exceeds maxLeverage 10x"));
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].json_body()["type"], "meta");
+        assert_eq!(requests[0].json_body()["dex"], "xyz");
+        assert_eq!(requests[1].json_body()["type"], "perpDexs");
+        assert_eq!(requests[2].json_body()["action"]["type"], "updateLeverage");
+        assert_eq!(requests[2].json_body()["action"]["asset"], 110001);
+        assert_eq!(requests[2].json_body()["action"]["isCross"], false);
+        assert_eq!(requests[2].json_body()["action"]["leverage"], 3);
+    }
+
+    #[tokio::test]
+    async fn hip3_leverage_allows_cross_when_margin_mode_is_unspecified() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"xyz:TSLA","szDecimals":2,"maxLeverage":10}]}"#,
+            ),
+            MockResponse::json(200, r#"[null,{"name":"xyz","fullName":"XYZ"}]"#),
+            MockResponse::json(
+                200,
+                r#"{"status":"ok","response":{"type":"updateLeverage"}}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        client.set_leverage("xyz:TSLA", 3).await.unwrap();
+
+        let requests = server.requests().await;
+        assert_eq!(requests[2].json_body()["action"]["asset"], 110000);
+        assert_eq!(requests[2].json_body()["action"]["isCross"], true);
+    }
+
+    #[tokio::test]
+    async fn hip3_leverage_fails_closed_for_unknown_margin_mode() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"universe":[{"name":"xyz:ODD","szDecimals":2,"maxLeverage":10,"marginMode":"futureMode"}]}"#,
+        )])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = client.set_leverage("xyz:ODD", 3).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Hyperliquid marginMode")
+        );
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].json_body()["type"], "meta");
+    }
+
+    #[tokio::test]
+    async fn hip3_submit_cancel_and_cancel_all_use_builder_asset_id() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"xyz:XYZ100","szDecimals":2,"maxLeverage":10},{"name":"xyz:CBRS","szDecimals":2,"maxLeverage":10,"onlyIsolated":true,"marginMode":"noCross"}]}"#,
+            ),
+            MockResponse::json(200, r#"[null,{"name":"xyz","fullName":"XYZ"}]"#),
+            MockResponse::json(
+                200,
+                r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":67890}}]}}}"#,
+            ),
+            MockResponse::json(200, r#"{"status":"ok","response":{"type":"cancel"}}"#),
+            MockResponse::json(
+                200,
+                r#"[{"coin":"xyz:CBRS","oid":12345,"side":"B","limitPx":"100.5","sz":"2"}]"#,
+            ),
+            MockResponse::json(200, r#"{"status":"ok","response":{"type":"cancel"}}"#),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        client
+            .submit_order(PortOrderRequest {
+                instrument: Instrument::new(Venue::Hyperliquid, "xyz:CBRS"),
+                side: Side::Buy,
+                price: 100.5,
+                quantity: 2.0,
+                client_order_id: "bc-hip3-submit".to_string(),
+                reduce_only: false,
+            })
+            .await
+            .unwrap();
+        client.cancel_order("xyz:CBRS", "67890").await.unwrap();
+        client.cancel_all("xyz:CBRS").await.unwrap();
+
+        let requests = server.requests().await;
+        assert_eq!(requests[0].json_body()["type"], "meta");
+        assert_eq!(requests[0].json_body()["dex"], "xyz");
+        assert_eq!(requests[1].json_body()["type"], "perpDexs");
+        assert_eq!(requests[2].json_body()["action"]["orders"][0]["a"], 110001);
+        assert_eq!(requests[3].json_body()["action"]["cancels"][0]["a"], 110001);
+        assert_eq!(requests[4].json_body()["type"], "openOrders");
+        assert_eq!(requests[4].json_body()["dex"], "xyz");
+        assert_eq!(requests[5].json_body()["action"]["cancels"][0]["a"], 110001);
+        assert_eq!(requests[5].json_body()["action"]["cancels"][0]["o"], 12345);
+    }
+
+    #[tokio::test]
+    async fn hip3_state_queries_use_dex_but_account_capacity_uses_account_scope() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"marginSummary":{"accountValue":"125.5"},"withdrawable":"100.25","assetPositions":[{"position":{"coin":"xyz:CBRS","szi":"2.0","entryPx":"100.5","unrealizedPnl":"3.25"}}]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"[{"coin":"xyz:CBRS","oid":12345,"side":"B","limitPx":"100.5","sz":"2"}]"#,
+            ),
+            MockResponse::json(200, r#""disabled""#),
+            MockResponse::json(
+                200,
+                r#"{"marginSummary":{"accountValue":"125.5"},"withdrawable":"100.25","assetPositions":[]}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_000_000_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let position = client.get_position("xyz:CBRS").await.unwrap();
+        let open_orders = client.get_open_orders("xyz:CBRS").await.unwrap();
+        let capacity = client.get_account_capacity_snapshot(3).await.unwrap();
+
+        assert_eq!(
+            position.instrument,
+            Instrument::new(Venue::Hyperliquid, "xyz:CBRS")
+        );
+        assert_eq!(position.qty, 2.0);
+        assert_eq!(open_orders.len(), 1);
+        assert_eq!(capacity.max_increase_notional, 300.75);
+        let requests = server.requests().await;
+        assert_eq!(requests[0].json_body()["type"], "clearinghouseState");
+        assert_eq!(requests[0].json_body()["dex"], "xyz");
+        assert_eq!(requests[1].json_body()["type"], "openOrders");
+        assert_eq!(requests[1].json_body()["dex"], "xyz");
+        assert_eq!(requests[2].json_body()["type"], "userAbstraction");
+        assert!(requests[2].json_body().get("dex").is_none());
+        assert_eq!(requests[3].json_body()["type"], "clearinghouseState");
+        assert!(requests[3].json_body().get("dex").is_none());
     }
 
     #[tokio::test]

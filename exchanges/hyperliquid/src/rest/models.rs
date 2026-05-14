@@ -10,6 +10,17 @@ pub(crate) struct PerpAssetMeta {
     pub name: String,
     #[serde(rename = "szDecimals")]
     pub sz_decimals: u32,
+    #[serde(rename = "maxLeverage", default)]
+    pub max_leverage: Option<u32>,
+    #[serde(rename = "onlyIsolated", default)]
+    pub only_isolated: Option<bool>,
+    #[serde(rename = "marginMode", default)]
+    pub margin_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct PerpDexMeta {
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -75,16 +86,42 @@ mod tests {
     #[test]
     fn deserializes_meta_response() {
         let response: MetaResponse =
-            serde_json::from_str(r#"{"universe":[{"name":"BTC","szDecimals":5}]}"#).unwrap();
+            serde_json::from_str(r#"{"universe":[{"name":"BTC","szDecimals":5,"maxLeverage":40},{"name":"xyz:CBRS","szDecimals":2,"maxLeverage":10,"onlyIsolated":true,"marginMode":"noCross"}]}"#).unwrap();
 
         assert_eq!(
             response,
             MetaResponse {
-                universe: vec![PerpAssetMeta {
-                    name: "BTC".to_string(),
-                    sz_decimals: 5,
-                }],
+                universe: vec![
+                    PerpAssetMeta {
+                        name: "BTC".to_string(),
+                        sz_decimals: 5,
+                        max_leverage: Some(40),
+                        only_isolated: None,
+                        margin_mode: None,
+                    },
+                    PerpAssetMeta {
+                        name: "xyz:CBRS".to_string(),
+                        sz_decimals: 2,
+                        max_leverage: Some(10),
+                        only_isolated: Some(true),
+                        margin_mode: Some("noCross".to_string()),
+                    }
+                ],
             }
+        );
+    }
+
+    #[test]
+    fn deserializes_perp_dexs_response() {
+        let response: Vec<Option<PerpDexMeta>> =
+            serde_json::from_str(r#"[null,{"name":"xyz","fullName":"XYZ"}]"#).unwrap();
+
+        assert_eq!(response[0], None);
+        assert_eq!(
+            response[1],
+            Some(PerpDexMeta {
+                name: "xyz".to_string(),
+            })
         );
     }
 
