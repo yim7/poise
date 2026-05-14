@@ -311,6 +311,57 @@ total_loss_limit = 600.0
     }
 
     #[test]
+    fn parses_hyperliquid_default_and_hip3_tracks_in_same_instance() {
+        let config = parse_config(
+            r#"
+[exchange]
+venue = "hyperliquid"
+deployment = "mainnet"
+private_key = "0x1111111111111111111111111111111111111111111111111111111111111111"
+wallet_address = "0x2222222222222222222222222222222222222222"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTC"
+lower_price = 90000.0
+upper_price = 110000.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+
+[[tracks]]
+track_id = "cbrs-hip3"
+symbol = "xyz:CBRS"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 100.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.exchange.venue(), Venue::Hyperliquid);
+        let instruments = config
+            .tracks
+            .iter()
+            .map(|track| {
+                track
+                    .to_track_definition(config.exchange.venue())
+                    .unwrap()
+                    .instrument()
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(instruments[0].symbol, "BTC");
+        assert_eq!(instruments[1].symbol, "xyz:CBRS");
+    }
+
+    #[test]
     fn parses_okx_exchange_config() {
         let config = parse_config(
             r#"

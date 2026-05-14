@@ -109,7 +109,7 @@ invalid Hyperliquid HIP-3 symbol `xyz:`: expected `{dex}:{coin}`
 - 如何按 dex name 查询 `perpDexs` 并映射为 dex index。
 - 默认 perps 和 HIP-3 perps 的 asset id 公式。
 - `MetaResponse` 中 `onlyIsolated`、`marginMode`、`maxLeverage` 对 leverage action 的影响。
-- WS subscription 是否需要带 `dex` 或仅使用 `{dex}:{coin}` wire name。
+- WS market subscription 使用 `{dex}:{coin}` wire name；账户级 user stream subscription 不带 dex。
 
 ### Server 拥有的知识
 
@@ -294,17 +294,15 @@ if let Some(max_leverage) = descriptor.max_leverage {
 
 设计选择：
 
-- 对 HIP-3，优先使用 `coin = "xyz:CBRS"`，不额外暴露新 port。
-- 如果实测 WS subscription 也需要 `dex` 字段，则 `subscribe_market` 私有函数从 symbol 解析 dex 并自动加入。
-- user stream 是账户级能力，当前 `AccountPort::subscribe_user_data()` 没有 instruments 参数。实现前必须确认 Hyperliquid user stream 对 HIP-3 是否账户级覆盖全部 dex。
-- 如果官方 user stream 覆盖全部 dex，则订阅不带 dex，解析层保留现有事件，runtime 按 instrument 过滤。
-- 如果官方 user stream 必须按 dex 订阅，本 spec 不允许临时在 WS client 构造时固定一个 dex；需要先升级 `AccountPort` / runtime 装配边界，让订阅端拿到当前实例的 dex 集合，再作为单独设计变更处理。
+- 对 HIP-3，使用 `coin = "xyz:CBRS"`，不额外带 `dex`，不暴露新 port。
+- `orderUpdates`、`userEvents`、`userFills`、`userFundings` 是账户级 user stream subscription，不带 dex；解析层保留现有事件，runtime 按 instrument 过滤。
+- 如果未来改用 `clearinghouseState` / `openOrders` 这类需要 dex 的 WS subscription，需要单独设计订阅输入边界；不要在当前 `HyperliquidWsClient` 构造时固定单一 dex。
 
 构造方式：
 
 - 不把 dex 放进 `HyperliquidWsClient` 构造参数。
 - market stream 的 dex 上下文来自每次 `subscribe_prices(instrument)` 的 `instrument.symbol`。
-- user stream 首版只接受账户级订阅方案。若验证结果不是账户级，停止实现并先更新本 spec。
+- user stream 保持账户级订阅，不需要当前实例的 dex 集合。
 
 ## 账户资产和容量
 
@@ -354,8 +352,8 @@ HIP-3 设计：
 - `set_leverage` 对 HIP-3 未知非空 margin mode fail closed。
 - `set_leverage` 对超过 `maxLeverage` 的配置 fail before exchange action。
 - submit / cancel / cancel all 使用 HIP-3 asset id。
-- WS market subscription 对 `xyz:CBRS` 保持 coin 原样；如实现带 `dex`，测试 JSON 包含该字段。
-- user stream 验证为账户级订阅后，补测试锁定订阅 JSON 不带单一 dex。
+- WS market subscription 对 `xyz:CBRS` 保持 coin 原样，且不带 `dex`。
+- user stream subscription JSON 不带单一 dex。
 
 最小测试命令：
 
@@ -388,7 +386,7 @@ cargo test -p poise-server config::tests::
 2. REST metadata 和 asset id 切片：实现按 symbol 注入 dex、按 dex 分桶 meta cache、`perpDexs` 查询、HIP-3 asset id 计算，并让 `get_exchange_info` 能同时找到 `BTC` 和 `xyz:CBRS`。
 3. 交易动作切片：让 leverage、submit、cancel、cancel all 统一使用新的 `AssetDescriptor`，并处理 isolated/cross。
 4. 状态查询切片：让 position、open orders 的 perps 查询按 instrument symbol 带 dex；账户容量继续使用共享账户余额。
-5. WS 切片：先确认 user stream 是否账户级；market stream 保持 `xyz:CBRS` wire name，按实测结果决定是否加入 dex 字段，补 subscription 测试。
+5. WS 切片：market stream 保持 `xyz:CBRS` wire name且不带 dex；user stream 保持账户级不带 dex；补 subscription 测试。
 6. 文档和验收切片：更新 README / system overview，跑 `poise-hyperliquid` 和直接相关的 `poise-server` config 测试。
 
 ## 备选方案
@@ -427,8 +425,6 @@ hyperliquid_dex = "xyz"
 
 ## 待确认
 
-- WebSocket `bbo` / `activeAssetCtx` 对 HIP-3 是否只需要 `coin = "xyz:CBRS"`，还是还要 `dex = "xyz"`。实现前应用主网只读 subscription 或本地 mock 验证。
-- WebSocket user stream 对 HIP-3 是否账户级覆盖全部 dex。若不是账户级，必须先重新设计 `AccountPort::subscribe_user_data` 的输入边界。
 - 是否存在已上线且 Poise 需要支持的 HIP-3 dex 使用非共享 collateral。如果存在，容量估算必须先返回明确限制，不能误报可用容量。
 - standard mode 下不带 dex 的 `clearinghouseState.withdrawable` 是否能作为默认 perps + HIP-3 混合实例的共享可用余额。如果不能确认，首版仅支持 unified / portfolio margin 下的 HIP-3 容量估算，或容量 fail closed。
 - `updateLeverage` 对 `onlyIsolated` / `noCross` / `strictIsolated` 资产使用 `isCross: false` 是否完全符合 Hyperliquid 当前接口语义，需要用测试账号或官方示例确认。

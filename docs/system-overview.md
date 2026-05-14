@@ -61,7 +61,7 @@ server::config::TrackSpec
 - Binance / Bybit 使用 `api_key` 和 `api_secret`；Hyperliquid 使用 `private_key` 和 `wallet_address`，可选 `vault_address`；OKX 使用 `api_key`、`api_secret` 和 `passphrase`。
 - `track_id` 是显式配置的稳定业务标识。
 - `Instrument` 由 `exchange.venue()` 和 track `symbol` 组成。
-- `symbol` 是当前交易所的合约标识：Binance / Bybit 使用 `BTCUSDT` 这类合约符号，Hyperliquid perpetuals 使用 `BTC`、`ETH` 这类 coin 名称，OKX SWAP 使用 `BTC-USDT-SWAP` 这类 instrument id。
+- `symbol` 是当前交易所的合约标识：Binance / Bybit 使用 `BTCUSDT` 这类合约符号，Hyperliquid 默认 perpetuals 使用 `BTC`、`ETH` 这类 coin 名称，Hyperliquid HIP-3 builder-deployed perpetuals 使用 `xyz:CBRS` 这类 `{dex}:{coin}` wire name，OKX SWAP 使用 `BTC-USDT-SWAP` 这类 instrument id。
 - 同一实例内 `track_id` 必须唯一。
 - 同一实例内 `Instrument { venue, symbol }` 必须唯一。
 - `leverage` 是 server-owned startup-only 配置，不进入 `TrackDefinition` 或 `TrackConfig`。
@@ -69,7 +69,7 @@ server::config::TrackSpec
 - `out_of_band_policy` 是每个 track 的单字段枚举配置，默认 `freeze`；`flatten` 可以用简写，也可以用对象形式配置 `trigger` 和 `recover`。
 - `risk_acquisition` 是每个 track 的参数子表，TOML 写作 `[tracks.risk_acquisition]`，归属于它前面最近的 `[[tracks]]`；省略子表时使用默认参数，不支持 `risk_acquisition = { ... }` 行内对象形式。
 
-当前交易所接入只覆盖 Poise 运行需要的合约能力。Hyperliquid 适配器只接入 perpetuals，不提供 spot、提现、划转、TWAP 或 vault 运维功能；可选 `vault_address` 只作为 Hyperliquid action 签名上下文进入适配器内部。Hyperliquid standard mode 使用 perps `clearinghouseState.withdrawable` 作为可用保证金口径；unified account / portfolio margin 使用 `spotClearinghouseState` 的 USDC 可用余额作为启动容量口径。OKX 适配器只接入 `SWAP` 永续合约，REST 覆盖规则查询、账户摘要、持仓、open orders、下单、撤单、cancel all 和启动期杠杆设置；WebSocket 覆盖 ticker、mark price、订单更新、成交 PNL、持仓更新、断线重连和重订阅。OKX 当前只支持 `cross` 保证金模式和 `net` 持仓模式，不提供 spot、期权、划转、提现或资金账户操作。
+当前交易所接入只覆盖 Poise 运行需要的合约能力。Hyperliquid 适配器只接入 perpetuals，不提供 spot、提现、划转、TWAP 或 vault 运维功能；可选 `vault_address` 只作为 Hyperliquid action 签名上下文进入适配器内部。Hyperliquid 默认 perpetuals 和 HIP-3 perpetuals 可以在同一实例中混配，适配器按 symbol 解析默认 dex 或 `{dex}:{coin}` HIP-3 dex 上下文；账户资产按 Hyperliquid 账户级共享余额处理。Hyperliquid standard mode 使用账户级 perps `clearinghouseState.withdrawable` 作为可用保证金口径；unified account / portfolio margin 使用 `spotClearinghouseState` 的 USDC 可用余额作为启动容量口径。OKX 适配器只接入 `SWAP` 永续合约，REST 覆盖规则查询、账户摘要、持仓、open orders、下单、撤单、cancel all 和启动期杠杆设置；WebSocket 覆盖 ticker、mark price、订单更新、成交 PNL、持仓更新、断线重连和重订阅。OKX 当前只支持 `cross` 保证金模式和 `net` 持仓模式，不提供 spot、期权、划转、提现或资金账户操作。
 
 `TrackSpec::to_track_definition(venue)` 负责把配置字段投影为 `TrackDefinition`，并触发 core 层策略、风险和默认值校验。
 

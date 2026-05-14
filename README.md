@@ -85,6 +85,8 @@ wallet_address = "0x..."
 # vault_address = "0x..."
 ```
 
+Hyperliquid 默认 perpetuals 和 HIP-3 builder-deployed perpetuals 可以在同一实例中混配。默认 perpetuals 使用 `BTC`、`ETH` 这类 coin 名称；HIP-3 使用交易所 wire name，例如 `xyz:CBRS`。
+
 OKX SWAP 永续合约：
 
 ```toml
@@ -150,7 +152,7 @@ total_loss_limit = 750.0
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
 | `track_id` | 必填 | 稳定业务标识，不由 `symbol` 派生。 |
-| `symbol` | 必填 | Binance / Bybit 使用 `BTCUSDT` 这类合约符号；Hyperliquid perpetuals 使用 `BTC`、`ETH` 这类 coin 名称；OKX SWAP 使用 `BTC-USDT-SWAP` 这类 instrument id。 |
+| `symbol` | 必填 | Binance / Bybit 使用 `BTCUSDT` 这类合约符号；Hyperliquid 默认 perpetuals 使用 `BTC`、`ETH` 这类 coin 名称，HIP-3 perpetuals 使用 `xyz:CBRS` 这类 `{dex}:{coin}` wire name；OKX SWAP 使用 `BTC-USDT-SWAP` 这类 instrument id。 |
 | `lower_price` | 必填 | 价格带下沿，必须小于 `upper_price`。 |
 | `upper_price` | 必填 | 价格带上沿。 |
 | `long_exposure_units` | 必填 | 价格到达下沿时的多头目标容量，必须非负。 |

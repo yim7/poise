@@ -593,6 +593,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_hip3_market_and_user_messages_with_wire_symbol() {
+        let bbo = parse_market_data_message(
+            r#"{"channel":"bbo","data":{"coin":"xyz:CBRS","time":1700000000000,"bbo":[{"px":"100.5","sz":"2","n":1},{"px":"101.0","sz":"3","n":1}]}}"#,
+            "xyz:CBRS",
+        )
+        .unwrap()
+        .unwrap();
+        let events = parse_user_data_message(
+            r#"{"channel":"orderUpdates","data":[{"order":{"coin":"xyz:CBRS","side":"B","limitPx":"100.5","sz":"2","oid":12345,"timestamp":1700000000000,"origSz":"2"},"status":"open","statusTimestamp":1700000000001}]}"#,
+        )
+        .unwrap();
+
+        match bbo {
+            MarketDataTick::ExecutionQuote(tick) => {
+                assert_eq!(
+                    tick.instrument,
+                    Instrument::new(Venue::Hyperliquid, "xyz:CBRS")
+                );
+                assert_eq!(tick.execution_quote.best_bid, 100.5);
+            }
+            MarketDataTick::MarkPrice(_) => panic!("expected execution quote tick"),
+        }
+        assert_eq!(
+            events[0].payload,
+            UserDataPayload::OrderUpdate(ExchangeOrder {
+                instrument: Instrument::new(Venue::Hyperliquid, "xyz:CBRS"),
+                order_id: "12345".to_string(),
+                client_order_id: "12345".to_string(),
+                side: Side::Buy,
+                price: 100.5,
+                qty: 2.0,
+                filled_qty: 0.0,
+                status: OrderStatus::New,
+            })
+        );
+    }
+
+    #[test]
     fn parses_order_updates_into_user_data_events() {
         let events = parse_user_data_message(
             r#"{"channel":"orderUpdates","data":[{"order":{"coin":"BTC","side":"B","limitPx":"65000.5","sz":"0.02","oid":12345,"timestamp":1700000000000,"origSz":"0.02","cloid":"0x11111111111111111111111111111111"},"status":"open","statusTimestamp":1700000000001}]}"#,
@@ -827,6 +865,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn market_subscription_uses_hip3_wire_symbol_without_dex() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_server = Arc::clone(&observed);
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.unwrap();
+            for _ in 0..2 {
+                if let Some(Ok(Message::Text(text))) = websocket.next().await {
+                    observed_server.lock().unwrap().push(text);
+                }
+            }
+            websocket
+                .send(Message::Text(
+                    r#"{"channel":"bbo","data":{"coin":"xyz:CBRS","time":1700000000000,"bbo":[{"px":"100.5","sz":"2","n":1},{"px":"101.0","sz":"3","n":1}]}}"#
+                        .to_string(),
+                ))
+                .await
+                .unwrap();
+            websocket.close(None).await.unwrap();
+        });
+
+        let client = HyperliquidWsClient::with_reconnect_delay(
+            format!("ws://{address}"),
+            "0x2222222222222222222222222222222222222222",
+            Duration::from_millis(10),
+        );
+        let mut receiver = client
+            .subscribe_prices(&Instrument::new(Venue::Hyperliquid, "xyz:CBRS"))
+            .await
+            .unwrap();
+        let first = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let messages = observed.lock().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.contains(r#""coin":"xyz:CBRS""#))
+        );
+        assert!(messages.iter().all(|message| !message.contains(r#""dex""#)));
+        match first {
+            MarketDataTick::ExecutionQuote(tick) => {
+                assert_eq!(
+                    tick.instrument,
+                    Instrument::new(Venue::Hyperliquid, "xyz:CBRS")
+                );
+            }
+            MarketDataTick::MarkPrice(_) => panic!("expected execution quote tick"),
+        }
+    }
+
+    #[tokio::test]
     async fn reconnects_user_stream_and_resubscribes_after_disconnect() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -898,6 +994,7 @@ mod tests {
                 .count()
                 == 2
         );
+        assert!(messages.iter().all(|message| !message.contains(r#""dex""#)));
         assert_eq!(first.event_time.timestamp_millis(), 1_700_000_000_001);
         assert_eq!(second.event_time.timestamp_millis(), 1_700_000_005_001);
     }
