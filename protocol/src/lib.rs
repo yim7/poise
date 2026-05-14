@@ -127,13 +127,13 @@ impl Default for RiskAcquisitionConfigView {
             min_release_steps: 1.0,
             max_release_steps: 4.0,
             catchup_ratio: 0.25,
-            stale_release_minutes: 60.0,
+            stale_release_minutes: 15.0,
         }
     }
 }
 
 fn default_risk_acquisition_config_stale_release_minutes() -> f64 {
-    60.0
+    15.0
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

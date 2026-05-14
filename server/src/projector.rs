@@ -644,7 +644,7 @@ mod tests {
         );
         assert_eq!(
             detail_json["strategy"]["risk_acquisition"]["stale_release_minutes"].as_f64(),
-            Some(60.0)
+            Some(15.0)
         );
         assert!(!detail.available_commands.is_empty());
         assert_eq!(
