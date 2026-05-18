@@ -1494,6 +1494,27 @@ mod tests {
     }
 
     #[test]
+    fn curve_maker_policy_emits_buy_side_reduce_only_binding_for_short_retrace() {
+        let config = config();
+        let rules = rules();
+
+        let plan = plan(input(&config, &rules, Exposure(-1.0), Exposure(-1.0)));
+
+        let buy_maker = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.proposal_key.policy == PolicyKind::CurveMaker
+                    && binding.request.side == Side::Buy
+                    && binding.request.reduce_only
+            })
+            .expect("buy-side short retrace maker binding should be reduce-only");
+        assert!(!buy_maker.increases_inventory());
+        assert_eq!(buy_maker.allocations.len(), 1);
+    }
+
+    #[test]
     fn planning_uses_process_local_binding_ids() {
         let binding_id = next_binding_id(PolicyKind::CatchUp);
         let binding_suffix = binding_id

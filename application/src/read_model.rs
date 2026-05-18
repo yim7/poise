@@ -866,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn read_model_derives_binding_intent_from_boundary_direction_not_reduce_only() {
+    fn read_model_projects_binding_intent_from_runtime_view() {
         let runtime = TrackRuntimeView {
             status: TrackStatus::Active,
             current_exposure: Exposure(1.0),

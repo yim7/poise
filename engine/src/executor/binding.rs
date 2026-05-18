@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::executor::boundary::{BoundaryDirection, BoundaryOperation};
+use crate::executor::boundary::BoundaryOperation;
 use crate::executor::policy::PolicyKind;
 use crate::ports::OrderRequest;
 use crate::price_gate::SubmitPurpose;
@@ -156,15 +156,7 @@ impl LiveOrderBinding {
     }
 
     pub fn increases_inventory(&self) -> bool {
-        let signed_exposure = self
-            .allocations
-            .iter()
-            .map(|allocation| match allocation.operation.direction {
-                BoundaryDirection::Up => allocation.exposure_qty,
-                BoundaryDirection::Down => -allocation.exposure_qty,
-            })
-            .sum::<f64>();
-        signed_exposure >= 0.0
+        !self.request.reduce_only
     }
 }
 
@@ -270,6 +262,41 @@ mod tests {
             !stale_attempt.matches_submission_identity(&later_attempt_for_same_operation),
             "same boundary proposal must not let a stale submit effect own a later submit instance"
         );
+    }
+
+    #[test]
+    fn reduce_only_buy_binding_decreases_inventory_even_when_boundary_direction_is_up() {
+        let operation = operation(-10_000, 0, BoundaryDirection::Up);
+        let binding = LiveOrderBinding {
+            binding_id: "curve-maker:short-retrace".to_string(),
+            proposal_key: BindingProposalKey {
+                policy: PolicyKind::CurveMaker,
+                operations: vec![operation.clone()],
+            },
+            allocations: vec![BindingOperationAllocation {
+                operation,
+                exposure_qty: 1.0,
+            }],
+            absorbed_exposure_qty: 0.0,
+            request: OrderRequest {
+                instrument: poise_core::track::Instrument::new(
+                    poise_core::track::Venue::Binance,
+                    "BTCUSDT",
+                ),
+                side: poise_core::types::Side::Buy,
+                price: 100.0,
+                quantity: 1.0,
+                client_order_id: "submit-1".to_string(),
+                reduce_only: true,
+            },
+            desired_exposure: Exposure(0.0),
+            submit_purpose: SubmitPurpose::AutoReconcile,
+            order_id: None,
+            status: BindingStatus::Working,
+            policy_state: BindingPolicyState::Stateless,
+        };
+
+        assert!(!binding.increases_inventory());
     }
 
     #[test]
