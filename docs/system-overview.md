@@ -160,7 +160,7 @@ release_units = clamp(backlog_units * catchup_ratio, min_release_steps * min_reb
 release_units = min(release_units, backlog_units)
 ```
 
-价格优势释放和时间释放使用同一套 `release_units`。只有当前仓位已经吸收上一段 frontier，且价格优势或 stale 时间条件满足时，才把 frontier 向 desired 推进，并重置 `anchor_price`、`anchor_curve_target` 和 `anchor_started_at`。价格继续移动产生的新 desired 变化只进入同一个 backlog，不单独立即释放。
+价格优势释放和时间释放使用同一套 `release_units`。只要还有同方向 backlog，且价格优势满足，就把 frontier 向 desired 推进，并重置 `anchor_price`、`anchor_curve_target` 和 `anchor_started_at`；因此即使 stale 已经接近到期，价格优势释放也会让 stale 重新计时。时间释放用于打破等待：当前 anchor 等待达到 `stale_release_minutes` 后可以释放一段，即使当前仓位还没有吸收上一段 frontier；但一次 stale 释放后，必须等当前仓位到达或穿过新的 frontier，重新获得进展，stale 才会再次可用。frontier 推进后由 `CatchUp` 追新的 `execution_target_exposure`。如果当前仓位已经到达或穿过 frontier，gate 会先 ratchet 承认已获得的仓位。价格继续移动产生的新 desired 变化只进入同一个 backlog，不单独立即释放。
 
 风险释放示例：
 

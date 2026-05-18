@@ -104,7 +104,8 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         submit_intent.config,
         profile_revision_for_config(submit_intent.config),
     );
-    let exposure_epsilon = exposure_epsilon(&submit_intent);
+    let boundary_epsilon = boundary_exposure_epsilon(&submit_intent);
+    let position_epsilon = position_exposure_epsilon(&submit_intent);
     let execution_target = execution_target_exposure(
         &submit_intent.current_exposure,
         &submit_intent.desired_exposure,
@@ -114,7 +115,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         &boundaries,
         &state.ledger_state,
         execution_target.clone(),
-        exposure_epsilon,
+        boundary_epsilon,
     ) {
         Ok(view) => view,
         Err(_error) => {
@@ -126,7 +127,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         &boundaries,
         &state.ledger_state,
         submit_intent.desired_exposure.clone(),
-        exposure_epsilon,
+        boundary_epsilon,
     ) {
         Ok(view) => view,
         Err(_error) => {
@@ -137,7 +138,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     if state.ledger_state.has_unexplained_exposure_drift(
         &submit_intent.current_exposure,
         active_binding_exposure_budget(&state.bindings),
-        exposure_epsilon,
+        position_epsilon,
     ) {
         state.recovery_anomaly = Some(RecoveryAnomaly::ExpectedExposureMismatch);
         return noop_plan(state);
@@ -172,7 +173,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         desired_exposure: &submit_intent.desired_exposure,
         execution_quote: submit_intent.execution_quote,
         submit_purpose: submit_intent.submit_purpose,
-        exposure_epsilon,
+        boundary_epsilon,
         curve_maker_levels_per_side: CURVE_MAKER_LEVELS_PER_SIDE,
     };
 
@@ -323,6 +324,12 @@ fn reconcile_bindings(
                 cancel_binding(&mut state.bindings[index], &mut effects);
                 submit_desired_binding(state, desired, &mut effects);
             }
+            BindingReconciliationDecision::CancelActiveOwners { indexes } => {
+                for index in indexes {
+                    matched_existing.insert(index);
+                    cancel_binding(&mut state.bindings[index], &mut effects);
+                }
+            }
             BindingReconciliationDecision::ReplaceActiveOwners { indexes } => {
                 for index in indexes {
                     cancel_binding(&mut state.bindings[index], &mut effects);
@@ -410,13 +417,17 @@ fn submit_recovery_token(binding: &LiveOrderBinding) -> SubmitRecoveryToken {
     SubmitRecoveryToken::from_binding(binding)
 }
 
-fn exposure_epsilon(input: &SubmitIntentInput<'_>) -> f64 {
+fn boundary_exposure_epsilon(input: &SubmitIntentInput<'_>) -> f64 {
+    (input.min_rebalance_units * 0.01).max(f64::EPSILON)
+}
+
+fn position_exposure_epsilon(input: &SubmitIntentInput<'_>) -> f64 {
     let quantity_step_as_exposure = if input.base_qty_per_unit <= f64::EPSILON {
         0.0
     } else {
         input.exchange_rules.quantity_step / input.base_qty_per_unit
     };
-    (input.min_rebalance_units * 0.01).max(quantity_step_as_exposure)
+    boundary_exposure_epsilon(input).max(quantity_step_as_exposure)
 }
 
 fn next_binding_id(policy: PolicyKind) -> String {
@@ -502,6 +513,18 @@ mod tests {
             },
             None,
         )
+    }
+
+    fn input_with_base_qty_per_unit<'a>(
+        config: &'a TrackConfig,
+        rules: &'a ExchangeRules,
+        base_qty_per_unit: f64,
+        current_exposure: Exposure,
+        desired_exposure: Exposure,
+    ) -> ExecutorInput<'a> {
+        let mut input = input(config, rules, current_exposure, desired_exposure);
+        input.submit_intent.base_qty_per_unit = base_qty_per_unit;
+        input
     }
 
     fn input_with_frontier<'a>(
@@ -652,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn catch_up_reduce_only_keeps_min_rebalance_pace() {
+    fn catch_up_reduce_only_tracks_full_inventory_gap() {
         let config = config();
         let rules = rules();
 
@@ -666,8 +689,100 @@ mod tests {
 
         assert_eq!(catch_up_binding.request.side, Side::Buy);
         assert!(catch_up_binding.request.reduce_only);
-        assert!((catch_up_binding.request.quantity - 1.0).abs() < 1e-9);
-        assert_eq!(catch_up_binding.allocations.len(), 1);
+        assert!((catch_up_binding.request.quantity - 5.0).abs() < 1e-9);
+        assert_eq!(catch_up_binding.allocations.len(), 5);
+    }
+
+    #[test]
+    fn catch_up_reduce_only_aggregates_small_exposure_steps_into_one_order() {
+        let config = TrackConfig {
+            lower_price: 1000.0,
+            upper_price: 2000.0,
+            long_exposure_units: 10.0,
+            short_exposure_units: 0.0,
+            notional_per_unit: 20.0,
+            min_rebalance_units: 0.5,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: BandProtectionPolicy::Freeze,
+            risk_acquisition: Default::default(),
+        };
+        let mut rules = rules();
+        rules.quantity_step = 0.01;
+        rules.min_qty = 0.01;
+
+        let plan = plan(input_with_base_qty_per_unit(
+            &config,
+            &rules,
+            config.base_qty_per_unit(),
+            Exposure(9.75),
+            Exposure(3.75),
+        ));
+        let catch_up_binding = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .expect("catch-up binding should aggregate enough small exposure steps");
+
+        assert_eq!(catch_up_binding.request.side, Side::Sell);
+        assert!(catch_up_binding.request.reduce_only);
+        assert!((catch_up_binding.request.quantity - 0.07).abs() < 1e-9);
+        assert_eq!(catch_up_binding.allocations.len(), 11);
+        let allocated_exposure = catch_up_binding
+            .allocations
+            .iter()
+            .map(|allocation| allocation.exposure_qty)
+            .sum::<f64>();
+        assert!(
+            (allocated_exposure - catch_up_binding.request.quantity / config.base_qty_per_unit())
+                .abs()
+                < 1e-9
+        );
+    }
+
+    #[test]
+    fn catch_up_increase_uses_minimum_executable_size_when_pace_is_too_small() {
+        let config = TrackConfig {
+            lower_price: 1000.0,
+            upper_price: 2000.0,
+            long_exposure_units: 10.0,
+            short_exposure_units: 0.0,
+            notional_per_unit: 20.0,
+            min_rebalance_units: 0.5,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: BandProtectionPolicy::Freeze,
+            risk_acquisition: Default::default(),
+        };
+        let mut rules = rules();
+        rules.quantity_step = 0.01;
+        rules.min_qty = 0.01;
+
+        let plan = plan(input_with_base_qty_per_unit(
+            &config,
+            &rules,
+            config.base_qty_per_unit(),
+            Exposure(0.75),
+            Exposure(1.8705),
+        ));
+        let catch_up_binding = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .expect("catch-up binding should be large enough to meet exchange quantity rules");
+
+        assert_eq!(catch_up_binding.request.side, Side::Buy);
+        assert!(!catch_up_binding.request.reduce_only);
+        assert!((catch_up_binding.request.quantity - 0.01).abs() < 1e-9);
+        let allocated_exposure = catch_up_binding
+            .allocations
+            .iter()
+            .map(|allocation| allocation.exposure_qty)
+            .sum::<f64>();
+        assert!(
+            allocated_exposure <= 1.8705 - 0.75 + 1e-9,
+            "catch-up must not cross the execution target"
+        );
     }
 
     #[test]
@@ -716,6 +831,56 @@ mod tests {
         assert!(next.state.bindings.iter().any(|binding| {
             binding.status == BindingStatus::SubmitPending
                 && binding.request.client_order_id == pending_client_order_id
+        }));
+    }
+
+    #[test]
+    fn working_reduce_only_catch_up_blocks_replacement_until_terminal() {
+        let config = config();
+        let rules = rules();
+        let mut previous = plan(input(&config, &rules, Exposure(-6.0), Exposure(-1.0))).state;
+        let existing = previous
+            .bindings
+            .iter_mut()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .expect("catch-up binding should be planned");
+        existing.status = BindingStatus::Working;
+        existing.order_id = Some("existing-reduce-order".to_string());
+        existing.request.price = 100.3;
+        let existing_client_order_id = existing.request.client_order_id.clone();
+
+        let next = plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: instrument(),
+                config: &config,
+                exchange_rules: &rules,
+                base_qty_per_unit: 1.0,
+                min_rebalance_units: config.min_rebalance_units,
+                current_exposure: Exposure(-6.0),
+                desired_exposure: Exposure(-1.0),
+                risk_release_frontier: None,
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            Some(&previous),
+        ));
+
+        assert!(
+            !next.effects.iter().any(|effect| matches!(
+                effect,
+                TrackEffect::SubmitOrder { .. } | TrackEffect::CancelOrder { .. }
+            )),
+            "working reduce-only catch-up must not overlap itself with cancel-and-replace"
+        );
+        assert!(next.state.bindings.iter().any(|binding| {
+            binding.status == BindingStatus::Working
+                && binding.request.client_order_id == existing_client_order_id
         }));
     }
 
@@ -1051,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn catch_up_policy_takes_over_due_curve_maker_in_same_round() {
+    fn catch_up_cancels_due_reduce_only_curve_maker_before_submit() {
         let config = config();
         let rules = rules();
         let initial = plan(input(&config, &rules, Exposure(1.0), Exposure(1.0))).state;
@@ -1093,22 +1258,25 @@ mod tests {
             effect,
             TrackEffect::CancelOrder { order_id, .. } if order_id == "maker-order"
         )));
-        assert!(plan.effects.iter().any(|effect| matches!(
-            effect,
-            TrackEffect::SubmitOrder { request, .. } if request.side == Side::Sell
-        )));
+        assert!(
+            !plan
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, TrackEffect::SubmitOrder { .. })),
+            "reduce-only catch-up must wait for the maker cancel to finish before submitting"
+        );
         assert!(plan.state.bindings.iter().any(|binding| {
             binding.proposal_key.policy == PolicyKind::CurveMaker
                 && binding.status == BindingStatus::CancelPending
         }));
-        assert!(plan.state.bindings.iter().any(|binding| {
+        assert!(!plan.state.bindings.iter().any(|binding| {
             binding.proposal_key.policy == PolicyKind::CatchUp
                 && binding.status == BindingStatus::SubmitPending
         }));
     }
 
     #[test]
-    fn catch_up_takes_over_far_due_curve_maker_at_threshold() {
+    fn catch_up_cancels_far_reduce_only_curve_maker_before_submit() {
         let config = config();
         let rules = rules();
         let initial = plan(input(&config, &rules, Exposure(1.0), Exposure(1.0))).state;
@@ -1151,15 +1319,18 @@ mod tests {
             effect,
             TrackEffect::CancelOrder { order_id, .. } if order_id == "maker-order"
         )));
-        assert!(plan.effects.iter().any(|effect| matches!(
-            effect,
-            TrackEffect::SubmitOrder { request, .. } if request.side == Side::Sell
-        )));
+        assert!(
+            !plan
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, TrackEffect::SubmitOrder { .. })),
+            "far reduce-only maker must be canceled before catch-up submits a replacement"
+        );
         assert!(plan.state.bindings.iter().any(|binding| {
             binding.proposal_key.policy == PolicyKind::CurveMaker
                 && binding.status == BindingStatus::CancelPending
         }));
-        assert!(plan.state.bindings.iter().any(|binding| {
+        assert!(!plan.state.bindings.iter().any(|binding| {
             binding.proposal_key.policy == PolicyKind::CatchUp
                 && binding.status == BindingStatus::SubmitPending
         }));

@@ -53,7 +53,7 @@ pub(super) struct PolicyPlanningInput<'a> {
     pub desired_exposure: &'a Exposure,
     pub execution_quote: Option<ExecutionQuote>,
     pub submit_purpose: SubmitPurpose,
-    pub exposure_epsilon: f64,
+    pub boundary_epsilon: f64,
     pub curve_maker_levels_per_side: usize,
 }
 
@@ -72,6 +72,7 @@ pub(super) enum BindingReconciliationDecision {
     CoveredByExisting { indexes: Vec<usize> },
     ReuseExisting { index: usize },
     ReplaceReusable { index: usize },
+    CancelActiveOwners { indexes: Vec<usize> },
     ReplaceActiveOwners { indexes: Vec<usize> },
     BlockedByActiveOwner,
     SubmitNew,
@@ -99,7 +100,7 @@ fn plan_normal_policy_bindings(input: &PolicyPlanningInput<'_>) -> Vec<DesiredBi
     let catch_up_operations = select_catch_up_operations(
         input.execution_view,
         &covered_operations,
-        input.exposure_epsilon,
+        input.boundary_epsilon,
         gap_direction,
     );
     if let Some(binding) = plan_target_binding(
@@ -130,7 +131,7 @@ fn plan_manual_override_binding(input: &PolicyPlanningInput<'_>) -> Option<Desir
         input.execution_view,
         &BTreeSet::new(),
         direction,
-        input.exposure_epsilon,
+        input.boundary_epsilon,
         false,
     );
     plan_target_binding(
@@ -154,7 +155,7 @@ fn plan_reduce_only_binding(input: &PolicyPlanningInput<'_>) -> Option<DesiredBi
         input.execution_view,
         &BTreeSet::new(),
         direction,
-        input.exposure_epsilon,
+        input.boundary_epsilon,
         false,
     );
     plan_target_binding(
@@ -203,6 +204,9 @@ pub(super) fn classify_binding_reconciliation(
                 indexes: vec![index],
             };
         }
+        if reduce_only_catch_up_replacement_must_wait(&bindings[index], desired) {
+            return BindingReconciliationDecision::ReuseExisting { index };
+        }
         return if binding_request_matches_desired(&bindings[index], desired, exchange_rules) {
             BindingReconciliationDecision::ReuseExisting { index }
         } else {
@@ -213,6 +217,13 @@ pub(super) fn classify_binding_reconciliation(
     if desired.proposal.policy == PolicyKind::CatchUp {
         let indexes = replaceable_owner_indexes(active_bindings, &desired.allocations);
         if !indexes.is_empty() {
+            if reduce_only_catch_up_replacement_must_wait_for_owners(
+                active_bindings,
+                &indexes,
+                desired,
+            ) {
+                return BindingReconciliationDecision::CancelActiveOwners { indexes };
+            }
             return BindingReconciliationDecision::ReplaceActiveOwners { indexes };
         }
     }
@@ -222,6 +233,30 @@ pub(super) fn classify_binding_reconciliation(
     }
 
     BindingReconciliationDecision::SubmitNew
+}
+
+fn reduce_only_catch_up_replacement_must_wait(
+    binding: &LiveOrderBinding,
+    desired: &DesiredBinding,
+) -> bool {
+    binding.proposal_key.policy == PolicyKind::CatchUp
+        && desired.proposal.policy == PolicyKind::CatchUp
+        && binding.request.reduce_only
+        && desired.request.reduce_only
+}
+
+fn reduce_only_catch_up_replacement_must_wait_for_owners(
+    bindings: &[LiveOrderBinding],
+    indexes: &[usize],
+    desired: &DesiredBinding,
+) -> bool {
+    desired.proposal.policy == PolicyKind::CatchUp
+        && desired.request.reduce_only
+        && indexes.iter().any(|index| {
+            bindings
+                .get(*index)
+                .is_some_and(|binding| binding_is_active(binding) && binding.request.reduce_only)
+        })
 }
 
 pub(super) fn plan_target_binding(
@@ -241,28 +276,14 @@ pub(super) fn plan_target_binding(
     let price = execution_price(direction, input.execution_quote)?;
     let decreases_inventory =
         target_change_decreases_inventory(input.current_exposure, input.execution_target_exposure);
-    let max_exposure_qty = match policy {
-        PolicyKind::CatchUp => inventory_gap.0.abs().min(input.min_rebalance_units),
-        PolicyKind::ManualOverride | PolicyKind::ReduceOnly | PolicyKind::CurveMaker => {
-            inventory_gap.0.abs()
-        }
-    };
-    let allocations = allocate_operations(input.execution_view, selected, max_exposure_qty);
-    if allocations.is_empty() {
-        return None;
-    }
-
-    let exposure_qty = allocations
-        .iter()
-        .map(|allocation| allocation.exposure_qty)
-        .sum::<f64>();
-    let quantity = round_to_step(
-        exposure_qty * input.base_qty_per_unit,
-        input.exchange_rules.quantity_step,
-    );
-    if quantity <= f64::EPSILON || !is_meetable_minimum(price, quantity, input.exchange_rules) {
-        return None;
-    }
+    let (allocations, quantity) = plan_executable_allocations(
+        input,
+        policy,
+        selected,
+        price,
+        inventory_gap.0,
+        decreases_inventory,
+    )?;
 
     let request = OrderRequest {
         instrument: input.instrument.clone(),
@@ -283,24 +304,77 @@ pub(super) fn plan_target_binding(
     })
 }
 
+fn plan_executable_allocations(
+    input: &PolicyPlanningInput<'_>,
+    policy: PolicyKind,
+    selected: Vec<BoundaryOperation>,
+    price: f64,
+    inventory_gap: f64,
+    decreases_inventory: bool,
+) -> Option<(Vec<BindingOperationAllocation>, f64)> {
+    let max_exposure_qty =
+        target_exposure_budget(input, policy, price, inventory_gap, decreases_inventory);
+    let allocations = allocate_operations(input.execution_view, selected, max_exposure_qty);
+    if allocations.is_empty() {
+        return None;
+    }
+
+    let exposure_qty = allocations
+        .iter()
+        .map(|allocation| allocation.exposure_qty)
+        .sum::<f64>();
+    let quantity = round_to_step(
+        exposure_qty * input.base_qty_per_unit,
+        input.exchange_rules.quantity_step,
+    );
+    if quantity <= f64::EPSILON || !is_meetable_minimum(price, quantity, input.exchange_rules) {
+        return None;
+    }
+
+    let allocations = trim_allocations_to_exposure_qty(
+        allocations,
+        quantity / input.base_qty_per_unit.max(f64::EPSILON),
+    );
+    if allocations.is_empty() {
+        return None;
+    }
+    Some((allocations, quantity))
+}
+
+fn target_exposure_budget(
+    input: &PolicyPlanningInput<'_>,
+    policy: PolicyKind,
+    price: f64,
+    inventory_gap: f64,
+    decreases_inventory: bool,
+) -> f64 {
+    match policy {
+        PolicyKind::CatchUp if decreases_inventory => inventory_gap.abs(),
+        PolicyKind::CatchUp => catch_up_increase_exposure_budget(input, price, inventory_gap),
+        PolicyKind::ManualOverride | PolicyKind::ReduceOnly | PolicyKind::CurveMaker => {
+            inventory_gap.abs()
+        }
+    }
+}
+
 fn select_catch_up_operations(
     view: &BoundaryLedgerView,
     covered_operations: &BTreeSet<BoundaryOperation>,
-    exposure_epsilon: f64,
+    boundary_epsilon: f64,
     gap_direction: Option<BoundaryDirection>,
 ) -> Vec<BoundaryOperation> {
     let mut up = select_target_operations(
         view,
         covered_operations,
         BoundaryDirection::Up,
-        exposure_epsilon,
+        boundary_epsilon,
         true,
     );
     let down = select_target_operations(
         view,
         covered_operations,
         BoundaryDirection::Down,
-        exposure_epsilon,
+        boundary_epsilon,
         true,
     );
     up.extend(down);
@@ -317,7 +391,7 @@ fn select_reduce_risk_curve_maker_operations(
         .operations
         .iter()
         .filter(|operation| !operation.due)
-        .filter(|operation| operation.remaining > input.exposure_epsilon)
+        .filter(|operation| operation.remaining > input.boundary_epsilon)
         .filter(|operation| operation.operation.direction == BoundaryDirection::Up)
         .filter(|operation| !covered_operations.contains(&operation.operation))
         .filter(|operation| operation_reduces_current_inventory(input, &operation.operation))
@@ -330,7 +404,7 @@ fn select_reduce_risk_curve_maker_operations(
         .iter()
         .rev()
         .filter(|operation| !operation.due)
-        .filter(|operation| operation.remaining > input.exposure_epsilon)
+        .filter(|operation| operation.remaining > input.boundary_epsilon)
         .filter(|operation| operation.operation.direction == BoundaryDirection::Down)
         .filter(|operation| !covered_operations.contains(&operation.operation))
         .filter(|operation| operation_reduces_current_inventory(input, &operation.operation))
@@ -346,7 +420,7 @@ pub(super) fn select_target_operations(
     view: &BoundaryLedgerView,
     covered_operations: &BTreeSet<BoundaryOperation>,
     direction: BoundaryDirection,
-    exposure_epsilon: f64,
+    boundary_epsilon: f64,
     require_due: bool,
 ) -> Vec<BoundaryOperation> {
     let mut selected = view
@@ -354,7 +428,7 @@ pub(super) fn select_target_operations(
         .iter()
         .filter(|operation| operation.operation.direction == direction)
         .filter(|operation| !require_due || operation.due)
-        .filter(|operation| operation.remaining > exposure_epsilon)
+        .filter(|operation| operation.remaining > boundary_epsilon)
         .filter(|operation| !covered_operations.contains(&operation.operation))
         .map(|operation| operation.operation.clone())
         .collect::<Vec<_>>();
@@ -626,6 +700,26 @@ fn allocate_operations(
     allocations
 }
 
+fn trim_allocations_to_exposure_qty(
+    allocations: Vec<BindingOperationAllocation>,
+    max_exposure_qty: f64,
+) -> Vec<BindingOperationAllocation> {
+    let mut remaining_budget = max_exposure_qty;
+    let mut trimmed = Vec::new();
+    for mut allocation in allocations {
+        if remaining_budget <= f64::EPSILON {
+            break;
+        }
+        allocation.exposure_qty = allocation.exposure_qty.min(remaining_budget);
+        if allocation.exposure_qty <= f64::EPSILON {
+            continue;
+        }
+        remaining_budget -= allocation.exposure_qty;
+        trimmed.push(allocation);
+    }
+    trimmed
+}
+
 fn boundary_for_operation<'a>(
     boundaries: &'a [BoundaryBlueprint],
     operation: &BoundaryOperation,
@@ -693,7 +787,7 @@ fn operation_reduces_current_inventory(
         return false;
     }
 
-    target.0.abs() + input.exposure_epsilon < input.current_exposure.0.abs()
+    target.0.abs() + input.boundary_epsilon < input.current_exposure.0.abs()
 }
 
 fn operation_target_exposure(boundary: &BoundaryBlueprint, direction: BoundaryDirection) -> f64 {
@@ -723,6 +817,53 @@ fn target_change_decreases_inventory(
     desired_exposure: &Exposure,
 ) -> bool {
     desired_exposure.0.abs() + f64::EPSILON < current_exposure.0.abs()
+}
+
+fn catch_up_increase_exposure_budget(
+    input: &PolicyPlanningInput<'_>,
+    price: f64,
+    inventory_gap: f64,
+) -> f64 {
+    let inventory_gap = inventory_gap.abs();
+    let paced_budget = inventory_gap.min(input.min_rebalance_units);
+    let minimum_executable_exposure = minimum_executable_exposure_qty(input, price);
+    if minimum_executable_exposure <= f64::EPSILON
+        || inventory_gap + input.boundary_epsilon < minimum_executable_exposure
+    {
+        return paced_budget;
+    }
+    paced_budget
+        .max(minimum_executable_exposure)
+        .min(inventory_gap)
+}
+
+fn minimum_executable_exposure_qty(input: &PolicyPlanningInput<'_>, price: f64) -> f64 {
+    if input.base_qty_per_unit <= f64::EPSILON {
+        return 0.0;
+    }
+    minimum_executable_order_qty(price, input.exchange_rules) / input.base_qty_per_unit
+}
+
+fn minimum_executable_order_qty(price: f64, rules: &ExchangeRules) -> f64 {
+    let min_notional_qty = if price <= f64::EPSILON {
+        0.0
+    } else {
+        rules.min_notional / price
+    };
+    let quantity = rules
+        .quantity_step
+        .max(rules.min_qty)
+        .max(min_notional_qty)
+        .max(0.0);
+    round_up_to_step(quantity, rules.quantity_step)
+}
+
+fn round_up_to_step(value: f64, step: f64) -> f64 {
+    if step <= f64::EPSILON {
+        return value;
+    }
+    let steps = (value / step).ceil();
+    steps * step
 }
 
 fn proposal_for_allocations(
@@ -940,7 +1081,7 @@ mod tests {
                 best_ask: 100.1,
             }),
             submit_purpose: SubmitPurpose::AutoReconcile,
-            exposure_epsilon: 1e-9,
+            boundary_epsilon: 1e-9,
             curve_maker_levels_per_side: 2,
         };
 
@@ -986,7 +1127,7 @@ mod tests {
                     best_ask: 100.1,
                 }),
                 submit_purpose: SubmitPurpose::AutoReconcile,
-                exposure_epsilon: 1e-9,
+                boundary_epsilon: 1e-9,
                 curve_maker_levels_per_side: 1,
             },
         );

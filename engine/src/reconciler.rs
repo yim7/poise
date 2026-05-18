@@ -632,6 +632,7 @@ mod tests {
             anchor_price,
             anchor_curve_target: Exposure(anchor_curve_target),
             anchor_started_at: Utc::now(),
+            stale_release_armed: true,
         }
     }
 

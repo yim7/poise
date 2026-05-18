@@ -1362,6 +1362,7 @@ mod tests {
                         anchor_price: 93.75,
                         anchor_curve_target: Exposure(5.0),
                         anchor_started_at: chrono::Utc::now(),
+                        stale_release_armed: true,
                     },
                 }));
         }
@@ -1373,6 +1374,44 @@ mod tests {
             TrackEffect::SubmitOrder { request, .. }
                 if request.side == Side::Buy && (request.price - 92.5).abs() < 1e-9
         )));
+    }
+
+    #[test]
+    fn stale_risk_release_submits_catch_up_even_when_previous_release_is_unfilled() {
+        let (mut manager, id) = manager();
+        {
+            let track = manager.tracks.get_mut(&id).unwrap();
+            track.current_exposure = Exposure(-0.75);
+            track.desired_exposure = Some(Exposure(-4.0));
+            track.track_state =
+                TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
+                    gate: RiskExposureGateState {
+                        risk_release_frontier: Exposure(-1.5),
+                        anchor_price: 105.0,
+                        anchor_curve_target: Exposure(-4.0),
+                        anchor_started_at: Utc.with_ymd_and_hms(2026, 4, 22, 7, 59, 0).unwrap(),
+                        stale_release_armed: true,
+                    },
+                }));
+        }
+
+        let transition = manager.observe(&id, market(105.625)).unwrap();
+        let track = manager.tracks.get(&id).unwrap();
+
+        assert!(transition.effects.iter().any(|effect| matches!(
+            effect,
+            TrackEffect::SubmitOrder { request, .. }
+                if request.side == Side::Sell && request.client_order_id.starts_with("bc")
+        )));
+        assert!(track.executor_state.bindings.iter().any(|binding| {
+            binding.proposal_key.policy == PolicyKind::CatchUp && binding.request.side == Side::Sell
+        }));
+        assert!(matches!(
+            &track.track_state,
+            TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
+                gate
+            })) if gate.risk_release_frontier == Exposure(-2.5)
+        ));
     }
 
     #[test]
