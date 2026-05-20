@@ -1361,8 +1361,7 @@ mod tests {
                         risk_release_frontier: Exposure(1.5),
                         anchor_price: 93.75,
                         anchor_curve_target: Exposure(5.0),
-                        anchor_started_at: chrono::Utc::now(),
-                        stale_release_armed: true,
+                        stale_since: chrono::Utc::now(),
                     },
                 }));
         }
@@ -1389,8 +1388,7 @@ mod tests {
                         risk_release_frontier: Exposure(-1.5),
                         anchor_price: 105.0,
                         anchor_curve_target: Exposure(-4.0),
-                        anchor_started_at: Utc.with_ymd_and_hms(2026, 4, 22, 7, 59, 0).unwrap(),
-                        stale_release_armed: true,
+                        stale_since: Utc.with_ymd_and_hms(2026, 4, 22, 7, 59, 0).unwrap(),
                     },
                 }));
         }

@@ -746,7 +746,7 @@ impl TrackRuntime {
         let next_advantage_price =
             trigger_price_for_boundary(release.advantage_target.0, self.config());
         let stale_release_elapsed_minutes = observed_at
-            .signed_duration_since(gate.anchor_started_at)
+            .signed_duration_since(gate.stale_since)
             .num_milliseconds()
             .max(0) as f64
             / 60_000.0;

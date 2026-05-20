@@ -631,8 +631,7 @@ mod tests {
             risk_release_frontier: Exposure(risk_release_frontier),
             anchor_price,
             anchor_curve_target: Exposure(anchor_curve_target),
-            anchor_started_at: Utc::now(),
-            stale_release_armed: true,
+            stale_since: Utc::now(),
         }
     }
 

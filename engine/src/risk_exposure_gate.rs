@@ -15,10 +15,7 @@ pub struct RiskExposureGateState {
     pub risk_release_frontier: Exposure,
     pub anchor_price: f64,
     pub anchor_curve_target: Exposure,
-    #[serde(default = "default_anchor_started_at")]
-    pub anchor_started_at: DateTime<Utc>,
-    #[serde(default = "default_stale_release_armed")]
-    pub stale_release_armed: bool,
+    pub stale_since: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,7 +113,6 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
             input.current_exposure.clone(),
             input.curve_target.clone(),
         );
-        state.stale_release_armed = true;
         if inside_or_equal(input.curve_target.0, state.risk_release_frontier.0) {
             return RiskExposureGateDecision {
                 risk_release_frontier: input.curve_target,
@@ -136,8 +132,7 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
         }
     };
 
-    let reached_stale_release =
-        state.stale_release_armed && stale_release_due(config, &state, input.observed_at);
+    let reached_stale_release = stale_release_due(config, &state, input.observed_at);
     if reached_advantage || reached_stale_release {
         let release_units = release_units(
             config,
@@ -150,10 +145,11 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
             input.curve_target.clone(),
             release_units,
         );
-        state.anchor_price = input.strategy_price;
-        state.anchor_curve_target = input.curve_target.clone();
-        state.anchor_started_at = input.observed_at;
-        state.stale_release_armed = false;
+        if reached_advantage {
+            state.anchor_price = input.strategy_price;
+            state.anchor_curve_target = input.curve_target.clone();
+        }
+        state.stale_since = input.observed_at;
     }
 
     let next_release = next_release(
@@ -195,8 +191,7 @@ fn startup_state(
         risk_release_frontier: Exposure(curve_target.0.signum() * frontier_units),
         anchor_price: strategy_price,
         anchor_curve_target: curve_target,
-        anchor_started_at: observed_at,
-        stale_release_armed: true,
+        stale_since: observed_at,
     }
 }
 
@@ -263,7 +258,7 @@ fn stale_release_due(
         return false;
     }
     let elapsed_minutes = observed_at
-        .signed_duration_since(state.anchor_started_at)
+        .signed_duration_since(state.stale_since)
         .num_milliseconds() as f64
         / 60_000.0;
     elapsed_minutes + f64::EPSILON >= config.stale_release_minutes
@@ -358,14 +353,6 @@ fn move_toward(from: Exposure, to: Exposure, units: f64) -> Exposure {
     }
 }
 
-fn default_anchor_started_at() -> DateTime<Utc> {
-    Utc::now()
-}
-
-fn default_stale_release_armed() -> bool {
-    true
-}
-
 fn crosses_zero(frontier: f64, curve_target: f64) -> bool {
     (frontier > f64::EPSILON && curve_target < -f64::EPSILON)
         || (frontier < -f64::EPSILON && curve_target > f64::EPSILON)
@@ -420,8 +407,7 @@ mod tests {
             risk_release_frontier: Exposure(frontier),
             anchor_price,
             anchor_curve_target: Exposure(anchor_curve),
-            anchor_started_at: observed_at(),
-            stale_release_armed: true,
+            stale_since: observed_at(),
         }
     }
 
@@ -466,8 +452,7 @@ mod tests {
                 risk_release_frontier: Exposure(2.5),
                 anchor_price: 100.0,
                 anchor_curve_target: Exposure(5.0),
-                anchor_started_at: observed_at(),
-                stale_release_armed: true,
+                stale_since: observed_at(),
             })
         );
         assert!(decision.next_release.is_some());
@@ -496,8 +481,7 @@ mod tests {
                 risk_release_frontier: Exposure(2.625),
                 anchor_price: 99.5,
                 anchor_curve_target: Exposure(6.0),
-                anchor_started_at: observed_at(),
-                stale_release_armed: false,
+                stale_since: observed_at(),
             })
         );
     }
@@ -514,10 +498,9 @@ mod tests {
             decision.state,
             Some(RiskExposureGateState {
                 risk_release_frontier: Exposure(2.5),
-                anchor_price: 99.8,
-                anchor_curve_target: Exposure(5.5),
-                anchor_started_at: later,
-                stale_release_armed: false,
+                anchor_price: 100.0,
+                anchor_curve_target: Exposure(5.0),
+                stale_since: later,
             })
         );
     }
@@ -534,16 +517,15 @@ mod tests {
             decision.state,
             Some(RiskExposureGateState {
                 risk_release_frontier: Exposure(2.5),
-                anchor_price: 99.8,
-                anchor_curve_target: Exposure(5.5),
-                anchor_started_at: later,
-                stale_release_armed: false,
+                anchor_price: 100.0,
+                anchor_curve_target: Exposure(5.0),
+                stale_since: later,
             })
         );
     }
 
     #[test]
-    fn stale_wait_does_not_repeat_without_position_progress() {
+    fn stale_wait_repeats_without_position_progress() {
         let state = gate_state(1.5, 100.0, 5.0);
         let first_release_at = observed_at() + Duration::minutes(60);
         let first = apply(input_at(Some(state), 0.75, 5.5, 99.8, first_release_at));
@@ -552,33 +534,40 @@ mod tests {
         let decision = apply(input_at(
             first.state.clone(),
             0.75,
-            6.0,
+            5.8,
             99.7,
             second_release_at,
         ));
 
-        assert_eq!(decision.risk_release_frontier, Exposure(2.5));
-        assert_eq!(decision.state, first.state);
+        assert_eq!(decision.risk_release_frontier, Exposure(3.325));
+        assert_eq!(
+            decision.state,
+            Some(RiskExposureGateState {
+                risk_release_frontier: Exposure(3.325),
+                anchor_price: 100.0,
+                anchor_curve_target: Exposure(5.0),
+                stale_since: second_release_at,
+            })
+        );
     }
 
     #[test]
-    fn stale_wait_rearms_after_position_reaches_release_frontier() {
+    fn stale_wait_uses_same_clock_after_position_reaches_release_frontier() {
         let state = gate_state(1.5, 100.0, 5.0);
         let first_release_at = observed_at() + Duration::minutes(60);
         let first = apply(input_at(Some(state), 0.75, 5.5, 99.8, first_release_at));
         let second_release_at = first_release_at + Duration::minutes(60);
 
-        let decision = apply(input_at(first.state, 2.5, 6.0, 99.7, second_release_at));
+        let decision = apply(input_at(first.state, 2.5, 5.8, 99.7, second_release_at));
 
-        assert_eq!(decision.risk_release_frontier, Exposure(3.375));
+        assert_eq!(decision.risk_release_frontier, Exposure(3.325));
         assert_eq!(
             decision.state,
             Some(RiskExposureGateState {
-                risk_release_frontier: Exposure(3.375),
-                anchor_price: 99.7,
-                anchor_curve_target: Exposure(6.0),
-                anchor_started_at: second_release_at,
-                stale_release_armed: false,
+                risk_release_frontier: Exposure(3.325),
+                anchor_price: 100.0,
+                anchor_curve_target: Exposure(5.0),
+                stale_since: second_release_at,
             })
         );
     }
@@ -597,10 +586,28 @@ mod tests {
                 risk_release_frontier: Exposure(-2.625),
                 anchor_price: 100.8,
                 anchor_curve_target: Exposure(-6.0),
-                anchor_started_at: advantage_at,
-                stale_release_armed: false,
+                stale_since: advantage_at,
             })
         );
+    }
+
+    #[test]
+    fn advantage_release_resets_stale_wait_clock() {
+        let state = gate_state(-1.5, 100.0, -5.0);
+        let advantage_at = observed_at() + Duration::minutes(14);
+        let first = apply(input_at(Some(state), -0.75, -6.0, 100.8, advantage_at));
+        let before_stale_from_advantage = advantage_at + Duration::minutes(59);
+
+        let decision = apply(input_at(
+            first.state.clone(),
+            -0.75,
+            -6.2,
+            100.9,
+            before_stale_from_advantage,
+        ));
+
+        assert_eq!(decision.risk_release_frontier, Exposure(-2.625));
+        assert_eq!(decision.state, first.state);
     }
 
     #[test]
@@ -616,8 +623,7 @@ mod tests {
                 risk_release_frontier: Exposure(2.0),
                 anchor_price: 100.0,
                 anchor_curve_target: Exposure(5.0),
-                anchor_started_at: observed_at(),
-                stale_release_armed: true,
+                stale_since: observed_at(),
             })
         );
     }
@@ -635,8 +641,7 @@ mod tests {
                 risk_release_frontier: Exposure(-2.0),
                 anchor_price: 100.0,
                 anchor_curve_target: Exposure(-5.0),
-                anchor_started_at: observed_at(),
-                stale_release_armed: true,
+                stale_since: observed_at(),
             })
         );
     }
