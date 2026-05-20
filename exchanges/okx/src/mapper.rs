@@ -73,11 +73,19 @@ pub(crate) fn position_from_snapshot(value: PositionSnapshot) -> Result<Position
             value.pos_side
         ));
     }
-    let _leverage = parse_decimal("lever", &value.lever)?;
+    let qty = parse_decimal("pos", &value.pos)?;
+    if qty == 0.0 {
+        return Ok(Position {
+            instrument: Instrument::new(Venue::Okx, value.inst_id),
+            qty: 0.0,
+            avg_price: 0.0,
+            unrealized_pnl: 0.0,
+        });
+    }
 
     Ok(Position {
         instrument: Instrument::new(Venue::Okx, value.inst_id),
-        qty: parse_decimal("pos", &value.pos)?,
+        qty,
         avg_price: parse_decimal("avgPx", &value.avg_px)?,
         unrealized_pnl: parse_decimal("upl", &value.upl)?,
     })
@@ -252,6 +260,74 @@ mod tests {
                 unrealized_pnl: 123.45,
             }
         );
+    }
+
+    #[test]
+    fn maps_okx_flat_position_snapshot_with_empty_derived_fields() {
+        let position = position_from_snapshot(PositionSnapshot {
+            inst_id: "MU-USDT-SWAP".to_string(),
+            pos: "0".to_string(),
+            avg_px: "".to_string(),
+            upl: "".to_string(),
+            pos_side: "net".to_string(),
+            lever: "".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            position,
+            Position {
+                instrument: Instrument::new(Venue::Okx, "MU-USDT-SWAP"),
+                qty: 0.0,
+                avg_price: 0.0,
+                unrealized_pnl: 0.0,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_tiny_non_zero_position_with_empty_derived_fields() {
+        let error = position_from_snapshot(PositionSnapshot {
+            inst_id: "MU-USDT-SWAP".to_string(),
+            pos: "0.0000000000000001".to_string(),
+            avg_px: "".to_string(),
+            upl: "".to_string(),
+            pos_side: "net".to_string(),
+            lever: "".to_string(),
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("avgPx"));
+    }
+
+    #[test]
+    fn rejects_non_flat_position_with_empty_avg_price() {
+        let error = position_from_snapshot(PositionSnapshot {
+            inst_id: "MU-USDT-SWAP".to_string(),
+            pos: "0.25".to_string(),
+            avg_px: "".to_string(),
+            upl: "12.3".to_string(),
+            pos_side: "net".to_string(),
+            lever: "".to_string(),
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("avgPx"));
+    }
+
+    #[test]
+    fn rejects_non_flat_position_with_empty_unrealized_pnl() {
+        let error = position_from_snapshot(PositionSnapshot {
+            inst_id: "MU-USDT-SWAP".to_string(),
+            pos: "0.25".to_string(),
+            avg_px: "650.5".to_string(),
+            upl: "".to_string(),
+            pos_side: "net".to_string(),
+            lever: "".to_string(),
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("upl"));
     }
 
     #[test]
