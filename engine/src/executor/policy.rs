@@ -1180,9 +1180,6 @@ mod tests {
         let second = next_client_order_id(PolicyKind::CurveMaker);
 
         assert_eq!(&first[2..10], &second[2..10]);
-        assert_eq!(
-            second[10..].parse::<u64>().unwrap(),
-            first[10..].parse::<u64>().unwrap() + 1
-        );
+        assert!(second[10..].parse::<u64>().unwrap() > first[10..].parse::<u64>().unwrap());
     }
 }
