@@ -675,6 +675,32 @@ mod tests {
     }
 
     #[test]
+    fn risk_release_frontier_allows_catch_up_reduce_when_current_exceeds_desired() {
+        let config = config();
+        let rules = rules();
+
+        let plan = plan(input_with_frontier(
+            &config,
+            &rules,
+            Exposure(-5.0),
+            Exposure(-4.0),
+            Exposure(-2.0),
+        ));
+
+        let catch_up_binding = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .expect("catch-up binding should reduce back to desired exposure");
+
+        assert_eq!(catch_up_binding.request.side, Side::Buy);
+        assert!(catch_up_binding.request.reduce_only);
+        assert_eq!(catch_up_binding.desired_exposure, Exposure(-4.0));
+        assert!((catch_up_binding.request.quantity - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn catch_up_reduce_only_tracks_full_inventory_gap() {
         let config = config();
         let rules = rules();

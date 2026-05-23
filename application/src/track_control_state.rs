@@ -109,7 +109,7 @@ impl PersistedControlMode {
         match control_state {
             ControlState::Automatic(
                 AutoState::FollowingBand
-                | AutoState::AcquiringRiskExposure { .. }
+                | AutoState::RiskExposureGated { .. }
                 | AutoState::Frozen { .. }
                 | AutoState::FlattenPending { .. }
                 | AutoState::Flattening { .. },

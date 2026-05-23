@@ -139,8 +139,8 @@ export interface RiskAcquisitionView {
   curve_target: number;
   risk_release_frontier: number;
   backlog_units: number;
-  anchor_price: number;
-  anchor_curve_target: number;
+  release_anchor_price: number;
+  release_anchor_target: number;
   stale_release_elapsed_minutes?: number;
   stale_release_minutes?: number;
   next_advantage_target: number;

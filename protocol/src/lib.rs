@@ -127,13 +127,13 @@ impl Default for RiskAcquisitionConfigView {
             min_release_steps: 1.0,
             max_release_steps: 4.0,
             catchup_ratio: 0.25,
-            stale_release_minutes: 15.0,
+            stale_release_minutes: 60.0,
         }
     }
 }
 
 fn default_risk_acquisition_config_stale_release_minutes() -> f64 {
-    15.0
+    60.0
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -229,8 +229,8 @@ pub struct RiskAcquisitionView {
     pub curve_target: f64,
     pub risk_release_frontier: f64,
     pub backlog_units: f64,
-    pub anchor_price: f64,
-    pub anchor_curve_target: f64,
+    pub release_anchor_price: f64,
+    pub release_anchor_target: f64,
     #[serde(default)]
     pub stale_release_elapsed_minutes: f64,
     #[serde(default)]
@@ -613,10 +613,10 @@ mod tests {
         AccountSummaryView, BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy,
         ExecutionBindingIntentView, ExecutionBindingOrderView, ExecutionBindingPolicyView,
         ExecutionBindingStatusView, ExecutionBindingView, ExecutionStateView, ExecutionStatusView,
-        RiskAcquisitionDirectionView, RiskAcquisitionView, RiskSignalView, ShapeFamily, Side,
-        StrategyPriceStatusView, StreamEvent, TrackCommandAccepted, TrackCommandRequest,
-        TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackExecutionView,
-        TrackListResponse, TrackStatus,
+        RiskAcquisitionConfigView, RiskAcquisitionDirectionView, RiskAcquisitionView,
+        RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView, StreamEvent,
+        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
+        TrackDiagnosticsView, TrackExecutionView, TrackListResponse, TrackStatus,
     };
 
     #[test]
@@ -843,8 +843,8 @@ mod tests {
                 curve_target: 6.0,
                 risk_release_frontier: 2.375,
                 backlog_units: 3.625,
-                anchor_price: 100.0,
-                anchor_curve_target: 4.0,
+                release_anchor_price: 100.0,
+                release_anchor_target: 4.0,
                 stale_release_elapsed_minutes: 12.0,
                 stale_release_minutes: 30.0,
                 next_advantage_target: 6.0,
@@ -870,6 +870,14 @@ mod tests {
         assert_eq!(
             payload["risk_acquisition"]["next_advantage_price"].as_f64(),
             Some(92.5)
+        );
+    }
+
+    #[test]
+    fn risk_acquisition_config_view_defaults_to_one_hour_stale_release() {
+        assert_eq!(
+            RiskAcquisitionConfigView::default().stale_release_minutes,
+            60.0
         );
     }
 

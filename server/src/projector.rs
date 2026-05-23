@@ -220,8 +220,8 @@ fn project_risk_acquisition_runtime(source: &TrackRiskAcquisitionReadModel) -> R
         curve_target: source.curve_target,
         risk_release_frontier: source.risk_release_frontier,
         backlog_units: source.backlog_units,
-        anchor_price: source.anchor_price,
-        anchor_curve_target: source.anchor_curve_target,
+        release_anchor_price: source.release_anchor_price,
+        release_anchor_target: source.release_anchor_target,
         stale_release_elapsed_minutes: source.stale_release_elapsed_minutes,
         stale_release_minutes: source.stale_release_minutes,
         next_advantage_target: source.next_advantage_target,
@@ -644,7 +644,7 @@ mod tests {
         );
         assert_eq!(
             detail_json["strategy"]["risk_acquisition"]["stale_release_minutes"].as_f64(),
-            Some(15.0)
+            Some(60.0)
         );
         assert!(!detail.available_commands.is_empty());
         assert_eq!(
@@ -1020,8 +1020,8 @@ mod tests {
             curve_target: 6.0,
             risk_release_frontier: 2.375,
             backlog_units: 3.625,
-            anchor_price: 100.0,
-            anchor_curve_target: 4.0,
+            release_anchor_price: 100.0,
+            release_anchor_target: 4.0,
             stale_release_elapsed_minutes: 12.0,
             stale_release_minutes: 30.0,
             next_advantage_target: 6.0,

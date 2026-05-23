@@ -1087,12 +1087,10 @@ impl TrackManager {
         }
     }
 
-    fn risk_acquisition_gate_active(track: &TrackRuntime, next_state: &Option<TrackState>) -> bool {
+    fn risk_exposure_gate_active(track: &TrackRuntime, next_state: &Option<TrackState>) -> bool {
         matches!(
             next_state.as_ref().unwrap_or(&track.track_state),
-            TrackState::Running(ControlState::Automatic(
-                AutoState::AcquiringRiskExposure { .. }
-            ))
+            TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated { .. }))
         )
     }
 
@@ -1117,9 +1115,9 @@ impl TrackManager {
                 executor_state: track.executor_state.clone(),
             });
         }
-        let risk_acquisition_gate_active =
-            Self::risk_acquisition_gate_active(track, &target.new_runtime_state);
-        if target.suppress_execution && !risk_acquisition_gate_active {
+        let risk_exposure_gate_active =
+            Self::risk_exposure_gate_active(track, &target.new_runtime_state);
+        if target.suppress_execution && !risk_exposure_gate_active {
             let executor_state = executor::refresh_state(
                 &track.executor_state,
                 track.config(),
@@ -1356,11 +1354,11 @@ mod tests {
             track.current_exposure = Exposure(1.5);
             track.desired_exposure = Some(Exposure(1.5));
             track.track_state =
-                TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
+                TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
                     gate: RiskExposureGateState {
                         risk_release_frontier: Exposure(1.5),
-                        anchor_price: 93.75,
-                        anchor_curve_target: Exposure(5.0),
+                        release_anchor_price: 93.75,
+                        release_anchor_target: Exposure(5.0),
                         stale_since: chrono::Utc::now(),
                     },
                 }));
@@ -1383,11 +1381,11 @@ mod tests {
             track.current_exposure = Exposure(-0.75);
             track.desired_exposure = Some(Exposure(-4.0));
             track.track_state =
-                TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
+                TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
                     gate: RiskExposureGateState {
                         risk_release_frontier: Exposure(-1.5),
-                        anchor_price: 105.0,
-                        anchor_curve_target: Exposure(-4.0),
+                        release_anchor_price: 105.0,
+                        release_anchor_target: Exposure(-4.0),
                         stale_since: Utc.with_ymd_and_hms(2026, 4, 22, 7, 59, 0).unwrap(),
                     },
                 }));
@@ -1406,7 +1404,7 @@ mod tests {
         }));
         assert!(matches!(
             &track.track_state,
-            TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
+            TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
                 gate
             })) if gate.risk_release_frontier == Exposure(-2.5)
         ));

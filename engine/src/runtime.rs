@@ -73,7 +73,7 @@ pub enum ControlState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AutoState {
     FollowingBand,
-    AcquiringRiskExposure {
+    RiskExposureGated {
         gate: RiskExposureGateState,
     },
     Frozen {
@@ -111,7 +111,7 @@ impl TrackState {
         match self {
             Self::WaitingMarketData => TrackStatus::WaitingMarketData,
             Self::Running(ControlState::Automatic(
-                AutoState::FollowingBand | AutoState::AcquiringRiskExposure { .. },
+                AutoState::FollowingBand | AutoState::RiskExposureGated { .. },
             )) => TrackStatus::Active,
             Self::Running(ControlState::Automatic(AutoState::Frozen { .. }))
             | Self::Running(ControlState::Automatic(AutoState::FlattenPending { .. })) => {
@@ -193,8 +193,8 @@ pub struct RiskAcquisitionRuntimeView {
     pub curve_target: Exposure,
     pub risk_release_frontier: Exposure,
     pub backlog_units: f64,
-    pub anchor_price: f64,
-    pub anchor_curve_target: Exposure,
+    pub release_anchor_price: f64,
+    pub release_anchor_target: Exposure,
     pub stale_release_elapsed_minutes: f64,
     pub stale_release_minutes: f64,
     pub next_advantage_target: Exposure,
@@ -755,8 +755,8 @@ impl TrackRuntime {
             curve_target: curve_target.clone(),
             risk_release_frontier: risk_release_frontier.clone(),
             backlog_units: curve_target.delta(risk_release_frontier).0.abs(),
-            anchor_price: gate.anchor_price,
-            anchor_curve_target: gate.anchor_curve_target.clone(),
+            release_anchor_price: gate.release_anchor_price,
+            release_anchor_target: gate.release_anchor_target.clone(),
             stale_release_elapsed_minutes,
             stale_release_minutes: self.config().risk_acquisition.stale_release_minutes,
             next_advantage_target: release.advantage_target.clone(),
@@ -780,7 +780,7 @@ impl From<RiskIncreaseDirection> for RiskAcquisitionDirection {
 
 fn gate_state_from_track_state(state: Option<&TrackState>) -> Option<&RiskExposureGateState> {
     match state {
-        Some(TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
+        Some(TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
             gate,
         }))) => Some(gate),
         _ => None,
@@ -855,8 +855,8 @@ mod tests {
         assert!((risk_acquisition.curve_target.0 - 4.0).abs() < 1e-9);
         assert!((risk_acquisition.risk_release_frontier.0 - 2.0).abs() < 1e-9);
         assert!((risk_acquisition.backlog_units - 2.0).abs() < 1e-9);
-        assert!((risk_acquisition.anchor_price - 95.0).abs() < 1e-9);
-        assert!((risk_acquisition.anchor_curve_target.0 - 4.0).abs() < 1e-9);
+        assert!((risk_acquisition.release_anchor_price - 95.0).abs() < 1e-9);
+        assert!((risk_acquisition.release_anchor_target.0 - 4.0).abs() < 1e-9);
         assert!((risk_acquisition.next_advantage_target.0 - 6.0).abs() < 1e-9);
         assert_eq!(risk_acquisition.next_advantage_price, Some(92.5));
         assert!((risk_acquisition.next_release_units - 1.0).abs() < 1e-9);

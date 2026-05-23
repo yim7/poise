@@ -8,7 +8,7 @@ pub const DEFAULT_RISK_ACQUISITION_ADVANTAGE_STEPS: f64 = 2.0;
 pub const DEFAULT_RISK_ACQUISITION_MIN_RELEASE_STEPS: f64 = 1.0;
 pub const DEFAULT_RISK_ACQUISITION_MAX_RELEASE_STEPS: f64 = 4.0;
 pub const DEFAULT_RISK_ACQUISITION_CATCHUP_RATIO: f64 = 0.25;
-pub const DEFAULT_RISK_ACQUISITION_STALE_RELEASE_MINUTES: f64 = 15.0;
+pub const DEFAULT_RISK_ACQUISITION_STALE_RELEASE_MINUTES: f64 = 60.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackConfig {
@@ -680,6 +680,11 @@ mod tests {
         };
 
         assert_eq!(validate_config(&config), Ok(()));
+    }
+
+    #[test]
+    fn risk_acquisition_defaults_to_one_hour_stale_release() {
+        assert_eq!(RiskAcquisitionConfig::default().stale_release_minutes, 60.0);
     }
 
     #[test]

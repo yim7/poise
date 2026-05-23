@@ -264,7 +264,7 @@ fn apply_risk_exposure_gate(
     let effective_state = effective_runtime_state(track, &new_runtime_state);
     let gate_state = match effective_state {
         TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)) => None,
-        TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure { gate })) => {
+        TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated { gate })) => {
             Some(gate)
         }
         _ => return (None, new_runtime_state, None),
@@ -303,16 +303,14 @@ fn merge_gate_state(
 ) -> Option<TrackState> {
     match gate_state {
         Some(gate) => Some(TrackState::Running(ControlState::Automatic(
-            AutoState::AcquiringRiskExposure { gate },
+            AutoState::RiskExposureGated { gate },
         ))),
         None => {
-            let was_acquiring = matches!(
+            let was_risk_exposure_gated = matches!(
                 base_state.as_ref().unwrap_or(current_state),
-                TrackState::Running(ControlState::Automatic(
-                    AutoState::AcquiringRiskExposure { .. }
-                ))
+                TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated { .. }))
             );
-            if was_acquiring {
+            if was_risk_exposure_gated {
                 Some(TrackState::Running(ControlState::Automatic(
                     AutoState::FollowingBand,
                 )))
@@ -624,13 +622,13 @@ mod tests {
 
     fn risk_exposure_gate_state(
         risk_release_frontier: f64,
-        anchor_price: f64,
-        anchor_curve_target: f64,
+        release_anchor_price: f64,
+        release_anchor_target: f64,
     ) -> RiskExposureGateState {
         RiskExposureGateState {
             risk_release_frontier: Exposure(risk_release_frontier),
-            anchor_price,
-            anchor_curve_target: Exposure(anchor_curve_target),
+            release_anchor_price,
+            release_anchor_target: Exposure(release_anchor_target),
             stale_since: Utc::now(),
         }
     }
@@ -719,7 +717,7 @@ mod tests {
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
-                AutoState::AcquiringRiskExposure { .. }
+                AutoState::RiskExposureGated { .. }
             )))
         ));
         assert!(!result.suppress_execution);
@@ -727,13 +725,13 @@ mod tests {
     }
 
     #[test]
-    fn risk_acquisition_reduces_to_desired_when_curve_reenters_inside_frontier() {
+    fn risk_acquisition_clamps_frontier_when_curve_reenters_inside_frontier() {
         let mut track = test_runtime();
         enable_risk_acquisition(&mut track);
         track.current_exposure = Exposure(1.5);
         track.desired_exposure = Some(Exposure(1.5));
         track.track_state =
-            TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
+            TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
                 gate: risk_exposure_gate_state(1.5, 93.75, 5.0),
             }));
 
@@ -741,11 +739,11 @@ mod tests {
 
         assert_eq!(result.desired_exposure, Exposure(1.0));
         assert_eq!(result.execution_target_exposure, Exposure(1.0));
-        assert_eq!(result.risk_release_frontier, None);
+        assert_eq!(result.risk_release_frontier, Some(Exposure(1.0)));
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
-                AutoState::FollowingBand
+                AutoState::RiskExposureGated { .. }
             )))
         ));
         assert!(!result.suppress_execution);
@@ -758,7 +756,7 @@ mod tests {
         track.current_exposure = Exposure(2.0);
         track.desired_exposure = Some(Exposure(5.0));
         track.track_state =
-            TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
+            TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
                 gate: risk_exposure_gate_state(1.5, 93.75, 5.0),
             }));
 
@@ -771,13 +769,76 @@ mod tests {
     }
 
     #[test]
+    fn risk_acquisition_holds_advantage_position_until_desired_crosses_current() {
+        let mut track = test_runtime();
+        enable_risk_acquisition(&mut track);
+        track.current_exposure = Exposure(2.625);
+        track.desired_exposure = Some(Exposure(6.0));
+        track.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
+                gate: risk_exposure_gate_state(2.625, 92.5, 6.0),
+            }));
+
+        let result = reconcile_target(&track, 93.75);
+
+        assert_eq!(result.desired_exposure, Exposure(5.0));
+        assert_eq!(result.execution_target_exposure, Exposure(2.625));
+        assert_eq!(result.risk_release_frontier, Some(Exposure(2.625)));
+        assert!(result.suppress_execution);
+    }
+
+    #[test]
+    fn risk_acquisition_reduces_when_desired_crosses_current_position() {
+        let mut track = test_runtime();
+        enable_risk_acquisition(&mut track);
+        track.current_exposure = Exposure(3.0);
+        track.desired_exposure = Some(Exposure(5.0));
+        track.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
+                gate: risk_exposure_gate_state(1.5, 93.75, 5.0),
+            }));
+
+        let result = reconcile_target(&track, 97.5);
+
+        assert_eq!(result.desired_exposure, Exposure(2.0));
+        assert_eq!(result.execution_target_exposure, Exposure(2.0));
+        assert_eq!(result.risk_release_frontier, Some(Exposure(1.5)));
+        assert!(!result.suppress_execution);
+    }
+
+    #[test]
+    fn risk_acquisition_clamps_frontier_after_reduce_reaches_desired() {
+        let mut track = test_runtime();
+        enable_risk_acquisition(&mut track);
+        track.current_exposure = Exposure(2.0);
+        track.desired_exposure = Some(Exposure(5.0));
+        track.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
+                gate: risk_exposure_gate_state(1.5, 93.75, 5.0),
+            }));
+
+        let result = reconcile_target(&track, 97.5);
+
+        assert_eq!(result.desired_exposure, Exposure(2.0));
+        assert_eq!(result.execution_target_exposure, Exposure(2.0));
+        assert_eq!(result.risk_release_frontier, Some(Exposure(2.0)));
+        assert!(matches!(
+            result.new_runtime_state,
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::RiskExposureGated { .. }
+            )))
+        ));
+        assert!(result.suppress_execution);
+    }
+
+    #[test]
     fn risk_acquisition_cross_zero_reduces_to_flat_first() {
         let mut track = test_runtime();
         enable_risk_acquisition(&mut track);
         track.current_exposure = Exposure(1.5);
         track.desired_exposure = Some(Exposure(1.5));
         track.track_state =
-            TrackState::Running(ControlState::Automatic(AutoState::AcquiringRiskExposure {
+            TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
                 gate: risk_exposure_gate_state(1.5, 93.75, 5.0),
             }));
 
@@ -789,10 +850,30 @@ mod tests {
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
-                AutoState::FollowingBand
+                AutoState::RiskExposureGated { .. }
             )))
         ));
         assert!(!result.suppress_execution);
+    }
+
+    #[test]
+    fn risk_acquisition_does_not_reinitialize_after_frontier_is_clamped_to_zero() {
+        let mut track = test_runtime();
+        enable_risk_acquisition(&mut track);
+        track.current_exposure = Exposure(0.0);
+        track.desired_exposure = Some(Exposure(0.0));
+        track.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
+                gate: risk_exposure_gate_state(0.0, 100.0, 0.0),
+            }));
+
+        let result = reconcile_target(&track, 99.375);
+
+        assert_eq!(result.desired_exposure, Exposure(0.5));
+        assert_eq!(result.execution_target_exposure, Exposure(0.0));
+        assert_eq!(result.risk_release_frontier, Some(Exposure(0.0)));
+        assert!(result.risk_acquisition.is_some());
+        assert!(result.suppress_execution);
     }
 
     #[test]
@@ -838,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_reentry_clears_target_anchor_and_enters_risk_acquisition() {
+    fn frozen_reentry_clears_target_anchor_and_enters_risk_exposure_gate() {
         let mut track = test_runtime();
         track.track_state = TrackState::Running(ControlState::Automatic(AutoState::Frozen {
             target_anchor: Exposure(4.0),
@@ -852,7 +933,7 @@ mod tests {
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
-                AutoState::AcquiringRiskExposure { .. }
+                AutoState::RiskExposureGated { .. }
             )))
         ));
     }
@@ -884,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn flatten_pending_reentry_clears_target_anchor_and_enters_risk_acquisition() {
+    fn flatten_pending_reentry_clears_target_anchor_and_enters_risk_exposure_gate() {
         let mut track = test_runtime_with_strategy_target(Exposure(2.0));
         track.track_state =
             TrackState::Running(ControlState::Automatic(AutoState::FlattenPending {
@@ -906,7 +987,7 @@ mod tests {
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
-                AutoState::AcquiringRiskExposure { .. }
+                AutoState::RiskExposureGated { .. }
             )))
         ));
     }

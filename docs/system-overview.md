@@ -132,9 +132,9 @@ server::config::TrackSpec
 - `desired_exposure` 是策略曲线理论目标，用于减仓规划和展示。
 - `risk_release_frontier` 是风险门控已经释放的新增风险边界，只限制继续增加风险，不是减仓目标。
 - `execution_target_exposure` 由 `current_exposure`、`desired_exposure` 和 `risk_release_frontier` 派生，是 executor 当前真正追随的目标。
-- 从零启动或进入新的同方向 backlog 时，系统先释放 `initial_ratio` 对应的目标暴露；如果曲线目标不小于 `min_rebalance_units`，至少释放一个最小调仓单位。
-- 增加风险暴露后，系统记录 `anchor_price` 和 `anchor_curve_target`。只有曲线目标相对锚点继续走出 `advantage_steps * min_rebalance_units`，才释放一部分 backlog。
-- 如果同一个 anchor 等待达到 `stale_release_minutes`，即使价格没有走到优势阈值，也允许释放一部分 backlog；设为 `0` 表示关闭时间释放。
+- 没有已有 `RiskExposureGated` gate state 的启动切片，系统先释放 `initial_ratio` 对应的目标暴露；如果曲线目标不小于 `min_rebalance_units`，至少释放一个最小调仓单位。已经存在 gate state 时，即使 frontier 曾被压到 0，后续同方向增长也不会再次获得这笔初始释放。
+- 增加风险暴露后，系统记录 `release_anchor_price` 和 `release_anchor_target`。只有曲线目标相对锚点继续走出 `advantage_steps * min_rebalance_units`，才释放一部分 backlog。
+- 如果 stale 等待达到 `stale_release_minutes`（默认 60 分钟），即使价格没有走到优势阈值，也允许释放一部分 backlog；设为 `0` 表示关闭时间释放。
 - 每次释放量由 backlog、`catchup_ratio`、`min_release_steps` 和 `max_release_steps` 共同决定：先按 backlog 比例计算，再限制在最小/最大释放单位之间。
 - 运行时公开 `risk_release_frontier`、`backlog_units`、`next_advantage_price` 和 `next_release_units` 等观测字段；TUI 的 Execution 区会展示释放边界、backlog 和下一次释放信息。
 
@@ -143,7 +143,7 @@ server::config::TrackSpec
 - `reconciler` 先计算理论 `desired_exposure`，再让 `risk_exposure_gate` 计算 `risk_release_frontier`。gate 不覆盖 desired。
 - 没有 frontier 时，`execution_target_exposure = desired_exposure`。
 - frontier 和 desired 异号时，执行目标先回到 `0`，不能在一次 reconcile 里直接反向增加风险。
-- desired 回到 frontier 内侧时，退出门控，执行目标直接回到 desired，用于降低风险。
+- desired 回到 frontier 内侧时，会把 frontier 一起往风险更低方向压回去，用于降低风险；frontier 被压到 0 后，后续同方向增加不会重新获得启动初始释放，只能继续靠价格优势或 stale 时间释放。
 - desired 仍在 frontier 外侧，且当前仓位还没到达 frontier 时，执行目标最多到 frontier，不继续释放下一段 backlog。
 - 当前仓位到达或穿过 frontier，但没有超过 desired 时，frontier 推进到当前仓位；这是承认已经获得的仓位，不算一次新的释放，也不重置 anchor。
 - 当前仓位超过 desired 时，执行目标回到 desired，优先降低风险。
@@ -160,7 +160,7 @@ release_units = clamp(backlog_units * catchup_ratio, min_release_steps * min_reb
 release_units = min(release_units, backlog_units)
 ```
 
-价格优势释放和时间释放使用同一套 `release_units`。只要还有同方向 backlog，且价格优势满足，就把 frontier 向 desired 推进，并重置 `anchor_price`、`anchor_curve_target` 和 `anchor_started_at`；因此即使 stale 已经接近到期，价格优势释放也会让 stale 重新计时。时间释放用于打破等待：当前 anchor 等待达到 `stale_release_minutes` 后可以释放一段，即使当前仓位还没有吸收上一段 frontier；但一次 stale 释放后，必须等当前仓位到达或穿过新的 frontier，重新获得进展，stale 才会再次可用。frontier 推进后由 `CatchUp` 追新的 `execution_target_exposure`。如果当前仓位已经到达或穿过 frontier，gate 会先 ratchet 承认已获得的仓位。价格继续移动产生的新 desired 变化只进入同一个 backlog，不单独立即释放。
+价格优势释放和时间释放使用同一套 `release_units`。只要还有同方向 backlog，且价格优势满足，就把 frontier 向 desired 推进，并重置 `release_anchor_price`、`release_anchor_target` 和 `stale_since`；因此即使 stale 已经接近到期，价格优势释放也会让 stale 重新计时。时间释放用于打破等待：stale 等待达到 `stale_release_minutes` 后可以释放一段，即使当前仓位还没有吸收上一段 frontier；时间释放不更新价格优势锚点，只重置 `stale_since`，所以下一次时间释放会重新等待完整 stale 周期。frontier 推进后由 `CatchUp` 追新的 `execution_target_exposure`。如果当前仓位已经到达或穿过 frontier，gate 会先 ratchet 承认已获得的仓位。价格继续移动产生的新 desired 变化只进入同一个 backlog，不单独立即释放。
 
 风险释放示例：
 
@@ -195,7 +195,7 @@ SQLite 文件位于 `<instance-dir>/.data/poise-server.sqlite`。
 
 当前持久化事实：
 
-- `track_control_state`：只保存可跨进程恢复的控制状态，例如自动、暂停、手动目标和终止。自动运行中的 `AcquiringRiskExposure`、冻结确认、flatten pending 等运行阶段在写入持久控制状态时折回对应的 durable 控制模式。
+- `track_control_state`：只保存可跨进程恢复的控制状态，例如自动、暂停、手动目标和终止。自动运行中的 `RiskExposureGated`、冻结确认、flatten pending 等运行阶段在写入持久控制状态时折回对应的 durable 控制模式。
 - `track_events`：保存领域事件，用于审计和读侧更新。
 - `track_effects`：保存 effect journal、执行状态、重试次数和错误摘要。它是 effect worker 的持久队列事实，不是交易所订单事实的完整替代。
 - `track_pnl_records`：保存可归属到 track 的成交盈亏、交易手续费和资金费明细。
@@ -205,7 +205,7 @@ SQLite 文件位于 `<instance-dir>/.data/poise-server.sqlite`。
 当前进程事实：
 
 - `TrackMutationFrame` 是一次 mutation 的当前进程快照，用于提交、回滚和 durable-write 判断；它不是持久文档。
-- `ExecutorState`、binding ledger、recovery anomaly、risk acquisition gate、`desired_exposure` 和 live market fields 属于 runtime 当前会话状态。需要展示时从 live runtime 投影；重启后根据 durable 控制状态、当前配置、交易所快照和新行情重新建立。
+- `ExecutorState`、binding ledger、recovery anomaly、risk exposure gate、`desired_exposure` 和 live market fields 属于 runtime 当前会话状态。需要展示时从 live runtime 投影；重启后根据 durable 控制状态、当前配置、交易所快照和新行情重新建立。
 - `TrackRuntimeView`、read model 和 protocol DTO 都是投影结果。它们可以被查询和推送，但不能反向作为 engine 或 persistence 的事实源。
 
 读模型链路：
