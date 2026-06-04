@@ -23,7 +23,7 @@ use crate::price_gate::{
 };
 use crate::reconciler;
 use crate::risk_exposure_gate::{
-    RiskAcquisitionRelease, RiskExposureGateState, RiskIncreaseDirection,
+    self, RiskAcquisitionRelease, RiskExposureGateState, RiskIncreaseDirection,
 };
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -716,23 +716,56 @@ impl TrackRuntime {
 
         let observed_at = Utc::now();
         let target = reconciler::reconcile_target_at(self, strategy_price, observed_at);
-        let risk_acquisition = target.risk_acquisition.as_ref().and_then(|release| {
-            let gate = gate_state_from_track_state(target.new_runtime_state.as_ref())
-                .or_else(|| gate_state_from_track_state(Some(&self.track_state)))?;
-            Some(self.risk_acquisition_view(
-                &target.curve_target,
-                &gate.risk_release_frontier,
-                gate,
-                release,
-                observed_at,
-            ))
-        });
+        let risk_acquisition =
+            self.live_risk_acquisition_view(&target, strategy_price, observed_at);
 
         LiveTargetProjection {
             desired_exposure: Some(target.desired_exposure),
             execution_target_exposure: Some(target.execution_target_exposure),
             risk_acquisition,
         }
+    }
+
+    fn live_risk_acquisition_view(
+        &self,
+        target: &reconciler::TargetReconcileResult,
+        strategy_price: f64,
+        observed_at: DateTime<Utc>,
+    ) -> Option<RiskAcquisitionRuntimeView> {
+        let persisted_gate = gate_state_from_track_state(target.new_runtime_state.as_ref())
+            .or_else(|| gate_state_from_track_state(Some(&self.track_state)));
+        let transient_gate = match persisted_gate {
+            Some(_) => None,
+            None => {
+                let risk_release_frontier = target.risk_release_frontier.as_ref()?;
+                let backlog_units = target.curve_target.delta(risk_release_frontier).0.abs();
+                if backlog_units <= f64::EPSILON {
+                    return None;
+                }
+                Some(RiskExposureGateState {
+                    risk_release_frontier: risk_release_frontier.clone(),
+                    release_anchor_price: strategy_price,
+                    release_anchor_target: risk_release_frontier.clone(),
+                    stale_since: observed_at,
+                })
+            }
+        };
+        let gate = persisted_gate.or(transient_gate.as_ref())?;
+        let release = target.risk_acquisition.clone().or_else(|| {
+            risk_exposure_gate::pending_release(
+                self.config().risk_acquisition,
+                self.config().min_rebalance_units,
+                gate,
+                target.curve_target.clone(),
+            )
+        })?;
+        Some(self.risk_acquisition_view(
+            &target.curve_target,
+            &gate.risk_release_frontier,
+            gate,
+            &release,
+            observed_at,
+        ))
     }
 
     fn risk_acquisition_view(
@@ -861,6 +894,41 @@ mod tests {
         assert_eq!(risk_acquisition.next_advantage_price, Some(92.5));
         assert!((risk_acquisition.next_release_units - 1.0).abs() < 1e-9);
         assert!((risk_acquisition.next_release_target.0 - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn live_view_exposes_cross_zero_risk_acquisition_backlog_without_bindings() {
+        let mut runtime = TrackRuntime::new(
+            test_definition_with_config(test_config()),
+            test_rules(0.1),
+            Utc::now(),
+        );
+        runtime.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
+        runtime.current_exposure = Exposure(-0.25);
+        runtime.strategy_price = Some(99.375);
+        runtime.strategy_price_status = StrategyPriceStatus::Live;
+        runtime.mark_price = Some(99.375);
+        runtime.best_bid = Some(99.3);
+        runtime.best_ask = Some(99.4);
+
+        let live = runtime.live_view();
+
+        assert_eq!(live.execution_target_exposure, Some(0.0));
+        let risk_acquisition = live
+            .risk_acquisition
+            .expect("transient cross-zero risk acquisition backlog should be visible");
+
+        assert_eq!(risk_acquisition.direction, RiskAcquisitionDirection::Long);
+        assert!((risk_acquisition.curve_target.0 - 0.5).abs() < 1e-9);
+        assert_eq!(risk_acquisition.risk_release_frontier, Exposure(0.0));
+        assert!((risk_acquisition.backlog_units - 0.5).abs() < 1e-9);
+        assert!((risk_acquisition.release_anchor_price - 99.375).abs() < 1e-9);
+        assert_eq!(risk_acquisition.release_anchor_target, Exposure(0.0));
+        assert_eq!(risk_acquisition.next_advantage_target, Exposure(2.0));
+        assert_eq!(risk_acquisition.next_advantage_price, Some(97.5));
+        assert!((risk_acquisition.next_release_units - 0.5).abs() < 1e-9);
+        assert_eq!(risk_acquisition.next_release_target, Exposure(0.5));
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         frame.render_widget(empty, area);
         return;
     };
-    let execution_body_line_count = execution_body_line_count(&detail.execution);
+    let execution_body_line_count = execution_body_line_count(detail);
     let sections = resolve_detail_layout(area, execution_body_line_count);
 
     let track = Paragraph::new(track_lines(detail, sections.mode))
@@ -49,7 +49,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let execution_body_height = sections.execution.height.saturating_sub(2) as usize;
     let execution = Paragraph::new(execution_lines(
-        &detail.execution,
+        detail,
         sections.mode,
         execution_body_height,
     ))
@@ -358,26 +358,31 @@ fn attention_summary(attention_reasons: &[String]) -> String {
     }
 }
 
-fn execution_body_line_count(execution: &TrackExecutionView) -> usize {
+fn execution_body_line_count(detail: &crate::protocol::TrackDetailView) -> usize {
+    let execution = &detail.execution;
     let alert_lines = usize::from(matches!(
         execution.execution_status,
         ExecutionStatusView::AttentionRequired
     ));
-    let risk_acquisition_lines = execution.risk_acquisition.as_ref().map_or(0, |_| 3);
+    let target_lines = 1;
+    let risk_acquisition_lines = execution.risk_acquisition.as_ref().map_or(0, |_| 2);
     let binding_lines = execution.bindings.len();
 
-    match (alert_lines + risk_acquisition_lines, binding_lines) {
-        (0, 0) => 1,
+    match (
+        target_lines + alert_lines + risk_acquisition_lines,
+        binding_lines,
+    ) {
         (non_binding, 0) => non_binding,
         (non_binding, bindings) => non_binding + bindings,
     }
 }
 
 fn execution_lines(
-    execution: &TrackExecutionView,
+    detail: &crate::protocol::TrackDetailView,
     mode: DetailLayoutMode,
     max_lines: usize,
 ) -> Vec<Line<'static>> {
+    let execution = &detail.execution;
     let binding_details = execution
         .bindings
         .iter()
@@ -385,13 +390,10 @@ fn execution_lines(
         .collect::<Vec<_>>();
 
     if matches!(mode, DetailLayoutMode::Minimal) {
-        return limit_execution_lines(
-            minimal_execution_lines(execution, &binding_details),
-            max_lines,
-        );
+        return limit_execution_lines(minimal_execution_lines(detail, &binding_details), max_lines);
     }
 
-    let mut lines = Vec::new();
+    let mut lines = vec![format_execution_target_line(detail)];
 
     if matches!(
         execution.execution_status,
@@ -411,10 +413,6 @@ fn execution_lines(
         lines.extend(format_risk_acquisition_lines(risk_acquisition));
     }
 
-    if lines.is_empty() && binding_details.is_empty() {
-        return limit_execution_lines(vec![Line::from("no active bindings")], max_lines);
-    }
-
     if matches!(mode, DetailLayoutMode::Compact) {
         let execution_summary = format_compact_execution_summary(execution);
         if let Some(summary) = execution_summary {
@@ -422,7 +420,7 @@ fn execution_lines(
         }
     } else if !binding_details.is_empty() {
         lines.extend(binding_details.into_iter().map(Line::from));
-    } else if !lines.is_empty() {
+    } else if !lines.is_empty() && execution.risk_acquisition.is_none() {
         lines.push(Line::from("bindings: none"));
     }
 
@@ -444,9 +442,10 @@ fn limit_execution_lines(mut lines: Vec<Line<'static>>, max_lines: usize) -> Vec
 }
 
 fn minimal_execution_lines(
-    execution: &TrackExecutionView,
+    detail: &crate::protocol::TrackDetailView,
     binding_details: &[String],
 ) -> Vec<Line<'static>> {
+    let execution = &detail.execution;
     if matches!(
         execution.execution_status,
         ExecutionStatusView::AttentionRequired
@@ -462,10 +461,20 @@ fn minimal_execution_lines(
     }
 
     if binding_details.is_empty() {
-        return vec![Line::from("no active bindings")];
+        return vec![format_execution_target_line(detail)];
     }
 
     vec![Line::from("execution detail unavailable")]
+}
+
+fn format_execution_target_line(detail: &crate::protocol::TrackDetailView) -> Line<'static> {
+    Line::from(format!(
+        "exposure: cur {} | curve {} | exec {} | gap {}",
+        format_signed_exposure(detail.position.current_exposure),
+        format_optional_signed_exposure(detail.position.desired_exposure),
+        format_optional_signed_exposure(detail.execution.execution_target_exposure),
+        format_signed_exposure(detail.execution.inventory_gap)
+    ))
 }
 
 fn format_compact_execution_summary(execution: &TrackExecutionView) -> Option<String> {
@@ -519,53 +528,69 @@ fn compact_binding_label(binding: &poise_protocol::ExecutionBindingView) -> Stri
 fn format_risk_acquisition_lines(risk_acquisition: &RiskAcquisitionView) -> Vec<Line<'static>> {
     vec![
         Line::from(format!(
-            "acq: {} | curve {} | release {} | backlog {}",
+            "acq: {} | frontier {} | backlog {} | release {} -> {}",
             format_risk_direction(risk_acquisition.direction),
-            format_signed_exposure(risk_acquisition.curve_target),
             format_signed_exposure(risk_acquisition.risk_release_frontier),
             format_signed_exposure(risk_acquisition.backlog_units),
-        )),
-        Line::from(format!(
-            "anchor {:.4} / {} | advantage {} @ {}",
-            risk_acquisition.release_anchor_price,
-            format_signed_exposure(risk_acquisition.release_anchor_target),
-            format_signed_exposure(risk_acquisition.next_advantage_target),
-            format_optional_price(risk_acquisition.next_advantage_price),
-        )),
-        Line::from(format!(
-            "release {} -> {}{}",
             format_signed_exposure(risk_acquisition.next_release_units),
             format_signed_exposure(risk_acquisition.next_release_target),
-            format_stale_release_suffix(risk_acquisition),
+        )),
+        Line::from(format!(
+            "unlock: {} | anchor {:.4}/{}",
+            format_release_trigger_conditions(risk_acquisition),
+            risk_acquisition.release_anchor_price,
+            format_signed_exposure(risk_acquisition.release_anchor_target),
         )),
     ]
 }
 
 fn format_compact_risk_acquisition(risk_acquisition: &RiskAcquisitionView) -> String {
     format!(
-        "acq: {} backlog {} | release {} -> {}{}",
+        "acq: {} backlog {} | release {} -> {} | unlock {}",
         format_risk_direction(risk_acquisition.direction),
         format_signed_exposure(risk_acquisition.backlog_units),
         format_signed_exposure(risk_acquisition.next_release_units),
         format_signed_exposure(risk_acquisition.next_release_target),
-        format_stale_release_suffix(risk_acquisition),
+        format_release_trigger_conditions(risk_acquisition),
     )
 }
 
-fn format_stale_release_suffix(risk_acquisition: &RiskAcquisitionView) -> String {
-    if risk_acquisition.stale_release_minutes <= f64::EPSILON {
-        return String::new();
+fn format_release_trigger_conditions(risk_acquisition: &RiskAcquisitionView) -> String {
+    let mut conditions = Vec::new();
+    if let Some(condition) = format_price_release_condition(risk_acquisition) {
+        conditions.push(condition);
     }
+    if let Some(condition) = format_stale_release_condition(risk_acquisition) {
+        conditions.push(condition);
+    }
+    if conditions.is_empty() {
+        return "none".to_string();
+    }
+    conditions.join(" or ")
+}
 
+fn format_price_release_condition(risk_acquisition: &RiskAcquisitionView) -> Option<String> {
+    let price = risk_acquisition.next_advantage_price?;
+    let comparison = match risk_acquisition.direction {
+        RiskAcquisitionDirectionView::Long => "<=",
+        RiskAcquisitionDirectionView::Short => ">=",
+    };
+    Some(format!("price {comparison} {price:.4}"))
+}
+
+fn format_stale_release_condition(risk_acquisition: &RiskAcquisitionView) -> Option<String> {
+    if risk_acquisition.stale_release_minutes <= f64::EPSILON {
+        return None;
+    }
     let elapsed = risk_acquisition
         .stale_release_elapsed_minutes
         .max(0.0)
         .min(risk_acquisition.stale_release_minutes);
-    format!(
-        " | stale {}/{}m",
-        format_minutes(elapsed),
-        format_minutes(risk_acquisition.stale_release_minutes)
-    )
+    let remaining = (risk_acquisition.stale_release_minutes - elapsed).max(0.0);
+    if remaining <= f64::EPSILON {
+        return Some("stale due".to_string());
+    }
+    Some(format!("stale in {}m", format_minutes(remaining)))
 }
 
 fn format_minutes(value: f64) -> String {
@@ -585,6 +610,12 @@ fn format_risk_direction(direction: RiskAcquisitionDirectionView) -> &'static st
 
 fn format_signed_exposure(value: f64) -> String {
     format!("{value:+.4}")
+}
+
+fn format_optional_signed_exposure(value: Option<f64>) -> String {
+    value
+        .map(format_signed_exposure)
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn format_binding_status(value: ExecutionBindingStatusView) -> &'static str {
@@ -1060,9 +1091,83 @@ mod tests {
         let text = render_text_with_size(detail, 180, 36);
 
         assert!(text.contains("exposure: 3.5000 → 3.7500 [↑ +0.2500] [acq backlog +3.6250]"));
-        assert!(text.contains("acq: long | curve +6.0000 | release +2.3750 | backlog +3.6250"));
-        assert!(text.contains("anchor 100.0000 / +4.0000 | advantage +6.0000 @ 92.5000"));
-        assert!(text.contains("release +0.8750 -> +3.2500 | stale 12/30m"));
+        assert!(text.contains(
+            "acq: long | frontier +2.3750 | backlog +3.6250 | release +0.8750 -> +3.2500"
+        ));
+        assert!(
+            text.contains("unlock: price <= 92.5000 or stale in 18m | anchor 100.0000/+4.0000")
+        );
+    }
+
+    #[test]
+    fn renders_execution_target_state_without_active_bindings() {
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        detail.execution.bindings.clear();
+        detail.execution.active_binding_count = 0;
+        detail.execution.execution_target_exposure = Some(3.75);
+        detail.execution.inventory_gap = 0.25;
+
+        let lines = execution_lines(&detail, DetailLayoutMode::Standard, 4)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lines[0],
+            "exposure: cur +3.5000 | curve +4.0000 | exec +3.7500 | gap +0.2500"
+        );
+        assert!(lines.iter().any(|line| line == "bindings: none"));
+        assert!(!lines.iter().any(|line| line == "no active bindings"));
+    }
+
+    #[test]
+    fn renders_risk_acquisition_without_hiding_no_binding_state() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        value["execution"]["bindings"] = serde_json::json!([]);
+        value["execution"]["active_binding_count"] = serde_json::json!(0);
+        value["execution"]["risk_acquisition"] = serde_json::json!({
+            "direction": "long",
+            "curve_target": 0.3742,
+            "risk_release_frontier": 0.0,
+            "backlog_units": 0.3742,
+            "release_anchor_price": 64399.5,
+            "release_anchor_target": 0.0,
+            "stale_release_elapsed_minutes": 0.0,
+            "stale_release_minutes": 60.0,
+            "next_advantage_target": 0.6,
+            "next_advantage_price": 64201.9945,
+            "next_release_units": 0.3742,
+            "next_release_target": 0.3742
+        });
+        value["position"]["current_exposure"] = serde_json::json!(-0.1056);
+        value["position"]["desired_exposure"] = serde_json::json!(0.3742);
+        value["execution"]["execution_target_exposure"] = serde_json::json!(0.0);
+        value["execution"]["inventory_gap"] = serde_json::json!(0.1056);
+        let detail: TrackDetailView = serde_json::from_value(value).unwrap();
+
+        let lines = execution_lines(&detail, DetailLayoutMode::Standard, 3)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            lines[0],
+            "exposure: cur -0.1056 | curve +0.3742 | exec +0.0000 | gap +0.1056"
+        );
+        assert_eq!(
+            lines[1],
+            "acq: long | frontier +0.0000 | backlog +0.3742 | release +0.3742 -> +0.3742"
+        );
+        assert_eq!(
+            lines[2],
+            "unlock: price <= 64201.9945 or stale in 60m | anchor 64399.5000/+0.0000"
+        );
+        assert!(!lines.iter().any(|line| line == "bindings: none"));
     }
 
     #[test]
@@ -1079,7 +1184,7 @@ mod tests {
             })
             .collect();
 
-        let lines = execution_lines(&detail.execution, DetailLayoutMode::Standard, 6)
+        let lines = execution_lines(&detail, DetailLayoutMode::Standard, 7)
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
@@ -1114,13 +1219,13 @@ mod tests {
             })
             .collect();
 
-        let lines = execution_lines(&detail.execution, DetailLayoutMode::Standard, 5)
+        let lines = execution_lines(&detail, DetailLayoutMode::Standard, 5)
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
 
         assert_eq!(lines.len(), 5);
-        assert!(lines[4].contains("+4 more execution lines"));
+        assert!(lines[4].contains("+5 more execution lines"));
     }
 
     #[test]

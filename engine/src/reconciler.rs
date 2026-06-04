@@ -302,9 +302,14 @@ fn merge_gate_state(
     gate_state: Option<RiskExposureGateState>,
 ) -> Option<TrackState> {
     match gate_state {
-        Some(gate) => Some(TrackState::Running(ControlState::Automatic(
-            AutoState::RiskExposureGated { gate },
-        ))),
+        Some(gate) => {
+            if is_flattening_reentry(base_state.as_ref(), current_state) {
+                return base_state;
+            }
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::RiskExposureGated { gate },
+            )))
+        }
         None => {
             let was_risk_exposure_gated = matches!(
                 base_state.as_ref().unwrap_or(current_state),
@@ -319,6 +324,18 @@ fn merge_gate_state(
             }
         }
     }
+}
+
+fn is_flattening_reentry(base_state: Option<&TrackState>, current_state: &TrackState) -> bool {
+    matches!(
+        current_state,
+        TrackState::Running(ControlState::Automatic(AutoState::Flattening { .. }))
+    ) && matches!(
+        base_state,
+        Some(TrackState::Running(ControlState::Automatic(
+            AutoState::FollowingBand
+        )))
+    )
 }
 
 fn resolve_in_band(
@@ -725,6 +742,52 @@ mod tests {
     }
 
     #[test]
+    fn risk_acquisition_cross_zero_opposite_residual_waits_before_advantage() {
+        let mut track = test_runtime();
+        enable_risk_acquisition(&mut track);
+        track.current_exposure = Exposure(-0.25);
+        track.track_state = TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
+
+        let result = reconcile_target(&track, 99.375);
+
+        assert_eq!(result.desired_exposure, Exposure(0.5));
+        assert_eq!(result.execution_target_exposure, Exposure(0.0));
+        assert_eq!(result.risk_release_frontier, Some(Exposure(0.0)));
+        assert!(matches!(
+            result.new_runtime_state,
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::RiskExposureGated { .. }
+            )))
+        ));
+        assert!(!result.suppress_execution);
+    }
+
+    #[test]
+    fn risk_acquisition_cross_zero_releases_after_advantage_with_opposite_residual() {
+        let mut track = test_runtime();
+        enable_risk_acquisition(&mut track);
+        track.current_exposure = Exposure(-0.25);
+        track.desired_exposure = Some(Exposure(0.0));
+        track.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
+                gate: risk_exposure_gate_state(0.0, 100.0, 0.0),
+            }));
+
+        let result = reconcile_target(&track, 98.75);
+
+        assert_eq!(result.desired_exposure, Exposure(1.0));
+        assert_eq!(result.execution_target_exposure, Exposure(0.5));
+        assert_eq!(result.risk_release_frontier, Some(Exposure(0.5)));
+        assert!(matches!(
+            result.new_runtime_state,
+            Some(TrackState::Running(ControlState::Automatic(
+                AutoState::RiskExposureGated { .. }
+            )))
+        ));
+        assert!(!result.suppress_execution);
+    }
+
+    #[test]
     fn risk_acquisition_clamps_frontier_when_curve_reenters_inside_frontier() {
         let mut track = test_runtime();
         enable_risk_acquisition(&mut track);
@@ -832,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn risk_acquisition_cross_zero_reduces_to_flat_first() {
+    fn risk_acquisition_cross_zero_waits_at_flat_before_advantage() {
         let mut track = test_runtime();
         enable_risk_acquisition(&mut track);
         track.current_exposure = Exposure(1.5);
@@ -842,9 +905,9 @@ mod tests {
                 gate: risk_exposure_gate_state(1.5, 93.75, 5.0),
             }));
 
-        let result = reconcile_target(&track, 101.25);
+        let result = reconcile_target(&track, 100.625);
 
-        assert_eq!(result.desired_exposure, Exposure(-1.0));
+        assert_eq!(result.desired_exposure, Exposure(-0.5));
         assert_eq!(result.execution_target_exposure, Exposure(0.0));
         assert_eq!(result.risk_release_frontier, Some(Exposure(0.0)));
         assert!(matches!(

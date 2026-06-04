@@ -47,19 +47,25 @@ pub struct RiskExposureGateDecision {
 pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
     let config = input.config;
 
-    let previous_frontier = input
-        .state
+    let mut gate_state = input.state.clone();
+    let mut previous_frontier = gate_state
         .as_ref()
         .map(|state| state.risk_release_frontier.clone())
         .unwrap_or_else(|| input.current_exposure.clone());
 
     if crosses_zero(previous_frontier.0, input.curve_target.0) {
-        return clamp_released_frontier(input, Exposure(0.0));
+        previous_frontier = Exposure(0.0);
+        gate_state = Some(zero_anchor_state(input.strategy_price, input.observed_at));
     }
 
     if inside_or_equal(input.curve_target.0, previous_frontier.0) {
         let risk_release_frontier = input.curve_target.clone();
-        return clamp_released_frontier(input, risk_release_frontier);
+        return clamp_released_frontier(
+            gate_state,
+            risk_release_frontier,
+            input.strategy_price,
+            input.observed_at,
+        );
     }
 
     let direction = if input.curve_target.0 > previous_frontier.0 {
@@ -68,7 +74,7 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
         RiskIncreaseDirection::Short
     };
 
-    let mut state = input.state.unwrap_or_else(|| {
+    let mut state = gate_state.unwrap_or_else(|| {
         startup_state(
             config,
             input.min_rebalance_units,
@@ -161,21 +167,27 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
 }
 
 fn clamp_released_frontier(
-    input: RiskExposureGateInput,
+    state: Option<RiskExposureGateState>,
     risk_release_frontier: Exposure,
+    strategy_price: f64,
+    observed_at: DateTime<Utc>,
 ) -> RiskExposureGateDecision {
-    if let Some(state) = input.state {
-        return clamp_state_to_frontier(
-            state,
-            risk_release_frontier,
-            input.strategy_price,
-            input.observed_at,
-        );
+    if let Some(state) = state {
+        return clamp_state_to_frontier(state, risk_release_frontier, strategy_price, observed_at);
     }
     RiskExposureGateDecision {
         risk_release_frontier,
         state: None,
         next_release: None,
+    }
+}
+
+fn zero_anchor_state(strategy_price: f64, observed_at: DateTime<Utc>) -> RiskExposureGateState {
+    RiskExposureGateState {
+        risk_release_frontier: Exposure(0.0),
+        release_anchor_price: strategy_price,
+        release_anchor_target: Exposure(0.0),
+        stale_since: observed_at,
     }
 }
 
@@ -279,6 +291,15 @@ fn next_release(
     })
 }
 
+pub fn pending_release(
+    config: RiskAcquisitionConfig,
+    min_rebalance_units: f64,
+    state: &RiskExposureGateState,
+    curve_target: Exposure,
+) -> Option<RiskAcquisitionRelease> {
+    next_release(config, min_rebalance_units, state, curve_target)
+}
+
 fn stale_release_due(
     config: RiskAcquisitionConfig,
     state: &RiskExposureGateState,
@@ -347,7 +368,7 @@ pub fn execution_target_exposure(
         return desired_exposure.clone();
     };
 
-    if crosses_zero(current_exposure.0, desired_exposure.0) {
+    if crosses_zero(frontier.0, desired_exposure.0) {
         return Exposure(0.0);
     }
     if inside_or_equal(desired_exposure.0, frontier.0) {
@@ -486,6 +507,40 @@ mod tests {
                 risk_release_frontier: Exposure(2.5),
                 release_anchor_price: 100.0,
                 release_anchor_target: Exposure(5.0),
+                stale_since: observed_at(),
+            })
+        );
+        assert!(decision.next_release.is_some());
+    }
+
+    #[test]
+    fn cross_zero_opposite_residual_starts_from_zero_without_initial_release() {
+        let decision = apply(input(None, -0.25, 0.75, 100.0));
+
+        assert_eq!(decision.risk_release_frontier, Exposure(0.0));
+        assert_eq!(
+            decision.state,
+            Some(RiskExposureGateState {
+                risk_release_frontier: Exposure(0.0),
+                release_anchor_price: 100.0,
+                release_anchor_target: Exposure(0.0),
+                stale_since: observed_at(),
+            })
+        );
+        assert!(decision.next_release.is_some());
+    }
+
+    #[test]
+    fn cross_zero_opposite_residual_releases_after_advantage_from_zero() {
+        let decision = apply(input(None, -0.25, 1.0, 100.0));
+
+        assert_eq!(decision.risk_release_frontier, Exposure(0.5));
+        assert_eq!(
+            decision.state,
+            Some(RiskExposureGateState {
+                risk_release_frontier: Exposure(0.5),
+                release_anchor_price: 100.0,
+                release_anchor_target: Exposure(1.0),
                 stale_since: observed_at(),
             })
         );
@@ -761,10 +816,10 @@ mod tests {
     }
 
     #[test]
-    fn cross_zero_reduces_to_flat_before_new_direction() {
+    fn cross_zero_projects_frontier_to_zero_and_waits_for_release_trigger() {
         let state = gate_state(1.5, 100.0, 5.0);
 
-        let decision = apply(input(Some(state), 1.5, -1.0, 105.0));
+        let decision = apply(input(Some(state), 1.5, -0.5, 105.0));
 
         assert_eq!(decision.risk_release_frontier, Exposure(0.0));
         assert_eq!(
@@ -776,7 +831,66 @@ mod tests {
                 stale_since: observed_at(),
             })
         );
-        assert_eq!(decision.next_release, None);
+        assert!(decision.next_release.is_some());
+    }
+
+    #[test]
+    fn cross_zero_projected_frontier_releases_after_stale_wait() {
+        let state = gate_state(1.5, 100.0, 5.0);
+        let flat = apply(input(Some(state), 1.5, -0.5, 105.0));
+        let later = observed_at() + Duration::minutes(60);
+
+        let decision = apply(input_at(flat.state, 0.0, -0.75, 105.2, later));
+
+        assert_eq!(decision.risk_release_frontier, Exposure(-0.5));
+        assert_eq!(
+            decision.state,
+            Some(RiskExposureGateState {
+                risk_release_frontier: Exposure(-0.5),
+                release_anchor_price: 105.0,
+                release_anchor_target: Exposure(0.0),
+                stale_since: later,
+            })
+        );
+        assert!(decision.next_release.is_some());
+    }
+
+    #[test]
+    fn cross_zero_projected_frontier_releases_immediately_when_advantage_is_reached() {
+        let state = gate_state(1.5, 100.0, 5.0);
+
+        let decision = apply(input(Some(state), 1.5, -1.0, 106.0));
+
+        assert_eq!(decision.risk_release_frontier, Exposure(-0.5));
+        assert_eq!(
+            decision.state,
+            Some(RiskExposureGateState {
+                risk_release_frontier: Exposure(-0.5),
+                release_anchor_price: 106.0,
+                release_anchor_target: Exposure(-1.0),
+                stale_since: observed_at(),
+            })
+        );
+        assert!(decision.next_release.is_some());
+    }
+
+    #[test]
+    fn cross_zero_frontier_releases_after_advantage_without_waiting_for_flat_position() {
+        let state = gate_state(0.0, 105.0, 0.0);
+
+        let decision = apply(input(Some(state), 0.25, -1.0, 106.0));
+
+        assert_eq!(decision.risk_release_frontier, Exposure(-0.5));
+        assert_eq!(
+            decision.state,
+            Some(RiskExposureGateState {
+                risk_release_frontier: Exposure(-0.5),
+                release_anchor_price: 106.0,
+                release_anchor_target: Exposure(-1.0),
+                stale_since: observed_at(),
+            })
+        );
+        assert!(decision.next_release.is_some());
     }
 
     #[test]
@@ -848,9 +962,17 @@ mod tests {
     }
 
     #[test]
-    fn execution_target_flattens_before_reversing_direction() {
+    fn execution_target_uses_released_frontier_when_current_is_opposite_direction_residual() {
         assert_eq!(
             execution_target_exposure(&Exposure(3.0), &Exposure(-10.0), Some(&Exposure(-5.0))),
+            Exposure(-5.0)
+        );
+    }
+
+    #[test]
+    fn execution_target_flattens_when_frontier_has_not_crossed_zero() {
+        assert_eq!(
+            execution_target_exposure(&Exposure(3.0), &Exposure(-10.0), Some(&Exposure(1.0))),
             Exposure(0.0)
         );
     }

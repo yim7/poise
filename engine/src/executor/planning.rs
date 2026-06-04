@@ -701,6 +701,109 @@ mod tests {
     }
 
     #[test]
+    fn risk_release_frontier_crosses_sub_min_opposite_residual_to_released_target() {
+        let config = config();
+        let rules = rules();
+
+        let plan = plan(input_with_frontier(
+            &config,
+            &rules,
+            Exposure(-0.25),
+            Exposure(2.0),
+            Exposure(1.0),
+        ));
+
+        let catch_up_binding = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .expect("catch-up binding should cross the residual short to the released long target");
+
+        assert_eq!(catch_up_binding.request.side, Side::Buy);
+        assert!(!catch_up_binding.request.reduce_only);
+        assert_eq!(catch_up_binding.desired_exposure, Exposure(1.0));
+        assert!((catch_up_binding.request.quantity - 1.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn risk_release_frontier_crosses_larger_opposite_residual_without_reduce_only() {
+        let config = config();
+        let rules = rules();
+
+        let plan = plan(input_with_frontier(
+            &config,
+            &rules,
+            Exposure(-1.0),
+            Exposure(2.0),
+            Exposure(0.5),
+        ));
+
+        let catch_up_binding = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .expect("catch-up binding should cross the residual short to the released long target");
+
+        assert_eq!(catch_up_binding.request.side, Side::Buy);
+        assert!(!catch_up_binding.request.reduce_only);
+        assert_eq!(catch_up_binding.desired_exposure, Exposure(0.5));
+        assert!(
+            (catch_up_binding.request.quantity - 1.5).abs() < 1e-9,
+            "quantity was {}",
+            catch_up_binding.request.quantity
+        );
+    }
+
+    #[test]
+    fn risk_release_frontier_flattens_sub_min_residual_when_zero_is_inside_boundary() {
+        let config = TrackConfig {
+            lower_price: 59_000.0,
+            upper_price: 73_000.0,
+            long_exposure_units: 5.0,
+            short_exposure_units: 10.0,
+            notional_per_unit: 200.0,
+            min_rebalance_units: 0.3,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: BandProtectionPolicy::Freeze,
+            risk_acquisition: Default::default(),
+        };
+        let mut rules = rules();
+        rules.price_tick = 0.5;
+        rules.quantity_step = 0.00001;
+        rules.min_qty = 0.00001;
+        rules.min_notional = 5.0;
+
+        let mut input = input_with_base_qty_per_unit(
+            &config,
+            &rules,
+            config.base_qty_per_unit(),
+            Exposure(-0.1056),
+            Exposure(0.4172),
+        );
+        input.submit_intent.risk_release_frontier = Some(Exposure(0.0));
+        input.submit_intent.execution_quote = Some(ExecutionQuote {
+            best_bid: 64_362.0,
+            best_ask: 64_363.0,
+        });
+
+        let plan = plan(input);
+
+        let catch_up_binding = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .expect("catch-up binding should flatten the sub-min residual short");
+
+        assert_eq!(catch_up_binding.request.side, Side::Buy);
+        assert!(catch_up_binding.request.reduce_only);
+        assert_eq!(catch_up_binding.desired_exposure, Exposure(0.0));
+        assert!((catch_up_binding.request.quantity - 0.00031).abs() < 1e-9);
+    }
+
+    #[test]
     fn catch_up_reduce_only_tracks_full_inventory_gap() {
         let config = config();
         let rules = rules();

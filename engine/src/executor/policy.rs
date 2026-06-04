@@ -97,12 +97,22 @@ fn plan_normal_policy_bindings(input: &PolicyPlanningInput<'_>) -> Vec<DesiredBi
             .current_exposure
             .delta(input.execution_target_exposure),
     );
-    let catch_up_operations = select_catch_up_operations(
-        input.execution_view,
-        &covered_operations,
-        input.boundary_epsilon,
-        gap_direction,
-    );
+    let catch_up_operations = if should_select_target_path_for_catch_up(input, gap_direction) {
+        select_target_operations(
+            input.execution_view,
+            &covered_operations,
+            gap_direction.expect("target path catch-up should have a direction"),
+            input.boundary_epsilon,
+            false,
+        )
+    } else {
+        select_catch_up_operations(
+            input.execution_view,
+            &covered_operations,
+            input.boundary_epsilon,
+            gap_direction,
+        )
+    };
     if let Some(binding) = plan_target_binding(
         input,
         PolicyKind::CatchUp,
@@ -142,8 +152,21 @@ fn plan_manual_override_binding(input: &PolicyPlanningInput<'_>) -> Option<Desir
     )
 }
 
+fn should_select_target_path_for_catch_up(
+    input: &PolicyPlanningInput<'_>,
+    gap_direction: Option<BoundaryDirection>,
+) -> bool {
+    gap_direction.is_some()
+        && ((input.execution_target_exposure.is_zero()
+            && target_change_can_use_reduce_only(
+                input.current_exposure,
+                input.execution_target_exposure,
+            ))
+            || target_change_crosses_zero(input.current_exposure, input.execution_target_exposure))
+}
+
 fn plan_reduce_only_binding(input: &PolicyPlanningInput<'_>) -> Option<DesiredBinding> {
-    if !target_change_decreases_inventory(input.current_exposure, input.execution_target_exposure) {
+    if !target_change_can_use_reduce_only(input.current_exposure, input.execution_target_exposure) {
         return None;
     }
     let direction = direction_for_gap(
@@ -268,22 +291,18 @@ pub(super) fn plan_target_binding(
     let inventory_gap = input
         .current_exposure
         .delta(input.execution_target_exposure);
-    if inventory_gap.0.abs() < input.min_rebalance_units {
+    let reduce_only =
+        target_change_can_use_reduce_only(input.current_exposure, input.execution_target_exposure);
+    if inventory_gap.0.abs() < input.min_rebalance_units
+        && !allows_sub_min_rebalance_flatten(input, reduce_only)
+    {
         return None;
     }
 
     let direction = direction_for_gap(&inventory_gap)?;
     let price = execution_price(direction, input.execution_quote)?;
-    let decreases_inventory =
-        target_change_decreases_inventory(input.current_exposure, input.execution_target_exposure);
-    let (allocations, quantity) = plan_executable_allocations(
-        input,
-        policy,
-        selected,
-        price,
-        inventory_gap.0,
-        decreases_inventory,
-    )?;
+    let (allocations, quantity) =
+        plan_executable_allocations(input, policy, selected, price, inventory_gap.0, reduce_only)?;
 
     let request = OrderRequest {
         instrument: input.instrument.clone(),
@@ -291,7 +310,7 @@ pub(super) fn plan_target_binding(
         price,
         quantity,
         client_order_id: next_client_order_id(policy),
-        reduce_only: decreases_inventory,
+        reduce_only,
     };
     let proposal = proposal_for_allocations(policy, &allocations);
     Some(DesiredBinding {
@@ -310,10 +329,9 @@ fn plan_executable_allocations(
     selected: Vec<BoundaryOperation>,
     price: f64,
     inventory_gap: f64,
-    decreases_inventory: bool,
+    reduce_only: bool,
 ) -> Option<(Vec<BindingOperationAllocation>, f64)> {
-    let max_exposure_qty =
-        target_exposure_budget(input, policy, price, inventory_gap, decreases_inventory);
+    let max_exposure_qty = target_exposure_budget(input, policy, price, inventory_gap, reduce_only);
     let allocations = allocate_operations(input.execution_view, selected, max_exposure_qty);
     if allocations.is_empty() {
         return None;
@@ -346,10 +364,18 @@ fn target_exposure_budget(
     policy: PolicyKind,
     price: f64,
     inventory_gap: f64,
-    decreases_inventory: bool,
+    reduce_only: bool,
 ) -> f64 {
     match policy {
-        PolicyKind::CatchUp if decreases_inventory => inventory_gap.abs(),
+        PolicyKind::CatchUp if reduce_only => inventory_gap.abs(),
+        PolicyKind::CatchUp
+            if target_change_crosses_zero(
+                input.current_exposure,
+                input.execution_target_exposure,
+            ) =>
+        {
+            inventory_gap.abs()
+        }
         PolicyKind::CatchUp => catch_up_increase_exposure_budget(input, price, inventory_gap),
         PolicyKind::ManualOverride | PolicyKind::ReduceOnly | PolicyKind::CurveMaker => {
             inventory_gap.abs()
@@ -767,7 +793,7 @@ fn reduce_only_for_operation(boundary: &BoundaryBlueprint, direction: BoundaryDi
         BoundaryDirection::Up => (boundary.lower_exposure.0, boundary.upper_exposure.0),
         BoundaryDirection::Down => (boundary.upper_exposure.0, boundary.lower_exposure.0),
     };
-    to.abs() + f64::EPSILON < from.abs()
+    target_change_can_use_reduce_only(&Exposure(from), &Exposure(to))
 }
 
 fn operation_reduces_current_inventory(
@@ -817,6 +843,23 @@ fn target_change_decreases_inventory(
     desired_exposure: &Exposure,
 ) -> bool {
     desired_exposure.0.abs() + f64::EPSILON < current_exposure.0.abs()
+}
+
+fn target_change_can_use_reduce_only(
+    current_exposure: &Exposure,
+    desired_exposure: &Exposure,
+) -> bool {
+    target_change_decreases_inventory(current_exposure, desired_exposure)
+        && !target_change_crosses_zero(current_exposure, desired_exposure)
+}
+
+fn target_change_crosses_zero(current_exposure: &Exposure, desired_exposure: &Exposure) -> bool {
+    (current_exposure.0 > f64::EPSILON && desired_exposure.0 < -f64::EPSILON)
+        || (current_exposure.0 < -f64::EPSILON && desired_exposure.0 > f64::EPSILON)
+}
+
+fn allows_sub_min_rebalance_flatten(input: &PolicyPlanningInput<'_>, reduce_only: bool) -> bool {
+    reduce_only && input.execution_target_exposure.is_zero()
 }
 
 fn catch_up_increase_exposure_budget(

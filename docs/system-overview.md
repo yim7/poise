@@ -136,13 +136,14 @@ server::config::TrackSpec
 - 增加风险暴露后，系统记录 `release_anchor_price` 和 `release_anchor_target`。只有曲线目标相对锚点继续走出 `advantage_steps * min_rebalance_units`，才释放一部分 backlog。
 - 如果 stale 等待达到 `stale_release_minutes`（默认 60 分钟），即使价格没有走到优势阈值，也允许释放一部分 backlog；设为 `0` 表示关闭时间释放。
 - 每次释放量由 backlog、`catchup_ratio`、`min_release_steps` 和 `max_release_steps` 共同决定：先按 backlog 比例计算，再限制在最小/最大释放单位之间。
-- 运行时公开 `risk_release_frontier`、`backlog_units`、`next_advantage_price` 和 `next_release_units` 等观测字段；TUI 的 Execution 区会展示释放边界、backlog 和下一次释放信息。
+- 运行时公开 `risk_release_frontier`、`backlog_units`、`next_advantage_price` 和 `next_release_units` 等观测字段；TUI 的 Execution 区会展示释放边界、backlog、下一次释放数量，以及价格或 stale 触发条件。
 
 风险释放不可变式：
 
 - `reconciler` 先计算理论 `desired_exposure`，再让 `risk_exposure_gate` 计算 `risk_release_frontier`。gate 不覆盖 desired。
 - 没有 frontier 时，`execution_target_exposure = desired_exposure`。
-- frontier 和 desired 异号时，执行目标先回到 `0`，不能在一次 reconcile 里直接反向增加风险。
+- 旧 frontier 和 desired 异号时，先把 frontier 投影到 `0` 作为新方向释放起点，再继续走同一套 advantage/stale 释放逻辑；如果本轮没有释放，`execution_target_exposure = 0`。
+- frontier 已经进入 desired 方向时，单向净持仓模式可以让 `CatchUp` 直接追到 frontier；这一笔订单的前半段会平掉旧方向残余仓位，后半段才进入已经释放的新方向风险，因此不能标成 reduce-only。
 - desired 回到 frontier 内侧时，会把 frontier 一起往风险更低方向压回去，用于降低风险；frontier 被压到 0 后，后续同方向增加不会重新获得启动初始释放，只能继续靠价格优势或 stale 时间释放。
 - desired 仍在 frontier 外侧，且当前仓位还没到达 frontier 时，执行目标最多到 frontier，不继续释放下一段 backlog。
 - 当前仓位到达或穿过 frontier，但没有超过 desired 时，frontier 推进到当前仓位；这是承认已经获得的仓位，不算一次新的释放，也不重置 anchor。
