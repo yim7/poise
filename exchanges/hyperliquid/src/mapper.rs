@@ -25,6 +25,9 @@ pub(crate) fn build_exchange_info(meta: &MetaResponse, symbol: &str) -> Result<E
         rules: ExchangeRules {
             price_tick: representative_perp_price_tick(asset.sz_decimals),
             price_precision: perp_price_precision(asset.sz_decimals),
+            quantity_kind: poise_core::types::QuantityKind::BaseAsset,
+            contract_notional: None,
+            settlement_asset: "USDC".to_string(),
             quantity_step,
             min_qty: quantity_step,
             min_notional: MIN_NOTIONAL_USD,
@@ -150,6 +153,9 @@ mod tests {
             ExchangeRules {
                 price_tick: 1.0,
                 price_precision: PricePrecision::significant_figures(1, 5),
+                quantity_kind: Default::default(),
+                contract_notional: None,
+                settlement_asset: "USDC".to_string(),
                 quantity_step: 0.00001,
                 min_qty: 0.00001,
                 min_notional: 10.0,

@@ -1086,6 +1086,9 @@ mod tests {
         ExchangeRules {
             price_tick,
             price_precision: Default::default(),
+            quantity_kind: Default::default(),
+            contract_notional: None,
+            settlement_asset: "USDT".to_string(),
             quantity_step: 0.01,
             min_qty: 0.0,
             min_notional: 0.0,

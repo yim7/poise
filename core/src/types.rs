@@ -37,6 +37,12 @@ pub struct ExchangeRules {
     pub price_tick: f64,
     #[serde(default)]
     pub price_precision: PricePrecision,
+    #[serde(default)]
+    pub quantity_kind: QuantityKind,
+    #[serde(default)]
+    pub contract_notional: Option<f64>,
+    #[serde(default)]
+    pub settlement_asset: String,
     pub quantity_step: f64,
     pub min_qty: f64,
     pub min_notional: f64,
@@ -45,6 +51,50 @@ pub struct ExchangeRules {
 }
 
 impl ExchangeRules {
+    pub fn native_qty_per_exposure_unit(&self, notional_per_unit: f64, band_center: f64) -> f64 {
+        if !notional_per_unit.is_finite() || notional_per_unit <= f64::EPSILON {
+            return 0.0;
+        }
+
+        match self.quantity_kind {
+            QuantityKind::BaseAsset => {
+                if !band_center.is_finite() || band_center <= f64::EPSILON {
+                    0.0
+                } else {
+                    notional_per_unit / band_center
+                }
+            }
+            QuantityKind::InverseContract => self
+                .contract_notional
+                .filter(|contract_notional| {
+                    contract_notional.is_finite() && *contract_notional > f64::EPSILON
+                })
+                .map_or(0.0, |contract_notional| {
+                    notional_per_unit / contract_notional
+                }),
+        }
+    }
+
+    pub fn notional_from_native_qty(&self, native_qty: f64, price: f64) -> f64 {
+        match self.quantity_kind {
+            QuantityKind::BaseAsset => {
+                if !price.is_finite() || price <= f64::EPSILON {
+                    0.0
+                } else {
+                    native_qty.abs() * price
+                }
+            }
+            QuantityKind::InverseContract => self
+                .contract_notional
+                .filter(|contract_notional| {
+                    contract_notional.is_finite() && *contract_notional > f64::EPSILON
+                })
+                .map_or(0.0, |contract_notional| {
+                    native_qty.abs() * contract_notional
+                }),
+        }
+    }
+
     pub fn round_price(&self, price: f64, rounding: PriceRounding) -> f64 {
         self.price_precision.round(price, rounding, self.price_tick)
     }
@@ -62,6 +112,19 @@ impl ExchangeRules {
                 )
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuantityKind {
+    BaseAsset,
+    InverseContract,
+}
+
+impl Default for QuantityKind {
+    fn default() -> Self {
+        Self::BaseAsset
     }
 }
 
@@ -192,6 +255,64 @@ mod tests {
         assert!(Exposure(0.0).is_zero());
         assert!(!Exposure(1.0).is_zero());
         assert!(!Exposure(-0.001).is_zero());
+    }
+
+    #[test]
+    fn base_asset_quantity_uses_band_center_for_unit_size() {
+        let rules = ExchangeRules {
+            price_tick: 0.1,
+            price_precision: Default::default(),
+            quantity_kind: QuantityKind::BaseAsset,
+            contract_notional: None,
+            settlement_asset: "USDT".to_string(),
+            quantity_step: 0.001,
+            min_qty: 0.001,
+            min_notional: 5.0,
+            maker_fee_rate: 0.0002,
+            taker_fee_rate: 0.0004,
+        };
+
+        assert!((rules.native_qty_per_exposure_unit(1000.0, 100000.0) - 0.01).abs() < 1e-12);
+        assert!((rules.notional_from_native_qty(-0.03, 50000.0) - 1500.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn inverse_contract_quantity_uses_contract_notional_for_unit_size() {
+        let rules = ExchangeRules {
+            price_tick: 0.1,
+            price_precision: Default::default(),
+            quantity_kind: QuantityKind::InverseContract,
+            contract_notional: Some(100.0),
+            settlement_asset: "BTC".to_string(),
+            quantity_step: 0.1,
+            min_qty: 0.1,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0002,
+            taker_fee_rate: 0.0005,
+        };
+
+        assert!((rules.native_qty_per_exposure_unit(1000.0, 100000.0) - 10.0).abs() < 1e-12);
+        assert!((rules.notional_from_native_qty(-30.0, 100000.0) - 3000.0).abs() < 1e-9);
+        assert!((rules.notional_from_native_qty(-30.0, 50000.0) - 3000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn inverse_contract_quantity_without_contract_notional_is_safe() {
+        let rules = ExchangeRules {
+            price_tick: 0.1,
+            price_precision: Default::default(),
+            quantity_kind: QuantityKind::InverseContract,
+            contract_notional: None,
+            settlement_asset: "BTC".to_string(),
+            quantity_step: 0.1,
+            min_qty: 0.1,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0002,
+            taker_fee_rate: 0.0005,
+        };
+
+        assert_eq!(rules.native_qty_per_exposure_unit(1000.0, 100000.0), 0.0);
+        assert_eq!(rules.notional_from_native_qty(-30.0, 100000.0), 0.0);
     }
 
     #[test]

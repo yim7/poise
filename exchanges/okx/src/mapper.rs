@@ -15,12 +15,17 @@ pub(crate) fn exchange_info_from_instrument(value: InstrumentInfo) -> Result<Exc
     if let Some(contract_value) = value.ct_val.as_deref() {
         let _ = parse_decimal("ctVal", contract_value)?;
     }
+    let instrument = Instrument::new(Venue::Okx, value.inst_id);
+    let settlement_asset = instrument.quote_asset();
 
     Ok(ExchangeInfo {
-        instrument: Instrument::new(Venue::Okx, value.inst_id),
+        instrument,
         rules: poise_core::types::ExchangeRules {
             price_tick: parse_decimal("tickSz", &value.tick_sz)?,
             price_precision: Default::default(),
+            quantity_kind: poise_core::types::QuantityKind::BaseAsset,
+            contract_notional: None,
+            settlement_asset,
             quantity_step: parse_decimal("lotSz", &value.lot_sz)?,
             min_qty: parse_decimal("minSz", &value.min_sz)?,
             min_notional: 0.0,
@@ -172,6 +177,9 @@ mod tests {
             ExchangeRules {
                 price_tick: 0.1,
                 price_precision: Default::default(),
+                quantity_kind: Default::default(),
+                contract_notional: None,
+                settlement_asset: "USDT".to_string(),
                 quantity_step: 0.01,
                 min_qty: 0.01,
                 min_notional: 0.0,

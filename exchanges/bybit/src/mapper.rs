@@ -45,11 +45,16 @@ impl TryFrom<InstrumentInfoResult> for ExchangeInfo {
             .into_iter()
             .next()
             .context("missing linear instrument info")?;
+        let instrument = Instrument::new(Venue::Bybit, info.symbol);
+        let settlement_asset = instrument.quote_asset();
         Ok(Self {
-            instrument: Instrument::new(Venue::Bybit, info.symbol),
+            instrument,
             rules: poise_core::types::ExchangeRules {
                 price_tick: required_value("priceFilter.tickSize", info.price_filter.tick_size)?,
                 price_precision: Default::default(),
+                quantity_kind: poise_core::types::QuantityKind::BaseAsset,
+                contract_notional: None,
+                settlement_asset,
                 quantity_step: required_value(
                     "lotSizeFilter.qtyStep",
                     info.lot_size_filter.qty_step,
@@ -290,6 +295,9 @@ mod tests {
             ExchangeRules {
                 price_tick: 0.1,
                 price_precision: Default::default(),
+                quantity_kind: Default::default(),
+                contract_notional: None,
+                settlement_asset: "USDT".to_string(),
                 quantity_step: 0.001,
                 min_qty: 0.001,
                 min_notional: 5.0,

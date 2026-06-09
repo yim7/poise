@@ -92,6 +92,7 @@ impl TryFrom<BinanceExchangeInfo> for ExchangeInfo {
 
     fn try_from(value: BinanceExchangeInfo) -> Result<Self, Self::Error> {
         let instrument = Instrument::new(Venue::Binance, value.symbol);
+        let settlement_asset = instrument.quote_asset();
         let price_filter = value
             .filters
             .iter()
@@ -113,6 +114,9 @@ impl TryFrom<BinanceExchangeInfo> for ExchangeInfo {
             rules: poise_core::types::ExchangeRules {
                 price_tick: parse_optional_decimal("tickSize", price_filter.tick_size.as_deref())?,
                 price_precision: Default::default(),
+                quantity_kind: poise_core::types::QuantityKind::BaseAsset,
+                contract_notional: None,
+                settlement_asset,
                 quantity_step: parse_optional_decimal(
                     "stepSize",
                     lot_size_filter.step_size.as_deref(),
@@ -339,6 +343,9 @@ mod tests {
                 rules: ExchangeRules {
                     price_tick: 0.1,
                     price_precision: Default::default(),
+                    quantity_kind: Default::default(),
+                    contract_notional: None,
+                    settlement_asset: "USDT".to_string(),
                     quantity_step: 0.001,
                     min_qty: 0.001,
                     min_notional: 100.0,

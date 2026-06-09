@@ -987,6 +987,9 @@ mod tests {
         ExchangeRules {
             price_tick: 0.1,
             price_precision: Default::default(),
+            quantity_kind: Default::default(),
+            contract_notional: None,
+            settlement_asset: "USDT".to_string(),
             quantity_step: 0.01,
             min_qty: 0.0,
             min_notional: 0.0,
@@ -1000,6 +1003,9 @@ mod tests {
         let rules = ExchangeRules {
             price_tick: 0.0001,
             price_precision: PricePrecision::significant_figures(2, 5),
+            quantity_kind: Default::default(),
+            contract_notional: None,
+            settlement_asset: "USDT".to_string(),
             quantity_step: 0.01,
             min_qty: 0.0,
             min_notional: 0.0,
