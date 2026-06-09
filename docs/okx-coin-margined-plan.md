@@ -24,7 +24,7 @@
 | 1. 扩展 `ExchangeRules` 数量语义 | completed | 已通过：`cargo test -p poise-core quantity`；四个 exchange mapper 测试；`poise-engine`、`poise-server`、`poise-application` no-run | `ccc3947a5aa259eb66f1e302f4e47c0078e00e83` |
 | 2. engine 使用 native quantity 规划和风控 | completed | 已通过：`poise-core` track/strategy；`poise-engine` executor/manager/runtime/execution_plan；`poise-server` startup_bootstrap | `4a10b9a9ba29d446114ca0679b6e87d5b474f5b5` |
 | 3. 持久化 PNL asset 并按同资产聚合 | completed | 已通过：`poise-storage` schema/pnl；`poise-engine` ledger/loss_guard/manager/reconciler；`poise-core` risk；`poise-application` runtime_lifecycle/mutation_executor；四个 exchange WS；`poise-server` startup_bootstrap | `4f3a797065b4e50622a7df21dd06871f8ef6ecec` |
-| 4. OKX metadata、数量映射和 PNL asset | pending | 未执行 |  |
+| 4. OKX metadata、数量映射和 PNL asset | completed | 已通过：`cargo test -p poise-okx`；`cargo test -p poise-server runtime::startup_bootstrap::tests::` | `6f084aadba3046a3ca030daa5fae78b74a4a9930` |
 | 5. OKX account capacity 本地估算 | pending | 未执行 |  |
 | 6. protocol / projector 单位展示 | pending | 未执行 |  |
 | 7. 最终回归验收 | pending | 未执行 |  |
