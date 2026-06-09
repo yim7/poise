@@ -22,7 +22,7 @@
 | Task | 状态 | 验收 | Commit |
 | --- | --- | --- | --- |
 | 1. 扩展 `ExchangeRules` 数量语义 | completed | 已通过：`cargo test -p poise-core quantity`；四个 exchange mapper 测试；`poise-engine`、`poise-server`、`poise-application` no-run | `ccc3947a5aa259eb66f1e302f4e47c0078e00e83` |
-| 2. engine 使用 native quantity 规划和风控 | pending | 未执行 |  |
+| 2. engine 使用 native quantity 规划和风控 | completed | 已通过：`poise-core` track/strategy；`poise-engine` executor/manager/runtime/execution_plan；`poise-server` startup_bootstrap | `4a10b9a9ba29d446114ca0679b6e87d5b474f5b5` |
 | 3. 持久化 PNL asset 并按同资产聚合 | pending | 未执行 |  |
 | 4. OKX metadata、数量映射和 PNL asset | pending | 未执行 |  |
 | 5. OKX account capacity 本地估算 | pending | 未执行 |  |
