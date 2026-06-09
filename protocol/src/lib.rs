@@ -185,11 +185,21 @@ pub struct TrackPositionView {
     #[serde(default)]
     pub desired_exposure: Option<f64>,
     #[serde(default)]
+    pub quantity_unit: TrackPositionQuantityUnitView,
+    #[serde(default)]
     pub quantity: f64,
     #[serde(default)]
     pub notional: f64,
     #[serde(default)]
     pub notional_asset: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackPositionQuantityUnitView {
+    #[default]
+    BaseAsset,
+    Contracts,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -920,6 +930,10 @@ mod tests {
         assert_eq!(json["market"]["mark_price"].as_f64(), Some(64123.4));
         assert_eq!(json["market"]["best_bid"].as_f64(), Some(64120.1));
         assert_eq!(json["market"]["best_ask"].as_f64(), Some(64124.5));
+        assert_eq!(
+            json["position"]["quantity_unit"].as_str(),
+            Some("base_asset")
+        );
         assert_eq!(json["position"]["quantity"].as_f64(), Some(0.0029296875));
         assert_eq!(json["position"]["notional"].as_f64(), Some(187.5));
         assert_eq!(json["position"]["notional_asset"].as_str(), Some("USDT"));

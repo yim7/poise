@@ -48,7 +48,7 @@ fn describe_binding(binding: &BindingView) -> String {
 mod tests {
     use chrono::Utc;
     use poise_core::track::{Instrument, Venue};
-    use poise_core::types::{Exposure, Side};
+    use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::ports::{ExchangeOpenOrderSnapshot, ExchangeOrder, OrderStatus};
     use poise_engine::runtime::{
         BindingView, ExecutorView, StrategyPriceStatus, TrackRuntimeView, TrackStatus,
@@ -60,6 +60,18 @@ mod tests {
     fn describe_runtime_bindings_includes_binding_identity_and_order_shape() {
         let runtime = TrackRuntimeView {
             status: TrackStatus::Active,
+            exchange_rules: ExchangeRules {
+                price_tick: 0.1,
+                price_precision: Default::default(),
+                quantity_kind: Default::default(),
+                contract_notional: None,
+                settlement_asset: "USDT".to_string(),
+                quantity_step: 0.001,
+                min_qty: 0.001,
+                min_notional: 5.0,
+                maker_fee_rate: 0.0,
+                taker_fee_rate: 0.0,
+            },
             current_exposure: Exposure(0.0),
             position_qty: 0.0,
             desired_exposure: None,

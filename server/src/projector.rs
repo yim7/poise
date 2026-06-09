@@ -8,11 +8,12 @@ use poise_protocol::{
     ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, StrategyPriceStatusView,
     TrackActivityItemView, TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionView,
     TrackIdentityView, TrackLifecycleView, TrackListItemView, TrackListPnlView,
-    TrackLossLimitsView, TrackMarketView, TrackPnlView, TrackPositionView,
-    TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
+    TrackLossLimitsView, TrackMarketView, TrackPnlView, TrackPositionQuantityUnitView,
+    TrackPositionView, TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
 };
 
 use poise_core::track::Instrument;
+use poise_core::types::{ExchangeRules, QuantityKind};
 
 use poise_application::{
     TrackActivityLevel, TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent,
@@ -105,9 +106,10 @@ impl TrackProjector {
             position: TrackPositionView {
                 current_exposure: source.current_exposure,
                 desired_exposure: source.desired_exposure,
+                quantity_unit: project_position_quantity_unit(&source.exchange_rules),
                 quantity: source.position_qty,
                 notional: project_position_notional(source),
-                notional_asset: source.instrument.quote_asset(),
+                notional_asset: project_position_notional_asset(&source.exchange_rules),
             },
             pnl: TrackPnlView {
                 pnl_asset: pnl.pnl_asset,
@@ -154,7 +156,7 @@ fn project_list_pnl_summary(source: &TrackListReadModel) -> PnlSummary {
     let net_realized_pnl = source.pnl_stats.net_realized_pnl();
 
     PnlSummary {
-        pnl_asset: source.instrument.quote_asset(),
+        pnl_asset: project_pnl_asset(&source.pnl_stats, &source.exchange_rules),
         gross_realized_pnl,
         net_realized_pnl,
         total_pnl: net_realized_pnl + source.unrealized_pnl,
@@ -168,7 +170,7 @@ fn project_detail_pnl_summary(source: &TrackReadModel) -> PnlSummary {
     let net_realized_pnl = source.pnl_stats.net_realized_pnl();
 
     PnlSummary {
-        pnl_asset: source.instrument.quote_asset(),
+        pnl_asset: project_pnl_asset(&source.pnl_stats, &source.exchange_rules),
         gross_realized_pnl,
         net_realized_pnl,
         total_pnl: net_realized_pnl + source.unrealized_pnl,
@@ -193,10 +195,45 @@ fn project_instrument(instrument: &Instrument) -> InstrumentView {
 }
 
 fn project_position_notional(source: &TrackReadModel) -> f64 {
-    source
-        .mark_price
-        .or(source.strategy_price)
-        .map_or(0.0, |price| source.position_qty * price)
+    match source.exchange_rules.quantity_kind {
+        QuantityKind::BaseAsset => {
+            source
+                .mark_price
+                .or(source.strategy_price)
+                .map_or(0.0, |price| {
+                    source
+                        .exchange_rules
+                        .notional_from_native_qty(source.position_qty, price)
+                })
+        }
+        QuantityKind::InverseContract => source
+            .exchange_rules
+            .notional_from_native_qty(source.position_qty, 0.0),
+    }
+}
+
+fn project_position_quantity_unit(rules: &ExchangeRules) -> TrackPositionQuantityUnitView {
+    match rules.quantity_kind {
+        QuantityKind::BaseAsset => TrackPositionQuantityUnitView::BaseAsset,
+        QuantityKind::InverseContract => TrackPositionQuantityUnitView::Contracts,
+    }
+}
+
+fn project_position_notional_asset(rules: &ExchangeRules) -> String {
+    match rules.quantity_kind {
+        QuantityKind::BaseAsset => rules.settlement_asset.clone(),
+        QuantityKind::InverseContract => "USD".to_string(),
+    }
+}
+
+fn project_pnl_asset(
+    pnl_stats: &poise_application::TrackReadPnlStats,
+    rules: &ExchangeRules,
+) -> String {
+    pnl_stats
+        .pnl_asset
+        .clone()
+        .unwrap_or_else(|| rules.settlement_asset.clone())
 }
 
 fn project_track_status(value: &TrackReadStatus) -> ProtocolTrackStatus {
@@ -498,10 +535,11 @@ mod tests {
     };
     use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily};
     use poise_core::track::{Instrument, Venue};
-    use poise_core::types::Side;
+    use poise_core::types::{ExchangeRules, QuantityKind, Side};
     use poise_protocol::{
         ActivityLevelView, ExecutionBindingIntentView, ExecutionBindingPolicyView,
         ExecutionBindingStatusView, ExecutionStateView, ExecutionStatusView, TrackCommandType,
+        TrackPositionQuantityUnitView,
     };
 
     use super::TrackProjector;
@@ -1062,6 +1100,10 @@ mod tests {
         source.strategy_price = Some(101.25);
         let detail = TrackProjector::new().project_detail(&source);
 
+        assert_eq!(
+            detail.position.quantity_unit,
+            TrackPositionQuantityUnitView::BaseAsset
+        );
         assert!((detail.position.quantity - 0.42).abs() < 1e-9);
         assert!((detail.position.notional - 42.63).abs() < 1e-9);
         assert_eq!(detail.position.notional_asset, "USDT");
@@ -1071,11 +1113,38 @@ mod tests {
     fn projects_hyperliquid_perp_pnl_asset_as_usdc() {
         let mut source = source_with_submitting_effect();
         source.instrument = Instrument::new(Venue::Hyperliquid, "ETH");
+        source.exchange_rules.settlement_asset = "USDC".to_string();
+        source.pnl_stats.pnl_asset = None;
         let detail = TrackProjector::new().project_detail(&source);
         let list = TrackProjector::new().project_list_item(&TrackListReadModel::from(&source));
 
         assert_eq!(detail.pnl.pnl_asset, "USDC");
         assert_eq!(list.pnl.pnl_asset, "USDC");
+    }
+
+    #[test]
+    fn projects_inverse_contract_units_notional_and_pnl_asset() {
+        let mut source = source_with_submitting_effect();
+        source.instrument = Instrument::new(Venue::Okx, "BTC-USD-SWAP");
+        source.exchange_rules = inverse_exchange_rules();
+        source.current_exposure = -3.0;
+        source.position_qty = -30.0;
+        source.mark_price = None;
+        source.strategy_price = None;
+        source.pnl_stats.pnl_asset = Some("BTC".to_string());
+
+        let detail = TrackProjector::new().project_detail(&source);
+        let list = TrackProjector::new().project_list_item(&TrackListReadModel::from(&source));
+
+        assert_eq!(
+            detail.position.quantity_unit,
+            TrackPositionQuantityUnitView::Contracts
+        );
+        assert_eq!(detail.position.quantity, -30.0);
+        assert_eq!(detail.position.notional, 3_000.0);
+        assert_eq!(detail.position.notional_asset, "USD");
+        assert_eq!(detail.pnl.pnl_asset, "BTC");
+        assert_eq!(list.pnl.pnl_asset, "BTC");
     }
 
     #[test]
@@ -1143,6 +1212,7 @@ mod tests {
         TrackReadModel {
             track_id: "btc-core".into(),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            exchange_rules: test_exchange_rules(),
             status: TrackReadStatus::Active,
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             lower_price: 90.0,
@@ -1170,6 +1240,7 @@ mod tests {
             execution_target_exposure: Some(4.0),
             risk_acquisition: Default::default(),
             pnl_stats: TrackReadPnlStats {
+                pnl_asset: Some("USDT".to_string()),
                 gross_realized_pnl_today: 980.1,
                 gross_realized_pnl_cumulative: 980.1,
                 trading_fee_today: 0.0,
@@ -1200,6 +1271,36 @@ mod tests {
                 "submit order executing",
                 TrackActivityLevel::Info,
             )],
+        }
+    }
+
+    fn test_exchange_rules() -> ExchangeRules {
+        ExchangeRules {
+            price_tick: 0.1,
+            price_precision: Default::default(),
+            quantity_kind: QuantityKind::BaseAsset,
+            contract_notional: None,
+            settlement_asset: "USDT".to_string(),
+            quantity_step: 0.001,
+            min_qty: 0.001,
+            min_notional: 5.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        }
+    }
+
+    fn inverse_exchange_rules() -> ExchangeRules {
+        ExchangeRules {
+            price_tick: 0.1,
+            price_precision: Default::default(),
+            quantity_kind: QuantityKind::InverseContract,
+            contract_notional: Some(100.0),
+            settlement_asset: "BTC".to_string(),
+            quantity_step: 1.0,
+            min_qty: 1.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
         }
     }
 

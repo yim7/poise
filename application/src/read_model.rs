@@ -3,7 +3,7 @@ use poise_core::events::{DomainEvent, ExecutionGateReason};
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, RiskAcquisitionConfig, ShapeFamily};
 use poise_core::track::{Instrument, TrackDefinition};
-use poise_core::types::Side;
+use poise_core::types::{ExchangeRules, Side};
 use poise_engine::execution_plan::TrackEffect;
 use poise_engine::executor::{BindingStatus, PolicyKind, RecoveryAnomaly};
 use poise_engine::ledger::TrackPnlStats;
@@ -36,6 +36,7 @@ pub enum TrackActivityLevel {
 pub struct TrackListReadModel {
     pub track_id: String,
     pub instrument: Instrument,
+    pub exchange_rules: ExchangeRules,
     pub status: TrackReadStatus,
     pub updated_at: DateTime<Utc>,
     pub strategy_price: Option<f64>,
@@ -58,6 +59,7 @@ pub struct TrackListReadModel {
 pub struct TrackReadModel {
     pub track_id: String,
     pub instrument: Instrument,
+    pub exchange_rules: ExchangeRules,
     pub status: TrackReadStatus,
     pub updated_at: DateTime<Utc>,
     pub lower_price: f64,
@@ -234,6 +236,7 @@ impl From<PriceExecutionBlockReason> for TrackPriceExecutionBlockReason {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct TrackReadPnlStats {
+    pub pnl_asset: Option<String>,
     pub gross_realized_pnl_today: f64,
     pub gross_realized_pnl_cumulative: f64,
     pub trading_fee_today: f64,
@@ -252,6 +255,7 @@ impl TrackReadPnlStats {
 impl From<TrackPnlStats> for TrackReadPnlStats {
     fn from(value: TrackPnlStats) -> Self {
         Self {
+            pnl_asset: value.pnl_asset,
             gross_realized_pnl_today: value.gross_realized_pnl_today,
             gross_realized_pnl_cumulative: value.gross_realized_pnl_cumulative,
             trading_fee_today: value.trading_fee_today,
@@ -286,6 +290,7 @@ impl TrackReadModel {
         Self {
             track_id: list_view.track_id.clone(),
             instrument: list_view.instrument.clone(),
+            exchange_rules: list_view.exchange_rules.clone(),
             status: list_view.status,
             updated_at: list_view.updated_at,
             lower_price: track_config.lower_price,
@@ -333,6 +338,7 @@ impl TrackListReadModel {
         Self {
             track_id: definition.track_id().as_str().to_string(),
             instrument: definition.instrument().clone(),
+            exchange_rules: runtime.exchange_rules.clone(),
             status: TrackReadStatus::from(runtime.status.clone()),
             updated_at,
             strategy_price: runtime.strategy_price,
@@ -370,6 +376,7 @@ impl From<&TrackReadModel> for TrackListReadModel {
         Self {
             track_id: value.track_id.clone(),
             instrument: value.instrument.clone(),
+            exchange_rules: value.exchange_rules.clone(),
             status: value.status,
             updated_at: value.updated_at,
             strategy_price: value.strategy_price,
@@ -592,7 +599,7 @@ mod tests {
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-    use poise_core::types::{Exposure, Side};
+    use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::{BindingStatus, PolicyKind, SubmitRecoveryToken};
     use poise_engine::ports::OrderRequest;
@@ -637,12 +644,28 @@ mod tests {
         .unwrap()
     }
 
+    fn test_exchange_rules() -> ExchangeRules {
+        ExchangeRules {
+            price_tick: 0.1,
+            price_precision: Default::default(),
+            quantity_kind: Default::default(),
+            contract_notional: None,
+            settlement_asset: "USDT".to_string(),
+            quantity_step: 0.001,
+            min_qty: 0.001,
+            min_notional: 5.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        }
+    }
+
     #[test]
     fn read_model_from_source_flattens_runtime_view() {
         let read_model = TrackReadModel::from_source(TrackReadSource {
             definition: test_track_definition(),
             runtime: TrackRuntimeView {
                 status: TrackStatus::Active,
+                exchange_rules: test_exchange_rules(),
                 current_exposure: Exposure(3.5),
                 position_qty: 0.42,
                 desired_exposure: Some(Exposure(4.0)),
@@ -725,6 +748,7 @@ mod tests {
             definition: test_track_definition(),
             runtime: TrackRuntimeView {
                 status: TrackStatus::Active,
+                exchange_rules: test_exchange_rules(),
                 current_exposure: Exposure(1.0),
                 position_qty: 1.0,
                 desired_exposure: Some(Exposure(2.0)),
@@ -771,6 +795,7 @@ mod tests {
             definition: test_track_definition(),
             runtime: TrackRuntimeView {
                 status: TrackStatus::Active,
+                exchange_rules: test_exchange_rules(),
                 current_exposure: Exposure(1.0),
                 position_qty: 1.0,
                 desired_exposure: Some(Exposure(2.0)),
@@ -818,6 +843,7 @@ mod tests {
             definition: test_track_definition(),
             runtime: TrackRuntimeView {
                 status: TrackStatus::Active,
+                exchange_rules: test_exchange_rules(),
                 current_exposure: Exposure(1.0),
                 position_qty: 1.0,
                 desired_exposure: Some(Exposure(4.0)),
@@ -876,6 +902,7 @@ mod tests {
     fn read_model_projects_binding_intent_from_runtime_view() {
         let runtime = TrackRuntimeView {
             status: TrackStatus::Active,
+            exchange_rules: test_exchange_rules(),
             current_exposure: Exposure(1.0),
             position_qty: 1.0,
             desired_exposure: Some(Exposure(0.0)),

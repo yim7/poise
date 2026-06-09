@@ -103,6 +103,10 @@ export interface TrackLiveView {
 export interface TrackPositionView {
   current_exposure: number;
   desired_exposure?: number | null;
+  quantity_unit?: "base_asset" | "contracts";
+  quantity?: number;
+  notional?: number;
+  notional_asset?: string;
 }
 
 export interface TrackPnlView {

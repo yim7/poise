@@ -256,6 +256,7 @@ pub struct BindingView {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackRuntimeView {
     pub status: TrackStatus,
+    pub exchange_rules: ExchangeRules,
     pub current_exposure: Exposure,
     pub position_qty: f64,
     pub desired_exposure: Option<Exposure>,
@@ -725,6 +726,7 @@ impl TrackRuntime {
         let live = self.live_view();
         TrackRuntimeView {
             status: self.status(),
+            exchange_rules: self.exchange_rules.clone(),
             current_exposure: self.current_exposure.clone(),
             position_qty: self.current_position_qty,
             desired_exposure: live
