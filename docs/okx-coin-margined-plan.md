@@ -26,7 +26,7 @@
 | 3. 持久化 PNL asset 并按同资产聚合 | completed | 已通过：`poise-storage` schema/pnl；`poise-engine` ledger/loss_guard/manager/reconciler；`poise-core` risk；`poise-application` runtime_lifecycle/mutation_executor；四个 exchange WS；`poise-server` startup_bootstrap | `4f3a797065b4e50622a7df21dd06871f8ef6ecec` |
 | 4. OKX metadata、数量映射和 PNL asset | completed | 已通过：`cargo test -p poise-okx`；`cargo test -p poise-server runtime::startup_bootstrap::tests::` | `6f084aadba3046a3ca030daa5fae78b74a4a9930` |
 | 5. OKX account capacity 本地估算 | completed | 已通过：`cargo test -p poise-okx`；`cargo test -p poise-server runtime::startup_bootstrap::tests::`；`cargo test -p poise-server runtime::guards::tests::`；`poise-server`、`poise-application`、`poise-storage` no-run；Binance/Bybit/Hyperliquid mapper/WS 相关测试 | `79518118e7a046970c966ae20d8bb682d65cfcf4` |
-| 6. protocol / projector 单位展示 | pending | 未执行 |  |
+| 6. protocol / projector 单位展示 | completed | 已通过：`cargo test -p poise-protocol`；`cargo test -p poise-application read_model::tests::`；`cargo test -p poise-engine runtime::tests::`；`cargo test -p poise-server projector::tests::`、`http::tests::`、`websocket::tests::`、`runtime::diagnostics::tests::`；`pnpm exec tsc -b` | `b262be7d03e154c509a4f502e1bcdf488ca5a7db` |
 | 7. 最终回归验收 | pending | 未执行 |  |
 
 ## Task 1. 扩展 `ExchangeRules` 数量语义
