@@ -12,17 +12,25 @@ use poise_engine::ports::{
     UserDataEvent,
 };
 
-use crate::{Config, rest::client::OkxRestClient, rest::error::OkxRestError, ws::OkxWsClient};
+use crate::{
+    Config, instrument::OkxInstrumentRegistry, rest::client::OkxRestClient,
+    rest::error::OkxRestError, ws::OkxWsClient,
+};
 
 pub async fn connect(config: &Config) -> Result<ExchangePorts> {
     let credentials = config.credentials()?;
     let endpoints = config.endpoints();
+    let instrument_registry = Arc::new(OkxInstrumentRegistry::default());
     Ok(ports_from_clients(
-        Arc::new(OkxRestClient::new(config)?),
-        Arc::new(OkxWsClient::new(
+        Arc::new(OkxRestClient::new_with_instrument_registry(
+            config,
+            Arc::clone(&instrument_registry),
+        )?),
+        Arc::new(OkxWsClient::new_with_instrument_registry(
             endpoints.public_ws_url(),
             endpoints.private_ws_url(),
             credentials,
+            instrument_registry,
         )),
     ))
 }

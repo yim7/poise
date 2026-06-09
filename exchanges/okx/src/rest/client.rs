@@ -13,9 +13,10 @@ use poise_engine::ports::{
     OrderRequest, OrderStatus, Position,
 };
 
+use crate::instrument::{OkxInstrumentMetadata, OkxInstrumentRegistry};
 use crate::mapper::{
-    account_summary_from_balance, available_balance_from_balance, exchange_info_from_instrument,
-    open_order_from_snapshot, position_from_snapshot, side_to_okx,
+    account_summary_from_balance, available_balance_from_balance,
+    open_order_from_snapshot_with_metadata, position_from_snapshot_with_metadata, side_to_okx,
 };
 use crate::rest::auth::sign_okx_payload;
 use crate::rest::error::OkxRestError;
@@ -39,10 +40,18 @@ pub(crate) struct OkxRestClient {
     credentials: Credentials,
     simulated_trading: bool,
     timestamp_provider: Arc<dyn Fn() -> chrono::DateTime<Utc> + Send + Sync>,
+    instrument_registry: Arc<OkxInstrumentRegistry>,
 }
 
 impl OkxRestClient {
     pub(crate) fn new(config: &Config) -> Result<Self> {
+        Self::new_with_instrument_registry(config, Arc::new(OkxInstrumentRegistry::default()))
+    }
+
+    pub(crate) fn new_with_instrument_registry(
+        config: &Config,
+        instrument_registry: Arc<OkxInstrumentRegistry>,
+    ) -> Result<Self> {
         let endpoints = config.endpoints();
         let base_url = endpoints.rest_base_url().to_string();
         Ok(Self {
@@ -51,6 +60,7 @@ impl OkxRestClient {
             credentials: config.credentials()?,
             simulated_trading: endpoints.simulated_trading(),
             timestamp_provider: Arc::new(Utc::now),
+            instrument_registry,
         })
     }
 
@@ -68,27 +78,16 @@ impl OkxRestClient {
             credentials,
             simulated_trading,
             timestamp_provider,
+            instrument_registry: Arc::new(OkxInstrumentRegistry::default()),
         }
     }
 
     pub(crate) async fn get_exchange_info(&self, symbol: &str) -> Result<ExchangeInfo> {
-        let response: Vec<InstrumentInfo> = self
-            .send_request(
-                Method::GET,
-                "/api/v5/public/instruments",
-                vec![
-                    ("instType", "SWAP".to_string()),
-                    ("instId", symbol.to_string()),
-                ],
-                None,
-                AuthMode::None,
-            )
-            .await?;
-        let instrument = response
-            .into_iter()
-            .find(|item| item.inst_id == symbol)
-            .with_context(|| format!("OKX instrument not found: {symbol}"))?;
-        exchange_info_from_instrument(instrument)
+        let instrument = self.fetch_instrument_info(symbol).await?;
+        let metadata = OkxInstrumentMetadata::from_instrument_info(&instrument)?;
+        let exchange_info = metadata.exchange_info_from_instrument(&instrument)?;
+        self.instrument_registry.upsert(metadata);
+        Ok(exchange_info)
     }
 
     pub(crate) async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
@@ -117,8 +116,9 @@ impl OkxRestClient {
     }
 
     pub(crate) async fn get_position(&self, symbol: &str) -> Result<Position> {
+        let metadata = self.get_or_fetch_instrument_metadata(symbol).await?;
         match self.get_position_snapshot(symbol).await? {
-            Some(position) => position_from_snapshot(position),
+            Some(position) => position_from_snapshot_with_metadata(position, Some(&metadata)),
             None => Ok(Position {
                 instrument: Instrument::new(Venue::Okx, symbol),
                 qty: 0.0,
@@ -129,6 +129,7 @@ impl OkxRestClient {
     }
 
     pub(crate) async fn get_open_orders(&self, symbol: &str) -> Result<Vec<ExchangeOrder>> {
+        let metadata = self.get_or_fetch_instrument_metadata(symbol).await?;
         let response: Vec<PendingOrderSnapshot> = self
             .send_request(
                 Method::GET,
@@ -143,11 +144,15 @@ impl OkxRestClient {
             .await?;
         response
             .into_iter()
-            .map(open_order_from_snapshot)
+            .map(|order| open_order_from_snapshot_with_metadata(order, Some(&metadata)))
             .collect::<Result<Vec<_>>>()
     }
 
     pub(crate) async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
+        let metadata = self
+            .get_or_fetch_instrument_metadata(&req.instrument.symbol)
+            .await?;
+        let order_size = metadata.okx_contract_qty_from_native(req.quantity);
         let body = serde_json::to_string(&PlaceOrderBody {
             inst_id: req.instrument.symbol,
             td_mode: "cross",
@@ -155,7 +160,7 @@ impl OkxRestClient {
             side: side_to_okx(req.side),
             ord_type: "limit",
             price: format_decimal(req.price),
-            size: format_decimal(req.quantity),
+            size: format_decimal(order_size),
             reduce_only: req.reduce_only.then_some(true),
         })
         .context("failed to serialize OKX place-order body")?;
@@ -263,6 +268,39 @@ impl OkxRestClient {
             .into_iter()
             .next()
             .context("missing OKX balance snapshot")
+    }
+
+    async fn get_or_fetch_instrument_metadata(
+        &self,
+        symbol: &str,
+    ) -> Result<OkxInstrumentMetadata> {
+        if let Some(metadata) = self.instrument_registry.get(symbol) {
+            return Ok(metadata);
+        }
+
+        let instrument = self.fetch_instrument_info(symbol).await?;
+        let metadata = OkxInstrumentMetadata::from_instrument_info(&instrument)?;
+        self.instrument_registry.upsert(metadata.clone());
+        Ok(metadata)
+    }
+
+    async fn fetch_instrument_info(&self, symbol: &str) -> Result<InstrumentInfo> {
+        let response: Vec<InstrumentInfo> = self
+            .send_request(
+                Method::GET,
+                "/api/v5/public/instruments",
+                vec![
+                    ("instType", "SWAP".to_string()),
+                    ("instId", symbol.to_string()),
+                ],
+                None,
+                AuthMode::None,
+            )
+            .await?;
+        response
+            .into_iter()
+            .find(|item| item.inst_id == symbol)
+            .with_context(|| format!("OKX instrument not found: {symbol}"))
     }
 
     async fn get_position_snapshot(&self, symbol: &str) -> Result<Option<PositionSnapshot>> {
@@ -560,7 +598,7 @@ mod tests {
         let server = MockHttpServer::spawn(vec![
             MockResponse::json(
                 200,
-                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","tickSz":"0.1","lotSz":"0.01","minSz":"0.01"}]}"#,
+                linear_instrument_response(),
             ),
             MockResponse::json(
                 200,
@@ -633,10 +671,13 @@ mod tests {
 
     #[tokio::test]
     async fn submit_order_posts_cross_limit_body() {
-        let server = MockHttpServer::spawn(vec![MockResponse::json(
-            200,
-            r#"{"code":"0","msg":"","data":[{"ordId":"123","clOrdId":"client-1","sCode":"0","sMsg":""}]}"#,
-        )])
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[{"ordId":"123","clOrdId":"client-1","sCode":"0","sMsg":""}]}"#,
+            ),
+        ])
         .await;
         let client = test_client(&server, true);
 
@@ -656,7 +697,12 @@ mod tests {
         assert_eq!(receipt.client_order_id, "client-1");
         assert_eq!(receipt.status, OrderStatus::Submitting);
 
-        let request = &server.requests()[0];
+        let requests = server.requests();
+        assert_eq!(
+            requests[0].path,
+            "/api/v5/public/instruments?instType=SWAP&instId=BTC-USDT-SWAP"
+        );
+        let request = &requests[1];
         assert_eq!(request.method, "POST");
         assert_eq!(request.path, "/api/v5/trade/order");
         let body = request.json_body();
@@ -666,7 +712,7 @@ mod tests {
         assert_eq!(body["clOrdId"], "client-1");
         assert_eq!(body["side"], "buy");
         assert_eq!(body["px"], "64000.1");
-        assert_eq!(body["sz"], "0.01");
+        assert_eq!(body["sz"], "1");
         assert_eq!(
             request.headers.get("ok-access-sign"),
             Some(&sign_okx_payload(
@@ -677,6 +723,36 @@ mod tests {
                 "secret-key",
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn submit_inverse_order_keeps_contract_quantity() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, inverse_instrument_response()),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[{"ordId":"123","clOrdId":"client-1","sCode":"0","sMsg":""}]}"#,
+            ),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        client
+            .submit_order(OrderRequest {
+                instrument: Instrument::new(Venue::Okx, "BTC-USD-SWAP"),
+                side: Side::Sell,
+                price: 64000.10,
+                quantity: 30.0,
+                client_order_id: "client-1".to_string(),
+                reduce_only: false,
+            })
+            .await
+            .unwrap();
+
+        let request = &server.requests()[1];
+        let body = request.json_body();
+        assert_eq!(body["instId"], "BTC-USD-SWAP");
+        assert_eq!(body["sz"], "30");
     }
 
     #[tokio::test]
@@ -702,6 +778,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_all_queries_pending_orders_then_posts_batch_cancel() {
         let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
             MockResponse::json(
                 200,
                 r#"{"code":"0","msg":"","data":[
@@ -726,11 +803,16 @@ mod tests {
         assert_eq!(requests[0].method, "GET");
         assert_eq!(
             requests[0].path,
+            "/api/v5/public/instruments?instType=SWAP&instId=BTC-USDT-SWAP"
+        );
+        assert_eq!(requests[1].method, "GET");
+        assert_eq!(
+            requests[1].path,
             "/api/v5/trade/orders-pending?instType=SWAP&instId=BTC-USDT-SWAP"
         );
-        assert_eq!(requests[1].method, "POST");
-        assert_eq!(requests[1].path, "/api/v5/trade/cancel-batch-orders");
-        let body = requests[1].json_body();
+        assert_eq!(requests[2].method, "POST");
+        assert_eq!(requests[2].path, "/api/v5/trade/cancel-batch-orders");
+        let body = requests[2].json_body();
         assert_eq!(body[0]["instId"], "BTC-USDT-SWAP");
         assert_eq!(body[0]["ordId"], "123");
         assert_eq!(body[1]["ordId"], "456");
@@ -782,9 +864,10 @@ mod tests {
     #[tokio::test]
     async fn maps_position_and_server_time_responses() {
         let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
             MockResponse::json(
                 200,
-                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","pos":"-0.25","avgPx":"65000.5","upl":"123.45","posSide":"net","lever":"20"}]}"#,
+                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","pos":"-25","avgPx":"65000.5","upl":"123.45","posSide":"net","lever":"20"}]}"#,
             ),
             MockResponse::json(
                 200,
@@ -820,10 +903,13 @@ mod tests {
 
     #[tokio::test]
     async fn execution_port_maps_insufficient_margin_code_to_execution_kind() {
-        let server = MockHttpServer::spawn(vec![MockResponse::json(
-            200,
-            r#"{"code":"51008","msg":"insufficient margin","data":[]}"#,
-        )])
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
+            MockResponse::json(
+                200,
+                r#"{"code":"51008","msg":"insufficient margin","data":[]}"#,
+            ),
+        ])
         .await;
         let client = test_client(&server, true);
 
@@ -850,10 +936,13 @@ mod tests {
 
     #[tokio::test]
     async fn submit_order_surfaces_ack_failure_when_envelope_reports_all_operations_failed() {
-        let server = MockHttpServer::spawn(vec![MockResponse::json(
-            200,
-            r#"{"code":"1","msg":"All operations failed","data":[{"ordId":"","clOrdId":"client-1","sCode":"51000","sMsg":"Parameter posSide error"}]}"#,
-        )])
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
+            MockResponse::json(
+                200,
+                r#"{"code":"1","msg":"All operations failed","data":[{"ordId":"","clOrdId":"client-1","sCode":"51000","sMsg":"Parameter posSide error"}]}"#,
+            ),
+        ])
         .await;
         let client = test_client(&server, true);
 
@@ -922,6 +1011,14 @@ mod tests {
 
     fn fixed_timestamp() -> String {
         "2020-12-08T09:08:57.715Z".to_string()
+    }
+
+    fn linear_instrument_response() -> &'static str {
+        r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","ctType":"linear","tickSz":"0.1","lotSz":"0.01","minSz":"0.01","ctVal":"0.01","ctValCcy":"BTC","settleCcy":"USDT"}]}"#
+    }
+
+    fn inverse_instrument_response() -> &'static str {
+        r#"{"code":"0","msg":"","data":[{"instId":"BTC-USD-SWAP","ctType":"inverse","tickSz":"0.1","lotSz":"1","minSz":"1","ctVal":"100","ctValCcy":"USD","settleCcy":"BTC"}]}"#
     }
 
     #[derive(Debug, Clone)]

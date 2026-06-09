@@ -14,7 +14,7 @@ use tokio_tungstenite::{
 use poise_core::track::Instrument;
 use poise_engine::ports::{MarketDataTick, UserDataEvent};
 
-use crate::Credentials;
+use crate::{Credentials, instrument::OkxInstrumentRegistry};
 
 type WebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -24,13 +24,15 @@ pub(crate) struct OkxWsClient {
     credentials: Credentials,
     reconnect_delay: Duration,
     timestamp_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    instrument_registry: Arc<OkxInstrumentRegistry>,
 }
 
 impl OkxWsClient {
-    pub(crate) fn new(
+    pub(crate) fn new_with_instrument_registry(
         public_ws_url: impl Into<String>,
         private_ws_url: impl Into<String>,
         credentials: Credentials,
+        instrument_registry: Arc<OkxInstrumentRegistry>,
     ) -> Self {
         Self {
             public_ws_url: public_ws_url.into().trim_end_matches('/').to_string(),
@@ -38,6 +40,7 @@ impl OkxWsClient {
             credentials,
             reconnect_delay: Duration::from_millis(250),
             timestamp_provider: Arc::new(|| chrono::Utc::now().timestamp()),
+            instrument_registry,
         }
     }
 
@@ -57,6 +60,7 @@ impl OkxWsClient {
             credentials: Credentials::new(api_key, api_secret, passphrase),
             reconnect_delay,
             timestamp_provider,
+            instrument_registry: Arc::new(OkxInstrumentRegistry::default()),
         }
     }
 
@@ -82,12 +86,14 @@ impl OkxWsClient {
         let credentials = self.credentials.clone();
         let timestamp_provider = Arc::clone(&self.timestamp_provider);
         let reconnect_delay = self.reconnect_delay;
+        let instrument_registry = Arc::clone(&self.instrument_registry);
 
         tokio::spawn(async move {
             account::run_user_stream(
                 url,
                 credentials,
                 timestamp_provider,
+                instrument_registry,
                 sender,
                 reconnect_delay,
             )
@@ -163,6 +169,8 @@ mod tests {
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use super::*;
+    use crate::instrument::{OkxInstrumentMetadata, OkxInstrumentRegistry};
+    use crate::rest::models::InstrumentInfo;
 
     #[test]
     fn tickers_message_maps_to_execution_quote() {
@@ -262,6 +270,49 @@ mod tests {
             }
             other => panic!("expected trade pnl, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn inverse_orders_message_uses_contract_qty_and_settlement_pnl_asset() {
+        let registry = registry_with_metadata(inverse_metadata());
+        let events = account::parse_user_data_message_with_registry(
+            r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"BTC-USD-SWAP","ordId":"123","clOrdId":"client-1","side":"sell","px":"64000.1","sz":"30","accFillSz":"10","state":"partially_filled","fillPx":"64000.0","fillSz":"10","fillPnl":"0.0012","fee":"-0.00001","feeCcy":"BTC","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
+            &registry,
+        )
+        .unwrap();
+
+        match &events[0].payload {
+            UserDataPayload::OrderUpdate(order) => {
+                assert_eq!(
+                    order.instrument,
+                    Instrument::new(Venue::Okx, "BTC-USD-SWAP")
+                );
+                assert_eq!(order.qty, 30.0);
+                assert_eq!(order.filled_qty, 10.0);
+            }
+            other => panic!("expected order update, got {other:?}"),
+        }
+        match &events[1].payload {
+            UserDataPayload::TrackPnl(record) => {
+                assert_eq!(record.pnl_asset, "BTC");
+                assert_eq!(record.qty, Some(10.0));
+                assert_eq!(record.realized_pnl, 0.0012);
+                assert_eq!(record.trading_fee, 0.00001);
+            }
+            other => panic!("expected trade pnl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orders_message_rejects_fee_asset_mismatch_when_metadata_is_known() {
+        let registry = registry_with_metadata(inverse_metadata());
+        let error = account::parse_user_data_message_with_registry(
+            r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"BTC-USD-SWAP","ordId":"123","clOrdId":"client-1","side":"sell","px":"64000.1","sz":"30","accFillSz":"10","state":"partially_filled","fillPx":"64000.0","fillSz":"10","fillPnl":"0.0012","fee":"-0.00001","feeCcy":"USD","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
+            &registry,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("fee asset"));
     }
 
     #[test]
@@ -415,8 +466,8 @@ mod tests {
 
         tokio::spawn(async move {
             for payload in [
-                r#"{"arg":{"channel":"positions","instType":"SWAP"},"data":[{"instId":"BTC-USDT-SWAP","pos":"0.1","avgPx":"64000","upl":"1","posSide":"net","lever":"10","uTime":"1700000000000"}]}"#,
-                r#"{"arg":{"channel":"positions","instType":"SWAP"},"data":[{"instId":"BTC-USDT-SWAP","pos":"0.2","avgPx":"64000","upl":"2","posSide":"net","lever":"10","uTime":"1700000005000"}]}"#,
+                r#"{"arg":{"channel":"positions","instType":"SWAP"},"data":[{"instId":"BTC-USDT-SWAP","pos":"10","avgPx":"64000","upl":"1","posSide":"net","lever":"10","uTime":"1700000000000"}]}"#,
+                r#"{"arg":{"channel":"positions","instType":"SWAP"},"data":[{"instId":"BTC-USDT-SWAP","pos":"20","avgPx":"64000","upl":"2","posSide":"net","lever":"10","uTime":"1700000005000"}]}"#,
             ] {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut websocket = accept_async(stream).await.unwrap();
@@ -445,6 +496,7 @@ mod tests {
             Duration::from_millis(10),
             Arc::new(|| 1_704_876_947),
         );
+        seed_linear_metadata(&client);
         let mut receiver = client.subscribe_user_data().await.unwrap();
         let first = timeout(Duration::from_secs(1), receiver.recv())
             .await
@@ -469,5 +521,43 @@ mod tests {
             UserDataPayload::PositionUpdate(position) => assert_eq!(position.qty, 0.2),
             _ => panic!("expected position"),
         }
+    }
+
+    fn seed_linear_metadata(client: &OkxWsClient) {
+        client.instrument_registry.upsert(linear_metadata());
+    }
+
+    fn registry_with_metadata(metadata: OkxInstrumentMetadata) -> OkxInstrumentRegistry {
+        let registry = OkxInstrumentRegistry::default();
+        registry.upsert(metadata);
+        registry
+    }
+
+    fn linear_metadata() -> OkxInstrumentMetadata {
+        OkxInstrumentMetadata::from_instrument_info(&InstrumentInfo {
+            inst_id: "BTC-USDT-SWAP".to_string(),
+            ct_type: Some("linear".to_string()),
+            tick_sz: "0.1".to_string(),
+            lot_sz: "0.01".to_string(),
+            min_sz: "0.01".to_string(),
+            ct_val: Some("0.01".to_string()),
+            ct_val_ccy: Some("BTC".to_string()),
+            settle_ccy: Some("USDT".to_string()),
+        })
+        .unwrap()
+    }
+
+    fn inverse_metadata() -> OkxInstrumentMetadata {
+        OkxInstrumentMetadata::from_instrument_info(&InstrumentInfo {
+            inst_id: "BTC-USD-SWAP".to_string(),
+            ct_type: Some("inverse".to_string()),
+            tick_sz: "0.1".to_string(),
+            lot_sz: "1".to_string(),
+            min_sz: "1".to_string(),
+            ct_val: Some("100".to_string()),
+            ct_val_ccy: Some("USD".to_string()),
+            settle_ccy: Some("BTC".to_string()),
+        })
+        .unwrap()
     }
 }

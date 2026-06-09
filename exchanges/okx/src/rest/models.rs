@@ -11,6 +11,8 @@ pub(crate) struct OkxEnvelope<T> {
 pub(crate) struct InstrumentInfo {
     #[serde(rename = "instId")]
     pub inst_id: String,
+    #[serde(rename = "ctType", default)]
+    pub ct_type: Option<String>,
     #[serde(rename = "tickSz")]
     pub tick_sz: String,
     #[serde(rename = "lotSz")]
@@ -19,6 +21,10 @@ pub(crate) struct InstrumentInfo {
     pub min_sz: String,
     #[serde(rename = "ctVal")]
     pub ct_val: Option<String>,
+    #[serde(rename = "ctValCcy", default)]
+    pub ct_val_ccy: Option<String>,
+    #[serde(rename = "settleCcy", default)]
+    pub settle_ccy: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -102,10 +108,13 @@ mod tests {
             "data": [
                 {
                     "instId": "BTC-USDT-SWAP",
+                    "ctType": "linear",
                     "tickSz": "0.1",
                     "lotSz": "0.01",
                     "minSz": "0.01",
-                    "ctVal": "0.01"
+                    "ctVal": "0.01",
+                    "ctValCcy": "BTC",
+                    "settleCcy": "USDT"
                 }
             ]
         }
@@ -119,7 +128,10 @@ mod tests {
         assert_eq!(envelope.data[0].tick_sz, "0.1");
         assert_eq!(envelope.data[0].lot_sz, "0.01");
         assert_eq!(envelope.data[0].min_sz, "0.01");
+        assert_eq!(envelope.data[0].ct_type.as_deref(), Some("linear"));
         assert_eq!(envelope.data[0].ct_val.as_deref(), Some("0.01"));
+        assert_eq!(envelope.data[0].ct_val_ccy.as_deref(), Some("BTC"));
+        assert_eq!(envelope.data[0].settle_ccy.as_deref(), Some("USDT"));
     }
 
     #[test]

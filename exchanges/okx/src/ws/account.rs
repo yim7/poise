@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use chrono::{TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
@@ -13,7 +13,11 @@ use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{UserDataEvent, UserDataPayload};
 
 use crate::Credentials;
-use crate::mapper::{open_order_from_snapshot, position_from_snapshot};
+use crate::instrument::{OkxInstrumentMetadata, OkxInstrumentRegistry};
+use crate::mapper::{
+    native_qty_from_okx_contracts, open_order_from_snapshot_with_metadata,
+    position_from_snapshot_with_metadata,
+};
 use crate::rest::auth::sign_okx_payload;
 use crate::rest::models::{PendingOrderSnapshot, PositionSnapshot};
 use crate::ws::{backoff_delay, connect_websocket, models::UserMessage};
@@ -22,6 +26,7 @@ pub(super) async fn run_user_stream(
     url: String,
     credentials: Credentials,
     timestamp_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    instrument_registry: Arc<OkxInstrumentRegistry>,
     sender: mpsc::Sender<UserDataEvent>,
     reconnect_delay: Duration,
 ) {
@@ -39,7 +44,10 @@ pub(super) async fn run_user_stream(
                 } else {
                     while let Some(message) = websocket.next().await {
                         match message {
-                            Ok(Message::Text(text)) => match parse_user_data_message(&text) {
+                            Ok(Message::Text(text)) => match parse_user_data_message_with_registry(
+                                &text,
+                                &instrument_registry,
+                            ) {
                                 Ok(events) => {
                                     for event in events {
                                         if sender.send(event).await.is_err() {
@@ -125,7 +133,22 @@ pub(crate) fn build_login_payload(
     .to_string()
 }
 
+#[cfg(test)]
 pub(crate) fn parse_user_data_message(payload: &str) -> Result<Vec<UserDataEvent>> {
+    parse_user_data_message_with_optional_registry(payload, None)
+}
+
+pub(crate) fn parse_user_data_message_with_registry(
+    payload: &str,
+    instrument_registry: &OkxInstrumentRegistry,
+) -> Result<Vec<UserDataEvent>> {
+    parse_user_data_message_with_optional_registry(payload, Some(instrument_registry))
+}
+
+fn parse_user_data_message_with_optional_registry(
+    payload: &str,
+    instrument_registry: Option<&OkxInstrumentRegistry>,
+) -> Result<Vec<UserDataEvent>> {
     let value: serde_json::Value = serde_json::from_str(payload)?;
     if value.get("event").is_some() {
         return Ok(Vec::new());
@@ -134,18 +157,22 @@ pub(crate) fn parse_user_data_message(payload: &str) -> Result<Vec<UserDataEvent
     let _inst_type = message.arg.inst_type.as_deref();
 
     match message.arg.channel.as_str() {
-        "orders" => parse_orders(message.data),
-        "positions" => parse_positions(message.data),
+        "orders" => parse_orders(message.data, instrument_registry),
+        "positions" => parse_positions(message.data, instrument_registry),
         _ => Ok(Vec::new()),
     }
 }
 
-fn parse_orders(data: Vec<serde_json::Value>) -> Result<Vec<UserDataEvent>> {
+fn parse_orders(
+    data: Vec<serde_json::Value>,
+    instrument_registry: Option<&OkxInstrumentRegistry>,
+) -> Result<Vec<UserDataEvent>> {
     let mut events = Vec::new();
     for value in data {
         let event_time = millis_to_utc(required_str(&value, "uTime")?)?;
         let order_snapshot: PendingOrderSnapshot = serde_json::from_value(value.clone())?;
-        let order = open_order_from_snapshot(order_snapshot)?;
+        let metadata = metadata_for_symbol(&order_snapshot.inst_id, instrument_registry)?;
+        let order = open_order_from_snapshot_with_metadata(order_snapshot, metadata.as_ref())?;
         events.push(UserDataEvent {
             event_time,
             payload: UserDataPayload::OrderUpdate(order.clone()),
@@ -154,6 +181,7 @@ fn parse_orders(data: Vec<serde_json::Value>) -> Result<Vec<UserDataEvent>> {
         let fill_size = optional_decimal(&value, "fillSz")?.unwrap_or(0.0);
         let trade_id = optional_str(&value, "tradeId");
         if fill_size > f64::EPSILON || trade_id.is_some() {
+            let fill_size = native_qty_from_okx_contracts(fill_size, metadata.as_ref());
             let fill_price = optional_decimal(&value, "fillPx")?.unwrap_or(order.price);
             let realized_pnl = optional_decimal(&value, "fillPnl")?
                 .or(optional_decimal(&value, "pnl")?)
@@ -170,6 +198,18 @@ fn parse_orders(data: Vec<serde_json::Value>) -> Result<Vec<UserDataEvent>> {
                     trade_id
                 )
             });
+            let pnl_asset = metadata
+                .as_ref()
+                .map(|metadata| metadata.settlement_asset().to_string())
+                .unwrap_or_else(|| order.instrument.quote_asset());
+            if let Some(fee_asset) =
+                optional_str(&value, "fillFeeCcy").or(optional_str(&value, "feeCcy"))
+            {
+                ensure!(
+                    fee_asset == pnl_asset,
+                    "OKX fee asset `{fee_asset}` does not match settlement asset `{pnl_asset}`"
+                );
+            }
             events.push(UserDataEvent {
                 event_time,
                 payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade(
@@ -184,7 +224,7 @@ fn parse_orders(data: Vec<serde_json::Value>) -> Result<Vec<UserDataEvent>> {
                     fill_size,
                     realized_pnl,
                     trading_fee,
-                    order.instrument.quote_asset(),
+                    pnl_asset,
                 )),
             });
         }
@@ -192,17 +232,37 @@ fn parse_orders(data: Vec<serde_json::Value>) -> Result<Vec<UserDataEvent>> {
     Ok(events)
 }
 
-fn parse_positions(data: Vec<serde_json::Value>) -> Result<Vec<UserDataEvent>> {
+fn parse_positions(
+    data: Vec<serde_json::Value>,
+    instrument_registry: Option<&OkxInstrumentRegistry>,
+) -> Result<Vec<UserDataEvent>> {
     let mut events = Vec::new();
     for value in data {
         let event_time = millis_to_utc(required_str(&value, "uTime")?)?;
         let position: PositionSnapshot = serde_json::from_value(value)?;
+        let metadata = metadata_for_symbol(&position.inst_id, instrument_registry)?;
         events.push(UserDataEvent {
             event_time,
-            payload: UserDataPayload::PositionUpdate(position_from_snapshot(position)?),
+            payload: UserDataPayload::PositionUpdate(position_from_snapshot_with_metadata(
+                position,
+                metadata.as_ref(),
+            )?),
         });
     }
     Ok(events)
+}
+
+fn metadata_for_symbol(
+    symbol: &str,
+    instrument_registry: Option<&OkxInstrumentRegistry>,
+) -> Result<Option<OkxInstrumentMetadata>> {
+    instrument_registry
+        .map(|registry| {
+            registry
+                .get(symbol)
+                .with_context(|| format!("missing OKX instrument metadata for `{symbol}`"))
+        })
+        .transpose()
 }
 
 fn millis_to_utc(value: &str) -> Result<chrono::DateTime<Utc>> {
