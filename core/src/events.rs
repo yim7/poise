@@ -10,6 +10,10 @@ pub enum ExecutionGateReason {
         required_notional: f64,
         available_notional: f64,
     },
+    PnlAssetMismatch {
+        expected_asset: String,
+        actual_asset: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

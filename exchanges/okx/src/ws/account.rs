@@ -184,6 +184,7 @@ fn parse_orders(data: Vec<serde_json::Value>) -> Result<Vec<UserDataEvent>> {
                     fill_size,
                     realized_pnl,
                     trading_fee,
+                    order.instrument.quote_asset(),
                 )),
             });
         }

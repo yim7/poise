@@ -28,6 +28,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             symbol TEXT NOT NULL,
             occurred_at TEXT NOT NULL,
             kind TEXT NOT NULL,
+            pnl_asset TEXT NOT NULL,
             source TEXT NOT NULL,
             source_key TEXT,
             order_id TEXT,
@@ -77,6 +78,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         );",
     )?;
 
+    migrate_track_pnl_records_pnl_asset(conn)?;
     ensure_columns_present(conn, "track_events", &["track_id"])?;
     ensure_columns_present(
         conn,
@@ -98,6 +100,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "symbol",
             "occurred_at",
             "kind",
+            "pnl_asset",
             "source",
             "source_key",
             "order_id",
@@ -156,6 +159,17 @@ pub fn initialize(conn: &Connection) -> Result<()> {
          ON track_pnl_records(source_key)
          WHERE source_key IS NOT NULL;",
     )?;
+    Ok(())
+}
+
+fn migrate_track_pnl_records_pnl_asset(conn: &Connection) -> Result<()> {
+    let columns = table_columns(conn, "track_pnl_records")?;
+    if !columns.iter().any(|column| column == "pnl_asset") {
+        conn.execute(
+            "ALTER TABLE track_pnl_records ADD COLUMN pnl_asset TEXT",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -263,6 +277,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pnl_records_count, 1);
+        assert!(
+            table_columns(&conn, "track_pnl_records")
+                .unwrap()
+                .contains(&"pnl_asset".to_string())
+        );
 
         let index_count: i64 = conn
             .query_row(
@@ -319,6 +338,7 @@ mod tests {
                 "symbol".to_string(),
                 "occurred_at".to_string(),
                 "kind".to_string(),
+                "pnl_asset".to_string(),
                 "source".to_string(),
                 "source_key".to_string(),
                 "order_id".to_string(),

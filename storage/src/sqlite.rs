@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::schema;
 use poise_core::events::DomainEvent;
-use poise_core::track::TrackId;
+use poise_core::track::{Instrument, TrackId, Venue};
 use poise_core::types::Side;
 use poise_engine::execution_plan::TrackEffect;
 use poise_engine::ledger::{TrackPnlRecord, TrackPnlRecordKind, TrackPnlStats};
@@ -669,6 +669,10 @@ impl SqliteStorage {
         track_id: TrackId,
         record: TrackPnlRecord,
     ) -> Result<bool> {
+        ensure!(
+            !record.pnl_asset.trim().is_empty(),
+            "pnl_asset must not be empty"
+        );
         let mut conn = Self::lock_connection(&conn)?;
         let tx = conn
             .transaction()
@@ -682,6 +686,7 @@ impl SqliteStorage {
                     symbol,
                     occurred_at,
                     kind,
+                    pnl_asset,
                     source,
                     source_key,
                     order_id,
@@ -692,13 +697,14 @@ impl SqliteStorage {
                     realized_pnl,
                     trading_fee,
                     funding_fee
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     track_id.as_str(),
                     record.instrument.venue.as_str(),
                     record.instrument.symbol,
                     record.occurred_at.to_rfc3339(),
                     track_pnl_record_kind_as_str(record.kind),
+                    record.pnl_asset,
                     record.source,
                     record.source_key,
                     record.order_id,
@@ -736,8 +742,7 @@ impl SqliteStorage {
         pnl_utc_day: NaiveDate,
     ) -> Result<TrackPnlStats> {
         let conn = Self::lock_connection(&conn)?;
-        let (gross_realized_pnl_cumulative, trading_fee_cumulative, funding_fee_cumulative) =
-            sum_pnl_records(&conn, track_id.as_str(), None, None)?;
+        let cumulative = sum_pnl_records(&conn, track_id.as_str(), None, None)?;
         let day_start =
             DateTime::<Utc>::from_naive_utc_and_offset(pnl_utc_day.and_time(NaiveTime::MIN), Utc);
         let next_day = pnl_utc_day
@@ -745,21 +750,23 @@ impl SqliteStorage {
             .ok_or_else(|| anyhow!("invalid pnl utc day `{pnl_utc_day}`"))?;
         let day_end =
             DateTime::<Utc>::from_naive_utc_and_offset(next_day.and_time(NaiveTime::MIN), Utc);
-        let (gross_realized_pnl_today, trading_fee_today, funding_fee_today) = sum_pnl_records(
+        let today = sum_pnl_records(
             &conn,
             track_id.as_str(),
             Some(day_start.to_rfc3339()),
             Some(day_end.to_rfc3339()),
         )?;
+        let pnl_asset = merge_pnl_assets(cumulative.pnl_asset.clone(), today.pnl_asset.clone())?;
 
         Ok(TrackPnlStats {
             pnl_utc_day,
-            gross_realized_pnl_today,
-            gross_realized_pnl_cumulative,
-            trading_fee_today,
-            trading_fee_cumulative,
-            funding_fee_today,
-            funding_fee_cumulative,
+            pnl_asset,
+            gross_realized_pnl_today: today.realized_pnl,
+            gross_realized_pnl_cumulative: cumulative.realized_pnl,
+            trading_fee_today: today.trading_fee,
+            trading_fee_cumulative: cumulative.trading_fee,
+            funding_fee_today: today.funding_fee,
+            funding_fee_cumulative: cumulative.funding_fee,
             ..TrackPnlStats::default()
         })
     }
@@ -779,18 +786,52 @@ fn side_as_str(side: Side) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct PnlRecordSums {
+    pnl_asset: Option<String>,
+    realized_pnl: f64,
+    trading_fee: f64,
+    funding_fee: f64,
+}
+
+impl PnlRecordSums {
+    fn apply(
+        &mut self,
+        pnl_asset: String,
+        realized_pnl: f64,
+        trading_fee: f64,
+        funding_fee: f64,
+    ) -> Result<()> {
+        match self.pnl_asset.as_deref() {
+            Some(existing) => ensure!(
+                existing == pnl_asset,
+                "track pnl records contain multiple pnl assets: `{existing}` and `{pnl_asset}`"
+            ),
+            None => self.pnl_asset = Some(pnl_asset),
+        }
+
+        self.realized_pnl += realized_pnl;
+        self.trading_fee += trading_fee;
+        self.funding_fee += funding_fee;
+        Ok(())
+    }
+}
+
 fn sum_pnl_records(
     conn: &Connection,
     track_id: &str,
     occurred_at_start: Option<String>,
     occurred_at_end: Option<String>,
-) -> Result<(f64, f64, f64)> {
+) -> Result<PnlRecordSums> {
     let mut statement = match (&occurred_at_start, &occurred_at_end) {
         (Some(_), Some(_)) => conn.prepare(
             "SELECT
-                COALESCE(SUM(realized_pnl), 0),
-                COALESCE(SUM(trading_fee), 0),
-                COALESCE(SUM(funding_fee), 0)
+                venue,
+                symbol,
+                pnl_asset,
+                realized_pnl,
+                trading_fee,
+                funding_fee
              FROM track_pnl_records
              WHERE track_id = ?1
                AND occurred_at >= ?2
@@ -798,24 +839,96 @@ fn sum_pnl_records(
         )?,
         _ => conn.prepare(
             "SELECT
-                COALESCE(SUM(realized_pnl), 0),
-                COALESCE(SUM(trading_fee), 0),
-                COALESCE(SUM(funding_fee), 0)
+                venue,
+                symbol,
+                pnl_asset,
+                realized_pnl,
+                trading_fee,
+                funding_fee
              FROM track_pnl_records
              WHERE track_id = ?1",
         )?,
     };
 
-    let sums = match (occurred_at_start, occurred_at_end) {
-        (Some(start), Some(end)) => statement.query_row(params![track_id, start, end], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?,
-        _ => statement.query_row(params![track_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?,
+    let mut sums = PnlRecordSums::default();
+    match (occurred_at_start, occurred_at_end) {
+        (Some(start), Some(end)) => {
+            let rows = statement.query_map(params![track_id, start, end], pnl_record_sum_row)?;
+            for row in rows {
+                let row = row?;
+                sums.apply(
+                    row.pnl_asset,
+                    row.realized_pnl,
+                    row.trading_fee,
+                    row.funding_fee,
+                )?;
+            }
+        }
+        _ => {
+            let rows = statement.query_map(params![track_id], pnl_record_sum_row)?;
+            for row in rows {
+                let row = row?;
+                sums.apply(
+                    row.pnl_asset,
+                    row.realized_pnl,
+                    row.trading_fee,
+                    row.funding_fee,
+                )?;
+            }
+        }
     };
 
     Ok(sums)
+}
+
+#[derive(Debug, Clone)]
+struct PnlRecordSumRow {
+    pnl_asset: String,
+    realized_pnl: f64,
+    trading_fee: f64,
+    funding_fee: f64,
+}
+
+fn pnl_record_sum_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PnlRecordSumRow> {
+    let venue: String = row.get(0)?;
+    let symbol: String = row.get(1)?;
+    let pnl_asset: Option<String> = row.get(2)?;
+    Ok(PnlRecordSumRow {
+        pnl_asset: pnl_asset.unwrap_or_else(|| legacy_pnl_asset(&venue, &symbol)),
+        realized_pnl: row.get(3)?,
+        trading_fee: row.get(4)?,
+        funding_fee: row.get(5)?,
+    })
+}
+
+fn legacy_pnl_asset(venue: &str, symbol: &str) -> String {
+    parse_venue(venue)
+        .map(|venue| Instrument::new(venue, symbol).quote_asset())
+        .unwrap_or_else(|| symbol.to_string())
+}
+
+fn parse_venue(venue: &str) -> Option<Venue> {
+    match venue {
+        "binance" => Some(Venue::Binance),
+        "bybit" => Some(Venue::Bybit),
+        "hyperliquid" => Some(Venue::Hyperliquid),
+        "okx" => Some(Venue::Okx),
+        _ => None,
+    }
+}
+
+fn merge_pnl_assets(left: Option<String>, right: Option<String>) -> Result<Option<String>> {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            ensure!(
+                left == right,
+                "track pnl records contain multiple pnl assets: `{left}` and `{right}`"
+            );
+            Ok(Some(left))
+        }
+        (Some(asset), None) | (None, Some(asset)) => Ok(Some(asset)),
+        (None, None) => Ok(None),
+    }
 }
 
 #[async_trait]
@@ -1372,6 +1485,7 @@ mod tests {
                 0.4,
                 120.0,
                 3.0,
+                "USDT",
             ),
         )
         .await
@@ -1385,6 +1499,7 @@ mod tests {
                 "binance:funding_fee".into(),
                 Some("binance:btcusdt:funding:2026-04-07T08:00:00Z".into()),
                 -1.5,
+                "USDT",
             ),
         )
         .await
@@ -1409,6 +1524,115 @@ mod tests {
         assert_eq!(stats.funding_fee_today, 0.0);
         assert_eq!(stats.funding_fee_cumulative, -1.5);
         assert_eq!(stats.net_realized_pnl_cumulative(), 115.5);
+        assert_eq!(stats.pnl_asset.as_deref(), Some("USDT"));
+    }
+
+    #[tokio::test]
+    async fn track_pnl_records_reject_mixed_pnl_assets_on_aggregate() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let track_id = TrackId::new("btc-core");
+
+        TrackMutationStore::insert_track_pnl_record(
+            &storage,
+            &track_id,
+            &TrackPnlRecord::trade_summary(
+                test_instrument("BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 8, 9, 0, 0).unwrap(),
+                "test".into(),
+                Some("test:usdt".into()),
+                None,
+                1.0,
+                0.0,
+                "USDT",
+            ),
+        )
+        .await
+        .unwrap();
+        TrackMutationStore::insert_track_pnl_record(
+            &storage,
+            &track_id,
+            &TrackPnlRecord::trade_summary(
+                test_instrument("BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 8, 10, 0, 0).unwrap(),
+                "test".into(),
+                Some("test:btc".into()),
+                None,
+                0.001,
+                0.0,
+                "BTC",
+            ),
+        )
+        .await
+        .unwrap();
+
+        let error = TrackQueryStore::load_track_pnl_stats(
+            &storage,
+            &track_id,
+            NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("multiple pnl assets"));
+    }
+
+    #[tokio::test]
+    async fn legacy_null_pnl_asset_records_use_quote_asset() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE track_pnl_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id TEXT NOT NULL,
+                venue TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_key TEXT,
+                order_id TEXT,
+                trade_id TEXT,
+                side TEXT,
+                price REAL,
+                qty REAL,
+                realized_pnl REAL NOT NULL DEFAULT 0,
+                trading_fee REAL NOT NULL DEFAULT 0,
+                funding_fee REAL NOT NULL DEFAULT 0
+            );
+            INSERT INTO track_pnl_records (
+                track_id,
+                venue,
+                symbol,
+                occurred_at,
+                kind,
+                source,
+                realized_pnl,
+                trading_fee,
+                funding_fee
+            ) VALUES (
+                'legacy',
+                'binance',
+                'BTCUSDT',
+                '2026-04-08T09:00:00+00:00',
+                'trade',
+                'legacy',
+                12.0,
+                1.0,
+                0.0
+            );",
+        )
+        .unwrap();
+        let storage = SqliteStorage::from_connection(conn).unwrap();
+
+        let stats = TrackQueryStore::load_track_pnl_stats(
+            &storage,
+            &TrackId::new("legacy"),
+            NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stats.pnl_asset.as_deref(), Some("USDT"));
+        assert_eq!(stats.gross_realized_pnl_cumulative, 12.0);
     }
 
     #[tokio::test]
@@ -1433,6 +1657,7 @@ mod tests {
                 None,
                 1.0,
                 0.0,
+                "USDT",
             ),
         )
         .await

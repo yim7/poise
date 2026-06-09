@@ -461,6 +461,7 @@ fn parse_fill(value: &serde_json::Value) -> Result<UserDataEvent> {
             parse_decimal("fill.sz", required_str(value, "sz")?)?,
             parse_decimal("fill.closedPnl", required_str(value, "closedPnl")?)?,
             parse_decimal("fill.fee", required_str(value, "fee")?)?,
+            "USDC",
         )),
     })
 }
@@ -476,6 +477,7 @@ fn parse_funding(value: &serde_json::Value) -> Result<UserDataEvent> {
             "hyperliquid:funding".to_string(),
             Some(format!("hyperliquid:funding:{symbol}:{time}")),
             parse_decimal("funding.usdc", required_str(value, "usdc")?)?,
+            "USDC",
         )),
     })
 }
@@ -698,6 +700,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
                 occurred_at: chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
                 kind: TrackPnlRecordKind::Trade,
+                pnl_asset: "USDC".to_string(),
                 source: "hyperliquid:fill".to_string(),
                 source_key: Some("hyperliquid:fill:BTC:999".to_string()),
                 order_id: Some("12345".to_string()),
@@ -716,6 +719,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
                 occurred_at: chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
                 kind: TrackPnlRecordKind::Funding,
+                pnl_asset: "USDC".to_string(),
                 source: "hyperliquid:funding".to_string(),
                 source_key: Some("hyperliquid:funding:BTC:1700000000000".to_string()),
                 order_id: None,
@@ -744,6 +748,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "ETH"),
                 occurred_at: chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
                 kind: TrackPnlRecordKind::Trade,
+                pnl_asset: "USDC".to_string(),
                 source: "hyperliquid:fill".to_string(),
                 source_key: Some("hyperliquid:fill:ETH:321706137923647".to_string()),
                 order_id: Some("411114920977".to_string()),
@@ -782,6 +787,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "ETH"),
                 occurred_at: chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
                 kind: TrackPnlRecordKind::Funding,
+                pnl_asset: "USDC".to_string(),
                 source: "hyperliquid:funding".to_string(),
                 source_key: Some("hyperliquid:funding:ETH:1700000000000".to_string()),
                 order_id: None,

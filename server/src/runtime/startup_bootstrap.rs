@@ -590,6 +590,7 @@ mod tests {
                     None,
                     42.0,
                     0.0,
+                    "USDT",
                 ),
             )
             .await

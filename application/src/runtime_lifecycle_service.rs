@@ -175,6 +175,7 @@ mod tests {
                 None,
                 100.0,
                 8.0,
+                "USDT",
             ),
         )
         .await
@@ -188,6 +189,7 @@ mod tests {
                 "test".into(),
                 None,
                 -4.0,
+                "USDT",
             ),
         )
         .await
@@ -249,6 +251,7 @@ mod tests {
                 None,
                 42.0,
                 0.0,
+                "USDT",
             ),
         )
         .await

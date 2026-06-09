@@ -1609,7 +1609,7 @@ pub(crate) mod test_support {
                 .cloned()
                 .unwrap_or_default()
             {
-                stats.apply_record(&record);
+                stats.apply_record(&record)?;
             }
             Ok(stats)
         }

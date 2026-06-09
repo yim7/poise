@@ -262,6 +262,7 @@ fn parse_execution_update(
             Some(exec_id),
             update.exec_pnl,
             trading_fee,
+            quote_asset,
         )),
     })
 }
@@ -423,6 +424,7 @@ mod tests {
                     Some("exec-1".into()),
                     12.34,
                     3.21,
+                    "USDT",
                 )),
             }]
         );
@@ -456,6 +458,7 @@ mod tests {
                     Some("exec-2".into()),
                     0.50,
                     1.25,
+                    "USDT",
                 )),
             }]
         );
@@ -530,6 +533,7 @@ mod tests {
                     Some("exec-bridge-1".into()),
                     12.34,
                     3.21,
+                    "USDT",
                 )),
             }
         );

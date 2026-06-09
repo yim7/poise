@@ -259,6 +259,7 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                         trade_qty,
                         realized_pnl,
                         trading_fee,
+                        quote_asset,
                     )),
                 });
             }
@@ -304,6 +305,7 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                             event_time.timestamp_millis()
                         )),
                         balance_change,
+                        quote_asset,
                     )),
                 }]));
             }
@@ -410,6 +412,7 @@ mod tests {
                         0.02,
                         12.34,
                         0.0,
+                        "USDT",
                     )),
                 },
             ])
@@ -471,6 +474,7 @@ mod tests {
                         0.02,
                         12.34,
                         3.2,
+                        "USDT",
                     )),
                 },
             ])
@@ -509,6 +513,7 @@ mod tests {
                     "binance:funding_fee".into(),
                     Some("binance:funding_fee:btcusdt:1700000000000".into()),
                     -1.5,
+                    "USDT",
                 )),
             }])
         );
@@ -608,6 +613,7 @@ mod tests {
                         0.02,
                         12.34,
                         0.0,
+                        "USDT",
                     )),
                 },
             ])

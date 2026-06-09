@@ -469,6 +469,13 @@ fn project_domain_event_message(event: &DomainEvent) -> String {
                 "execution gate: account capacity insufficient {:.4} > {:.4}",
                 required_notional, available_notional
             ),
+            ExecutionGateReason::PnlAssetMismatch {
+                expected_asset,
+                actual_asset,
+            } => format!(
+                "execution gate: pnl asset mismatch expected {} got {}",
+                expected_asset, actual_asset
+            ),
         },
     }
 }

@@ -1,11 +1,11 @@
 use chrono::{DateTime, Utc};
-use poise_core::events::DomainEvent;
+use poise_core::events::{DomainEvent, ExecutionGateReason};
 use poise_core::risk::{self, ExposureIntent, RiskOutcome};
 use poise_core::strategy::{self, BandBoundary, BandProtectionPolicy, BandStatus};
 use poise_core::types::Exposure;
 
 use crate::execution_gate::{AccountCapacityGate, AccountCapacityGateInput, ExecutionGateDecision};
-use crate::loss_guard::build_loss_guard_snapshot;
+use crate::loss_guard::build_loss_guard_snapshot_for_asset;
 use crate::risk_exposure_gate::{
     self, RiskAcquisitionRelease, RiskExposureGateInput, RiskExposureGateState,
 };
@@ -86,11 +86,22 @@ pub fn reconcile_target_at(
         }
     };
 
+    let loss_guard = match build_loss_guard_snapshot_for_asset(
+        &track.pnl_stats,
+        &track.risk_state,
+        Some(&track.exchange_rules.settlement_asset),
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(_error) => {
+            return pnl_asset_mismatch_result(track, &target, new_runtime_state);
+        }
+    };
+
     let intent = ExposureIntent {
         current: track.current_exposure.clone(),
         target: target.clone(),
         unit_notional: track.config().notional_per_unit,
-        loss_guard: build_loss_guard_snapshot(&track.pnl_stats, &track.risk_state),
+        loss_guard,
     };
 
     let decision = risk::evaluate_risk_outcome(&intent, track.max_notional(), track.loss_limits());
@@ -221,6 +232,33 @@ pub fn reconcile_target_at(
         suppress_execution: false,
         risk_release_frontier,
         risk_acquisition,
+    }
+}
+
+fn pnl_asset_mismatch_result(
+    track: &TrackRuntime,
+    curve_target: &Exposure,
+    new_runtime_state: Option<TrackState>,
+) -> TargetReconcileResult {
+    let current = track.current_exposure.clone();
+    let reason = ExecutionGateReason::PnlAssetMismatch {
+        expected_asset: track.exchange_rules.settlement_asset.clone(),
+        actual_asset: track.pnl_stats.pnl_asset.clone().unwrap_or_default(),
+    };
+
+    TargetReconcileResult {
+        events: vec![DomainEvent::ExecutionGateApplied {
+            reason: reason.clone(),
+        }],
+        curve_target: curve_target.clone(),
+        desired_exposure: current.clone(),
+        execution_target_exposure: current,
+        applied_risk_cap: None,
+        new_runtime_state,
+        execution_gate_decision: ExecutionGateDecision::NoSubmit { reason },
+        suppress_execution: true,
+        risk_release_frontier: None,
+        risk_acquisition: None,
     }
 }
 
@@ -1587,6 +1625,34 @@ mod tests {
                 ),
             }),
         );
+    }
+
+    #[test]
+    fn reconcile_holds_when_pnl_asset_mismatches_settlement_asset() {
+        let mut track = test_runtime();
+        set_runtime_status(&mut track, TrackStatus::Active);
+        track.current_exposure = Exposure(2.0);
+        track.pnl_stats.pnl_asset = Some("BTC".to_string());
+
+        let result = reconcile_target(&track, 90.0);
+
+        assert!(result.suppress_execution);
+        assert_eq!(result.desired_exposure, Exposure(2.0));
+        assert_eq!(
+            result.execution_gate_decision,
+            ExecutionGateDecision::NoSubmit {
+                reason: ExecutionGateReason::PnlAssetMismatch {
+                    expected_asset: "USDT".to_string(),
+                    actual_asset: "BTC".to_string(),
+                }
+            }
+        );
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            DomainEvent::ExecutionGateApplied {
+                reason: ExecutionGateReason::PnlAssetMismatch { .. }
+            }
+        )));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use anyhow::{Result, ensure};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,7 @@ pub struct TrackPnlRecord {
     pub instrument: Instrument,
     pub occurred_at: DateTime<Utc>,
     pub kind: TrackPnlRecordKind,
+    pub pnl_asset: String,
     pub source: String,
     pub source_key: Option<String>,
     pub order_id: Option<String>,
@@ -42,11 +44,13 @@ impl TrackPnlRecord {
         qty: f64,
         realized_pnl: f64,
         trading_fee: f64,
+        pnl_asset: impl Into<String>,
     ) -> Self {
         Self {
             instrument,
             occurred_at,
             kind: TrackPnlRecordKind::Trade,
+            pnl_asset: pnl_asset.into(),
             source,
             source_key,
             order_id,
@@ -66,11 +70,13 @@ impl TrackPnlRecord {
         source: String,
         source_key: Option<String>,
         funding_fee: f64,
+        pnl_asset: impl Into<String>,
     ) -> Self {
         Self {
             instrument,
             occurred_at,
             kind: TrackPnlRecordKind::Funding,
+            pnl_asset: pnl_asset.into(),
             source,
             source_key,
             order_id: None,
@@ -92,11 +98,13 @@ impl TrackPnlRecord {
         trade_id: Option<String>,
         realized_pnl: f64,
         trading_fee: f64,
+        pnl_asset: impl Into<String>,
     ) -> Self {
         Self {
             instrument,
             occurred_at,
             kind: TrackPnlRecordKind::Trade,
+            pnl_asset: pnl_asset.into(),
             source,
             source_key,
             order_id: None,
@@ -114,6 +122,7 @@ impl TrackPnlRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackPnlStats {
     pub pnl_utc_day: NaiveDate,
+    pub pnl_asset: Option<String>,
     pub gross_realized_pnl_today: f64,
     pub gross_realized_pnl_cumulative: f64,
     pub trading_fee_today: f64,
@@ -126,6 +135,7 @@ impl Default for TrackPnlStats {
     fn default() -> Self {
         Self {
             pnl_utc_day: NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch date"),
+            pnl_asset: None,
             gross_realized_pnl_today: 0.0,
             gross_realized_pnl_cumulative: 0.0,
             trading_fee_today: 0.0,
@@ -163,7 +173,20 @@ impl TrackPnlStats {
         self.net_realized_pnl_cumulative()
     }
 
-    pub fn apply_record(&mut self, record: &TrackPnlRecord) {
+    pub fn apply_record(&mut self, record: &TrackPnlRecord) -> Result<()> {
+        ensure!(
+            !record.pnl_asset.trim().is_empty(),
+            "pnl_asset must not be empty"
+        );
+        match self.pnl_asset.as_deref() {
+            Some(existing) => ensure!(
+                existing == record.pnl_asset,
+                "pnl asset `{}` does not match existing pnl asset `{existing}`",
+                record.pnl_asset
+            ),
+            None => self.pnl_asset = Some(record.pnl_asset.clone()),
+        }
+
         if record.occurred_at.date_naive() == self.pnl_utc_day {
             self.gross_realized_pnl_today += record.realized_pnl;
             self.trading_fee_today += record.trading_fee;
@@ -172,6 +195,7 @@ impl TrackPnlStats {
         self.gross_realized_pnl_cumulative += record.realized_pnl;
         self.trading_fee_cumulative += record.trading_fee;
         self.funding_fee_cumulative += record.funding_fee;
+        Ok(())
     }
 }
 
@@ -183,6 +207,7 @@ impl TrackPnlStats {
             && self.trading_fee_cumulative.abs() <= f64::EPSILON
             && self.funding_fee_today.abs() <= f64::EPSILON
             && self.funding_fee_cumulative.abs() <= f64::EPSILON
+            && self.pnl_asset.is_none()
     }
 }
 
@@ -202,15 +227,18 @@ mod tests {
         };
 
         stats.ensure_utc_day(NaiveDate::from_ymd_opt(2026, 3, 25).unwrap());
-        stats.apply_record(&TrackPnlRecord::trade_summary(
-            Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
-            Utc.with_ymd_and_hms(2026, 3, 25, 8, 0, 0).unwrap(),
-            "test".into(),
-            None,
-            None,
-            -5.0,
-            0.0,
-        ));
+        stats
+            .apply_record(&TrackPnlRecord::trade_summary(
+                Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 3, 25, 8, 0, 0).unwrap(),
+                "test".into(),
+                None,
+                None,
+                -5.0,
+                0.0,
+                "USDT",
+            ))
+            .unwrap();
 
         assert_eq!(
             stats.pnl_utc_day,
@@ -253,24 +281,31 @@ mod tests {
             pnl_utc_day: NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
             ..TrackPnlStats::default()
         };
-        stats.apply_record(&TrackPnlRecord::trade_summary(
-            Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
-            Utc.with_ymd_and_hms(2026, 4, 8, 8, 0, 0).unwrap(),
-            "test".into(),
-            None,
-            None,
-            120.0,
-            5.0,
-        ));
-        stats.apply_record(&TrackPnlRecord::funding(
-            Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
-            Utc.with_ymd_and_hms(2026, 4, 8, 9, 0, 0).unwrap(),
-            "test".into(),
-            None,
-            -2.0,
-        ));
+        stats
+            .apply_record(&TrackPnlRecord::trade_summary(
+                Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 8, 8, 0, 0).unwrap(),
+                "test".into(),
+                None,
+                None,
+                120.0,
+                5.0,
+                "USDT",
+            ))
+            .unwrap();
+        stats
+            .apply_record(&TrackPnlRecord::funding(
+                Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 8, 9, 0, 0).unwrap(),
+                "test".into(),
+                None,
+                -2.0,
+                "USDT",
+            ))
+            .unwrap();
 
         assert!((stats.net_realized_pnl_today() - 113.0).abs() < f64::EPSILON);
+        assert_eq!(stats.pnl_asset.as_deref(), Some("USDT"));
     }
 
     #[test]
@@ -279,25 +314,31 @@ mod tests {
             pnl_utc_day: NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
             ..TrackPnlStats::default()
         };
-        stats.apply_record(&TrackPnlRecord::trade_summary(
-            Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
-            Utc.with_ymd_and_hms(2026, 4, 8, 8, 0, 0).unwrap(),
-            "test".into(),
-            None,
-            None,
-            120.0,
-            5.0,
-        ));
+        stats
+            .apply_record(&TrackPnlRecord::trade_summary(
+                Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 8, 8, 0, 0).unwrap(),
+                "test".into(),
+                None,
+                None,
+                120.0,
+                5.0,
+                "USDT",
+            ))
+            .unwrap();
         stats.ensure_utc_day(NaiveDate::from_ymd_opt(2026, 4, 9).unwrap());
-        stats.apply_record(&TrackPnlRecord::trade_summary(
-            Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
-            Utc.with_ymd_and_hms(2026, 4, 9, 8, 0, 0).unwrap(),
-            "test".into(),
-            None,
-            None,
-            10.0,
-            0.0,
-        ));
+        stats
+            .apply_record(&TrackPnlRecord::trade_summary(
+                Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 9, 8, 0, 0).unwrap(),
+                "test".into(),
+                None,
+                None,
+                10.0,
+                0.0,
+                "USDT",
+            ))
+            .unwrap();
 
         assert!((stats.trading_fee_today - 0.0).abs() < f64::EPSILON);
         assert!((stats.trading_fee_cumulative - 5.0).abs() < f64::EPSILON);
@@ -313,15 +354,50 @@ mod tests {
             None,
             0.002,
             0.00001,
+            "BTC",
         );
         let mut stats = TrackPnlStats {
             pnl_utc_day: NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
             ..TrackPnlStats::default()
         };
 
-        stats.apply_record(&record);
+        stats.apply_record(&record).unwrap();
 
         assert_eq!(stats.gross_realized_pnl_cumulative, 0.002);
         assert_eq!(stats.trading_fee_cumulative, 0.00001);
+        assert_eq!(stats.pnl_asset.as_deref(), Some("BTC"));
+    }
+
+    #[test]
+    fn apply_record_rejects_mismatched_pnl_asset() {
+        let mut stats = TrackPnlStats {
+            pnl_utc_day: NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
+            ..TrackPnlStats::default()
+        };
+        stats
+            .apply_record(&TrackPnlRecord::trade_summary(
+                Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 8, 8, 0, 0).unwrap(),
+                "test".into(),
+                None,
+                None,
+                120.0,
+                5.0,
+                "USDT",
+            ))
+            .unwrap();
+
+        let error = stats
+            .apply_record(&TrackPnlRecord::funding(
+                Instrument::new(poise_core::track::Venue::Binance, "BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 8, 9, 0, 0).unwrap(),
+                "test".into(),
+                None,
+                -2.0,
+                "BTC",
+            ))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("pnl asset"));
     }
 }

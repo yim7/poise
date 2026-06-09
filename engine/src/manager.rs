@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use poise_core::events::DomainEvent;
 use poise_core::types::ExchangeRules;
 use poise_core::types::Exposure;
@@ -235,8 +235,15 @@ impl TrackManager {
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+        ensure!(
+            record.pnl_asset == track.exchange_rules.settlement_asset,
+            "pnl asset `{}` does not match settlement asset `{}` for track `{}`",
+            record.pnl_asset,
+            track.exchange_rules.settlement_asset,
+            id.as_str()
+        );
         track.pnl_stats.normalize_utc_day(pnl_utc_day);
-        track.pnl_stats.apply_record(record);
+        track.pnl_stats.apply_record(record)?;
         Ok(())
     }
 
@@ -1585,6 +1592,7 @@ mod tests {
                     None,
                     5.0,
                     0.5,
+                    "USDT",
                 ),
             )
             .unwrap();
@@ -1598,6 +1606,32 @@ mod tests {
         assert_eq!(stats.trading_fee_today, 0.5);
         assert_eq!(stats.gross_realized_pnl_cumulative, 25.0);
         assert_eq!(stats.trading_fee_cumulative, 2.5);
+    }
+
+    #[test]
+    fn applying_pnl_record_rejects_mismatched_settlement_asset() {
+        let (mut manager, id) = manager();
+
+        let error = manager
+            .apply_pnl_record(
+                &id,
+                &TrackPnlRecord::trade_summary(
+                    Instrument::new(Venue::Binance, "BTCUSDT"),
+                    Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
+                    "test".into(),
+                    None,
+                    None,
+                    0.001,
+                    0.0,
+                    "BTC",
+                ),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("settlement asset"));
+        let stats = &manager.tracks.get(&id).unwrap().pnl_stats;
+        assert!(stats.pnl_asset.is_none());
+        assert_eq!(stats.gross_realized_pnl_cumulative, 0.0);
     }
 
     #[test]
