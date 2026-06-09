@@ -1101,6 +1101,7 @@ impl app::AccountMonitorStore for SqliteStorage {
                     poise_engine::ports::AccountSummarySnapshot {
                         equity: snapshot.equity,
                         available: snapshot.available,
+                        available_by_asset: Default::default(),
                         unrealized_pnl: snapshot.unrealized_pnl,
                         observed_at: snapshot.observed_at,
                     }

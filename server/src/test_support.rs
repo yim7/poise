@@ -398,6 +398,7 @@ impl ExecutionPort for RecordingExecutionPort {
             qty: 0.0,
             avg_price: 0.0,
             unrealized_pnl: 0.0,
+            mark_price: None,
         })
     }
 

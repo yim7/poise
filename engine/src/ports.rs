@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -94,6 +94,7 @@ pub struct Position {
     pub qty: f64,
     pub avg_price: f64,
     pub unrealized_pnl: f64,
+    pub mark_price: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -208,8 +209,16 @@ pub struct AccountCapacitySnapshot {
 pub struct AccountSummarySnapshot {
     pub equity: f64,
     pub available: f64,
+    #[serde(default)]
+    pub available_by_asset: BTreeMap<String, f64>,
     pub unrealized_pnl: f64,
     pub observed_at: DateTime<Utc>,
+}
+
+impl AccountSummarySnapshot {
+    pub fn available_for_asset(&self, asset: &str) -> Option<f64> {
+        self.available_by_asset.get(asset).copied()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -241,8 +250,11 @@ impl UserDataEvent {
 pub trait AccountSummaryPort: Send + Sync {
     async fn get_account_summary(&self) -> Result<AccountSummarySnapshot>;
 
-    async fn get_available_balance(&self, _instrument: &Instrument) -> Result<f64> {
-        Ok(self.get_account_summary().await?.available)
+    async fn get_available_balance(&self, instrument: &Instrument) -> Result<f64> {
+        let summary = self.get_account_summary().await?;
+        Ok(summary
+            .available_for_asset(&instrument.quote_asset())
+            .unwrap_or(summary.available))
     }
 }
 

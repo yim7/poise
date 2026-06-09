@@ -96,22 +96,56 @@ impl OkxRestClient {
     }
 
     pub(crate) async fn get_available_balance(&self, symbol: &str) -> Result<f64> {
-        let quote_asset = Instrument::new(Venue::Okx, symbol).quote_asset();
+        let metadata = self.get_or_fetch_instrument_metadata(symbol).await?;
         let balance = self.get_balance_snapshot().await?;
-        available_balance_from_balance(&balance, &quote_asset)
+        available_balance_from_balance(&balance, metadata.settlement_asset())
     }
 
     pub(crate) async fn get_account_capacity_snapshot(
         &self,
         symbol: &str,
     ) -> Result<AccountCapacitySnapshot> {
+        let metadata = self.get_or_fetch_instrument_metadata(symbol).await?;
         let summary = self.get_account_summary().await?;
         let position = self.get_position_snapshot(symbol).await?.ok_or_else(|| {
             anyhow!("OKX account capacity unavailable for `{symbol}`: position missing")
         })?;
         let leverage = parse_decimal("lever", &position.lever)?;
+        if metadata.is_inverse() {
+            let mark_price = parse_decimal(
+                "markPx",
+                position
+                    .mark_px
+                    .as_deref()
+                    .context("OKX inverse account capacity requires position markPx")?,
+            )?;
+            let contract_notional = metadata
+                .contract_notional()
+                .context("OKX inverse account capacity requires contract notional")?;
+            let available = summary
+                .available_for_asset(metadata.settlement_asset())
+                .with_context(|| {
+                    format!(
+                        "missing OKX balance detail for settlement asset `{}`",
+                        metadata.settlement_asset()
+                    )
+                })?;
+            let estimated_contracts = available * mark_price * leverage / contract_notional;
+            return Ok(AccountCapacitySnapshot {
+                max_increase_notional: estimated_contracts * contract_notional,
+            });
+        }
+
+        let available = summary
+            .available_for_asset(metadata.settlement_asset())
+            .with_context(|| {
+                format!(
+                    "missing OKX balance detail for settlement asset `{}`",
+                    metadata.settlement_asset()
+                )
+            })?;
         Ok(AccountCapacitySnapshot {
-            max_increase_notional: summary.available * leverage,
+            max_increase_notional: available * leverage,
         })
     }
 
@@ -124,6 +158,7 @@ impl OkxRestClient {
                 qty: 0.0,
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
+                mark_price: None,
             }),
         }
     }
@@ -650,14 +685,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn available_balance_uses_quote_asset_from_swap_symbol() {
-        let server = MockHttpServer::spawn(vec![MockResponse::json(
-            200,
-            r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[
+    async fn available_balance_uses_settlement_asset_from_metadata() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[
                 {"ccy":"USDT","availEq":"9800.25","upl":"-120.75"},
                 {"ccy":"BTC","availEq":"200.0","upl":"10.0"}
             ]}]}"#,
-        )])
+            ),
+        ])
         .await;
         let client = test_client(&server, true);
 
@@ -665,8 +703,32 @@ mod tests {
 
         assert_eq!(available, 9_800.25);
         let requests = server.requests();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].path, "/api/v5/account/balance");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].path,
+            "/api/v5/public/instruments?instType=SWAP&instId=BTC-USDT-SWAP"
+        );
+        assert_eq!(requests[1].path, "/api/v5/account/balance");
+    }
+
+    #[tokio::test]
+    async fn inverse_available_balance_uses_settlement_asset() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, inverse_instrument_response()),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[
+                {"ccy":"USD","availEq":"9800.25","upl":"0"},
+                {"ccy":"BTC","availEq":"0.5","upl":"0"}
+            ]}]}"#,
+            ),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        let available = client.get_available_balance("BTC-USD-SWAP").await.unwrap();
+
+        assert_eq!(available, 0.5);
     }
 
     #[tokio::test]
@@ -841,9 +903,13 @@ mod tests {
     #[tokio::test]
     async fn account_capacity_scales_available_balance_by_position_leverage() {
         let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
             MockResponse::json(
                 200,
-                r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[{"ccy":"USDT","availEq":"100.25","upl":"0"}]}]}"#,
+                r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[
+                    {"ccy":"USDT","availEq":"100.25","upl":"0"},
+                    {"ccy":"BTC","availEq":"9.0","upl":"0"}
+                ]}]}"#,
             ),
             MockResponse::json(
                 200,
@@ -862,12 +928,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inverse_account_capacity_uses_settlement_asset_mark_price_and_leverage() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, inverse_instrument_response()),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[{"totalEq":"50000","details":[{"ccy":"BTC","availEq":"0.5","upl":"0"}]}]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USD-SWAP","pos":"0","avgPx":"0","markPx":"100000","upl":"0","posSide":"net","lever":"2"}]}"#,
+            ),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        let snapshot = client
+            .get_account_capacity_snapshot("BTC-USD-SWAP")
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.max_increase_notional, 100_000.0);
+    }
+
+    #[tokio::test]
+    async fn inverse_account_capacity_declines_with_mark_price() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, inverse_instrument_response()),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[{"totalEq":"25000","details":[{"ccy":"BTC","availEq":"0.5","upl":"0"}]}]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USD-SWAP","pos":"0","avgPx":"0","markPx":"50000","upl":"0","posSide":"net","lever":"2"}]}"#,
+            ),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        let snapshot = client
+            .get_account_capacity_snapshot("BTC-USD-SWAP")
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.max_increase_notional, 50_000.0);
+    }
+
+    #[tokio::test]
     async fn maps_position_and_server_time_responses() {
         let server = MockHttpServer::spawn(vec![
             MockResponse::json(200, linear_instrument_response()),
             MockResponse::json(
                 200,
-                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","pos":"-25","avgPx":"65000.5","upl":"123.45","posSide":"net","lever":"20"}]}"#,
+                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","pos":"-25","avgPx":"65000.5","markPx":"65100.5","upl":"123.45","posSide":"net","lever":"20"}]}"#,
             ),
             MockResponse::json(
                 200,
@@ -882,6 +996,7 @@ mod tests {
 
         assert_eq!(position.qty, -0.25);
         assert_eq!(position.avg_price, 65000.5);
+        assert_eq!(position.mark_price, Some(65100.5));
         assert_eq!(server_time.timestamp_millis(), 1_704_876_947_123);
     }
 

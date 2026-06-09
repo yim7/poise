@@ -93,6 +93,17 @@ impl OkxInstrumentMetadata {
         &self.settle_ccy
     }
 
+    pub(crate) fn is_inverse(&self) -> bool {
+        matches!(self.contract_kind, OkxContractKind::Inverse)
+    }
+
+    pub(crate) fn contract_notional(&self) -> Option<f64> {
+        match self.contract_kind {
+            OkxContractKind::Inverse => self.ct_val,
+            OkxContractKind::Linear => None,
+        }
+    }
+
     pub(crate) fn exchange_info_from_instrument(
         &self,
         value: &InstrumentInfo,

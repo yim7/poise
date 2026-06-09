@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 
@@ -16,16 +18,21 @@ pub(crate) fn account_summary_from_balance(
     }
 
     let mut available = 0.0;
+    let mut available_by_asset = BTreeMap::new();
     let mut unrealized_pnl = 0.0;
     for detail in value.details {
         let currency = detail.currency;
-        available += parse_decimal(&format!("details[{currency}].availEq"), &detail.avail_eq)?;
+        let asset_available =
+            parse_decimal(&format!("details[{currency}].availEq"), &detail.avail_eq)?;
+        available += asset_available;
+        available_by_asset.insert(currency.clone(), asset_available);
         unrealized_pnl += parse_decimal(&format!("details[{currency}].upl"), &detail.upl)?;
     }
 
     Ok(AccountSummarySnapshot {
         equity: parse_decimal("totalEq", &value.total_eq)?,
         available,
+        available_by_asset,
         unrealized_pnl,
         observed_at: Utc::now(),
     })
@@ -60,12 +67,14 @@ pub(crate) fn position_from_snapshot_with_metadata(
         ));
     }
     let qty = native_qty_from_okx_contracts(parse_decimal("pos", &value.pos)?, metadata);
+    let mark_price = parse_optional_decimal("markPx", value.mark_px.as_deref())?;
     if qty == 0.0 {
         return Ok(Position {
             instrument: Instrument::new(Venue::Okx, value.inst_id),
             qty: 0.0,
             avg_price: 0.0,
             unrealized_pnl: 0.0,
+            mark_price,
         });
     }
 
@@ -74,6 +83,7 @@ pub(crate) fn position_from_snapshot_with_metadata(
         qty,
         avg_price: parse_decimal("avgPx", &value.avg_px)?,
         unrealized_pnl: parse_decimal("upl", &value.upl)?,
+        mark_price,
     })
 }
 
@@ -145,6 +155,13 @@ fn parse_decimal(field: &str, value: &str) -> Result<f64> {
     value
         .parse::<f64>()
         .with_context(|| format!("invalid decimal for {field}: {value}"))
+}
+
+fn parse_optional_decimal(field: &str, value: Option<&str>) -> Result<Option<f64>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    parse_decimal(field, value).map(Some)
 }
 
 #[cfg(test)]
@@ -260,6 +277,10 @@ mod tests {
             AccountSummarySnapshot {
                 equity: 12_500.5,
                 available: 10_000.25,
+                available_by_asset: BTreeMap::from([
+                    ("BTC".to_string(), 200.0),
+                    ("USDT".to_string(), 9_800.25),
+                ]),
                 unrealized_pnl: -110.75,
                 observed_at: summary.observed_at,
             }
@@ -300,6 +321,7 @@ mod tests {
             inst_id: "BTC-USDT-SWAP".to_string(),
             pos: "-0.25".to_string(),
             avg_px: "65000.5".to_string(),
+            mark_px: Some("65100.5".to_string()),
             upl: "123.45".to_string(),
             pos_side: "net".to_string(),
             lever: "20".to_string(),
@@ -313,6 +335,7 @@ mod tests {
                 qty: -0.25,
                 avg_price: 65000.5,
                 unrealized_pnl: 123.45,
+                mark_price: Some(65100.5),
             }
         );
     }
@@ -325,6 +348,7 @@ mod tests {
                 inst_id: "BTC-USDT-SWAP".to_string(),
                 pos: "-30".to_string(),
                 avg_px: "65000.5".to_string(),
+                mark_px: None,
                 upl: "123.45".to_string(),
                 pos_side: "net".to_string(),
                 lever: "20".to_string(),
@@ -344,6 +368,7 @@ mod tests {
                 inst_id: "BTC-USD-SWAP".to_string(),
                 pos: "-30".to_string(),
                 avg_px: "65000.5".to_string(),
+                mark_px: Some("65100.5".to_string()),
                 upl: "0.0012".to_string(),
                 pos_side: "net".to_string(),
                 lever: "20".to_string(),
@@ -361,6 +386,7 @@ mod tests {
             inst_id: "MU-USDT-SWAP".to_string(),
             pos: "0".to_string(),
             avg_px: "".to_string(),
+            mark_px: None,
             upl: "".to_string(),
             pos_side: "net".to_string(),
             lever: "".to_string(),
@@ -374,6 +400,7 @@ mod tests {
                 qty: 0.0,
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
+                mark_price: None,
             }
         );
     }
@@ -384,6 +411,7 @@ mod tests {
             inst_id: "MU-USDT-SWAP".to_string(),
             pos: "0.0000000000000001".to_string(),
             avg_px: "".to_string(),
+            mark_px: None,
             upl: "".to_string(),
             pos_side: "net".to_string(),
             lever: "".to_string(),
@@ -399,6 +427,7 @@ mod tests {
             inst_id: "MU-USDT-SWAP".to_string(),
             pos: "0.25".to_string(),
             avg_px: "".to_string(),
+            mark_px: None,
             upl: "12.3".to_string(),
             pos_side: "net".to_string(),
             lever: "".to_string(),
@@ -414,6 +443,7 @@ mod tests {
             inst_id: "MU-USDT-SWAP".to_string(),
             pos: "0.25".to_string(),
             avg_px: "650.5".to_string(),
+            mark_px: None,
             upl: "".to_string(),
             pos_side: "net".to_string(),
             lever: "".to_string(),
@@ -429,6 +459,7 @@ mod tests {
             inst_id: "BTC-USDT-SWAP".to_string(),
             pos: "0.25".to_string(),
             avg_px: "65000.5".to_string(),
+            mark_px: None,
             upl: "123.45".to_string(),
             pos_side: "long".to_string(),
             lever: "20".to_string(),

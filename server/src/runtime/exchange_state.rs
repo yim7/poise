@@ -167,6 +167,7 @@ mod tests {
             qty: request.quantity,
             avg_price: request.price,
             unrealized_pnl: 0.0,
+            mark_price: None,
         });
 
         apply_user_data_event(

@@ -39,6 +39,7 @@ impl TryFrom<BinancePositionRisk> for Position {
             qty: parse_decimal("positionAmt", &value.position_amt)?,
             avg_price: parse_decimal("entryPrice", &value.entry_price)?,
             unrealized_pnl: parse_decimal("unRealizedProfit", &value.unrealized_profit)?,
+            mark_price: None,
         })
     }
 }
@@ -48,6 +49,7 @@ impl BinanceAccountSummaryInformation {
         Ok(AccountSummarySnapshot {
             equity: parse_decimal("totalMarginBalance", &self.total_margin_balance)?,
             available: parse_decimal("availableBalance", &self.available_balance)?,
+            available_by_asset: Default::default(),
             unrealized_pnl: parse_decimal("totalUnrealizedProfit", &self.total_unrealized_profit)?,
             observed_at: Utc::now(),
         })
@@ -219,6 +221,7 @@ mod tests {
                 qty: 0.25,
                 avg_price: 65000.5,
                 unrealized_pnl: 123.45,
+                mark_price: None,
             }
         );
     }
@@ -241,6 +244,7 @@ mod tests {
             AccountSummarySnapshot {
                 equity: 12_500.5,
                 available: 9_800.25,
+                available_by_asset: Default::default(),
                 unrealized_pnl: -120.75,
                 observed_at: snapshot.observed_at,
             }

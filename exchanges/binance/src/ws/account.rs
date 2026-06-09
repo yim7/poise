@@ -321,6 +321,7 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                             qty: parse_decimal("a.P.pa", &position.position_amt)?,
                             avg_price: parse_decimal("a.P.ep", &position.entry_price)?,
                             unrealized_pnl: parse_decimal("a.P.up", &position.unrealized_profit)?,
+                            mark_price: None,
                         }),
                     })
                 })
@@ -647,6 +648,7 @@ mod tests {
                     qty: 0.015,
                     avg_price: 64200.0,
                     unrealized_pnl: 12.3,
+                    mark_price: None,
                 }),
             }])
         );
@@ -799,6 +801,7 @@ mod tests {
                     qty: 0.015,
                     avg_price: 64200.0,
                     unrealized_pnl: 12.3,
+                    mark_price: None,
                 }),
             }
         );
@@ -867,6 +870,7 @@ mod tests {
                     qty: 0.015,
                     avg_price: 64200.0,
                     unrealized_pnl: 12.3,
+                    mark_price: None,
                 }),
             }
         );
@@ -947,6 +951,7 @@ mod tests {
                     qty: 0.015,
                     avg_price: 64200.0,
                     unrealized_pnl: 12.3,
+                    mark_price: None,
                 }),
             }
         );

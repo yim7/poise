@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use poise_core::track::Instrument;
-use poise_engine::ports::{AccountCapacitySnapshot, UserDataEvent};
+use poise_core::types::{ExchangeRules, QuantityKind};
+use poise_engine::ports::{AccountCapacitySnapshot, Position, UserDataEvent};
 use poise_engine::runtime::FreshSessionExternalInputs;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
@@ -182,7 +183,8 @@ async fn rebuild_fresh_sessions(
             runtime.metadata.get_exchange_info(&instrument)
         })
         .await?;
-        let account_capacity_snapshot = probe_startup_account_capacity(runtime, seed).await?;
+        let account_capacity_snapshot =
+            probe_startup_account_capacity(runtime, seed, &position, &exchange_info.rules).await?;
         let required_additional_notional =
             seed.required_additional_notional(position.qty, &exchange_info.rules);
         if required_additional_notional > account_capacity_snapshot.max_increase_notional {
@@ -269,6 +271,8 @@ async fn clear_inherited_open_orders(
 async fn probe_startup_account_capacity(
     runtime: &ServerRuntime,
     track: &TrackStartupSeed,
+    position: &Position,
+    exchange_rules: &ExchangeRules,
 ) -> Result<AccountCapacitySnapshot> {
     let instrument = track.instrument().clone();
     let startup_leverage = track.startup_leverage();
@@ -276,7 +280,38 @@ async fn probe_startup_account_capacity(
     retry_startup_step("probe_startup_capacity", || {
         let account_summary = Arc::clone(&account_summary);
         let instrument = instrument.clone();
+        let position = position.clone();
+        let exchange_rules = exchange_rules.clone();
         async move {
+            if matches!(exchange_rules.quantity_kind, QuantityKind::InverseContract) {
+                let summary = account_summary.get_account_summary().await?;
+                let available = summary
+                    .available_for_asset(&exchange_rules.settlement_asset)
+                    .with_context(|| {
+                        format!(
+                            "missing available balance for settlement asset `{}`",
+                            exchange_rules.settlement_asset
+                        )
+                    })?;
+                let mark_price = position.mark_price.with_context(|| {
+                    format!(
+                        "missing mark price for inverse account capacity on `{}`",
+                        instrument.symbol
+                    )
+                })?;
+                let contract_notional = exchange_rules.contract_notional.with_context(|| {
+                    format!(
+                        "missing contract notional for inverse account capacity on `{}`",
+                        instrument.symbol
+                    )
+                })?;
+                let estimated_contracts =
+                    available * mark_price * startup_leverage as f64 / contract_notional;
+                return Ok::<AccountCapacitySnapshot, anyhow::Error>(AccountCapacitySnapshot {
+                    max_increase_notional: estimated_contracts * contract_notional,
+                });
+            }
+
             let available = account_summary.get_available_balance(&instrument).await?;
             Ok::<AccountCapacitySnapshot, anyhow::Error>(AccountCapacitySnapshot {
                 max_increase_notional: available * startup_leverage as f64,
@@ -383,6 +418,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -394,7 +430,7 @@ mod tests {
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-    use poise_core::types::{ExchangeRules, Exposure, Side};
+    use poise_core::types::{ExchangeRules, Exposure, QuantityKind, Side};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
         AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort,
@@ -472,6 +508,102 @@ mod tests {
         assert_eq!(constraint.max_increase_notional, Some(5_000.0));
         assert_eq!(exchange.available_balance_calls.load(Ordering::SeqCst), 1);
         assert_eq!(exchange.account_summary_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(exchange.account_capacity_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn startup_inverse_capacity_uses_settlement_asset_mark_price_and_leverage() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let track = TrackDefinition::try_new(
+            TrackId::new("btc-coin"),
+            Instrument::new(Venue::Okx, "BTC-USD-SWAP"),
+            TrackConfig {
+                lower_price: 90_000.0,
+                upper_price: 110_000.0,
+                long_exposure_units: 4.0,
+                short_exposure_units: 4.0,
+                notional_per_unit: 1_000.0,
+                min_rebalance_units: 0.5,
+                shape_family: ShapeFamily::Linear,
+                out_of_band_policy: BandProtectionPolicy::Freeze,
+                risk_acquisition: Default::default(),
+            },
+            Some(50_000.0),
+            LossLimits {
+                daily_loss_limit: 0.01,
+                total_loss_limit: 0.02,
+            },
+            None,
+        )
+        .unwrap();
+        let inverse_rules = ExchangeRules {
+            price_tick: 0.1,
+            price_precision: Default::default(),
+            quantity_kind: QuantityKind::InverseContract,
+            contract_notional: Some(100.0),
+            settlement_asset: "BTC".to_string(),
+            quantity_step: 1.0,
+            min_qty: 1.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        };
+        let mut manager = TrackManager::new(Arc::new(SystemClock));
+        manager
+            .add_track(track.clone(), inverse_rules.clone())
+            .unwrap();
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            manager,
+            repository.clone() as Arc<dyn TrackMutationStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
+            notifications.clone(),
+            account_margin_guard,
+        );
+        let account_monitor = unavailable_account_monitor(notifications.clone());
+        let (runtime_context, effect_worker_context) =
+            build_runtime_and_effect_worker_test_contexts(
+                &services,
+                repository.clone() as Arc<dyn TrackQueryStore>,
+                repository.clone() as Arc<dyn TrackEffectJournal>,
+                account_monitor,
+            );
+        let exchange = Arc::new(StartupExchange::with_instrument(Instrument::new(
+            Venue::Okx,
+            "BTC-USD-SWAP",
+        )));
+        exchange.set_exchange_rules(inverse_rules);
+        exchange.set_available_asset("BTC", 0.5);
+        exchange.set_position_mark_price(100_000.0);
+        let runtime = super::ServerRuntime::new(
+            runtime_context.runtime_state(),
+            effect_worker_context.effect_worker_state,
+            RuntimePorts::new(
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                Arc::new(SystemClock),
+            ),
+            vec![RuntimeStartupDefinition::new(track, 2)],
+        );
+        let (_sender, mut receiver) = mpsc::channel(8);
+        let startup_replay_floor = Utc.with_ymd_and_hms(2026, 4, 23, 12, 0, 0).unwrap();
+
+        complete_startup(&runtime, &mut receiver, startup_replay_floor)
+            .await
+            .unwrap();
+
+        let constraint = runtime
+            .state
+            .account_margin_guard
+            .constraint_for(&Instrument::new(Venue::Okx, "BTC-USD-SWAP"));
+        assert_eq!(constraint.max_increase_notional, Some(100_000.0));
+        assert_eq!(exchange.available_balance_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(exchange.account_summary_calls.load(Ordering::SeqCst), 1);
         assert_eq!(exchange.account_capacity_calls.load(Ordering::SeqCst), 0);
     }
 
@@ -731,6 +863,7 @@ mod tests {
                     qty: 1.25,
                     avg_price: 100.0,
                     unrealized_pnl: 12.0,
+                    mark_price: None,
                 }),
             })
             .await
@@ -882,6 +1015,7 @@ mod tests {
                     qty: 1.25,
                     avg_price: 100.0,
                     unrealized_pnl: 12.0,
+                    mark_price: None,
                 }),
             })
             .await
@@ -991,11 +1125,19 @@ mod tests {
         account_summary_calls: AtomicUsize,
         account_capacity_calls: AtomicUsize,
         available_balance: std::sync::Mutex<f64>,
+        available_by_asset: std::sync::Mutex<BTreeMap<String, f64>>,
+        position_mark_price: std::sync::Mutex<Option<f64>>,
+        exchange_rules: std::sync::Mutex<ExchangeRules>,
         instrument: Instrument,
     }
 
     impl StartupExchange {
         fn with_inherited_order(symbol: &str) -> Self {
+            Self::with_instrument(Instrument::new(Venue::Binance, symbol))
+        }
+
+        fn with_instrument(instrument: Instrument) -> Self {
+            let settlement_asset = instrument.quote_asset();
             Self {
                 inherited_order_present: AtomicBool::new(true),
                 cancel_all_calls: AtomicUsize::new(0),
@@ -1005,12 +1147,41 @@ mod tests {
                 account_summary_calls: AtomicUsize::new(0),
                 account_capacity_calls: AtomicUsize::new(0),
                 available_balance: std::sync::Mutex::new(1_000_000.0),
-                instrument: Instrument::new(Venue::Binance, symbol),
+                available_by_asset: std::sync::Mutex::new(BTreeMap::new()),
+                position_mark_price: std::sync::Mutex::new(None),
+                exchange_rules: std::sync::Mutex::new(ExchangeRules {
+                    price_tick: 0.1,
+                    price_precision: Default::default(),
+                    quantity_kind: Default::default(),
+                    contract_notional: None,
+                    settlement_asset,
+                    quantity_step: 0.001,
+                    min_qty: 0.001,
+                    min_notional: 5.0,
+                    maker_fee_rate: 0.0,
+                    taker_fee_rate: 0.0,
+                }),
+                instrument,
             }
         }
 
         fn set_available_balance(&self, available: f64) {
             *self.available_balance.lock().unwrap() = available;
+        }
+
+        fn set_available_asset(&self, asset: &str, available: f64) {
+            self.available_by_asset
+                .lock()
+                .unwrap()
+                .insert(asset.to_string(), available);
+        }
+
+        fn set_position_mark_price(&self, mark_price: f64) {
+            *self.position_mark_price.lock().unwrap() = Some(mark_price);
+        }
+
+        fn set_exchange_rules(&self, rules: ExchangeRules) {
+            *self.exchange_rules.lock().unwrap() = rules;
         }
     }
 
@@ -1056,6 +1227,7 @@ mod tests {
                 qty: 0.0,
                 avg_price: 100.0,
                 unrealized_pnl: 0.0,
+                mark_price: *self.position_mark_price.lock().unwrap(),
             })
         }
 
@@ -1099,6 +1271,7 @@ mod tests {
             Ok(poise_engine::ports::AccountSummarySnapshot {
                 equity: 1_000_000.0,
                 available,
+                available_by_asset: self.available_by_asset.lock().unwrap().clone(),
                 unrealized_pnl: 0.0,
                 observed_at: Utc::now(),
             })
@@ -1138,18 +1311,7 @@ mod tests {
             assert_eq!(instrument, &self.instrument);
             Ok(ExchangeInfo {
                 instrument: instrument.clone(),
-                rules: ExchangeRules {
-                    price_tick: 0.1,
-                    price_precision: Default::default(),
-                    quantity_kind: Default::default(),
-                    contract_notional: None,
-                    settlement_asset: "USDT".to_string(),
-                    quantity_step: 0.001,
-                    min_qty: 0.001,
-                    min_notional: 5.0,
-                    maker_fee_rate: 0.0,
-                    taker_fee_rate: 0.0,
-                },
+                rules: self.exchange_rules.lock().unwrap().clone(),
             })
         }
 

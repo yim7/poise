@@ -664,6 +664,7 @@ total_loss_limit = 600.0
             Ok(poise_engine::ports::AccountSummarySnapshot {
                 equity: 1_000_000.0,
                 available: 1_000_000.0,
+                available_by_asset: Default::default(),
                 unrealized_pnl: 0.0,
                 observed_at: Utc::now(),
             })
@@ -713,6 +714,7 @@ total_loss_limit = 600.0
                 qty: 0.0,
                 avg_price: 100.0,
                 unrealized_pnl: 0.0,
+                mark_price: None,
             })
         }
 

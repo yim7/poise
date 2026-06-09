@@ -52,6 +52,8 @@ pub(crate) struct PositionSnapshot {
     pub pos: String,
     #[serde(rename = "avgPx")]
     pub avg_px: String,
+    #[serde(rename = "markPx", default)]
+    pub mark_px: Option<String>,
     pub upl: String,
     #[serde(rename = "posSide")]
     pub pos_side: String,
@@ -158,6 +160,7 @@ mod tests {
                 "instId": "BTC-USDT-SWAP",
                 "pos": "-0.25",
                 "avgPx": "65000.5",
+                "markPx": "65100.5",
                 "upl": "123.45",
                 "posSide": "net",
                 "lever": "20"
@@ -168,6 +171,7 @@ mod tests {
         assert_eq!(position.inst_id, "BTC-USDT-SWAP");
         assert_eq!(position.pos, "-0.25");
         assert_eq!(position.avg_px, "65000.5");
+        assert_eq!(position.mark_px.as_deref(), Some("65100.5"));
         assert_eq!(position.pos_side, "net");
 
         let order: PendingOrderSnapshot = serde_json::from_str(

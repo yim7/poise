@@ -80,6 +80,7 @@ impl WalletBalanceResult {
         Ok(AccountSummarySnapshot {
             equity: required_value("totalEquity", balance.total_equity)?,
             available: required_value("totalAvailableBalance", balance.total_available_balance)?,
+            available_by_asset: Default::default(),
             unrealized_pnl: required_value("totalPerpUPL", balance.total_perp_upl)?,
             observed_at: Utc::now(),
         })
@@ -213,6 +214,7 @@ pub(crate) fn build_bybit_position(
         qty: signed_qty,
         avg_price: value_or_zero("avgPrice", avg_price, allow_blank_numeric)?,
         unrealized_pnl: value_or_zero("unrealisedPnl", unrealised_pnl, allow_blank_numeric)?,
+        mark_price: None,
     })
 }
 
@@ -429,6 +431,7 @@ mod tests {
                 qty: -0.25,
                 avg_price: 65000.5,
                 unrealized_pnl: -12.5,
+                mark_price: None,
             }
         );
     }
@@ -453,6 +456,7 @@ mod tests {
                 qty: 0.0,
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
+                mark_price: None,
             }
         );
     }

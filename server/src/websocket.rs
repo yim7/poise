@@ -1058,6 +1058,7 @@ mod tests {
                 last_observed_account_snapshot: Some(AccountSummarySnapshot {
                     equity: 12_500.0,
                     available: 9_000.0,
+                    available_by_asset: Default::default(),
                     unrealized_pnl: -350.0,
                     observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
                 }),
@@ -1875,6 +1876,7 @@ mod tests {
             Ok(poise_engine::ports::AccountSummarySnapshot {
                 equity: 1_000_000.0,
                 available: 1_000_000.0,
+                available_by_asset: Default::default(),
                 unrealized_pnl: 0.0,
                 observed_at: Utc::now(),
             })
@@ -1924,6 +1926,7 @@ mod tests {
                 qty: 0.0,
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
+                mark_price: None,
             })
         }
 

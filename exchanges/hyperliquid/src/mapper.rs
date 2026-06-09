@@ -46,6 +46,7 @@ pub(crate) fn account_summary_from_state(
             &state.margin_summary.account_value,
         )?,
         available: parse_decimal("withdrawable", &state.withdrawable)?,
+        available_by_asset: Default::default(),
         unrealized_pnl: state
             .asset_positions
             .iter()
@@ -69,6 +70,7 @@ pub(crate) fn position_from_state(
             qty: 0.0,
             avg_price: 0.0,
             unrealized_pnl: 0.0,
+            mark_price: None,
         });
     };
     let position = &asset_position.position;
@@ -82,6 +84,7 @@ pub(crate) fn position_from_state(
             .transpose()?
             .unwrap_or(0.0),
         unrealized_pnl: parse_decimal("position.unrealizedPnl", &position.unrealized_pnl)?,
+        mark_price: None,
     })
 }
 
@@ -226,6 +229,7 @@ mod tests {
                 qty: -0.02,
                 avg_price: 65000.5,
                 unrealized_pnl: -3.25,
+                mark_price: None,
             }
         );
         assert_eq!(
@@ -235,6 +239,7 @@ mod tests {
                 qty: 0.0,
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
+                mark_price: None,
             }
         );
     }

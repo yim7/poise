@@ -381,6 +381,7 @@ mod tests {
             Some(ObservedAccountSnapshot {
                 equity: -10.0,
                 available: 2.5,
+                available_by_asset: Default::default(),
                 unrealized_pnl: -1.25,
                 observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
             }),
@@ -404,6 +405,7 @@ mod tests {
                 last_observed_account_snapshot: Some(ObservedAccountSnapshot {
                     equity: 12_500.0,
                     available: 9_000.0,
+                    available_by_asset: Default::default(),
                     unrealized_pnl: -350.0,
                     observed_at,
                 }),
@@ -439,6 +441,7 @@ mod tests {
                 snapshot: AccountSummarySnapshot {
                     equity: 12_500.0,
                     available: 9_000.0,
+                    available_by_asset: Default::default(),
                     unrealized_pnl: -350.0,
                     observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
                 },
@@ -473,6 +476,7 @@ mod tests {
                 snapshot: AccountSummarySnapshot {
                     equity: 12_500.0,
                     available: 9_000.0,
+                    available_by_asset: Default::default(),
                     unrealized_pnl: -350.0,
                     observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
                 },
