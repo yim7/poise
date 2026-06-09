@@ -9,7 +9,7 @@ use crate::test_support::RuntimeTestContext;
 use anyhow::{Result, anyhow};
 use poise_application::TrackMutationError;
 use poise_core::track::{Instrument, TrackDefinition, TrackId};
-use poise_core::types::Exposure;
+use poise_core::types::{ExchangeRules, Exposure};
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::ports::{
     AccountPort, AccountSummaryPort, ClockPort, ExecutionPort, MarketDataPort, MetadataPort,
@@ -54,12 +54,29 @@ impl RuntimeStartupDefinition {
         self.track.instrument()
     }
 
-    pub(crate) fn required_additional_notional(&self, position_qty: f64) -> f64 {
-        self.track.required_additional_notional(position_qty)
+    pub(crate) fn required_additional_notional(
+        &self,
+        position_qty: f64,
+        exchange_rules: &ExchangeRules,
+    ) -> f64 {
+        poise_engine::runtime::required_additional_notional(
+            self.track.track_config(),
+            exchange_rules,
+            self.track.max_notional(),
+            position_qty,
+        )
     }
 
-    pub(crate) fn exposure_from_position_qty(&self, position_qty: f64) -> Exposure {
-        self.track.exposure_from_position_qty(position_qty)
+    pub(crate) fn exposure_from_position_qty(
+        &self,
+        position_qty: f64,
+        exchange_rules: &ExchangeRules,
+    ) -> Exposure {
+        poise_engine::runtime::exposure_from_position_qty(
+            self.track.track_config(),
+            exchange_rules,
+            position_qty,
+        )
     }
 
     pub(crate) fn startup_leverage(&self) -> u32 {

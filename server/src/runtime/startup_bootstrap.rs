@@ -29,12 +29,22 @@ impl TrackStartupSeed {
         self.definition.instrument()
     }
 
-    fn required_additional_notional(&self, position_qty: f64) -> f64 {
-        self.definition.required_additional_notional(position_qty)
+    fn required_additional_notional(
+        &self,
+        position_qty: f64,
+        exchange_rules: &poise_core::types::ExchangeRules,
+    ) -> f64 {
+        self.definition
+            .required_additional_notional(position_qty, exchange_rules)
     }
 
-    fn exposure_from_position_qty(&self, position_qty: f64) -> poise_core::types::Exposure {
-        self.definition.exposure_from_position_qty(position_qty)
+    fn exposure_from_position_qty(
+        &self,
+        position_qty: f64,
+        exchange_rules: &poise_core::types::ExchangeRules,
+    ) -> poise_core::types::Exposure {
+        self.definition
+            .exposure_from_position_qty(position_qty, exchange_rules)
     }
 
     fn startup_leverage(&self) -> u32 {
@@ -168,8 +178,13 @@ async fn rebuild_fresh_sessions(
             runtime.execution.get_position(&instrument)
         })
         .await?;
+        let exchange_info = retry_startup_step("get_exchange_info", || {
+            runtime.metadata.get_exchange_info(&instrument)
+        })
+        .await?;
         let account_capacity_snapshot = probe_startup_account_capacity(runtime, seed).await?;
-        let required_additional_notional = seed.required_additional_notional(position.qty);
+        let required_additional_notional =
+            seed.required_additional_notional(position.qty, &exchange_info.rules);
         if required_additional_notional > account_capacity_snapshot.max_increase_notional {
             return Err(anyhow!(
                 "insufficient account margin for configured max_notional on track `{}`: required {}, available {}",
@@ -178,10 +193,7 @@ async fn rebuild_fresh_sessions(
                 account_capacity_snapshot.max_increase_notional
             ));
         }
-        let exchange_info = retry_startup_step("get_exchange_info", || {
-            runtime.metadata.get_exchange_info(&instrument)
-        })
-        .await?;
+        let current_exposure = seed.exposure_from_position_qty(position.qty, &exchange_info.rules);
         let applied = runtime
             .state
             .reconcile
@@ -190,7 +202,7 @@ async fn rebuild_fresh_sessions(
                 &poise_core::track::TrackId::new(seed.track_id()),
                 current_utc_day,
                 FreshSessionExternalInputs {
-                    current_exposure: seed.exposure_from_position_qty(position.qty),
+                    current_exposure,
                     position_qty: position.qty,
                     market_data: None,
                     exchange_rules: exchange_info.rules,

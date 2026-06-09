@@ -820,12 +820,7 @@ impl TrackManager {
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        let unit_qty = track.config().base_qty_per_unit();
-        track.current_exposure = if unit_qty <= f64::EPSILON {
-            poise_core::types::Exposure(0.0)
-        } else {
-            poise_core::types::Exposure(observation.qty / unit_qty)
-        };
+        track.current_exposure = track.exposure_from_position_qty(observation.qty);
         track.current_position_qty = observation.qty;
         track.risk_state.unrealized_pnl = observation.unrealized_pnl;
         Ok(())
@@ -1061,7 +1056,7 @@ impl TrackManager {
             instrument: track.instrument(),
             config: track.config(),
             exchange_rules: &track.exchange_rules,
-            base_qty_per_unit: track.config().base_qty_per_unit(),
+            native_qty_per_unit: track.native_qty_per_exposure_unit(),
             min_rebalance_units: track.config().min_rebalance_units,
             current_exposure: track.current_exposure.clone(),
             desired_exposure,
@@ -1301,6 +1296,21 @@ mod tests {
         }
     }
 
+    fn inverse_rules() -> ExchangeRules {
+        ExchangeRules {
+            price_tick: 0.1,
+            price_precision: Default::default(),
+            quantity_kind: poise_core::types::QuantityKind::InverseContract,
+            contract_notional: Some(100.0),
+            settlement_asset: "BTC".to_string(),
+            quantity_step: 1.0,
+            min_qty: 1.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        }
+    }
+
     fn market(price: f64) -> TrackObservation {
         TrackObservation::Market(MarketObservation::ExecutionQuote {
             execution_quote: ExecutionQuote {
@@ -1518,6 +1528,38 @@ mod tests {
         assert!((track.risk_state.unrealized_pnl - 5.0).abs() < f64::EPSILON);
         assert!((track.pnl_stats.gross_realized_pnl_today - 20.0).abs() < f64::EPSILON);
         assert!((track.pnl_stats.gross_realized_pnl_cumulative - 20.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn position_observation_uses_inverse_contract_quantity_for_exposure() {
+        let (mut manager, id) = manager();
+        {
+            let track = manager.tracks.get_mut(&id).unwrap();
+            let mut config = track.config().clone();
+            config.lower_price = 90_000.0;
+            config.upper_price = 110_000.0;
+            config.notional_per_unit = 1_000.0;
+            track.replace_definition_for_test(
+                config,
+                track.max_notional(),
+                track.loss_limits().clone(),
+            );
+            track.exchange_rules = inverse_rules();
+        }
+
+        manager
+            .observe(
+                &id,
+                TrackObservation::Position(PositionObservation {
+                    qty: -30.0,
+                    unrealized_pnl: 0.25,
+                }),
+            )
+            .unwrap();
+
+        let track = manager.tracks.get(&id).unwrap();
+        assert_eq!(track.current_position_qty, -30.0);
+        assert_eq!(track.current_exposure, Exposure(-3.0));
     }
 
     #[test]

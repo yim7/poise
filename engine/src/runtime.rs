@@ -388,6 +388,40 @@ pub struct TrackRuntime {
     pub(crate) tick_timeout_secs: u64,
 }
 
+pub fn native_qty_per_exposure_unit(config: &TrackConfig, exchange_rules: &ExchangeRules) -> f64 {
+    exchange_rules.native_qty_per_exposure_unit(config.notional_per_unit, config.band_center())
+}
+
+pub fn exposure_from_position_qty(
+    config: &TrackConfig,
+    exchange_rules: &ExchangeRules,
+    position_qty: f64,
+) -> Exposure {
+    let unit_qty = native_qty_per_exposure_unit(config, exchange_rules);
+    if !unit_qty.is_finite() || unit_qty <= f64::EPSILON {
+        Exposure(0.0)
+    } else {
+        Exposure(position_qty / unit_qty)
+    }
+}
+
+pub fn position_notional(
+    config: &TrackConfig,
+    exchange_rules: &ExchangeRules,
+    position_qty: f64,
+) -> f64 {
+    exchange_rules.notional_from_native_qty(position_qty, config.band_center())
+}
+
+pub fn required_additional_notional(
+    config: &TrackConfig,
+    exchange_rules: &ExchangeRules,
+    max_notional: f64,
+    position_qty: f64,
+) -> f64 {
+    (max_notional - position_notional(config, exchange_rules, position_qty)).max(0.0)
+}
+
 impl TrackRuntime {
     pub fn new(
         definition: TrackDefinition,
@@ -487,6 +521,27 @@ impl TrackRuntime {
 
     pub fn exchange_rules(&self) -> &ExchangeRules {
         &self.exchange_rules
+    }
+
+    pub fn native_qty_per_exposure_unit(&self) -> f64 {
+        native_qty_per_exposure_unit(self.config(), &self.exchange_rules)
+    }
+
+    pub fn exposure_from_position_qty(&self, position_qty: f64) -> Exposure {
+        exposure_from_position_qty(self.config(), &self.exchange_rules, position_qty)
+    }
+
+    pub fn position_notional(&self, position_qty: f64) -> f64 {
+        position_notional(self.config(), &self.exchange_rules, position_qty)
+    }
+
+    pub fn required_additional_notional(&self, position_qty: f64) -> f64 {
+        required_additional_notional(
+            self.config(),
+            &self.exchange_rules,
+            self.max_notional(),
+            position_qty,
+        )
     }
 
     fn static_definition(&self) -> TrackDefinition {
@@ -847,6 +902,29 @@ mod tests {
     use poise_core::track::{TrackDefinition, Venue};
 
     #[test]
+    fn inverse_contract_position_exposure_uses_contract_quantity() {
+        let mut config = test_config();
+        config.lower_price = 90_000.0;
+        config.upper_price = 110_000.0;
+        config.notional_per_unit = 1_000.0;
+        let rules = inverse_rules();
+
+        assert_eq!(native_qty_per_exposure_unit(&config, &rules), 10.0);
+        assert_eq!(
+            exposure_from_position_qty(&config, &rules, -30.0),
+            Exposure(-3.0)
+        );
+        assert_eq!(position_notional(&config, &rules, -30.0), 3_000.0);
+
+        config.lower_price = 40_000.0;
+        config.upper_price = 60_000.0;
+        assert_eq!(
+            exposure_from_position_qty(&config, &rules, -30.0),
+            Exposure(-3.0)
+        );
+    }
+
+    #[test]
     fn runtime_frame_is_current_process_state_not_persisted_document() {
         let mut runtime = TrackRuntime::new(test_definition(), test_rules(0.1), Utc::now());
         runtime.executor_state = dirty_executor_state();
@@ -1091,6 +1169,21 @@ mod tests {
             settlement_asset: "USDT".to_string(),
             quantity_step: 0.01,
             min_qty: 0.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        }
+    }
+
+    fn inverse_rules() -> ExchangeRules {
+        ExchangeRules {
+            price_tick: 0.1,
+            price_precision: Default::default(),
+            quantity_kind: poise_core::types::QuantityKind::InverseContract,
+            contract_notional: Some(100.0),
+            settlement_asset: "BTC".to_string(),
+            quantity_step: 1.0,
+            min_qty: 1.0,
             min_notional: 0.0,
             maker_fee_rate: 0.0,
             taker_fee_rate: 0.0,

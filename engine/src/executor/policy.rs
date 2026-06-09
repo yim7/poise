@@ -46,7 +46,7 @@ pub(super) struct PolicyPlanningInput<'a> {
     pub instrument: &'a Instrument,
     pub config: &'a TrackConfig,
     pub exchange_rules: &'a ExchangeRules,
-    pub base_qty_per_unit: f64,
+    pub native_qty_per_unit: f64,
     pub min_rebalance_units: f64,
     pub current_exposure: &'a Exposure,
     pub execution_target_exposure: &'a Exposure,
@@ -342,7 +342,7 @@ fn plan_executable_allocations(
         .map(|allocation| allocation.exposure_qty)
         .sum::<f64>();
     let quantity = round_to_step(
-        exposure_qty * input.base_qty_per_unit,
+        exposure_qty * input.native_qty_per_unit,
         input.exchange_rules.quantity_step,
     );
     if quantity <= f64::EPSILON || !is_meetable_minimum(price, quantity, input.exchange_rules) {
@@ -351,7 +351,7 @@ fn plan_executable_allocations(
 
     let allocations = trim_allocations_to_exposure_qty(
         allocations,
-        quantity / input.base_qty_per_unit.max(f64::EPSILON),
+        quantity / input.native_qty_per_unit.max(f64::EPSILON),
     );
     if allocations.is_empty() {
         return None;
@@ -663,7 +663,7 @@ fn plan_curve_maker_binding(
         .iter()
         .find(|candidate| candidate.operation == operation)?;
     let quantity = round_to_step(
-        operation_view.remaining * input.base_qty_per_unit,
+        operation_view.remaining * input.native_qty_per_unit,
         input.exchange_rules.quantity_step,
     );
     if quantity <= f64::EPSILON || !is_meetable_minimum(price, quantity, input.exchange_rules) {
@@ -881,18 +881,14 @@ fn catch_up_increase_exposure_budget(
 }
 
 fn minimum_executable_exposure_qty(input: &PolicyPlanningInput<'_>, price: f64) -> f64 {
-    if input.base_qty_per_unit <= f64::EPSILON {
+    if input.native_qty_per_unit <= f64::EPSILON {
         return 0.0;
     }
-    minimum_executable_order_qty(price, input.exchange_rules) / input.base_qty_per_unit
+    minimum_executable_order_qty(price, input.exchange_rules) / input.native_qty_per_unit
 }
 
 fn minimum_executable_order_qty(price: f64, rules: &ExchangeRules) -> f64 {
-    let min_notional_qty = if price <= f64::EPSILON {
-        0.0
-    } else {
-        rules.min_notional / price
-    };
+    let min_notional_qty = rules.native_qty_per_exposure_unit(rules.min_notional, price);
     let quantity = rules
         .quantity_step
         .max(rules.min_qty)
@@ -1120,7 +1116,7 @@ mod tests {
             instrument: &instrument,
             config: &config,
             exchange_rules: &rules,
-            base_qty_per_unit: 1.0,
+            native_qty_per_unit: 1.0,
             min_rebalance_units: 1.0,
             current_exposure: &current,
             execution_target_exposure: &desired,
@@ -1166,7 +1162,7 @@ mod tests {
                 instrument: &instrument,
                 config: &config,
                 exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: &Exposure(0.0),
                 execution_target_exposure: &Exposure(1.0),

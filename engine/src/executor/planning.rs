@@ -44,7 +44,7 @@ pub struct SubmitIntentInput<'a> {
     pub instrument: &'a Instrument,
     pub config: &'a TrackConfig,
     pub exchange_rules: &'a ExchangeRules,
-    pub base_qty_per_unit: f64,
+    pub native_qty_per_unit: f64,
     pub min_rebalance_units: f64,
     pub current_exposure: Exposure,
     pub desired_exposure: Exposure,
@@ -166,7 +166,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         instrument: submit_intent.instrument,
         config: submit_intent.config,
         exchange_rules: submit_intent.exchange_rules,
-        base_qty_per_unit: submit_intent.base_qty_per_unit,
+        native_qty_per_unit: submit_intent.native_qty_per_unit,
         min_rebalance_units: submit_intent.min_rebalance_units,
         current_exposure: &submit_intent.current_exposure,
         execution_target_exposure: &execution_target,
@@ -422,10 +422,10 @@ fn boundary_exposure_epsilon(input: &SubmitIntentInput<'_>) -> f64 {
 }
 
 fn position_exposure_epsilon(input: &SubmitIntentInput<'_>) -> f64 {
-    let quantity_step_as_exposure = if input.base_qty_per_unit <= f64::EPSILON {
+    let quantity_step_as_exposure = if input.native_qty_per_unit <= f64::EPSILON {
         0.0
     } else {
-        input.exchange_rules.quantity_step / input.base_qty_per_unit
+        input.exchange_rules.quantity_step / input.native_qty_per_unit
     };
     boundary_exposure_epsilon(input).max(quantity_step_as_exposure)
 }
@@ -500,7 +500,7 @@ mod tests {
                 instrument: instrument(),
                 config,
                 exchange_rules: rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,
                 desired_exposure,
@@ -518,15 +518,15 @@ mod tests {
         )
     }
 
-    fn input_with_base_qty_per_unit<'a>(
+    fn input_with_native_qty_per_unit<'a>(
         config: &'a TrackConfig,
         rules: &'a ExchangeRules,
-        base_qty_per_unit: f64,
+        native_qty_per_unit: f64,
         current_exposure: Exposure,
         desired_exposure: Exposure,
     ) -> ExecutorInput<'a> {
         let mut input = input(config, rules, current_exposure, desired_exposure);
-        input.submit_intent.base_qty_per_unit = base_qty_per_unit;
+        input.submit_intent.native_qty_per_unit = native_qty_per_unit;
         input
     }
 
@@ -555,7 +555,7 @@ mod tests {
                 instrument: instrument(),
                 config,
                 exchange_rules: rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,
                 desired_exposure,
@@ -602,6 +602,28 @@ mod tests {
         assert_eq!(request.price, 100.1);
         assert!((request.quantity - 1.0).abs() < 1e-9);
         assert_eq!(catch_up_binding.allocations.len(), 1);
+    }
+
+    #[test]
+    fn catch_up_policy_uses_native_quantity_per_exposure_unit() {
+        let config = config();
+        let rules = rules();
+
+        let plan = plan(input_with_native_qty_per_unit(
+            &config,
+            &rules,
+            10.0,
+            Exposure(0.0),
+            Exposure(2.0),
+        ));
+
+        let catch_up_binding = plan
+            .state
+            .bindings
+            .iter()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .expect("catch-up binding should be submitted");
+        assert!((catch_up_binding.request.quantity - 10.0).abs() < 1e-9);
     }
 
     #[test]
@@ -778,7 +800,7 @@ mod tests {
         rules.min_qty = 0.00001;
         rules.min_notional = 5.0;
 
-        let mut input = input_with_base_qty_per_unit(
+        let mut input = input_with_native_qty_per_unit(
             &config,
             &rules,
             config.base_qty_per_unit(),
@@ -842,7 +864,7 @@ mod tests {
         rules.quantity_step = 0.01;
         rules.min_qty = 0.01;
 
-        let plan = plan(input_with_base_qty_per_unit(
+        let plan = plan(input_with_native_qty_per_unit(
             &config,
             &rules,
             config.base_qty_per_unit(),
@@ -889,7 +911,7 @@ mod tests {
         rules.quantity_step = 0.01;
         rules.min_qty = 0.01;
 
-        let plan = plan(input_with_base_qty_per_unit(
+        let plan = plan(input_with_native_qty_per_unit(
             &config,
             &rules,
             config.base_qty_per_unit(),
@@ -936,7 +958,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(2.0),
@@ -986,7 +1008,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(-6.0),
                 desired_exposure: Exposure(-1.0),
@@ -1067,7 +1089,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(2.0),
@@ -1134,7 +1156,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(2.0),
@@ -1173,7 +1195,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(2.0),
@@ -1369,7 +1391,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
                 desired_exposure: Exposure(0.0),
@@ -1430,7 +1452,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
                 desired_exposure: Exposure(0.0),
@@ -1494,7 +1516,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
                 desired_exposure: Exposure(0.0),
@@ -1540,7 +1562,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(0.0),
@@ -1579,7 +1601,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(0.0),
@@ -1678,7 +1700,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(1.0),
@@ -1713,7 +1735,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.6),
                 desired_exposure: Exposure(1.0),
@@ -1756,7 +1778,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 exchange_rules: &rules,
-                base_qty_per_unit: 1.0,
+                native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(1.2),
                 desired_exposure: Exposure(1.0),
