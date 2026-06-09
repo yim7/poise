@@ -2,7 +2,7 @@
 
 ## 状态
 
-本计划基于 [okx-coin-margined-spec.md](okx-coin-margined-spec.md)。当前只写计划，不执行实现、不提交代码。
+本计划基于 [okx-coin-margined-spec.md](okx-coin-margined-spec.md)。当前按任务清单逐项执行。
 
 执行本 plan 时遵守项目约定：
 
@@ -25,7 +25,7 @@
 | 2. engine 使用 native quantity 规划和风控 | completed | 已通过：`poise-core` track/strategy；`poise-engine` executor/manager/runtime/execution_plan；`poise-server` startup_bootstrap | `4a10b9a9ba29d446114ca0679b6e87d5b474f5b5` |
 | 3. 持久化 PNL asset 并按同资产聚合 | completed | 已通过：`poise-storage` schema/pnl；`poise-engine` ledger/loss_guard/manager/reconciler；`poise-core` risk；`poise-application` runtime_lifecycle/mutation_executor；四个 exchange WS；`poise-server` startup_bootstrap | `4f3a797065b4e50622a7df21dd06871f8ef6ecec` |
 | 4. OKX metadata、数量映射和 PNL asset | completed | 已通过：`cargo test -p poise-okx`；`cargo test -p poise-server runtime::startup_bootstrap::tests::` | `6f084aadba3046a3ca030daa5fae78b74a4a9930` |
-| 5. OKX account capacity 本地估算 | pending | 未执行 |  |
+| 5. OKX account capacity 本地估算 | completed | 已通过：`cargo test -p poise-okx`；`cargo test -p poise-server runtime::startup_bootstrap::tests::`；`cargo test -p poise-server runtime::guards::tests::`；`poise-server`、`poise-application`、`poise-storage` no-run；Binance/Bybit/Hyperliquid mapper/WS 相关测试 | `79518118e7a046970c966ae20d8bb682d65cfcf4` |
 | 6. protocol / projector 单位展示 | pending | 未执行 |  |
 | 7. 最终回归验收 | pending | 未执行 |  |
 
