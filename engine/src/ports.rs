@@ -295,6 +295,10 @@ pub trait MarketDataPort: Send + Sync {
         &self,
         instrument: &Instrument,
     ) -> Result<mpsc::Receiver<MarketDataTick>>;
+
+    async fn get_mark_price(&self, _instrument: &Instrument) -> Result<Option<f64>> {
+        Ok(None)
+    }
 }
 
 #[derive(Clone)]

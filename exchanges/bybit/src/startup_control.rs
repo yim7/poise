@@ -17,6 +17,10 @@ impl SymbolLeverageControl {
     pub async fn set_leverage(&self, symbol: &str, leverage: u32) -> Result<()> {
         self.rest.set_leverage(symbol, leverage).await
     }
+
+    pub async fn validate_one_way_position_mode(&self, symbol: &str) -> Result<()> {
+        self.rest.validate_one_way_position_mode(symbol).await
+    }
 }
 
 #[cfg(test)]
@@ -54,6 +58,36 @@ mod tests {
         let request = &server.requests()[0];
         assert_eq!(request.method, "POST");
         assert_eq!(request.path, "/v5/position/set-leverage");
+    }
+
+    #[tokio::test]
+    async fn startup_control_validates_one_way_position_mode() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","side":"","size":"0","avgPrice":"","unrealisedPnl":"","positionIdx":0,"leverage":"10"}]}}"#,
+        )])
+        .await;
+        let control = SymbolLeverageControl {
+            rest: BybitRestClient::with_http_client_and_timestamp_provider(
+                server.base_url(),
+                "api-key",
+                "secret-key",
+                Arc::new(|| 1_700_000_000_000),
+                reqwest::Client::new(),
+            ),
+        };
+
+        control
+            .validate_one_way_position_mode("BTCUSDT")
+            .await
+            .unwrap();
+
+        let request = &server.requests()[0];
+        assert_eq!(request.method, "GET");
+        assert_eq!(
+            request.path,
+            "/v5/position/list?category=linear&symbol=BTCUSDT"
+        );
     }
 
     #[derive(Debug, Clone)]

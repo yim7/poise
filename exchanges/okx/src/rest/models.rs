@@ -61,6 +61,20 @@ pub(crate) struct PositionSnapshot {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub(crate) struct MarkPriceSnapshot {
+    #[serde(rename = "instId")]
+    pub inst_id: String,
+    #[serde(rename = "markPx")]
+    pub mark_px: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AccountConfigSnapshot {
+    #[serde(rename = "posMode")]
+    pub pos_mode: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct PendingOrderSnapshot {
     #[serde(rename = "instId")]
     pub inst_id: String,
@@ -201,6 +215,10 @@ mod tests {
         assert_eq!(ack.client_order_id, "client-123");
         assert_eq!(ack.s_code, "0");
         assert_eq!(ack.s_msg, "");
+
+        let account_config: AccountConfigSnapshot =
+            serde_json::from_str(r#"{ "posMode": "net_mode" }"#).unwrap();
+        assert_eq!(account_config.pos_mode, "net_mode");
 
         let time: ServerTime = serde_json::from_str(r#"{ "ts": "1704876947123" }"#).unwrap();
         assert_eq!(time.ts, "1704876947123");

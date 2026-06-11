@@ -37,7 +37,10 @@ pub async fn connect(config: &Config) -> Result<ExchangePorts> {
 
 fn ports_from_clients(rest: Arc<OkxRestClient>, ws: Arc<OkxWsClient>) -> ExchangePorts {
     let execution: Arc<dyn ExecutionPort> = rest.clone();
-    let market_data: Arc<dyn MarketDataPort> = ws.clone();
+    let market_data: Arc<dyn MarketDataPort> = Arc::new(OkxMarketData {
+        rest: Arc::clone(&rest),
+        ws: Arc::clone(&ws),
+    });
     let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
     let metadata: Arc<dyn MetadataPort> = rest.clone();
 
@@ -54,6 +57,11 @@ fn ports_from_clients(rest: Arc<OkxRestClient>, ws: Arc<OkxWsClient>) -> Exchang
 }
 
 struct OkxAccount {
+    rest: Arc<OkxRestClient>,
+    ws: Arc<OkxWsClient>,
+}
+
+struct OkxMarketData {
     rest: Arc<OkxRestClient>,
     ws: Arc<OkxWsClient>,
 }
@@ -117,6 +125,20 @@ impl MarketDataPort for OkxWsClient {
         instrument: &Instrument,
     ) -> Result<mpsc::Receiver<MarketDataTick>> {
         self.subscribe_prices(instrument).await
+    }
+}
+
+#[async_trait]
+impl MarketDataPort for OkxMarketData {
+    async fn subscribe_prices(
+        &self,
+        instrument: &Instrument,
+    ) -> Result<mpsc::Receiver<MarketDataTick>> {
+        self.ws.subscribe_prices(instrument).await
+    }
+
+    async fn get_mark_price(&self, instrument: &Instrument) -> Result<Option<f64>> {
+        self.rest.get_mark_price(&instrument.symbol).await.map(Some)
     }
 }
 

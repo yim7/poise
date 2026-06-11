@@ -5,41 +5,54 @@ use anyhow::{Result, anyhow};
 use poise_core::track::Instrument;
 
 use crate::config::{ExchangeConfig, TrackSpec};
-use crate::startup_preparation::{SymbolLeverageSetter, TrackLeverageIndex};
+use crate::startup_preparation::{ExchangeStartupControl, TrackLeverageIndex};
 
 pub(crate) const DEFAULT_TRACK_LEVERAGE: u32 = 10;
 
 #[async_trait::async_trait]
-impl SymbolLeverageSetter for poise_binance::SymbolLeverageControl {
+impl ExchangeStartupControl for poise_binance::SymbolLeverageControl {
+    async fn validate_account_mode(&self) -> Result<()> {
+        self.validate_one_way_position_mode().await
+    }
+
     async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()> {
         self.set_leverage(&instrument.symbol, leverage).await
     }
 }
 
 #[async_trait::async_trait]
-impl SymbolLeverageSetter for poise_bybit::SymbolLeverageControl {
+impl ExchangeStartupControl for poise_bybit::SymbolLeverageControl {
+    async fn validate_instrument_mode(&self, instrument: &Instrument) -> Result<()> {
+        self.validate_one_way_position_mode(&instrument.symbol)
+            .await
+    }
+
     async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()> {
         self.set_leverage(&instrument.symbol, leverage).await
     }
 }
 
 #[async_trait::async_trait]
-impl SymbolLeverageSetter for poise_hyperliquid::SymbolLeverageControl {
+impl ExchangeStartupControl for poise_hyperliquid::SymbolLeverageControl {
     async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()> {
         self.set_leverage(&instrument.symbol, leverage).await
     }
 }
 
 #[async_trait::async_trait]
-impl SymbolLeverageSetter for poise_okx::SymbolLeverageControl {
+impl ExchangeStartupControl for poise_okx::SymbolLeverageControl {
+    async fn validate_account_mode(&self) -> Result<()> {
+        self.validate_net_position_mode().await
+    }
+
     async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()> {
         self.set_leverage(&instrument.symbol, leverage).await
     }
 }
 
-pub(crate) fn build_symbol_leverage_setter(
+pub(crate) fn build_exchange_startup_control(
     config: &ExchangeConfig,
-) -> Result<Arc<dyn SymbolLeverageSetter>> {
+) -> Result<Arc<dyn ExchangeStartupControl>> {
     match config {
         ExchangeConfig::Binance(binance_config) => Ok(Arc::new(
             poise_binance::SymbolLeverageControl::new(binance_config)?,
@@ -80,9 +93,9 @@ mod tests {
     use poise_application::TrackDefinitionRegistry;
     use poise_core::track::{Instrument, TrackId, Venue};
 
-    use super::{build_symbol_leverage_setter, build_track_leverage_index};
+    use super::{build_exchange_startup_control, build_track_leverage_index};
     use crate::config::{ExchangeConfig, TrackSpec};
-    use crate::startup_preparation::{SymbolLeverageSetter, apply_track_startup_leverage};
+    use crate::startup_preparation::{ExchangeStartupControl, apply_exchange_startup_controls};
 
     #[test]
     fn track_leverage_index_defaults_to_ten() {
@@ -109,8 +122,8 @@ mod tests {
     }
 
     #[test]
-    fn build_symbol_leverage_setter_accepts_binance_credentials() {
-        build_symbol_leverage_setter(&ExchangeConfig::Binance(poise_binance::Config {
+    fn build_exchange_startup_control_accepts_binance_credentials() {
+        build_exchange_startup_control(&ExchangeConfig::Binance(poise_binance::Config {
             deployment: poise_binance::Deployment::Testnet,
             api_key: Some("demo-key".into()),
             api_secret: Some("demo-secret".into()),
@@ -119,8 +132,8 @@ mod tests {
     }
 
     #[test]
-    fn build_symbol_leverage_setter_accepts_bybit_credentials() {
-        build_symbol_leverage_setter(&ExchangeConfig::Bybit(poise_bybit::Config {
+    fn build_exchange_startup_control_accepts_bybit_credentials() {
+        build_exchange_startup_control(&ExchangeConfig::Bybit(poise_bybit::Config {
             deployment: poise_bybit::Deployment::Testnet,
             api_key: Some("demo-key".into()),
             api_secret: Some("demo-secret".into()),
@@ -129,8 +142,8 @@ mod tests {
     }
 
     #[test]
-    fn build_symbol_leverage_setter_accepts_hyperliquid_credentials() {
-        build_symbol_leverage_setter(&ExchangeConfig::Hyperliquid(poise_hyperliquid::Config {
+    fn build_exchange_startup_control_accepts_hyperliquid_credentials() {
+        build_exchange_startup_control(&ExchangeConfig::Hyperliquid(poise_hyperliquid::Config {
             deployment: poise_hyperliquid::Deployment::Testnet,
             private_key: Some(
                 "0xe908f86dbb4d55ac876378565aafeabc187f6690f046459397b17d9b9a19688e".into(),
@@ -142,8 +155,8 @@ mod tests {
     }
 
     #[test]
-    fn build_symbol_leverage_setter_accepts_okx_credentials() {
-        build_symbol_leverage_setter(&ExchangeConfig::Okx(poise_okx::Config {
+    fn build_exchange_startup_control_accepts_okx_credentials() {
+        build_exchange_startup_control(&ExchangeConfig::Okx(poise_okx::Config {
             deployment: poise_okx::Deployment::Demo,
             api_key: Some("demo-key".into()),
             api_secret: Some("demo-secret".into()),
@@ -153,7 +166,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_track_startup_leverage_uses_track_index_in_registry_order() {
+    async fn apply_exchange_startup_controls_validates_then_uses_track_index_in_registry_order() {
         let tracks = vec![
             track_spec("btc-core", "BTCUSDT", Some(20)),
             track_spec("eth-core", "ETHUSDT", None),
@@ -162,30 +175,36 @@ mod tests {
         let index = build_track_leverage_index(&tracks).unwrap();
         let calls = Arc::new(Mutex::new(Vec::new()));
 
-        apply_track_startup_leverage(
+        apply_exchange_startup_controls(
             &registry,
             &index,
-            &RecordingSymbolLeverageSetter::succeed(calls.clone()),
+            &RecordingExchangeStartupControl::succeed(calls.clone()),
         )
         .await
         .unwrap();
 
         assert_eq!(
             *calls.lock().unwrap(),
-            vec!["BTCUSDT:20".to_string(), "ETHUSDT:10".to_string()]
+            vec![
+                "validate_account_mode".to_string(),
+                "validate_instrument_mode:BTCUSDT".to_string(),
+                "BTCUSDT:20".to_string(),
+                "validate_instrument_mode:ETHUSDT".to_string(),
+                "ETHUSDT:10".to_string()
+            ]
         );
     }
 
     #[tokio::test]
-    async fn apply_track_startup_leverage_adds_track_symbol_and_leverage_context() {
+    async fn apply_exchange_startup_controls_adds_track_symbol_and_leverage_context() {
         let tracks = vec![track_spec("btc-core", "BTCUSDT", Some(7))];
         let registry = track_definition_registry(&tracks);
         let index = build_track_leverage_index(&tracks).unwrap();
 
-        let error = apply_track_startup_leverage(
+        let error = apply_exchange_startup_controls(
             &registry,
             &index,
-            &RecordingSymbolLeverageSetter::fail("exchange rejected leverage"),
+            &RecordingExchangeStartupControl::fail("exchange rejected leverage"),
         )
         .await
         .unwrap_err();
@@ -227,12 +246,12 @@ mod tests {
         }
     }
 
-    struct RecordingSymbolLeverageSetter {
+    struct RecordingExchangeStartupControl {
         calls: Arc<Mutex<Vec<String>>>,
         failure: Option<String>,
     }
 
-    impl RecordingSymbolLeverageSetter {
+    impl RecordingExchangeStartupControl {
         fn succeed(calls: Arc<Mutex<Vec<String>>>) -> Self {
             Self {
                 calls,
@@ -249,7 +268,23 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl SymbolLeverageSetter for RecordingSymbolLeverageSetter {
+    impl ExchangeStartupControl for RecordingExchangeStartupControl {
+        async fn validate_account_mode(&self) -> anyhow::Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push("validate_account_mode".to_string());
+            Ok(())
+        }
+
+        async fn validate_instrument_mode(&self, instrument: &Instrument) -> anyhow::Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("validate_instrument_mode:{}", instrument.symbol));
+            Ok(())
+        }
+
         async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> anyhow::Result<()> {
             self.calls
                 .lock()

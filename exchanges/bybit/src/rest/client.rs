@@ -285,6 +285,18 @@ impl BybitRestClient {
         Ok(())
     }
 
+    pub async fn validate_one_way_position_mode(&self, symbol: &str) -> Result<()> {
+        let positions = self.get_linear_position_snapshots(symbol).await?;
+        if let Some(position) = positions.iter().find(|position| position.position_idx != 0) {
+            return Err(anyhow!(
+                "Bybit symbol `{}` position mode must be one-way (positionIdx=0), got positionIdx={}; switch Bybit position mode to one-way before starting",
+                symbol,
+                position.position_idx
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
         let response: ServerTimeResult = self
             .send_request(
@@ -299,6 +311,14 @@ impl BybitRestClient {
     }
 
     async fn get_linear_position_snapshot(&self, symbol: &str) -> Result<Option<PositionSnapshot>> {
+        Ok(self
+            .get_linear_position_snapshots(symbol)
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    async fn get_linear_position_snapshots(&self, symbol: &str) -> Result<Vec<PositionSnapshot>> {
         let response: PositionListResult = self
             .send_request(
                 Method::GET,
@@ -312,7 +332,7 @@ impl BybitRestClient {
             )
             .await?;
 
-        Ok(response.list.into_iter().next())
+        Ok(response.list)
     }
 
     async fn send_request<T>(
@@ -653,6 +673,66 @@ mod tests {
         );
 
         client.set_leverage("BTCUSDT", 10).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn validate_one_way_position_mode_accepts_position_idx_zero() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","side":"","size":"0","avgPrice":"","unrealisedPnl":"","positionIdx":0,"leverage":"10"}]}}"#,
+        )])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        client
+            .validate_one_way_position_mode("BTCUSDT")
+            .await
+            .unwrap();
+
+        let request = &server.requests()[0];
+        assert_eq!(
+            request.path,
+            "/v5/position/list?category=linear&symbol=BTCUSDT"
+        );
+        assert_eq!(
+            request.headers.get("x-bapi-api-key"),
+            Some(&"api-key".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_one_way_position_mode_rejects_hedge_position_idx() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":0,"retMsg":"OK","result":{"list":[
+                {"symbol":"BTCUSDT","side":"Buy","size":"0","avgPrice":"","unrealisedPnl":"","positionIdx":1,"leverage":"10"},
+                {"symbol":"BTCUSDT","side":"Sell","size":"0","avgPrice":"","unrealisedPnl":"","positionIdx":2,"leverage":"10"}
+            ]}}"#,
+        )])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        let error = client
+            .validate_one_way_position_mode("BTCUSDT")
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("positionIdx=0"), "{message}");
+        assert!(message.contains("positionIdx=1"), "{message}");
+        assert!(message.contains("one-way"), "{message}");
     }
 
     #[tokio::test]

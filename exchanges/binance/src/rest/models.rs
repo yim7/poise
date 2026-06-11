@@ -39,6 +39,12 @@ pub struct BinanceSymbolConfiguration {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct BinancePositionMode {
+    #[serde(rename = "dualSidePosition")]
+    pub dual_side_position: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct BinanceLeverageChangeResponse {
     pub leverage: u32,
     pub symbol: String,

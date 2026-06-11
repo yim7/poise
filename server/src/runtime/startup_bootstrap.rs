@@ -277,8 +277,10 @@ async fn probe_startup_account_capacity(
     let instrument = track.instrument().clone();
     let startup_leverage = track.startup_leverage();
     let account_summary = Arc::clone(&runtime.account_summary);
+    let market_data = Arc::clone(&runtime.market_data);
     retry_startup_step("probe_startup_capacity", || {
         let account_summary = Arc::clone(&account_summary);
+        let market_data = Arc::clone(&market_data);
         let instrument = instrument.clone();
         let position = position.clone();
         let exchange_rules = exchange_rules.clone();
@@ -293,12 +295,18 @@ async fn probe_startup_account_capacity(
                             exchange_rules.settlement_asset
                         )
                     })?;
-                let mark_price = position.mark_price.with_context(|| {
-                    format!(
-                        "missing mark price for inverse account capacity on `{}`",
-                        instrument.symbol
-                    )
-                })?;
+                let mark_price = match position.mark_price {
+                    Some(mark_price) => mark_price,
+                    None => market_data
+                        .get_mark_price(&instrument)
+                        .await?
+                        .with_context(|| {
+                            format!(
+                                "missing mark price for inverse account capacity on `{}`",
+                                instrument.symbol
+                            )
+                        })?,
+                };
                 let contract_notional = exchange_rules.contract_notional.with_context(|| {
                     format!(
                         "missing contract notional for inverse account capacity on `{}`",
@@ -605,6 +613,100 @@ mod tests {
         assert_eq!(exchange.available_balance_calls.load(Ordering::SeqCst), 0);
         assert_eq!(exchange.account_summary_calls.load(Ordering::SeqCst), 1);
         assert_eq!(exchange.account_capacity_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn startup_inverse_capacity_fetches_market_mark_price_when_position_mark_missing() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let track = TrackDefinition::try_new(
+            TrackId::new("btc-coin"),
+            Instrument::new(Venue::Okx, "BTC-USD-SWAP"),
+            TrackConfig {
+                lower_price: 90_000.0,
+                upper_price: 110_000.0,
+                long_exposure_units: 4.0,
+                short_exposure_units: 4.0,
+                notional_per_unit: 1_000.0,
+                min_rebalance_units: 0.5,
+                shape_family: ShapeFamily::Linear,
+                out_of_band_policy: BandProtectionPolicy::Freeze,
+                risk_acquisition: Default::default(),
+            },
+            Some(50_000.0),
+            LossLimits {
+                daily_loss_limit: 0.01,
+                total_loss_limit: 0.02,
+            },
+            None,
+        )
+        .unwrap();
+        let inverse_rules = ExchangeRules {
+            price_tick: 0.1,
+            price_precision: Default::default(),
+            quantity_kind: QuantityKind::InverseContract,
+            contract_notional: Some(100.0),
+            settlement_asset: "BTC".to_string(),
+            quantity_step: 1.0,
+            min_qty: 1.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        };
+        let mut manager = TrackManager::new(Arc::new(SystemClock));
+        manager
+            .add_track(track.clone(), inverse_rules.clone())
+            .unwrap();
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            manager,
+            repository.clone() as Arc<dyn TrackMutationStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
+            notifications.clone(),
+            account_margin_guard,
+        );
+        let account_monitor = unavailable_account_monitor(notifications.clone());
+        let (runtime_context, effect_worker_context) =
+            build_runtime_and_effect_worker_test_contexts(
+                &services,
+                repository.clone() as Arc<dyn TrackQueryStore>,
+                repository.clone() as Arc<dyn TrackEffectJournal>,
+                account_monitor,
+            );
+        let exchange = Arc::new(StartupExchange::with_instrument(Instrument::new(
+            Venue::Okx,
+            "BTC-USD-SWAP",
+        )));
+        exchange.set_exchange_rules(inverse_rules);
+        exchange.set_available_asset("BTC", 0.5);
+        exchange.set_market_mark_price(100_000.0);
+        let runtime = super::ServerRuntime::new(
+            runtime_context.runtime_state(),
+            effect_worker_context.effect_worker_state,
+            RuntimePorts::new(
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                Arc::new(SystemClock),
+            ),
+            vec![RuntimeStartupDefinition::new(track, 2)],
+        );
+        let (_sender, mut receiver) = mpsc::channel(8);
+        let startup_replay_floor = Utc.with_ymd_and_hms(2026, 4, 23, 12, 0, 0).unwrap();
+
+        complete_startup(&runtime, &mut receiver, startup_replay_floor)
+            .await
+            .unwrap();
+
+        let constraint = runtime
+            .state
+            .account_margin_guard
+            .constraint_for(&Instrument::new(Venue::Okx, "BTC-USD-SWAP"));
+        assert_eq!(constraint.max_increase_notional, Some(100_000.0));
+        assert_eq!(exchange.account_summary_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1127,6 +1229,7 @@ mod tests {
         available_balance: std::sync::Mutex<f64>,
         available_by_asset: std::sync::Mutex<BTreeMap<String, f64>>,
         position_mark_price: std::sync::Mutex<Option<f64>>,
+        market_mark_price: std::sync::Mutex<Option<f64>>,
         exchange_rules: std::sync::Mutex<ExchangeRules>,
         instrument: Instrument,
     }
@@ -1149,6 +1252,7 @@ mod tests {
                 available_balance: std::sync::Mutex::new(1_000_000.0),
                 available_by_asset: std::sync::Mutex::new(BTreeMap::new()),
                 position_mark_price: std::sync::Mutex::new(None),
+                market_mark_price: std::sync::Mutex::new(None),
                 exchange_rules: std::sync::Mutex::new(ExchangeRules {
                     price_tick: 0.1,
                     price_precision: Default::default(),
@@ -1178,6 +1282,10 @@ mod tests {
 
         fn set_position_mark_price(&self, mark_price: f64) {
             *self.position_mark_price.lock().unwrap() = Some(mark_price);
+        }
+
+        fn set_market_mark_price(&self, mark_price: f64) {
+            *self.market_mark_price.lock().unwrap() = Some(mark_price);
         }
 
         fn set_exchange_rules(&self, rules: ExchangeRules) {
@@ -1328,6 +1436,11 @@ mod tests {
         ) -> Result<mpsc::Receiver<MarketDataTick>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
+        }
+
+        async fn get_mark_price(&self, instrument: &Instrument) -> Result<Option<f64>> {
+            assert_eq!(instrument, &self.instrument);
+            Ok(*self.market_mark_price.lock().unwrap())
         }
     }
 }

@@ -18,6 +18,10 @@ impl SymbolLeverageControl {
     pub async fn set_leverage(&self, symbol: &str, leverage: u32) -> Result<()> {
         self.rest.set_leverage(symbol, leverage).await
     }
+
+    pub async fn validate_one_way_position_mode(&self) -> Result<()> {
+        self.rest.validate_one_way_position_mode().await
+    }
 }
 
 #[cfg(test)]
@@ -53,6 +57,28 @@ mod tests {
             requests[0]
                 .path
                 .starts_with("/fapi/v1/leverage?symbol=BTCUSDT&leverage=10&timestamp=")
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_control_validates_one_way_position_mode() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"dualSidePosition":false}"#,
+        )])
+        .await;
+        let control = SymbolLeverageControl {
+            rest: BinanceRestClient::new(server.base_url(), "api-key", "secret-key"),
+        };
+
+        control.validate_one_way_position_mode().await.unwrap();
+
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .path
+                .starts_with("/fapi/v1/positionSide/dual?timestamp=")
         );
     }
 

@@ -20,8 +20,8 @@ use super::auth::{encode_query, sign_query};
 use super::error::BinanceRestError;
 use super::models::{
     BinanceAccountSummaryInformation, BinanceErrorResponse, BinanceExchangeInfoResponse,
-    BinanceLeverageChangeResponse, BinanceOpenOrder, BinanceOrderResponse, BinancePositionRisk,
-    BinanceSymbolConfiguration, ListenKeyResponse, ServerTimeResponse,
+    BinanceLeverageChangeResponse, BinanceOpenOrder, BinanceOrderResponse, BinancePositionMode,
+    BinancePositionRisk, BinanceSymbolConfiguration, ListenKeyResponse, ServerTimeResponse,
 };
 use crate::mapper::build_account_capacity_snapshot;
 
@@ -212,6 +212,23 @@ impl BinanceRestClient {
             response.symbol,
             response.max_notional_value,
         );
+        Ok(())
+    }
+
+    pub async fn validate_one_way_position_mode(&self) -> Result<()> {
+        let mode: BinancePositionMode = self
+            .send_request(
+                Method::GET,
+                "/fapi/v1/positionSide/dual",
+                Vec::new(),
+                AuthMode::Signed,
+            )
+            .await?;
+        if mode.dual_side_position {
+            return Err(anyhow!(
+                "Binance account position mode must be one-way, got hedge mode; switch Binance Futures position mode to one-way before starting"
+            ));
+        }
         Ok(())
     }
 
@@ -1030,6 +1047,56 @@ mod tests {
             requests[0].headers.get("x-mbx-apikey"),
             Some(&"api-key".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn validate_one_way_position_mode_accepts_single_position_mode() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"dualSidePosition":false}"#,
+        )])
+        .await;
+        let client = BinanceRestClient::with_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+        );
+
+        client.validate_one_way_position_mode().await.unwrap();
+
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .path
+                .starts_with("/fapi/v1/positionSide/dual?timestamp=")
+        );
+        assert_eq!(
+            requests[0].headers.get("x-mbx-apikey"),
+            Some(&"api-key".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_one_way_position_mode_rejects_hedge_mode() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"dualSidePosition":true}"#,
+        )])
+        .await;
+        let client = BinanceRestClient::with_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+        );
+
+        let error = client.validate_one_way_position_mode().await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("one-way"), "{message}");
+        assert!(message.contains("hedge mode"), "{message}");
     }
 
     #[tokio::test]

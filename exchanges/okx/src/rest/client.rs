@@ -21,8 +21,8 @@ use crate::mapper::{
 use crate::rest::auth::sign_okx_payload;
 use crate::rest::error::OkxRestError;
 use crate::rest::models::{
-    BalanceSnapshot, InstrumentInfo, OkxEnvelope, OrderAck, PendingOrderSnapshot, PositionSnapshot,
-    ServerTime,
+    AccountConfigSnapshot, BalanceSnapshot, InstrumentInfo, MarkPriceSnapshot, OkxEnvelope,
+    OrderAck, PendingOrderSnapshot, PositionSnapshot, ServerTime,
 };
 use crate::{Config, Credentials};
 
@@ -33,6 +33,7 @@ enum AuthMode {
 }
 
 const MAX_DECIMAL_SCALE: u32 = 16;
+const OKX_NET_POSITION_MODE: &str = "net_mode";
 
 pub(crate) struct OkxRestClient {
     http: reqwest::Client,
@@ -95,6 +96,50 @@ impl OkxRestClient {
         account_summary_from_balance(balance)
     }
 
+    pub(crate) async fn get_mark_price(&self, symbol: &str) -> Result<f64> {
+        let response: Vec<MarkPriceSnapshot> = self
+            .send_request(
+                Method::GET,
+                "/api/v5/public/mark-price",
+                vec![
+                    ("instType", "SWAP".to_string()),
+                    ("instId", symbol.to_string()),
+                ],
+                None,
+                AuthMode::None,
+            )
+            .await?;
+        let snapshot = response
+            .into_iter()
+            .find(|snapshot| snapshot.inst_id == symbol)
+            .with_context(|| format!("OKX mark price not found: {symbol}"))?;
+        parse_decimal("markPx", &snapshot.mark_px)
+    }
+
+    pub(crate) async fn validate_net_position_mode(&self) -> Result<()> {
+        let response: Vec<AccountConfigSnapshot> = self
+            .send_request(
+                Method::GET,
+                "/api/v5/account/config",
+                Vec::new(),
+                None,
+                AuthMode::Signed,
+            )
+            .await?;
+        let config = response
+            .into_iter()
+            .next()
+            .context("missing OKX account config")?;
+        if config.pos_mode != OKX_NET_POSITION_MODE {
+            return Err(anyhow!(
+                "OKX account position mode must be `{}`, got `{}`; switch OKX to single-position/net mode before starting",
+                OKX_NET_POSITION_MODE,
+                config.pos_mode
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn get_available_balance(&self, symbol: &str) -> Result<f64> {
         let metadata = self.get_or_fetch_instrument_metadata(symbol).await?;
         let balance = self.get_balance_snapshot().await?;
@@ -112,13 +157,9 @@ impl OkxRestClient {
         })?;
         let leverage = parse_decimal("lever", &position.lever)?;
         if metadata.is_inverse() {
-            let mark_price = parse_decimal(
-                "markPx",
-                position
-                    .mark_px
-                    .as_deref()
-                    .context("OKX inverse account capacity requires position markPx")?,
-            )?;
+            let mark_price = self
+                .mark_price_for_capacity(symbol, position.mark_px.as_deref())
+                .await?;
             let contract_notional = metadata
                 .contract_notional()
                 .context("OKX inverse account capacity requires contract notional")?;
@@ -130,9 +171,13 @@ impl OkxRestClient {
                         metadata.settlement_asset()
                     )
                 })?;
-            let estimated_contracts = available * mark_price * leverage / contract_notional;
             return Ok(AccountCapacitySnapshot {
-                max_increase_notional: estimated_contracts * contract_notional,
+                max_increase_notional: capacity_notional_from_inverse_available(
+                    available,
+                    mark_price,
+                    leverage,
+                    contract_notional,
+                ),
             });
         }
 
@@ -193,6 +238,7 @@ impl OkxRestClient {
             td_mode: "cross",
             cl_ord_id: req.client_order_id,
             side: side_to_okx(req.side),
+            pos_side: "net",
             ord_type: "limit",
             price: format_decimal(req.price),
             size: format_decimal(order_size),
@@ -303,6 +349,17 @@ impl OkxRestClient {
             .into_iter()
             .next()
             .context("missing OKX balance snapshot")
+    }
+
+    async fn mark_price_for_capacity(
+        &self,
+        symbol: &str,
+        position_mark_price: Option<&str>,
+    ) -> Result<f64> {
+        match position_mark_price {
+            Some(mark_price) => parse_decimal("markPx", mark_price),
+            None => self.get_mark_price(symbol).await,
+        }
     }
 
     async fn get_or_fetch_instrument_metadata(
@@ -488,6 +545,8 @@ struct PlaceOrderBody<'a> {
     #[serde(rename = "clOrdId")]
     cl_ord_id: String,
     side: &'a str,
+    #[serde(rename = "posSide")]
+    pos_side: &'a str,
     #[serde(rename = "ordType")]
     ord_type: &'a str,
     #[serde(rename = "px")]
@@ -554,6 +613,16 @@ fn build_http_client(_base_url: &str) -> reqwest::Client {
 
 fn format_okx_timestamp(timestamp: chrono::DateTime<Utc>) -> String {
     timestamp.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn capacity_notional_from_inverse_available(
+    available: f64,
+    mark_price: f64,
+    leverage: f64,
+    contract_notional: f64,
+) -> f64 {
+    let estimated_contracts = available * mark_price * leverage / contract_notional;
+    estimated_contracts * contract_notional
 }
 
 fn parse_decimal(field: &str, value: &str) -> Result<f64> {
@@ -773,6 +842,7 @@ mod tests {
         assert_eq!(body["ordType"], "limit");
         assert_eq!(body["clOrdId"], "client-1");
         assert_eq!(body["side"], "buy");
+        assert_eq!(body["posSide"], "net");
         assert_eq!(body["px"], "64000.1");
         assert_eq!(body["sz"], "1");
         assert_eq!(
@@ -814,6 +884,7 @@ mod tests {
         let request = &server.requests()[1];
         let body = request.json_body();
         assert_eq!(body["instId"], "BTC-USD-SWAP");
+        assert_eq!(body["posSide"], "net");
         assert_eq!(body["sz"], "30");
     }
 
@@ -973,6 +1044,91 @@ mod tests {
             .unwrap();
 
         assert_eq!(snapshot.max_increase_notional, 50_000.0);
+    }
+
+    #[tokio::test]
+    async fn inverse_account_capacity_fetches_public_mark_price_when_position_mark_missing() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, inverse_instrument_response()),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[{"totalEq":"37500","details":[{"ccy":"BTC","availEq":"0.5","upl":"0"}]}]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USD-SWAP","pos":"0","avgPx":"0","upl":"0","posSide":"net","lever":"2"}]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USD-SWAP","instType":"SWAP","markPx":"75000","ts":"1781068207856"}]}"#,
+            ),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        let snapshot = client
+            .get_account_capacity_snapshot("BTC-USD-SWAP")
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.max_increase_notional, 75_000.0);
+        assert_eq!(
+            server.requests()[3].path,
+            "/api/v5/public/mark-price?instType=SWAP&instId=BTC-USD-SWAP"
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_price_reads_public_mark_price_endpoint() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"code":"0","msg":"","data":[{"instId":"BTC-USD-SWAP","instType":"SWAP","markPx":"61123.7","ts":"1781068207856"}]}"#,
+        )])
+        .await;
+        let client = test_client(&server, true);
+
+        let mark_price = client.get_mark_price("BTC-USD-SWAP").await.unwrap();
+
+        assert_eq!(mark_price, 61_123.7);
+        assert_eq!(
+            server.requests()[0].path,
+            "/api/v5/public/mark-price?instType=SWAP&instId=BTC-USD-SWAP"
+        );
+    }
+
+    #[tokio::test]
+    async fn validates_net_position_mode_from_account_config() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"code":"0","msg":"","data":[{"posMode":"net_mode"}]}"#,
+        )])
+        .await;
+        let client = test_client(&server, true);
+
+        client.validate_net_position_mode().await.unwrap();
+
+        assert_eq!(server.requests()[0].path, "/api/v5/account/config");
+        assert_eq!(
+            server.requests()[0].headers.get("ok-access-key"),
+            Some(&"api-key".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_long_short_position_mode_at_startup_validation() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"code":"0","msg":"","data":[{"posMode":"long_short_mode"}]}"#,
+        )])
+        .await;
+        let client = test_client(&server, true);
+
+        let error = client.validate_net_position_mode().await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("net_mode"), "{message}");
+        assert!(message.contains("long_short_mode"), "{message}");
+        assert!(message.contains("single-position"), "{message}");
     }
 
     #[tokio::test]

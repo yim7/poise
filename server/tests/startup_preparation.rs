@@ -13,7 +13,7 @@ use poise_engine::ports::{ExchangeInfo, MetadataPort};
 #[path = "../src/startup_preparation.rs"]
 mod startup_preparation;
 
-use startup_preparation::{SymbolLeverageSetter, TrackLeverageIndex};
+use startup_preparation::{ExchangeStartupControl, TrackLeverageIndex};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FakeBuiltExchange(&'static str);
@@ -41,8 +41,8 @@ async fn prepare_exchange_startup_builds_exchange_before_setting_leverage() {
             let call_log = call_log.clone();
             move || {
                 Ok(
-                    Arc::new(RecordingSymbolLeverageSetter::succeed(call_log.clone()))
-                        as Arc<dyn SymbolLeverageSetter>,
+                    Arc::new(RecordingExchangeStartupControl::succeed(call_log.clone()))
+                        as Arc<dyn ExchangeStartupControl>,
                 )
             }
         },
@@ -56,6 +56,8 @@ async fn prepare_exchange_startup_builds_exchange_before_setting_leverage() {
         *call_log.lock().unwrap(),
         vec![
             "build_exchange".to_string(),
+            "validate_account_mode".to_string(),
+            "validate_instrument_mode:BTCUSDT".to_string(),
             "set_leverage:BTCUSDT:20".to_string()
         ]
     );
@@ -83,10 +85,10 @@ async fn prepare_exchange_startup_failure_surfaces_track_symbol_and_leverage_con
         {
             let call_log = call_log.clone();
             move || {
-                Ok(Arc::new(RecordingSymbolLeverageSetter::fail(
+                Ok(Arc::new(RecordingExchangeStartupControl::fail(
                     call_log.clone(),
                     "exchange rejected leverage",
-                )) as Arc<dyn SymbolLeverageSetter>)
+                )) as Arc<dyn ExchangeStartupControl>)
             }
         },
     )
@@ -106,7 +108,100 @@ async fn prepare_exchange_startup_failure_surfaces_track_symbol_and_leverage_con
         *call_log.lock().unwrap(),
         vec![
             "build_exchange".to_string(),
+            "validate_account_mode".to_string(),
+            "validate_instrument_mode:BTCUSDT".to_string(),
             "set_leverage:BTCUSDT:7".to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn prepare_exchange_startup_stops_before_leverage_when_account_mode_validation_fails() {
+    let call_log = Arc::new(Mutex::new(Vec::new()));
+    let track_definition_registry = track_definition_registry("btc-core", "BTCUSDT");
+    let track_leverage_index = TrackLeverageIndex::from([(TrackId::new("btc-core"), 20)]);
+
+    let result: Result<FakeBuiltExchange> = startup_preparation::prepare_exchange_startup_with(
+        &track_definition_registry,
+        &track_leverage_index,
+        {
+            let call_log = call_log.clone();
+            move || {
+                let call_log = call_log.clone();
+                async move {
+                    call_log.lock().unwrap().push("build_exchange".to_string());
+                    Ok(FakeBuiltExchange("binance-startup"))
+                }
+            }
+        },
+        {
+            let call_log = call_log.clone();
+            move || {
+                Ok(Arc::new(RecordingExchangeStartupControl::fail_validation(
+                    call_log.clone(),
+                    "wrong position mode",
+                )) as Arc<dyn ExchangeStartupControl>)
+            }
+        },
+    )
+    .await;
+
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("failed to validate exchange account mode"));
+    assert!(error.contains("wrong position mode"));
+    assert_eq!(
+        *call_log.lock().unwrap(),
+        vec![
+            "build_exchange".to_string(),
+            "validate_account_mode".to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn prepare_exchange_startup_stops_before_leverage_when_instrument_mode_validation_fails() {
+    let call_log = Arc::new(Mutex::new(Vec::new()));
+    let track_definition_registry = track_definition_registry("btc-core", "BTCUSDT");
+    let track_leverage_index = TrackLeverageIndex::from([(TrackId::new("btc-core"), 20)]);
+
+    let result: Result<FakeBuiltExchange> = startup_preparation::prepare_exchange_startup_with(
+        &track_definition_registry,
+        &track_leverage_index,
+        {
+            let call_log = call_log.clone();
+            move || {
+                let call_log = call_log.clone();
+                async move {
+                    call_log.lock().unwrap().push("build_exchange".to_string());
+                    Ok(FakeBuiltExchange("binance-startup"))
+                }
+            }
+        },
+        {
+            let call_log = call_log.clone();
+            move || {
+                Ok(
+                    Arc::new(RecordingExchangeStartupControl::fail_instrument_validation(
+                        call_log.clone(),
+                        "wrong symbol mode",
+                    )) as Arc<dyn ExchangeStartupControl>,
+                )
+            }
+        },
+    )
+    .await;
+
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("failed to validate startup mode"));
+    assert!(error.contains("btc-core"));
+    assert!(error.contains("BTCUSDT"));
+    assert!(error.contains("wrong symbol mode"));
+    assert_eq!(
+        *call_log.lock().unwrap(),
+        vec![
+            "build_exchange".to_string(),
+            "validate_account_mode".to_string(),
+            "validate_instrument_mode:BTCUSDT".to_string()
         ]
     );
 }
@@ -169,15 +264,19 @@ fn test_exchange_rules() -> ExchangeRules {
     }
 }
 
-struct RecordingSymbolLeverageSetter {
+struct RecordingExchangeStartupControl {
     calls: Arc<Mutex<Vec<String>>>,
+    validation_failure: Option<String>,
+    instrument_validation_failure: Option<String>,
     failure: Option<String>,
 }
 
-impl RecordingSymbolLeverageSetter {
+impl RecordingExchangeStartupControl {
     fn succeed(calls: Arc<Mutex<Vec<String>>>) -> Self {
         Self {
             calls,
+            validation_failure: None,
+            instrument_validation_failure: None,
             failure: None,
         }
     }
@@ -185,13 +284,58 @@ impl RecordingSymbolLeverageSetter {
     fn fail(calls: Arc<Mutex<Vec<String>>>, message: impl Into<String>) -> Self {
         Self {
             calls,
+            validation_failure: None,
+            instrument_validation_failure: None,
             failure: Some(message.into()),
+        }
+    }
+
+    fn fail_validation(calls: Arc<Mutex<Vec<String>>>, message: impl Into<String>) -> Self {
+        Self {
+            calls,
+            validation_failure: Some(message.into()),
+            instrument_validation_failure: None,
+            failure: None,
+        }
+    }
+
+    fn fail_instrument_validation(
+        calls: Arc<Mutex<Vec<String>>>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            calls,
+            validation_failure: None,
+            instrument_validation_failure: Some(message.into()),
+            failure: None,
         }
     }
 }
 
 #[async_trait]
-impl SymbolLeverageSetter for RecordingSymbolLeverageSetter {
+impl ExchangeStartupControl for RecordingExchangeStartupControl {
+    async fn validate_account_mode(&self) -> Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push("validate_account_mode".to_string());
+        if let Some(message) = &self.validation_failure {
+            return Err(anyhow!(message.clone()));
+        }
+        Ok(())
+    }
+
+    async fn validate_instrument_mode(&self, instrument: &Instrument) -> Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("validate_instrument_mode:{}", instrument.symbol));
+        if let Some(message) = &self.instrument_validation_failure {
+            return Err(anyhow!(message.clone()));
+        }
+        Ok(())
+    }
+
     async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()> {
         self.calls
             .lock()

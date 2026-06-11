@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use poise_application::TrackDefinitionRegistry;
 use poise_core::track::{Instrument, TrackId};
 use poise_engine::ports::{ExchangeInfo, MetadataPort};
@@ -11,15 +11,28 @@ use tokio::time::{Duration, sleep};
 pub(crate) type TrackLeverageIndex = HashMap<TrackId, u32>;
 
 #[async_trait::async_trait]
-pub(crate) trait SymbolLeverageSetter: Send + Sync {
+pub(crate) trait ExchangeStartupControl: Send + Sync {
+    async fn validate_account_mode(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn validate_instrument_mode(&self, _instrument: &Instrument) -> Result<()> {
+        Ok(())
+    }
+
     async fn set_leverage(&self, instrument: &Instrument, leverage: u32) -> Result<()>;
 }
 
-pub(crate) async fn apply_track_startup_leverage(
+pub(crate) async fn apply_exchange_startup_controls(
     track_definition_registry: &TrackDefinitionRegistry,
     track_leverage_index: &TrackLeverageIndex,
-    symbol_leverage_setter: &dyn SymbolLeverageSetter,
+    exchange_startup_control: &dyn ExchangeStartupControl,
 ) -> Result<()> {
+    exchange_startup_control
+        .validate_account_mode()
+        .await
+        .context("failed to validate exchange account mode")?;
+
     for track in track_definition_registry.iter() {
         let track_id = track.track_id().clone();
         let instrument = track.instrument().clone();
@@ -27,7 +40,17 @@ pub(crate) async fn apply_track_startup_leverage(
             .get(&track_id)
             .copied()
             .ok_or_else(|| anyhow!("missing startup leverage for track `{}`", track_id.as_str()))?;
-        symbol_leverage_setter
+        exchange_startup_control
+            .validate_instrument_mode(&instrument)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to validate startup mode for track `{}` symbol `{}`",
+                    track_id.as_str(),
+                    instrument.symbol
+                )
+            })?;
+        exchange_startup_control
             .set_leverage(&instrument, leverage)
             .await
             .map_err(|error| {
@@ -58,19 +81,19 @@ pub(crate) async fn prepare_exchange_startup_with<
     track_definition_registry: &TrackDefinitionRegistry,
     track_leverage_index: &TrackLeverageIndex,
     build_exchange_fn: BuildExchange,
-    build_symbol_leverage_setter_fn: BuildSetter,
+    build_exchange_startup_control_fn: BuildSetter,
 ) -> Result<PreparedExchange>
 where
     BuildExchange: FnOnce() -> BuildExchangeFuture,
     BuildExchangeFuture: Future<Output = Result<PreparedExchange>>,
-    BuildSetter: FnOnce() -> Result<Arc<dyn SymbolLeverageSetter>>,
+    BuildSetter: FnOnce() -> Result<Arc<dyn ExchangeStartupControl>>,
 {
     let exchange = build_exchange_fn().await?;
-    let symbol_leverage_setter = build_symbol_leverage_setter_fn()?;
-    apply_track_startup_leverage(
+    let exchange_startup_control = build_exchange_startup_control_fn()?;
+    apply_exchange_startup_controls(
         track_definition_registry,
         track_leverage_index,
-        symbol_leverage_setter.as_ref(),
+        exchange_startup_control.as_ref(),
     )
     .await?;
     Ok(exchange)

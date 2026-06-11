@@ -28,7 +28,7 @@ use tokio::time::Duration;
 use crate::account_projector::AccountProjector;
 use crate::config::{Config, ExchangeConfig};
 use crate::exchange_freshness::ExchangeFreshness;
-use crate::exchange_startup::{build_symbol_leverage_setter, build_track_leverage_index};
+use crate::exchange_startup::{build_exchange_startup_control, build_track_leverage_index};
 use crate::projector::TrackProjector;
 use crate::runtime::{
     AccountMarginGuardStore, RecoveryAnomalyDirtyObserver, RecoveryDirtyState, RuntimeHandles,
@@ -172,7 +172,7 @@ async fn build_exchange_and_prepare_startup(
         track_definition_registry,
         track_leverage_index,
         || build_exchange(&config.exchange),
-        || build_symbol_leverage_setter(&config.exchange),
+        || build_exchange_startup_control(&config.exchange),
     )
     .await
 }

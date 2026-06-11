@@ -16,6 +16,10 @@ impl SymbolLeverageControl {
     pub async fn set_leverage(&self, symbol: &str, leverage: u32) -> Result<()> {
         self.rest.set_leverage(symbol, leverage).await
     }
+
+    pub async fn validate_net_position_mode(&self) -> Result<()> {
+        self.rest.validate_net_position_mode().await
+    }
 }
 
 #[cfg(test)]
@@ -63,6 +67,39 @@ mod tests {
         assert!(request.body.contains(r#""instId":"BTC-USDT-SWAP""#));
         assert!(request.body.contains(r#""lever":"10""#));
         assert!(request.body.contains(r#""mgnMode":"cross""#));
+    }
+
+    #[tokio::test]
+    async fn symbol_leverage_control_validates_net_position_mode() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"code":"0","msg":"","data":[{"posMode":"net_mode"}]}"#,
+        )])
+        .await;
+        let rest = OkxRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            Config {
+                deployment: Deployment::Demo,
+                api_key: Some("api-key".to_string()),
+                api_secret: Some("secret-key".to_string()),
+                passphrase: Some("passphrase".to_string()),
+            }
+            .credentials()
+            .unwrap(),
+            true,
+            Arc::new(fixed_datetime),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+        let control = SymbolLeverageControl { rest };
+
+        control.validate_net_position_mode().await.unwrap();
+
+        let request = &server.requests()[0];
+        assert_eq!(request.path, "/api/v5/account/config");
+        assert_eq!(
+            request.headers.get("ok-access-key"),
+            Some(&"api-key".to_string())
+        );
     }
 
     fn fixed_datetime() -> DateTime<Utc> {
