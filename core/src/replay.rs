@@ -483,6 +483,80 @@ mod tests {
         assert!(wider_band.stats.max_abs_native_quantity < baseline.stats.max_abs_native_quantity);
     }
 
+    #[test]
+    fn replay_fixed_sample_output_is_stable() {
+        let first = run_replay(&replay_input()).unwrap();
+        let second = run_replay(&replay_input()).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::json!({
+                "samples": [
+                    {
+                        "price": 60000.0,
+                        "target_exposure": 4.0,
+                        "position_native_quantity": 12.0,
+                        "position_notional": 1200.0,
+                        "trade_native_quantity": 0.0,
+                        "trade_notional": 0.0,
+                        "estimated_fee": 0.0
+                    },
+                    {
+                        "price": 65000.0,
+                        "target_exposure": -1.0,
+                        "position_native_quantity": -3.0,
+                        "position_notional": 300.0,
+                        "trade_native_quantity": -15.0,
+                        "trade_notional": 1500.0,
+                        "estimated_fee": 0.000011538461538461538
+                    },
+                    {
+                        "price": 70000.0,
+                        "target_exposure": -6.0,
+                        "position_native_quantity": -18.0,
+                        "position_notional": 1800.0,
+                        "trade_native_quantity": -15.0,
+                        "trade_notional": 1500.0,
+                        "estimated_fee": 0.000010714285714285714
+                    }
+                ],
+                "stats": {
+                    "trade_count": 2,
+                    "trade_density": 0.6666666666666666,
+                    "max_abs_native_quantity": 18.0,
+                    "max_abs_notional": 1800.0,
+                    "max_margin_requirement": 600.0,
+                    "estimated_fee": 0.000022252747252747252,
+                    "fee_asset": "BTC",
+                    "position_distribution": {
+                        "min_exposure": -6.0,
+                        "max_exposure": 4.0,
+                        "mean_abs_exposure": 3.6666666666666665,
+                        "min_native_quantity": -18.0,
+                        "max_native_quantity": 12.0
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn inverse_contract_exposure_unit_does_not_drift_with_price() {
+        let input = replay_input();
+        let quantities = input
+            .prices
+            .iter()
+            .map(|price| {
+                input
+                    .exchange_rules
+                    .native_qty_per_exposure_unit(input.track_config.notional_per_unit, *price)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(quantities, vec![3.0, 3.0, 3.0]);
+    }
+
     fn replay_input() -> ReplayInput {
         ReplayInput {
             prices: vec![60_000.0, 65_000.0, 70_000.0],
