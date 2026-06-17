@@ -65,6 +65,7 @@ pub struct RuntimeState {
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
     pub runtime_health: Arc<RuntimeHealth>,
     pub pnl_backfill_status: Arc<PnlBackfillStatus>,
+    pub recent_fills_auditor: Arc<RecentFillsAuditor>,
 }
 
 #[derive(Clone)]

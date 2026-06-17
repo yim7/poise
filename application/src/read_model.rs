@@ -484,13 +484,30 @@ fn project_domain_event_message(event: &DomainEvent) -> String {
                 expected_asset, actual_asset
             ),
         },
+        DomainEvent::PnlAuditMissingRecords {
+            missing_count,
+            sample_source_keys,
+        } => format!(
+            "pnl audit: {missing_count} recent exchange fill records missing locally{}",
+            format_source_key_sample(sample_source_keys)
+        ),
     }
 }
 
 fn project_domain_event_level(event: &DomainEvent) -> TrackActivityLevel {
     match event {
-        DomainEvent::ExecutionGateApplied { .. } => TrackActivityLevel::Warn,
+        DomainEvent::ExecutionGateApplied { .. } | DomainEvent::PnlAuditMissingRecords { .. } => {
+            TrackActivityLevel::Warn
+        }
         _ => TrackActivityLevel::Info,
+    }
+}
+
+fn format_source_key_sample(source_keys: &[String]) -> String {
+    if source_keys.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", source_keys.join(", "))
     }
 }
 

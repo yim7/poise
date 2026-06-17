@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use poise_core::events::DomainEvent;
 #[cfg(any(test, feature = "server-test-support"))]
 use poise_engine::manager::TrackManager;
 use poise_engine::observation::{
@@ -98,6 +99,10 @@ impl TrackObservationService {
         record: poise_engine::ledger::TrackPnlRecord,
     ) -> Result<bool> {
         self.executor.record_track_pnl(id, record).await
+    }
+
+    pub async fn record_track_events(&self, id: &str, events: &[DomainEvent]) -> Result<()> {
+        self.executor.record_track_events(id, events).await
     }
 
     pub async fn sync_exchange_state(

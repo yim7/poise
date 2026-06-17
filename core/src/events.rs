@@ -40,4 +40,8 @@ pub enum DomainEvent {
     ExecutionGateApplied {
         reason: ExecutionGateReason,
     },
+    PnlAuditMissingRecords {
+        missing_count: usize,
+        sample_source_keys: Vec<String>,
+    },
 }

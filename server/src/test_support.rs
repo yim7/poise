@@ -479,7 +479,7 @@ pub(crate) fn build_websocket_state(
 
 pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     services: &TestApplicationServices,
-    _query_store: Arc<dyn TrackQueryStore>,
+    query_store: Arc<dyn TrackQueryStore>,
     _effect_store: Arc<dyn TrackEffectJournal>,
     account_monitor: Arc<AccountMonitor>,
 ) -> (RuntimeTestContext, EffectWorkerTestContext) {
@@ -488,6 +488,10 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     let reconcile_guards = Arc::new(TrackReconcileGuards::default());
     let runtime_health = Arc::new(RuntimeHealth::new());
     let pnl_backfill_status = Arc::new(PnlBackfillStatus::new());
+    let recent_fills_auditor = Arc::new(RecentFillsAuditor::new(
+        Arc::new(NoopAccountPort),
+        query_store,
+    ));
     let reconcile = crate::assembly::build_reconcile_state(
         Arc::clone(&services.observation_service),
         Arc::clone(&services.runtime_lifecycle_service),
@@ -505,6 +509,7 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
         Arc::clone(&services.account_margin_guard),
         runtime_health.clone(),
         pnl_backfill_status,
+        recent_fills_auditor,
     );
     let effect_worker_state = crate::assembly::build_effect_worker_state(
         reconcile,

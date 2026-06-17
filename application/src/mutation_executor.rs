@@ -597,6 +597,27 @@ impl MutationExecutor {
         Ok(inserted)
     }
 
+    pub async fn record_track_events(&self, id: &str, events: &[DomainEvent]) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let _mutation_guard = self.lock_track_mutation(id).await;
+        {
+            let manager = self.manager.read().await;
+            if manager.get_track(id).is_none() {
+                return Err(anyhow!("track `{id}` not found"));
+            }
+        }
+
+        self.mutation_store
+            .commit_track_transition(id, None, events)
+            .await?;
+        self.emit_internal_notification(ApplicationNotification::TrackChanged {
+            track_id: TrackId::new(id),
+        });
+        Ok(())
+    }
+
     pub async fn sync_exchange_state(
         &self,
         id: &str,

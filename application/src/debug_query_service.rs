@@ -44,11 +44,30 @@ fn classify_diagnostic_items(events: &[StoredTrackEvent]) -> Vec<TrackDiagnostic
                 severity: DiagnosticSeverity::Info,
                 message: format!("desired exposure {:.4} -> {:.4}", from.0, to.0),
             }),
+            DomainEvent::PnlAuditMissingRecords {
+                missing_count,
+                sample_source_keys,
+            } => Some(TrackDiagnosticItem {
+                observed_at: event.created_at,
+                severity: DiagnosticSeverity::Warn,
+                message: format!(
+                    "pnl audit: {missing_count} recent exchange fill records missing locally{}",
+                    format_source_key_sample(sample_source_keys)
+                ),
+            }),
             _ => None,
         })
         .collect::<Vec<_>>();
     items.sort_by_key(|item| item.observed_at);
     items
+}
+
+fn format_source_key_sample(source_keys: &[String]) -> String {
+    if source_keys.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", source_keys.join(", "))
+    }
 }
 
 #[cfg(test)]
@@ -117,6 +136,38 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(repository.effect_query_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn load_track_diagnostics_projects_pnl_audit_missing_records_as_warning() {
+        let mut repository = FakeReadRepository::new();
+        repository.events.push(StoredTrackEvent {
+            id: 3,
+            track_id: TrackId::new("btc-core"),
+            event: DomainEvent::PnlAuditMissingRecords {
+                missing_count: 2,
+                sample_source_keys: vec!["okx:fills:missing".to_string()],
+            },
+            created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 2, 0).unwrap(),
+        });
+        let repository = Arc::new(repository);
+        let live_repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), live_repository);
+        let service = TrackDebugQueryService::new(repository, Arc::new(services.observation));
+
+        let diagnostics = service
+            .load_track_diagnostics(&TrackId::new("btc-core"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let audit = diagnostics
+            .iter()
+            .find(|item| item.message.contains("pnl audit"))
+            .unwrap();
+        assert_eq!(audit.severity, DiagnosticSeverity::Warn);
+        assert!(audit.message.contains("2 recent exchange fill records"));
+        assert!(audit.message.contains("okx:fills:missing"));
     }
 
     struct FakeReadRepository {

@@ -26,6 +26,7 @@ mod health;
 mod market_data;
 mod market_data_health;
 mod pnl_backfill;
+mod pnl_startup_audit;
 mod reconcile;
 mod startup_bootstrap;
 mod submit_preflight;
@@ -267,6 +268,7 @@ impl ServerRuntime {
         })
         .await?;
         startup_bootstrap::complete_startup(self, &mut user_receiver, startup_cutoff).await?;
+        pnl_startup_audit::run_startup_pnl_audit(&self.state).await;
         let account_task = self.spawn_account_task(self.shutdown_tx.subscribe());
         let recovery_task = self.spawn_recovery_task(self.shutdown_tx.subscribe());
         let pnl_backfill_task = self.spawn_pnl_backfill_task(self.shutdown_tx.subscribe());

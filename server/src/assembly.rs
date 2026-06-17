@@ -319,7 +319,7 @@ async fn assemble_with_state_store(
         account_projector.clone(),
         runtime_health.clone(),
         pnl_backfill_status.clone(),
-        recent_fills_auditor,
+        recent_fills_auditor.clone(),
     );
     let websocket_state = build_websocket_state(
         notifications.clone(),
@@ -338,6 +338,7 @@ async fn assemble_with_state_store(
         account_margin_guard.clone(),
         runtime_health.clone(),
         pnl_backfill_status,
+        recent_fills_auditor,
     );
     let effect_worker_state = build_effect_worker_state(
         reconcile_state.clone(),
@@ -508,6 +509,7 @@ pub(crate) fn build_runtime_state(
     account_margin_guard: Arc<AccountMarginGuardStore>,
     runtime_health: Arc<RuntimeHealth>,
     pnl_backfill_status: Arc<PnlBackfillStatus>,
+    recent_fills_auditor: Arc<RecentFillsAuditor>,
 ) -> RuntimeState {
     RuntimeState {
         reconcile,
@@ -517,6 +519,7 @@ pub(crate) fn build_runtime_state(
         account_margin_guard,
         runtime_health,
         pnl_backfill_status,
+        recent_fills_auditor,
     }
 }
 
