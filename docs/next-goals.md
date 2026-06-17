@@ -185,7 +185,7 @@ Task 清单：
 | Task | 状态 | 验收 | Commit |
 | --- | --- | --- | --- |
 | 3.1 增加配置解释模型 | completed | 对每个 track 展示 unit 对应 native quantity、USD 面值、最小步长、最大名义、loss limit 资产 | `68e2955` |
-| 3.2 增加 dry-run 启动检查 | pending | 不下单、不订阅实时 task，也能加载配置、metadata、账户摘要并输出风险说明 |  |
+| 3.2 增加 dry-run 启动检查 | completed | 不下单、不订阅实时 task，也能加载配置、metadata、账户摘要并输出风险说明 | `0028165` |
 | 3.3 增加当前价格下的容量估算 | pending | inverse 能展示可用 BTC、mark price、leverage、估算最大 contracts 和 USD 面值 |  |
 | 3.4 增加错误提示测试 | pending | 缺 symbol、缺 ctVal、数量低于最小单位时提示具体字段和计算结果 |  |
 
