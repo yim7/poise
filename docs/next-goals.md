@@ -44,7 +44,7 @@
 | 3 | 提供配置解释和 dry-run | P1 | M | completed | Goal 1 |
 | 4 | 建立 BTC-USD-SWAP 调参 replay | P1 | M | completed | Goal 3 |
 | 5 | 文档治理与模块拆分决策 | P1 | S | completed | Goal 0, Goal 1 |
-| 6 | 增加账户视角分析层 | P2 | M | pending | Goal 2, Goal 3 |
+| 6 | 增加账户视角分析层 | P2 | M | completed | Goal 2, Goal 3 |
 | 7 | 评估多 track 和更多交易所 | P3 | L | pending | Goal 1 到 Goal 4 |
 
 ## Goal 0. 收尾当前 PNL backfill
@@ -303,7 +303,7 @@ Task 清单：
 | --- | --- | --- | --- |
 | 6.1 定义账户分析 read model | completed | application read model 可从 track 列表展示 settlement asset、合约张数、USD 面值、折算 BTC 暴露、PNL asset | 89582eb |
 | 6.2 增加 hedge-like 视图 | completed | application read model 使用 account_summary.available_by_asset 明确估算现货 BTC 与合约净暴露关系，不影响 engine 决策 | 7bd6621 |
-| 6.3 接入 TUI 或 HTTP detail | pending | 用户能从现有界面看到净暴露和账户视角风险 |  |
+| 6.3 接入 TUI 或 HTTP detail | completed | `/account`、WebSocket account summary 和 TUI Account 面板展示账户分析、合约暴露与净 BTC 暴露 | bb437d0 |
 
 建议验证命令：
 
