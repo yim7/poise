@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -94,6 +95,45 @@ pub struct RecentFillsAuditResponse {
     pub records_missing: usize,
     pub records_unkeyed: usize,
     pub items: Vec<RecentFillAuditItemView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigDryRunResponse {
+    pub account: ConfigDryRunAccountView,
+    pub tracks: Vec<ConfigDryRunTrackView>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigDryRunAccountView {
+    pub equity: f64,
+    pub available: f64,
+    #[serde(default)]
+    pub available_by_asset: BTreeMap<String, f64>,
+    pub unrealized_pnl: f64,
+    pub observed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigDryRunTrackView {
+    pub track_id: String,
+    pub instrument: InstrumentView,
+    pub leverage: u32,
+    pub native_quantity_unit: TrackPositionQuantityUnitView,
+    pub native_quantity_per_unit: f64,
+    pub unit_notional: f64,
+    pub unit_notional_asset: String,
+    pub quantity_step: f64,
+    pub min_quantity: f64,
+    pub min_notional: f64,
+    pub effective_max_notional: f64,
+    pub loss_limit_asset: String,
+    pub daily_loss_limit: f64,
+    pub total_loss_limit: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

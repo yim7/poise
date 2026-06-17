@@ -2,6 +2,7 @@ mod account_projector;
 mod assembly;
 mod config;
 mod config_explain;
+mod dry_run;
 mod effect_worker;
 mod exchange_freshness;
 mod exchange_startup;
@@ -31,6 +32,7 @@ use crate::instance_dir::InstanceDir;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StartupOptions {
     instance_dir: std::path::PathBuf,
+    dry_run: bool,
 }
 
 #[tokio::main]
@@ -41,6 +43,14 @@ async fn main() -> Result<()> {
     let options = parse_startup_options(env::args().skip(1))?;
     let instance_dir = InstanceDir::new(&options.instance_dir);
     let config = config::load_config(instance_dir.config_path())?;
+    if options.dry_run {
+        let (_venue, exchange_ports) = assembly::build_exchange(&config.exchange).await?;
+        let response = dry_run::run_config_dry_run_with_ports(&config, exchange_ports).await?;
+        serde_json::to_writer_pretty(std::io::stdout(), &response)?;
+        println!();
+        return Ok(());
+    }
+
     let db_path = instance_dir.db_path();
     let prepared_state = state_bootstrap::prepare_state_repository(&config, &db_path)
         .await
@@ -103,8 +113,12 @@ async fn shutdown_signal() {
 
 fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<StartupOptions> {
     let mut instance_dir = None;
+    let mut dry_run = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--dry-run" => {
+                dry_run = true;
+            }
             "--instance-dir" => {
                 let value = args
                     .next()
@@ -120,6 +134,7 @@ fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<Start
     Ok(StartupOptions {
         instance_dir: instance_dir
             .ok_or_else(|| anyhow::anyhow!("missing required --instance-dir <path>"))?,
+        dry_run,
     })
 }
 
@@ -179,6 +194,27 @@ mod tests {
             options,
             StartupOptions {
                 instance_dir: std::path::PathBuf::from("/tmp/poise-a"),
+                dry_run: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_startup_options_reads_dry_run_flag() {
+        let options = parse_startup_options(
+            vec![
+                "--dry-run".to_string(),
+                "--instance-dir".to_string(),
+                "/tmp/poise-a".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(
+            options,
+            StartupOptions {
+                instance_dir: std::path::PathBuf::from("/tmp/poise-a"),
+                dry_run: true,
             }
         );
     }
