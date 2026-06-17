@@ -12,7 +12,8 @@ use crate::account_projector::AccountProjector;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
 use crate::runtime::{
-    AccountMarginGuardStore, RecoveryDirtyState, RuntimeHealth, TrackReconcileGuards,
+    AccountMarginGuardStore, PnlBackfillStatus, RecoveryDirtyState, RuntimeHealth,
+    TrackReconcileGuards,
 };
 use crate::submit_preflight::SubmitPreflight;
 
@@ -25,6 +26,7 @@ pub struct HttpState {
     pub account_monitor: Arc<AccountMonitor>,
     pub account_projector: Arc<AccountProjector>,
     pub runtime_health: Arc<RuntimeHealth>,
+    pub pnl_backfill_status: Arc<PnlBackfillStatus>,
 }
 
 #[derive(Clone)]
@@ -60,6 +62,7 @@ pub struct RuntimeState {
     pub account_monitor: Arc<AccountMonitor>,
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
     pub runtime_health: Arc<RuntimeHealth>,
+    pub pnl_backfill_status: Arc<PnlBackfillStatus>,
 }
 
 #[derive(Clone)]

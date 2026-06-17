@@ -144,11 +144,7 @@ impl RuntimeHealth {
         task.last_error = Some(error.to_string());
     }
 
-    pub(crate) fn record_error_now(
-        &self,
-        component: RuntimeHealthComponent,
-        error: impl ToString,
-    ) {
+    pub(crate) fn record_error_now(&self, component: RuntimeHealthComponent, error: impl ToString) {
         self.record_error(component, Utc::now(), error);
     }
 
@@ -236,5 +232,4 @@ mod tests {
         assert_eq!(recovered.last_error_at, Some(second));
         assert_eq!(recovered.last_error.as_deref(), Some("temporary outage"));
     }
-
 }

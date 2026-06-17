@@ -290,8 +290,7 @@ fn validate_startup_exchange_rules(
         seed.instrument().symbol
     );
     ensure!(
-        exchange_rules.quantity_step.is_finite()
-            && exchange_rules.quantity_step > f64::EPSILON,
+        exchange_rules.quantity_step.is_finite() && exchange_rules.quantity_step > f64::EPSILON,
         "invalid minimum trade unit for `{}`: quantity_step must be positive, got {}",
         seed.instrument().symbol,
         exchange_rules.quantity_step
@@ -1298,10 +1297,7 @@ mod tests {
     fn seeded_manager() -> TrackManager {
         let mut manager = TrackManager::new(Arc::new(SystemClock));
         manager
-            .add_track(
-                seeded_track(),
-                linear_rules("BTCUSDT"),
-            )
+            .add_track(seeded_track(), linear_rules("BTCUSDT"))
             .unwrap();
         manager
     }
@@ -1392,7 +1388,9 @@ mod tests {
     ) -> (super::ServerRuntime, Arc<StartupExchange>) {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let mut manager = TrackManager::new(Arc::new(SystemClock));
-        manager.add_track(track.clone(), exchange_rules.clone()).unwrap();
+        manager
+            .add_track(track.clone(), exchange_rules.clone())
+            .unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(

@@ -7,15 +7,14 @@ use poise_core::track::TrackId;
 use poise_engine::command::TrackCommand;
 use poise_protocol::{
     AccountSummaryView, ActivityLevelView, HealthResponse, HealthStatusView, HealthTaskStatusView,
-    HealthTaskView, TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
-    TrackDiagnosticItemView, TrackDiagnosticsView, TrackListResponse,
+    HealthTaskView, PnlBackfillStatusView, TrackCommandAccepted, TrackCommandRequest,
+    TrackCommandType, TrackDetailView, TrackDiagnosticItemView, TrackDiagnosticsView,
+    TrackListResponse,
 };
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
 
-use crate::runtime::{
-    RuntimeHealthStatus, RuntimeHealthSnapshot, RuntimeTaskHealthSnapshot,
-};
+use crate::runtime::{RuntimeHealthSnapshot, RuntimeHealthStatus, RuntimeTaskHealthSnapshot};
 use crate::server_context::{HttpState, WebSocketState};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -89,6 +88,7 @@ async fn health(
             track_count: sources.len(),
             attention_required_count,
             tasks: project_runtime_health(runtime_health),
+            pnl_backfill: project_pnl_backfill_status(state.pnl_backfill_status.snapshot()),
         }),
     ))
 }
@@ -119,6 +119,20 @@ fn project_runtime_health_task(task: RuntimeTaskHealthSnapshot) -> HealthTaskVie
         last_success_at: task.last_success_at.map(|value| value.to_rfc3339()),
         last_error_at: task.last_error_at.map(|value| value.to_rfc3339()),
         last_error: task.last_error,
+    }
+}
+
+fn project_pnl_backfill_status(
+    snapshot: crate::runtime::PnlBackfillSnapshot,
+) -> PnlBackfillStatusView {
+    PnlBackfillStatusView {
+        last_completed_at: snapshot.last_completed_at.map(|value| value.to_rfc3339()),
+        records_seen: snapshot.records_seen,
+        records_inserted: snapshot.records_inserted,
+        records_skipped: snapshot.records_skipped,
+        failures: snapshot.failures,
+        last_error_at: snapshot.last_error_at.map(|value| value.to_rfc3339()),
+        last_error: snapshot.last_error,
     }
 }
 
@@ -629,6 +643,13 @@ mod tests {
         assert_eq!(pnl_backfill["status"], "unknown");
         assert!(pnl_backfill["last_success_at"].is_null());
         assert!(pnl_backfill["last_error"].is_null());
+        assert!(payload["pnl_backfill"]["last_completed_at"].is_null());
+        assert_eq!(payload["pnl_backfill"]["records_seen"], 0);
+        assert_eq!(payload["pnl_backfill"]["records_inserted"], 0);
+        assert_eq!(payload["pnl_backfill"]["records_skipped"], 0);
+        assert_eq!(payload["pnl_backfill"]["failures"], 0);
+        assert!(payload["pnl_backfill"]["last_error_at"].is_null());
+        assert!(payload["pnl_backfill"]["last_error"].is_null());
     }
 
     #[tokio::test]
@@ -738,11 +759,55 @@ mod tests {
             .find(|task| task["component"] == "pnl_backfill")
             .unwrap();
         assert_eq!(pnl_backfill["status"], "degraded");
+        assert_eq!(pnl_backfill["last_error_at"], "2026-06-17T01:02:03+00:00");
+        assert_eq!(pnl_backfill["last_error"], "temporary okx outage");
+    }
+
+    #[tokio::test]
+    async fn health_returns_pnl_backfill_observability() {
+        let state = app_state().await;
+        let observed_at = Utc.with_ymd_and_hms(2026, 6, 17, 1, 2, 3).unwrap();
+        state.http_state.pnl_backfill_status.replace_snapshot(
+            crate::runtime::PnlBackfillSnapshot {
+                last_completed_at: Some(observed_at),
+                records_seen: 5,
+                records_inserted: 2,
+                records_skipped: 3,
+                failures: 1,
+                last_error_at: Some(observed_at),
+                last_error: Some("failed to persist backfilled track pnl record".to_string()),
+            },
+        );
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
-            pnl_backfill["last_error_at"],
+            payload["pnl_backfill"]["last_completed_at"],
             "2026-06-17T01:02:03+00:00"
         );
-        assert_eq!(pnl_backfill["last_error"], "temporary okx outage");
+        assert_eq!(payload["pnl_backfill"]["records_seen"], 5);
+        assert_eq!(payload["pnl_backfill"]["records_inserted"], 2);
+        assert_eq!(payload["pnl_backfill"]["records_skipped"], 3);
+        assert_eq!(payload["pnl_backfill"]["failures"], 1);
+        assert_eq!(
+            payload["pnl_backfill"]["last_error_at"],
+            "2026-06-17T01:02:03+00:00"
+        );
+        assert_eq!(
+            payload["pnl_backfill"]["last_error"],
+            "failed to persist backfilled track pnl record"
+        );
     }
 
     #[tokio::test]

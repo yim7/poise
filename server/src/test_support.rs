@@ -27,8 +27,8 @@ use tokio::sync::mpsc;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
 use crate::runtime::{
-    AccountMarginGuardStore, RecoveryAnomalyDirtyObserver, RecoveryDirtyState, RuntimeHealth,
-    TrackReconcileGuards,
+    AccountMarginGuardStore, PnlBackfillStatus, RecoveryAnomalyDirtyObserver, RecoveryDirtyState,
+    RuntimeHealth, TrackReconcileGuards,
 };
 use crate::server_context::{EffectWorkerState, RuntimeState};
 use crate::submit_preflight::SubmitPreflight;
@@ -449,6 +449,7 @@ pub(crate) fn build_http_state(
         account_monitor,
         account_projector,
         Arc::new(RuntimeHealth::new()),
+        Arc::new(PnlBackfillStatus::new()),
     )
 }
 
@@ -480,6 +481,7 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     let submit_preflight = Arc::new(SubmitPreflight::new());
     let reconcile_guards = Arc::new(TrackReconcileGuards::default());
     let runtime_health = Arc::new(RuntimeHealth::new());
+    let pnl_backfill_status = Arc::new(PnlBackfillStatus::new());
     let reconcile = crate::assembly::build_reconcile_state(
         Arc::clone(&services.observation_service),
         Arc::clone(&services.runtime_lifecycle_service),
@@ -496,6 +498,7 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
         Arc::clone(&account_monitor),
         Arc::clone(&services.account_margin_guard),
         runtime_health.clone(),
+        pnl_backfill_status,
     );
     let effect_worker_state = crate::assembly::build_effect_worker_state(
         reconcile,

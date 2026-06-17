@@ -36,6 +36,7 @@ pub(crate) use health::{
     RuntimeHealth, RuntimeHealthComponent, RuntimeHealthSnapshot, RuntimeHealthStatus,
     RuntimeTaskHealthSnapshot,
 };
+pub(crate) use pnl_backfill::{PnlBackfillSnapshot, PnlBackfillStatus};
 pub(crate) use reconcile::{RecoveryAnomalyDirtyObserver, RecoveryDirtyState};
 
 #[derive(Clone)]

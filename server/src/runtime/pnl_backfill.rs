@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use poise_engine::ports::AccountPort;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -12,11 +13,57 @@ use super::{RuntimeHealthComponent, ServerRuntime};
 
 const PNL_BACKFILL_INTERVAL: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct PnlBackfillSummary {
     pub records_seen: usize,
     pub records_inserted: usize,
+    pub records_skipped: usize,
     pub failures: usize,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct PnlBackfillSnapshot {
+    pub last_completed_at: Option<DateTime<Utc>>,
+    pub records_seen: usize,
+    pub records_inserted: usize,
+    pub records_skipped: usize,
+    pub failures: usize,
+    pub last_error_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PnlBackfillStatus {
+    snapshot: RwLock<PnlBackfillSnapshot>,
+}
+
+impl PnlBackfillStatus {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn record_completion(&self, completed_at: DateTime<Utc>, summary: PnlBackfillSummary) {
+        let mut snapshot = self.snapshot.write().unwrap();
+        snapshot.last_completed_at = Some(completed_at);
+        snapshot.records_seen = summary.records_seen;
+        snapshot.records_inserted = summary.records_inserted;
+        snapshot.records_skipped = summary.records_skipped;
+        snapshot.failures = summary.failures;
+        if let Some(error) = summary.last_error {
+            snapshot.last_error_at = Some(completed_at);
+            snapshot.last_error = Some(error);
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> PnlBackfillSnapshot {
+        self.snapshot.read().unwrap().clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_snapshot(&self, snapshot: PnlBackfillSnapshot) {
+        *self.snapshot.write().unwrap() = snapshot;
+    }
 }
 
 pub(super) fn spawn_pnl_backfill_task(
@@ -26,6 +73,7 @@ pub(super) fn spawn_pnl_backfill_task(
     let state = runtime.state.reconcile.clone();
     let account = Arc::clone(&runtime.account);
     let runtime_health = Arc::clone(&runtime.state.runtime_health);
+    let pnl_backfill_status = Arc::clone(&runtime.state.pnl_backfill_status);
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PNL_BACKFILL_INTERVAL);
@@ -40,30 +88,39 @@ pub(super) fn spawn_pnl_backfill_task(
                 }
                 _ = interval.tick() => {
                     let summary = backfill_recent_pnl_once(&state, account.as_ref()).await;
+                    let completed_at = Utc::now();
+                    pnl_backfill_status.record_completion(completed_at, summary.clone());
                     if summary.failures > 0 {
-                        runtime_health.record_error_now(
-                            RuntimeHealthComponent::PnlBackfill,
+                        let error = summary.last_error.clone().unwrap_or_else(|| {
                             format!(
-                                "records_seen={}, records_inserted={}, failures={}",
+                                "records_seen={}, records_inserted={}, records_skipped={}, failures={}",
                                 summary.records_seen,
                                 summary.records_inserted,
+                                summary.records_skipped,
                                 summary.failures
-                            ),
+                            )
+                        });
+                        runtime_health.record_error(
+                            RuntimeHealthComponent::PnlBackfill,
+                            completed_at,
+                            error,
                         );
                     } else {
                         runtime_health
-                            .record_success_now(RuntimeHealthComponent::PnlBackfill);
+                            .record_success(RuntimeHealthComponent::PnlBackfill, completed_at);
                     }
                     if summary.records_inserted > 0 {
                         tracing::info!(
                             records_seen = summary.records_seen,
                             records_inserted = summary.records_inserted,
+                            records_skipped = summary.records_skipped,
                             failures = summary.failures,
                             "track pnl backfill inserted records"
                         );
                     } else if summary.failures > 0 {
                         tracing::warn!(
                             records_seen = summary.records_seen,
+                            records_skipped = summary.records_skipped,
                             failures = summary.failures,
                             "track pnl backfill completed with failures"
                         );
@@ -89,6 +146,7 @@ pub(super) async fn backfill_recent_pnl_once(
             Ok(records) => records,
             Err(error) => {
                 summary.failures += 1;
+                summary.last_error = Some(error.to_string());
                 tracing::warn!(
                     track_id = track.id,
                     venue = track.instrument.venue.as_str(),
@@ -110,6 +168,7 @@ pub(super) async fn backfill_recent_pnl_once(
                     .await
             };
             let Some(track_id) = track_id else {
+                summary.records_skipped += 1;
                 tracing::warn!(
                     venue = record.instrument.venue.as_str(),
                     symbol = %record.instrument.symbol,
@@ -125,9 +184,10 @@ pub(super) async fn backfill_recent_pnl_once(
                 .await
             {
                 Ok(true) => summary.records_inserted += 1,
-                Ok(false) => {}
+                Ok(false) => summary.records_skipped += 1,
                 Err(error) => {
                     summary.failures += 1;
+                    summary.last_error = Some(error.to_string());
                     tracing::warn!(
                         track_id,
                         "failed to persist backfilled track pnl record: {error}"
@@ -207,8 +267,14 @@ mod tests {
 
         assert_eq!(first.records_seen, 1);
         assert_eq!(first.records_inserted, 1);
+        assert_eq!(first.records_skipped, 0);
+        assert_eq!(first.failures, 0);
+        assert_eq!(first.last_error, None);
         assert_eq!(second.records_seen, 1);
         assert_eq!(second.records_inserted, 0);
+        assert_eq!(second.records_skipped, 1);
+        assert_eq!(second.failures, 0);
+        assert_eq!(second.last_error, None);
         let stats = repository
             .load_track_pnl_stats(
                 &TrackId::new("btc-coin"),
@@ -253,7 +319,9 @@ mod tests {
 
         assert_eq!(summary.records_seen, 0);
         assert_eq!(summary.records_inserted, 0);
+        assert_eq!(summary.records_skipped, 0);
         assert_eq!(summary.failures, 1);
+        assert_eq!(summary.last_error.as_deref(), Some("temporary okx outage"));
         assert_eq!(*account.calls.lock().unwrap(), vec!["BTC-USD-SWAP"]);
         let stats = repository
             .load_track_pnl_stats(

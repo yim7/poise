@@ -31,8 +31,9 @@ use crate::exchange_freshness::ExchangeFreshness;
 use crate::exchange_startup::{build_exchange_startup_control, build_track_leverage_index};
 use crate::projector::TrackProjector;
 use crate::runtime::{
-    AccountMarginGuardStore, RecoveryAnomalyDirtyObserver, RecoveryDirtyState, RuntimeHandles,
-    RuntimeHealth, RuntimePorts, RuntimeStartupDefinition, ServerRuntime, TrackReconcileGuards,
+    AccountMarginGuardStore, PnlBackfillStatus, RecoveryAnomalyDirtyObserver, RecoveryDirtyState,
+    RuntimeHandles, RuntimeHealth, RuntimePorts, RuntimeStartupDefinition, ServerRuntime,
+    TrackReconcileGuards,
 };
 use crate::server_context::{
     EffectWorkerState, HttpState, ReconcileState, RuntimeState, WebSocketState,
@@ -294,6 +295,7 @@ async fn assemble_with_state_store(
     let reconcile_guards = Arc::new(TrackReconcileGuards::default());
     let submit_preflight = Arc::new(SubmitPreflight::new());
     let runtime_health = Arc::new(RuntimeHealth::new());
+    let pnl_backfill_status = Arc::new(PnlBackfillStatus::new());
     let reconcile_state = build_reconcile_state(
         observation_service.clone(),
         runtime_lifecycle_service.clone(),
@@ -311,6 +313,7 @@ async fn assemble_with_state_store(
         account_monitor.clone(),
         account_projector.clone(),
         runtime_health.clone(),
+        pnl_backfill_status.clone(),
     );
     let websocket_state = build_websocket_state(
         notifications.clone(),
@@ -328,6 +331,7 @@ async fn assemble_with_state_store(
         account_monitor.clone(),
         account_margin_guard.clone(),
         runtime_health.clone(),
+        pnl_backfill_status,
     );
     let effect_worker_state = build_effect_worker_state(
         reconcile_state.clone(),
@@ -432,6 +436,7 @@ pub(crate) fn build_http_state(
     account_monitor: Arc<AccountMonitor>,
     account_projector: Arc<AccountProjector>,
     runtime_health: Arc<RuntimeHealth>,
+    pnl_backfill_status: Arc<PnlBackfillStatus>,
 ) -> HttpState {
     HttpState {
         command_service,
@@ -441,6 +446,7 @@ pub(crate) fn build_http_state(
         account_monitor,
         account_projector,
         runtime_health,
+        pnl_backfill_status,
     }
 }
 
@@ -493,6 +499,7 @@ pub(crate) fn build_runtime_state(
     account_monitor: Arc<AccountMonitor>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
     runtime_health: Arc<RuntimeHealth>,
+    pnl_backfill_status: Arc<PnlBackfillStatus>,
 ) -> RuntimeState {
     RuntimeState {
         reconcile,
@@ -501,6 +508,7 @@ pub(crate) fn build_runtime_state(
         account_monitor,
         account_margin_guard,
         runtime_health,
+        pnl_backfill_status,
     }
 }
 

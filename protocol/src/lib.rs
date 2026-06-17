@@ -44,6 +44,18 @@ pub struct HealthTaskView {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PnlBackfillStatusView {
+    pub last_completed_at: Option<String>,
+    pub records_seen: usize,
+    pub records_inserted: usize,
+    pub records_skipped: usize,
+    pub failures: usize,
+    pub last_error_at: Option<String>,
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthResponse {
@@ -51,6 +63,8 @@ pub struct HealthResponse {
     pub track_count: usize,
     pub attention_required_count: usize,
     pub tasks: Vec<HealthTaskView>,
+    #[serde(default)]
+    pub pnl_backfill: PnlBackfillStatusView,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
