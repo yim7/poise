@@ -11,7 +11,9 @@ use tokio::sync::broadcast;
 use crate::account_projector::AccountProjector;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
-use crate::runtime::{AccountMarginGuardStore, RecoveryDirtyState, TrackReconcileGuards};
+use crate::runtime::{
+    AccountMarginGuardStore, RecoveryDirtyState, RuntimeHealth, TrackReconcileGuards,
+};
 use crate::submit_preflight::SubmitPreflight;
 
 #[derive(Clone)]
@@ -22,6 +24,7 @@ pub struct HttpState {
     pub projector: Arc<TrackProjector>,
     pub account_monitor: Arc<AccountMonitor>,
     pub account_projector: Arc<AccountProjector>,
+    pub runtime_health: Arc<RuntimeHealth>,
 }
 
 #[derive(Clone)]
@@ -56,6 +59,7 @@ pub struct RuntimeState {
     pub live_view_notifications: broadcast::Sender<String>,
     pub account_monitor: Arc<AccountMonitor>,
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
+    pub runtime_health: Arc<RuntimeHealth>,
 }
 
 #[derive(Clone)]
@@ -65,4 +69,5 @@ pub struct EffectWorkerState {
     pub submit_effect_service: Arc<SubmitEffectService>,
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
     pub session_effect_queue: SessionEffectQueue,
+    pub runtime_health: Arc<RuntimeHealth>,
 }

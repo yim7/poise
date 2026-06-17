@@ -5,7 +5,7 @@ use poise_engine::ports::MarketDataTick;
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 
-use super::ServerRuntime;
+use super::{RuntimeHealthComponent, ServerRuntime};
 
 pub(super) fn spawn_market_task(
     runtime: &ServerRuntime,
@@ -14,6 +14,7 @@ pub(super) fn spawn_market_task(
     let state = runtime.state.clone();
     let market_data = Arc::clone(&runtime.market_data);
     let market_data_health_state = Arc::clone(&runtime.market_data_health_state);
+    let runtime_health = Arc::clone(&runtime.state.runtime_health);
 
     tokio::spawn(async move {
         let tracks = state
@@ -32,6 +33,7 @@ pub(super) fn spawn_market_task(
             let instrument = track.instrument.clone();
             match market_data.subscribe_prices(&instrument).await {
                 Ok(mut receiver) => {
+                    runtime_health.record_success_now(RuntimeHealthComponent::MarketData);
                     tracing::info!(
                         "subscribed market data for track {} ({})",
                         track.id,
@@ -39,6 +41,7 @@ pub(super) fn spawn_market_task(
                     );
                     let state = state.clone();
                     let market_data_health_state = Arc::clone(&market_data_health_state);
+                    let runtime_health = Arc::clone(&runtime_health);
                     let mut worker_shutdown_rx = shutdown_rx.clone();
                     workers.spawn(async move {
                         loop {
@@ -55,6 +58,14 @@ pub(super) fn spawn_market_task(
                                 }
                                 tick = receiver.recv() => {
                                     let Some(tick) = tick else {
+                                        runtime_health.record_error_now(
+                                            RuntimeHealthComponent::MarketData,
+                                            format!(
+                                                "market data receiver closed for track {} ({})",
+                                                track.id,
+                                                instrument.symbol
+                                            ),
+                                        );
                                         tracing::warn!(
                                             "market data receiver closed for track {} ({})",
                                             track.id,
@@ -83,12 +94,19 @@ pub(super) fn spawn_market_task(
                                         .await
                                     {
                                         Ok(_) => {
+                                            runtime_health.record_success_now(
+                                                RuntimeHealthComponent::MarketData,
+                                            );
                                             let _ = state
                                                 .live_view_notifications
                                                 .send(track.id.clone());
                                             market_data_health_state.mark_dirty(&track.id);
                                         }
                                         Err(error) => {
+                                            runtime_health.record_error_now(
+                                                RuntimeHealthComponent::MarketData,
+                                                error.to_string(),
+                                            );
                                             tracing::warn!(
                                                 "failed to apply market data update for {}: {}",
                                                 instrument.symbol,
@@ -102,6 +120,8 @@ pub(super) fn spawn_market_task(
                     });
                 }
                 Err(error) => {
+                    runtime_health
+                        .record_error_now(RuntimeHealthComponent::MarketData, error.to_string());
                     tracing::warn!(
                         "failed to subscribe market data for {}: {error}",
                         instrument.symbol

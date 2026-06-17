@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::order_outcome::OutcomeUnknownRecovery;
+use crate::runtime::RuntimeHealthComponent;
 use crate::server_context::EffectWorkerState;
 
 mod dispatch;
@@ -104,6 +105,10 @@ impl EffectWorker {
                 }
                 _ = sleep(self.poll_interval) => {
                     if let Err(error) = self.run_once().await {
+                        self.state.runtime_health.record_error_now(
+                            RuntimeHealthComponent::EffectWorker,
+                            error.to_string(),
+                        );
                         tracing::warn!("effect worker iteration failed: {error}");
                         if wait_for_backoff_or_shutdown(
                             &mut shutdown_rx,
@@ -113,6 +118,10 @@ impl EffectWorker {
                         {
                             return Ok(());
                         }
+                    } else {
+                        self.state
+                            .runtime_health
+                            .record_success_now(RuntimeHealthComponent::EffectWorker);
                     }
                 }
             }

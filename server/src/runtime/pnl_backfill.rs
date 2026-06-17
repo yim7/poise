@@ -8,7 +8,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::server_context::ReconcileState;
 
-use super::ServerRuntime;
+use super::{RuntimeHealthComponent, ServerRuntime};
 
 const PNL_BACKFILL_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -25,6 +25,7 @@ pub(super) fn spawn_pnl_backfill_task(
 ) -> JoinHandle<()> {
     let state = runtime.state.reconcile.clone();
     let account = Arc::clone(&runtime.account);
+    let runtime_health = Arc::clone(&runtime.state.runtime_health);
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PNL_BACKFILL_INTERVAL);
@@ -39,6 +40,20 @@ pub(super) fn spawn_pnl_backfill_task(
                 }
                 _ = interval.tick() => {
                     let summary = backfill_recent_pnl_once(&state, account.as_ref()).await;
+                    if summary.failures > 0 {
+                        runtime_health.record_error_now(
+                            RuntimeHealthComponent::PnlBackfill,
+                            format!(
+                                "records_seen={}, records_inserted={}, failures={}",
+                                summary.records_seen,
+                                summary.records_inserted,
+                                summary.failures
+                            ),
+                        );
+                    } else {
+                        runtime_health
+                            .record_success_now(RuntimeHealthComponent::PnlBackfill);
+                    }
                     if summary.records_inserted > 0 {
                         tracing::info!(
                             records_seen = summary.records_seen,

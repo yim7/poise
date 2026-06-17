@@ -27,7 +27,8 @@ use tokio::sync::mpsc;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::projector::TrackProjector;
 use crate::runtime::{
-    AccountMarginGuardStore, RecoveryAnomalyDirtyObserver, RecoveryDirtyState, TrackReconcileGuards,
+    AccountMarginGuardStore, RecoveryAnomalyDirtyObserver, RecoveryDirtyState, RuntimeHealth,
+    TrackReconcileGuards,
 };
 use crate::server_context::{EffectWorkerState, RuntimeState};
 use crate::submit_preflight::SubmitPreflight;
@@ -447,6 +448,7 @@ pub(crate) fn build_http_state(
         projector,
         account_monitor,
         account_projector,
+        Arc::new(RuntimeHealth::new()),
     )
 }
 
@@ -477,6 +479,7 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     let exchange_freshness = Arc::new(ExchangeFreshness::default());
     let submit_preflight = Arc::new(SubmitPreflight::new());
     let reconcile_guards = Arc::new(TrackReconcileGuards::default());
+    let runtime_health = Arc::new(RuntimeHealth::new());
     let reconcile = crate::assembly::build_reconcile_state(
         Arc::clone(&services.observation_service),
         Arc::clone(&services.runtime_lifecycle_service),
@@ -492,6 +495,7 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
         broadcast::channel(1024).0,
         Arc::clone(&account_monitor),
         Arc::clone(&services.account_margin_guard),
+        runtime_health.clone(),
     );
     let effect_worker_state = crate::assembly::build_effect_worker_state(
         reconcile,
@@ -499,6 +503,7 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
         Arc::clone(&services.submit_effect_service),
         Arc::clone(&services.account_margin_guard),
         services.session_effect_queue.clone(),
+        runtime_health,
     );
     build_test_contexts_from_runtime_states(
         runtime_state,
@@ -521,6 +526,10 @@ pub(crate) fn build_test_contexts_from_runtime_states(
     debug_assert!(Arc::ptr_eq(
         &runtime_state.reconcile.submit_preflight,
         &effect_worker_state.reconcile.submit_preflight,
+    ));
+    debug_assert!(Arc::ptr_eq(
+        &runtime_state.runtime_health,
+        &effect_worker_state.runtime_health,
     ));
 
     let exchange_freshness = Arc::clone(&runtime_state.reconcile.exchange_freshness);
@@ -549,6 +558,7 @@ pub(crate) fn build_effect_worker_test_context(
 ) -> EffectWorkerTestContext {
     let exchange_freshness = Arc::new(ExchangeFreshness::default());
     let submit_preflight = Arc::new(SubmitPreflight::new());
+    let runtime_health = Arc::new(RuntimeHealth::new());
     let reconcile = crate::assembly::build_reconcile_state(
         Arc::clone(&services.observation_service),
         Arc::clone(&services.runtime_lifecycle_service),
@@ -565,6 +575,7 @@ pub(crate) fn build_effect_worker_test_context(
             Arc::clone(&services.submit_effect_service),
             Arc::clone(&services.account_margin_guard),
             services.session_effect_queue.clone(),
+            runtime_health,
         ),
         exchange_freshness,
         submit_preflight,

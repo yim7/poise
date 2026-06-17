@@ -32,7 +32,7 @@ use crate::exchange_startup::{build_exchange_startup_control, build_track_levera
 use crate::projector::TrackProjector;
 use crate::runtime::{
     AccountMarginGuardStore, RecoveryAnomalyDirtyObserver, RecoveryDirtyState, RuntimeHandles,
-    RuntimePorts, RuntimeStartupDefinition, ServerRuntime, TrackReconcileGuards,
+    RuntimeHealth, RuntimePorts, RuntimeStartupDefinition, ServerRuntime, TrackReconcileGuards,
 };
 use crate::server_context::{
     EffectWorkerState, HttpState, ReconcileState, RuntimeState, WebSocketState,
@@ -293,6 +293,7 @@ async fn assemble_with_state_store(
     let exchange_freshness = Arc::new(ExchangeFreshness::default());
     let reconcile_guards = Arc::new(TrackReconcileGuards::default());
     let submit_preflight = Arc::new(SubmitPreflight::new());
+    let runtime_health = Arc::new(RuntimeHealth::new());
     let reconcile_state = build_reconcile_state(
         observation_service.clone(),
         runtime_lifecycle_service.clone(),
@@ -309,6 +310,7 @@ async fn assemble_with_state_store(
         projector.clone(),
         account_monitor.clone(),
         account_projector.clone(),
+        runtime_health.clone(),
     );
     let websocket_state = build_websocket_state(
         notifications.clone(),
@@ -325,6 +327,7 @@ async fn assemble_with_state_store(
         live_view_notifications.clone(),
         account_monitor.clone(),
         account_margin_guard.clone(),
+        runtime_health.clone(),
     );
     let effect_worker_state = build_effect_worker_state(
         reconcile_state.clone(),
@@ -332,6 +335,7 @@ async fn assemble_with_state_store(
         submit_effect_service.clone(),
         account_margin_guard.clone(),
         session_effect_queue,
+        runtime_health,
     );
     #[cfg(test)]
     let (runtime_test_context, effect_worker_test_context) =
@@ -427,6 +431,7 @@ pub(crate) fn build_http_state(
     projector: Arc<TrackProjector>,
     account_monitor: Arc<AccountMonitor>,
     account_projector: Arc<AccountProjector>,
+    runtime_health: Arc<RuntimeHealth>,
 ) -> HttpState {
     HttpState {
         command_service,
@@ -435,6 +440,7 @@ pub(crate) fn build_http_state(
         projector,
         account_monitor,
         account_projector,
+        runtime_health,
     }
 }
 
@@ -486,6 +492,7 @@ pub(crate) fn build_runtime_state(
     live_view_notifications: broadcast::Sender<String>,
     account_monitor: Arc<AccountMonitor>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
+    runtime_health: Arc<RuntimeHealth>,
 ) -> RuntimeState {
     RuntimeState {
         reconcile,
@@ -493,6 +500,7 @@ pub(crate) fn build_runtime_state(
         live_view_notifications,
         account_monitor,
         account_margin_guard,
+        runtime_health,
     }
 }
 
@@ -502,6 +510,7 @@ pub(crate) fn build_effect_worker_state(
     submit_effect_service: Arc<SubmitEffectService>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
     session_effect_queue: poise_application::SessionEffectQueue,
+    runtime_health: Arc<RuntimeHealth>,
 ) -> EffectWorkerState {
     EffectWorkerState {
         reconcile,
@@ -509,6 +518,7 @@ pub(crate) fn build_effect_worker_state(
         submit_effect_service,
         account_margin_guard,
         session_effect_queue,
+        runtime_health,
     }
 }
 

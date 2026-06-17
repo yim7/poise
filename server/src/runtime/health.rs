@@ -44,16 +44,6 @@ pub(crate) enum RuntimeHealthStatus {
     Degraded,
 }
 
-impl RuntimeHealthStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::Ok => "ok",
-            Self::Degraded => "degraded",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeTaskHealthSnapshot {
     pub component: RuntimeHealthComponent,
@@ -136,6 +126,10 @@ impl RuntimeHealth {
         task.last_success_at = Some(at);
     }
 
+    pub(crate) fn record_success_now(&self, component: RuntimeHealthComponent) {
+        self.record_success(component, Utc::now());
+    }
+
     pub(crate) fn record_error(
         &self,
         component: RuntimeHealthComponent,
@@ -148,6 +142,14 @@ impl RuntimeHealth {
             .or_insert_with(|| RuntimeTaskHealth::new(component));
         task.last_error_at = Some(at);
         task.last_error = Some(error.to_string());
+    }
+
+    pub(crate) fn record_error_now(
+        &self,
+        component: RuntimeHealthComponent,
+        error: impl ToString,
+    ) {
+        self.record_error(component, Utc::now(), error);
     }
 
     pub(crate) fn snapshot(&self) -> RuntimeHealthSnapshot {
@@ -235,10 +237,4 @@ mod tests {
         assert_eq!(recovered.last_error.as_deref(), Some("temporary outage"));
     }
 
-    #[test]
-    fn runtime_health_status_labels_are_stable() {
-        assert_eq!(RuntimeHealthStatus::Unknown.as_str(), "unknown");
-        assert_eq!(RuntimeHealthStatus::Ok.as_str(), "ok");
-        assert_eq!(RuntimeHealthStatus::Degraded.as_str(), "degraded");
-    }
 }

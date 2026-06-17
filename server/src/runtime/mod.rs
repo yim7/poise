@@ -32,6 +32,10 @@ mod submit_preflight;
 mod user_data;
 
 pub use guards::{AccountMarginGuardStore, TrackReconcileGuards};
+pub(crate) use health::{
+    RuntimeHealth, RuntimeHealthComponent, RuntimeHealthSnapshot, RuntimeHealthStatus,
+    RuntimeTaskHealthSnapshot,
+};
 pub(crate) use reconcile::{RecoveryAnomalyDirtyObserver, RecoveryDirtyState};
 
 #[derive(Clone)]

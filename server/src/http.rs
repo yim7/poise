@@ -6,25 +6,21 @@ use poise_application::{DiagnosticSeverity, TrackMutationError};
 use poise_core::track::TrackId;
 use poise_engine::command::TrackCommand;
 use poise_protocol::{
-    AccountSummaryView, ActivityLevelView, TrackCommandAccepted, TrackCommandRequest,
-    TrackCommandType, TrackDetailView, TrackDiagnosticItemView, TrackDiagnosticsView,
-    TrackListResponse,
+    AccountSummaryView, ActivityLevelView, HealthResponse, HealthStatusView, HealthTaskStatusView,
+    HealthTaskView, TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
+    TrackDiagnosticItemView, TrackDiagnosticsView, TrackListResponse,
 };
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
 
+use crate::runtime::{
+    RuntimeHealthStatus, RuntimeHealthSnapshot, RuntimeTaskHealthSnapshot,
+};
 use crate::server_context::{HttpState, WebSocketState};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct ErrorResponse {
     error: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct HealthResponse {
-    status: String,
-    track_count: usize,
-    attention_required_count: usize,
 }
 
 pub fn router(http_state: HttpState, websocket_state: WebSocketState) -> Router {
@@ -74,7 +70,9 @@ async fn health(
                 || source.has_stale_market_data
         })
         .count();
-    let status = if attention_required_count == 0 {
+    let runtime_health = state.runtime_health.snapshot();
+    let task_attention_required = runtime_health_has_degraded_task(&runtime_health);
+    let status = if attention_required_count == 0 && !task_attention_required {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
@@ -83,15 +81,45 @@ async fn health(
     Ok((
         status,
         Json(HealthResponse {
-            status: if attention_required_count == 0 {
-                "ok".to_string()
+            status: if attention_required_count == 0 && !task_attention_required {
+                HealthStatusView::Ok
             } else {
-                "attention_required".to_string()
+                HealthStatusView::AttentionRequired
             },
             track_count: sources.len(),
             attention_required_count,
+            tasks: project_runtime_health(runtime_health),
         }),
     ))
+}
+
+fn runtime_health_has_degraded_task(snapshot: &RuntimeHealthSnapshot) -> bool {
+    snapshot
+        .tasks
+        .iter()
+        .any(|task| task.status == RuntimeHealthStatus::Degraded)
+}
+
+fn project_runtime_health(snapshot: RuntimeHealthSnapshot) -> Vec<HealthTaskView> {
+    snapshot
+        .tasks
+        .into_iter()
+        .map(project_runtime_health_task)
+        .collect()
+}
+
+fn project_runtime_health_task(task: RuntimeTaskHealthSnapshot) -> HealthTaskView {
+    HealthTaskView {
+        component: task.component.as_str().to_string(),
+        status: match task.status {
+            RuntimeHealthStatus::Unknown => HealthTaskStatusView::Unknown,
+            RuntimeHealthStatus::Ok => HealthTaskStatusView::Ok,
+            RuntimeHealthStatus::Degraded => HealthTaskStatusView::Degraded,
+        },
+        last_success_at: task.last_success_at.map(|value| value.to_rfc3339()),
+        last_error_at: task.last_error_at.map(|value| value.to_rfc3339()),
+        last_error: task.last_error,
+    }
 }
 
 async fn get_account(
@@ -253,6 +281,7 @@ mod tests {
 
     use crate::account_projector::AccountProjector;
     use crate::projector::TrackProjector;
+    use crate::runtime::RuntimeHealthComponent;
     use crate::server_context::{HttpState, WebSocketState};
     use crate::test_support::{
         build_http_state, build_test_application_services, build_websocket_state,
@@ -590,6 +619,16 @@ mod tests {
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["track_count"], 1);
         assert_eq!(payload["attention_required_count"], 0);
+        assert_eq!(payload["tasks"].as_array().unwrap().len(), 6);
+        let pnl_backfill = payload["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["component"] == "pnl_backfill")
+            .unwrap();
+        assert_eq!(pnl_backfill["status"], "unknown");
+        assert!(pnl_backfill["last_success_at"].is_null());
+        assert!(pnl_backfill["last_error"].is_null());
     }
 
     #[tokio::test]
@@ -666,6 +705,44 @@ mod tests {
         assert_eq!(payload["status"], "attention_required");
         assert_eq!(payload["track_count"], 1);
         assert_eq!(payload["attention_required_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn health_returns_service_unavailable_when_runtime_task_degraded() {
+        let state = app_state().await;
+        state.http_state.runtime_health.record_error(
+            RuntimeHealthComponent::PnlBackfill,
+            Utc.with_ymd_and_hms(2026, 6, 17, 1, 2, 3).unwrap(),
+            "temporary okx outage",
+        );
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["status"], "attention_required");
+        assert_eq!(payload["attention_required_count"], 0);
+        let pnl_backfill = payload["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["component"] == "pnl_backfill")
+            .unwrap();
+        assert_eq!(pnl_backfill["status"], "degraded");
+        assert_eq!(
+            pnl_backfill["last_error_at"],
+            "2026-06-17T01:02:03+00:00"
+        );
+        assert_eq!(pnl_backfill["last_error"], "temporary okx outage");
     }
 
     #[tokio::test]

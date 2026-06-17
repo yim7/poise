@@ -2,7 +2,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
-use super::ServerRuntime;
+use super::{RuntimeHealthComponent, ServerRuntime};
 
 pub(super) fn spawn_account_task(
     runtime: &ServerRuntime,
@@ -23,7 +23,15 @@ pub(super) fn spawn_account_task(
                 }
                 _ = interval.tick() => {
                     if let Err(error) = state.account_monitor.refresh_once().await {
+                        state.runtime_health.record_error_now(
+                            RuntimeHealthComponent::AccountMonitor,
+                            error.to_string(),
+                        );
                         tracing::warn!("account monitor refresh failed: {error}");
+                    } else {
+                        state
+                            .runtime_health
+                            .record_success_now(RuntimeHealthComponent::AccountMonitor);
                     }
                 }
             }

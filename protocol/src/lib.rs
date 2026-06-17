@@ -19,6 +19,40 @@ pub struct TrackListResponse {
     pub items: Vec<TrackListItemView>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatusView {
+    Ok,
+    AttentionRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthTaskStatusView {
+    Unknown,
+    Ok,
+    Degraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HealthTaskView {
+    pub component: String,
+    pub status: HealthTaskStatusView,
+    pub last_success_at: Option<String>,
+    pub last_error_at: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HealthResponse {
+    pub status: HealthStatusView,
+    pub track_count: usize,
+    pub attention_required_count: usize,
+    pub tasks: Vec<HealthTaskView>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrackListItemView {

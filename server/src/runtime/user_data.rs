@@ -4,7 +4,7 @@ use poise_engine::ports::UserDataEvent;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use super::{ServerRuntime, exchange_state::apply_user_data_event};
+use super::{RuntimeHealthComponent, ServerRuntime, exchange_state::apply_user_data_event};
 
 pub(super) fn spawn_user_task(
     runtime: &ServerRuntime,
@@ -15,6 +15,9 @@ pub(super) fn spawn_user_task(
     let execution = Arc::clone(&runtime.execution);
 
     tokio::spawn(async move {
+        state
+            .runtime_health
+            .record_success_now(RuntimeHealthComponent::UserData);
         loop {
             if *shutdown_rx.borrow() {
                 break;
@@ -32,6 +35,12 @@ pub(super) fn spawn_user_task(
             };
 
             let Some(event) = event else {
+                if !*shutdown_rx.borrow() {
+                    state.runtime_health.record_error_now(
+                        RuntimeHealthComponent::UserData,
+                        "user data receiver closed",
+                    );
+                }
                 break;
             };
 
@@ -42,6 +51,14 @@ pub(super) fn spawn_user_task(
                 .resolve_track_id(&instrument)
                 .await
             else {
+                state.runtime_health.record_error_now(
+                    RuntimeHealthComponent::UserData,
+                    format!(
+                        "received user data for unknown instrument {}:{}",
+                        instrument.venue.as_str(),
+                        instrument.symbol
+                    ),
+                );
                 tracing::warn!(
                     "received user data for unknown instrument {}:{}",
                     instrument.venue.as_str(),
@@ -52,6 +69,9 @@ pub(super) fn spawn_user_task(
             if let Err(error) =
                 apply_user_data_event(&state.reconcile, execution.as_ref(), &track_id, event).await
             {
+                state
+                    .runtime_health
+                    .record_error_now(RuntimeHealthComponent::UserData, error.message());
                 tracing::warn!(
                     "failed to apply user data update for {}: {}",
                     instrument.symbol,
@@ -59,6 +79,9 @@ pub(super) fn spawn_user_task(
                 );
                 continue;
             }
+            state
+                .runtime_health
+                .record_success_now(RuntimeHealthComponent::UserData);
         }
     })
 }

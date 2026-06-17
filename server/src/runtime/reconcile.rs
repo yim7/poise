@@ -18,7 +18,8 @@ use crate::order_outcome::reconcile_execution;
 use crate::server_context::ReconcileState;
 
 use super::{
-    ReconcileExecution, ReconcileRequest, ReconcileStateAccess, ServerRuntime,
+    ReconcileExecution, ReconcileRequest, ReconcileStateAccess, RuntimeHealthComponent,
+    ServerRuntime,
     diagnostics::{describe_open_orders, describe_runtime_bindings},
     exchange_state, preserve_track_mutation_error,
 };
@@ -103,6 +104,9 @@ pub(super) fn spawn_recovery_task(
             .await;
         let mut tracked =
             seed_recovery_tracking(&state.reconcile, &instruments, retry_interval).await;
+        state
+            .runtime_health
+            .record_success_now(RuntimeHealthComponent::Recovery);
         let mut next_audit_at = instruments
             .iter()
             .map(|track| (track.id.clone(), Instant::now() + audit_interval))
@@ -172,11 +176,19 @@ pub(super) fn spawn_recovery_task(
                             ExchangeSyncMode::RecoverAndReconcile,
                         )
                         .await {
+                            state.runtime_health.record_error_now(
+                                RuntimeHealthComponent::Recovery,
+                                error.message(),
+                            );
                             tracing::warn!(
                                 "failed to auto-resync recovery anomaly for {}: {}",
                                 instrument.symbol,
                                 error.message()
                             );
+                        } else {
+                            state
+                                .runtime_health
+                                .record_success_now(RuntimeHealthComponent::Recovery);
                         }
                     }
                 }
