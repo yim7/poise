@@ -40,7 +40,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 0 | 收尾当前 PNL backfill | P0 | M | completed | 无 |
 | 1 | 增加运行健康与启动前检查 | P0 | M | completed | Goal 0 |
-| 2 | 建立交易事实对账闭环 | P0 | L | pending | Goal 0, Goal 1 |
+| 2 | 建立交易事实对账闭环 | P0 | L | completed | Goal 0, Goal 1 |
 | 3 | 提供配置解释和 dry-run | P1 | M | pending | Goal 1 |
 | 4 | 建立 BTC-USD-SWAP 调参 replay | P1 | M | pending | Goal 3 |
 | 5 | 文档治理与模块拆分决策 | P1 | S | pending | Goal 0, Goal 1 |
@@ -148,7 +148,7 @@ Task 清单：
 | 2.1 增加 PNL backfill 观测字段 | completed | 能查询最近回补时间、写入数量、跳过数量、最近错误 | `1aa2876` |
 | 2.2 增加 recent fills 审计接口 | completed | 能比较最近交易所 fills 与本地 `track_pnl_records` 的覆盖情况 | `7bcd54f` |
 | 2.3 接入资金费事实 | completed | 可归属到 track 的 funding fee 进入 `TrackPnlRecord`，资产不一致时拒绝混算 | `606c59b` |
-| 2.4 增加启动后自动审计 | pending | 重启后能发现最近成交缺失，并给出明确 diagnostics |  |
+| 2.4 增加启动后自动审计 | completed | 重启后能发现最近成交缺失，并给出明确 diagnostics | `8a7b999` |
 
 建议验证命令：
 
