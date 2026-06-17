@@ -48,6 +48,14 @@ pub(crate) fn explain_track_config(
     );
 
     let native_quantity_per_unit = native_quantity_per_unit(track, exchange_rules)?;
+    ensure!(
+        native_quantity_per_unit + f64::EPSILON >= exchange_rules.min_qty,
+        "track `{}` symbol `{}` native_quantity_per_unit {} is below min_qty {}",
+        track.track_id().as_str(),
+        track.instrument().symbol,
+        native_quantity_per_unit,
+        exchange_rules.min_qty
+    );
     Ok(TrackConfigExplanation {
         track_id: track.track_id().as_str().to_string(),
         symbol: track.instrument().symbol.clone(),
@@ -84,7 +92,7 @@ fn native_quantity_per_unit(
         QuantityKind::InverseContract => {
             let contract_notional = exchange_rules.contract_notional.with_context(|| {
                 format!(
-                    "missing contract_notional for inverse config explanation on `{}`",
+                    "missing ctVal/contract_notional for inverse config explanation on `{}`",
                     track.instrument().symbol
                 )
             })?;

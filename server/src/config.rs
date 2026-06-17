@@ -84,7 +84,8 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<Config> {
 }
 
 pub fn parse_config(input: &str) -> Result<Config> {
-    let config: Config = toml_edit::de::from_str(input).context("failed to parse TOML config")?;
+    let config: Config = toml_edit::de::from_str(input)
+        .map_err(|error| anyhow::anyhow!("failed to parse TOML config: {error}"))?;
     for track in &config.tracks {
         track
             .to_track_definition(config.exchange.venue())
@@ -222,6 +223,30 @@ total_loss_limit = 600.0
         .unwrap();
 
         assert_eq!(config.tracks[0].leverage, Some(20));
+    }
+
+    #[test]
+    fn parse_config_reports_missing_track_symbol_field() {
+        let error = parse_config(
+            r#"
+[exchange]
+venue = "binance"
+
+[[tracks]]
+track_id = "btc-core"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("symbol"));
     }
 
     #[test]

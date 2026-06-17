@@ -187,7 +187,7 @@ async fn estimate_capacity(
             QuantityKind::InverseContract => {
                 let contract_notional = exchange_rules.contract_notional.with_context(|| {
                     format!(
-                        "missing contract_notional for inverse dry-run capacity on `{}`",
+                        "missing ctVal/contract_notional for inverse dry-run capacity on `{}`",
                         track.instrument().symbol
                     )
                 })?;
@@ -308,12 +308,108 @@ total_loss_limit = 0.03
         assert!(response.warnings.is_empty());
     }
 
-    #[derive(Default)]
+    #[tokio::test]
+    async fn dry_run_reports_missing_inverse_ct_val_metadata() {
+        let config = inverse_config_with_notional_per_unit(300.0);
+        let exchange = Arc::new(RecordingDryRunExchange::with_rules(ExchangeRules {
+            contract_notional: None,
+            ..inverse_rules()
+        }));
+
+        let error = run_config_dry_run_with_ports(
+            &config,
+            ExchangePorts::new(
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+            ),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("BTC-USD-SWAP"));
+        assert!(error.contains("ctVal"));
+        assert!(error.contains("contract_notional"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_reports_native_quantity_below_minimum_unit() {
+        let config = inverse_config_with_notional_per_unit(50.0);
+        let exchange = Arc::new(RecordingDryRunExchange::default());
+
+        let error = run_config_dry_run_with_ports(
+            &config,
+            ExchangePorts::new(
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+            ),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("BTC-USD-SWAP"));
+        assert!(error.contains("native_quantity_per_unit"));
+        assert!(error.contains("0.5"));
+        assert!(error.contains("min_qty"));
+        assert!(error.contains("1"));
+    }
+
+    fn inverse_config_with_notional_per_unit(notional_per_unit: f64) -> crate::config::Config {
+        crate::config::parse_config(&format!(
+            r#"
+[exchange]
+venue = "okx"
+api_key = "demo-key"
+api_secret = "demo-secret"
+passphrase = "demo-passphrase"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTC-USD-SWAP"
+lower_price = 60000.0
+upper_price = 70000.0
+long_exposure_units = 4.0
+short_exposure_units = 6.0
+notional_per_unit = {notional_per_unit}
+leverage = 3
+daily_loss_limit = 0.01
+total_loss_limit = 0.03
+"#
+        ))
+        .unwrap()
+    }
+
     struct RecordingDryRunExchange {
         calls: Mutex<Vec<String>>,
+        rules: Mutex<ExchangeRules>,
+        mark_price: Mutex<Option<f64>>,
+    }
+
+    impl Default for RecordingDryRunExchange {
+        fn default() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                rules: Mutex::new(inverse_rules()),
+                mark_price: Mutex::new(Some(60_000.0)),
+            }
+        }
     }
 
     impl RecordingDryRunExchange {
+        fn with_rules(rules: ExchangeRules) -> Self {
+            Self {
+                rules: Mutex::new(rules),
+                ..Self::default()
+            }
+        }
+
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
         }
@@ -343,18 +439,7 @@ total_loss_limit = 0.03
             self.record(format!("metadata:{}", instrument.symbol));
             Ok(ExchangeInfo {
                 instrument: instrument.clone(),
-                rules: ExchangeRules {
-                    price_tick: 0.1,
-                    price_precision: Default::default(),
-                    quantity_kind: QuantityKind::InverseContract,
-                    contract_notional: Some(100.0),
-                    settlement_asset: "BTC".to_string(),
-                    quantity_step: 1.0,
-                    min_qty: 1.0,
-                    min_notional: 0.0,
-                    maker_fee_rate: 0.0002,
-                    taker_fee_rate: 0.0005,
-                },
+                rules: self.rules.lock().unwrap().clone(),
             })
         }
 
@@ -429,7 +514,22 @@ total_loss_limit = 0.03
 
         async fn get_mark_price(&self, _instrument: &Instrument) -> Result<Option<f64>> {
             self.record("mark_price:BTC-USD-SWAP");
-            Ok(Some(60_000.0))
+            Ok(*self.mark_price.lock().unwrap())
+        }
+    }
+
+    fn inverse_rules() -> ExchangeRules {
+        ExchangeRules {
+            price_tick: 0.1,
+            price_precision: Default::default(),
+            quantity_kind: QuantityKind::InverseContract,
+            contract_notional: Some(100.0),
+            settlement_asset: "BTC".to_string(),
+            quantity_step: 1.0,
+            min_qty: 1.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0002,
+            taker_fee_rate: 0.0005,
         }
     }
 }
