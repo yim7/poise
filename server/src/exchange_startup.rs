@@ -216,6 +216,28 @@ mod tests {
         assert!(message.contains("exchange rejected leverage"));
     }
 
+    #[tokio::test]
+    async fn apply_exchange_startup_controls_preserves_account_mode_error_context() {
+        let tracks = vec![track_spec("btc-core", "BTCUSDT", Some(7))];
+        let registry = track_definition_registry(&tracks);
+        let index = build_track_leverage_index(&tracks).unwrap();
+
+        let error = apply_exchange_startup_controls(
+            &registry,
+            &index,
+            &RecordingExchangeStartupControl::fail_account_mode(
+                "OKX account position mode must be `net_mode`, got `long_short_mode`",
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("failed to validate exchange account mode"));
+        assert!(message.contains("net_mode"));
+        assert!(message.contains("long_short_mode"));
+    }
+
     fn track_definition_registry(tracks: &[TrackSpec]) -> TrackDefinitionRegistry {
         let configured = tracks
             .iter()
@@ -248,21 +270,32 @@ mod tests {
 
     struct RecordingExchangeStartupControl {
         calls: Arc<Mutex<Vec<String>>>,
-        failure: Option<String>,
+        account_mode_failure: Option<String>,
+        leverage_failure: Option<String>,
     }
 
     impl RecordingExchangeStartupControl {
         fn succeed(calls: Arc<Mutex<Vec<String>>>) -> Self {
             Self {
                 calls,
-                failure: None,
+                account_mode_failure: None,
+                leverage_failure: None,
             }
         }
 
         fn fail(message: impl Into<String>) -> Self {
             Self {
                 calls: Arc::new(Mutex::new(Vec::new())),
-                failure: Some(message.into()),
+                account_mode_failure: None,
+                leverage_failure: Some(message.into()),
+            }
+        }
+
+        fn fail_account_mode(message: impl Into<String>) -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                account_mode_failure: Some(message.into()),
+                leverage_failure: None,
             }
         }
     }
@@ -274,6 +307,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push("validate_account_mode".to_string());
+            if let Some(message) = &self.account_mode_failure {
+                return Err(anyhow!(message.clone()));
+            }
             Ok(())
         }
 
@@ -290,7 +326,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("{}:{leverage}", instrument.symbol));
-            if let Some(message) = &self.failure {
+            if let Some(message) = &self.leverage_failure {
                 return Err(anyhow!(message.clone()));
             }
             Ok(())

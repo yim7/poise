@@ -28,10 +28,11 @@ pub(crate) async fn apply_exchange_startup_controls(
     track_leverage_index: &TrackLeverageIndex,
     exchange_startup_control: &dyn ExchangeStartupControl,
 ) -> Result<()> {
-    exchange_startup_control
-        .validate_account_mode()
-        .await
-        .context("failed to validate exchange account mode")?;
+    if let Err(error) = exchange_startup_control.validate_account_mode().await {
+        return Err(anyhow!(
+            "failed to validate exchange account mode: {error:#}"
+        ));
+    }
 
     for track in track_definition_registry.iter() {
         let track_id = track.track_id().clone();
