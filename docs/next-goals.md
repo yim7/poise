@@ -222,7 +222,7 @@ Task 清单：
 | --- | --- | --- | --- |
 | 4.1 定义 replay 输入格式 | completed | 支持读取价格序列、初始仓位、手续费率、当前 track 配置 | `3f3e48d` |
 | 4.2 输出仓位和交易统计 | completed | 输出最大 contracts、最大 USD 面值、估算 BTC 手续费、成交次数、区间内仓位分布 | `1bb5ba1` |
-| 4.3 对比参数组合 | pending | 能对比 `min_rebalance_units`、杠杆、notional per unit、区间宽度的影响 |  |
+| 4.3 对比参数组合 | completed | 能对比 `min_rebalance_units`、杠杆、notional per unit、区间宽度的影响 | `c1a0d7d` |
 | 4.4 增加固定样本验收测试 | pending | 同一输入输出稳定，inverse contracts exposure 不随价格漂移 |  |
 
 建议验证命令：
