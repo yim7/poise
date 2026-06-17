@@ -123,6 +123,21 @@ pub(crate) struct TradeFillSnapshot {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub(crate) struct FundingBillSnapshot {
+    #[serde(rename = "instId")]
+    pub inst_id: String,
+    #[serde(rename = "billId")]
+    pub bill_id: String,
+    #[serde(rename = "subType")]
+    pub sub_type: String,
+    #[serde(rename = "balChg")]
+    pub balance_change: String,
+    #[serde(rename = "ccy")]
+    pub currency: String,
+    pub ts: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct OrderAck {
     #[serde(rename = "ordId")]
     pub order_id: String,

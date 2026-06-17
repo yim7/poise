@@ -18,13 +18,14 @@ use crate::instrument::{OkxInstrumentMetadata, OkxInstrumentRegistry};
 use crate::mapper::{
     account_summary_from_balance, available_balance_from_balance,
     open_order_from_snapshot_with_metadata, position_from_snapshot_with_metadata, side_to_okx,
+    track_pnl_record_from_funding_bill_with_metadata,
     track_pnl_record_from_trade_fill_with_metadata,
 };
 use crate::rest::auth::sign_okx_payload;
 use crate::rest::error::OkxRestError;
 use crate::rest::models::{
-    AccountConfigSnapshot, BalanceSnapshot, InstrumentInfo, MarkPriceSnapshot, OkxEnvelope,
-    OrderAck, PendingOrderSnapshot, PositionSnapshot, ServerTime, TradeFillSnapshot,
+    AccountConfigSnapshot, BalanceSnapshot, FundingBillSnapshot, InstrumentInfo, MarkPriceSnapshot,
+    OkxEnvelope, OrderAck, PendingOrderSnapshot, PositionSnapshot, ServerTime, TradeFillSnapshot,
 };
 use crate::{Config, Credentials};
 
@@ -37,6 +38,8 @@ enum AuthMode {
 const MAX_DECIMAL_SCALE: u32 = 16;
 const OKX_NET_POSITION_MODE: &str = "net_mode";
 const RECENT_TRADE_FILL_LIMIT: usize = 100;
+const RECENT_FUNDING_BILL_LIMIT: usize = 100;
+const OKX_FUNDING_BILL_SUBTYPES: [&str; 2] = ["173", "174"];
 
 pub(crate) struct OkxRestClient {
     http: reqwest::Client,
@@ -236,6 +239,21 @@ impl OkxRestClient {
         symbol: &str,
     ) -> Result<Vec<TrackPnlRecord>> {
         let metadata = self.get_or_fetch_instrument_metadata(symbol).await?;
+        let mut records = self
+            .get_recent_trade_pnl_records_with_metadata(symbol, &metadata)
+            .await?;
+        records.extend(
+            self.get_recent_funding_pnl_records_with_metadata(symbol, &metadata)
+                .await?,
+        );
+        Ok(records)
+    }
+
+    async fn get_recent_trade_pnl_records_with_metadata(
+        &self,
+        symbol: &str,
+        metadata: &OkxInstrumentMetadata,
+    ) -> Result<Vec<TrackPnlRecord>> {
         let response: Vec<TradeFillSnapshot> = self
             .send_request(
                 Method::GET,
@@ -251,8 +269,39 @@ impl OkxRestClient {
             .await?;
         response
             .into_iter()
-            .map(|fill| track_pnl_record_from_trade_fill_with_metadata(fill, Some(&metadata)))
+            .map(|fill| track_pnl_record_from_trade_fill_with_metadata(fill, Some(metadata)))
             .collect::<Result<Vec<_>>>()
+    }
+
+    async fn get_recent_funding_pnl_records_with_metadata(
+        &self,
+        symbol: &str,
+        metadata: &OkxInstrumentMetadata,
+    ) -> Result<Vec<TrackPnlRecord>> {
+        let mut records = Vec::new();
+        for sub_type in OKX_FUNDING_BILL_SUBTYPES {
+            let response: Vec<FundingBillSnapshot> = self
+                .send_request(
+                    Method::GET,
+                    "/api/v5/account/bills",
+                    vec![
+                        ("instType", "SWAP".to_string()),
+                        ("instId", symbol.to_string()),
+                        ("subType", sub_type.to_string()),
+                        ("limit", RECENT_FUNDING_BILL_LIMIT.to_string()),
+                    ],
+                    None,
+                    AuthMode::Signed,
+                )
+                .await?;
+            for bill in response {
+                records.push(track_pnl_record_from_funding_bill_with_metadata(
+                    bill,
+                    Some(metadata),
+                )?);
+            }
+        }
+        Ok(records)
     }
 
     pub(crate) async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
@@ -1144,6 +1193,8 @@ mod tests {
                     }
                 ]}"#,
             ),
+            MockResponse::json(200, r#"{"code":"0","msg":"","data":[]}"#),
+            MockResponse::json(200, r#"{"code":"0","msg":"","data":[]}"#),
         ])
         .await;
         let client = test_client(&server, true);
@@ -1170,9 +1221,71 @@ mod tests {
             "/api/v5/trade/fills?instType=SWAP&instId=BTC-USD-SWAP&limit=100"
         );
         assert_eq!(
+            requests[2].path,
+            "/api/v5/account/bills?instType=SWAP&instId=BTC-USD-SWAP&subType=173&limit=100"
+        );
+        assert_eq!(
+            requests[3].path,
+            "/api/v5/account/bills?instType=SWAP&instId=BTC-USD-SWAP&subType=174&limit=100"
+        );
+        assert_eq!(
             requests[1].headers.get("ok-access-key"),
             Some(&"api-key".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_read_funding_bills() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, inverse_instrument_response()),
+            MockResponse::json(200, r#"{"code":"0","msg":"","data":[]}"#),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[
+                    {
+                        "instId":"BTC-USD-SWAP",
+                        "billId":"bill-expense",
+                        "subType":"173",
+                        "balChg":"-0.0001",
+                        "ccy":"BTC",
+                        "ts":"1781145600000"
+                    }
+                ]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[
+                    {
+                        "instId":"BTC-USD-SWAP",
+                        "billId":"bill-income",
+                        "subType":"174",
+                        "balChg":"0.00025",
+                        "ccy":"BTC",
+                        "ts":"1781174400000"
+                    }
+                ]}"#,
+            ),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        let records = client
+            .get_recent_track_pnl_records("BTC-USD-SWAP")
+            .await
+            .unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[0].source_key.as_deref(),
+            Some("okx:bills:btc-usd-swap:bill-expense")
+        );
+        assert_eq!(records[0].pnl_asset, "BTC");
+        assert_eq!(records[0].funding_fee, -0.0001);
+        assert_eq!(
+            records[1].source_key.as_deref(),
+            Some("okx:bills:btc-usd-swap:bill-income")
+        );
+        assert_eq!(records[1].funding_fee, 0.00025);
     }
 
     #[tokio::test]

@@ -10,8 +10,11 @@ use poise_engine::ports::{AccountSummarySnapshot, ExchangeOrder, OrderStatus, Po
 
 use crate::instrument::OkxInstrumentMetadata;
 use crate::rest::models::{
-    BalanceSnapshot, PendingOrderSnapshot, PositionSnapshot, TradeFillSnapshot,
+    BalanceSnapshot, FundingBillSnapshot, PendingOrderSnapshot, PositionSnapshot, TradeFillSnapshot,
 };
+
+const OKX_FUNDING_EXPENSE_SUBTYPE: &str = "173";
+const OKX_FUNDING_INCOME_SUBTYPE: &str = "174";
 
 pub(crate) fn account_summary_from_balance(
     value: BalanceSnapshot,
@@ -171,6 +174,40 @@ pub(crate) fn track_pnl_record_from_trade_fill_with_metadata(
         fill_size,
         realized_pnl,
         trading_fee,
+        pnl_asset,
+    ))
+}
+
+pub(crate) fn track_pnl_record_from_funding_bill_with_metadata(
+    value: FundingBillSnapshot,
+    metadata: Option<&OkxInstrumentMetadata>,
+) -> Result<TrackPnlRecord> {
+    ensure!(
+        matches!(
+            value.sub_type.as_str(),
+            OKX_FUNDING_EXPENSE_SUBTYPE | OKX_FUNDING_INCOME_SUBTYPE
+        ),
+        "unsupported OKX funding bill subType `{}`",
+        value.sub_type
+    );
+    let instrument = Instrument::new(Venue::Okx, value.inst_id);
+    let pnl_asset = metadata
+        .map(|metadata| metadata.settlement_asset().to_string())
+        .unwrap_or_else(|| instrument.quote_asset());
+    ensure!(
+        value.currency == pnl_asset,
+        "OKX funding asset `{}` does not match settlement asset `{pnl_asset}`",
+        value.currency
+    );
+    let bill_id = non_empty_string(value.bill_id).context("OKX funding bill missing billId")?;
+    let source_key = format!("okx:bills:{}:{}", instrument.symbol.to_lowercase(), bill_id);
+
+    Ok(TrackPnlRecord::funding(
+        instrument,
+        millis_to_utc(&value.ts)?,
+        "okx:bills".to_string(),
+        Some(source_key),
+        parse_decimal("balChg", &value.balance_change)?,
         pnl_asset,
     ))
 }
@@ -442,6 +479,80 @@ mod tests {
                 .to_string()
                 .contains("does not match settlement asset")
         );
+    }
+
+    #[test]
+    fn maps_funding_bill_to_track_pnl_record() {
+        let metadata = OkxInstrumentMetadata::from_instrument_info(&InstrumentInfo {
+            inst_id: "BTC-USD-SWAP".to_string(),
+            ct_type: Some("inverse".to_string()),
+            tick_sz: "0.1".to_string(),
+            lot_sz: "1".to_string(),
+            min_sz: "1".to_string(),
+            ct_val: Some("100".to_string()),
+            ct_val_ccy: Some("USD".to_string()),
+            settle_ccy: Some("BTC".to_string()),
+        })
+        .unwrap();
+
+        let record = track_pnl_record_from_funding_bill_with_metadata(
+            FundingBillSnapshot {
+                inst_id: "BTC-USD-SWAP".to_string(),
+                bill_id: "bill-1".to_string(),
+                sub_type: "174".to_string(),
+                balance_change: "0.00025".to_string(),
+                currency: "BTC".to_string(),
+                ts: "1781145600000".to_string(),
+            },
+            Some(&metadata),
+        )
+        .unwrap();
+
+        assert_eq!(
+            record.kind,
+            poise_engine::ledger::TrackPnlRecordKind::Funding
+        );
+        assert_eq!(record.source, "okx:bills");
+        assert_eq!(
+            record.source_key.as_deref(),
+            Some("okx:bills:btc-usd-swap:bill-1")
+        );
+        assert_eq!(record.pnl_asset, "BTC");
+        assert_eq!(record.funding_fee, 0.00025);
+        assert_eq!(record.realized_pnl, 0.0);
+        assert_eq!(record.trading_fee, 0.0);
+    }
+
+    #[test]
+    fn funding_bill_rejects_asset_mismatch() {
+        let metadata = OkxInstrumentMetadata::from_instrument_info(&InstrumentInfo {
+            inst_id: "BTC-USD-SWAP".to_string(),
+            ct_type: Some("inverse".to_string()),
+            tick_sz: "0.1".to_string(),
+            lot_sz: "1".to_string(),
+            min_sz: "1".to_string(),
+            ct_val: Some("100".to_string()),
+            ct_val_ccy: Some("USD".to_string()),
+            settle_ccy: Some("BTC".to_string()),
+        })
+        .unwrap();
+
+        let error = track_pnl_record_from_funding_bill_with_metadata(
+            FundingBillSnapshot {
+                inst_id: "BTC-USD-SWAP".to_string(),
+                bill_id: "bill-1".to_string(),
+                sub_type: "173".to_string(),
+                balance_change: "-0.00025".to_string(),
+                currency: "USDT".to_string(),
+                ts: "1781145600000".to_string(),
+            },
+            Some(&metadata),
+        )
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("USDT"));
+        assert!(message.contains("BTC"));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use poise_application::TrackQueryStore;
 use poise_core::track::{Instrument, TrackId};
-use poise_engine::ledger::TrackPnlRecord;
+use poise_engine::ledger::{TrackPnlRecord, TrackPnlRecordKind};
 use poise_engine::ports::AccountPort;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +53,10 @@ impl RecentFillsAuditor {
         let records = self
             .account
             .get_recent_track_pnl_records(instrument)
-            .await?;
+            .await?
+            .into_iter()
+            .filter(|record| record.kind == TrackPnlRecordKind::Trade)
+            .collect::<Vec<_>>();
         let source_keys = records
             .iter()
             .filter_map(normalized_source_key)
@@ -157,6 +160,33 @@ mod tests {
         assert_eq!(audit.items[0].coverage, RecentFillCoverage::Recorded);
         assert_eq!(audit.items[1].coverage, RecentFillCoverage::Missing);
         assert_eq!(audit.items[2].coverage, RecentFillCoverage::Unkeyed);
+    }
+
+    #[tokio::test]
+    async fn recent_fills_audit_ignores_funding_records() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let track_id = TrackId::new("btc-core");
+        let instrument = Instrument::new(Venue::Okx, "BTC-USD-SWAP");
+        let account = Arc::new(FakeRecentFillsAccount {
+            records: vec![TrackPnlRecord::funding(
+                instrument.clone(),
+                Utc.with_ymd_and_hms(2026, 6, 17, 8, 0, 0).unwrap(),
+                "okx:bills".to_string(),
+                Some("okx:bills:btc-usd-swap:bill-1".to_string()),
+                -0.0001,
+                "BTC",
+            )],
+        });
+        let auditor =
+            RecentFillsAuditor::new(account, repository.clone() as Arc<dyn TrackQueryStore>);
+
+        let audit = auditor
+            .audit_recent_fills(&track_id, &instrument)
+            .await
+            .unwrap();
+
+        assert_eq!(audit.records_seen, 0);
+        assert!(audit.items.is_empty());
     }
 
     fn trade_record(
