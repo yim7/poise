@@ -1066,11 +1066,13 @@ total_loss_limit = 600.0
         handles.effect_task.abort();
         handles.recovery_task.abort();
         handles.submit_preflight_task.abort();
+        handles.pnl_backfill_task.abort();
         let _ = handles.market_task.await;
         let _ = handles.user_task.await;
         let _ = handles.effect_task.await;
         let _ = handles.recovery_task.await;
         let _ = handles.submit_preflight_task.await;
+        let _ = handles.pnl_backfill_task.await;
     }
 
     #[tokio::test]
@@ -1138,6 +1140,7 @@ total_loss_limit = 600.0
         handles.recovery_task.abort();
         handles.submit_preflight_task.abort();
         handles.account_task.abort();
+        handles.pnl_backfill_task.abort();
     }
 
     #[tokio::test]
@@ -1228,6 +1231,7 @@ total_loss_limit = 600.0
         handles.recovery_task.abort();
         handles.submit_preflight_task.abort();
         handles.account_task.abort();
+        handles.pnl_backfill_task.abort();
     }
 
     #[tokio::test]

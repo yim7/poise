@@ -24,6 +24,7 @@ mod exchange_state;
 mod guards;
 mod market_data;
 mod market_data_health;
+mod pnl_backfill;
 mod reconcile;
 mod startup_bootstrap;
 mod submit_preflight;
@@ -173,6 +174,8 @@ pub struct RuntimeHandles {
     pub submit_preflight_task: JoinHandle<()>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub account_task: JoinHandle<()>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub pnl_backfill_task: JoinHandle<()>,
 }
 
 const STARTUP_RETRY_ATTEMPTS: usize = 5;
@@ -260,6 +263,7 @@ impl ServerRuntime {
         startup_bootstrap::complete_startup(self, &mut user_receiver, startup_cutoff).await?;
         let account_task = self.spawn_account_task(self.shutdown_tx.subscribe());
         let recovery_task = self.spawn_recovery_task(self.shutdown_tx.subscribe());
+        let pnl_backfill_task = self.spawn_pnl_backfill_task(self.shutdown_tx.subscribe());
         let market_data_health_task =
             self.spawn_market_data_health_task(self.shutdown_tx.subscribe());
         let submit_preflight_task = self.spawn_submit_preflight_task(self.shutdown_tx.subscribe());
@@ -275,6 +279,7 @@ impl ServerRuntime {
             recovery_task,
             submit_preflight_task,
             account_task,
+            pnl_backfill_task,
         })
     }
 
@@ -330,12 +335,14 @@ impl ServerRuntime {
         handles.recovery_task.abort();
         handles.submit_preflight_task.abort();
         handles.account_task.abort();
+        handles.pnl_backfill_task.abort();
         let _ = handles.market_task.await;
         let _ = handles.market_data_health_task.await;
         let _ = handles.user_task.await;
         let _ = handles.recovery_task.await;
         let _ = handles.submit_preflight_task.await;
         let _ = handles.account_task.await;
+        let _ = handles.pnl_backfill_task.await;
 
         tracing::info!("shutdown complete");
     }
@@ -369,6 +376,10 @@ impl ServerRuntime {
 
     fn spawn_account_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         account_refresh::spawn_account_task(self, shutdown_rx)
+    }
+
+    fn spawn_pnl_backfill_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
+        pnl_backfill::spawn_pnl_backfill_task(self, shutdown_rx)
     }
 
     fn spawn_user_task(
