@@ -297,8 +297,8 @@ fn validate_startup_exchange_rules(
         exchange_rules.quantity_step
     );
     ensure!(
-        exchange_rules.min_qty.is_finite() && exchange_rules.min_qty > f64::EPSILON,
-        "invalid minimum trade unit for `{}`: min_qty must be positive, got {}",
+        exchange_rules.min_qty.is_finite() && exchange_rules.min_qty >= 0.0,
+        "invalid minimum trade unit for `{}`: min_qty must be non-negative, got {}",
         seed.instrument().symbol,
         exchange_rules.min_qty
     );
