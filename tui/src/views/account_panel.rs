@@ -3,7 +3,9 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::protocol::{AccountSummaryView, RiskSignalView};
+use crate::protocol::{
+    AccountAnalysisView, AccountHedgeLikeView, AccountSummaryView, RiskSignalView,
+};
 use crate::theme::Theme;
 use crate::timestamp_display::format_local_timestamp_for_display;
 
@@ -21,7 +23,7 @@ fn lines(summary: Option<&AccountSummaryView>) -> Vec<Line<'static>> {
         ];
     };
 
-    vec![
+    let mut result = vec![
         Line::from(format!(
             "equity {} | available {} | unrealized pnl {} | day change {}",
             format_optional_amount(summary.equity),
@@ -49,7 +51,21 @@ fn lines(summary: Option<&AccountSummaryView>) -> Vec<Line<'static>> {
                     .unwrap_or_else(|| "-".to_string()),
             )),
         ]),
-    ]
+    ];
+
+    if let Some(analysis) = summary.analysis.as_ref() {
+        result.push(Line::from(format!(
+            "contracts {} | usd notional {} | base {}",
+            format_quantity(analysis.total_contracts),
+            format_amount(analysis.total_signed_usd_notional),
+            format_base_exposures(analysis),
+        )));
+        if let Some(hedge_like) = analysis.hedge_like.first() {
+            result.push(Line::from(format_hedge_like(hedge_like)));
+        }
+    }
+
+    result
 }
 
 fn format_optional_amount(value: Option<f64>) -> String {
@@ -70,6 +86,43 @@ fn format_amount(value: f64) -> String {
         .expect("fixed precision amount should contain decimal point");
 
     format!("{sign}{}.{fraction}", group_digits(integer))
+}
+
+fn format_base_exposures(analysis: &AccountAnalysisView) -> String {
+    if analysis.base_exposures.is_empty() {
+        return "-".to_string();
+    }
+
+    analysis
+        .base_exposures
+        .iter()
+        .map(|exposure| format!("{} {}", exposure.asset, format_quantity(exposure.quantity)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_hedge_like(hedge_like: &AccountHedgeLikeView) -> String {
+    format!(
+        "spot {} {} | contracts {} | net {}",
+        hedge_like.asset,
+        hedge_like
+            .spot_quantity
+            .map(format_quantity)
+            .unwrap_or_else(|| "unknown".to_string()),
+        format_quantity(hedge_like.contract_base_exposure),
+        hedge_like
+            .net_base_exposure
+            .map(|quantity| format!("{} {}", hedge_like.asset, format_signed_quantity(quantity)))
+            .unwrap_or_else(|| "unknown".to_string()),
+    )
+}
+
+fn format_quantity(value: f64) -> String {
+    format!("{value:.4}")
+}
+
+fn format_signed_quantity(value: f64) -> String {
+    format!("{value:+.4}")
 }
 
 fn group_digits(value: &str) -> String {
@@ -121,7 +174,7 @@ mod tests {
 
     #[test]
     fn renders_account_timestamps_in_local_time() {
-        let backend = TestBackend::new(160, 6);
+        let backend = TestBackend::new(160, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         let summary: AccountSummaryView = serde_json::from_str(include_str!(
             "../../tests/fixtures/account_summary_view.json"
@@ -142,5 +195,24 @@ mod tests {
         assert!(text.contains(&format!("updated {expected_updated_at}")));
         assert!(!text.contains(original_day_base_at));
         assert!(!text.contains(original_updated_at));
+    }
+
+    #[test]
+    fn renders_account_analysis_net_exposure() {
+        let backend = TestBackend::new(160, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let summary: AccountSummaryView = serde_json::from_str(include_str!(
+            "../../tests/fixtures/account_summary_view.json"
+        ))
+        .unwrap();
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), Some(&summary)))
+            .unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("contracts -30.0000"));
+        assert!(text.contains("base BTC -0.0300"));
+        assert!(text.contains("net BTC +0.1700"));
     }
 }

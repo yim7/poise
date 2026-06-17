@@ -1,6 +1,8 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
-use poise_application::{ApplicationNotification, TrackListReadModel};
+use poise_application::{
+    ApplicationNotification, TrackListReadModel, build_account_analysis_read_model_with_account,
+};
 use poise_protocol::{
     PriceExecutionBlockReasonView, RiskAcquisitionDirectionView, RiskAcquisitionView, StreamEvent,
     TrackLiveView as ProtocolTrackLiveView,
@@ -590,7 +592,8 @@ async fn push_projected_updates(
         }
     }
 
-    true
+    diagnostics.record_account_push();
+    push_account_summary(socket, state, diagnostics).await
 }
 
 async fn push_live_view_update(
@@ -702,10 +705,23 @@ async fn push_account_summary(
     let Some(summary) = state.account_monitor.current_summary().await else {
         return true;
     };
+    let sources = match state.query_service.list_track_sources().await {
+        Ok(sources) => sources,
+        Err(error) => {
+            tracing::warn!(
+                "failed to load account analysis for websocket account summary: {error}"
+            );
+            Vec::new()
+        }
+    };
+    let analysis = build_account_analysis_read_model_with_account(Some(&summary), &sources);
+
     send_event(
         socket,
         StreamEvent::AccountSummaryChanged {
-            summary: state.account_projector.project_summary(&summary),
+            summary: state
+                .account_projector
+                .project_summary_with_analysis(Some(&summary), Some(&analysis)),
         },
         diagnostics,
     )

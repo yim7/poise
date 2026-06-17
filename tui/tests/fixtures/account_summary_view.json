@@ -6,5 +6,34 @@
   "risk_signal": "attention",
   "reason": "day_change -2.8%",
   "day_base_at": "2026-04-04T00:00:01Z",
-  "updated_at": "2026-04-04T08:30:00Z"
+  "updated_at": "2026-04-04T08:30:00Z",
+  "analysis": {
+    "tracks": [
+      {
+        "track_id": "btc-coin",
+        "instrument": { "venue": "okx", "symbol": "BTC-USD-SWAP" },
+        "settlement_asset": "BTC",
+        "native_quantity": -30.0,
+        "contract_count": -30.0,
+        "signed_usd_notional": -3000.0,
+        "abs_usd_notional": 3000.0,
+        "estimated_base_asset": "BTC",
+        "estimated_base_exposure": -0.03,
+        "pnl_asset": "BTC"
+      }
+    ],
+    "total_contracts": -30.0,
+    "total_signed_usd_notional": -3000.0,
+    "total_abs_usd_notional": 3000.0,
+    "base_exposures": [{ "asset": "BTC", "quantity": -0.03 }],
+    "hedge_like": [
+      {
+        "asset": "BTC",
+        "contract_base_exposure": -0.03,
+        "spot_quantity": 0.2,
+        "spot_quantity_source": "account_summary_available_by_asset",
+        "net_base_exposure": 0.17
+      }
+    ]
+  }
 }

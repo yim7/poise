@@ -23,7 +23,7 @@ const DASHBOARD_COLUMN_SHRINK_ORDER: [usize; 5] = [4, 2, 5, 3, 6];
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .constraints([Constraint::Length(6), Constraint::Min(0)])
         .split(area);
 
     account_panel::render(frame, sections[0], app.account_summary());
@@ -668,6 +668,7 @@ mod tests {
         assert!(text.contains("Account"));
         assert!(text.contains("12,500.00"));
         assert!(text.contains("attention"));
+        assert!(text.contains("net BTC +0.1700"));
         assert!(
             background_colors_for_substring(&terminal, "attention")
                 .iter()

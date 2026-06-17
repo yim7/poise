@@ -2,7 +2,9 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use poise_application::{DiagnosticSeverity, TrackMutationError};
+use poise_application::{
+    DiagnosticSeverity, TrackMutationError, build_account_analysis_read_model_with_account,
+};
 use poise_core::track::TrackId;
 use poise_engine::command::TrackCommand;
 use poise_protocol::{
@@ -144,13 +146,18 @@ fn project_pnl_backfill_status(
 async fn get_account(
     State(state): State<HttpState>,
 ) -> Result<Json<AccountSummaryView>, (StatusCode, Json<ErrorResponse>)> {
-    let summary = state
-        .account_monitor
-        .current_summary()
+    let summary = state.account_monitor.current_summary().await;
+    let sources = state
+        .query_service
+        .list_track_sources()
         .await
-        .map(|model| state.account_projector.project_summary(&model))
-        .unwrap_or_default();
-    Ok(Json(summary))
+        .map_err(map_query_error)?;
+    let analysis = build_account_analysis_read_model_with_account(summary.as_ref(), &sources);
+
+    Ok(Json(state.account_projector.project_summary_with_analysis(
+        summary.as_ref(),
+        Some(&analysis),
+    )))
 }
 
 async fn get_track_detail(
@@ -1046,19 +1053,28 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload: AccountSummaryView = serde_json::from_slice(&body).unwrap();
 
+        assert_eq!(payload.equity, Some(12_500.0));
+        assert_eq!(payload.available, Some(9_000.0));
+        assert_eq!(payload.unrealized_pnl, Some(-350.0));
+        assert_eq!(payload.day_change_pct, Some(-3.8461538461538463));
+        assert_eq!(payload.risk_signal, RiskSignalView::Attention);
+        assert_eq!(payload.reason.as_deref(), Some("day_change -3.8%"));
         assert_eq!(
-            payload,
-            AccountSummaryView {
-                equity: Some(12_500.0),
-                available: Some(9_000.0),
-                unrealized_pnl: Some(-350.0),
-                day_change_pct: Some(-3.8461538461538463),
-                risk_signal: RiskSignalView::Attention,
-                reason: Some("day_change -3.8%".to_string()),
-                day_base_at: Some("2026-04-04T00:00:01+00:00".to_string()),
-                updated_at: Some("2026-04-04T01:23:45+00:00".to_string()),
-            }
+            payload.day_base_at.as_deref(),
+            Some("2026-04-04T00:00:01+00:00")
         );
+        assert_eq!(
+            payload.updated_at.as_deref(),
+            Some("2026-04-04T01:23:45+00:00")
+        );
+
+        let analysis = payload
+            .analysis
+            .expect("account analysis should be present");
+        assert_eq!(analysis.tracks.len(), 1);
+        assert_eq!(analysis.tracks[0].track_id, "btc-core");
+        assert_eq!(analysis.tracks[0].settlement_asset, "USDT");
+        assert_eq!(analysis.tracks[0].pnl_asset, "USDT");
     }
 
     #[tokio::test]

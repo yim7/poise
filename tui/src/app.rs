@@ -455,6 +455,7 @@ mod tests {
             reason: Some("day_change -2.75%".to_string()),
             day_base_at: Some("2026-04-04T00:00:01Z".to_string()),
             updated_at: Some("2026-04-04T01:23:45Z".to_string()),
+            analysis: None,
         });
 
         assert_eq!(
@@ -468,6 +469,7 @@ mod tests {
                 reason: Some("day_change -2.75%".to_string()),
                 day_base_at: Some("2026-04-04T00:00:01Z".to_string()),
                 updated_at: Some("2026-04-04T01:23:45Z".to_string()),
+                analysis: None,
             })
         );
     }

@@ -220,7 +220,45 @@ export interface AccountSummaryView {
   reason?: string | null;
   day_base_at?: string | null;
   updated_at?: string | null;
+  analysis?: AccountAnalysisView | null;
 }
+
+export interface AccountAnalysisView {
+  tracks: AccountTrackAnalysisView[];
+  total_contracts: number;
+  total_signed_usd_notional: number;
+  total_abs_usd_notional: number;
+  base_exposures: AccountAssetExposureView[];
+  hedge_like: AccountHedgeLikeView[];
+}
+
+export interface AccountTrackAnalysisView {
+  track_id: string;
+  instrument: InstrumentView;
+  settlement_asset: string;
+  native_quantity: number;
+  contract_count?: number | null;
+  signed_usd_notional: number;
+  abs_usd_notional: number;
+  estimated_base_asset?: string | null;
+  estimated_base_exposure?: number | null;
+  pnl_asset: string;
+}
+
+export interface AccountAssetExposureView {
+  asset: string;
+  quantity: number;
+}
+
+export interface AccountHedgeLikeView {
+  asset: string;
+  contract_base_exposure: number;
+  spot_quantity?: number | null;
+  spot_quantity_source?: AccountSpotQuantitySourceView | null;
+  net_base_exposure?: number | null;
+}
+
+export type AccountSpotQuantitySourceView = 'account_summary_available_by_asset';
 
 export type TrackStatus =
   | 'waiting_market_data'

@@ -530,6 +530,65 @@ pub struct AccountSummaryView {
     pub day_base_at: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<AccountAnalysisView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct AccountAnalysisView {
+    #[serde(default)]
+    pub tracks: Vec<AccountTrackAnalysisView>,
+    #[serde(default)]
+    pub total_contracts: f64,
+    #[serde(default)]
+    pub total_signed_usd_notional: f64,
+    #[serde(default)]
+    pub total_abs_usd_notional: f64,
+    #[serde(default)]
+    pub base_exposures: Vec<AccountAssetExposureView>,
+    #[serde(default)]
+    pub hedge_like: Vec<AccountHedgeLikeView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountTrackAnalysisView {
+    pub track_id: String,
+    pub instrument: InstrumentView,
+    pub settlement_asset: String,
+    pub native_quantity: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_count: Option<f64>,
+    pub signed_usd_notional: f64,
+    pub abs_usd_notional: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_base_asset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_base_exposure: Option<f64>,
+    pub pnl_asset: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountAssetExposureView {
+    pub asset: String,
+    pub quantity: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountHedgeLikeView {
+    pub asset: String,
+    pub contract_base_exposure: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spot_quantity: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spot_quantity_source: Option<AccountSpotQuantitySourceView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net_base_exposure: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountSpotQuantitySourceView {
+    AccountSummaryAvailableByAsset,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -751,9 +810,11 @@ impl fmt::Display for Side {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountSummaryView, BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy,
-        ExecutionBindingIntentView, ExecutionBindingOrderView, ExecutionBindingPolicyView,
-        ExecutionBindingStatusView, ExecutionBindingView, ExecutionStateView, ExecutionStatusView,
+        AccountAnalysisView, AccountAssetExposureView, AccountHedgeLikeView,
+        AccountSpotQuantitySourceView, AccountSummaryView, AccountTrackAnalysisView,
+        BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy, ExecutionBindingIntentView,
+        ExecutionBindingOrderView, ExecutionBindingPolicyView, ExecutionBindingStatusView,
+        ExecutionBindingView, ExecutionStateView, ExecutionStatusView, InstrumentView,
         RiskAcquisitionConfigView, RiskAcquisitionDirectionView, RiskAcquisitionView,
         RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView, StreamEvent,
         TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
@@ -1212,7 +1273,32 @@ mod tests {
                     "risk_signal":"attention",
                     "reason":"day_change -1.35%",
                     "day_base_at":"2026-04-04T00:01:23Z",
-                    "updated_at":"2026-04-04T01:02:03Z"
+                    "updated_at":"2026-04-04T01:02:03Z",
+                    "analysis":{
+                        "tracks":[{
+                            "track_id":"btc-coin",
+                            "instrument":{"venue":"okx","symbol":"BTC-USD-SWAP"},
+                            "settlement_asset":"BTC",
+                            "native_quantity":-30.0,
+                            "contract_count":-30.0,
+                            "signed_usd_notional":-3000.0,
+                            "abs_usd_notional":3000.0,
+                            "estimated_base_asset":"BTC",
+                            "estimated_base_exposure":-0.03,
+                            "pnl_asset":"BTC"
+                        }],
+                        "total_contracts":-30.0,
+                        "total_signed_usd_notional":-3000.0,
+                        "total_abs_usd_notional":3000.0,
+                        "base_exposures":[{"asset":"BTC","quantity":-0.03}],
+                        "hedge_like":[{
+                            "asset":"BTC",
+                            "contract_base_exposure":-0.03,
+                            "spot_quantity":0.2,
+                            "spot_quantity_source":"account_summary_available_by_asset",
+                            "net_base_exposure":0.17
+                        }]
+                    }
                 }
             }"#,
         )
@@ -1231,6 +1317,39 @@ mod tests {
                         reason: Some("day_change -1.35%".to_string()),
                         day_base_at: Some("2026-04-04T00:01:23Z".to_string()),
                         updated_at: Some("2026-04-04T01:02:03Z".to_string()),
+                        analysis: Some(AccountAnalysisView {
+                            tracks: vec![AccountTrackAnalysisView {
+                                track_id: "btc-coin".to_string(),
+                                instrument: InstrumentView {
+                                    venue: "okx".to_string(),
+                                    symbol: "BTC-USD-SWAP".to_string(),
+                                },
+                                settlement_asset: "BTC".to_string(),
+                                native_quantity: -30.0,
+                                contract_count: Some(-30.0),
+                                signed_usd_notional: -3000.0,
+                                abs_usd_notional: 3000.0,
+                                estimated_base_asset: Some("BTC".to_string()),
+                                estimated_base_exposure: Some(-0.03),
+                                pnl_asset: "BTC".to_string(),
+                            }],
+                            total_contracts: -30.0,
+                            total_signed_usd_notional: -3000.0,
+                            total_abs_usd_notional: 3000.0,
+                            base_exposures: vec![AccountAssetExposureView {
+                                asset: "BTC".to_string(),
+                                quantity: -0.03,
+                            }],
+                            hedge_like: vec![AccountHedgeLikeView {
+                                asset: "BTC".to_string(),
+                                contract_base_exposure: -0.03,
+                                spot_quantity: Some(0.2),
+                                spot_quantity_source: Some(
+                                    AccountSpotQuantitySourceView::AccountSummaryAvailableByAsset,
+                                ),
+                                net_base_exposure: Some(0.17),
+                            }],
+                        }),
                     }
                 );
             }
