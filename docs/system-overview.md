@@ -112,6 +112,10 @@ dry-run 对每个 track 解释 native quantity 语义：base 合约按价格带�
 
 ## 策略与执行语义
 
+Replay 是 `core::replay` 中的纯调参计算，不连接交易所、不读取持久化、不模拟完整撮合。输入由价格序列、初始 native quantity、startup leverage、`TrackConfig` 和 `ExchangeRules` 组成；调用方负责从文件、配置或工具界面装配这些输入。Replay 第一版的成交假设是：每个价格点用 `strategy::desired_exposure` 计算目标 exposure，当目标变化达到 `min_rebalance_units` 时，直接按 taker 费率成交到目标。它输出每个价格点的目标、native 仓位、名义、成交量、成交名义和估算手续费，并汇总最大 native quantity、最大名义、最大保证金需求、成交次数、成交密度、估算费用和仓位分布。
+
+Replay 复用 `ExchangeRules` 的 native quantity / notional 换算。对于 inverse contracts，unit native quantity 来自 `notional_per_unit / contract_notional`，不随价格变化；手续费按 USD 成交名义乘 taker 费率后再除以成交价格，资产为 settlement asset。Replay 参数对比只通过克隆基线输入并覆盖 `min_rebalance_units`、`leverage`、`notional_per_unit`、`lower_price` 和 `upper_price` 来生成变体，避免为每个参数方向引入独立模拟器。
+
 策略价格：
 
 - `strategy_price = book_mid = (best_bid + best_ask) / 2`。
