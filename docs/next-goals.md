@@ -43,7 +43,7 @@
 | 2 | 建立交易事实对账闭环 | P0 | L | completed | Goal 0, Goal 1 |
 | 3 | 提供配置解释和 dry-run | P1 | M | completed | Goal 1 |
 | 4 | 建立 BTC-USD-SWAP 调参 replay | P1 | M | completed | Goal 3 |
-| 5 | 文档治理与模块拆分决策 | P1 | S | pending | Goal 0, Goal 1 |
+| 5 | 文档治理与模块拆分决策 | P1 | S | completed | Goal 0, Goal 1 |
 | 6 | 增加账户视角分析层 | P2 | M | pending | Goal 2, Goal 3 |
 | 7 | 评估多 track 和更多交易所 | P3 | L | pending | Goal 1 到 Goal 4 |
 
@@ -271,7 +271,7 @@ Task 清单：
 | 5.1 更新系统概览 | completed | PNL、数量单位、OKX 运行语义与当前实现一致 | `0cfb4b7` |
 | 5.2 做模块拆分决策 | completed | 明确继续单文档，或列出长期模块、边界、入口和去重规则 | `83e4c1f` |
 | 5.3 吸收并删除历史 spec/plan | completed | 已完成阶段性信息进入长期文档；旧 spec/plan 不再保留 | `55743a5` |
-| 5.4 更新 README 导航 | pending | README 只指向长期文档和当前有效入口，不指向历史过程文档 |  |
+| 5.4 更新 README 导航 | completed | README 只指向长期文档和当前有效入口，不指向历史过程文档 | `2a88ea9` |
 
 建议验证命令：
 
