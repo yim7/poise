@@ -8,6 +8,7 @@ use crate::types::{ExchangeRules, QuantityKind};
 pub struct ReplayInput {
     pub prices: Vec<f64>,
     pub initial_native_quantity: f64,
+    pub leverage: u32,
     pub track_config: TrackConfig,
     pub exchange_rules: ExchangeRules,
 }
@@ -29,6 +30,9 @@ impl ReplayInput {
                 "initial_native_quantity must be finite, got {}",
                 self.initial_native_quantity
             ));
+        }
+        if self.leverage == 0 {
+            return Err("leverage must be positive".to_string());
         }
         validate_config(&self.track_config)?;
         validate_exchange_rules(&self.exchange_rules)?;
@@ -62,6 +66,7 @@ pub struct ReplayStats {
     pub trade_density: f64,
     pub max_abs_native_quantity: f64,
     pub max_abs_notional: f64,
+    pub max_margin_requirement: f64,
     pub estimated_fee: f64,
     pub fee_asset: String,
     pub position_distribution: ReplayPositionDistribution,
@@ -75,6 +80,98 @@ pub struct ReplayPositionDistribution {
     pub mean_abs_exposure: f64,
     pub min_native_quantity: f64,
     pub max_native_quantity: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayComparisonInput {
+    pub baseline: ReplayInput,
+    pub variants: Vec<ReplayParameterOverride>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayParameterOverride {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_rebalance_units: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leverage: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notional_per_unit: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lower_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper_price: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayComparisonReport {
+    pub items: Vec<ReplayComparisonItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayComparisonItem {
+    pub name: String,
+    pub min_rebalance_units: f64,
+    pub leverage: u32,
+    pub notional_per_unit: f64,
+    pub lower_price: f64,
+    pub upper_price: f64,
+    pub stats: ReplayStats,
+}
+
+pub fn compare_replay_parameters(
+    input: &ReplayComparisonInput,
+) -> Result<ReplayComparisonReport, String> {
+    let mut items = Vec::with_capacity(input.variants.len() + 1);
+    items.push(replay_comparison_item(
+        "baseline".to_string(),
+        &input.baseline,
+    )?);
+
+    for variant in &input.variants {
+        if variant.name.trim().is_empty() {
+            return Err("replay variant name must not be empty".to_string());
+        }
+        let mut replay_input = input.baseline.clone();
+        if let Some(value) = variant.min_rebalance_units {
+            replay_input.track_config.min_rebalance_units = value;
+        }
+        if let Some(value) = variant.leverage {
+            replay_input.leverage = value;
+        }
+        if let Some(value) = variant.notional_per_unit {
+            replay_input.track_config.notional_per_unit = value;
+        }
+        if let Some(value) = variant.lower_price {
+            replay_input.track_config.lower_price = value;
+        }
+        if let Some(value) = variant.upper_price {
+            replay_input.track_config.upper_price = value;
+        }
+        items.push(replay_comparison_item(variant.name.clone(), &replay_input)?);
+    }
+
+    Ok(ReplayComparisonReport { items })
+}
+
+fn replay_comparison_item(
+    name: String,
+    input: &ReplayInput,
+) -> Result<ReplayComparisonItem, String> {
+    let report = run_replay(input)?;
+    Ok(ReplayComparisonItem {
+        name,
+        min_rebalance_units: input.track_config.min_rebalance_units,
+        leverage: input.leverage,
+        notional_per_unit: input.track_config.notional_per_unit,
+        lower_price: input.track_config.lower_price,
+        upper_price: input.track_config.upper_price,
+        stats: report.stats,
+    })
 }
 
 pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
@@ -150,6 +247,7 @@ pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
             trade_density: trade_count as f64 / input.prices.len() as f64,
             max_abs_native_quantity,
             max_abs_notional,
+            max_margin_requirement: max_abs_notional / input.leverage as f64,
             estimated_fee,
             fee_asset: input.exchange_rules.settlement_asset.clone(),
             position_distribution: ReplayPositionDistribution {
@@ -246,6 +344,7 @@ mod tests {
 {
   "prices": [60000.0, 65000.0, 70000.0],
   "initial_native_quantity": 12.0,
+  "leverage": 3,
   "track_config": {
     "lower_price": 60000.0,
     "upper_price": 70000.0,
@@ -283,6 +382,7 @@ mod tests {
 
         assert_eq!(input.prices, vec![60_000.0, 65_000.0, 70_000.0]);
         assert_eq!(input.initial_native_quantity, 12.0);
+        assert_eq!(input.leverage, 3);
         assert_eq!(input.track_config.notional_per_unit, 300.0);
         assert_eq!(input.exchange_rules.taker_fee_rate, 0.0005);
         input.validate().unwrap();
@@ -309,6 +409,7 @@ mod tests {
         assert_close(report.stats.trade_density, 0.6666666666666666);
         assert_eq!(report.stats.max_abs_native_quantity, 18.0);
         assert_eq!(report.stats.max_abs_notional, 1_800.0);
+        assert_eq!(report.stats.max_margin_requirement, 600.0);
         assert_eq!(report.stats.fee_asset, "BTC");
         assert_close(report.stats.estimated_fee, 0.00002225274725274725);
         assert_eq!(report.stats.position_distribution.min_exposure, -6.0);
@@ -326,10 +427,67 @@ mod tests {
         assert_eq!(report.samples[2].position_native_quantity, -18.0);
     }
 
+    #[test]
+    fn replay_compares_parameter_overrides() {
+        let report = super::compare_replay_parameters(&super::ReplayComparisonInput {
+            baseline: replay_input(),
+            variants: vec![
+                super::ReplayParameterOverride {
+                    name: "high_min_rebalance".to_string(),
+                    min_rebalance_units: Some(6.0),
+                    leverage: None,
+                    notional_per_unit: None,
+                    lower_price: None,
+                    upper_price: None,
+                },
+                super::ReplayParameterOverride {
+                    name: "higher_leverage".to_string(),
+                    min_rebalance_units: None,
+                    leverage: Some(6),
+                    notional_per_unit: None,
+                    lower_price: None,
+                    upper_price: None,
+                },
+                super::ReplayParameterOverride {
+                    name: "larger_unit".to_string(),
+                    min_rebalance_units: None,
+                    leverage: None,
+                    notional_per_unit: Some(500.0),
+                    lower_price: None,
+                    upper_price: None,
+                },
+                super::ReplayParameterOverride {
+                    name: "wider_band".to_string(),
+                    min_rebalance_units: None,
+                    leverage: None,
+                    notional_per_unit: None,
+                    lower_price: Some(55_000.0),
+                    upper_price: Some(75_000.0),
+                },
+            ],
+        })
+        .unwrap();
+
+        let baseline = item(&report, "baseline");
+        let high_min_rebalance = item(&report, "high_min_rebalance");
+        let higher_leverage = item(&report, "higher_leverage");
+        let larger_unit = item(&report, "larger_unit");
+        let wider_band = item(&report, "wider_band");
+
+        assert_eq!(report.items.len(), 5);
+        assert!(high_min_rebalance.stats.trade_count < baseline.stats.trade_count);
+        assert!(
+            higher_leverage.stats.max_margin_requirement < baseline.stats.max_margin_requirement
+        );
+        assert!(larger_unit.stats.max_abs_notional > baseline.stats.max_abs_notional);
+        assert!(wider_band.stats.max_abs_native_quantity < baseline.stats.max_abs_native_quantity);
+    }
+
     fn replay_input() -> ReplayInput {
         ReplayInput {
             prices: vec![60_000.0, 65_000.0, 70_000.0],
             initial_native_quantity: 12.0,
+            leverage: 3,
             track_config: TrackConfig {
                 lower_price: 60_000.0,
                 upper_price: 70_000.0,
@@ -365,5 +523,16 @@ mod tests {
             (actual - expected).abs() < 1e-12,
             "expected {actual} to be close to {expected}"
         );
+    }
+
+    fn item<'a>(
+        report: &'a super::ReplayComparisonReport,
+        name: &str,
+    ) -> &'a super::ReplayComparisonItem {
+        report
+            .items
+            .iter()
+            .find(|item| item.name == name)
+            .unwrap_or_else(|| panic!("missing comparison item {name}"))
     }
 }
