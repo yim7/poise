@@ -222,10 +222,10 @@ TrackDefinitionRegistry + TrackRuntimeView + persisted events/effects
 
 Track PNL 统计只把本地可归属到 track 的明细作为事实来源：
 
-- `track_pnl_records` 记录每笔成交已实现盈亏、交易手续费，以及可归属到 symbol/track 的资金费。
-- `pnl_asset` 只存在于 HTTP / WebSocket 公开读模型，由当前 track 的 instrument 推导；PNL 明细和运行时统计不重复保存这份可推导信息。
-- 非 `pnl_asset` 计价的手续费不进入本地 PNL 统计。
-- `TrackPnlStats` 是运行时和读模型使用的即时统计结果，不是持久化真值；启动和查询时可以从明细重新聚合。
+- `track_pnl_records` 记录每笔成交已实现盈亏、交易手续费、PNL 资产，以及可归属到 symbol/track 的资金费。
+- `pnl_asset` 是 PNL 明细的一部分，来自交易所成交、费用或合约结算资产语义；运行时和读模型统计从明细聚合得到该资产。公开读模型只在没有任何 PNL 明细时，才用当前 track 的 settlement asset 作为展示 fallback。
+- 非当前 track settlement asset 计价的手续费不能混入本地 track PNL 统计；adapter 应拒绝或跳过这类明细，而不是把不同资产相加。
+- `TrackPnlStats` 是运行时和读模型使用的即时统计结果，不是持久化真值；启动和查询时可以从 `track_pnl_records` 重新聚合。
 - 当日 PNL 窗口按当前 UTC 日展示，明细是否进入当日统计由它自己的发生时间决定。
 - 订单成交更新只更新订单/执行器状态；PNL 明细作为独立记录写入，避免订单状态和财务统计互相隐藏规则。
 - 资金费如果无法归属到某个 track，就不进入 track PNL 统计。
