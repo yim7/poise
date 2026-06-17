@@ -41,7 +41,7 @@
 | 0 | 收尾当前 PNL backfill | P0 | M | completed | 无 |
 | 1 | 增加运行健康与启动前检查 | P0 | M | completed | Goal 0 |
 | 2 | 建立交易事实对账闭环 | P0 | L | completed | Goal 0, Goal 1 |
-| 3 | 提供配置解释和 dry-run | P1 | M | pending | Goal 1 |
+| 3 | 提供配置解释和 dry-run | P1 | M | completed | Goal 1 |
 | 4 | 建立 BTC-USD-SWAP 调参 replay | P1 | M | pending | Goal 3 |
 | 5 | 文档治理与模块拆分决策 | P1 | S | pending | Goal 0, Goal 1 |
 | 6 | 增加账户视角分析层 | P2 | M | pending | Goal 2, Goal 3 |
@@ -187,7 +187,7 @@ Task 清单：
 | 3.1 增加配置解释模型 | completed | 对每个 track 展示 unit 对应 native quantity、USD 面值、最小步长、最大名义、loss limit 资产 | `68e2955` |
 | 3.2 增加 dry-run 启动检查 | completed | 不下单、不订阅实时 task，也能加载配置、metadata、账户摘要并输出风险说明 | `0028165` |
 | 3.3 增加当前价格下的容量估算 | completed | inverse 能展示可用 BTC、mark price、leverage、估算最大 contracts 和 USD 面值 | `5fba7de` |
-| 3.4 增加错误提示测试 | pending | 缺 symbol、缺 ctVal、数量低于最小单位时提示具体字段和计算结果 |  |
+| 3.4 增加错误提示测试 | completed | 缺 symbol、缺 ctVal、数量低于最小单位时提示具体字段和计算结果 | `d3862ad` |
 
 建议验证命令：
 

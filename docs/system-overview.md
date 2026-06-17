@@ -106,6 +106,10 @@ server::config::TrackSpec
 
 启动遇到持久状态与当前配置不兼容时会失败，操作者应显式处理实例目录或数据库。
 
+配置 dry-run 是启动前只读检查，入口是 `poise-server --instance-dir <dir> --dry-run`。它读取同一份 `config.toml`，连接交易所只读 port，加载账户摘要、symbol metadata 和可用的 mark price，然后输出 JSON 格式的 `ConfigDryRunResponse`。dry-run 不初始化 SQLite，不执行 startup-only 杠杆设置，不下单，不订阅 market data 或 user data，也不启动 runtime task。输出中的配置解释和容量估算只是当前配置与交易所 metadata/account snapshot 的读模型，不写入持久化，也不作为 engine、PNL 或恢复流程的事实源。
+
+dry-run 对每个 track 解释 native quantity 语义：base 合约按价格带中心把 `notional_per_unit` 换算为 base quantity；inverse 合约按 `ctVal/contract_notional` 换算为 contracts，并把 unit 面值解释为 USD。loss limit 资产来自当前交易规则的 settlement asset。inverse 容量估算使用 settlement asset 可用余额、mark price、startup leverage 和 contract notional 估算最大 contracts 与 USD 面值；缺 `ctVal/contract_notional`、缺 settlement asset 余额、缺 mark price，或 unit native quantity 低于 `min_qty` 时，dry-run 应给出包含 track/symbol、字段名和计算值的错误。
+
 ## 策略与执行语义
 
 策略价格：
