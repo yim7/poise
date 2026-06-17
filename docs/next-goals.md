@@ -145,7 +145,7 @@ Task 清单：
 
 | Task | 状态 | 验收 | Commit |
 | --- | --- | --- | --- |
-| 2.1 增加 PNL backfill 观测字段 | pending | 能查询最近回补时间、写入数量、跳过数量、最近错误 |  |
+| 2.1 增加 PNL backfill 观测字段 | completed | 能查询最近回补时间、写入数量、跳过数量、最近错误 | `1aa2876` |
 | 2.2 增加 recent fills 审计接口 | pending | 能比较最近交易所 fills 与本地 `track_pnl_records` 的覆盖情况 |  |
 | 2.3 接入资金费事实 | pending | 可归属到 track 的 funding fee 进入 `TrackPnlRecord`，资产不一致时拒绝混算 |  |
 | 2.4 增加启动后自动审计 | pending | 重启后能发现最近成交缺失，并给出明确 diagnostics |  |
