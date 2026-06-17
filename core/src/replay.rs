@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::strategy::{TrackConfig, validate_config};
+use crate::strategy::{TrackConfig, desired_exposure, validate_config};
 use crate::types::{ExchangeRules, QuantityKind};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -33,6 +33,149 @@ impl ReplayInput {
         validate_config(&self.track_config)?;
         validate_exchange_rules(&self.exchange_rules)?;
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayReport {
+    pub samples: Vec<ReplaySample>,
+    pub stats: ReplayStats,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaySample {
+    pub price: f64,
+    pub target_exposure: f64,
+    pub position_native_quantity: f64,
+    pub position_notional: f64,
+    pub trade_native_quantity: f64,
+    pub trade_notional: f64,
+    pub estimated_fee: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayStats {
+    pub trade_count: usize,
+    pub trade_density: f64,
+    pub max_abs_native_quantity: f64,
+    pub max_abs_notional: f64,
+    pub estimated_fee: f64,
+    pub fee_asset: String,
+    pub position_distribution: ReplayPositionDistribution,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayPositionDistribution {
+    pub min_exposure: f64,
+    pub max_exposure: f64,
+    pub mean_abs_exposure: f64,
+    pub min_native_quantity: f64,
+    pub max_native_quantity: f64,
+}
+
+pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
+    input.validate()?;
+    let native_quantity_per_unit = input.exchange_rules.native_qty_per_exposure_unit(
+        input.track_config.notional_per_unit,
+        input.track_config.band_center(),
+    );
+    if !native_quantity_per_unit.is_finite() || native_quantity_per_unit <= 0.0 {
+        return Err("native quantity per exposure unit must be positive".to_string());
+    }
+
+    let mut position_native_quantity = input.initial_native_quantity;
+    let mut current_exposure = position_native_quantity / native_quantity_per_unit;
+    let mut samples = Vec::with_capacity(input.prices.len());
+    let mut trade_count = 0;
+    let mut estimated_fee = 0.0;
+    let mut max_abs_native_quantity = position_native_quantity.abs();
+    let mut max_abs_notional = input
+        .exchange_rules
+        .notional_from_native_qty(position_native_quantity, input.track_config.band_center());
+    let mut min_exposure = current_exposure;
+    let mut max_exposure = current_exposure;
+    let mut min_native_quantity = position_native_quantity;
+    let mut max_native_quantity = position_native_quantity;
+    let mut abs_exposure_sum = 0.0;
+
+    for price in &input.prices {
+        let target_exposure = desired_exposure(*price, &input.track_config).0;
+        let exposure_delta = target_exposure - current_exposure;
+        let mut trade_native_quantity = 0.0;
+        let mut trade_notional = 0.0;
+        let mut sample_fee = 0.0;
+
+        if exposure_delta.abs() + f64::EPSILON >= input.track_config.min_rebalance_units {
+            let target_native_quantity = target_exposure * native_quantity_per_unit;
+            trade_native_quantity = target_native_quantity - position_native_quantity;
+            trade_notional = input
+                .exchange_rules
+                .notional_from_native_qty(trade_native_quantity, *price);
+            sample_fee = estimate_fee(&input.exchange_rules, trade_notional, *price)?;
+            estimated_fee += sample_fee;
+            trade_count += 1;
+            position_native_quantity = target_native_quantity;
+            current_exposure = target_exposure;
+        }
+
+        let position_notional = input
+            .exchange_rules
+            .notional_from_native_qty(position_native_quantity, *price);
+        max_abs_native_quantity = max_abs_native_quantity.max(position_native_quantity.abs());
+        max_abs_notional = max_abs_notional.max(position_notional);
+        min_exposure = min_exposure.min(current_exposure);
+        max_exposure = max_exposure.max(current_exposure);
+        min_native_quantity = min_native_quantity.min(position_native_quantity);
+        max_native_quantity = max_native_quantity.max(position_native_quantity);
+        abs_exposure_sum += current_exposure.abs();
+
+        samples.push(ReplaySample {
+            price: *price,
+            target_exposure,
+            position_native_quantity,
+            position_notional,
+            trade_native_quantity,
+            trade_notional,
+            estimated_fee: sample_fee,
+        });
+    }
+
+    Ok(ReplayReport {
+        stats: ReplayStats {
+            trade_count,
+            trade_density: trade_count as f64 / input.prices.len() as f64,
+            max_abs_native_quantity,
+            max_abs_notional,
+            estimated_fee,
+            fee_asset: input.exchange_rules.settlement_asset.clone(),
+            position_distribution: ReplayPositionDistribution {
+                min_exposure,
+                max_exposure,
+                mean_abs_exposure: abs_exposure_sum / input.prices.len() as f64,
+                min_native_quantity,
+                max_native_quantity,
+            },
+        },
+        samples,
+    })
+}
+
+fn estimate_fee(rules: &ExchangeRules, trade_notional: f64, price: f64) -> Result<f64, String> {
+    let fee_notional = trade_notional * rules.taker_fee_rate;
+    match rules.quantity_kind {
+        QuantityKind::BaseAsset => Ok(fee_notional),
+        QuantityKind::InverseContract => {
+            if !price.is_finite() || price <= 0.0 {
+                return Err(format!(
+                    "fee price must be finite and positive, got {price}"
+                ));
+            }
+            Ok(fee_notional / price)
+        }
     }
 }
 
@@ -94,7 +237,7 @@ mod tests {
     use crate::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use crate::types::{ExchangeRules, QuantityKind};
 
-    use super::ReplayInput;
+    use super::{ReplayInput, run_replay};
 
     #[test]
     fn replay_input_deserializes_price_sequence_initial_position_fees_and_track_config() {
@@ -157,6 +300,32 @@ mod tests {
         assert!(error.contains("positive"));
     }
 
+    #[test]
+    fn replay_outputs_inverse_position_and_trade_statistics() {
+        let report = run_replay(&replay_input()).unwrap();
+
+        assert_eq!(report.samples.len(), 3);
+        assert_eq!(report.stats.trade_count, 2);
+        assert_close(report.stats.trade_density, 0.6666666666666666);
+        assert_eq!(report.stats.max_abs_native_quantity, 18.0);
+        assert_eq!(report.stats.max_abs_notional, 1_800.0);
+        assert_eq!(report.stats.fee_asset, "BTC");
+        assert_close(report.stats.estimated_fee, 0.00002225274725274725);
+        assert_eq!(report.stats.position_distribution.min_exposure, -6.0);
+        assert_eq!(report.stats.position_distribution.max_exposure, 4.0);
+        assert_close(
+            report.stats.position_distribution.mean_abs_exposure,
+            3.6666666666666665,
+        );
+        assert_eq!(report.samples[0].target_exposure, 4.0);
+        assert_eq!(report.samples[0].position_native_quantity, 12.0);
+        assert_eq!(report.samples[0].trade_native_quantity, 0.0);
+        assert_eq!(report.samples[1].target_exposure, -1.0);
+        assert_eq!(report.samples[1].position_native_quantity, -3.0);
+        assert_eq!(report.samples[2].target_exposure, -6.0);
+        assert_eq!(report.samples[2].position_native_quantity, -18.0);
+    }
+
     fn replay_input() -> ReplayInput {
         ReplayInput {
             prices: vec![60_000.0, 65_000.0, 70_000.0],
@@ -189,5 +358,12 @@ mod tests {
             maker_fee_rate: 0.0002,
             taker_fee_rate: 0.0005,
         }
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "expected {actual} to be close to {expected}"
+        );
     }
 }
