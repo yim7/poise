@@ -22,6 +22,7 @@ mod account_refresh;
 mod diagnostics;
 mod exchange_state;
 mod guards;
+mod health;
 mod market_data;
 mod market_data_health;
 mod pnl_backfill;
