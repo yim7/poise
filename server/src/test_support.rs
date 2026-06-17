@@ -25,6 +25,7 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
 use crate::exchange_freshness::ExchangeFreshness;
+use crate::pnl_audit::RecentFillsAuditor;
 use crate::projector::TrackProjector;
 use crate::runtime::{
     AccountMarginGuardStore, PnlBackfillStatus, RecoveryAnomalyDirtyObserver, RecoveryDirtyState,
@@ -435,6 +436,7 @@ impl AccountPort for NoopAccountPort {
 
 pub(crate) fn build_http_state(
     services: &TestApplicationServices,
+    query_store: Arc<dyn TrackQueryStore>,
     query_service: Arc<poise_application::TrackQueryService>,
     debug_query_service: Arc<poise_application::TrackDebugQueryService>,
     projector: Arc<TrackProjector>,
@@ -450,6 +452,10 @@ pub(crate) fn build_http_state(
         account_projector,
         Arc::new(RuntimeHealth::new()),
         Arc::new(PnlBackfillStatus::new()),
+        Arc::new(RecentFillsAuditor::new(
+            Arc::new(NoopAccountPort),
+            query_store,
+        )),
     )
 }
 

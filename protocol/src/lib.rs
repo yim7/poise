@@ -67,6 +67,35 @@ pub struct HealthResponse {
     pub pnl_backfill: PnlBackfillStatusView,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecentFillCoverageView {
+    Recorded,
+    Missing,
+    Unkeyed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecentFillAuditItemView {
+    pub source_key: Option<String>,
+    pub trade_id: Option<String>,
+    pub occurred_at: String,
+    pub coverage: RecentFillCoverageView,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecentFillsAuditResponse {
+    pub track_id: String,
+    pub instrument: InstrumentView,
+    pub records_seen: usize,
+    pub records_recorded: usize,
+    pub records_missing: usize,
+    pub records_unkeyed: usize,
+    pub items: Vec<RecentFillAuditItemView>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrackListItemView {

@@ -770,6 +770,40 @@ impl SqliteStorage {
             ..TrackPnlStats::default()
         })
     }
+
+    fn list_track_pnl_source_keys_blocking(
+        conn: Arc<Mutex<Connection>>,
+        track_id: TrackId,
+        source_keys: Vec<String>,
+    ) -> Result<Vec<String>> {
+        if source_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = Self::lock_connection(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_key
+                 FROM track_pnl_records
+                 WHERE track_id = ?1 AND source_key = ?2
+                 LIMIT 1",
+            )
+            .context("failed to prepare track pnl source key lookup")?;
+        let mut found = Vec::new();
+        for source_key in source_keys {
+            let existing = stmt
+                .query_row(params![track_id.as_str(), source_key], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .context("failed to look up track pnl source key")?;
+            if let Some(source_key) = existing {
+                found.push(source_key);
+            }
+        }
+
+        Ok(found)
+    }
 }
 
 fn track_pnl_record_kind_as_str(kind: TrackPnlRecordKind) -> &'static str {
@@ -1075,6 +1109,22 @@ impl TrackQueryStore for SqliteStorage {
         })
         .await
         .context("failed to join load_track_pnl_stats blocking task")?
+    }
+
+    async fn list_track_pnl_source_keys(
+        &self,
+        track_id: &TrackId,
+        source_keys: &[String],
+    ) -> Result<Vec<String>> {
+        let conn = Arc::clone(&self.conn);
+        let track_id = track_id.clone();
+        let source_keys = source_keys.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            Self::list_track_pnl_source_keys_blocking(conn, track_id, source_keys)
+        })
+        .await
+        .context("failed to join list_track_pnl_source_keys blocking task")?
     }
 
     async fn load_track_updated_at(&self, track_id: &TrackId) -> Result<Option<DateTime<Utc>>> {
@@ -1526,6 +1576,60 @@ mod tests {
         assert_eq!(stats.funding_fee_cumulative, -1.5);
         assert_eq!(stats.net_realized_pnl_cumulative(), 115.5);
         assert_eq!(stats.pnl_asset.as_deref(), Some("USDT"));
+    }
+
+    #[tokio::test]
+    async fn track_pnl_source_key_lookup_is_scoped_to_track() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let track_id = TrackId::new("btc-core");
+        let other_track_id = TrackId::new("eth-core");
+
+        TrackMutationStore::insert_track_pnl_record(
+            &storage,
+            &track_id,
+            &TrackPnlRecord::trade_summary(
+                test_instrument("BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 8, 9, 0, 0).unwrap(),
+                "okx:fills".into(),
+                Some("okx:fills:recorded".into()),
+                Some("recorded".into()),
+                1.0,
+                0.1,
+                "USDT",
+            ),
+        )
+        .await
+        .unwrap();
+        TrackMutationStore::insert_track_pnl_record(
+            &storage,
+            &other_track_id,
+            &TrackPnlRecord::trade_summary(
+                test_instrument("ETHUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 8, 9, 0, 0).unwrap(),
+                "okx:fills".into(),
+                Some("okx:fills:other-track".into()),
+                Some("other-track".into()),
+                1.0,
+                0.1,
+                "USDT",
+            ),
+        )
+        .await
+        .unwrap();
+
+        let source_keys = storage
+            .list_track_pnl_source_keys(
+                &track_id,
+                &[
+                    "okx:fills:recorded".to_string(),
+                    "okx:fills:missing".to_string(),
+                    "okx:fills:other-track".to_string(),
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(source_keys, vec!["okx:fills:recorded"]);
     }
 
     #[tokio::test]

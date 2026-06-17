@@ -29,6 +29,7 @@ use crate::account_projector::AccountProjector;
 use crate::config::{Config, ExchangeConfig};
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::exchange_startup::{build_exchange_startup_control, build_track_leverage_index};
+use crate::pnl_audit::RecentFillsAuditor;
 use crate::projector::TrackProjector;
 use crate::runtime::{
     AccountMarginGuardStore, PnlBackfillStatus, RecoveryAnomalyDirtyObserver, RecoveryDirtyState,
@@ -270,7 +271,7 @@ async fn assemble_with_state_store(
         observation_service.clone(),
     ));
     let debug_query_service = Arc::new(TrackDebugQueryService::new(
-        query_store,
+        query_store.clone(),
         observation_service.clone(),
     ));
     let projector = Arc::new(TrackProjector::new());
@@ -296,6 +297,10 @@ async fn assemble_with_state_store(
     let submit_preflight = Arc::new(SubmitPreflight::new());
     let runtime_health = Arc::new(RuntimeHealth::new());
     let pnl_backfill_status = Arc::new(PnlBackfillStatus::new());
+    let recent_fills_auditor = Arc::new(RecentFillsAuditor::new(
+        exchange_ports.account(),
+        query_store.clone(),
+    ));
     let reconcile_state = build_reconcile_state(
         observation_service.clone(),
         runtime_lifecycle_service.clone(),
@@ -314,6 +319,7 @@ async fn assemble_with_state_store(
         account_projector.clone(),
         runtime_health.clone(),
         pnl_backfill_status.clone(),
+        recent_fills_auditor,
     );
     let websocket_state = build_websocket_state(
         notifications.clone(),
@@ -437,6 +443,7 @@ pub(crate) fn build_http_state(
     account_projector: Arc<AccountProjector>,
     runtime_health: Arc<RuntimeHealth>,
     pnl_backfill_status: Arc<PnlBackfillStatus>,
+    recent_fills_auditor: Arc<RecentFillsAuditor>,
 ) -> HttpState {
     HttpState {
         command_service,
@@ -447,6 +454,7 @@ pub(crate) fn build_http_state(
         account_projector,
         runtime_health,
         pnl_backfill_status,
+        recent_fills_auditor,
     }
 }
 
@@ -1498,7 +1506,7 @@ total_loss_limit = 600.0
             services.observation_service.clone(),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
-            query_store,
+            query_store.clone(),
             services.observation_service.clone(),
         ));
         let projector = Arc::new(TrackProjector::new());
@@ -1516,6 +1524,7 @@ total_loss_limit = 600.0
             ServerPlatform {
                 http_state: build_test_http_state(
                     &services,
+                    query_store.clone(),
                     query_service.clone(),
                     debug_query_service,
                     projector.clone(),
@@ -1807,6 +1816,14 @@ total_loss_limit = 600.0
                 pnl_utc_day,
                 ..poise_engine::ledger::TrackPnlStats::default()
             })
+        }
+
+        async fn list_track_pnl_source_keys(
+            &self,
+            _track_id: &TrackId,
+            _source_keys: &[String],
+        ) -> Result<Vec<String>> {
+            Ok(Vec::new())
         }
     }
 

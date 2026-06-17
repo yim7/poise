@@ -7,7 +7,8 @@ use poise_core::track::TrackId;
 use poise_engine::command::TrackCommand;
 use poise_protocol::{
     AccountSummaryView, ActivityLevelView, HealthResponse, HealthStatusView, HealthTaskStatusView,
-    HealthTaskView, PnlBackfillStatusView, TrackCommandAccepted, TrackCommandRequest,
+    HealthTaskView, InstrumentView, PnlBackfillStatusView, RecentFillAuditItemView,
+    RecentFillCoverageView, RecentFillsAuditResponse, TrackCommandAccepted, TrackCommandRequest,
     TrackCommandType, TrackDetailView, TrackDiagnosticItemView, TrackDiagnosticsView,
     TrackListResponse,
 };
@@ -29,6 +30,10 @@ pub fn router(http_state: HttpState, websocket_state: WebSocketState) -> Router 
         .route("/tracks", get(list_tracks))
         .route("/tracks/:id", get(get_track_detail))
         .route("/debug/tracks/:id/diagnostics", get(get_track_diagnostics))
+        .route(
+            "/debug/tracks/:id/recent-fills-audit",
+            get(get_recent_fills_audit),
+        )
         .route("/tracks/:id/commands", post(submit_command))
         .route(
             "/ws",
@@ -186,6 +191,68 @@ async fn get_track_diagnostics(
     }))
 }
 
+async fn get_recent_fills_audit(
+    Path(id): Path<String>,
+    State(state): State<HttpState>,
+) -> Result<Json<RecentFillsAuditResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let track_id = TrackId::new(id.clone());
+    let source = state
+        .query_service
+        .load_track_detail_source(&track_id)
+        .await
+        .map_err(map_query_error)?
+        .ok_or_else(|| not_found(format!("track `{id}` not found")))?;
+    let audit = state
+        .recent_fills_auditor
+        .audit_recent_fills(&track_id, &source.instrument)
+        .await
+        .map_err(map_query_error)?;
+
+    Ok(Json(project_recent_fills_audit(
+        source.track_id,
+        source.instrument,
+        audit,
+    )))
+}
+
+fn project_recent_fills_audit(
+    track_id: String,
+    instrument: poise_core::track::Instrument,
+    audit: crate::pnl_audit::RecentFillsAudit,
+) -> RecentFillsAuditResponse {
+    RecentFillsAuditResponse {
+        track_id,
+        instrument: InstrumentView {
+            venue: instrument.venue.as_str().to_string(),
+            symbol: instrument.symbol,
+        },
+        records_seen: audit.records_seen,
+        records_recorded: audit.records_recorded,
+        records_missing: audit.records_missing,
+        records_unkeyed: audit.records_unkeyed,
+        items: audit
+            .items
+            .into_iter()
+            .map(|item| RecentFillAuditItemView {
+                source_key: item.record.source_key,
+                trade_id: item.record.trade_id,
+                occurred_at: item.record.occurred_at.to_rfc3339(),
+                coverage: match item.coverage {
+                    crate::pnl_audit::RecentFillCoverage::Recorded => {
+                        RecentFillCoverageView::Recorded
+                    }
+                    crate::pnl_audit::RecentFillCoverage::Missing => {
+                        RecentFillCoverageView::Missing
+                    }
+                    crate::pnl_audit::RecentFillCoverage::Unkeyed => {
+                        RecentFillCoverageView::Unkeyed
+                    }
+                },
+            })
+            .collect(),
+    }
+}
+
 async fn submit_command(
     Path(id): Path<String>,
     State(state): State<HttpState>,
@@ -280,22 +347,27 @@ mod tests {
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_core::{
         events::DomainEvent,
-        types::{ExchangeRules, Exposure},
+        types::{ExchangeRules, Exposure, Side},
     };
+    use poise_engine::ledger::TrackPnlRecord;
     use poise_engine::manager::TrackManager;
-    use poise_engine::ports::AccountSummarySnapshot;
-    use poise_engine::ports::ClockPort;
+    use poise_engine::ports::{
+        AccountCapacitySnapshot, AccountPort, AccountSummarySnapshot, ClockPort, UserDataEvent,
+    };
     use poise_protocol::{
         AccountSummaryView, ExecutionBindingIntentView, ExecutionBindingStatusView,
-        ExecutionStatusView, RiskSignalView, TrackCommandAccepted, TrackCommandRequest,
-        TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackListResponse, TrackStatus,
+        ExecutionStatusView, RecentFillCoverageView, RecentFillsAuditResponse, RiskSignalView,
+        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
+        TrackDiagnosticsView, TrackListResponse, TrackStatus,
     };
     use poise_storage::sqlite::SqliteStorage;
+    use tokio::sync::mpsc;
     use tower::ServiceExt;
 
     use crate::account_projector::AccountProjector;
+    use crate::pnl_audit::RecentFillsAuditor;
     use crate::projector::TrackProjector;
-    use crate::runtime::RuntimeHealthComponent;
+    use crate::runtime::{PnlBackfillStatus, RuntimeHealth, RuntimeHealthComponent};
     use crate::server_context::{HttpState, WebSocketState};
     use crate::test_support::{
         build_http_state, build_test_application_services, build_websocket_state,
@@ -395,7 +467,7 @@ mod tests {
             services.observation_service.clone(),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
-            query_store,
+            query_store.clone(),
             services.observation_service.clone(),
         ));
         let projector = Arc::new(TrackProjector::new());
@@ -404,6 +476,7 @@ mod tests {
         HttpTestState {
             http_state: build_http_state(
                 &services,
+                query_store.clone(),
                 query_service.clone(),
                 debug_query_service,
                 projector.clone(),
@@ -417,6 +490,66 @@ mod tests {
                     test_track_definition_registry("btc-core"),
                     services.observation_service.clone(),
                 )),
+                projector,
+                account_monitor,
+                account_projector,
+            ),
+        }
+    }
+
+    async fn build_test_state_with_recent_fills_account<R>(
+        repository: Arc<R>,
+        account: Arc<dyn AccountPort>,
+    ) -> HttpTestState
+    where
+        R: TrackMutationStore + TrackEffectJournal + TrackQueryStore + 'static,
+    {
+        let mut manager = test_manager();
+        let mut snapshot = manager
+            .mutation_frame("btc-core")
+            .expect("seeded manager should expose mutation frame");
+        seed_frame_pnl_stats(&mut snapshot);
+        manager.rollback_track_state(&snapshot).unwrap();
+        let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
+        let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
+        let effect_store: Arc<dyn TrackEffectJournal> = repository.clone();
+        let query_store: Arc<dyn TrackQueryStore> = repository.clone();
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            manager,
+            mutation_store,
+            query_store.clone(),
+            effect_store,
+            notifications,
+            account_margin_guard,
+        );
+        let query_service = Arc::new(TrackQueryService::new(
+            query_store.clone(),
+            test_track_definition_registry("btc-core"),
+            services.observation_service.clone(),
+        ));
+        let debug_query_service = Arc::new(TrackDebugQueryService::new(
+            query_store.clone(),
+            services.observation_service.clone(),
+        ));
+        let projector = Arc::new(TrackProjector::new());
+        let account_monitor = unavailable_account_monitor(services.notifications.clone());
+        let account_projector = Arc::new(AccountProjector::new());
+        HttpTestState {
+            http_state: crate::assembly::build_http_state(
+                Arc::clone(&services.command_service),
+                query_service.clone(),
+                debug_query_service,
+                projector.clone(),
+                account_monitor.clone(),
+                account_projector.clone(),
+                Arc::new(RuntimeHealth::new()),
+                Arc::new(PnlBackfillStatus::new()),
+                Arc::new(RecentFillsAuditor::new(account, query_store.clone())),
+            ),
+            websocket_state: build_websocket_state(
+                &services,
+                query_service,
                 projector,
                 account_monitor,
                 account_projector,
@@ -492,12 +625,13 @@ mod tests {
             services.observation_service.clone(),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
-            query_store,
+            query_store.clone(),
             services.observation_service.clone(),
         ));
         HttpTestState {
             http_state: build_http_state(
                 &services,
+                query_store.clone(),
                 query_service.clone(),
                 debug_query_service,
                 projector.clone(),
@@ -681,7 +815,7 @@ mod tests {
                 services.observation_service.clone(),
             ));
             let debug_query_service = Arc::new(TrackDebugQueryService::new(
-                query_store,
+                query_store.clone(),
                 services.observation_service.clone(),
             ));
             let projector = Arc::new(TrackProjector::new());
@@ -690,6 +824,7 @@ mod tests {
             HttpTestState {
                 http_state: build_http_state(
                     &services,
+                    query_store.clone(),
                     query_service.clone(),
                     debug_query_service,
                     projector.clone(),
@@ -1057,12 +1192,13 @@ mod tests {
         let account_monitor = unavailable_account_monitor(services.notifications.clone());
         let account_projector = Arc::new(AccountProjector::new());
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
-            query_store,
+            query_store.clone(),
             services.observation_service.clone(),
         ));
         let app = router(HttpTestState {
             http_state: build_http_state(
                 &services,
+                query_store.clone(),
                 query_service.clone(),
                 debug_query_service,
                 projector.clone(),
@@ -1247,6 +1383,107 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn get_recent_fills_audit_compares_exchange_and_local_pnl_records() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let track_id = TrackId::new("btc-core");
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+        let recorded = audit_trade_record(
+            instrument.clone(),
+            Some("okx:fills:recorded"),
+            Some("recorded"),
+        );
+        TrackMutationStore::insert_track_pnl_record(&*repository, &track_id, &recorded)
+            .await
+            .unwrap();
+        let missing = audit_trade_record(
+            instrument.clone(),
+            Some("okx:fills:missing"),
+            Some("missing"),
+        );
+        let unkeyed = audit_trade_record(instrument, None, Some("unkeyed"));
+        let account = Arc::new(FakeRecentFillsAccount {
+            records: vec![recorded, missing, unkeyed],
+        });
+        let state = build_test_state_with_recent_fills_account(repository, account).await;
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/debug/tracks/btc-core/recent-fills-audit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: RecentFillsAuditResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload.track_id, "btc-core");
+        assert_eq!(payload.instrument.symbol, "BTCUSDT");
+        assert_eq!(payload.records_seen, 3);
+        assert_eq!(payload.records_recorded, 1);
+        assert_eq!(payload.records_missing, 1);
+        assert_eq!(payload.records_unkeyed, 1);
+        assert_eq!(payload.items[0].coverage, RecentFillCoverageView::Recorded);
+        assert_eq!(payload.items[1].coverage, RecentFillCoverageView::Missing);
+        assert_eq!(payload.items[2].coverage, RecentFillCoverageView::Unkeyed);
+        assert_eq!(
+            payload.items[1].source_key.as_deref(),
+            Some("okx:fills:missing")
+        );
+    }
+
+    fn audit_trade_record(
+        instrument: Instrument,
+        source_key: Option<&str>,
+        trade_id: Option<&str>,
+    ) -> TrackPnlRecord {
+        TrackPnlRecord::trade(
+            instrument,
+            Utc.with_ymd_and_hms(2026, 6, 17, 1, 2, 3).unwrap(),
+            "okx:fills".to_string(),
+            source_key.map(str::to_string),
+            Some("order-1".to_string()),
+            trade_id.map(str::to_string),
+            Side::Sell,
+            62_000.0,
+            0.2,
+            0.0001,
+            0.00001,
+            "USDT",
+        )
+    }
+
+    struct FakeRecentFillsAccount {
+        records: Vec<TrackPnlRecord>,
+    }
+
+    #[async_trait::async_trait]
+    impl AccountPort for FakeRecentFillsAccount {
+        async fn get_account_capacity_snapshot(
+            &self,
+            _instrument: &Instrument,
+        ) -> anyhow::Result<AccountCapacitySnapshot> {
+            Ok(AccountCapacitySnapshot {
+                max_increase_notional: 1_000_000.0,
+            })
+        }
+
+        async fn get_recent_track_pnl_records(
+            &self,
+            _instrument: &Instrument,
+        ) -> anyhow::Result<Vec<TrackPnlRecord>> {
+            Ok(self.records.clone())
+        }
+
+        async fn subscribe_user_data(&self) -> anyhow::Result<mpsc::Receiver<UserDataEvent>> {
+            let (_sender, receiver) = mpsc::channel(1);
+            Ok(receiver)
+        }
+    }
+
     #[derive(Default)]
     struct FailingRepository {
         updated_at: std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<Utc>>>,
@@ -1356,6 +1593,14 @@ mod tests {
                 pnl_utc_day,
                 ..poise_engine::ledger::TrackPnlStats::default()
             })
+        }
+
+        async fn list_track_pnl_source_keys(
+            &self,
+            _track_id: &TrackId,
+            _source_keys: &[String],
+        ) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
         }
     }
 }

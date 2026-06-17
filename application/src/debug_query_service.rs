@@ -230,6 +230,14 @@ mod tests {
             })
         }
 
+        async fn list_track_pnl_source_keys(
+            &self,
+            _track_id: &TrackId,
+            _source_keys: &[String],
+        ) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
         async fn load_track_updated_at(
             &self,
             track_id: &TrackId,

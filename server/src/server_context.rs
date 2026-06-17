@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 
 use crate::account_projector::AccountProjector;
 use crate::exchange_freshness::ExchangeFreshness;
+use crate::pnl_audit::RecentFillsAuditor;
 use crate::projector::TrackProjector;
 use crate::runtime::{
     AccountMarginGuardStore, PnlBackfillStatus, RecoveryDirtyState, RuntimeHealth,
@@ -27,6 +28,7 @@ pub struct HttpState {
     pub account_projector: Arc<AccountProjector>,
     pub runtime_health: Arc<RuntimeHealth>,
     pub pnl_backfill_status: Arc<PnlBackfillStatus>,
+    pub recent_fills_auditor: Arc<RecentFillsAuditor>,
 }
 
 #[derive(Clone)]

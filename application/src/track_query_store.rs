@@ -28,6 +28,11 @@ pub trait TrackQueryStore: Send + Sync {
         track_id: &TrackId,
         pnl_utc_day: NaiveDate,
     ) -> Result<TrackPnlStats>;
+    async fn list_track_pnl_source_keys(
+        &self,
+        track_id: &TrackId,
+        source_keys: &[String],
+    ) -> Result<Vec<String>>;
     /// Read-model freshness metadata only.
     ///
     /// This timestamp is backed by `persisted_track_presence`; it is not durable

@@ -1614,6 +1614,29 @@ pub(crate) mod test_support {
             Ok(stats)
         }
 
+        async fn list_track_pnl_source_keys(
+            &self,
+            track_id: &TrackId,
+            source_keys: &[String],
+        ) -> Result<Vec<String>> {
+            let records = self
+                .pnl_records
+                .lock()
+                .unwrap()
+                .get(track_id.as_str())
+                .cloned()
+                .unwrap_or_default();
+            Ok(source_keys
+                .iter()
+                .filter(|source_key| {
+                    records
+                        .iter()
+                        .any(|record| record.source_key.as_ref() == Some(*source_key))
+                })
+                .cloned()
+                .collect())
+        }
+
         async fn load_track_updated_at(
             &self,
             _track_id: &TrackId,

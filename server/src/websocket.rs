@@ -1827,6 +1827,14 @@ mod tests {
             })
         }
 
+        async fn list_track_pnl_source_keys(
+            &self,
+            _track_id: &TrackId,
+            _source_keys: &[String],
+        ) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
         async fn list_recent_track_events(
             &self,
             track_id: &TrackId,

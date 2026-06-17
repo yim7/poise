@@ -7,6 +7,7 @@ mod exchange_startup;
 mod http;
 mod instance_dir;
 mod order_outcome;
+mod pnl_audit;
 #[allow(dead_code)]
 mod projector;
 mod runtime;
