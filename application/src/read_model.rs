@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use poise_core::events::{DomainEvent, ExecutionGateReason};
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, RiskAcquisitionConfig, ShapeFamily};
 use poise_core::track::{Instrument, TrackDefinition};
-use poise_core::types::{ExchangeRules, Side};
+use poise_core::types::{ExchangeRules, QuantityKind, Side};
 use poise_engine::execution_plan::TrackEffect;
 use poise_engine::executor::{BindingStatus, PolicyKind, RecoveryAnomaly};
 use poise_engine::ledger::TrackPnlStats;
@@ -53,6 +55,140 @@ pub struct TrackListReadModel {
     pub has_stale_market_data: bool,
     pub price_execution_block_reason: Option<TrackPriceExecutionBlockReason>,
     pub active_binding_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AccountAnalysisReadModel {
+    pub tracks: Vec<AccountTrackAnalysisReadModel>,
+    pub total_contracts: f64,
+    pub total_signed_usd_notional: f64,
+    pub total_abs_usd_notional: f64,
+    pub base_exposures: Vec<AccountAssetExposureReadModel>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountTrackAnalysisReadModel {
+    pub track_id: String,
+    pub instrument: Instrument,
+    pub settlement_asset: String,
+    pub native_quantity: f64,
+    pub contract_count: Option<f64>,
+    pub signed_usd_notional: f64,
+    pub abs_usd_notional: f64,
+    pub estimated_base_asset: Option<String>,
+    pub estimated_base_exposure: Option<f64>,
+    pub pnl_asset: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountAssetExposureReadModel {
+    pub asset: String,
+    pub quantity: f64,
+}
+
+pub fn build_account_analysis_read_model(
+    tracks: &[TrackListReadModel],
+) -> AccountAnalysisReadModel {
+    let mut base_exposures = BTreeMap::<String, f64>::new();
+    let mut total_contracts = 0.0;
+    let mut total_signed_usd_notional = 0.0;
+    let mut total_abs_usd_notional = 0.0;
+    let mut items = Vec::with_capacity(tracks.len());
+
+    for track in tracks {
+        let item = project_account_track_analysis(track);
+
+        total_contracts += item.contract_count.unwrap_or(0.0);
+        total_signed_usd_notional += item.signed_usd_notional;
+        total_abs_usd_notional += item.abs_usd_notional;
+        if let (Some(asset), Some(quantity)) = (
+            item.estimated_base_asset.as_ref(),
+            item.estimated_base_exposure,
+        ) {
+            *base_exposures.entry(asset.clone()).or_default() += quantity;
+        }
+
+        items.push(item);
+    }
+
+    AccountAnalysisReadModel {
+        tracks: items,
+        total_contracts,
+        total_signed_usd_notional,
+        total_abs_usd_notional,
+        base_exposures: base_exposures
+            .into_iter()
+            .filter(|(_, quantity)| quantity.abs() > f64::EPSILON)
+            .map(|(asset, quantity)| AccountAssetExposureReadModel { asset, quantity })
+            .collect(),
+    }
+}
+
+fn project_account_track_analysis(source: &TrackListReadModel) -> AccountTrackAnalysisReadModel {
+    let native_quantity = finite_or_zero(source.position_qty);
+    let reference_price = positive_finite(source.strategy_price);
+    let signed_usd_notional =
+        signed_position_usd_notional(native_quantity, &source.exchange_rules, reference_price);
+    let (estimated_base_asset, estimated_base_exposure) =
+        estimated_base_exposure(source, signed_usd_notional, reference_price);
+
+    AccountTrackAnalysisReadModel {
+        track_id: source.track_id.clone(),
+        instrument: source.instrument.clone(),
+        settlement_asset: source.exchange_rules.settlement_asset.clone(),
+        native_quantity,
+        contract_count: match source.exchange_rules.quantity_kind {
+            QuantityKind::BaseAsset => None,
+            QuantityKind::InverseContract => Some(native_quantity),
+        },
+        signed_usd_notional,
+        abs_usd_notional: signed_usd_notional.abs(),
+        estimated_base_asset,
+        estimated_base_exposure,
+        pnl_asset: source
+            .pnl_stats
+            .pnl_asset
+            .clone()
+            .unwrap_or_else(|| source.exchange_rules.settlement_asset.clone()),
+    }
+}
+
+fn signed_position_usd_notional(
+    native_quantity: f64,
+    rules: &ExchangeRules,
+    reference_price: Option<f64>,
+) -> f64 {
+    match rules.quantity_kind {
+        QuantityKind::BaseAsset => reference_price.map_or(0.0, |price| native_quantity * price),
+        QuantityKind::InverseContract => rules
+            .contract_notional
+            .and_then(|contract_notional| positive_finite(Some(contract_notional)))
+            .map_or(0.0, |contract_notional| native_quantity * contract_notional),
+    }
+}
+
+fn estimated_base_exposure(
+    source: &TrackListReadModel,
+    signed_usd_notional: f64,
+    reference_price: Option<f64>,
+) -> (Option<String>, Option<f64>) {
+    match source.exchange_rules.quantity_kind {
+        QuantityKind::BaseAsset => (None, None),
+        QuantityKind::InverseContract => reference_price.map_or((None, None), |price| {
+            (
+                Some(source.exchange_rules.settlement_asset.clone()),
+                Some(signed_usd_notional / price),
+            )
+        }),
+    }
+}
+
+fn positive_finite(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite() && *value > f64::EPSILON)
+}
+
+fn finite_or_zero(value: f64) -> f64 {
+    if value.is_finite() { value } else { 0.0 }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -616,7 +752,7 @@ mod tests {
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-    use poise_core::types::{ExchangeRules, Exposure, Side};
+    use poise_core::types::{ExchangeRules, Exposure, QuantityKind, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::{BindingStatus, PolicyKind, SubmitRecoveryToken};
     use poise_engine::ports::OrderRequest;
@@ -626,8 +762,10 @@ mod tests {
     };
 
     use super::{
-        TrackActivityLevel, TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadModel,
-        TrackReadStatus, TrackRiskAcquisitionDirection, TrackStrategyPriceStatus,
+        AccountAssetExposureReadModel, TrackActivityLevel, TrackListReadModel,
+        TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadModel, TrackReadPnlStats,
+        TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
+        TrackStrategyPriceStatus,
     };
     use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
     use crate::track_read_source::TrackReadSource;
@@ -674,6 +812,85 @@ mod tests {
             maker_fee_rate: 0.0,
             taker_fee_rate: 0.0,
         }
+    }
+
+    fn test_track_list_read_model() -> TrackListReadModel {
+        TrackListReadModel {
+            track_id: "btc-core".to_string(),
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            exchange_rules: test_exchange_rules(),
+            status: TrackReadStatus::Active,
+            updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+            strategy_price: Some(100_000.0),
+            strategy_price_status: TrackStrategyPriceStatus::Live,
+            current_exposure: 0.0,
+            position_qty: 0.42,
+            desired_exposure: Some(0.0),
+            execution_target_exposure: Some(0.0),
+            risk_acquisition: None,
+            pnl_stats: TrackReadPnlStats::default(),
+            unrealized_pnl: 0.0,
+            recovery_issue: None,
+            has_account_margin_guard: false,
+            has_stale_market_data: false,
+            price_execution_block_reason: None,
+            active_binding_count: 0,
+        }
+    }
+
+    #[test]
+    fn account_analysis_summarizes_inverse_contract_exposure() {
+        let mut rules = test_exchange_rules();
+        rules.quantity_kind = QuantityKind::InverseContract;
+        rules.contract_notional = Some(100.0);
+        rules.settlement_asset = "BTC".to_string();
+
+        let mut track = test_track_list_read_model();
+        track.track_id = "btc-coin".to_string();
+        track.instrument = Instrument::new(Venue::Okx, "BTC-USD-SWAP");
+        track.exchange_rules = rules;
+        track.position_qty = -30.0;
+        track.pnl_stats.pnl_asset = Some("BTC".to_string());
+
+        let analysis = super::build_account_analysis_read_model(&[track]);
+
+        assert_eq!(analysis.total_contracts, -30.0);
+        assert_eq!(analysis.total_signed_usd_notional, -3000.0);
+        assert_eq!(analysis.total_abs_usd_notional, 3000.0);
+        assert_eq!(
+            analysis.base_exposures,
+            vec![AccountAssetExposureReadModel {
+                asset: "BTC".to_string(),
+                quantity: -0.03,
+            }]
+        );
+
+        let item = &analysis.tracks[0];
+        assert_eq!(item.track_id, "btc-coin");
+        assert_eq!(item.settlement_asset, "BTC");
+        assert_eq!(item.pnl_asset, "BTC");
+        assert_eq!(item.contract_count, Some(-30.0));
+        assert_eq!(item.signed_usd_notional, -3000.0);
+        assert_eq!(item.abs_usd_notional, 3000.0);
+        assert_eq!(item.estimated_base_asset.as_deref(), Some("BTC"));
+        assert_eq!(item.estimated_base_exposure, Some(-0.03));
+    }
+
+    #[test]
+    fn account_analysis_keeps_unknown_base_exposure_explicit() {
+        let mut track = test_track_list_read_model();
+        track.strategy_price = None;
+        track.recovery_issue = Some(TrackRecoveryIssue::ExpectedExposureMismatch);
+
+        let analysis = super::build_account_analysis_read_model(&[track]);
+
+        assert_eq!(analysis.total_contracts, 0.0);
+        assert_eq!(analysis.total_signed_usd_notional, 0.0);
+        assert_eq!(analysis.base_exposures, Vec::new());
+        assert_eq!(analysis.tracks[0].settlement_asset, "USDT");
+        assert_eq!(analysis.tracks[0].contract_count, None);
+        assert_eq!(analysis.tracks[0].estimated_base_asset, None);
+        assert_eq!(analysis.tracks[0].estimated_base_exposure, None);
     }
 
     #[test]
