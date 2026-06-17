@@ -134,6 +134,20 @@ pub struct ConfigDryRunTrackView {
     pub loss_limit_asset: String,
     pub daily_loss_limit: f64,
     pub total_loss_limit: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<ConfigDryRunCapacityView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigDryRunCapacityView {
+    pub available: f64,
+    pub available_asset: String,
+    pub mark_price: f64,
+    pub leverage: u32,
+    pub estimated_max_native_quantity: f64,
+    pub estimated_max_notional: f64,
+    pub estimated_max_notional_asset: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,10 +1,11 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use poise_application::TrackDefinitionRegistry;
-use poise_core::types::QuantityKind;
-use poise_engine::ports::{AccountSummarySnapshot, ExchangePorts};
+use poise_core::track::{Instrument, TrackDefinition};
+use poise_core::types::{ExchangeRules, QuantityKind};
+use poise_engine::ports::{AccountSummarySnapshot, ExchangePorts, MarketDataPort};
 use poise_protocol::{
-    ConfigDryRunAccountView, ConfigDryRunResponse, ConfigDryRunTrackView, InstrumentView,
-    TrackPositionQuantityUnitView,
+    ConfigDryRunAccountView, ConfigDryRunCapacityView, ConfigDryRunResponse, ConfigDryRunTrackView,
+    InstrumentView, TrackPositionQuantityUnitView,
 };
 
 use crate::config::Config;
@@ -23,6 +24,7 @@ pub(crate) async fn run_config_dry_run_with_ports(
         .await
         .context("failed to load dry-run account summary")?;
     let metadata = exchange_ports.metadata();
+    let market_data = exchange_ports.market_data();
     let mut tracks = Vec::new();
 
     for track in registry.iter() {
@@ -46,10 +48,13 @@ pub(crate) async fn run_config_dry_run_with_ports(
                     explanation.track_id
                 )
             })?;
+        let capacity =
+            estimate_capacity(track, &info.rules, &account, leverage, market_data.as_ref()).await?;
         tracks.push(project_track_explanation(
             explanation,
             track.instrument(),
             leverage,
+            capacity,
         ));
     }
 
@@ -81,8 +86,9 @@ fn project_account(account: AccountSummarySnapshot) -> ConfigDryRunAccountView {
 
 fn project_track_explanation(
     explanation: TrackConfigExplanation,
-    instrument: &poise_core::track::Instrument,
+    instrument: &Instrument,
     leverage: u32,
+    capacity: Option<ConfigDryRunCapacityView>,
 ) -> ConfigDryRunTrackView {
     ConfigDryRunTrackView {
         track_id: explanation.track_id,
@@ -102,6 +108,7 @@ fn project_track_explanation(
         loss_limit_asset: explanation.loss_limit_asset,
         daily_loss_limit: explanation.daily_loss_limit,
         total_loss_limit: explanation.total_loss_limit,
+        capacity,
     }
 }
 
@@ -112,12 +119,111 @@ fn quantity_unit(quantity_kind: QuantityKind) -> TrackPositionQuantityUnitView {
     }
 }
 
+async fn estimate_capacity(
+    track: &TrackDefinition,
+    exchange_rules: &ExchangeRules,
+    account: &AccountSummarySnapshot,
+    leverage: u32,
+    market_data: &dyn MarketDataPort,
+) -> Result<Option<ConfigDryRunCapacityView>> {
+    let mark_price = market_data
+        .get_mark_price(track.instrument())
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load dry-run mark price for track `{}` symbol `{}`",
+                track.track_id().as_str(),
+                track.instrument().symbol
+            )
+        })?;
+    let Some(mark_price) = mark_price else {
+        if matches!(exchange_rules.quantity_kind, QuantityKind::InverseContract) {
+            return Err(anyhow!(
+                "missing mark price for inverse dry-run capacity on `{}`",
+                track.instrument().symbol
+            ));
+        }
+        return Ok(None);
+    };
+    ensure!(
+        mark_price.is_finite() && mark_price > 0.0,
+        "invalid mark price for dry-run capacity on `{}`: got {}",
+        track.instrument().symbol,
+        mark_price
+    );
+
+    let available_asset = exchange_rules.settlement_asset.clone();
+    let available = match exchange_rules.quantity_kind {
+        QuantityKind::InverseContract => account
+            .available_for_asset(&available_asset)
+            .with_context(|| {
+                format!(
+                    "missing available balance for settlement asset `{}`",
+                    available_asset
+                )
+            })?,
+        QuantityKind::BaseAsset => account
+            .available_for_asset(&available_asset)
+            .unwrap_or(account.available),
+    };
+    ensure!(
+        available.is_finite(),
+        "invalid available balance for `{}`: got {}",
+        available_asset,
+        available
+    );
+    let available = available.max(0.0);
+
+    let (estimated_max_native_quantity, estimated_max_notional, estimated_max_notional_asset) =
+        match exchange_rules.quantity_kind {
+            QuantityKind::BaseAsset => {
+                let estimated_max_notional = available * leverage as f64;
+                (
+                    estimated_max_notional / mark_price,
+                    estimated_max_notional,
+                    track.instrument().quote_asset(),
+                )
+            }
+            QuantityKind::InverseContract => {
+                let contract_notional = exchange_rules.contract_notional.with_context(|| {
+                    format!(
+                        "missing contract_notional for inverse dry-run capacity on `{}`",
+                        track.instrument().symbol
+                    )
+                })?;
+                ensure!(
+                    contract_notional.is_finite() && contract_notional > 0.0,
+                    "invalid contract_notional for `{}`: got {}",
+                    track.instrument().symbol,
+                    contract_notional
+                );
+                let estimated_contracts =
+                    available * mark_price * leverage as f64 / contract_notional;
+                (
+                    estimated_contracts,
+                    estimated_contracts * contract_notional,
+                    "USD".to_string(),
+                )
+            }
+        };
+
+    Ok(Some(ConfigDryRunCapacityView {
+        available,
+        available_asset,
+        mark_price,
+        leverage,
+        estimated_max_native_quantity,
+        estimated_max_notional,
+        estimated_max_notional_asset,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
-    use anyhow::{Result, anyhow};
+    use anyhow::Result;
     use chrono::{TimeZone, Utc};
     use poise_core::track::Instrument;
     use poise_core::types::{ExchangeRules, QuantityKind};
@@ -171,7 +277,11 @@ total_loss_limit = 0.03
 
         assert_eq!(
             exchange.calls(),
-            vec!["account_summary", "metadata:BTC-USD-SWAP"]
+            vec![
+                "account_summary",
+                "metadata:BTC-USD-SWAP",
+                "mark_price:BTC-USD-SWAP"
+            ]
         );
         assert_eq!(response.account.available_by_asset["BTC"], 0.25);
         assert_eq!(response.tracks.len(), 1);
@@ -187,6 +297,14 @@ total_loss_limit = 0.03
         assert_eq!(track.native_quantity_per_unit, 3.0);
         assert_eq!(track.unit_notional_asset, "USD");
         assert_eq!(track.loss_limit_asset, "BTC");
+        let capacity = track.capacity.as_ref().unwrap();
+        assert_eq!(capacity.available, 0.25);
+        assert_eq!(capacity.available_asset, "BTC");
+        assert_eq!(capacity.mark_price, 60_000.0);
+        assert_eq!(capacity.leverage, 3);
+        assert_eq!(capacity.estimated_max_native_quantity, 450.0);
+        assert_eq!(capacity.estimated_max_notional, 45_000.0);
+        assert_eq!(capacity.estimated_max_notional_asset, "USD");
         assert!(response.warnings.is_empty());
     }
 
@@ -310,9 +428,8 @@ total_loss_limit = 0.03
         }
 
         async fn get_mark_price(&self, _instrument: &Instrument) -> Result<Option<f64>> {
-            Err(anyhow!(
-                "dry-run capacity estimation is introduced in task 3.3"
-            ))
+            self.record("mark_price:BTC-USD-SWAP");
+            Ok(Some(60_000.0))
         }
     }
 }
