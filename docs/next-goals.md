@@ -39,7 +39,7 @@
 | 顺序 | Goal | 优先级 | 难度 | 状态 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
 | 0 | 收尾当前 PNL backfill | P0 | M | completed | 无 |
-| 1 | 增加运行健康与启动前检查 | P0 | M | pending | Goal 0 |
+| 1 | 增加运行健康与启动前检查 | P0 | M | completed | Goal 0 |
 | 2 | 建立交易事实对账闭环 | P0 | L | pending | Goal 0, Goal 1 |
 | 3 | 提供配置解释和 dry-run | P1 | M | pending | Goal 1 |
 | 4 | 建立 BTC-USD-SWAP 调参 replay | P1 | M | pending | Goal 3 |
@@ -109,7 +109,7 @@ Task 清单：
 | 1.1 定义健康状态模型 | completed | 能表达 market data、user data、effect worker、recovery、account monitor、PNL backfill 的状态 | `e477f6f` |
 | 1.2 增加启动前 preflight | completed | 启动前校验账户模式、保证金模式、symbol metadata、mark price、available balance、最小交易单位 | `475385d`, `624939d` |
 | 1.3 暴露健康查询接口 | completed | HTTP 能返回整体状态、每个 task 最近成功时间、最近错误摘要 | `f745def` |
-| 1.4 增加启动失败和降级路径测试 | pending | 缺 mark price、错误 position mode、缺 metadata 时错误信息明确 |  |
+| 1.4 增加启动失败和降级路径测试 | completed | 缺 mark price、错误 position mode、缺 metadata 时错误信息明确 | `eefb708` |
 
 建议验证命令：
 
