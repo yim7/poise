@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -12,6 +14,7 @@ pub enum AccountRiskSignal {
 pub struct AccountReadModel {
     pub equity: f64,
     pub available: f64,
+    pub available_by_asset: BTreeMap<String, f64>,
     pub unrealized_pnl: f64,
     pub baseline_equity: f64,
     pub day_base_at: DateTime<Utc>,

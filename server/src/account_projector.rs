@@ -33,6 +33,8 @@ fn project_risk_signal(signal: AccountRiskSignal) -> RiskSignalView {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use chrono::{TimeZone, Utc};
     use poise_protocol::{AccountSummaryView, RiskSignalView};
 
@@ -45,6 +47,7 @@ mod tests {
         let model = AccountReadModel {
             equity: 12_500.0,
             available: 9_000.0,
+            available_by_asset: BTreeMap::from([("BTC".to_string(), 0.2)]),
             unrealized_pnl: -350.0,
             baseline_equity: 12_800.0,
             day_base_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),

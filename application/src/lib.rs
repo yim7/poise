@@ -35,12 +35,13 @@ pub use mutation_executor::{
 pub use notifications::ApplicationNotification;
 pub use query_service::TrackQueryService;
 pub use read_model::{
-    AccountAnalysisReadModel, AccountAssetExposureReadModel, AccountTrackAnalysisReadModel,
-    ReadModelBinding, TrackActivityEntry, TrackActivityLevel, TrackListReadModel,
-    TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadBindingPolicy,
-    TrackReadBindingStatus, TrackReadModel, TrackReadPnlStats, TrackReadStatus, TrackRecoveryIssue,
-    TrackRiskAcquisitionDirection, TrackRiskAcquisitionReadModel, TrackStrategyPriceStatus,
-    build_account_analysis_read_model,
+    AccountAnalysisReadModel, AccountAssetExposureReadModel, AccountHedgeLikeReadModel,
+    AccountSpotQuantitySource, AccountTrackAnalysisReadModel, ReadModelBinding, TrackActivityEntry,
+    TrackActivityLevel, TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent,
+    TrackReadBindingPolicy, TrackReadBindingStatus, TrackReadModel, TrackReadPnlStats,
+    TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
+    TrackRiskAcquisitionReadModel, TrackStrategyPriceStatus, build_account_analysis_read_model,
+    build_account_analysis_read_model_with_account,
 };
 pub use runtime_lifecycle_service::{TrackRecoverySummary, TrackRuntimeLifecycleService};
 pub use session_effect_queue::{

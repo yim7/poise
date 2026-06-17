@@ -16,6 +16,7 @@ use poise_engine::runtime::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::account_read_model::AccountReadModel;
 use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
 use crate::track_read_source::TrackReadSource;
 
@@ -64,6 +65,7 @@ pub struct AccountAnalysisReadModel {
     pub total_signed_usd_notional: f64,
     pub total_abs_usd_notional: f64,
     pub base_exposures: Vec<AccountAssetExposureReadModel>,
+    pub hedge_like: Vec<AccountHedgeLikeReadModel>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,7 +88,28 @@ pub struct AccountAssetExposureReadModel {
     pub quantity: f64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountHedgeLikeReadModel {
+    pub asset: String,
+    pub contract_base_exposure: f64,
+    pub spot_quantity: Option<f64>,
+    pub spot_quantity_source: Option<AccountSpotQuantitySource>,
+    pub net_base_exposure: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountSpotQuantitySource {
+    AccountSummaryAvailableByAsset,
+}
+
 pub fn build_account_analysis_read_model(
+    tracks: &[TrackListReadModel],
+) -> AccountAnalysisReadModel {
+    build_account_analysis_read_model_with_account(None, tracks)
+}
+
+pub fn build_account_analysis_read_model_with_account(
+    account: Option<&AccountReadModel>,
     tracks: &[TrackListReadModel],
 ) -> AccountAnalysisReadModel {
     let mut base_exposures = BTreeMap::<String, f64>::new();
@@ -111,17 +134,48 @@ pub fn build_account_analysis_read_model(
         items.push(item);
     }
 
+    let base_exposures: Vec<_> = base_exposures
+        .into_iter()
+        .filter(|(_, quantity)| quantity.abs() > f64::EPSILON)
+        .map(|(asset, quantity)| AccountAssetExposureReadModel { asset, quantity })
+        .collect();
+    let hedge_like = project_hedge_like(account, &base_exposures);
+
     AccountAnalysisReadModel {
         tracks: items,
         total_contracts,
         total_signed_usd_notional,
         total_abs_usd_notional,
-        base_exposures: base_exposures
-            .into_iter()
-            .filter(|(_, quantity)| quantity.abs() > f64::EPSILON)
-            .map(|(asset, quantity)| AccountAssetExposureReadModel { asset, quantity })
-            .collect(),
+        base_exposures,
+        hedge_like,
     }
+}
+
+fn project_hedge_like(
+    account: Option<&AccountReadModel>,
+    base_exposures: &[AccountAssetExposureReadModel],
+) -> Vec<AccountHedgeLikeReadModel> {
+    base_exposures
+        .iter()
+        .map(|exposure| {
+            let spot_quantity = account.and_then(|account| {
+                account
+                    .available_by_asset
+                    .get(&exposure.asset)
+                    .copied()
+                    .filter(|value| value.is_finite())
+            });
+
+            AccountHedgeLikeReadModel {
+                asset: exposure.asset.clone(),
+                contract_base_exposure: exposure.quantity,
+                spot_quantity,
+                spot_quantity_source: spot_quantity
+                    .map(|_| AccountSpotQuantitySource::AccountSummaryAvailableByAsset),
+                net_base_exposure: spot_quantity.map(|quantity| quantity + exposure.quantity),
+            }
+        })
+        .collect()
 }
 
 fn project_account_track_analysis(source: &TrackListReadModel) -> AccountTrackAnalysisReadModel {
@@ -747,6 +801,8 @@ fn project_binding_label(index: usize, is_passive_execution: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
     use poise_core::risk::LossLimits;
@@ -762,13 +818,14 @@ mod tests {
     };
 
     use super::{
-        AccountAssetExposureReadModel, TrackActivityLevel, TrackListReadModel,
-        TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadModel, TrackReadPnlStats,
-        TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
+        AccountAssetExposureReadModel, AccountSpotQuantitySource, TrackActivityLevel,
+        TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadModel,
+        TrackReadPnlStats, TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
         TrackStrategyPriceStatus,
     };
     use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
     use crate::track_read_source::TrackReadSource;
+    use crate::{AccountReadModel, AccountRiskSignal};
 
     fn test_track_config() -> TrackConfig {
         TrackConfig {
@@ -838,6 +895,21 @@ mod tests {
         }
     }
 
+    fn test_account_read_model() -> AccountReadModel {
+        AccountReadModel {
+            equity: 12_500.0,
+            available: 9_000.0,
+            available_by_asset: BTreeMap::from([("BTC".to_string(), 0.20)]),
+            unrealized_pnl: -350.0,
+            baseline_equity: 12_800.0,
+            day_base_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),
+            day_change_pct: Some(-2.75),
+            risk_signal: AccountRiskSignal::Attention,
+            reason: Some("day_change -2.75%".to_string()),
+            updated_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
+        }
+    }
+
     #[test]
     fn account_analysis_summarizes_inverse_contract_exposure() {
         let mut rules = test_exchange_rules();
@@ -891,6 +963,54 @@ mod tests {
         assert_eq!(analysis.tracks[0].contract_count, None);
         assert_eq!(analysis.tracks[0].estimated_base_asset, None);
         assert_eq!(analysis.tracks[0].estimated_base_exposure, None);
+    }
+
+    #[test]
+    fn account_analysis_estimates_hedge_like_net_exposure_from_account_asset_balance() {
+        let mut rules = test_exchange_rules();
+        rules.quantity_kind = QuantityKind::InverseContract;
+        rules.contract_notional = Some(100.0);
+        rules.settlement_asset = "BTC".to_string();
+
+        let mut track = test_track_list_read_model();
+        track.exchange_rules = rules;
+        track.position_qty = -30.0;
+
+        let account = test_account_read_model();
+        let analysis =
+            super::build_account_analysis_read_model_with_account(Some(&account), &[track]);
+
+        assert_eq!(analysis.hedge_like.len(), 1);
+        let hedge = &analysis.hedge_like[0];
+        assert_eq!(hedge.asset, "BTC");
+        assert_eq!(hedge.contract_base_exposure, -0.03);
+        assert_eq!(hedge.spot_quantity, Some(0.20));
+        assert_eq!(hedge.net_base_exposure, Some(0.17));
+        assert_eq!(
+            hedge.spot_quantity_source,
+            Some(AccountSpotQuantitySource::AccountSummaryAvailableByAsset)
+        );
+    }
+
+    #[test]
+    fn account_analysis_marks_hedge_like_net_exposure_unknown_without_account_asset_balance() {
+        let mut rules = test_exchange_rules();
+        rules.quantity_kind = QuantityKind::InverseContract;
+        rules.contract_notional = Some(100.0);
+        rules.settlement_asset = "BTC".to_string();
+
+        let mut track = test_track_list_read_model();
+        track.exchange_rules = rules;
+        track.position_qty = -30.0;
+
+        let analysis = super::build_account_analysis_read_model_with_account(None, &[track]);
+
+        assert_eq!(analysis.hedge_like.len(), 1);
+        assert_eq!(analysis.hedge_like[0].asset, "BTC");
+        assert_eq!(analysis.hedge_like[0].contract_base_exposure, -0.03);
+        assert_eq!(analysis.hedge_like[0].spot_quantity, None);
+        assert_eq!(analysis.hedge_like[0].net_base_exposure, None);
+        assert_eq!(analysis.hedge_like[0].spot_quantity_source, None);
     }
 
     #[test]

@@ -206,6 +206,7 @@ fn build_read_model(
         return Some(AccountReadModel {
             equity: snapshot.equity,
             available: snapshot.available,
+            available_by_asset: snapshot.available_by_asset,
             unrealized_pnl: snapshot.unrealized_pnl,
             baseline_equity,
             day_base_at,
@@ -259,6 +260,7 @@ fn build_read_model(
     Some(AccountReadModel {
         equity: snapshot.equity,
         available: snapshot.available,
+        available_by_asset: snapshot.available_by_asset,
         unrealized_pnl: snapshot.unrealized_pnl,
         baseline_equity,
         day_base_at,
@@ -360,6 +362,7 @@ impl AccountSummaryPort for UnavailableAccountSummarySource {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use anyhow::Result;
@@ -405,7 +408,7 @@ mod tests {
                 last_observed_account_snapshot: Some(ObservedAccountSnapshot {
                     equity: 12_500.0,
                     available: 9_000.0,
-                    available_by_asset: Default::default(),
+                    available_by_asset: BTreeMap::from([("BTC".to_string(), 0.25)]),
                     unrealized_pnl: -350.0,
                     observed_at,
                 }),
@@ -418,6 +421,10 @@ mod tests {
         assert_eq!(summary.equity, 12_500.0);
         assert_eq!(summary.available, 9_000.0);
         assert_eq!(summary.unrealized_pnl, -350.0);
+        assert_eq!(
+            summary.available_by_asset,
+            BTreeMap::from([("BTC".to_string(), 0.25)])
+        );
         assert_eq!(summary.baseline_equity, 12_800.0);
         assert_eq!(summary.day_base_at, baseline_at);
         assert_eq!(summary.updated_at, observed_at);
