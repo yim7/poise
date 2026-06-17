@@ -38,7 +38,7 @@
 
 | 顺序 | Goal | 优先级 | 难度 | 状态 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| 0 | 收尾当前 PNL backfill | P0 | M | pending | 无 |
+| 0 | 收尾当前 PNL backfill | P0 | M | completed | 无 |
 | 1 | 增加运行健康与启动前检查 | P0 | M | pending | Goal 0 |
 | 2 | 建立交易事实对账闭环 | P0 | L | pending | Goal 0, Goal 1 |
 | 3 | 提供配置解释和 dry-run | P1 | M | pending | Goal 1 |
@@ -70,7 +70,7 @@ Task 清单：
 | --- | --- | --- | --- |
 | 0.1 核对并补齐 OKX recent fills 到 `TrackPnlRecord` 的映射 | completed | OKX REST fill mapper 覆盖 inverse 数量、PNL asset、fee asset、source key 幂等 | `9521162` |
 | 0.2 接入 runtime PNL backfill task | completed | backfill task 启动后可写入缺失 PNL，重复执行不重复入账，失败只降级为告警 | `37cb992` |
-| 0.3 更新 PNL 文档语义 | pending | `system-overview.md` 不再描述 `pnl_asset` 只由公开读模型推导 |  |
+| 0.3 更新 PNL 文档语义 | completed | `system-overview.md` 不再描述 `pnl_asset` 只由公开读模型推导 | `4ec3cad` |
 
 建议验证命令：
 
