@@ -261,8 +261,7 @@ git diff --check
 
 - `README.md`
 - `docs/system-overview.md`
-- `docs/okx-coin-margined-spec.md`
-- `docs/okx-coin-margined-plan.md`
+- 已删除的历史阶段性 spec / plan
 - 必要时新增经确认的长期模块文档
 
 Task 清单：
@@ -271,7 +270,7 @@ Task 清单：
 | --- | --- | --- | --- |
 | 5.1 更新系统概览 | completed | PNL、数量单位、OKX 运行语义与当前实现一致 | `0cfb4b7` |
 | 5.2 做模块拆分决策 | completed | 明确继续单文档，或列出长期模块、边界、入口和去重规则 | `83e4c1f` |
-| 5.3 吸收并删除历史 spec/plan | pending | 已完成阶段性信息进入长期文档；旧 spec/plan 不再保留 |  |
+| 5.3 吸收并删除历史 spec/plan | completed | 已完成阶段性信息进入长期文档；旧 spec/plan 不再保留 | `55743a5` |
 | 5.4 更新 README 导航 | pending | README 只指向长期文档和当前有效入口，不指向历史过程文档 |  |
 
 建议验证命令：
