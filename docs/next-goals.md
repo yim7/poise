@@ -302,7 +302,7 @@ Task 清单：
 | Task | 状态 | 验收 | Commit |
 | --- | --- | --- | --- |
 | 6.1 定义账户分析 read model | completed | application read model 可从 track 列表展示 settlement asset、合约张数、USD 面值、折算 BTC 暴露、PNL asset | 89582eb |
-| 6.2 增加 hedge-like 视图 | pending | 能展示用户现货 BTC 与合约净暴露的估算关系，但不影响 engine 决策 |  |
+| 6.2 增加 hedge-like 视图 | completed | application read model 使用 account_summary.available_by_asset 明确估算现货 BTC 与合约净暴露关系，不影响 engine 决策 | 7bd6621 |
 | 6.3 接入 TUI 或 HTTP detail | pending | 用户能从现有界面看到净暴露和账户视角风险 |  |
 
 建议验证命令：
