@@ -95,6 +95,34 @@ pub(crate) struct PendingOrderSnapshot {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub(crate) struct TradeFillSnapshot {
+    #[serde(rename = "instId")]
+    pub inst_id: String,
+    #[serde(rename = "ordId", default)]
+    pub order_id: String,
+    #[serde(rename = "tradeId")]
+    pub trade_id: String,
+    pub side: String,
+    #[serde(rename = "fillPx")]
+    pub fill_price: String,
+    #[serde(rename = "fillSz")]
+    pub fill_size: String,
+    #[serde(rename = "fillPnl", default)]
+    pub fill_pnl: Option<String>,
+    #[serde(default)]
+    pub pnl: Option<String>,
+    #[serde(rename = "fillFee", default)]
+    pub fill_fee: Option<String>,
+    #[serde(default)]
+    pub fee: Option<String>,
+    #[serde(rename = "fillFeeCcy", default)]
+    pub fill_fee_currency: Option<String>,
+    #[serde(rename = "feeCcy", default)]
+    pub fee_currency: Option<String>,
+    pub ts: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct OrderAck {
     #[serde(rename = "ordId")]
     pub order_id: String,
@@ -206,6 +234,27 @@ mod tests {
         assert_eq!(order.order_id, "123");
         assert_eq!(order.client_order_id, "client-123");
         assert_eq!(order.acc_fill_sz, "0.05");
+
+        let fill: TradeFillSnapshot = serde_json::from_str(
+            r#"
+            {
+                "instId": "BTC-USD-SWAP",
+                "ordId": "456",
+                "tradeId": "trade-456",
+                "side": "sell",
+                "fillPx": "62147.4",
+                "fillSz": "1",
+                "fillPnl": "0.0000001",
+                "fee": "-0.00000002",
+                "feeCcy": "BTC",
+                "ts": "1781099765546"
+            }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(fill.inst_id, "BTC-USD-SWAP");
+        assert_eq!(fill.trade_id, "trade-456");
+        assert_eq!(fill.fee.as_deref(), Some("-0.00000002"));
 
         let ack: OrderAck = serde_json::from_str(
             r#"{ "ordId": "123", "clOrdId": "client-123", "sCode": "0", "sMsg": "" }"#,

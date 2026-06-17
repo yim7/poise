@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 use url::form_urlencoded::Serializer;
 
 use poise_core::track::{Instrument, Venue};
+use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderRequest, OrderStatus, Position,
@@ -17,12 +18,13 @@ use crate::instrument::{OkxInstrumentMetadata, OkxInstrumentRegistry};
 use crate::mapper::{
     account_summary_from_balance, available_balance_from_balance,
     open_order_from_snapshot_with_metadata, position_from_snapshot_with_metadata, side_to_okx,
+    track_pnl_record_from_trade_fill_with_metadata,
 };
 use crate::rest::auth::sign_okx_payload;
 use crate::rest::error::OkxRestError;
 use crate::rest::models::{
     AccountConfigSnapshot, BalanceSnapshot, InstrumentInfo, MarkPriceSnapshot, OkxEnvelope,
-    OrderAck, PendingOrderSnapshot, PositionSnapshot, ServerTime,
+    OrderAck, PendingOrderSnapshot, PositionSnapshot, ServerTime, TradeFillSnapshot,
 };
 use crate::{Config, Credentials};
 
@@ -34,6 +36,7 @@ enum AuthMode {
 
 const MAX_DECIMAL_SCALE: u32 = 16;
 const OKX_NET_POSITION_MODE: &str = "net_mode";
+const RECENT_TRADE_FILL_LIMIT: usize = 100;
 
 pub(crate) struct OkxRestClient {
     http: reqwest::Client,
@@ -225,6 +228,30 @@ impl OkxRestClient {
         response
             .into_iter()
             .map(|order| open_order_from_snapshot_with_metadata(order, Some(&metadata)))
+            .collect::<Result<Vec<_>>>()
+    }
+
+    pub(crate) async fn get_recent_track_pnl_records(
+        &self,
+        symbol: &str,
+    ) -> Result<Vec<TrackPnlRecord>> {
+        let metadata = self.get_or_fetch_instrument_metadata(symbol).await?;
+        let response: Vec<TradeFillSnapshot> = self
+            .send_request(
+                Method::GET,
+                "/api/v5/trade/fills",
+                vec![
+                    ("instType", "SWAP".to_string()),
+                    ("instId", symbol.to_string()),
+                    ("limit", RECENT_TRADE_FILL_LIMIT.to_string()),
+                ],
+                None,
+                AuthMode::Signed,
+            )
+            .await?;
+        response
+            .into_iter()
+            .map(|fill| track_pnl_record_from_trade_fill_with_metadata(fill, Some(&metadata)))
             .collect::<Result<Vec<_>>>()
     }
 
@@ -1093,6 +1120,58 @@ mod tests {
         assert_eq!(
             server.requests()[0].path,
             "/api/v5/public/mark-price?instType=SWAP&instId=BTC-USD-SWAP"
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_read_trade_fills() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, inverse_instrument_response()),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[
+                    {
+                        "instId":"BTC-USD-SWAP",
+                        "ordId":"3645412589617586176",
+                        "tradeId":"460607985",
+                        "side":"sell",
+                        "fillPx":"62096.9",
+                        "fillSz":"0.2",
+                        "fillPnl":"0",
+                        "fee":"-0.0000001610386348",
+                        "feeCcy":"BTC",
+                        "ts":"1781144161232"
+                    }
+                ]}"#,
+            ),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        let records = client
+            .get_recent_track_pnl_records("BTC-USD-SWAP")
+            .await
+            .unwrap();
+
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(
+            record.source_key.as_deref(),
+            Some("okx:orders:btc-usd-swap:460607985")
+        );
+        assert_eq!(record.pnl_asset, "BTC");
+        assert_eq!(record.qty, Some(0.2));
+        assert_eq!(record.realized_pnl, 0.0);
+        assert_eq!(record.trading_fee, 0.0000001610386348);
+
+        let requests = server.requests();
+        assert_eq!(
+            requests[1].path,
+            "/api/v5/trade/fills?instType=SWAP&instId=BTC-USD-SWAP&limit=100"
+        );
+        assert_eq!(
+            requests[1].headers.get("ok-access-key"),
+            Some(&"api-key".to_string())
         );
     }
 

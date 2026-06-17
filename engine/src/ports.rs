@@ -280,6 +280,14 @@ pub trait AccountPort: Send + Sync {
         &self,
         instrument: &Instrument,
     ) -> Result<AccountCapacitySnapshot>;
+
+    async fn get_recent_track_pnl_records(
+        &self,
+        _instrument: &Instrument,
+    ) -> Result<Vec<TrackPnlRecord>> {
+        Ok(Vec::new())
+    }
+
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>>;
 }
 

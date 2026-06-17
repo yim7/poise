@@ -1,14 +1,17 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, anyhow};
-use chrono::Utc;
+use anyhow::{Context, Result, anyhow, ensure};
+use chrono::{TimeZone, Utc};
 
 use poise_core::track::{Instrument, Venue};
 use poise_core::types::Side;
+use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{AccountSummarySnapshot, ExchangeOrder, OrderStatus, Position};
 
 use crate::instrument::OkxInstrumentMetadata;
-use crate::rest::models::{BalanceSnapshot, PendingOrderSnapshot, PositionSnapshot};
+use crate::rest::models::{
+    BalanceSnapshot, PendingOrderSnapshot, PositionSnapshot, TradeFillSnapshot,
+};
 
 pub(crate) fn account_summary_from_balance(
     value: BalanceSnapshot,
@@ -117,6 +120,61 @@ pub(crate) fn open_order_from_snapshot_with_metadata(
     })
 }
 
+pub(crate) fn track_pnl_record_from_trade_fill_with_metadata(
+    value: TradeFillSnapshot,
+    metadata: Option<&OkxInstrumentMetadata>,
+) -> Result<TrackPnlRecord> {
+    let instrument = Instrument::new(Venue::Okx, value.inst_id);
+    let occurred_at = millis_to_utc(&value.ts)?;
+    let side = side_from_okx(&value.side)?;
+    let fill_price = parse_decimal("fillPx", &value.fill_price)?;
+    let fill_size =
+        native_qty_from_okx_contracts(parse_decimal("fillSz", &value.fill_size)?, metadata);
+    let realized_pnl = parse_optional_decimal("fillPnl", value.fill_pnl.as_deref())?
+        .or(parse_optional_decimal("pnl", value.pnl.as_deref())?)
+        .unwrap_or(0.0);
+    let raw_fee = parse_optional_decimal("fillFee", value.fill_fee.as_deref())?
+        .or(parse_optional_decimal("fee", value.fee.as_deref())?)
+        .unwrap_or(0.0);
+    let trading_fee = -raw_fee;
+    let pnl_asset = metadata
+        .map(|metadata| metadata.settlement_asset().to_string())
+        .unwrap_or_else(|| instrument.quote_asset());
+    if let Some(fee_asset) = value
+        .fill_fee_currency
+        .as_deref()
+        .or(value.fee_currency.as_deref())
+    {
+        ensure!(
+            fee_asset == pnl_asset,
+            "OKX fee asset `{fee_asset}` does not match settlement asset `{pnl_asset}`"
+        );
+    }
+    let trade_id = non_empty_string(value.trade_id);
+    let source_key = trade_id.as_ref().map(|trade_id| {
+        format!(
+            "okx:orders:{}:{}",
+            instrument.symbol.to_lowercase(),
+            trade_id
+        )
+    });
+
+    Ok(TrackPnlRecord::trade(
+        instrument,
+        occurred_at,
+        "okx:fills".to_string(),
+        source_key,
+        non_empty_string(value.order_id),
+        trade_id,
+        side,
+        fill_price,
+        fill_size,
+        realized_pnl,
+        trading_fee,
+        pnl_asset,
+    ))
+}
+
 pub(crate) fn order_status_from_okx_state(value: &str) -> Result<OrderStatus> {
     match value {
         "live" => Ok(OrderStatus::New),
@@ -164,6 +222,20 @@ fn parse_optional_decimal(field: &str, value: Option<&str>) -> Result<Option<f64
     parse_decimal(field, value).map(Some)
 }
 
+fn millis_to_utc(value: &str) -> Result<chrono::DateTime<Utc>> {
+    let timestamp_ms = value
+        .parse::<i64>()
+        .with_context(|| format!("invalid OKX timestamp: {value}"))?;
+    Utc.timestamp_millis_opt(timestamp_ms)
+        .single()
+        .context("invalid OKX timestamp millis")
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
 #[cfg(test)]
 mod tests {
     use poise_core::track::{Instrument, Venue};
@@ -174,6 +246,7 @@ mod tests {
     use crate::instrument::{OkxInstrumentMetadata, exchange_info_from_instrument};
     use crate::rest::models::{
         BalanceDetail, BalanceSnapshot, InstrumentInfo, PendingOrderSnapshot, PositionSnapshot,
+        TradeFillSnapshot,
     };
 
     #[test]
@@ -234,6 +307,141 @@ mod tests {
         assert_eq!(info.rules.settlement_asset, "BTC");
         assert_eq!(info.rules.quantity_step, 1.0);
         assert_eq!(info.rules.min_qty, 1.0);
+    }
+
+    #[test]
+    fn maps_inverse_trade_fill_to_contract_qty_and_settlement_pnl_asset() {
+        let metadata = OkxInstrumentMetadata::from_instrument_info(&InstrumentInfo {
+            inst_id: "BTC-USD-SWAP".to_string(),
+            ct_type: Some("inverse".to_string()),
+            tick_sz: "0.1".to_string(),
+            lot_sz: "1".to_string(),
+            min_sz: "1".to_string(),
+            ct_val: Some("100".to_string()),
+            ct_val_ccy: Some("USD".to_string()),
+            settle_ccy: Some("BTC".to_string()),
+        })
+        .unwrap();
+
+        let record = track_pnl_record_from_trade_fill_with_metadata(
+            TradeFillSnapshot {
+                inst_id: "BTC-USD-SWAP".to_string(),
+                order_id: "order-1".to_string(),
+                trade_id: "trade-1".to_string(),
+                side: "sell".to_string(),
+                fill_price: "62147.4".to_string(),
+                fill_size: "10".to_string(),
+                fill_pnl: Some("0.000000154839457".to_string()),
+                pnl: None,
+                fill_fee: None,
+                fee: Some("-0.000000032".to_string()),
+                fill_fee_currency: None,
+                fee_currency: Some("BTC".to_string()),
+                ts: "1781099765546".to_string(),
+            },
+            Some(&metadata),
+        )
+        .unwrap();
+
+        assert_eq!(
+            record.instrument,
+            Instrument::new(Venue::Okx, "BTC-USD-SWAP")
+        );
+        assert_eq!(record.pnl_asset, "BTC");
+        assert_eq!(record.source, "okx:fills");
+        assert_eq!(
+            record.source_key.as_deref(),
+            Some("okx:orders:btc-usd-swap:trade-1")
+        );
+        assert_eq!(record.order_id.as_deref(), Some("order-1"));
+        assert_eq!(record.trade_id.as_deref(), Some("trade-1"));
+        assert_eq!(record.side, Some(Side::Sell));
+        assert_eq!(record.price, Some(62_147.4));
+        assert_eq!(record.qty, Some(10.0));
+        assert_eq!(record.realized_pnl, 0.000000154839457);
+        assert_eq!(record.trading_fee, 0.000000032);
+        assert_eq!(record.occurred_at.timestamp_millis(), 1_781_099_765_546);
+    }
+
+    #[test]
+    fn maps_linear_trade_fill_to_base_asset_qty() {
+        let metadata = OkxInstrumentMetadata::from_instrument_info(&InstrumentInfo {
+            inst_id: "BTC-USDT-SWAP".to_string(),
+            ct_type: Some("linear".to_string()),
+            tick_sz: "0.1".to_string(),
+            lot_sz: "0.01".to_string(),
+            min_sz: "0.01".to_string(),
+            ct_val: Some("0.01".to_string()),
+            ct_val_ccy: Some("BTC".to_string()),
+            settle_ccy: Some("USDT".to_string()),
+        })
+        .unwrap();
+
+        let record = track_pnl_record_from_trade_fill_with_metadata(
+            TradeFillSnapshot {
+                inst_id: "BTC-USDT-SWAP".to_string(),
+                order_id: "order-1".to_string(),
+                trade_id: "trade-1".to_string(),
+                side: "buy".to_string(),
+                fill_price: "64000".to_string(),
+                fill_size: "3".to_string(),
+                fill_pnl: Some("12.34".to_string()),
+                pnl: None,
+                fill_fee: None,
+                fee: Some("-0.5".to_string()),
+                fill_fee_currency: None,
+                fee_currency: Some("USDT".to_string()),
+                ts: "1781099765546".to_string(),
+            },
+            Some(&metadata),
+        )
+        .unwrap();
+
+        assert_eq!(record.pnl_asset, "USDT");
+        assert_eq!(record.qty, Some(0.03));
+        assert_eq!(record.realized_pnl, 12.34);
+        assert_eq!(record.trading_fee, 0.5);
+    }
+
+    #[test]
+    fn trade_fill_rejects_fee_asset_mismatch() {
+        let metadata = OkxInstrumentMetadata::from_instrument_info(&InstrumentInfo {
+            inst_id: "BTC-USD-SWAP".to_string(),
+            ct_type: Some("inverse".to_string()),
+            tick_sz: "0.1".to_string(),
+            lot_sz: "1".to_string(),
+            min_sz: "1".to_string(),
+            ct_val: Some("100".to_string()),
+            ct_val_ccy: Some("USD".to_string()),
+            settle_ccy: Some("BTC".to_string()),
+        })
+        .unwrap();
+
+        let error = track_pnl_record_from_trade_fill_with_metadata(
+            TradeFillSnapshot {
+                inst_id: "BTC-USD-SWAP".to_string(),
+                order_id: "order-1".to_string(),
+                trade_id: "trade-1".to_string(),
+                side: "sell".to_string(),
+                fill_price: "62147.4".to_string(),
+                fill_size: "10".to_string(),
+                fill_pnl: Some("0".to_string()),
+                pnl: None,
+                fill_fee: None,
+                fee: Some("-0.000000032".to_string()),
+                fill_fee_currency: None,
+                fee_currency: Some("USD".to_string()),
+                ts: "1781099765546".to_string(),
+            },
+            Some(&metadata),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("does not match settlement asset")
+        );
     }
 
     #[test]

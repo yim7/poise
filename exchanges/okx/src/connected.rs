@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use poise_core::track::Instrument;
+use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
@@ -166,6 +167,15 @@ impl AccountPort for OkxAccount {
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
         self.ws.subscribe_user_data().await
+    }
+
+    async fn get_recent_track_pnl_records(
+        &self,
+        instrument: &Instrument,
+    ) -> Result<Vec<TrackPnlRecord>> {
+        self.rest
+            .get_recent_track_pnl_records(&instrument.symbol)
+            .await
     }
 }
 
