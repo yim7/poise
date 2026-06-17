@@ -8,10 +8,10 @@ Poise 是个人策略运行实验项目。源码公开主要为了透明记录�
 
 本项目可能连接真实合约账户并自动下单。它不构成投资建议，也不保证收益、风控效果或可用性。默认建议只在 testnet、只使用独立低权限 API key 或 Hyperliquid API wallet、只投入可以承受全部损失的资金。不要给 API key 开启提现权限，不要把 Hyperliquid 主钱包私钥交给 Poise，不要把实例目录、真实配置、SQLite 数据库、日志或密钥提交到仓库。
 
-项目仍在快速探索，旧方案不会保留兼容层。当前文档保留这些入口：
+项目仍在快速探索，旧方案不会保留兼容层。当前文档只保留这些长期入口：
 
 - 本文件：启动、配置和常用开发入口。
-- [docs/system-overview.md](docs/system-overview.md)：从零构建路径、当前系统边界、运行语义和事实源。
+- [docs/system-overview.md](docs/system-overview.md)：唯一长期系统文档，记录从零构建路径、当前系统边界、运行语义和事实源。
 - [SECURITY.md](SECURITY.md)：安全边界、密钥使用和漏洞报告方式。
 - [LICENSE](LICENSE)：源码许可证。
 
@@ -242,6 +242,12 @@ stale_release_minutes = 60.0
 详细边界见 [docs/system-overview.md](docs/system-overview.md)。
 
 ### 4. 启动服务端
+
+真实启动前可以先做配置 dry-run。它会读取配置、加载交易所 metadata、账户摘要和可用 mark price，输出配置解释与容量估算；不会初始化 SQLite、下单、订阅实时任务或启动 runtime。
+
+```bash
+cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet" --dry-run
+```
 
 ```bash
 cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet"
