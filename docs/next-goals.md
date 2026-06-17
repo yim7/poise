@@ -69,7 +69,7 @@ Task 清单：
 | Task | 状态 | 验收 | Commit |
 | --- | --- | --- | --- |
 | 0.1 核对并补齐 OKX recent fills 到 `TrackPnlRecord` 的映射 | completed | OKX REST fill mapper 覆盖 inverse 数量、PNL asset、fee asset、source key 幂等 | `9521162` |
-| 0.2 接入 runtime PNL backfill task | pending | backfill task 启动后可写入缺失 PNL，重复执行不重复入账，失败只降级为告警 |  |
+| 0.2 接入 runtime PNL backfill task | completed | backfill task 启动后可写入缺失 PNL，重复执行不重复入账，失败只降级为告警 | `37cb992` |
 | 0.3 更新 PNL 文档语义 | pending | `system-overview.md` 不再描述 `pnl_asset` 只由公开读模型推导 |  |
 
 建议验证命令：
