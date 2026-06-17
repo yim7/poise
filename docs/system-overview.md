@@ -239,6 +239,8 @@ Track PNL 统计只把本地可归属到 track 的明细作为事实来源：
 - 资金费如果无法归属到某个 track，就不进入 track PNL 统计。
 - HTTP / WebSocket 公开读模型使用 `pnl` 字段，不再用旧的 `ledger` 命名承载 PNL 统计。
 
+OKX recent fills 和可归属 funding bills 都映射为 `TrackPnlRecord`，不进入第二套 PNL 事实表。runtime 的 PNL backfill task 使用交易所 recent records 补写本地缺失明细，并通过 `/health` 暴露最近完成时间、写入数量、跳过数量和最近错误；重复回补依赖 source key 保持幂等。`GET /debug/tracks/:id/recent-fills-audit` 只比较交易所最近成交和本地 `track_pnl_records` 的覆盖情况，是排查投影，不写事实。启动后的 recent fills audit 如果发现本地缺失，会写入 `PnlAuditMissingRecords` 诊断事件；该事件说明“启动时发现缺失”，不替代 PNL 明细，也不表示缺失一定尚未被后续 backfill 修复。
+
 ## HTTP / WebSocket
 
 当前公开入口：
