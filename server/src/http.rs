@@ -147,16 +147,20 @@ async fn get_account(
     State(state): State<HttpState>,
 ) -> Result<Json<AccountSummaryView>, (StatusCode, Json<ErrorResponse>)> {
     let summary = state.account_monitor.current_summary().await;
-    let sources = state
-        .query_service
-        .list_track_sources()
-        .await
-        .map_err(map_query_error)?;
-    let analysis = build_account_analysis_read_model_with_account(summary.as_ref(), &sources);
+    let analysis = match state.query_service.list_track_sources().await {
+        Ok(sources) => Some(build_account_analysis_read_model_with_account(
+            summary.as_ref(),
+            &sources,
+        )),
+        Err(error) => {
+            tracing::warn!("failed to load account analysis for HTTP account summary: {error}");
+            None
+        }
+    };
 
     Ok(Json(state.account_projector.project_summary_with_analysis(
         summary.as_ref(),
-        Some(&analysis),
+        analysis.as_ref(),
     )))
 }
 
@@ -425,6 +429,57 @@ mod tests {
     impl poise_engine::ports::AccountSummaryPort for AccountSummaryOnlyExchange {
         async fn get_account_summary(&self) -> anyhow::Result<AccountSummarySnapshot> {
             Err(anyhow!("not used in tests"))
+        }
+    }
+
+    struct FailingQueryStore;
+
+    #[async_trait::async_trait]
+    impl TrackQueryStore for FailingQueryStore {
+        async fn list_recent_track_events(
+            &self,
+            _track_id: &TrackId,
+            _limit: usize,
+        ) -> anyhow::Result<Vec<StoredTrackEvent>> {
+            Err(anyhow!("query unavailable"))
+        }
+
+        async fn list_recent_track_effects(
+            &self,
+            _track_id: &TrackId,
+            _limit: usize,
+        ) -> anyhow::Result<Vec<PersistedTrackEffect>> {
+            Err(anyhow!("query unavailable"))
+        }
+
+        async fn load_track_control_state(
+            &self,
+            _track_id: &TrackId,
+        ) -> anyhow::Result<Option<poise_application::TrackControlState>> {
+            Err(anyhow!("query unavailable"))
+        }
+
+        async fn load_track_pnl_stats(
+            &self,
+            _track_id: &TrackId,
+            _pnl_utc_day: chrono::NaiveDate,
+        ) -> anyhow::Result<poise_engine::ledger::TrackPnlStats> {
+            Err(anyhow!("query unavailable"))
+        }
+
+        async fn list_track_pnl_source_keys(
+            &self,
+            _track_id: &TrackId,
+            _source_keys: &[String],
+        ) -> anyhow::Result<Vec<String>> {
+            Err(anyhow!("query unavailable"))
+        }
+
+        async fn load_track_updated_at(
+            &self,
+            _track_id: &TrackId,
+        ) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
+            Err(anyhow!("query unavailable"))
         }
     }
 
@@ -1075,6 +1130,34 @@ mod tests {
         assert_eq!(analysis.tracks[0].track_id, "btc-core");
         assert_eq!(analysis.tracks[0].settlement_asset, "USDT");
         assert_eq!(analysis.tracks[0].pnl_asset, "USDT");
+    }
+
+    #[tokio::test]
+    async fn get_account_keeps_summary_when_analysis_query_fails() {
+        let mut state = app_state_with_account_summary().await;
+        state.http_state.query_service = Arc::new(TrackQueryService::new(
+            Arc::new(FailingQueryStore),
+            test_track_definition_registry("btc-core"),
+            state.websocket_state.observation_service.clone(),
+        ));
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/account")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: AccountSummaryView = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(payload.equity, Some(12_500.0));
+        assert_eq!(payload.available, Some(9_000.0));
+        assert_eq!(payload.analysis, None);
     }
 
     #[tokio::test]
