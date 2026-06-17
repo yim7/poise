@@ -45,7 +45,7 @@
 | 4 | 建立 BTC-USD-SWAP 调参 replay | P1 | M | completed | Goal 3 |
 | 5 | 文档治理与模块拆分决策 | P1 | S | completed | Goal 0, Goal 1 |
 | 6 | 增加账户视角分析层 | P2 | M | completed | Goal 2, Goal 3 |
-| 7 | 评估多 track 和更多交易所 | P3 | L | pending | Goal 1 到 Goal 4 |
+| 7 | 评估多 track 和更多交易所 | P3 | L | completed | Goal 1 到 Goal 4 |
 
 ## Goal 0. 收尾当前 PNL backfill
 
@@ -332,6 +332,14 @@ git diff --check
 - OKX 以外交易所的 recent fills / funding fee backfill 能力。
 - 更完整的 TUI / workbench 配置编辑和模拟。
 - 多实例运行管理。
+
+评估结论：
+
+- 当前不进入多 track 容量分配或多交易所抽象实现。原因是缺少新的明确用户场景，且长期系统约束仍是单实例连接单交易所。
+- 多 track 共享容量会改变当前单 track 风险语义。进入实现前必须先写 spec，明确账户容量事实来源、风险预算 owner、启动 preflight、运行时 guard、read model 和 UI 呈现。
+- 新增交易所应继续按 `system-overview.md` 的交易所接入边界推进：只实现真实运行所需的最小 port，不提前统一所有 exchange 私有语义。
+- 更完整的 TUI / workbench 配置编辑和模拟应围绕现有公开协议和 `core::replay` 形成薄闭环，不成为运行时事实源。
+- 多实例运行管理应作为进程/实例编排问题处理，不反向改变 `core` 或单实例 engine 语义。
 
 进入条件：
 
