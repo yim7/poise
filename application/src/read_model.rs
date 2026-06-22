@@ -92,13 +92,13 @@ pub struct AccountAssetExposureReadModel {
 pub struct AccountHedgeLikeReadModel {
     pub asset: String,
     pub contract_base_exposure: f64,
-    pub spot_quantity: Option<f64>,
-    pub spot_quantity_source: Option<AccountSpotQuantitySource>,
+    pub account_asset_quantity: Option<f64>,
+    pub account_asset_quantity_source: Option<AccountAssetQuantitySource>,
     pub net_base_exposure: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AccountSpotQuantitySource {
+pub enum AccountAssetQuantitySource {
     AccountSummaryAvailableByAsset,
 }
 
@@ -158,7 +158,7 @@ fn project_hedge_like(
     base_exposures
         .iter()
         .map(|exposure| {
-            let spot_quantity = account.and_then(|account| {
+            let account_asset_quantity = account.and_then(|account| {
                 account
                     .available_by_asset
                     .get(&exposure.asset)
@@ -169,10 +169,11 @@ fn project_hedge_like(
             AccountHedgeLikeReadModel {
                 asset: exposure.asset.clone(),
                 contract_base_exposure: exposure.quantity,
-                spot_quantity,
-                spot_quantity_source: spot_quantity
-                    .map(|_| AccountSpotQuantitySource::AccountSummaryAvailableByAsset),
-                net_base_exposure: spot_quantity.map(|quantity| quantity + exposure.quantity),
+                account_asset_quantity,
+                account_asset_quantity_source: account_asset_quantity
+                    .map(|_| AccountAssetQuantitySource::AccountSummaryAvailableByAsset),
+                net_base_exposure: account_asset_quantity
+                    .map(|quantity| quantity + exposure.quantity),
             }
         })
         .collect()
@@ -818,7 +819,7 @@ mod tests {
     };
 
     use super::{
-        AccountAssetExposureReadModel, AccountSpotQuantitySource, TrackActivityLevel,
+        AccountAssetExposureReadModel, AccountAssetQuantitySource, TrackActivityLevel,
         TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadModel,
         TrackReadPnlStats, TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
         TrackStrategyPriceStatus,
@@ -984,11 +985,11 @@ mod tests {
         let hedge = &analysis.hedge_like[0];
         assert_eq!(hedge.asset, "BTC");
         assert_eq!(hedge.contract_base_exposure, -0.03);
-        assert_eq!(hedge.spot_quantity, Some(0.20));
+        assert_eq!(hedge.account_asset_quantity, Some(0.20));
         assert_eq!(hedge.net_base_exposure, Some(0.17));
         assert_eq!(
-            hedge.spot_quantity_source,
-            Some(AccountSpotQuantitySource::AccountSummaryAvailableByAsset)
+            hedge.account_asset_quantity_source,
+            Some(AccountAssetQuantitySource::AccountSummaryAvailableByAsset)
         );
     }
 
@@ -1008,9 +1009,9 @@ mod tests {
         assert_eq!(analysis.hedge_like.len(), 1);
         assert_eq!(analysis.hedge_like[0].asset, "BTC");
         assert_eq!(analysis.hedge_like[0].contract_base_exposure, -0.03);
-        assert_eq!(analysis.hedge_like[0].spot_quantity, None);
+        assert_eq!(analysis.hedge_like[0].account_asset_quantity, None);
         assert_eq!(analysis.hedge_like[0].net_base_exposure, None);
-        assert_eq!(analysis.hedge_like[0].spot_quantity_source, None);
+        assert_eq!(analysis.hedge_like[0].account_asset_quantity_source, None);
     }
 
     #[test]

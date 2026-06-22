@@ -161,7 +161,7 @@ total_loss_limit = 750.0
 | `daily_loss_limit` | 必填 | 当日亏损终止阈值，必须大于 `0`。 |
 | `total_loss_limit` | 必填 | 累计亏损终止阈值，必须大于 `0`。 |
 | `min_rebalance_units` | `0.5` | 最小调仓单位；目标变化小于该值时不触发新的执行动作。 |
-| `shape_family` | `linear` | 曲线形状，支持 `linear`、`inertial`、`responsive`。旧名 `concave` / `convex` 不再接受。 |
+| `shape_family` | `linear` | 曲线形状，支持 `linear`、`inertial`、`responsive`。 |
 | `out_of_band_policy` | `freeze` | 价格离开主价格带后的处理策略，见下面的带外配置。 |
 | `max_notional` | `max(long_exposure_units, short_exposure_units) * notional_per_unit` | track 最大绝对名义金额，必须大于 `0`。 |
 | `leverage` | `10` | 启动时按 track 下发到交易所；这是 server-owned startup-only 配置，不进入策略曲线。 |

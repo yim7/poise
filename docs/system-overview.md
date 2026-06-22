@@ -209,12 +209,13 @@ SQLite 文件位于 `<instance-dir>/.data/poise-server.sqlite`。
 - `track_effects`：保存 effect journal、执行状态、重试次数和错误摘要。它是 effect worker 的持久队列事实，不是交易所订单事实的完整替代。
 - `track_pnl_records`：保存可归属到 track 的成交盈亏、交易手续费和资金费明细。
 - `persisted_track_presence`：读模型辅助表，只用于 listing 和 updated-at 元数据。
-- `account_monitor_state`：账户监控的跨进程基线和最近观测。
+- `account_monitor_state`：账户监控的跨进程基线，包括交易日、基线权益和基线捕获时间；不保存当前账户摘要。
 
 当前进程事实：
 
 - `TrackMutationFrame` 是一次 mutation 的当前进程快照，用于提交、回滚和 durable-write 判断；它不是持久文档。
 - `ExecutorState`、binding ledger、recovery anomaly、risk exposure gate、`desired_exposure` 和 live market fields 属于 runtime 当前会话状态。需要展示时从 live runtime 投影；重启后根据 durable 控制状态、当前配置、交易所快照和新行情重新建立。
+- 当前账户摘要、`available_by_asset` 和 hedge-like account asset 数量来自启动后的 `AccountSummaryPort` 刷新或订阅更新，不从 `account_monitor_state` 恢复。
 - `TrackRuntimeView`、read model 和 protocol DTO 都是投影结果。它们可以被查询和推送，但不能反向作为 engine 或 persistence 的事实源。
 
 读模型链路：

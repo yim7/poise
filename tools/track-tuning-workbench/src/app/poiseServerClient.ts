@@ -253,12 +253,12 @@ export interface AccountAssetExposureView {
 export interface AccountHedgeLikeView {
   asset: string;
   contract_base_exposure: number;
-  spot_quantity?: number | null;
-  spot_quantity_source?: AccountSpotQuantitySourceView | null;
+  account_asset_quantity?: number | null;
+  account_asset_quantity_source?: AccountAssetQuantitySourceView | null;
   net_base_exposure?: number | null;
 }
 
-export type AccountSpotQuantitySourceView = 'account_summary_available_by_asset';
+export type AccountAssetQuantitySourceView = 'account_summary_available_by_asset';
 
 export type TrackStatus =
   | 'waiting_market_data'

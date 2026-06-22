@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::schema;
 use poise_core::events::DomainEvent;
-use poise_core::track::{Instrument, TrackId, Venue};
+use poise_core::track::TrackId;
 use poise_core::types::Side;
 use poise_engine::execution_plan::TrackEffect;
 use poise_engine::ledger::{TrackPnlRecord, TrackPnlRecordKind, TrackPnlStats};
@@ -23,19 +23,10 @@ pub struct SqliteStorage {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct AccountMonitorObservedSnapshotRow {
-    pub equity: f64,
-    pub available: f64,
-    pub unrealized_pnl: f64,
-    pub observed_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct AccountMonitorStateRow {
     pub trading_day: NaiveDate,
     pub baseline_equity: f64,
     pub baseline_captured_at: DateTime<Utc>,
-    pub last_observed_snapshot: Option<AccountMonitorObservedSnapshotRow>,
 }
 
 impl SqliteStorage {
@@ -114,33 +105,6 @@ impl SqliteStorage {
         })
     }
 
-    fn deserialize_account_monitor_snapshot(
-        equity: Option<f64>,
-        available: Option<f64>,
-        unrealized_pnl: Option<f64>,
-        observed_at: Option<String>,
-    ) -> rusqlite::Result<Option<AccountMonitorObservedSnapshotRow>> {
-        match (equity, available, unrealized_pnl, observed_at) {
-            (None, None, None, None) => Ok(None),
-            (Some(equity), Some(available), Some(unrealized_pnl), Some(observed_at)) => {
-                Ok(Some(AccountMonitorObservedSnapshotRow {
-                    equity,
-                    available,
-                    unrealized_pnl,
-                    observed_at: Self::deserialize_timestamp(&observed_at, 6)?,
-                }))
-            }
-            _ => Err(rusqlite::Error::FromSqlConversionFailure(
-                6,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "account monitor snapshot columns must be all present or all absent",
-                )),
-            )),
-        }
-    }
-
     fn persisted_effect_from_row(
         row: &rusqlite::Row<'_>,
     ) -> rusqlite::Result<PersistedTrackEffect> {
@@ -188,21 +152,13 @@ impl SqliteStorage {
             .query_row(
                 "SELECT trading_day,
                         baseline_equity,
-                        baseline_captured_at,
-                        last_observed_equity,
-                        last_observed_available,
-                        last_observed_unrealized_pnl,
-                        last_observed_at
+                        baseline_captured_at
                  FROM account_monitor_state
                  WHERE singleton_key = 1",
                 [],
                 |row| {
                     let trading_day: String = row.get(0)?;
                     let baseline_captured_at: String = row.get(2)?;
-                    let last_observed_equity: Option<f64> = row.get(3)?;
-                    let last_observed_available: Option<f64> = row.get(4)?;
-                    let last_observed_unrealized_pnl: Option<f64> = row.get(5)?;
-                    let last_observed_at: Option<String> = row.get(6)?;
 
                     Ok(AccountMonitorStateRow {
                         trading_day: Self::deserialize_trading_day(&trading_day, 0)?,
@@ -210,12 +166,6 @@ impl SqliteStorage {
                         baseline_captured_at: Self::deserialize_timestamp(
                             &baseline_captured_at,
                             2,
-                        )?,
-                        last_observed_snapshot: Self::deserialize_account_monitor_snapshot(
-                            last_observed_equity,
-                            last_observed_available,
-                            last_observed_unrealized_pnl,
-                            last_observed_at,
                         )?,
                     })
                 },
@@ -236,36 +186,16 @@ impl SqliteStorage {
                 singleton_key,
                 trading_day,
                 baseline_equity,
-                baseline_captured_at,
-                last_observed_equity,
-                last_observed_available,
-                last_observed_unrealized_pnl,
-                last_observed_at
-            ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                baseline_captured_at
+            ) VALUES (1, ?1, ?2, ?3)
             ON CONFLICT(singleton_key) DO UPDATE SET
                 trading_day = excluded.trading_day,
                 baseline_equity = excluded.baseline_equity,
-                baseline_captured_at = excluded.baseline_captured_at,
-                last_observed_equity = excluded.last_observed_equity,
-                last_observed_available = excluded.last_observed_available,
-                last_observed_unrealized_pnl = excluded.last_observed_unrealized_pnl,
-                last_observed_at = excluded.last_observed_at",
+                baseline_captured_at = excluded.baseline_captured_at",
             params![
                 row.trading_day.format("%F").to_string(),
                 row.baseline_equity,
                 row.baseline_captured_at.to_rfc3339(),
-                row.last_observed_snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.equity),
-                row.last_observed_snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.available),
-                row.last_observed_snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.unrealized_pnl),
-                row.last_observed_snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.observed_at.to_rfc3339()),
             ],
         )
         .context("failed to save account monitor state")?;
@@ -860,8 +790,6 @@ fn sum_pnl_records(
     let mut statement = match (&occurred_at_start, &occurred_at_end) {
         (Some(_), Some(_)) => conn.prepare(
             "SELECT
-                venue,
-                symbol,
                 pnl_asset,
                 realized_pnl,
                 trading_fee,
@@ -873,8 +801,6 @@ fn sum_pnl_records(
         )?,
         _ => conn.prepare(
             "SELECT
-                venue,
-                symbol,
                 pnl_asset,
                 realized_pnl,
                 trading_fee,
@@ -924,31 +850,12 @@ struct PnlRecordSumRow {
 }
 
 fn pnl_record_sum_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PnlRecordSumRow> {
-    let venue: String = row.get(0)?;
-    let symbol: String = row.get(1)?;
-    let pnl_asset: Option<String> = row.get(2)?;
     Ok(PnlRecordSumRow {
-        pnl_asset: pnl_asset.unwrap_or_else(|| legacy_pnl_asset(&venue, &symbol)),
-        realized_pnl: row.get(3)?,
-        trading_fee: row.get(4)?,
-        funding_fee: row.get(5)?,
+        pnl_asset: row.get(0)?,
+        realized_pnl: row.get(1)?,
+        trading_fee: row.get(2)?,
+        funding_fee: row.get(3)?,
     })
-}
-
-fn legacy_pnl_asset(venue: &str, symbol: &str) -> String {
-    parse_venue(venue)
-        .map(|venue| Instrument::new(venue, symbol).quote_asset())
-        .unwrap_or_else(|| symbol.to_string())
-}
-
-fn parse_venue(venue: &str) -> Option<Venue> {
-    match venue {
-        "binance" => Some(Venue::Binance),
-        "bybit" => Some(Venue::Bybit),
-        "hyperliquid" => Some(Venue::Hyperliquid),
-        "okx" => Some(Venue::Okx),
-        _ => None,
-    }
 }
 
 fn merge_pnl_assets(left: Option<String>, right: Option<String>) -> Result<Option<String>> {
@@ -1147,15 +1054,6 @@ impl app::AccountMonitorStore for SqliteStorage {
                 trading_day: row.trading_day,
                 baseline_equity: row.baseline_equity,
                 baseline_captured_at: row.baseline_captured_at,
-                last_observed_account_snapshot: row.last_observed_snapshot.map(|snapshot| {
-                    poise_engine::ports::AccountSummarySnapshot {
-                        equity: snapshot.equity,
-                        available: snapshot.available,
-                        available_by_asset: Default::default(),
-                        unrealized_pnl: snapshot.unrealized_pnl,
-                        observed_at: snapshot.observed_at,
-                    }
-                }),
             }))
     }
 
@@ -1164,15 +1062,6 @@ impl app::AccountMonitorStore for SqliteStorage {
             trading_day: state.trading_day,
             baseline_equity: state.baseline_equity,
             baseline_captured_at: state.baseline_captured_at,
-            last_observed_snapshot: state
-                .last_observed_account_snapshot
-                .as_ref()
-                .map(|snapshot| AccountMonitorObservedSnapshotRow {
-                    equity: snapshot.equity,
-                    available: snapshot.available,
-                    unrealized_pnl: snapshot.unrealized_pnl,
-                    observed_at: snapshot.observed_at,
-                }),
         };
         self.save_account_monitor_state_row(&row).await
     }
@@ -1476,12 +1365,6 @@ mod tests {
             trading_day: NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
             baseline_equity: 12_500.5,
             baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 1, 2).unwrap(),
-            last_observed_snapshot: Some(AccountMonitorObservedSnapshotRow {
-                equity: 12_450.0,
-                available: 9_800.0,
-                unrealized_pnl: -120.0,
-                observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
-            }),
         };
 
         storage
@@ -1492,6 +1375,36 @@ mod tests {
         let actual = storage.load_account_monitor_state_row().await.unwrap();
 
         assert_eq!(actual, Some(expected));
+    }
+
+    #[tokio::test]
+    async fn account_monitor_store_persists_baseline_without_current_snapshot() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let expected = app::StoredAccountMonitorState {
+            trading_day: NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
+            baseline_equity: 12_500.5,
+            baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 1, 2).unwrap(),
+        };
+
+        app::AccountMonitorStore::save_state(&storage, &expected)
+            .await
+            .unwrap();
+
+        let loaded = app::AccountMonitorStore::load_state(&storage)
+            .await
+            .unwrap()
+            .expect("baseline should load");
+
+        assert_eq!(loaded, expected);
+        let row = storage
+            .load_account_monitor_state_row()
+            .await
+            .unwrap()
+            .expect("row should remain");
+
+        assert_eq!(row.trading_day, expected.trading_day);
+        assert_eq!(row.baseline_equity, expected.baseline_equity);
+        assert_eq!(row.baseline_captured_at, expected.baseline_captured_at);
     }
 
     #[tokio::test]
@@ -1682,65 +1595,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_null_pnl_asset_records_use_quote_asset() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE track_pnl_records (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                track_id TEXT NOT NULL,
-                venue TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                occurred_at TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                source TEXT NOT NULL,
-                source_key TEXT,
-                order_id TEXT,
-                trade_id TEXT,
-                side TEXT,
-                price REAL,
-                qty REAL,
-                realized_pnl REAL NOT NULL DEFAULT 0,
-                trading_fee REAL NOT NULL DEFAULT 0,
-                funding_fee REAL NOT NULL DEFAULT 0
-            );
-            INSERT INTO track_pnl_records (
-                track_id,
-                venue,
-                symbol,
-                occurred_at,
-                kind,
-                source,
-                realized_pnl,
-                trading_fee,
-                funding_fee
-            ) VALUES (
-                'legacy',
-                'binance',
-                'BTCUSDT',
-                '2026-04-08T09:00:00+00:00',
-                'trade',
-                'legacy',
-                12.0,
-                1.0,
-                0.0
-            );",
-        )
-        .unwrap();
-        let storage = SqliteStorage::from_connection(conn).unwrap();
-
-        let stats = TrackQueryStore::load_track_pnl_stats(
-            &storage,
-            &TrackId::new("legacy"),
-            NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(stats.pnl_asset.as_deref(), Some("USDT"));
-        assert_eq!(stats.gross_realized_pnl_cumulative, 12.0);
-    }
-
-    #[tokio::test]
     async fn saving_control_or_pnl_record_records_persisted_track_presence() {
         let storage = SqliteStorage::in_memory().unwrap();
 
@@ -1773,63 +1627,6 @@ mod tests {
         assert_eq!(
             found,
             vec![TrackId::new("btc-core"), TrackId::new("eth-core")]
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_partial_account_monitor_snapshot_rows() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        {
-            let conn = storage.conn.lock().unwrap();
-            conn.execute("DROP TABLE account_monitor_state", [])
-                .unwrap();
-            conn.execute(
-                "CREATE TABLE account_monitor_state (
-                    singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
-                    trading_day TEXT NOT NULL,
-                    baseline_equity REAL NOT NULL,
-                    baseline_captured_at TEXT NOT NULL,
-                    last_observed_equity REAL,
-                    last_observed_available REAL,
-                    last_observed_unrealized_pnl REAL,
-                    last_observed_at TEXT
-                )",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO account_monitor_state (
-                    singleton_key,
-                    trading_day,
-                    baseline_equity,
-                    baseline_captured_at,
-                    last_observed_equity,
-                    last_observed_available,
-                    last_observed_unrealized_pnl,
-                    last_observed_at
-                ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    "2026-04-04",
-                    12_500.5,
-                    "2026-04-04T00:01:02+00:00",
-                    12_450.0,
-                    Option::<f64>::None,
-                    -120.0,
-                    "2026-04-04T01:02:03+00:00",
-                ],
-            )
-            .unwrap();
-        }
-
-        let error = storage
-            .load_account_monitor_state_row()
-            .await
-            .expect_err("partial account snapshot should fail to load");
-
-        let rendered = format!("{error:#}");
-        assert!(
-            rendered.contains("account monitor snapshot columns must be all present or all absent"),
-            "unexpected error: {rendered}"
         );
     }
 
@@ -2230,25 +2027,5 @@ mod tests {
 
         drop(reopened);
         let _ = fs::remove_file(db_path);
-    }
-
-    #[tokio::test]
-    async fn list_events_rejects_legacy_event_json() {
-        let conn = Connection::open_in_memory().unwrap();
-        schema::initialize(&conn).unwrap();
-        conn.execute(
-            "INSERT INTO track_events (track_id, event_json, created_at)
-             VALUES (?1, ?2, ?3)",
-            params![
-                "BTCUSDT",
-                "{\"BandBreached\":{\"boundary\":\"Above\",\"price\":120.0}}",
-                "2026-03-25T00:00:00Z"
-            ],
-        )
-        .unwrap();
-
-        let storage = SqliteStorage::from_connection(conn).unwrap();
-        let result = storage.list_track_events("BTCUSDT").await;
-        assert!(result.is_err());
     }
 }

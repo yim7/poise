@@ -1,8 +1,5 @@
 use anyhow::{Result, ensure};
-use rusqlite::{Connection, OptionalExtension};
-
-const ACCOUNT_MONITOR_STATE_SNAPSHOT_COMPLETENESS_CONSTRAINT: &str =
-    "account_monitor_state_snapshot_completeness";
+use rusqlite::Connection;
 
 pub fn initialize(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -65,32 +62,29 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
             trading_day TEXT NOT NULL,
             baseline_equity REAL NOT NULL,
-            baseline_captured_at TEXT NOT NULL,
-            last_observed_equity REAL,
-            last_observed_available REAL,
-            last_observed_unrealized_pnl REAL,
-            last_observed_at TEXT,
-            CONSTRAINT account_monitor_state_snapshot_completeness CHECK (
-                (last_observed_equity IS NULL AND last_observed_available IS NULL AND last_observed_unrealized_pnl IS NULL AND last_observed_at IS NULL)
-                OR
-                (last_observed_equity IS NOT NULL AND last_observed_available IS NOT NULL AND last_observed_unrealized_pnl IS NOT NULL AND last_observed_at IS NOT NULL)
-            )
+            baseline_captured_at TEXT NOT NULL
         );",
     )?;
 
-    migrate_track_pnl_records_pnl_asset(conn)?;
-    ensure_columns_present(conn, "track_events", &["track_id"])?;
-    ensure_columns_present(
+    ensure_table_schema(
+        conn,
+        "track_events",
+        &["id", "track_id", "event_json", "created_at"],
+        &["track_id", "event_json", "created_at"],
+    )?;
+    ensure_table_schema(
         conn,
         "persisted_track_presence",
         &["track_id", "created_at", "updated_at"],
+        &["created_at", "updated_at"],
     )?;
-    ensure_columns_present(
+    ensure_table_schema(
         conn,
         "track_control_state",
         &["track_id", "control_state_json", "updated_at"],
+        &["control_state_json", "updated_at"],
     )?;
-    ensure_columns_present(
+    ensure_table_schema(
         conn,
         "track_pnl_records",
         &[
@@ -112,8 +106,20 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "trading_fee",
             "funding_fee",
         ],
+        &[
+            "track_id",
+            "venue",
+            "symbol",
+            "occurred_at",
+            "kind",
+            "pnl_asset",
+            "source",
+            "realized_pnl",
+            "trading_fee",
+            "funding_fee",
+        ],
     )?;
-    ensure_columns_present(
+    ensure_table_schema(
         conn,
         "track_effects",
         &[
@@ -128,8 +134,18 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "created_at",
             "updated_at",
         ],
+        &[
+            "track_id",
+            "batch_id",
+            "sequence",
+            "effect_json",
+            "status",
+            "attempt_count",
+            "created_at",
+            "updated_at",
+        ],
     )?;
-    ensure_columns_present(
+    ensure_table_schema(
         conn,
         "account_monitor_state",
         &[
@@ -137,14 +153,9 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "trading_day",
             "baseline_equity",
             "baseline_captured_at",
-            "last_observed_equity",
-            "last_observed_available",
-            "last_observed_unrealized_pnl",
-            "last_observed_at",
         ],
+        &["trading_day", "baseline_equity", "baseline_captured_at"],
     )?;
-    ensure_account_monitor_state_snapshot_completeness_constraint(conn)?;
-
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_track_events_created_at
          ON track_events(track_id, created_at);
@@ -162,33 +173,39 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate_track_pnl_records_pnl_asset(conn: &Connection) -> Result<()> {
-    let columns = table_columns(conn, "track_pnl_records")?;
-    if !columns.iter().any(|column| column == "pnl_asset") {
-        conn.execute(
-            "ALTER TABLE track_pnl_records ADD COLUMN pnl_asset TEXT",
-            [],
-        )?;
-    }
+fn ensure_table_schema(
+    conn: &Connection,
+    table: &str,
+    expected_columns: &[&str],
+    required_not_null_columns: &[&str],
+) -> Result<()> {
+    ensure_columns_exact(conn, table, expected_columns)?;
+    ensure_columns_not_null(conn, table, required_not_null_columns)?;
     Ok(())
 }
 
-fn ensure_account_monitor_state_snapshot_completeness_constraint(conn: &Connection) -> Result<()> {
-    let table_sql = table_sql(conn, "account_monitor_state")?.unwrap_or_default();
-    ensure!(
-        table_sql.contains(ACCOUNT_MONITOR_STATE_SNAPSHOT_COMPLETENESS_CONSTRAINT),
-        "sqlite schema for `account_monitor_state` is missing required constraint `{ACCOUNT_MONITOR_STATE_SNAPSHOT_COMPLETENESS_CONSTRAINT}`"
-    );
-    Ok(())
-}
-
-fn ensure_columns_present(conn: &Connection, table: &str, required: &[&str]) -> Result<()> {
+fn ensure_columns_exact(conn: &Connection, table: &str, expected: &[&str]) -> Result<()> {
     let columns = table_columns(conn, table)?;
+    let expected = expected
+        .iter()
+        .map(|column| column.to_string())
+        .collect::<Vec<_>>();
+
+    ensure!(
+        columns == expected,
+        "sqlite schema for `{table}` columns do not match current schema: expected {expected:?}, found {columns:?}"
+    );
+
+    Ok(())
+}
+
+fn ensure_columns_not_null(conn: &Connection, table: &str, required: &[&str]) -> Result<()> {
+    let columns = table_not_null_columns(conn, table)?;
 
     for column in required {
         ensure!(
             columns.iter().any(|existing| existing == column),
-            "legacy sqlite schema for `{table}` is missing required column `{column}`"
+            "sqlite schema for `{table}` column `{column}` allows NULL"
         );
     }
 
@@ -204,14 +221,22 @@ pub(crate) fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String
     Ok(columns)
 }
 
-fn table_sql(conn: &Connection, table: &str) -> Result<Option<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT sql
-         FROM sqlite_master
-         WHERE type = 'table' AND name = ?1",
-    )?;
-    let sql = stmt.query_row([table], |row| row.get(0)).optional()?;
-    Ok(sql)
+fn table_not_null_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&pragma)?;
+    let columns = stmt
+        .query_map([], |row| {
+            let name: String = row.get(1)?;
+            let not_null = row.get::<_, i64>(3)? != 0;
+            Ok((name, not_null))
+        })?
+        .filter_map(|column| match column {
+            Ok((name, true)) => Some(Ok(name)),
+            Ok((_name, false)) => None,
+            Err(err) => Some(Err(err)),
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(columns)
 }
 
 #[cfg(test)]
@@ -260,14 +285,14 @@ mod tests {
             .unwrap();
         assert_eq!(control_state_count, 1);
 
-        let legacy_ledger_state_count: i64 = conn
+        let removed_ledger_state_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='track_ledger_state'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(legacy_ledger_state_count, 0);
+        assert_eq!(removed_ledger_state_count, 0);
 
         let pnl_records_count: i64 = conn
             .query_row(
@@ -351,6 +376,16 @@ mod tests {
                 "funding_fee".to_string(),
             ]
         );
+        let account_monitor_state_columns = table_columns(&conn, "account_monitor_state").unwrap();
+        assert_eq!(
+            account_monitor_state_columns,
+            vec![
+                "singleton_key".to_string(),
+                "trading_day".to_string(),
+                "baseline_equity".to_string(),
+                "baseline_captured_at".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -358,6 +393,85 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         initialize(&conn).unwrap();
         initialize(&conn).unwrap();
+    }
+
+    #[test]
+    fn initialize_rejects_nullable_track_pnl_asset_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE track_pnl_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id TEXT NOT NULL,
+                venue TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                pnl_asset TEXT,
+                source TEXT NOT NULL,
+                source_key TEXT,
+                order_id TEXT,
+                trade_id TEXT,
+                side TEXT,
+                price REAL,
+                qty REAL,
+                realized_pnl REAL NOT NULL DEFAULT 0,
+                trading_fee REAL NOT NULL DEFAULT 0,
+                funding_fee REAL NOT NULL DEFAULT 0
+            );",
+        )
+        .unwrap();
+
+        let error = initialize(&conn).expect_err("nullable pnl_asset column should fail");
+
+        assert!(
+            format!("{error:#}").contains("column `pnl_asset` allows NULL"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn initialize_rejects_extra_account_monitor_state_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE account_monitor_state (
+                singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
+                trading_day TEXT NOT NULL,
+                baseline_equity REAL NOT NULL,
+                baseline_captured_at TEXT NOT NULL,
+                extra_column TEXT
+            );",
+        )
+        .unwrap();
+
+        let error = initialize(&conn).expect_err("extra account monitor column should fail");
+
+        assert!(
+            format!("{error:#}")
+                .contains("sqlite schema for `account_monitor_state` columns do not match"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn initialize_rejects_nullable_current_account_monitor_state_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE account_monitor_state (
+                singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
+                trading_day TEXT NOT NULL,
+                baseline_equity REAL,
+                baseline_captured_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+
+        let error =
+            initialize(&conn).expect_err("nullable current account monitor column should fail");
+
+        assert!(
+            format!("{error:#}").contains("column `baseline_equity` allows NULL"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]

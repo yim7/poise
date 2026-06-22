@@ -425,14 +425,14 @@ describe('workbench store', () => {
   });
 
   it('applies current Binance futures fee defaults when a loaded draft omits fee rules', async () => {
-    const legacySnapshot = makeSnapshot({
+    const snapshotWithoutFeeRules = makeSnapshot({
       drafts: [
         makeDraft('draft-a', {
           attachments: {},
         }),
       ],
     });
-    const persistence = makePersistence(legacySnapshot);
+    const persistence = makePersistence(snapshotWithoutFeeRules);
     const reopenedStore = createWorkbenchStore({
       sessionSync: createSessionSync(persistence, { debounceMs: 0 }),
     });

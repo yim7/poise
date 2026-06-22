@@ -840,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_boundary_migration_removes_holding_from_public_status_projection() {
+    fn frozen_runtime_status_projects_frozen_lifecycle() {
         let mut source = source_with_failed_effect_and_recent_event();
         source.status = TrackReadStatus::Frozen;
 

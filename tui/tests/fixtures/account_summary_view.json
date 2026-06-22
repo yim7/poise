@@ -30,8 +30,8 @@
       {
         "asset": "BTC",
         "contract_base_exposure": -0.03,
-        "spot_quantity": 0.2,
-        "spot_quantity_source": "account_summary_available_by_asset",
+        "account_asset_quantity": 0.2,
+        "account_asset_quantity_source": "account_summary_available_by_asset",
         "net_base_exposure": 0.17
       }
     ]

@@ -513,7 +513,7 @@ total_loss_limit = 600.0
                 exchange.clone(),
                 exchange,
             ),
-            StateRepositories::new(storage),
+            StateRepositories::from_sqlite_storage(storage),
             Arc::new(FakeClock),
         )
         .await
@@ -678,7 +678,7 @@ total_loss_limit = 600.0
                 exchange.clone(),
                 exchange,
             ),
-            StateRepositories::new(storage),
+            StateRepositories::from_sqlite_storage(storage),
             Arc::new(FakeClock),
         )
         .await

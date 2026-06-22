@@ -1,12 +1,12 @@
 use poise_protocol::{
-    AccountAnalysisView, AccountAssetExposureView, AccountHedgeLikeView,
-    AccountSpotQuantitySourceView, AccountSummaryView, AccountTrackAnalysisView, InstrumentView,
+    AccountAnalysisView, AccountAssetExposureView, AccountAssetQuantitySourceView,
+    AccountHedgeLikeView, AccountSummaryView, AccountTrackAnalysisView, InstrumentView,
     RiskSignalView,
 };
 
 use poise_application::{
-    AccountAnalysisReadModel, AccountAssetExposureReadModel, AccountHedgeLikeReadModel,
-    AccountReadModel, AccountRiskSignal, AccountSpotQuantitySource, AccountTrackAnalysisReadModel,
+    AccountAnalysisReadModel, AccountAssetExposureReadModel, AccountAssetQuantitySource,
+    AccountHedgeLikeReadModel, AccountReadModel, AccountRiskSignal, AccountTrackAnalysisReadModel,
 };
 
 pub struct AccountProjector;
@@ -95,20 +95,20 @@ fn project_account_hedge_like(source: &AccountHedgeLikeReadModel) -> AccountHedg
     AccountHedgeLikeView {
         asset: source.asset.clone(),
         contract_base_exposure: source.contract_base_exposure,
-        spot_quantity: source.spot_quantity,
-        spot_quantity_source: source
-            .spot_quantity_source
-            .map(project_spot_quantity_source),
+        account_asset_quantity: source.account_asset_quantity,
+        account_asset_quantity_source: source
+            .account_asset_quantity_source
+            .map(project_account_asset_quantity_source),
         net_base_exposure: source.net_base_exposure,
     }
 }
 
-fn project_spot_quantity_source(
-    source: AccountSpotQuantitySource,
-) -> AccountSpotQuantitySourceView {
+fn project_account_asset_quantity_source(
+    source: AccountAssetQuantitySource,
+) -> AccountAssetQuantitySourceView {
     match source {
-        AccountSpotQuantitySource::AccountSummaryAvailableByAsset => {
-            AccountSpotQuantitySourceView::AccountSummaryAvailableByAsset
+        AccountAssetQuantitySource::AccountSummaryAvailableByAsset => {
+            AccountAssetQuantitySourceView::AccountSummaryAvailableByAsset
         }
     }
 }
@@ -120,15 +120,15 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use poise_core::track::{Instrument, Venue};
     use poise_protocol::{
-        AccountAnalysisView, AccountAssetExposureView, AccountHedgeLikeView,
-        AccountSpotQuantitySourceView, AccountSummaryView, AccountTrackAnalysisView,
-        InstrumentView, RiskSignalView,
+        AccountAnalysisView, AccountAssetExposureView, AccountAssetQuantitySourceView,
+        AccountHedgeLikeView, AccountSummaryView, AccountTrackAnalysisView, InstrumentView,
+        RiskSignalView,
     };
 
     use super::AccountProjector;
     use poise_application::{
-        AccountAnalysisReadModel, AccountAssetExposureReadModel, AccountHedgeLikeReadModel,
-        AccountReadModel, AccountRiskSignal, AccountSpotQuantitySource,
+        AccountAnalysisReadModel, AccountAssetExposureReadModel, AccountAssetQuantitySource,
+        AccountHedgeLikeReadModel, AccountReadModel, AccountRiskSignal,
         AccountTrackAnalysisReadModel,
     };
 
@@ -202,9 +202,9 @@ mod tests {
             hedge_like: vec![AccountHedgeLikeReadModel {
                 asset: "BTC".to_string(),
                 contract_base_exposure: -0.03,
-                spot_quantity: Some(0.2),
-                spot_quantity_source: Some(
-                    AccountSpotQuantitySource::AccountSummaryAvailableByAsset,
+                account_asset_quantity: Some(0.2),
+                account_asset_quantity_source: Some(
+                    AccountAssetQuantitySource::AccountSummaryAvailableByAsset,
                 ),
                 net_base_exposure: Some(0.17),
             }],
@@ -240,9 +240,9 @@ mod tests {
                 hedge_like: vec![AccountHedgeLikeView {
                     asset: "BTC".to_string(),
                     contract_base_exposure: -0.03,
-                    spot_quantity: Some(0.2),
-                    spot_quantity_source: Some(
-                        AccountSpotQuantitySourceView::AccountSummaryAvailableByAsset,
+                    account_asset_quantity: Some(0.2),
+                    account_asset_quantity_source: Some(
+                        AccountAssetQuantitySourceView::AccountSummaryAvailableByAsset,
                     ),
                     net_base_exposure: Some(0.17),
                 }],

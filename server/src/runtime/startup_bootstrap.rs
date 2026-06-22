@@ -1435,8 +1435,8 @@ mod tests {
             event_time: startup_replay_floor + chrono::TimeDelta::seconds(1),
             payload: UserDataPayload::OrderUpdate(ExchangeOrder {
                 instrument: Instrument::new(Venue::Binance, symbol),
-                order_id: "legacy-order".into(),
-                client_order_id: "legacy-client-order".into(),
+                order_id: "inherited-order".into(),
+                client_order_id: "inherited-client-order".into(),
                 side: Side::Buy,
                 price: 99.0,
                 qty: 0.1,
@@ -1592,8 +1592,8 @@ mod tests {
                 poise_engine::ports::ExchangeOpenOrderSnapshot::from_complete_exchange_query(vec![
                     ExchangeOrder {
                         instrument: instrument.clone(),
-                        order_id: "legacy-order".into(),
-                        client_order_id: "legacy-client-order".into(),
+                        order_id: "inherited-order".into(),
+                        client_order_id: "inherited-client-order".into(),
                         side: Side::Buy,
                         price: 99.0,
                         qty: 0.1,

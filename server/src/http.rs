@@ -428,7 +428,13 @@ mod tests {
     #[async_trait::async_trait]
     impl poise_engine::ports::AccountSummaryPort for AccountSummaryOnlyExchange {
         async fn get_account_summary(&self) -> anyhow::Result<AccountSummarySnapshot> {
-            Err(anyhow!("not used in tests"))
+            Ok(AccountSummarySnapshot {
+                equity: 12_500.0,
+                available: 9_000.0,
+                available_by_asset: Default::default(),
+                unrealized_pnl: -350.0,
+                observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
+            })
         }
     }
 
@@ -659,26 +665,19 @@ mod tests {
                 trading_day: chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
                 baseline_equity: 13_000.0,
                 baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),
-                last_observed_account_snapshot: Some(AccountSummarySnapshot {
-                    equity: 12_500.0,
-                    available: 9_000.0,
-                    available_by_asset: Default::default(),
-                    unrealized_pnl: -350.0,
-                    observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
-                }),
             })
             .await
             .unwrap();
-        let account_monitor = Arc::new(
-            AccountMonitor::restore(
-                Arc::new(AccountSummaryOnlyExchange),
-                account_store,
-                notifications,
-                AccountMonitorConfig::default(),
-            )
-            .await
-            .unwrap(),
-        );
+        let account_monitor = AccountMonitor::restore(
+            Arc::new(AccountSummaryOnlyExchange),
+            account_store,
+            notifications,
+            AccountMonitorConfig::default(),
+        )
+        .await
+        .unwrap();
+        account_monitor.refresh_once().await.unwrap();
+        let account_monitor = Arc::new(account_monitor);
         let projector = Arc::new(TrackProjector::new());
         let account_projector = Arc::new(AccountProjector::new());
         let query_service = Arc::new(TrackQueryService::new(

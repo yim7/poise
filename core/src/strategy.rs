@@ -586,38 +586,6 @@ mod tests {
     }
 
     #[test]
-    fn band_protection_policy_rejects_legacy_trigger_bps_shape() {
-        let error = serde_json::from_value::<BandProtectionPolicy>(serde_json::json!({
-            "flatten": {
-                "trigger_bps": 500,
-                "recover": {
-                    "reentry_confirm": { "bps": 500 }
-                }
-            }
-        }))
-        .expect_err("legacy trigger_bps policy should be rejected");
-
-        assert!(!error.to_string().is_empty());
-    }
-
-    #[test]
-    fn band_protection_policy_rejects_legacy_price_confirm_alias() {
-        let error = serde_json::from_value::<BandProtectionPolicy>(serde_json::json!({
-            "flatten": {
-                "trigger": {
-                    "flatten_confirm": { "bps": 500 }
-                },
-                "recover": {
-                    "price_confirm": { "bps": 500 }
-                }
-            }
-        }))
-        .expect_err("legacy price_confirm alias should be rejected");
-
-        assert!(!error.to_string().is_empty());
-    }
-
-    #[test]
     fn track_config_accepts_flatten_reentry_confirm_policy() {
         let config = TrackConfig {
             lower_price: 75_000.0,

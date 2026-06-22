@@ -41,7 +41,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_representative_tick_for_legacy_rule_display() {
+    fn keeps_representative_tick_for_rule_display() {
         assert_eq!(representative_perp_price_tick(5), 1.0);
         assert_eq!(representative_perp_price_tick(4), 0.1);
     }

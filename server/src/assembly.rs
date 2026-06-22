@@ -551,8 +551,9 @@ mod tests {
     use anyhow::{Result, anyhow};
     use futures_util::StreamExt;
     use poise_application::{
-        CommittedTrackWrite, EffectJournalEntry, EffectStatusUpdate, PersistedControlMode,
-        PersistedTrackEffect, StoredTrackEvent, TrackControlState, TrackEffectJournal,
+        AccountMonitor, AccountMonitorConfig, AccountMonitorStore, CommittedTrackWrite,
+        EffectJournalEntry, EffectStatusUpdate, PersistedControlMode, PersistedTrackEffect,
+        StoredAccountMonitorState, StoredTrackEvent, TrackControlState, TrackEffectJournal,
         TrackMutationStore, TrackQueryStore,
     };
     use poise_core::events::DomainEvent as EngineDomainEvent;
@@ -579,7 +580,6 @@ mod tests {
     use crate::test_support::{
         build_http_state as build_test_http_state, build_runtime_and_effect_worker_test_contexts,
         build_test_application_services, build_websocket_state as build_test_websocket_state,
-        unavailable_account_monitor,
     };
     use poise_application::{TrackDebugQueryService, TrackDefinitionRegistry, TrackQueryService};
 
@@ -1052,7 +1052,7 @@ total_loss_limit = 600.0
 
     #[tokio::test]
     async fn start_market_data_tasks_broadcasts_events_to_ws_clients() {
-        let (platform, btc_sender) = test_platform();
+        let (platform, btc_sender) = test_platform().await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = router(platform.http_state(), platform.websocket_state());
@@ -1265,7 +1265,7 @@ total_loss_limit = 600.0
 
     #[tokio::test]
     async fn runtime_state_exposes_observation_and_account_paths_only() {
-        let (platform, _) = test_platform();
+        let (platform, _) = test_platform().await;
         let state = platform.runtime_test_context();
 
         assert_eq!(state.track_instruments().await.len(), 1);
@@ -1282,7 +1282,7 @@ total_loss_limit = 600.0
 
     #[tokio::test]
     async fn effect_worker_state_exposes_effect_execution_paths_only() {
-        let (platform, _) = test_platform();
+        let (platform, _) = test_platform().await;
         let state = platform.effect_worker_test_context().effect_worker_state;
 
         assert!(state.session_effect_queue.claim_next().is_none());
@@ -1294,7 +1294,7 @@ total_loss_limit = 600.0
     #[tokio::test]
     async fn newer_tick_snapshot_is_not_overwritten_by_older_command_snapshot() {
         let persistence = Arc::new(BlockingPersistence::default());
-        let (platform, _btc_sender) = test_platform_with_repository(persistence.clone());
+        let (platform, _btc_sender) = test_platform_with_repository(persistence.clone()).await;
         let app = router(platform.http_state(), platform.websocket_state());
 
         {
@@ -1398,14 +1398,14 @@ total_loss_limit = 600.0
 
     #[tokio::test]
     async fn build_test_context_initializes_fresh_exchange_freshness_store() {
-        let (platform, _) = test_platform();
+        let (platform, _) = test_platform().await;
 
         assert!(!platform.exchange_freshness().is_stale("btc-core").await);
     }
 
     #[tokio::test]
     async fn build_test_context_reuses_runtime_coordination_objects() {
-        let (platform, _) = test_platform();
+        let (platform, _) = test_platform().await;
         let runtime_context = platform.runtime_test_context();
         let effect_worker_context = platform.effect_worker_test_context();
 
@@ -1419,9 +1419,9 @@ total_loss_limit = 600.0
         ));
     }
 
-    fn test_platform() -> (ServerPlatform, mpsc::Sender<MarketDataTick>) {
+    async fn test_platform() -> (ServerPlatform, mpsc::Sender<MarketDataTick>) {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        test_platform_with_repository(storage)
+        test_platform_with_repository(storage).await
     }
 
     async fn assemble_with_fake_ports(
@@ -1442,13 +1442,13 @@ total_loss_limit = 600.0
                 exchange.clone(),
                 exchange,
             ),
-            StateRepositories::new(repository),
+            StateRepositories::from_sqlite_storage(repository),
             Arc::new(SystemClock),
         )
         .await
     }
 
-    fn test_platform_with_repository<R>(
+    async fn test_platform_with_repository<R>(
         repository: Arc<R>,
     ) -> (ServerPlatform, mpsc::Sender<MarketDataTick>)
     where
@@ -1513,7 +1513,16 @@ total_loss_limit = 600.0
             services.observation_service.clone(),
         ));
         let projector = Arc::new(TrackProjector::new());
-        let account_monitor = unavailable_account_monitor(events.clone());
+        let account_monitor = Arc::new(
+            AccountMonitor::restore(
+                exchange.clone(),
+                Arc::new(NoopAccountMonitorStore),
+                events.clone(),
+                AccountMonitorConfig::default(),
+            )
+            .await
+            .unwrap(),
+        );
         let account_projector = Arc::new(crate::account_projector::AccountProjector::new());
         let (runtime_test_context, effect_worker_test_context) =
             build_runtime_and_effect_worker_test_contexts(
@@ -1566,6 +1575,19 @@ total_loss_limit = 600.0
             },
             btc_sender,
         )
+    }
+
+    struct NoopAccountMonitorStore;
+
+    #[async_trait::async_trait]
+    impl AccountMonitorStore for NoopAccountMonitorStore {
+        async fn load_state(&self) -> Result<Option<StoredAccountMonitorState>> {
+            Ok(None)
+        }
+
+        async fn save_state(&self, _state: &StoredAccountMonitorState) -> Result<()> {
+            Ok(())
+        }
     }
 
     struct FakeExchange;

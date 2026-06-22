@@ -578,16 +578,16 @@ pub struct AccountHedgeLikeView {
     pub asset: String,
     pub contract_base_exposure: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spot_quantity: Option<f64>,
+    pub account_asset_quantity: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spot_quantity_source: Option<AccountSpotQuantitySourceView>,
+    pub account_asset_quantity_source: Option<AccountAssetQuantitySourceView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net_base_exposure: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AccountSpotQuantitySourceView {
+pub enum AccountAssetQuantitySourceView {
     AccountSummaryAvailableByAsset,
 }
 
@@ -810,9 +810,9 @@ impl fmt::Display for Side {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountAnalysisView, AccountAssetExposureView, AccountHedgeLikeView,
-        AccountSpotQuantitySourceView, AccountSummaryView, AccountTrackAnalysisView,
-        BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy, ExecutionBindingIntentView,
+        AccountAnalysisView, AccountAssetExposureView, AccountAssetQuantitySourceView,
+        AccountHedgeLikeView, AccountSummaryView, AccountTrackAnalysisView, BandFlattenTrigger,
+        BandProtectionPolicy, BandRecoverPolicy, ExecutionBindingIntentView,
         ExecutionBindingOrderView, ExecutionBindingPolicyView, ExecutionBindingStatusView,
         ExecutionBindingView, ExecutionStateView, ExecutionStatusView, InstrumentView,
         RiskAcquisitionConfigView, RiskAcquisitionDirectionView, RiskAcquisitionView,
@@ -826,12 +826,6 @@ mod tests {
         let payload = serde_json::to_string(&ShapeFamily::Responsive).unwrap();
         assert_eq!(payload, "\"responsive\"");
         assert_eq!(ShapeFamily::Inertial.to_string(), "inertial");
-    }
-
-    #[test]
-    fn shape_family_rejects_legacy_geometry_names() {
-        assert!(serde_json::from_str::<ShapeFamily>("\"concave\"").is_err());
-        assert!(serde_json::from_str::<ShapeFamily>("\"convex\"").is_err());
     }
 
     #[test]
@@ -881,38 +875,6 @@ mod tests {
                 recover: BandRecoverPolicy::ReentryConfirm { bps: 500 },
             }
         );
-    }
-
-    #[test]
-    fn band_protection_policy_rejects_legacy_trigger_bps_shape() {
-        let error = serde_json::from_value::<BandProtectionPolicy>(serde_json::json!({
-            "flatten": {
-                "trigger_bps": 500,
-                "recover": {
-                    "reentry_confirm": { "bps": 500 }
-                }
-            }
-        }))
-        .expect_err("legacy trigger_bps policy should be rejected");
-
-        assert!(!error.to_string().is_empty());
-    }
-
-    #[test]
-    fn band_protection_policy_rejects_legacy_price_confirm_alias() {
-        let error = serde_json::from_value::<BandProtectionPolicy>(serde_json::json!({
-            "flatten": {
-                "trigger": {
-                    "flatten_confirm": { "bps": 500 }
-                },
-                "recover": {
-                    "price_confirm": { "bps": 500 }
-                }
-            }
-        }))
-        .expect_err("legacy price_confirm alias should be rejected");
-
-        assert!(!error.to_string().is_empty());
     }
 
     #[test]
@@ -975,27 +937,6 @@ mod tests {
         assert_eq!(
             serialized["items"][0]["pnl"]["total_pnl"].as_f64(),
             Some(1229.0)
-        );
-    }
-
-    #[test]
-    fn execution_view_does_not_export_legacy_replacement_gate() {
-        let execution = TrackExecutionView {
-            state: ExecutionStateView::Open,
-            execution_status: ExecutionStatusView::Normal,
-            attention_reasons: Vec::new(),
-            inventory_gap: 0.0,
-            execution_target_exposure: None,
-            active_binding_count: 0,
-            risk_acquisition: Default::default(),
-            bindings: Vec::new(),
-        };
-
-        let payload = serde_json::to_value(&execution).unwrap();
-
-        assert!(
-            payload.get("replacement_gate").is_none(),
-            "boundary-ledger protocol should not expose the old replacement gate model"
         );
     }
 
@@ -1294,8 +1235,8 @@ mod tests {
                         "hedge_like":[{
                             "asset":"BTC",
                             "contract_base_exposure":-0.03,
-                            "spot_quantity":0.2,
-                            "spot_quantity_source":"account_summary_available_by_asset",
+                            "account_asset_quantity":0.2,
+                            "account_asset_quantity_source":"account_summary_available_by_asset",
                             "net_base_exposure":0.17
                         }]
                     }
@@ -1343,9 +1284,9 @@ mod tests {
                             hedge_like: vec![AccountHedgeLikeView {
                                 asset: "BTC".to_string(),
                                 contract_base_exposure: -0.03,
-                                spot_quantity: Some(0.2),
-                                spot_quantity_source: Some(
-                                    AccountSpotQuantitySourceView::AccountSummaryAvailableByAsset,
+                                account_asset_quantity: Some(0.2),
+                                account_asset_quantity_source: Some(
+                                    AccountAssetQuantitySourceView::AccountSummaryAvailableByAsset,
                                 ),
                                 net_base_exposure: Some(0.17),
                             }],

@@ -1,7 +1,7 @@
 #[allow(unused_imports)]
 pub use poise_protocol::{
-    AccountAnalysisView, AccountAssetExposureView, AccountHedgeLikeView,
-    AccountSpotQuantitySourceView, AccountSummaryView, AccountTrackAnalysisView, ActivityLevelView,
+    AccountAnalysisView, AccountAssetExposureView, AccountAssetQuantitySourceView,
+    AccountHedgeLikeView, AccountSummaryView, AccountTrackAnalysisView, ActivityLevelView,
     ExecutionBindingIntentView, ExecutionBindingStatusView, ExecutionStateView,
     ExecutionStatusView, PriceExecutionBlockReasonView, RiskAcquisitionDirectionView,
     RiskAcquisitionView, RiskSignalView, StrategyPriceStatusView, StreamEvent,

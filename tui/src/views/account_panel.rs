@@ -103,10 +103,10 @@ fn format_base_exposures(analysis: &AccountAnalysisView) -> String {
 
 fn format_hedge_like(hedge_like: &AccountHedgeLikeView) -> String {
     format!(
-        "spot {} {} | contracts {} | net {}",
+        "account {} {} | contracts {} | net {}",
         hedge_like.asset,
         hedge_like
-            .spot_quantity
+            .account_asset_quantity
             .map(format_quantity)
             .unwrap_or_else(|| "unknown".to_string()),
         format_quantity(hedge_like.contract_base_exposure),

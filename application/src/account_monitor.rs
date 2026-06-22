@@ -34,7 +34,7 @@ pub(crate) struct InMemoryAccountMonitorState {
     pub trading_day: Option<NaiveDate>,
     pub baseline_equity: Option<f64>,
     pub baseline_captured_at: Option<DateTime<Utc>>,
-    pub last_observed_account_snapshot: Option<ObservedAccountSnapshot>,
+    pub current_account_snapshot: Option<ObservedAccountSnapshot>,
 }
 
 pub struct AccountMonitor {
@@ -157,7 +157,7 @@ fn in_memory_state_from_stored(state: StoredAccountMonitorState) -> InMemoryAcco
         trading_day: Some(state.trading_day),
         baseline_equity: Some(state.baseline_equity),
         baseline_captured_at: Some(state.baseline_captured_at),
-        last_observed_account_snapshot: state.last_observed_account_snapshot,
+        current_account_snapshot: None,
     }
 }
 
@@ -168,7 +168,6 @@ fn stored_state_from_in_memory(
         trading_day: state.trading_day?,
         baseline_equity: state.baseline_equity?,
         baseline_captured_at: state.baseline_captured_at?,
-        last_observed_account_snapshot: state.last_observed_account_snapshot.clone(),
     })
 }
 
@@ -184,7 +183,7 @@ fn apply_snapshot(state: &mut InMemoryAccountMonitorState, snapshot: ObservedAcc
         state.baseline_captured_at = Some(snapshot.observed_at);
     }
 
-    state.last_observed_account_snapshot = Some(snapshot);
+    state.current_account_snapshot = Some(snapshot);
 }
 
 fn trading_day_for(observed_at: DateTime<Utc>) -> NaiveDate {
@@ -198,7 +197,7 @@ fn build_read_model(
     config: &AccountMonitorConfig,
     snapshot: Option<ObservedAccountSnapshot>,
 ) -> Option<AccountReadModel> {
-    let snapshot = snapshot.or_else(|| state.last_observed_account_snapshot.clone())?;
+    let snapshot = snapshot.or_else(|| state.current_account_snapshot.clone())?;
     let baseline_equity = state.baseline_equity.unwrap_or(snapshot.equity);
     let day_base_at = state.baseline_captured_at.unwrap_or(snapshot.observed_at);
 
@@ -373,7 +372,9 @@ mod tests {
         AccountMonitor, AccountMonitorConfig, InMemoryAccountMonitorState,
         InMemoryAccountMonitorStore, ObservedAccountSnapshot, build_read_model,
     };
-    use crate::{AccountRiskSignal, ApplicationNotification};
+    use crate::{
+        AccountMonitorStore, AccountRiskSignal, ApplicationNotification, StoredAccountMonitorState,
+    };
     use poise_engine::ports::AccountSummarySnapshot;
 
     #[test]
@@ -405,7 +406,7 @@ mod tests {
                 trading_day: Some(observed_at.date_naive()),
                 baseline_equity: Some(12_800.0),
                 baseline_captured_at: Some(baseline_at),
-                last_observed_account_snapshot: Some(ObservedAccountSnapshot {
+                current_account_snapshot: Some(ObservedAccountSnapshot {
                     equity: 12_500.0,
                     available: 9_000.0,
                     available_by_asset: BTreeMap::from([("BTC".to_string(), 0.25)]),
@@ -439,6 +440,63 @@ mod tests {
         async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
             Ok(self.snapshot.clone())
         }
+    }
+
+    struct RestoredBaselineStore {
+        state: StoredAccountMonitorState,
+    }
+
+    #[async_trait::async_trait]
+    impl AccountMonitorStore for RestoredBaselineStore {
+        async fn load_state(&self) -> Result<Option<StoredAccountMonitorState>> {
+            Ok(Some(self.state.clone()))
+        }
+
+        async fn save_state(&self, _state: &StoredAccountMonitorState) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_keeps_baseline_without_restoring_current_account_summary() {
+        let source: Arc<dyn poise_engine::ports::AccountSummaryPort> =
+            Arc::new(SummaryOnlySource {
+                snapshot: AccountSummarySnapshot {
+                    equity: 12_700.0,
+                    available: 9_100.0,
+                    available_by_asset: BTreeMap::from([("BTC".to_string(), 0.25)]),
+                    unrealized_pnl: -125.0,
+                    observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+                },
+            });
+        let (notifications, _) = broadcast::channel(1);
+        let monitor = AccountMonitor::restore(
+            source,
+            Arc::new(RestoredBaselineStore {
+                state: StoredAccountMonitorState {
+                    trading_day: chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
+                    baseline_equity: 12_800.0,
+                    baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),
+                },
+            }),
+            notifications,
+            AccountMonitorConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(monitor.current_summary().await, None);
+
+        monitor.refresh_once().await.unwrap();
+        let summary = monitor.current_summary().await.unwrap();
+
+        assert_eq!(summary.equity, 12_700.0);
+        assert_eq!(
+            summary.available_by_asset,
+            BTreeMap::from([("BTC".to_string(), 0.25)])
+        );
+        assert_eq!(summary.baseline_equity, 12_800.0);
+        assert_eq!(summary.day_change_pct, Some(-0.78125));
     }
 
     #[tokio::test]

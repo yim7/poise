@@ -769,7 +769,7 @@ mod tests {
     use poise_engine::command::TrackCommand;
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::manager::TrackManager;
-    use poise_engine::ports::{AccountSummarySnapshot, ClockPort};
+    use poise_engine::ports::ClockPort;
     use poise_engine::runtime::{
         RiskAcquisitionDirection, RiskAcquisitionRuntimeView, StrategyPriceStatus, TrackLiveView,
     };
@@ -1071,27 +1071,20 @@ mod tests {
                 trading_day: chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
                 baseline_equity: 13_000.0,
                 baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),
-                last_observed_account_snapshot: Some(AccountSummarySnapshot {
-                    equity: 12_500.0,
-                    available: 9_000.0,
-                    available_by_asset: Default::default(),
-                    unrealized_pnl: -350.0,
-                    observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
-                }),
             })
             .await
             .unwrap();
 
-        Arc::new(
-            AccountMonitor::restore(
-                Arc::new(NoopExchange),
-                account_store,
-                notifications,
-                AccountMonitorConfig::default(),
-            )
-            .await
-            .unwrap(),
+        let account_monitor = AccountMonitor::restore(
+            Arc::new(NoopExchange),
+            account_store,
+            notifications,
+            AccountMonitorConfig::default(),
         )
+        .await
+        .unwrap();
+        account_monitor.refresh_once().await.unwrap();
+        Arc::new(account_monitor)
     }
 
     #[tokio::test]
@@ -1539,7 +1532,7 @@ mod tests {
         assert_eq!(snapshot.raw_track_notifications, 48);
         assert_eq!(snapshot.raw_account_notifications, 1);
         assert_eq!(snapshot.track_pushes, 1);
-        assert_eq!(snapshot.account_pushes, 1);
+        assert_eq!(snapshot.account_pushes, 2);
         assert_eq!(snapshot.detail_query_count, 1);
         assert_eq!(snapshot.max_batch_size, 48);
         assert!(snapshot.avg_detail_query >= Duration::from_millis(25));
@@ -1898,11 +1891,11 @@ mod tests {
     impl poise_engine::ports::AccountSummaryPort for NoopExchange {
         async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
             Ok(poise_engine::ports::AccountSummarySnapshot {
-                equity: 1_000_000.0,
-                available: 1_000_000.0,
+                equity: 12_500.0,
+                available: 9_000.0,
                 available_by_asset: Default::default(),
-                unrealized_pnl: 0.0,
-                observed_at: Utc::now(),
+                unrealized_pnl: -350.0,
+                observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
             })
         }
     }

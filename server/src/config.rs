@@ -12,7 +12,7 @@ use poise_core::strategy::{
 use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
 use poise_hyperliquid as hyperliquid;
 use poise_okx as okx;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 use crate::exchange_startup::build_track_leverage_index;
 
@@ -38,7 +38,7 @@ pub struct TrackSpec {
     pub short_exposure_units: f64,
     pub notional_per_unit: f64,
     pub min_rebalance_units: Option<f64>,
-    #[serde(default, deserialize_with = "deserialize_shape_family_option")]
+    #[serde(default)]
     pub shape_family: Option<ShapeFamily>,
     pub out_of_band_policy: Option<BandProtectionPolicy>,
     pub max_notional: Option<f64>,
@@ -136,28 +136,6 @@ impl TrackSpec {
 
 fn default_bind_address() -> String {
     "127.0.0.1:8000".to_string()
-}
-
-fn deserialize_shape_family_option<'de, D>(deserializer: D) -> Result<Option<ShapeFamily>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = Option::<String>::deserialize(deserializer)?;
-    match value.as_deref() {
-        None => Ok(None),
-        Some("linear") => Ok(Some(ShapeFamily::Linear)),
-        Some("inertial") => Ok(Some(ShapeFamily::Inertial)),
-        Some("responsive") => Ok(Some(ShapeFamily::Responsive)),
-        Some("concave") => Err(serde::de::Error::custom(
-            "shape_family `concave` has been renamed to `inertial`",
-        )),
-        Some("convex") => Err(serde::de::Error::custom(
-            "shape_family `convex` has been renamed to `responsive`",
-        )),
-        Some(other) => Err(serde::de::Error::custom(format!(
-            "unknown shape_family `{other}`; expected one of: linear, inertial, responsive"
-        ))),
-    }
 }
 
 #[cfg(test)]
@@ -705,34 +683,6 @@ total_loss_limit = 600.0
     }
 
     #[test]
-    fn rejects_legacy_track_level_venue_field() {
-        let error = parse_config(
-            r#"
-[exchange]
-venue = "binance"
-deployment = "testnet"
-
-[[tracks]]
-track_id = "btc-core"
-venue = "binance"
-symbol = "BTCUSDT"
-lower_price = 90.0
-upper_price = 110.0
-long_exposure_units = 8.0
-short_exposure_units = 6.0
-notional_per_unit = 3000.0
-"#,
-        )
-        .unwrap_err();
-
-        assert!(
-            error
-                .chain()
-                .any(|cause| cause.to_string().contains("unknown field `venue`"))
-        );
-    }
-
-    #[test]
     fn defaults_bind_address_and_exchange_credentials_for_testnet() {
         let config = parse_config(
             r#"
@@ -902,32 +852,6 @@ shape_family = "inertial"
 
         let track = &config.tracks[0];
         assert_eq!(track.shape_family, Some(ShapeFamily::Inertial));
-    }
-
-    #[test]
-    fn rejects_legacy_shape_family_names_with_migration_hint() {
-        let error = parse_config(
-            r#"
-[exchange]
-venue = "binance"
-
-[[tracks]]
-track_id = "btc-core"
-symbol = "BTCUSDT"
-lower_price = 90.0
-upper_price = 110.0
-long_exposure_units = 8.0
-short_exposure_units = 4.0
-notional_per_unit = 375.0
-daily_loss_limit = 300.0
-total_loss_limit = 600.0
-shape_family = "concave"
-"#,
-        )
-        .unwrap_err();
-
-        assert!(format!("{error:#}").contains("concave"));
-        assert!(format!("{error:#}").contains("inertial"));
     }
 
     #[test]

@@ -24,14 +24,13 @@ impl Config {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Deployment {
     Mainnet,
     #[default]
     Testnet,
     Custom {
         rest_base_url: String,
-        #[serde(alias = "ws_base_url")]
         ws_root_base_url: String,
     },
 }
@@ -147,21 +146,5 @@ mod tests {
         assert_eq!(custom.public_ws_base_url(), "ws://127.0.0.1:9000/public");
         assert_eq!(custom.market_ws_base_url(), "ws://127.0.0.1:9000/market");
         assert_eq!(custom.user_ws_base_url(), "ws://127.0.0.1:9000/private");
-    }
-
-    #[test]
-    fn custom_deployment_accepts_legacy_ws_base_url_field() {
-        let deployment: Deployment = serde_json::from_str(
-            r#"{"custom":{"rest_base_url":"http://127.0.0.1:8080","ws_base_url":"ws://127.0.0.1:9000"}}"#,
-        )
-        .unwrap();
-
-        let Deployment::Custom {
-            ws_root_base_url, ..
-        } = deployment
-        else {
-            panic!("expected custom deployment");
-        };
-        assert_eq!(ws_root_base_url, "ws://127.0.0.1:9000");
     }
 }
