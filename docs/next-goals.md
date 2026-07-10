@@ -4,7 +4,7 @@
 
 本文是当前已确认的实现任务清单，不是长期架构事实源。长期架构和运行语义仍以 [system-overview.md](system-overview.md) 为准。
 
-当前状态：执行中。当前 task 是 0.6 增加 trading readiness 并校正文档中的 journal 语义。
+当前状态：执行中。当前 task 是 1.1 让 executor 只消费 final execution target。
 
 本文的生命周期：
 
@@ -130,8 +130,8 @@ track events 和 track effects 只用于审计与诊断，不参与启动恢复�
 
 | 顺序 | Goal | 优先级 | 难度 | 状态 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| 0 | 建立正确性与交易事实底线 | P0 | L | in_progress | 无 |
-| 1 | 统一决策 owner 与可解释性 | P1 | L | pending | Goal 0 |
+| 0 | 建立正确性与交易事实底线 | P0 | L | completed | 无 |
+| 1 | 统一决策 owner 与可解释性 | P1 | L | in_progress | Goal 0 |
 | 2 | 建立真实 decision replay 与 Workbench 评估 | P2 | L | pending | Goal 1 |
 | 3 | 完成整体验收与长期文档同步 | P1 | M | pending | Goal 0 到 Goal 2 |
 
@@ -148,7 +148,7 @@ Task 清单：
 | 0.3 建立 track identity guard | completed | track_id 不能把旧控制或 PNL 重新解释成另一 instrument | 903ab2c |
 | 0.4 消除 PNL backfill 空成功并补齐当前实用 venue | completed | Available(empty)、Unsupported、transient error 明确分离 | 9f35f74 |
 | 0.5 修复 REST 旧快照覆盖 WS 新事实 | completed | observation revision 改变时旧 REST 快照不能应用 | f0fcc4a |
-| 0.6 增加 trading readiness 并校正文档中的 journal 语义 | in_progress | readiness 区分 blocker 与 warning，journal 不参与恢复 | — |
+| 0.6 增加 trading readiness 并校正文档中的 journal 语义 | completed | readiness 区分 blocker 与 warning，journal 不参与恢复 | e2708bd |
 
 ### Task 0.1 修复跨零新增风险计算
 
@@ -391,7 +391,7 @@ Task 清单：
 
 | Task | 状态 | 验收摘要 | Commit |
 | --- | --- | --- | --- |
-| 1.1 让 executor 只消费 final execution target | pending | executor 不再读取 frontier 或重复计算 backlog target | — |
+| 1.1 让 executor 只消费 final execution target | in_progress | executor 不再读取 frontier 或重复计算 backlog target | — |
 | 1.2 建立 committed InventoryDecisionSnapshot | pending | 查询只投影已提交决策，不推进 gate 或 timer | — |
 | 1.3 统一公开词汇并增加 DecisionReason | pending | API、WebSocket、TUI 使用同一 revision 和原因 | — |
 | 1.4 固定保守 fresh-session acquisition 语义 | pending | 重启本身不授予新增风险，离线时间不触发 stale | — |
