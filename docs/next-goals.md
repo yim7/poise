@@ -672,9 +672,13 @@ git diff --check
 - engine/src/runtime.rs
 - engine/src/risk_exposure_gate.rs
 - engine/src/reconciler.rs
+- engine/src/manager.rs
+- engine/src/mutation_frame.rs
 - server/src/runtime/startup_bootstrap.rs
 - application read model
 - protocol/src/lib.rs
+- server/src/projector.rs
+- server/src/websocket.rs
 - tui/
 
 验收矩阵：
@@ -701,6 +705,9 @@ initial_release_units
 实现约束：
 
 - 使用 current-session 私有状态表达 fresh acquisition pending，不新增表。
+- marker 由 TrackRuntime 持有并进入 TrackMutationFrame；manager 只在一次已安装的 automatic risk-gate 决策中消费，rollback 不得误消费。
+- fresh-session 初始化使用独立入口，不改变同一运行 session 内普通 acquisition episode 的 initial_ratio 语义。
+- acquisition session 使用 risk acquisition backlog 的 sibling view 公开；即使第一笔决策只减仓、没有 backlog，也能看到 reset reason、session start、initial frontier 和 initial release units。
 - 不保存 frontier、anchor、stale timer 或旧 target。
 - inherited orders 仍按现有 startup cleanup 清理。
 - 如果实现需要区分首次启用和进程重启并引入 durable activation intent，先停止确认；本 task 默认所有 fresh process session 都采用保守规则。
