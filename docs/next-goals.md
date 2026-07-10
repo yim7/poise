@@ -586,10 +586,15 @@ git diff --check
 - engine/src/executor/
 - engine/src/reconciler.rs
 - engine/src/manager.rs
+- engine/src/runtime.rs
 - application/src/read_model.rs
+- application/src/mutation_executor.rs
+- application/src/session_effect_queue.rs
 - protocol/src/lib.rs
 - server/src/projector.rs
 - server/src/websocket.rs
+- server/src/effect_worker/dispatch.rs
+- storage/src/sqlite.rs 中的 effect 验收测试
 - tui/
 
 统一公开词汇：
@@ -609,6 +614,8 @@ paused
 at_execution_target
 waiting_risk_release
 account_capacity_blocked
+risk_input_invalid
+band_policy_blocked
 price_gate_blocked
 below_rebalance
 below_venue_minimum
@@ -617,6 +624,19 @@ recovery_required
 waiting_cancel
 submit_planned
 ~~~
+
+已确认实现边界：
+
+- DecisionReason 与四层 target、revision 一起进入 InventoryDecisionSnapshot；manager 必须在 reconciler 和 executor 都完成后才构造 snapshot。
+- reconciler 只提供 `recovery_required`、`risk_input_invalid`、`account_capacity_blocked`、`band_policy_blocked`、`waiting_risk_release` 和 `at_execution_target` 候选原因；executor 只提供 `recovery_required`、`price_gate_blocked`、`below_rebalance`、`below_venue_minimum`、`covered_by_working_order`、`waiting_cancel` 和 `submit_planned` 候选原因。`risk_input_invalid` 表示 PnL 等风险输入无法可靠比较，`band_policy_blocked` 表示 freeze/flatten protection 正在阻止新增风险。
+- manager 按“恢复或风险输入无效 -> 账户安全阻断 -> 已计划 submit -> band/price gate 或 cancel 维护 -> 风险释放等待 -> 已有订单覆盖 -> 交易所最小量 -> rebalance 阈值 -> 已到 execution target”选择唯一主因。`price_gate_blocked` 只在 gate 阻止非零 target gap 或产生必要 cancel 时压过 `at_execution_target`。同轮同时有 cancel 和 submit 时选择 `submit_planned`，只有等待 cancel 完成时才选择 `waiting_cancel`。
+- protocol 只定义一份可原子替换的 InventoryDecisionView，list、detail 和 live update 共用它。它包含 `revision`、四层 target 和 `reason`。
+- 有 committed decision 时，`revision`、`policy_target`、`risk_approved_target` 和 `execution_target` 必须同时存在，`acquisition_frontier` 可为空，所有值都来自同一 snapshot。
+- fresh start、paused、market data stale 或 resume 后尚未完成一次 reconcile 时，公开 decision 的 revision 和四层 target 全部为空，reason 分别为 `waiting_market_data` 或 `paused`。runtime 可保留旧 snapshot 作为当前 session 内部状态，但公开投影不得把旧 revision/target 与当前 lifecycle reason 混合。
+- 删除公开模型中分散的 `desired_exposure`、`execution_target_exposure` 和 target fallback；TUI 只整体替换 InventoryDecisionView，dashboard 只使用其 `execution_target`。
+- executor binding/effect 内部的 `desired_exposure` 表示订单绑定所有权，不是四层 decision 的公开字段，本 task 不为字面统一而改变它的语义。
+- TrackEffect 不再表示“无事发生”；manager、executor、session effect queue、mutation commit、worker 和 storage 测试统一使用空 effects。
+- 删除 NoOp 枚举前先只读审计本地实例的 track_effects；若存在历史 NoOp JSON 则先停止实现并制定一次性数据处理，不保留长期 serde 兼容变体。
 
 验收：
 
