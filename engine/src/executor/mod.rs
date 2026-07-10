@@ -95,7 +95,8 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.5),
                 desired_exposure: Exposure(1.5),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(1.5),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -131,7 +132,8 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
                 desired_exposure: Exposure(1.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(1.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -179,7 +181,8 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
                 desired_exposure: Exposure(1.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(1.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -240,8 +243,9 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,
+                execution_target_exposure: desired_exposure.clone(),
+                execution_gate_decision: Default::default(),
                 desired_exposure,
-                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,

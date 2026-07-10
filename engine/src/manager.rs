@@ -484,9 +484,6 @@ impl TrackManager {
                         &resumed.executor_state,
                         resumed.config(),
                         &resumed.current_exposure,
-                        &result.desired_exposure,
-                        resumed.config().min_rebalance_units,
-                        resumed_at,
                     ),
                 )
             } else {
@@ -1096,7 +1093,8 @@ impl TrackManager {
         &self,
         track: &'a TrackRuntime,
         desired_exposure: poise_core::types::Exposure,
-        risk_release_frontier: Option<poise_core::types::Exposure>,
+        execution_target_exposure: poise_core::types::Exposure,
+        execution_gate_decision: ExecutionGateDecision,
         observed_at: chrono::DateTime<chrono::Utc>,
     ) -> executor::SubmitIntentInput<'a> {
         let submit_purpose = self.submit_purpose_for_track(track, &desired_exposure);
@@ -1108,7 +1106,8 @@ impl TrackManager {
             min_rebalance_units: track.config().min_rebalance_units,
             current_exposure: track.current_exposure.clone(),
             desired_exposure,
-            risk_release_frontier,
+            execution_target_exposure,
+            execution_gate_decision,
             execution_quote: Self::execution_quote_for_track(track),
             policy_context: Self::policy_context_for_track(track),
             price_execution_gate: track.price_execution_gate,
@@ -1160,14 +1159,18 @@ impl TrackManager {
         }
         let risk_exposure_gate_active =
             Self::risk_exposure_gate_active(track, &target.new_runtime_state);
-        if target.suppress_execution && !risk_exposure_gate_active {
+        let execution_gate_blocks_submit = matches!(
+            &target.execution_gate_decision,
+            ExecutionGateDecision::NoSubmit { .. }
+        );
+        if target.target_pursuit_suppressed
+            && !risk_exposure_gate_active
+            && !execution_gate_blocks_submit
+        {
             let executor_state = executor::refresh_state(
                 &track.executor_state,
                 track.config(),
                 &track.current_exposure,
-                &target.desired_exposure,
-                track.config().min_rebalance_units,
-                observed_at,
             );
             return Ok(PlannedInventoryExecution {
                 events: target.events,
@@ -1184,7 +1187,8 @@ impl TrackManager {
         let submit_intent = self.submit_intent_input(
             track,
             target.desired_exposure.clone(),
-            target.risk_release_frontier.clone(),
+            target.execution_target_exposure.clone(),
+            target.execution_gate_decision.clone(),
             observed_at,
         );
         let plan = executor::plan(executor::ExecutorInput::new(submit_intent, executor_state));
@@ -1265,6 +1269,7 @@ fn market_mutation_requires_durable_write(
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+    use poise_core::events::ExecutionGateReason;
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{
         BandProtectionPolicy, RiskAcquisitionConfig, ShapeFamily, TrackConfig,
@@ -1400,6 +1405,23 @@ mod tests {
     }
 
     #[test]
+    fn manager_passes_reconciled_final_target_to_executor() {
+        let (mut manager, id) = manager();
+
+        manager.observe(&id, market(93.75)).unwrap();
+        let track = manager.tracks.get(&id).unwrap();
+        let catch_up_binding = track
+            .executor_state
+            .bindings
+            .iter()
+            .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+            .expect("catch-up binding should be tracked");
+
+        assert_eq!(track.desired_exposure, Some(Exposure(5.0)));
+        assert_eq!(catch_up_binding.desired_exposure, Exposure(2.5));
+    }
+
+    #[test]
     fn reconcile_track_does_not_plan_risk_acquisition_maker_from_next_release() {
         let (mut manager, id) = manager();
         {
@@ -1423,6 +1445,9 @@ mod tests {
                         stale_since: chrono::Utc::now(),
                     },
                 }));
+            track.executor_state =
+                ExecutorState::empty(Utc.with_ymd_and_hms(2026, 4, 22, 8, 0, 0).unwrap())
+                    .ensure_revision(track.config(), track.current_exposure.clone());
         }
 
         let transition = manager.observe(&id, market(93.75)).unwrap();
@@ -1431,6 +1456,11 @@ mod tests {
             effect,
             TrackEffect::SubmitOrder { request, .. }
                 if request.side == Side::Buy && (request.price - 92.5).abs() < 1e-9
+        )));
+        assert!(transition.effects.iter().any(|effect| matches!(
+            effect,
+            TrackEffect::SubmitOrder { request, .. }
+                if request.side == Side::Sell && request.reduce_only
         )));
     }
 
@@ -1469,6 +1499,72 @@ mod tests {
                 gate
             })) if gate.risk_release_frontier == Exposure(-2.5)
         ));
+    }
+
+    #[test]
+    fn account_capacity_block_is_not_bypassed_by_active_acquisition_gate() {
+        let (mut manager, id) = manager();
+        {
+            let track = manager.tracks.get_mut(&id).unwrap();
+            track.current_exposure = Exposure(1.5);
+            track.desired_exposure = Some(Exposure(1.5));
+            track.track_state =
+                TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
+                    gate: RiskExposureGateState {
+                        risk_release_frontier: Exposure(1.5),
+                        release_anchor_price: 93.75,
+                        release_anchor_target: Exposure(5.0),
+                        stale_since: Utc.with_ymd_and_hms(2026, 4, 22, 8, 0, 0).unwrap(),
+                    },
+                }));
+            track
+                .execution_gate_state
+                .account_capacity
+                .available_notional = Some(0.0);
+            track.executor_state =
+                ExecutorState::empty(Utc.with_ymd_and_hms(2026, 4, 22, 8, 0, 0).unwrap())
+                    .ensure_revision(track.config(), track.current_exposure.clone());
+        }
+
+        let transition = manager.observe(&id, market(93.75)).unwrap();
+
+        assert!(transition.events.iter().any(|event| matches!(
+            event,
+            DomainEvent::ExecutionGateApplied {
+                reason: ExecutionGateReason::AccountCapacityInsufficient { .. }
+            }
+        )));
+        assert!(!transition.effects.iter().any(|effect| matches!(
+            effect,
+            TrackEffect::SubmitOrder { request, .. } if !request.reduce_only
+        )));
+    }
+
+    #[test]
+    fn protected_state_transition_does_not_pursue_a_risk_increasing_target() {
+        let (mut manager, id) = manager();
+        {
+            let track = manager.tracks.get_mut(&id).unwrap();
+            track.current_exposure = Exposure(1.0);
+            track.desired_exposure = Some(Exposure(4.0));
+            track.track_state =
+                TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
+            track.executor_state =
+                ExecutorState::empty(Utc.with_ymd_and_hms(2026, 4, 22, 8, 0, 0).unwrap())
+                    .ensure_revision(track.config(), track.current_exposure.clone());
+        }
+
+        let transition = manager.observe(&id, market(85.0)).unwrap();
+        let track = manager.tracks.get(&id).unwrap();
+
+        assert!(matches!(
+            track.track_state,
+            TrackState::Running(ControlState::Automatic(AutoState::Frozen { .. }))
+        ));
+        assert!(!transition.effects.iter().any(|effect| matches!(
+            effect,
+            TrackEffect::SubmitOrder { request, .. } if !request.reduce_only
+        )));
     }
 
     #[test]

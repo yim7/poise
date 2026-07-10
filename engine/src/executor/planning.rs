@@ -5,13 +5,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
+use crate::execution_gate::ExecutionGateDecision;
 use crate::execution_plan::TrackEffect;
 use crate::ports::{ExecutionQuote, OrderRequest};
 use crate::price_gate::{
     PriceExecutionGate, SubmitPurpose, WorkingOrderGateAction, allows_submit,
     working_order_gate_action,
 };
-use crate::risk_exposure_gate::execution_target_exposure;
 use crate::runtime::ExecutorState;
 use poise_core::track::Instrument;
 
@@ -47,8 +47,12 @@ pub struct SubmitIntentInput<'a> {
     pub native_qty_per_unit: f64,
     pub min_rebalance_units: f64,
     pub current_exposure: Exposure,
+    // Risk-approved target retained for risk-reducing passive maker selection.
     pub desired_exposure: Exposure,
-    pub risk_release_frontier: Option<Exposure>,
+    // Final target already resolved by the reconciler; active policies must not derive it again.
+    pub execution_target_exposure: Exposure,
+    // Execution constraints stay separate from target ownership and order maintenance.
+    pub execution_gate_decision: ExecutionGateDecision,
     pub execution_quote: Option<ExecutionQuote>,
     pub policy_context: PolicyContext,
     pub price_execution_gate: PriceExecutionGate,
@@ -106,11 +110,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     );
     let boundary_epsilon = boundary_exposure_epsilon(&submit_intent);
     let position_epsilon = position_exposure_epsilon(&submit_intent);
-    let execution_target = execution_target_exposure(
-        &submit_intent.current_exposure,
-        &submit_intent.desired_exposure,
-        submit_intent.risk_release_frontier.as_ref(),
-    );
+    let execution_target = submit_intent.execution_target_exposure.clone();
     let execution_view = match BoundaryLedgerView::try_from_boundaries(
         &boundaries,
         &state.ledger_state,
@@ -146,6 +146,17 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
 
     let mut effects =
         apply_price_gate_to_existing_bindings(&mut state, submit_intent.price_execution_gate);
+    effects.extend(apply_execution_gate_to_existing_bindings(
+        &mut state,
+        &submit_intent.execution_gate_decision,
+    ));
+
+    if matches!(
+        &submit_intent.execution_gate_decision,
+        ExecutionGateDecision::NoSubmit { .. }
+    ) {
+        return finish_plan(state, Vec::new(), effects);
+    }
 
     if !allows_submit(
         submit_intent.price_execution_gate,
@@ -200,9 +211,6 @@ pub fn refresh_state(
     previous_state: &ExecutorState,
     config: &TrackConfig,
     current_exposure: &Exposure,
-    _desired_exposure: &Exposure,
-    _min_rebalance_units: f64,
-    _observed_at: DateTime<Utc>,
 ) -> ExecutorState {
     previous_state.ensure_revision(config, current_exposure.clone())
 }
@@ -279,6 +287,29 @@ fn apply_price_gate_to_existing_bindings(
         match working_order_gate_action(gate, order_role_for_binding(binding)) {
             WorkingOrderGateAction::Keep => {}
             WorkingOrderGateAction::Cancel => cancel_binding(binding, &mut effects),
+        }
+    }
+    effects
+}
+
+fn apply_execution_gate_to_existing_bindings(
+    state: &mut ExecutorState,
+    decision: &ExecutionGateDecision,
+) -> Vec<TrackEffect> {
+    if matches!(decision, ExecutionGateDecision::Open) {
+        return Vec::new();
+    }
+
+    let mut effects = Vec::new();
+    for binding in &mut state.bindings {
+        if !matches!(
+            binding.status,
+            BindingStatus::SubmitPending | BindingStatus::Working
+        ) {
+            continue;
+        }
+        if order_role_for_binding(binding) == OrderRole::IncreaseInventory {
+            cancel_binding(binding, &mut effects);
         }
     }
     effects
@@ -503,8 +534,9 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,
+                execution_target_exposure: desired_exposure.clone(),
+                execution_gate_decision: Default::default(),
                 desired_exposure,
-                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -530,15 +562,15 @@ mod tests {
         input
     }
 
-    fn input_with_frontier<'a>(
+    fn input_with_execution_target<'a>(
         config: &'a TrackConfig,
         rules: &'a ExchangeRules,
         current_exposure: Exposure,
         desired_exposure: Exposure,
-        risk_release_frontier: Exposure,
+        execution_target_exposure: Exposure,
     ) -> ExecutorInput<'a> {
         let mut input = input(config, rules, current_exposure, desired_exposure);
-        input.submit_intent.risk_release_frontier = Some(risk_release_frontier);
+        input.submit_intent.execution_target_exposure = execution_target_exposure;
         input
     }
 
@@ -558,8 +590,9 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,
+                execution_target_exposure: desired_exposure.clone(),
+                execution_gate_decision: Default::default(),
                 desired_exposure,
-                risk_release_frontier: None,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -571,6 +604,20 @@ mod tests {
             },
             Some(previous_state),
         )
+    }
+
+    fn input_with_execution_gate<'a>(
+        config: &'a TrackConfig,
+        rules: &'a ExchangeRules,
+        current_exposure: Exposure,
+        desired_exposure: Exposure,
+        execution_gate_decision: ExecutionGateDecision,
+        previous_state: &'a ExecutorState,
+    ) -> ExecutorInput<'a> {
+        let mut input = input(config, rules, current_exposure, desired_exposure);
+        input.submit_intent.execution_gate_decision = execution_gate_decision;
+        input.executor_state = Some(previous_state);
+        input
     }
 
     #[test]
@@ -652,11 +699,11 @@ mod tests {
     }
 
     #[test]
-    fn risk_release_frontier_limits_catch_up_increase() {
+    fn catch_up_follows_final_execution_target_instead_of_risk_approved_target() {
         let config = config();
         let rules = rules();
 
-        let plan = plan(input_with_frontier(
+        let plan = plan(input_with_execution_target(
             &config,
             &rules,
             Exposure(0.0),
@@ -669,7 +716,7 @@ mod tests {
             .bindings
             .iter()
             .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
-            .expect("catch-up binding should be planned toward the release frontier");
+            .expect("catch-up binding should be planned toward the final execution target");
 
         assert_eq!(catch_up_binding.request.side, Side::Sell);
         assert!(!catch_up_binding.request.reduce_only);
@@ -678,16 +725,16 @@ mod tests {
     }
 
     #[test]
-    fn risk_release_frontier_does_not_make_catch_up_reduce_advantage_position() {
+    fn final_execution_target_does_not_make_catch_up_reduce_advantage_position() {
         let config = config();
         let rules = rules();
 
-        let plan = plan(input_with_frontier(
+        let plan = plan(input_with_execution_target(
             &config,
             &rules,
             Exposure(-3.0),
             Exposure(-4.0),
-            Exposure(-2.0),
+            Exposure(-3.0),
         ));
 
         assert!(
@@ -700,16 +747,43 @@ mod tests {
     }
 
     #[test]
-    fn risk_release_frontier_allows_catch_up_reduce_when_current_exceeds_desired() {
+    fn risk_approved_target_still_allows_reduce_only_maker_when_final_target_holds() {
         let config = config();
         let rules = rules();
 
-        let plan = plan(input_with_frontier(
+        let plan = plan(input_with_execution_target(
+            &config,
+            &rules,
+            Exposure(1.0),
+            Exposure(5.0),
+            Exposure(1.0),
+        ));
+
+        assert!(
+            !plan
+                .state
+                .bindings
+                .iter()
+                .any(|binding| { binding.proposal_key.policy == PolicyKind::CatchUp })
+        );
+        assert!(plan.state.bindings.iter().any(|binding| {
+            binding.proposal_key.policy == PolicyKind::CurveMaker
+                && binding.request.side == Side::Sell
+                && binding.request.reduce_only
+        }));
+    }
+
+    #[test]
+    fn risk_reduction_follows_final_execution_target_without_frontier_input() {
+        let config = config();
+        let rules = rules();
+
+        let plan = plan(input_with_execution_target(
             &config,
             &rules,
             Exposure(-5.0),
             Exposure(-4.0),
-            Exposure(-2.0),
+            Exposure(-4.0),
         ));
 
         let catch_up_binding = plan
@@ -726,11 +800,11 @@ mod tests {
     }
 
     #[test]
-    fn risk_release_frontier_crosses_sub_min_opposite_residual_to_released_target() {
+    fn cross_zero_catch_up_stops_at_final_execution_target() {
         let config = config();
         let rules = rules();
 
-        let plan = plan(input_with_frontier(
+        let plan = plan(input_with_execution_target(
             &config,
             &rules,
             Exposure(-0.25),
@@ -752,11 +826,11 @@ mod tests {
     }
 
     #[test]
-    fn risk_release_frontier_crosses_larger_opposite_residual_without_reduce_only() {
+    fn cross_zero_catch_up_does_not_infer_a_target_beyond_final_input() {
         let config = config();
         let rules = rules();
 
-        let plan = plan(input_with_frontier(
+        let plan = plan(input_with_execution_target(
             &config,
             &rules,
             Exposure(-1.0),
@@ -782,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn risk_release_frontier_flattens_sub_min_residual_when_zero_is_inside_boundary() {
+    fn final_zero_target_flattens_sub_min_opposite_residual() {
         let config = TrackConfig {
             lower_price: 59_000.0,
             upper_price: 73_000.0,
@@ -807,7 +881,7 @@ mod tests {
             Exposure(-0.1056),
             Exposure(0.4172),
         );
-        input.submit_intent.risk_release_frontier = Some(Exposure(0.0));
+        input.submit_intent.execution_target_exposure = Exposure(0.0);
         input.submit_intent.execution_quote = Some(ExecutionQuote {
             best_bid: 64_362.0,
             best_ask: 64_363.0,
@@ -962,7 +1036,8 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(2.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(2.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 100.0,
                     best_ask: 100.2,
@@ -1012,7 +1087,8 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(-6.0),
                 desired_exposure: Exposure(-1.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(-1.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1093,7 +1169,8 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(2.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(2.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1160,7 +1237,8 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(2.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(2.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1199,7 +1277,8 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(2.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(2.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 100.0,
                     best_ask: 100.2,
@@ -1255,6 +1334,42 @@ mod tests {
         assert!(plan.effects.iter().any(|effect| matches!(
             effect,
             TrackEffect::CancelOrder { order_id, .. } if order_id == "increase-order"
+        )));
+        assert!(
+            !plan
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, TrackEffect::SubmitOrder { .. }))
+        );
+        assert_eq!(plan.state.bindings[0].status, BindingStatus::CancelPending);
+    }
+
+    #[test]
+    fn execution_gate_cancels_existing_increase_and_blocks_replacement_submit() {
+        let config = config();
+        let rules = rules();
+        let mut previous = plan(input(&config, &rules, Exposure(0.0), Exposure(2.0))).state;
+        previous.bindings[0].status = BindingStatus::Working;
+        previous.bindings[0].order_id = Some("capacity-blocked-increase".to_string());
+
+        let plan = plan(input_with_execution_gate(
+            &config,
+            &rules,
+            Exposure(0.0),
+            Exposure(2.0),
+            ExecutionGateDecision::NoSubmit {
+                reason: poise_core::events::ExecutionGateReason::AccountCapacityInsufficient {
+                    required_notional: 200.0,
+                    available_notional: 0.0,
+                },
+            },
+            &previous,
+        ));
+
+        assert!(plan.effects.iter().any(|effect| matches!(
+            effect,
+            TrackEffect::CancelOrder { order_id, .. }
+                if order_id == "capacity-blocked-increase"
         )));
         assert!(
             !plan
@@ -1395,7 +1510,8 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
                 desired_exposure: Exposure(0.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(0.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1456,7 +1572,8 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
                 desired_exposure: Exposure(0.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(0.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1520,7 +1637,8 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
                 desired_exposure: Exposure(0.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(0.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1566,7 +1684,8 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(0.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(0.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1605,7 +1724,8 @@ mod tests {
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(0.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(0.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1704,7 +1824,8 @@ mod tests {
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
                 desired_exposure: Exposure(1.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(1.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1739,7 +1860,8 @@ mod tests {
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.6),
                 desired_exposure: Exposure(1.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(1.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1782,7 +1904,8 @@ mod tests {
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(1.2),
                 desired_exposure: Exposure(1.0),
-                risk_release_frontier: None,
+                execution_target_exposure: Exposure(1.0),
+                execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,

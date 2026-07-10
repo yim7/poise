@@ -22,7 +22,8 @@ pub struct TargetReconcileResult {
     pub applied_risk_cap: Option<AppliedRiskCap>,
     pub new_runtime_state: Option<TrackState>,
     pub execution_gate_decision: ExecutionGateDecision,
-    pub suppress_execution: bool,
+    // Suppresses active pursuit of the target; binding maintenance and gate cleanup may still run.
+    pub target_pursuit_suppressed: bool,
     pub risk_release_frontier: Option<Exposure>,
     pub risk_acquisition: Option<RiskAcquisitionRelease>,
 }
@@ -49,7 +50,7 @@ pub fn reconcile_target_at(
             applied_risk_cap: None,
             new_runtime_state: Some(track.track_state.clone()),
             execution_gate_decision: ExecutionGateDecision::Open,
-            suppress_execution: delta.is_zero(),
+            target_pursuit_suppressed: delta.is_zero(),
             risk_release_frontier: None,
             risk_acquisition: Default::default(),
         };
@@ -71,7 +72,7 @@ pub fn reconcile_target_at(
             applied_risk_cap: None,
             new_runtime_state: Some(track.track_state.clone()),
             execution_gate_decision: ExecutionGateDecision::Open,
-            suppress_execution: delta.is_zero(),
+            target_pursuit_suppressed: delta.is_zero(),
             risk_release_frontier: None,
             risk_acquisition: Default::default(),
         };
@@ -131,7 +132,7 @@ pub fn reconcile_target_at(
                     cause: TerminationCause::Risk(cause),
                 }),
                 execution_gate_decision: ExecutionGateDecision::Open,
-                suppress_execution: delta.is_zero(),
+                target_pursuit_suppressed: delta.is_zero(),
                 risk_release_frontier: None,
                 risk_acquisition: Default::default(),
             };
@@ -165,7 +166,7 @@ pub fn reconcile_target_at(
             applied_risk_cap,
             new_runtime_state,
             execution_gate_decision: ExecutionGateDecision::Open,
-            suppress_execution: true,
+            target_pursuit_suppressed: true,
             risk_release_frontier,
             risk_acquisition,
         };
@@ -195,7 +196,7 @@ pub fn reconcile_target_at(
             applied_risk_cap,
             new_runtime_state,
             execution_gate_decision,
-            suppress_execution: true,
+            target_pursuit_suppressed: true,
             risk_release_frontier,
             risk_acquisition,
         };
@@ -211,7 +212,7 @@ pub fn reconcile_target_at(
             applied_risk_cap,
             new_runtime_state,
             execution_gate_decision,
-            suppress_execution: true,
+            target_pursuit_suppressed: true,
             risk_release_frontier,
             risk_acquisition,
         };
@@ -229,7 +230,7 @@ pub fn reconcile_target_at(
         applied_risk_cap,
         new_runtime_state,
         execution_gate_decision,
-        suppress_execution: false,
+        target_pursuit_suppressed: false,
         risk_release_frontier,
         risk_acquisition,
     }
@@ -256,7 +257,7 @@ fn pnl_asset_mismatch_result(
         applied_risk_cap: None,
         new_runtime_state,
         execution_gate_decision: ExecutionGateDecision::NoSubmit { reason },
-        suppress_execution: true,
+        target_pursuit_suppressed: true,
         risk_release_frontier: None,
         risk_acquisition: None,
     }
@@ -758,7 +759,7 @@ mod tests {
 
         let result = reconcile_target(&track, 100.0);
 
-        assert!(result.suppress_execution);
+        assert!(result.target_pursuit_suppressed);
         assert_eq!(result.desired_exposure, Exposure(0.0));
     }
 
@@ -778,8 +779,25 @@ mod tests {
                 AutoState::RiskExposureGated { .. }
             )))
         ));
-        assert!(!result.suppress_execution);
+        assert!(!result.target_pursuit_suppressed);
         assert!(result.risk_acquisition.is_some());
+    }
+
+    #[test]
+    fn account_capacity_is_evaluated_against_final_execution_target() {
+        let mut track = test_runtime();
+        enable_risk_acquisition(&mut track);
+        track
+            .execution_gate_state
+            .account_capacity
+            .available_notional = Some(1_000.0);
+
+        let result = reconcile_target(&track, 93.75);
+
+        assert_eq!(result.desired_exposure, Exposure(5.0));
+        assert_eq!(result.execution_target_exposure, Exposure(2.5));
+        assert_eq!(result.execution_gate_decision, ExecutionGateDecision::Open);
+        assert!(!result.target_pursuit_suppressed);
     }
 
     #[test]
@@ -800,7 +818,7 @@ mod tests {
                 AutoState::RiskExposureGated { .. }
             )))
         ));
-        assert!(!result.suppress_execution);
+        assert!(!result.target_pursuit_suppressed);
     }
 
     #[test]
@@ -825,7 +843,7 @@ mod tests {
                 AutoState::RiskExposureGated { .. }
             )))
         ));
-        assert!(!result.suppress_execution);
+        assert!(!result.target_pursuit_suppressed);
     }
 
     #[test]
@@ -850,7 +868,7 @@ mod tests {
                 AutoState::RiskExposureGated { .. }
             )))
         ));
-        assert!(!result.suppress_execution);
+        assert!(!result.target_pursuit_suppressed);
     }
 
     #[test]
@@ -869,7 +887,7 @@ mod tests {
         assert_eq!(result.desired_exposure, Exposure(5.5));
         assert_eq!(result.execution_target_exposure, Exposure(2.0));
         assert_eq!(result.risk_release_frontier, Some(Exposure(2.0)));
-        assert!(result.suppress_execution);
+        assert!(result.target_pursuit_suppressed);
     }
 
     #[test]
@@ -888,7 +906,7 @@ mod tests {
         assert_eq!(result.desired_exposure, Exposure(5.0));
         assert_eq!(result.execution_target_exposure, Exposure(2.625));
         assert_eq!(result.risk_release_frontier, Some(Exposure(2.625)));
-        assert!(result.suppress_execution);
+        assert!(result.target_pursuit_suppressed);
     }
 
     #[test]
@@ -907,7 +925,7 @@ mod tests {
         assert_eq!(result.desired_exposure, Exposure(2.0));
         assert_eq!(result.execution_target_exposure, Exposure(2.0));
         assert_eq!(result.risk_release_frontier, Some(Exposure(1.5)));
-        assert!(!result.suppress_execution);
+        assert!(!result.target_pursuit_suppressed);
     }
 
     #[test]
@@ -932,7 +950,7 @@ mod tests {
                 AutoState::RiskExposureGated { .. }
             )))
         ));
-        assert!(result.suppress_execution);
+        assert!(result.target_pursuit_suppressed);
     }
 
     #[test]
@@ -957,7 +975,7 @@ mod tests {
                 AutoState::RiskExposureGated { .. }
             )))
         ));
-        assert!(!result.suppress_execution);
+        assert!(!result.target_pursuit_suppressed);
     }
 
     #[test]
@@ -977,7 +995,7 @@ mod tests {
         assert_eq!(result.execution_target_exposure, Exposure(0.0));
         assert_eq!(result.risk_release_frontier, Some(Exposure(0.0)));
         assert!(result.risk_acquisition.is_some());
-        assert!(result.suppress_execution);
+        assert!(result.target_pursuit_suppressed);
     }
 
     #[test]
@@ -1152,7 +1170,7 @@ mod tests {
         let result = reconcile_target(&track, 90.0);
 
         assert!((result.desired_exposure.0 - 8.0).abs() < 0.001);
-        assert!(!result.suppress_execution);
+        assert!(!result.target_pursuit_suppressed);
         assert!(
             result
                 .events
@@ -1171,7 +1189,7 @@ mod tests {
         let result = reconcile_target(&track, 90.0);
 
         assert_eq!(result.desired_exposure, Exposure(8.0));
-        assert!(!result.suppress_execution);
+        assert!(!result.target_pursuit_suppressed);
         assert!(
             !result
                 .events
@@ -1195,7 +1213,7 @@ mod tests {
                 .map(|state| state.status()),
             Some(TrackStatus::Frozen),
         );
-        assert!(result.suppress_execution);
+        assert!(result.target_pursuit_suppressed);
     }
 
     #[test]
@@ -1211,7 +1229,7 @@ mod tests {
                 .map(|state| state.status()),
             Some(TrackStatus::Active),
         );
-        assert!(result.suppress_execution);
+        assert!(result.target_pursuit_suppressed);
     }
 
     #[test]
@@ -1229,7 +1247,7 @@ mod tests {
                 .map(|state| state.status()),
             Some(TrackStatus::Active),
         );
-        assert!(!result.suppress_execution);
+        assert!(!result.target_pursuit_suppressed);
     }
 
     #[test]
@@ -1520,7 +1538,7 @@ mod tests {
 
         let result = reconcile_target(&track, 90.0);
 
-        assert!(result.suppress_execution);
+        assert!(result.target_pursuit_suppressed);
         assert_eq!(result.desired_exposure, Exposure(4.0));
         assert!(result.events.iter().any(|event| matches!(
             event,
@@ -1547,7 +1565,7 @@ mod tests {
         let result = reconcile_target(&track, 90.0);
 
         assert_eq!(result.desired_exposure, Exposure(4.0));
-        assert!(!result.suppress_execution);
+        assert!(!result.target_pursuit_suppressed);
         assert!(result.events.iter().any(|event| matches!(
             event,
             DomainEvent::RiskCapApplied { intended, capped }
@@ -1583,7 +1601,7 @@ mod tests {
         let result = reconcile_target(&track, 90.0);
 
         assert_eq!(result.desired_exposure, Exposure(4.0));
-        assert!(!result.suppress_execution);
+        assert!(!result.target_pursuit_suppressed);
         assert!(
             !result
                 .events
@@ -1636,7 +1654,7 @@ mod tests {
 
         let result = reconcile_target(&track, 90.0);
 
-        assert!(result.suppress_execution);
+        assert!(result.target_pursuit_suppressed);
         assert_eq!(result.desired_exposure, Exposure(2.0));
         assert_eq!(
             result.execution_gate_decision,
@@ -1666,7 +1684,7 @@ mod tests {
         let result = reconcile_target(&track, 85.0);
 
         assert_eq!(result.desired_exposure.0, 6.0);
-        assert!(result.suppress_execution);
+        assert!(result.target_pursuit_suppressed);
     }
 
     #[test]
@@ -1698,7 +1716,7 @@ mod tests {
 
         let result = reconcile_target(&track, 90.0);
 
-        assert!(result.suppress_execution);
+        assert!(result.target_pursuit_suppressed);
         assert_eq!(
             result.execution_gate_decision,
             ExecutionGateDecision::NoSubmit {
@@ -1731,7 +1749,7 @@ mod tests {
 
         let result = reconcile_target(&track, 90.0);
 
-        assert!(result.suppress_execution);
+        assert!(result.target_pursuit_suppressed);
         assert_eq!(
             result.execution_gate_decision,
             ExecutionGateDecision::NoSubmit {
@@ -1759,7 +1777,7 @@ mod tests {
 
         let result = reconcile_target(&track, 100.0);
 
-        assert!(!result.suppress_execution);
+        assert!(!result.target_pursuit_suppressed);
         assert_eq!(result.desired_exposure, Exposure(2.0));
         assert!(
             result

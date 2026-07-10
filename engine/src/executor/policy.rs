@@ -49,7 +49,9 @@ pub(super) struct PolicyPlanningInput<'a> {
     pub native_qty_per_unit: f64,
     pub min_rebalance_units: f64,
     pub current_exposure: &'a Exposure,
+    // Catch-up and direct target policies consume only this reconciler-owned target.
     pub execution_target_exposure: &'a Exposure,
+    // Passive makers may inspect the risk-approved target, but may only lower current risk.
     pub desired_exposure: &'a Exposure,
     pub execution_quote: Option<ExecutionQuote>,
     pub submit_purpose: SubmitPurpose,
