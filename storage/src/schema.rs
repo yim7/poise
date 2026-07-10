@@ -5,11 +5,19 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         // `persisted_track_presence` is a read-model helper for listing tracks
         // and updated-at metadata. Startup correctness must use the explicit
-        // control state; PNL stats are rebuilt from track_pnl_records.
+        // control state and track identity; PNL stats are rebuilt from
+        // track_pnl_records.
         "CREATE TABLE IF NOT EXISTS persisted_track_presence (
             track_id TEXT PRIMARY KEY,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS track_identity (
+            track_id TEXT PRIMARY KEY NOT NULL,
+            venue TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            bound_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS track_control_state (
@@ -77,6 +85,12 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         "persisted_track_presence",
         &["track_id", "created_at", "updated_at"],
         &["created_at", "updated_at"],
+    )?;
+    ensure_table_schema(
+        conn,
+        "track_identity",
+        &["track_id", "venue", "symbol", "bound_at"],
+        &["track_id", "venue", "symbol", "bound_at"],
     )?;
     ensure_table_schema(
         conn,
@@ -393,6 +407,44 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         initialize(&conn).unwrap();
         initialize(&conn).unwrap();
+    }
+
+    #[test]
+    fn initialize_creates_track_identity_table_with_exact_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        initialize(&conn).unwrap();
+
+        assert_eq!(
+            table_columns(&conn, "track_identity").unwrap(),
+            vec!["track_id", "venue", "symbol", "bound_at"]
+        );
+        assert_eq!(
+            table_not_null_columns(&conn, "track_identity").unwrap(),
+            vec!["track_id", "venue", "symbol", "bound_at"]
+        );
+    }
+
+    #[test]
+    fn initialize_rejects_malformed_track_identity_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE track_identity (
+                track_id TEXT PRIMARY KEY,
+                venue TEXT NOT NULL,
+                symbol TEXT,
+                bound_at TEXT NOT NULL,
+                extra_column TEXT
+            );",
+        )
+        .unwrap();
+
+        let error = initialize(&conn).expect_err("malformed track identity table should fail");
+
+        assert!(
+            format!("{error:#}").contains("sqlite schema for `track_identity`"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]

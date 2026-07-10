@@ -112,7 +112,7 @@ mod tests {
 
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
-    use poise_application::{TrackMutationStore, TrackQueryStore};
+    use poise_application::{TrackIdentityStore, TrackMutationStore, TrackQueryStore};
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::Side;
     use poise_engine::ledger::TrackPnlRecord;
@@ -127,6 +127,12 @@ mod tests {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let track_id = TrackId::new("btc-core");
         let instrument = Instrument::new(Venue::Okx, "BTC-USD-SWAP");
+        TrackIdentityStore::guard_track_identities(
+            &*repository,
+            &[(track_id.clone(), instrument.clone())],
+        )
+        .await
+        .unwrap();
         let recorded = trade_record(
             instrument.clone(),
             Some("okx:fills:recorded"),

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Result, anyhow};
 use poise_core::track::{TrackDefinition, TrackId};
@@ -11,11 +11,21 @@ pub struct TrackDefinitionRegistry {
 impl TrackDefinitionRegistry {
     pub fn new(definitions: Vec<TrackDefinition>) -> Result<Self> {
         let mut tracks = BTreeMap::new();
+        let mut instruments = HashSet::new();
         for definition in definitions {
             let track_id = definition.track_id().as_str().to_string();
-            if tracks.insert(track_id.clone(), definition).is_some() {
+            if tracks.contains_key(&track_id) {
                 return Err(anyhow!("duplicate track id `{track_id}`"));
             }
+            let instrument = definition.instrument().clone();
+            if !instruments.insert(instrument.clone()) {
+                return Err(anyhow!(
+                    "duplicate instrument `{}:{}`",
+                    instrument.venue.as_str(),
+                    instrument.symbol
+                ));
+            }
+            tracks.insert(track_id, definition);
         }
         Ok(Self { tracks })
     }
@@ -38,9 +48,13 @@ mod tests {
     use super::TrackDefinitionRegistry;
 
     fn track_definition(track_id: &str) -> TrackDefinition {
+        track_definition_for(track_id, Instrument::new(Venue::Binance, "BTCUSDT"))
+    }
+
+    fn track_definition_for(track_id: &str, instrument: Instrument) -> TrackDefinition {
         TrackDefinition::try_new(
             TrackId::new(track_id),
-            Instrument::new(Venue::Binance, "BTCUSDT"),
+            instrument,
             TrackConfig {
                 lower_price: 90.0,
                 upper_price: 110.0,
@@ -81,5 +95,20 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("duplicate track id `btc-core`"));
+    }
+
+    #[test]
+    fn track_definition_registry_rejects_duplicate_instrument() {
+        let error = TrackDefinitionRegistry::new(vec![
+            track_definition_for("btc-core", Instrument::new(Venue::Binance, "BTCUSDT")),
+            track_definition_for("btc-secondary", Instrument::new(Venue::Binance, "BTCUSDT")),
+        ])
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate instrument `binance:BTCUSDT`")
+        );
     }
 }

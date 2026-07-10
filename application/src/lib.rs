@@ -16,6 +16,7 @@ pub mod track_definition;
 mod track_diagnostic_event_loader;
 pub mod track_effect_service;
 pub mod track_effect_store;
+pub mod track_identity_store;
 pub mod track_mutation_store;
 pub mod track_observation_service;
 pub mod track_persistence;
@@ -53,6 +54,7 @@ pub use track_control_state::{PersistedControlMode, TrackControlCommand, TrackCo
 pub use track_definition::TrackDefinitionRegistry;
 pub use track_effect_service::TrackEffectService;
 pub use track_effect_store::TrackEffectJournal;
+pub use track_identity_store::{TrackIdentityGuardOutcome, TrackIdentityStore};
 pub use track_mutation_store::TrackMutationStore;
 pub use track_observation_service::TrackObservationService;
 pub use track_persistence::{

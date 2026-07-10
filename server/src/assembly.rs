@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 #[cfg(test)]
 use std::path::Path;
 use std::sync::Arc;
@@ -15,7 +14,7 @@ use poise_application::{
 };
 use poise_binance::connect as connect_binance;
 use poise_bybit::connect as connect_bybit;
-use poise_core::track::{Instrument, TrackId, Venue};
+use poise_core::track::Venue;
 use poise_engine::manager::TrackManager;
 use poise_engine::ports::{ClockPort, ExchangePorts};
 use poise_hyperliquid::connect as connect_hyperliquid;
@@ -59,34 +58,6 @@ pub struct ServerPlatform {
     #[cfg(test)]
     effect_worker_test_context: EffectWorkerTestContext,
     pub runtime: ServerRuntime,
-}
-
-fn validate_unique_instruments(
-    instruments: impl IntoIterator<Item = Instrument>,
-) -> Result<(), anyhow::Error> {
-    let mut known_instruments = HashSet::new();
-    for instrument in instruments {
-        if !known_instruments.insert(instrument.clone()) {
-            return Err(anyhow!(
-                "duplicate instrument `{}:{}`",
-                instrument.venue.as_str(),
-                instrument.symbol
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_unique_track_ids(
-    track_ids: impl IntoIterator<Item = TrackId>,
-) -> Result<(), anyhow::Error> {
-    let mut known_track_ids = HashSet::new();
-    for track_id in track_ids {
-        if !known_track_ids.insert(track_id.as_str().to_string()) {
-            return Err(anyhow!("duplicate track id `{}`", track_id.as_str()));
-        }
-    }
-    Ok(())
 }
 
 fn validate_registry_venue(
@@ -135,16 +106,6 @@ pub async fn assemble(
 ) -> Result<ServerPlatform> {
     let track_leverage_index = build_track_leverage_index(&config.tracks)?;
     validate_registry_venue(track_definition_registry.as_ref(), config.exchange.venue())?;
-    validate_unique_instruments(
-        track_definition_registry
-            .iter()
-            .map(|track| track.instrument().clone()),
-    )?;
-    validate_unique_track_ids(
-        track_definition_registry
-            .iter()
-            .map(|track| track.track_id().clone()),
-    )?;
     let (exchange_venue, exchange_ports) = build_exchange_and_prepare_startup(
         config,
         track_definition_registry.as_ref(),
@@ -210,16 +171,6 @@ async fn assemble_with_state_store(
     track_leverage_index: &TrackLeverageIndex,
 ) -> Result<ServerPlatform> {
     validate_registry_venue(track_definition_registry.as_ref(), exchange_venue)?;
-    validate_unique_instruments(
-        track_definition_registry
-            .iter()
-            .map(|track| track.instrument().clone()),
-    )?;
-    validate_unique_track_ids(
-        track_definition_registry
-            .iter()
-            .map(|track| track.track_id().clone()),
-    )?;
 
     let mut manager = TrackManager::new(clock.clone());
     let mut startup_definitions = Vec::new();
@@ -583,10 +534,7 @@ mod tests {
     };
     use poise_application::{TrackDebugQueryService, TrackDefinitionRegistry, TrackQueryService};
 
-    use super::{
-        ServerPlatform, SystemClock, assemble, build_exchange, validate_registry_venue,
-        validate_unique_instruments, validate_unique_track_ids,
-    };
+    use super::{ServerPlatform, SystemClock, assemble, build_exchange, validate_registry_venue};
 
     fn test_exchange_rules() -> poise_core::types::ExchangeRules {
         poise_core::types::ExchangeRules {
@@ -899,23 +847,6 @@ total_loss_limit = 600.0
     }
 
     #[test]
-    fn assemble_rejects_duplicate_track_ids() {
-        let error =
-            validate_unique_track_ids([TrackId::new("alpha"), TrackId::new("alpha")]).unwrap_err();
-        assert!(error.to_string().contains("duplicate track id"));
-    }
-
-    #[test]
-    fn assemble_rejects_duplicate_instruments() {
-        let error = validate_unique_instruments([
-            Instrument::new(Venue::Binance, "BTCUSDT"),
-            Instrument::new(Venue::Binance, "BTCUSDT"),
-        ])
-        .unwrap_err();
-        assert!(error.to_string().contains("duplicate instrument"));
-    }
-
-    #[test]
     fn assemble_rejects_registry_venue_that_does_not_match_exchange() {
         let config = parse_config(
             r#"
@@ -946,65 +877,6 @@ total_loss_limit = 600.0
                 .to_string()
                 .contains("does not match exchange venue `binance`")
         );
-    }
-
-    #[tokio::test]
-    async fn assemble_rejects_duplicate_symbols() {
-        let config = Config {
-            bind_address: "127.0.0.1:0".into(),
-            tracks: vec![
-                TrackSpec {
-                    track_id: "btc-core".into(),
-                    symbol: "BTCUSDT".into(),
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: Some(0.5),
-                    shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
-                    out_of_band_policy: Some(poise_core::strategy::BandProtectionPolicy::Freeze),
-                    max_notional: None,
-                    leverage: None,
-                    daily_loss_limit: 300.0,
-                    total_loss_limit: 600.0,
-                    tick_timeout_secs: None,
-                    risk_acquisition: Default::default(),
-                },
-                TrackSpec {
-                    track_id: "btc-alt".into(),
-                    symbol: "BTCUSDT".into(),
-                    lower_price: 80.0,
-                    upper_price: 100.0,
-                    long_exposure_units: 6.0,
-                    short_exposure_units: 6.0,
-                    notional_per_unit: 250.0,
-                    min_rebalance_units: Some(0.5),
-                    shape_family: Some(poise_core::strategy::ShapeFamily::Linear),
-                    out_of_band_policy: Some(poise_core::strategy::BandProtectionPolicy::Freeze),
-                    max_notional: None,
-                    leverage: None,
-                    daily_loss_limit: 300.0,
-                    total_loss_limit: 600.0,
-                    tick_timeout_secs: None,
-                    risk_acquisition: Default::default(),
-                },
-            ],
-            exchange: ExchangeConfig::default(),
-            account_monitor: Default::default(),
-        };
-
-        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let repositories = StateRepositories::new(repository);
-        let error = assemble(
-            &config,
-            test_track_definition_registry(&config),
-            repositories,
-        )
-        .await
-        .err()
-        .unwrap();
-        assert!(error.to_string().contains("duplicate instrument"));
     }
 
     #[tokio::test]

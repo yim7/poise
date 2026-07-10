@@ -351,7 +351,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use poise_application::{
         CommittedTrackWrite, EffectJournalEntry, EffectStatusUpdate, PersistedTrackEffect,
-        StoredTrackEvent, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
+        StoredTrackEvent, TrackEffectJournal, TrackIdentityStore, TrackMutationStore,
+        TrackQueryStore,
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
@@ -1486,6 +1487,12 @@ mod tests {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let track_id = TrackId::new("btc-core");
         let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+        TrackIdentityStore::guard_track_identities(
+            &*repository,
+            &[(track_id.clone(), instrument.clone())],
+        )
+        .await
+        .unwrap();
         let recorded = audit_trade_record(
             instrument.clone(),
             Some("okx:fills:recorded"),

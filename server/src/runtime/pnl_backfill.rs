@@ -206,7 +206,9 @@ mod tests {
 
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
-    use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
+    use poise_application::{
+        TrackEffectJournal, TrackIdentityStore, TrackMutationStore, TrackQueryStore,
+    };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
@@ -228,6 +230,15 @@ mod tests {
     #[tokio::test]
     async fn backfill_recent_pnl_records_persists_new_records_idempotently() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        TrackIdentityStore::guard_track_identities(
+            &*repository,
+            &[(
+                TrackId::new("btc-coin"),
+                Instrument::new(Venue::Okx, "BTC-USD-SWAP"),
+            )],
+        )
+        .await
+        .unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
         let services = build_test_application_services(

@@ -515,7 +515,7 @@ mod tests {
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
     use poise_application::{
-        EffectStatus, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
+        EffectStatus, TrackEffectJournal, TrackIdentityStore, TrackMutationStore, TrackQueryStore,
     };
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
@@ -939,6 +939,15 @@ mod tests {
      {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let manager = seeded_manager();
+        TrackIdentityStore::guard_track_identities(
+            &*repository,
+            &[(
+                TrackId::new("btc-core"),
+                Instrument::new(Venue::Binance, "BTCUSDT"),
+            )],
+        )
+        .await
+        .unwrap();
         repository
             .save_track_control_state(
                 &TrackId::new("btc-core"),
