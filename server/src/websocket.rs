@@ -1971,6 +1971,15 @@ mod tests {
             })
         }
 
+        async fn get_recent_track_pnl_records(
+            &self,
+            _instrument: &poise_core::track::Instrument,
+        ) -> Result<poise_engine::ports::RecentTrackPnlRecords> {
+            Ok(poise_engine::ports::RecentTrackPnlRecords::Available(
+                Vec::new(),
+            ))
+        }
+
         async fn subscribe_user_data(
             &self,
         ) -> Result<tokio::sync::mpsc::Receiver<poise_engine::ports::UserDataEvent>> {

@@ -10,7 +10,6 @@ pub(crate) enum RuntimeHealthComponent {
     EffectWorker,
     Recovery,
     AccountMonitor,
-    PnlBackfill,
 }
 
 impl RuntimeHealthComponent {
@@ -21,18 +20,16 @@ impl RuntimeHealthComponent {
             Self::EffectWorker => "effect_worker",
             Self::Recovery => "recovery",
             Self::AccountMonitor => "account_monitor",
-            Self::PnlBackfill => "pnl_backfill",
         }
     }
 
-    fn all() -> [Self; 6] {
+    fn all() -> [Self; 5] {
         [
             Self::MarketData,
             Self::UserData,
             Self::EffectWorker,
             Self::Recovery,
             Self::AccountMonitor,
-            Self::PnlBackfill,
         ]
     }
 }
@@ -185,7 +182,6 @@ mod tests {
                 "effect_worker",
                 "recovery",
                 "account_monitor",
-                "pnl_backfill",
             ]
         );
         assert!(
@@ -203,29 +199,25 @@ mod tests {
         let second = Utc.with_ymd_and_hms(2026, 6, 17, 1, 1, 0).unwrap();
         let third = Utc.with_ymd_and_hms(2026, 6, 17, 1, 2, 0).unwrap();
 
-        health.record_success(RuntimeHealthComponent::PnlBackfill, first);
-        health.record_error(
-            RuntimeHealthComponent::PnlBackfill,
-            second,
-            "temporary outage",
-        );
+        health.record_success(RuntimeHealthComponent::Recovery, first);
+        health.record_error(RuntimeHealthComponent::Recovery, second, "temporary outage");
         let degraded = health
             .snapshot()
             .tasks
             .into_iter()
-            .find(|task| task.component == RuntimeHealthComponent::PnlBackfill)
+            .find(|task| task.component == RuntimeHealthComponent::Recovery)
             .unwrap();
         assert_eq!(degraded.status, RuntimeHealthStatus::Degraded);
         assert_eq!(degraded.last_success_at, Some(first));
         assert_eq!(degraded.last_error_at, Some(second));
         assert_eq!(degraded.last_error.as_deref(), Some("temporary outage"));
 
-        health.record_success(RuntimeHealthComponent::PnlBackfill, third);
+        health.record_success(RuntimeHealthComponent::Recovery, third);
         let recovered = health
             .snapshot()
             .tasks
             .into_iter()
-            .find(|task| task.component == RuntimeHealthComponent::PnlBackfill)
+            .find(|task| task.component == RuntimeHealthComponent::Recovery)
             .unwrap();
         assert_eq!(recovered.status, RuntimeHealthStatus::Ok);
         assert_eq!(recovered.last_success_at, Some(third));

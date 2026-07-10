@@ -10,7 +10,7 @@ use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
     MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position,
-    UserDataEvent,
+    RecentTrackPnlRecords, UserDataEvent,
 };
 
 use crate::{
@@ -25,7 +25,7 @@ pub async fn connect(config: &Config) -> Result<ExchangePorts> {
     let client_order_ids = ClientOrderIdMapper::shared();
     let ws = Arc::new(HyperliquidWsClient::new_with_client_order_id_mapper(
         config.endpoints().ws_url().to_string(),
-        credentials.wallet_address().to_string(),
+        credentials.account_address().to_string(),
         Arc::clone(&client_order_ids),
     ));
     let rest = Arc::new(HyperliquidRestClient::new_with_client_order_id_mapper(
@@ -132,6 +132,16 @@ impl AccountPort for HyperliquidAccount {
         self.rest
             .get_account_capacity_snapshot(DEFAULT_CAPACITY_LEVERAGE)
             .await
+    }
+
+    async fn get_recent_track_pnl_records(
+        &self,
+        instrument: &Instrument,
+    ) -> Result<RecentTrackPnlRecords> {
+        self.rest
+            .get_recent_track_pnl_records(&instrument.symbol)
+            .await
+            .map(RecentTrackPnlRecords::Available)
     }
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {

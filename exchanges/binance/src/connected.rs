@@ -9,7 +9,7 @@ use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
     MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position,
-    UserDataEvent,
+    RecentTrackPnlRecords, UserDataEvent,
 };
 
 use crate::{
@@ -127,6 +127,13 @@ impl AccountPort for BinanceAccount {
         self.rest
             .get_account_capacity_snapshot(&instrument.symbol)
             .await
+    }
+
+    async fn get_recent_track_pnl_records(
+        &self,
+        _instrument: &Instrument,
+    ) -> Result<RecentTrackPnlRecords> {
+        Ok(RecentTrackPnlRecords::Unsupported)
     }
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
@@ -247,6 +254,13 @@ mod tests {
             unreachable!("not used in test")
         }
 
+        async fn get_recent_track_pnl_records(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<RecentTrackPnlRecords> {
+            Ok(RecentTrackPnlRecords::Unsupported)
+        }
+
         async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
             unreachable!("not used in test")
         }
@@ -295,6 +309,19 @@ mod tests {
         let _account_summary: Arc<dyn AccountSummaryPort> = connected.account_summary();
         let _account: Arc<dyn AccountPort> = connected.account();
         let _metadata: Arc<dyn MetadataPort> = connected.metadata();
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_are_explicitly_unsupported() {
+        let connected = build_test_connected();
+
+        let outcome = connected
+            .account()
+            .get_recent_track_pnl_records(&Instrument::new(Venue::Binance, "BTCUSDT"))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, RecentTrackPnlRecords::Unsupported);
     }
 
     #[test]

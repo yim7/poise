@@ -10,9 +10,9 @@ use poise_engine::command::TrackCommand;
 use poise_protocol::{
     AccountSummaryView, ActivityLevelView, HealthResponse, HealthStatusView, HealthTaskStatusView,
     HealthTaskView, InstrumentView, PnlBackfillStatusView, RecentFillAuditItemView,
-    RecentFillCoverageView, RecentFillsAuditResponse, TrackCommandAccepted, TrackCommandRequest,
-    TrackCommandType, TrackDetailView, TrackDiagnosticItemView, TrackDiagnosticsView,
-    TrackListResponse,
+    RecentFillCoverageView, RecentFillsAuditResponse, RecentPnlAvailabilityView,
+    TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
+    TrackDiagnosticItemView, TrackDiagnosticsView, TrackListResponse,
 };
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
@@ -77,12 +77,17 @@ async fn health(
         })
         .count();
     let runtime_health = state.runtime_health.snapshot();
-    let task_attention_required = runtime_health_has_degraded_task(&runtime_health);
+    let pnl_backfill = state.pnl_backfill_status.snapshot();
+    let task_attention_required = runtime_health_has_degraded_task(&runtime_health)
+        || pnl_backfill.health_status() == RuntimeHealthStatus::Degraded;
     let status = if attention_required_count == 0 && !task_attention_required {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
+
+    let mut tasks = project_runtime_health(runtime_health);
+    tasks.push(project_pnl_backfill_health(&pnl_backfill));
 
     Ok((
         status,
@@ -94,8 +99,8 @@ async fn health(
             },
             track_count: sources.len(),
             attention_required_count,
-            tasks: project_runtime_health(runtime_health),
-            pnl_backfill: project_pnl_backfill_status(state.pnl_backfill_status.snapshot()),
+            tasks,
+            pnl_backfill: project_pnl_backfill_status(&pnl_backfill),
         }),
     ))
 }
@@ -129,17 +134,33 @@ fn project_runtime_health_task(task: RuntimeTaskHealthSnapshot) -> HealthTaskVie
     }
 }
 
+fn project_pnl_backfill_health(snapshot: &crate::runtime::PnlBackfillSnapshot) -> HealthTaskView {
+    HealthTaskView {
+        component: "pnl_backfill".to_string(),
+        status: match snapshot.health_status() {
+            RuntimeHealthStatus::Unknown => HealthTaskStatusView::Unknown,
+            RuntimeHealthStatus::Ok => HealthTaskStatusView::Ok,
+            RuntimeHealthStatus::Degraded => HealthTaskStatusView::Degraded,
+        },
+        last_success_at: snapshot.last_success_at.map(|value| value.to_rfc3339()),
+        last_error_at: snapshot.last_error_at.map(|value| value.to_rfc3339()),
+        last_error: snapshot.last_error.clone(),
+    }
+}
+
 fn project_pnl_backfill_status(
-    snapshot: crate::runtime::PnlBackfillSnapshot,
+    snapshot: &crate::runtime::PnlBackfillSnapshot,
 ) -> PnlBackfillStatusView {
     PnlBackfillStatusView {
         last_completed_at: snapshot.last_completed_at.map(|value| value.to_rfc3339()),
+        available_tracks: snapshot.available_tracks,
+        unsupported_tracks: snapshot.unsupported_tracks,
         records_seen: snapshot.records_seen,
         records_inserted: snapshot.records_inserted,
         records_skipped: snapshot.records_skipped,
         failures: snapshot.failures,
         last_error_at: snapshot.last_error_at.map(|value| value.to_rfc3339()),
-        last_error: snapshot.last_error,
+        last_error: snapshot.last_error.clone(),
     }
 }
 
@@ -217,7 +238,7 @@ async fn get_recent_fills_audit(
         .recent_fills_auditor
         .audit_recent_fills(&track_id, &source.instrument)
         .await
-        .map_err(map_query_error)?;
+        .map_err(map_recent_fills_audit_error)?;
 
     Ok(Json(project_recent_fills_audit(
         source.track_id,
@@ -236,6 +257,14 @@ fn project_recent_fills_audit(
         instrument: InstrumentView {
             venue: instrument.venue.as_str().to_string(),
             symbol: instrument.symbol,
+        },
+        availability: match audit.availability {
+            crate::pnl_audit::RecentPnlAvailability::Available => {
+                RecentPnlAvailabilityView::Available
+            }
+            crate::pnl_audit::RecentPnlAvailability::Unsupported => {
+                RecentPnlAvailabilityView::Unsupported
+            }
         },
         records_seen: audit.records_seen,
         records_recorded: audit.records_recorded,
@@ -319,6 +348,26 @@ fn internal_error(message: String) -> (StatusCode, Json<ErrorResponse>) {
     )
 }
 
+fn service_unavailable(message: String) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse { error: message }),
+    )
+}
+
+fn map_recent_fills_audit_error(
+    error: crate::pnl_audit::RecentFillsAuditError,
+) -> (StatusCode, Json<ErrorResponse>) {
+    match error {
+        error @ crate::pnl_audit::RecentFillsAuditError::Exchange(_) => {
+            service_unavailable(error.to_string())
+        }
+        error @ crate::pnl_audit::RecentFillsAuditError::Store(_) => {
+            internal_error(error.to_string())
+        }
+    }
+}
+
 fn map_query_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
     internal_error(error.to_string())
 }
@@ -364,13 +413,14 @@ mod tests {
     use poise_engine::ledger::TrackPnlRecord;
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
-        AccountCapacitySnapshot, AccountPort, AccountSummarySnapshot, ClockPort, UserDataEvent,
+        AccountCapacitySnapshot, AccountPort, AccountSummarySnapshot, ClockPort,
+        RecentTrackPnlRecords, UserDataEvent,
     };
     use poise_protocol::{
         AccountSummaryView, ExecutionBindingIntentView, ExecutionBindingStatusView,
-        ExecutionStatusView, RecentFillCoverageView, RecentFillsAuditResponse, RiskSignalView,
-        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
-        TrackDiagnosticsView, TrackListResponse, TrackStatus,
+        ExecutionStatusView, RecentFillCoverageView, RecentFillsAuditResponse,
+        RecentPnlAvailabilityView, RiskSignalView, TrackCommandAccepted, TrackCommandRequest,
+        TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackListResponse, TrackStatus,
     };
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
@@ -840,6 +890,8 @@ mod tests {
         assert!(pnl_backfill["last_success_at"].is_null());
         assert!(pnl_backfill["last_error"].is_null());
         assert!(payload["pnl_backfill"]["last_completed_at"].is_null());
+        assert_eq!(payload["pnl_backfill"]["available_tracks"], 0);
+        assert_eq!(payload["pnl_backfill"]["unsupported_tracks"], 0);
         assert_eq!(payload["pnl_backfill"]["records_seen"], 0);
         assert_eq!(payload["pnl_backfill"]["records_inserted"], 0);
         assert_eq!(payload["pnl_backfill"]["records_skipped"], 0);
@@ -929,7 +981,7 @@ mod tests {
     async fn health_returns_service_unavailable_when_runtime_task_degraded() {
         let state = app_state().await;
         state.http_state.runtime_health.record_error(
-            RuntimeHealthComponent::PnlBackfill,
+            RuntimeHealthComponent::Recovery,
             Utc.with_ymd_and_hms(2026, 6, 17, 1, 2, 3).unwrap(),
             "temporary okx outage",
         );
@@ -949,15 +1001,15 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["status"], "attention_required");
         assert_eq!(payload["attention_required_count"], 0);
-        let pnl_backfill = payload["tasks"]
+        let recovery = payload["tasks"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|task| task["component"] == "pnl_backfill")
+            .find(|task| task["component"] == "recovery")
             .unwrap();
-        assert_eq!(pnl_backfill["status"], "degraded");
-        assert_eq!(pnl_backfill["last_error_at"], "2026-06-17T01:02:03+00:00");
-        assert_eq!(pnl_backfill["last_error"], "temporary okx outage");
+        assert_eq!(recovery["status"], "degraded");
+        assert_eq!(recovery["last_error_at"], "2026-06-17T01:02:03+00:00");
+        assert_eq!(recovery["last_error"], "temporary okx outage");
     }
 
     #[tokio::test]
@@ -967,6 +1019,9 @@ mod tests {
         state.http_state.pnl_backfill_status.replace_snapshot(
             crate::runtime::PnlBackfillSnapshot {
                 last_completed_at: Some(observed_at),
+                last_success_at: None,
+                available_tracks: 2,
+                unsupported_tracks: 1,
                 records_seen: 5,
                 records_inserted: 2,
                 records_skipped: 3,
@@ -986,17 +1041,26 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
             payload["pnl_backfill"]["last_completed_at"],
             "2026-06-17T01:02:03+00:00"
         );
+        assert_eq!(payload["pnl_backfill"]["available_tracks"], 2);
+        assert_eq!(payload["pnl_backfill"]["unsupported_tracks"], 1);
         assert_eq!(payload["pnl_backfill"]["records_seen"], 5);
         assert_eq!(payload["pnl_backfill"]["records_inserted"], 2);
         assert_eq!(payload["pnl_backfill"]["records_skipped"], 3);
         assert_eq!(payload["pnl_backfill"]["failures"], 1);
+        let pnl_backfill = payload["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["component"] == "pnl_backfill")
+            .unwrap();
+        assert_eq!(pnl_backfill["status"], "degraded");
         assert_eq!(
             payload["pnl_backfill"]["last_error_at"],
             "2026-06-17T01:02:03+00:00"
@@ -1508,7 +1572,7 @@ mod tests {
         );
         let unkeyed = audit_trade_record(instrument, None, Some("unkeyed"));
         let account = Arc::new(FakeRecentFillsAccount {
-            records: vec![recorded, missing, unkeyed],
+            response: FakeRecentFillsResponse::Available(vec![recorded, missing, unkeyed]),
         });
         let state = build_test_state_with_recent_fills_account(repository, account).await;
 
@@ -1527,6 +1591,7 @@ mod tests {
         let payload: RecentFillsAuditResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload.track_id, "btc-core");
         assert_eq!(payload.instrument.symbol, "BTCUSDT");
+        assert_eq!(payload.availability, RecentPnlAvailabilityView::Available);
         assert_eq!(payload.records_seen, 3);
         assert_eq!(payload.records_recorded, 1);
         assert_eq!(payload.records_missing, 1);
@@ -1537,6 +1602,101 @@ mod tests {
         assert_eq!(
             payload.items[1].source_key.as_deref(),
             Some("okx:fills:missing")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_recent_fills_audit_reports_unsupported_as_a_successful_capability_answer() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let state = build_test_state_with_recent_fills_account(
+            repository,
+            Arc::new(FakeRecentFillsAccount {
+                response: FakeRecentFillsResponse::Unsupported,
+            }),
+        )
+        .await;
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/debug/tracks/btc-core/recent-fills-audit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["availability"], "unsupported");
+        assert_eq!(payload["records_seen"], 0);
+    }
+
+    #[tokio::test]
+    async fn get_recent_fills_audit_reports_transient_query_errors_as_service_unavailable() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let state = build_test_state_with_recent_fills_account(
+            repository,
+            Arc::new(FakeRecentFillsAccount {
+                response: FakeRecentFillsResponse::Error("temporary exchange outage".to_string()),
+            }),
+        )
+        .await;
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/debug/tracks/btc-core/recent-fills-audit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            payload["error"],
+            "recent exchange PNL query failed: temporary exchange outage"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_recent_fills_audit_reports_local_query_errors_as_internal_errors() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+        let account = Arc::new(FakeRecentFillsAccount {
+            response: FakeRecentFillsResponse::Available(vec![audit_trade_record(
+                instrument,
+                Some("binance:fills:one"),
+                Some("one"),
+            )]),
+        });
+        let mut state =
+            build_test_state_with_recent_fills_account(repository, account.clone()).await;
+        state.http_state.recent_fills_auditor = Arc::new(RecentFillsAuditor::new(
+            account,
+            Arc::new(FailingQueryStore),
+        ));
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/debug/tracks/btc-core/recent-fills-audit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            payload["error"],
+            "local PNL coverage query failed: query unavailable"
         );
     }
 
@@ -1562,7 +1722,13 @@ mod tests {
     }
 
     struct FakeRecentFillsAccount {
-        records: Vec<TrackPnlRecord>,
+        response: FakeRecentFillsResponse,
+    }
+
+    enum FakeRecentFillsResponse {
+        Available(Vec<TrackPnlRecord>),
+        Unsupported,
+        Error(String),
     }
 
     #[async_trait::async_trait]
@@ -1579,8 +1745,14 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
-        ) -> anyhow::Result<Vec<TrackPnlRecord>> {
-            Ok(self.records.clone())
+        ) -> anyhow::Result<RecentTrackPnlRecords> {
+            match &self.response {
+                FakeRecentFillsResponse::Available(records) => {
+                    Ok(RecentTrackPnlRecords::Available(records.clone()))
+                }
+                FakeRecentFillsResponse::Unsupported => Ok(RecentTrackPnlRecords::Unsupported),
+                FakeRecentFillsResponse::Error(message) => anyhow::bail!(message.clone()),
+            }
         }
 
         async fn subscribe_user_data(&self) -> anyhow::Result<mpsc::Receiver<UserDataEvent>> {

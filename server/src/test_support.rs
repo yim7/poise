@@ -17,7 +17,7 @@ use poise_engine::manager::TrackManager;
 use poise_engine::observation::MarketObservation;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, ExchangeOpenOrderSnapshot, ExecutionPort, ExecutionQuote,
-    OrderReceipt, OrderRequest, OrderStatus, Position, UserDataEvent,
+    OrderReceipt, OrderRequest, OrderStatus, Position, RecentTrackPnlRecords, UserDataEvent,
 };
 use poise_engine::price_gate::SubmitPurpose;
 use poise_engine::transition::TrackTransition;
@@ -426,6 +426,13 @@ impl AccountPort for NoopAccountPort {
         Ok(AccountCapacitySnapshot {
             max_increase_notional: 1_000_000.0,
         })
+    }
+
+    async fn get_recent_track_pnl_records(
+        &self,
+        _instrument: &poise_core::track::Instrument,
+    ) -> Result<RecentTrackPnlRecords> {
+        Ok(RecentTrackPnlRecords::Available(Vec::new()))
     }
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {

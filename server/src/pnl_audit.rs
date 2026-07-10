@@ -1,11 +1,32 @@
 use std::collections::BTreeSet;
+use std::fmt;
 use std::sync::Arc;
 
-use anyhow::Result;
 use poise_application::TrackQueryStore;
 use poise_core::track::{Instrument, TrackId};
 use poise_engine::ledger::{TrackPnlRecord, TrackPnlRecordKind};
-use poise_engine::ports::AccountPort;
+use poise_engine::ports::{AccountPort, RecentTrackPnlRecords};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecentPnlAvailability {
+    Available,
+    Unsupported,
+}
+
+#[derive(Debug)]
+pub(crate) enum RecentFillsAuditError {
+    Exchange(anyhow::Error),
+    Store(anyhow::Error),
+}
+
+impl fmt::Display for RecentFillsAuditError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exchange(error) => write!(formatter, "recent exchange PNL query failed: {error}"),
+            Self::Store(error) => write!(formatter, "local PNL coverage query failed: {error}"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecentFillCoverage {
@@ -20,8 +41,9 @@ pub(crate) struct RecentFillAuditItem {
     pub coverage: RecentFillCoverage,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RecentFillsAudit {
+    pub availability: RecentPnlAvailability,
     pub records_seen: usize,
     pub records_recorded: usize,
     pub records_missing: usize,
@@ -49,14 +71,28 @@ impl RecentFillsAuditor {
         &self,
         track_id: &TrackId,
         instrument: &Instrument,
-    ) -> Result<RecentFillsAudit> {
-        let records = self
+    ) -> std::result::Result<RecentFillsAudit, RecentFillsAuditError> {
+        let records = match self
             .account
             .get_recent_track_pnl_records(instrument)
-            .await?
-            .into_iter()
-            .filter(|record| record.kind == TrackPnlRecordKind::Trade)
-            .collect::<Vec<_>>();
+            .await
+            .map_err(RecentFillsAuditError::Exchange)?
+        {
+            RecentTrackPnlRecords::Available(records) => records,
+            RecentTrackPnlRecords::Unsupported => {
+                return Ok(RecentFillsAudit {
+                    availability: RecentPnlAvailability::Unsupported,
+                    records_seen: 0,
+                    records_recorded: 0,
+                    records_missing: 0,
+                    records_unkeyed: 0,
+                    items: Vec::new(),
+                });
+            }
+        }
+        .into_iter()
+        .filter(|record| record.kind == TrackPnlRecordKind::Trade)
+        .collect::<Vec<_>>();
         let source_keys = records
             .iter()
             .filter_map(normalized_source_key)
@@ -66,14 +102,19 @@ impl RecentFillsAuditor {
         } else {
             self.query_store
                 .list_track_pnl_source_keys(track_id, &source_keys)
-                .await?
+                .await
+                .map_err(RecentFillsAuditError::Store)?
                 .into_iter()
                 .collect::<BTreeSet<_>>()
         };
 
         let mut audit = RecentFillsAudit {
+            availability: RecentPnlAvailability::Available,
             records_seen: records.len(),
-            ..RecentFillsAudit::default()
+            records_recorded: 0,
+            records_missing: 0,
+            records_unkeyed: 0,
+            items: Vec::new(),
         };
         for record in records {
             let coverage = match normalized_source_key(&record) {
@@ -116,11 +157,15 @@ mod tests {
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::Side;
     use poise_engine::ledger::TrackPnlRecord;
-    use poise_engine::ports::{AccountCapacitySnapshot, AccountPort, UserDataEvent};
+    use poise_engine::ports::{
+        AccountCapacitySnapshot, AccountPort, RecentTrackPnlRecords, UserDataEvent,
+    };
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
-    use super::{RecentFillCoverage, RecentFillsAuditor};
+    use super::{
+        RecentFillCoverage, RecentFillsAuditError, RecentFillsAuditor, RecentPnlAvailability,
+    };
 
     #[tokio::test]
     async fn recent_fills_audit_marks_recorded_missing_and_unkeyed_records() {
@@ -149,7 +194,7 @@ mod tests {
         );
         let unkeyed = trade_record(instrument.clone(), None, Some("unkeyed"));
         let account = Arc::new(FakeRecentFillsAccount {
-            records: vec![recorded, missing, unkeyed],
+            response: FakeRecentFillsResponse::Available(vec![recorded, missing, unkeyed]),
         });
         let auditor =
             RecentFillsAuditor::new(account, repository.clone() as Arc<dyn TrackQueryStore>);
@@ -160,6 +205,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(audit.records_seen, 3);
+        assert_eq!(audit.availability, RecentPnlAvailability::Available);
         assert_eq!(audit.records_recorded, 1);
         assert_eq!(audit.records_missing, 1);
         assert_eq!(audit.records_unkeyed, 1);
@@ -174,14 +220,14 @@ mod tests {
         let track_id = TrackId::new("btc-core");
         let instrument = Instrument::new(Venue::Okx, "BTC-USD-SWAP");
         let account = Arc::new(FakeRecentFillsAccount {
-            records: vec![TrackPnlRecord::funding(
+            response: FakeRecentFillsResponse::Available(vec![TrackPnlRecord::funding(
                 instrument.clone(),
                 Utc.with_ymd_and_hms(2026, 6, 17, 8, 0, 0).unwrap(),
                 "okx:bills".to_string(),
                 Some("okx:bills:btc-usd-swap:bill-1".to_string()),
                 -0.0001,
                 "BTC",
-            )],
+            )]),
         });
         let auditor =
             RecentFillsAuditor::new(account, repository.clone() as Arc<dyn TrackQueryStore>);
@@ -193,6 +239,83 @@ mod tests {
 
         assert_eq!(audit.records_seen, 0);
         assert!(audit.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recent_fills_audit_preserves_supported_empty_and_unsupported() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let track_id = TrackId::new("btc-core");
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+
+        let available = RecentFillsAuditor::new(
+            Arc::new(FakeRecentFillsAccount {
+                response: FakeRecentFillsResponse::Available(Vec::new()),
+            }),
+            repository.clone() as Arc<dyn TrackQueryStore>,
+        )
+        .audit_recent_fills(&track_id, &instrument)
+        .await
+        .unwrap();
+        let unsupported = RecentFillsAuditor::new(
+            Arc::new(FakeRecentFillsAccount {
+                response: FakeRecentFillsResponse::Unsupported,
+            }),
+            repository as Arc<dyn TrackQueryStore>,
+        )
+        .audit_recent_fills(&track_id, &instrument)
+        .await
+        .unwrap();
+
+        assert_eq!(available.availability, RecentPnlAvailability::Available);
+        assert_eq!(available.records_seen, 0);
+        assert_eq!(unsupported.availability, RecentPnlAvailability::Unsupported);
+        assert_eq!(unsupported.records_seen, 0);
+    }
+
+    #[tokio::test]
+    async fn recent_fills_audit_keeps_transient_errors_separate_from_unsupported() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let error = RecentFillsAuditor::new(
+            Arc::new(FakeRecentFillsAccount {
+                response: FakeRecentFillsResponse::Error("temporary exchange outage".to_string()),
+            }),
+            repository as Arc<dyn TrackQueryStore>,
+        )
+        .audit_recent_fills(
+            &TrackId::new("btc-core"),
+            &Instrument::new(Venue::Binance, "BTCUSDT"),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "recent exchange PNL query failed: temporary exchange outage"
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_fills_audit_classifies_local_coverage_query_failures_separately() {
+        let instrument = Instrument::new(Venue::Okx, "BTC-USDT-SWAP");
+        let error = RecentFillsAuditor::new(
+            Arc::new(FakeRecentFillsAccount {
+                response: FakeRecentFillsResponse::Available(vec![trade_record(
+                    instrument.clone(),
+                    Some("okx:fills:one"),
+                    Some("one"),
+                )]),
+            }),
+            Arc::new(FailingPnlSourceKeyStore),
+        )
+        .audit_recent_fills(&TrackId::new("btc-core"), &instrument)
+        .await
+        .unwrap_err();
+
+        assert!(matches!(&error, RecentFillsAuditError::Store(_)));
+        assert_eq!(
+            error.to_string(),
+            "local PNL coverage query failed: local source-key query unavailable"
+        );
     }
 
     fn trade_record(
@@ -217,7 +340,64 @@ mod tests {
     }
 
     struct FakeRecentFillsAccount {
-        records: Vec<TrackPnlRecord>,
+        response: FakeRecentFillsResponse,
+    }
+
+    enum FakeRecentFillsResponse {
+        Available(Vec<TrackPnlRecord>),
+        Unsupported,
+        Error(String),
+    }
+
+    struct FailingPnlSourceKeyStore;
+
+    #[async_trait::async_trait]
+    impl TrackQueryStore for FailingPnlSourceKeyStore {
+        async fn list_recent_track_events(
+            &self,
+            _track_id: &TrackId,
+            _limit: usize,
+        ) -> Result<Vec<poise_application::StoredTrackEvent>> {
+            unreachable!("not used by recent fills audit")
+        }
+
+        async fn list_recent_track_effects(
+            &self,
+            _track_id: &TrackId,
+            _limit: usize,
+        ) -> Result<Vec<poise_application::PersistedTrackEffect>> {
+            unreachable!("not used by recent fills audit")
+        }
+
+        async fn load_track_control_state(
+            &self,
+            _track_id: &TrackId,
+        ) -> Result<Option<poise_application::TrackControlState>> {
+            unreachable!("not used by recent fills audit")
+        }
+
+        async fn load_track_pnl_stats(
+            &self,
+            _track_id: &TrackId,
+            _pnl_utc_day: chrono::NaiveDate,
+        ) -> Result<poise_engine::ledger::TrackPnlStats> {
+            unreachable!("not used by recent fills audit")
+        }
+
+        async fn list_track_pnl_source_keys(
+            &self,
+            _track_id: &TrackId,
+            _source_keys: &[String],
+        ) -> Result<Vec<String>> {
+            anyhow::bail!("local source-key query unavailable")
+        }
+
+        async fn load_track_updated_at(
+            &self,
+            _track_id: &TrackId,
+        ) -> Result<Option<chrono::DateTime<Utc>>> {
+            unreachable!("not used by recent fills audit")
+        }
     }
 
     #[async_trait::async_trait]
@@ -234,8 +414,14 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
-        ) -> Result<Vec<TrackPnlRecord>> {
-            Ok(self.records.clone())
+        ) -> Result<RecentTrackPnlRecords> {
+            match &self.response {
+                FakeRecentFillsResponse::Available(records) => {
+                    Ok(RecentTrackPnlRecords::Available(records.clone()))
+                }
+                FakeRecentFillsResponse::Unsupported => Ok(RecentTrackPnlRecords::Unsupported),
+                FakeRecentFillsResponse::Error(message) => anyhow::bail!(message.clone()),
+            }
         }
 
         async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {

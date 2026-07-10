@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use tokio::sync::{Mutex as AsyncMutex, OnceCell};
 
 use poise_core::types::PriceRounding;
+use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderRequest as PortOrderRequest, OrderStatus, Position,
@@ -17,6 +18,7 @@ use crate::client_order_id::ClientOrderIdMapper;
 use crate::config::{Config, Credentials};
 use crate::mapper::{
     account_summary_from_state, build_exchange_info, open_order_from_response, position_from_state,
+    track_pnl_record_from_fill, track_pnl_record_from_funding,
 };
 use crate::rest::actions::{
     CancelAction, CancelRequest, ExchangeAction, LimitOrderType, OrderAction, OrderRequest,
@@ -25,12 +27,16 @@ use crate::rest::actions::{
 use crate::rest::error::HyperliquidRestError;
 use crate::rest::models::{
     ClearinghouseStateResponse, MetaResponse, OpenOrderResponse, PerpAssetMeta, PerpDexMeta,
-    SpotClearinghouseStateResponse,
+    SpotClearinghouseStateResponse, UserFillResponse, UserFundingResponse,
 };
 use crate::rules::normalize_perp_price;
 use crate::signing::{HyperliquidChain, action_hash, sign_l1_action};
 
 const MAX_DECIMAL_SCALE: u32 = 16;
+const RECENT_PNL_WINDOW_MILLIS: i64 = 24 * 60 * 60 * 1_000;
+const USER_FILLS_PAGE_SIZE: usize = 2_000;
+const USER_FILLS_RETENTION_LIMIT: usize = 10_000;
+const USER_FUNDING_PAGE_SIZE: usize = 500;
 
 pub(crate) struct HyperliquidRestClient {
     http: reqwest::Client,
@@ -189,7 +195,7 @@ impl HyperliquidRestClient {
         let body = with_perp_dex(
             json!({
                 "type": "openOrders",
-                "user": self.credentials.wallet_address(),
+                "user": self.credentials.account_address(),
             }),
             dex_ref,
         );
@@ -204,6 +210,156 @@ impl HyperliquidRestClient {
                     .local_id_for_exchange(&order.client_order_id);
                 Ok(order)
             })
+            .collect()
+    }
+
+    pub(crate) async fn get_recent_track_pnl_records(
+        &self,
+        symbol: &str,
+    ) -> Result<Vec<TrackPnlRecord>> {
+        let end_time = i64::try_from((self.timestamp_provider)())
+            .context("Hyperliquid timestamp does not fit signed milliseconds")?;
+        let start_time = end_time.saturating_sub(RECENT_PNL_WINDOW_MILLIS);
+        let mut records = self
+            .get_recent_fill_pnl_records(symbol, start_time, end_time)
+            .await?;
+        records.extend(
+            self.get_recent_funding_pnl_records(symbol, start_time, end_time)
+                .await?,
+        );
+        records.sort_by(|left, right| {
+            left.occurred_at
+                .cmp(&right.occurred_at)
+                .then_with(|| left.source_key.cmp(&right.source_key))
+        });
+        Ok(records)
+    }
+
+    async fn get_recent_fill_pnl_records(
+        &self,
+        symbol: &str,
+        start_time: i64,
+        end_time: i64,
+    ) -> Result<Vec<TrackPnlRecord>> {
+        let mut cursor = start_time;
+        let mut fills_by_key = HashMap::<(String, u64), UserFillResponse>::new();
+        loop {
+            let response: Vec<UserFillResponse> = self
+                .post_info(&json!({
+                    "type": "userFillsByTime",
+                    "user": self.credentials.account_address(),
+                    "startTime": cursor,
+                    "endTime": end_time,
+                    "aggregateByTime": false,
+                }))
+                .await?;
+            validate_recent_history_times(
+                "userFillsByTime",
+                cursor,
+                end_time,
+                response.iter().map(|value| value.time),
+            )?;
+            let item_count = response.len();
+            let latest_time = response.last().map(|value| value.time);
+            let mut new_fill_keys = 0_usize;
+            for fill in response {
+                let fill_key = (fill.coin.clone(), fill.tid);
+                match fills_by_key.get(&fill_key) {
+                    None => {
+                        new_fill_keys += 1;
+                        fills_by_key.insert(fill_key, fill);
+                    }
+                    Some(existing) if existing == &fill => {}
+                    Some(_) => {
+                        return Err(anyhow!(
+                            "conflicting Hyperliquid fill identity {}:{} across recent history pages",
+                            fill_key.0,
+                            fill_key.1
+                        ));
+                    }
+                }
+            }
+            ensure_recent_fill_history_complete(fills_by_key.len())?;
+            let Some(next_start) =
+                next_recent_history_start(cursor, item_count, latest_time, USER_FILLS_PAGE_SIZE)?
+            else {
+                break;
+            };
+            ensure!(
+                new_fill_keys > 0,
+                "full userFillsByTime page contained no new fill identity; pagination made no progress"
+            );
+            cursor = next_start;
+        }
+
+        fills_by_key
+            .values()
+            .filter(|fill| fill.coin == symbol)
+            .map(track_pnl_record_from_fill)
+            .collect()
+    }
+
+    async fn get_recent_funding_pnl_records(
+        &self,
+        symbol: &str,
+        start_time: i64,
+        end_time: i64,
+    ) -> Result<Vec<TrackPnlRecord>> {
+        let mut cursor = start_time;
+        let mut funding_by_key = HashMap::<(String, i64), UserFundingResponse>::new();
+        loop {
+            let response: Vec<UserFundingResponse> = self
+                .post_info(&json!({
+                    "type": "userFunding",
+                    "user": self.credentials.account_address(),
+                    "startTime": cursor,
+                    "endTime": end_time,
+                }))
+                .await?;
+            validate_recent_history_times(
+                "userFunding",
+                cursor,
+                end_time,
+                response.iter().map(|value| value.time),
+            )?;
+            let item_count = response.len();
+            let latest_time = response.last().map(|value| value.time);
+            let mut new_funding_keys = 0_usize;
+            for funding in response {
+                let hash = funding.hash.trim();
+                ensure!(!hash.is_empty(), "missing Hyperliquid `funding.hash`");
+                let funding_key = (funding.delta.coin.clone(), funding.time);
+                match funding_by_key.get(&funding_key) {
+                    None => {
+                        new_funding_keys += 1;
+                        funding_by_key.insert(funding_key, funding);
+                    }
+                    Some(existing) if existing == &funding => {}
+                    Some(_) => {
+                        return Err(anyhow!(
+                            "conflicting Hyperliquid funding canonical key {}:{} across recent history pages",
+                            funding_key.0,
+                            funding_key.1
+                        ));
+                    }
+                }
+            }
+            let Some(next_start) =
+                next_recent_history_start(cursor, item_count, latest_time, USER_FUNDING_PAGE_SIZE)?
+            else {
+                break;
+            };
+            ensure!(
+                new_funding_keys > 0,
+                "full userFunding page contained no new funding identity; pagination made no progress"
+            );
+            cursor = next_start;
+        }
+
+        funding_by_key
+            .values()
+            .filter(|funding| funding.delta.coin == symbol)
+            .map(track_pnl_record_from_funding)
             .collect()
     }
 
@@ -304,7 +460,7 @@ impl HyperliquidRestClient {
     async fn account_state(&self) -> Result<ClearinghouseStateResponse> {
         self.post_info(&json!({
             "type": "clearinghouseState",
-            "user": self.credentials.wallet_address(),
+            "user": self.credentials.account_address(),
         }))
         .await
     }
@@ -314,7 +470,7 @@ impl HyperliquidRestClient {
         let body = with_perp_dex(
             json!({
                 "type": "clearinghouseState",
-                "user": self.credentials.wallet_address(),
+                "user": self.credentials.account_address(),
             }),
             dex_ref,
         );
@@ -324,7 +480,7 @@ impl HyperliquidRestClient {
     async fn spot_user_state(&self) -> Result<SpotClearinghouseStateResponse> {
         self.post_info(&json!({
             "type": "spotClearinghouseState",
-            "user": self.credentials.wallet_address(),
+            "user": self.credentials.account_address(),
         }))
         .await
     }
@@ -335,7 +491,7 @@ impl HyperliquidRestClient {
                 let abstraction: String = self
                     .post_info(&json!({
                         "type": "userAbstraction",
-                        "user": self.credentials.wallet_address(),
+                        "user": self.credentials.account_address(),
                     }))
                     .await?;
                 Ok(matches!(
@@ -444,10 +600,68 @@ impl HyperliquidRestClient {
         if status != StatusCode::OK {
             return Err(HyperliquidRestError::http_status(path, status, body).into());
         }
-        serde_json::from_str(&body).with_context(|| {
-            format!("failed to deserialize Hyperliquid response for {path}: {body}")
+        serde_json::from_str(&body).map_err(|error| {
+            anyhow!("failed to deserialize Hyperliquid response for {path}: {error}; body: {body}")
         })
     }
+}
+
+fn validate_recent_history_times(
+    endpoint: &str,
+    start_time: i64,
+    end_time: i64,
+    times: impl IntoIterator<Item = i64>,
+) -> Result<()> {
+    let mut previous_time = None;
+    for time in times {
+        ensure!(
+            (start_time..=end_time).contains(&time),
+            "Hyperliquid {endpoint} returned timestamp {time} outside requested range {start_time}..={end_time}"
+        );
+        if let Some(previous_time) = previous_time {
+            ensure!(
+                time >= previous_time,
+                "Hyperliquid {endpoint} returned timestamps out of order: {time} after {previous_time}"
+            );
+        }
+        previous_time = Some(time);
+    }
+    Ok(())
+}
+
+fn next_recent_history_start(
+    current_start: i64,
+    item_count: usize,
+    latest_time: Option<i64>,
+    page_size: usize,
+) -> Result<Option<i64>> {
+    ensure!(
+        page_size > 0,
+        "Hyperliquid history page size must be positive"
+    );
+    ensure!(
+        item_count <= page_size,
+        "Hyperliquid history response exceeded expected page size {page_size}: received {item_count} items"
+    );
+    if item_count < page_size {
+        return Ok(None);
+    }
+    let latest_time = latest_time.context("Hyperliquid full history page missing timestamp")?;
+    // startTime is inclusive. Reusing the last timestamp preserves records that share the page
+    // boundary millisecond; endpoint-specific identity maps absorb the repeated boundary items.
+    ensure!(
+        latest_time >= current_start,
+        "Hyperliquid history pagination did not advance safely from {current_start}"
+    );
+    Ok(Some(latest_time))
+}
+
+fn ensure_recent_fill_history_complete(unique_fill_count: usize) -> Result<()> {
+    ensure!(
+        unique_fill_count < USER_FILLS_RETENTION_LIMIT,
+        "Hyperliquid userFillsByTime reached the 10,000-fill retention limit; cannot prove the requested PNL window is complete"
+    );
+    Ok(())
 }
 
 fn usdc_total_balance(state: &SpotClearinghouseStateResponse) -> Result<f64> {
@@ -647,6 +861,7 @@ mod tests {
 
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
+    use poise_engine::ledger::TrackPnlRecordKind;
     use poise_engine::ports::{OrderRequest as PortOrderRequest, OrderStatus};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -654,7 +869,10 @@ mod tests {
         sync::Mutex,
     };
 
-    use super::{HyperliquidRestClient, PerpDexRef, parse_perp_dex};
+    use super::{
+        HyperliquidRestClient, PerpDexRef, ensure_recent_fill_history_complete,
+        next_recent_history_start, parse_perp_dex,
+    };
     use crate::config::Credentials;
 
     fn credentials() -> Credentials {
@@ -668,6 +886,72 @@ mod tests {
         }
         .credentials()
         .unwrap()
+    }
+
+    fn vault_credentials() -> Credentials {
+        crate::Config {
+            deployment: crate::Deployment::Testnet,
+            private_key: Some(
+                "0xe908f86dbb4d55ac876378565aafeabc187f6690f046459397b17d9b9a19688e".to_string(),
+            ),
+            wallet_address: Some("0x2222222222222222222222222222222222222222".to_string()),
+            vault_address: Some("0x3333333333333333333333333333333333333333".to_string()),
+        }
+        .credentials()
+        .unwrap()
+    }
+
+    fn fill_value(
+        coin: &str,
+        time: i64,
+        tid: u64,
+        fee: &str,
+        fee_token: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "coin": coin,
+            "px": "65000.5",
+            "sz": "0.02",
+            "side": "B",
+            "time": time,
+            "closedPnl": "3.25",
+            "hash": format!("0xfill{tid}"),
+            "oid": 10_000_u64 + tid,
+            "tid": tid,
+            "fee": fee,
+            "feeToken": fee_token,
+        })
+    }
+
+    fn funding_value(coin: &str, time: i64, hash: &str, usdc: &str) -> serde_json::Value {
+        serde_json::json!({
+            "delta": {"type": "funding", "coin": coin, "usdc": usdc},
+            "time": time,
+            "hash": hash,
+        })
+    }
+
+    fn full_fill_page(last: serde_json::Value) -> String {
+        let mut values = (0_u64..1_999)
+            .map(|index| fill_value("ETH", 1_700_000_000_000, 10_000 + index, "0.002", "HYPE"))
+            .collect::<Vec<_>>();
+        values.push(last);
+        serde_json::to_string(&values).unwrap()
+    }
+
+    fn full_funding_page(last: serde_json::Value) -> String {
+        let mut values = (0_u64..499)
+            .map(|index| {
+                funding_value(
+                    &format!("ALT{index}"),
+                    1_700_000_000_000 + index as i64,
+                    &format!("0xfunding{index}"),
+                    "-0.01",
+                )
+            })
+            .collect::<Vec<_>>();
+        values.push(last);
+        serde_json::to_string(&values).unwrap()
     }
 
     #[test]
@@ -686,6 +970,492 @@ mod tests {
                     .contains("invalid Hyperliquid HIP-3 symbol")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_map_and_filter_exact_symbol() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"[
+                    {"coin":"ETH","px":"2376.0","sz":"0.0064","side":"B","time":1700080000000,"closedPnl":"-0.1","hash":"0xeth","oid":41,"tid":32,"fee":"0.002","feeToken":"HYPE"},
+                    {"coin":"BTC","px":"65000.5","sz":"0.02","side":"A","time":1700080001000,"closedPnl":"3.25","hash":"0xbtc","oid":12345,"tid":999,"fee":"0.12","feeToken":"USDC"}
+                ]"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"[
+                    {"delta":{"type":"funding","coin":"ETH","usdc":"-0.05"},"time":1700070000000,"hash":"0xeth-funding"},
+                    {"delta":{"type":"funding","coin":"BTC","usdc":" -0.15"},"time":1700070001000,"hash":"0xbtc-funding"}
+                ]"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_086_400_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, TrackPnlRecordKind::Funding);
+        assert_eq!(
+            records[0].instrument,
+            Instrument::new(Venue::Hyperliquid, "BTC")
+        );
+        assert_eq!(
+            records[0].source_key.as_deref(),
+            Some("hyperliquid:funding:BTC:1700070001000")
+        );
+        assert_eq!(records[0].funding_fee, -0.15);
+        assert_eq!(records[1].kind, TrackPnlRecordKind::Trade);
+        assert_eq!(
+            records[1].source_key.as_deref(),
+            Some("hyperliquid:fill:BTC:999")
+        );
+        assert_eq!(records[1].realized_pnl, 3.25);
+        assert_eq!(records[1].trading_fee, 0.12);
+
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].json_body()["type"], "userFillsByTime");
+        assert_eq!(requests[0].json_body()["startTime"], 1_700_000_000_000_i64);
+        assert_eq!(requests[0].json_body()["endTime"], 1_700_086_400_000_i64);
+        assert_eq!(requests[0].json_body()["aggregateByTime"], false);
+        assert_eq!(requests[1].json_body()["type"], "userFunding");
+        assert_eq!(requests[1].json_body()["startTime"], 1_700_000_000_000_i64);
+        assert_eq!(requests[1].json_body()["endTime"], 1_700_086_400_000_i64);
+    }
+
+    #[tokio::test]
+    async fn account_queries_target_vault_when_configured() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"marginSummary":{"accountValue":"125.5"},"withdrawable":"100.25","assetPositions":[]}"#,
+            ),
+            MockResponse::json(200, "[]"),
+            MockResponse::json(200, "[]"),
+            MockResponse::json(200, "[]"),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            vault_credentials(),
+            Arc::new(|| 1_700_086_400_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        client.get_position("BTC").await.unwrap();
+        client.get_open_orders("BTC").await.unwrap();
+        client.get_recent_track_pnl_records("BTC").await.unwrap();
+
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 4);
+        assert!(requests.iter().all(|request| {
+            request.json_body()["user"] == "0x3333333333333333333333333333333333333333"
+        }));
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_reject_non_usdc_fee_token() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"[{"coin":"BTC","px":"65000.5","sz":"0.02","side":"B","time":1700080001000,"closedPnl":"3.25","hash":"0xbtc","oid":12345,"tid":999,"fee":"0.12","feeToken":"HYPE"}]"#,
+        )])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_086_400_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = client
+            .get_recent_track_pnl_records("BTC")
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("feeToken"));
+        assert!(error.to_string().contains("HYPE"));
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_continue_from_last_full_page_timestamp() {
+        let boundary_time = 1_700_000_000_500;
+        let boundary_fill = fill_value("BTC", boundary_time, 999, "0.12", "USDC");
+        let first_page = full_fill_page(boundary_fill.clone());
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, &first_page),
+            MockResponse::json(
+                200,
+                &serde_json::json!([
+                    boundary_fill,
+                    fill_value("BTC", boundary_time, 1000, "0.13", "USDC"),
+                ])
+                .to_string(),
+            ),
+            MockResponse::json(200, "[]"),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_086_400_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.source_key.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["hyperliquid:fill:BTC:1000", "hyperliquid:fill:BTC:999"]
+        );
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[1].json_body()["startTime"], boundary_time);
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_reject_full_page_without_new_fill_ids() {
+        let boundary_time = 1_700_000_000_500;
+        let page = serde_json::to_string(
+            &(0_u64..2_000)
+                .map(|tid| fill_value("BTC", boundary_time, tid, "0.12", "USDC"))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, &page),
+            MockResponse::json(200, &page),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_086_400_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = client
+            .get_recent_track_pnl_records("BTC")
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("full userFillsByTime page"));
+        assert!(error.to_string().contains("no new fill identity"));
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_reject_conflicting_fill_tid() {
+        let boundary_time = 1_700_000_000_500;
+        let boundary_fill = fill_value("BTC", boundary_time, 999, "0.12", "USDC");
+        let first_page = full_fill_page(boundary_fill);
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, &first_page),
+            MockResponse::json(
+                200,
+                &serde_json::json!([fill_value("BTC", boundary_time, 999, "0.99", "USDC")])
+                    .to_string(),
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_086_400_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = client
+            .get_recent_track_pnl_records("BTC")
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("conflicting Hyperliquid fill identity BTC:999")
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_allow_more_than_four_funding_pages() {
+        let mut responses = vec![MockResponse::json(200, "[]")];
+        let first_time = 1_700_000_000_000_i64;
+        for page_index in 0_i64..5 {
+            let page_start = first_time + page_index * 499;
+            let values = (0_i64..500)
+                .map(|item_index| {
+                    funding_value(
+                        &format!("ALT{page_index}-{item_index}"),
+                        page_start + item_index,
+                        &format!("0xfunding-{page_index}-{item_index}"),
+                        "-0.01",
+                    )
+                })
+                .collect::<Vec<_>>();
+            responses.push(MockResponse::json(
+                200,
+                &serde_json::to_string(&values).unwrap(),
+            ));
+        }
+        responses.push(MockResponse::json(200, "[]"));
+        let server = MockHttpServer::spawn(responses).await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_086_400_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+
+        assert!(records.is_empty());
+        assert_eq!(server.requests().await.len(), 7);
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_allow_same_tid_for_different_symbols() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                &serde_json::json!([
+                    fill_value("ETH", 1_700_000_000_500, 999, "0.01", "USDC"),
+                    fill_value("BTC", 1_700_000_000_501, 999, "0.12", "USDC")
+                ])
+                .to_string(),
+            ),
+            MockResponse::json(200, "[]"),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_086_400_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].source_key.as_deref(),
+            Some("hyperliquid:fill:BTC:999")
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_reject_conflicting_funding_canonical_key() {
+        let boundary_time = 1_700_000_000_500;
+        let first_page =
+            full_funding_page(funding_value("BTC", boundary_time, "0xfunding-a", "-0.15"));
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, "[]"),
+            MockResponse::json(200, &first_page),
+            MockResponse::json(
+                200,
+                &serde_json::json!([funding_value("BTC", boundary_time, "0xfunding-b", "-0.16")])
+                    .to_string(),
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_086_400_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = client
+            .get_recent_track_pnl_records("BTC")
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("conflicting Hyperliquid funding canonical key BTC:1700000000500")
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_deduplicate_funding_at_inclusive_boundary() {
+        let boundary_time = 1_700_000_000_500;
+        let boundary_funding = funding_value("BTC", boundary_time, "0xbtc-boundary", "-0.15");
+        let first_page = full_funding_page(boundary_funding.clone());
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, "[]"),
+            MockResponse::json(200, &first_page),
+            MockResponse::json(
+                200,
+                &serde_json::json!([
+                    boundary_funding,
+                    funding_value("BTC", boundary_time + 1, "0xbtc-next", "0.05")
+                ])
+                .to_string(),
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_086_400_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].funding_fee, -0.15);
+        assert_eq!(records[1].funding_fee, 0.05);
+        let requests = server.requests().await;
+        assert_eq!(requests[2].json_body()["startTime"], boundary_time);
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_allow_reused_funding_hash_across_canonical_keys() {
+        let boundary_time = 1_700_000_000_500;
+        let first_page = full_funding_page(funding_value(
+            "BTC",
+            boundary_time,
+            "0xshared-funding",
+            "-0.15",
+        ));
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, "[]"),
+            MockResponse::json(200, &first_page),
+            MockResponse::json(
+                200,
+                &serde_json::json!([funding_value(
+                    "BTC",
+                    boundary_time + 1,
+                    "0xshared-funding",
+                    "-0.16"
+                )])
+                .to_string(),
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_086_400_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].funding_fee, -0.15);
+        assert_eq!(records[1].funding_fee, -0.16);
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_accept_whitespace_around_usdc_fee_token() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                &serde_json::json!([fill_value("BTC", 1_700_000_000_500, 999, "0.12", " USDC ")])
+                    .to_string(),
+            ),
+            MockResponse::json(200, "[]"),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_086_400_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].trading_fee, 0.12);
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_reject_missing_funding_hash() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, "[]"),
+            MockResponse::json(
+                200,
+                r#"[{"delta":{"type":"funding","coin":"BTC","usdc":"-0.15"},"time":1700081001000}]"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_086_400_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = client
+            .get_recent_track_pnl_records("BTC")
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("failed to deserialize"));
+        assert!(error.to_string().contains("hash"));
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_keep_transient_http_error_distinct() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            503,
+            r#"{"error":"temporarily unavailable"}"#,
+        )])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_086_400_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = client
+            .get_recent_track_pnl_records("BTC")
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("status 503"));
+    }
+
+    #[test]
+    fn recent_history_pagination_uses_inclusive_cursor_for_full_pages() {
+        assert_eq!(
+            next_recent_history_start(1_000, 1_999, Some(1_500), 2_000).unwrap(),
+            None
+        );
+        assert_eq!(
+            next_recent_history_start(1_000, 2_000, Some(1_500), 2_000).unwrap(),
+            Some(1_500)
+        );
+        assert_eq!(
+            next_recent_history_start(1_000, 500, Some(2_000), 500).unwrap(),
+            Some(2_000)
+        );
+        assert!(
+            next_recent_history_start(1_000, 500, Some(999), 500)
+                .unwrap_err()
+                .to_string()
+                .contains("did not advance")
+        );
+    }
+
+    #[test]
+    fn recent_fill_history_rejects_the_exchange_retention_boundary() {
+        ensure_recent_fill_history_complete(9_999).unwrap();
+        let error = ensure_recent_fill_history_complete(10_000).unwrap_err();
+        assert!(error.to_string().contains("10,000-fill retention limit"));
     }
 
     #[tokio::test]

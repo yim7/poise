@@ -2,19 +2,21 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use poise_engine::ports::AccountPort;
+use poise_engine::ports::{AccountPort, RecentTrackPnlRecords};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 use crate::server_context::ReconcileState;
 
-use super::{RuntimeHealthComponent, ServerRuntime};
+use super::ServerRuntime;
 
 const PNL_BACKFILL_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct PnlBackfillSummary {
+    pub available_tracks: usize,
+    pub unsupported_tracks: usize,
     pub records_seen: usize,
     pub records_inserted: usize,
     pub records_skipped: usize,
@@ -25,6 +27,9 @@ pub(super) struct PnlBackfillSummary {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct PnlBackfillSnapshot {
     pub last_completed_at: Option<DateTime<Utc>>,
+    pub last_success_at: Option<DateTime<Utc>>,
+    pub available_tracks: usize,
+    pub unsupported_tracks: usize,
     pub records_seen: usize,
     pub records_inserted: usize,
     pub records_skipped: usize,
@@ -43,17 +48,58 @@ impl PnlBackfillStatus {
         Self::default()
     }
 
-    fn record_completion(&self, completed_at: DateTime<Utc>, summary: PnlBackfillSummary) {
+    fn record_completion(&self, completed_at: DateTime<Utc>, summary: &PnlBackfillSummary) {
         let mut snapshot = self.snapshot.write().unwrap();
         snapshot.last_completed_at = Some(completed_at);
+        snapshot.available_tracks = summary.available_tracks;
+        snapshot.unsupported_tracks = summary.unsupported_tracks;
         snapshot.records_seen = summary.records_seen;
         snapshot.records_inserted = summary.records_inserted;
         snapshot.records_skipped = summary.records_skipped;
         snapshot.failures = summary.failures;
-        if let Some(error) = summary.last_error {
-            snapshot.last_error_at = Some(completed_at);
-            snapshot.last_error = Some(error);
+        let error = if summary.unsupported_tracks > 0 {
+            Some(format!(
+                "recent PNL recovery is unsupported for {} configured track(s)",
+                summary.unsupported_tracks
+            ))
+        } else if summary.failures > 0 {
+            Some(summary.last_error.clone().unwrap_or_else(|| {
+                format!(
+                    "records_seen={}, records_inserted={}, records_skipped={}, failures={}",
+                    summary.records_seen,
+                    summary.records_inserted,
+                    summary.records_skipped,
+                    summary.failures
+                )
+            }))
+        } else {
+            None
+        };
+        match error {
+            Some(error) => {
+                snapshot.last_error_at = Some(completed_at);
+                snapshot.last_error = Some(error);
+            }
+            None => snapshot.last_success_at = Some(completed_at),
         }
+    }
+
+    pub(crate) fn record_success(&self, at: DateTime<Utc>) {
+        self.snapshot.write().unwrap().last_success_at = Some(at);
+    }
+
+    pub(crate) fn record_success_now(&self) {
+        self.record_success(Utc::now());
+    }
+
+    pub(crate) fn record_error(&self, at: DateTime<Utc>, error: impl ToString) {
+        let mut snapshot = self.snapshot.write().unwrap();
+        snapshot.last_error_at = Some(at);
+        snapshot.last_error = Some(error.to_string());
+    }
+
+    pub(crate) fn record_error_now(&self, error: impl ToString) {
+        self.record_error(Utc::now(), error);
     }
 
     pub(crate) fn snapshot(&self) -> PnlBackfillSnapshot {
@@ -66,13 +112,23 @@ impl PnlBackfillStatus {
     }
 }
 
+impl PnlBackfillSnapshot {
+    pub(crate) fn health_status(&self) -> super::RuntimeHealthStatus {
+        match (self.last_success_at, self.last_error_at) {
+            (None, None) => super::RuntimeHealthStatus::Unknown,
+            (Some(success), Some(error)) if error > success => super::RuntimeHealthStatus::Degraded,
+            (None, Some(_)) => super::RuntimeHealthStatus::Degraded,
+            _ => super::RuntimeHealthStatus::Ok,
+        }
+    }
+}
+
 pub(super) fn spawn_pnl_backfill_task(
     runtime: &ServerRuntime,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     let state = runtime.state.reconcile.clone();
     let account = Arc::clone(&runtime.account);
-    let runtime_health = Arc::clone(&runtime.state.runtime_health);
     let pnl_backfill_status = Arc::clone(&runtime.state.pnl_backfill_status);
 
     tokio::spawn(async move {
@@ -89,26 +145,7 @@ pub(super) fn spawn_pnl_backfill_task(
                 _ = interval.tick() => {
                     let summary = backfill_recent_pnl_once(&state, account.as_ref()).await;
                     let completed_at = Utc::now();
-                    pnl_backfill_status.record_completion(completed_at, summary.clone());
-                    if summary.failures > 0 {
-                        let error = summary.last_error.clone().unwrap_or_else(|| {
-                            format!(
-                                "records_seen={}, records_inserted={}, records_skipped={}, failures={}",
-                                summary.records_seen,
-                                summary.records_inserted,
-                                summary.records_skipped,
-                                summary.failures
-                            )
-                        });
-                        runtime_health.record_error(
-                            RuntimeHealthComponent::PnlBackfill,
-                            completed_at,
-                            error,
-                        );
-                    } else {
-                        runtime_health
-                            .record_success(RuntimeHealthComponent::PnlBackfill, completed_at);
-                    }
+                    pnl_backfill_status.record_completion(completed_at, &summary);
                     if summary.records_inserted > 0 {
                         tracing::info!(
                             records_seen = summary.records_seen,
@@ -117,8 +154,9 @@ pub(super) fn spawn_pnl_backfill_task(
                             failures = summary.failures,
                             "track pnl backfill inserted records"
                         );
-                    } else if summary.failures > 0 {
+                    } else if summary.unsupported_tracks > 0 || summary.failures > 0 {
                         tracing::warn!(
+                            unsupported_tracks = summary.unsupported_tracks,
                             records_seen = summary.records_seen,
                             records_skipped = summary.records_skipped,
                             failures = summary.failures,
@@ -143,7 +181,20 @@ pub(super) async fn backfill_recent_pnl_once(
             .get_recent_track_pnl_records(&track.instrument)
             .await
         {
-            Ok(records) => records,
+            Ok(RecentTrackPnlRecords::Available(records)) => {
+                summary.available_tracks += 1;
+                records
+            }
+            Ok(RecentTrackPnlRecords::Unsupported) => {
+                summary.unsupported_tracks += 1;
+                tracing::warn!(
+                    track_id = track.id,
+                    venue = track.instrument.venue.as_str(),
+                    symbol = %track.instrument.symbol,
+                    "recent track PNL recovery is unsupported"
+                );
+                continue;
+            }
             Err(error) => {
                 summary.failures += 1;
                 summary.last_error = Some(error.to_string());
@@ -215,7 +266,9 @@ mod tests {
     use poise_core::types::{ExchangeRules, Side};
     use poise_engine::ledger::TrackPnlRecord;
     use poise_engine::manager::TrackManager;
-    use poise_engine::ports::{AccountCapacitySnapshot, AccountPort, UserDataEvent};
+    use poise_engine::ports::{
+        AccountCapacitySnapshot, AccountPort, RecentTrackPnlRecords, UserDataEvent,
+    };
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
@@ -225,7 +278,30 @@ mod tests {
         unavailable_account_monitor,
     };
 
-    use super::backfill_recent_pnl_once;
+    use super::{PnlBackfillStatus, PnlBackfillSummary, backfill_recent_pnl_once};
+
+    #[test]
+    fn unsupported_backfill_is_recorded_as_degraded_not_success() {
+        let status = PnlBackfillStatus::new();
+        let completed_at = Utc.with_ymd_and_hms(2026, 6, 17, 1, 2, 3).unwrap();
+        let summary = PnlBackfillSummary {
+            unsupported_tracks: 1,
+            ..PnlBackfillSummary::default()
+        };
+
+        status.record_completion(completed_at, &summary);
+
+        let status = status.snapshot();
+        assert_eq!(status.last_completed_at, Some(completed_at));
+        assert_eq!(status.available_tracks, 0);
+        assert_eq!(status.unsupported_tracks, 1);
+        assert_eq!(
+            status.health_status(),
+            crate::runtime::RuntimeHealthStatus::Degraded
+        );
+        assert_eq!(status.last_success_at, None);
+        assert!(status.last_error.unwrap().contains("unsupported"));
+    }
 
     #[tokio::test]
     async fn backfill_recent_pnl_records_persists_new_records_idempotently() {
@@ -277,11 +353,15 @@ mod tests {
             backfill_recent_pnl_once(&runtime_context.runtime_state().reconcile, &account).await;
 
         assert_eq!(first.records_seen, 1);
+        assert_eq!(first.available_tracks, 1);
+        assert_eq!(first.unsupported_tracks, 0);
         assert_eq!(first.records_inserted, 1);
         assert_eq!(first.records_skipped, 0);
         assert_eq!(first.failures, 0);
         assert_eq!(first.last_error, None);
         assert_eq!(second.records_seen, 1);
+        assert_eq!(second.available_tracks, 1);
+        assert_eq!(second.unsupported_tracks, 0);
         assert_eq!(second.records_inserted, 0);
         assert_eq!(second.records_skipped, 1);
         assert_eq!(second.failures, 0);
@@ -329,6 +409,8 @@ mod tests {
             backfill_recent_pnl_once(&runtime_context.runtime_state().reconcile, &account).await;
 
         assert_eq!(summary.records_seen, 0);
+        assert_eq!(summary.available_tracks, 0);
+        assert_eq!(summary.unsupported_tracks, 0);
         assert_eq!(summary.records_inserted, 0);
         assert_eq!(summary.records_skipped, 0);
         assert_eq!(summary.failures, 1);
@@ -342,6 +424,46 @@ mod tests {
             .await
             .unwrap();
         assert!(stats.is_empty());
+    }
+
+    #[tokio::test]
+    async fn backfill_recent_pnl_records_distinguishes_supported_empty_from_unsupported() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            test_manager(),
+            repository.clone() as Arc<dyn TrackMutationStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
+            notifications.clone(),
+            account_margin_guard,
+        );
+        let account_monitor = unavailable_account_monitor(notifications);
+        let (runtime_context, _) = build_runtime_and_effect_worker_test_contexts(
+            &services,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository as Arc<dyn TrackEffectJournal>,
+            account_monitor,
+        );
+
+        let available = backfill_recent_pnl_once(
+            &runtime_context.runtime_state().reconcile,
+            &FakeAccount::new(Vec::new()),
+        )
+        .await;
+        let unsupported = backfill_recent_pnl_once(
+            &runtime_context.runtime_state().reconcile,
+            &FakeAccount::unsupported(),
+        )
+        .await;
+
+        assert_eq!(available.available_tracks, 1);
+        assert_eq!(available.unsupported_tracks, 0);
+        assert_eq!(available.failures, 0);
+        assert_eq!(unsupported.available_tracks, 0);
+        assert_eq!(unsupported.unsupported_tracks, 1);
+        assert_eq!(unsupported.failures, 0);
     }
 
     fn test_manager() -> TrackManager {
@@ -394,6 +516,7 @@ mod tests {
 
     enum FakeAccountResponse {
         Records(Vec<TrackPnlRecord>),
+        Unsupported,
         Error(String),
     }
 
@@ -408,6 +531,13 @@ mod tests {
         fn failing(message: &str) -> Self {
             Self {
                 response: FakeAccountResponse::Error(message.to_string()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn unsupported() -> Self {
+            Self {
+                response: FakeAccountResponse::Unsupported,
                 calls: Mutex::new(Vec::new()),
             }
         }
@@ -427,10 +557,13 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             instrument: &Instrument,
-        ) -> Result<Vec<TrackPnlRecord>> {
+        ) -> Result<RecentTrackPnlRecords> {
             self.calls.lock().unwrap().push(instrument.symbol.clone());
             match &self.response {
-                FakeAccountResponse::Records(records) => Ok(records.clone()),
+                FakeAccountResponse::Records(records) => {
+                    Ok(RecentTrackPnlRecords::Available(records.clone()))
+                }
+                FakeAccountResponse::Unsupported => Ok(RecentTrackPnlRecords::Unsupported),
                 FakeAccountResponse::Error(message) => anyhow::bail!(message.clone()),
             }
         }

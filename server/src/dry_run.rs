@@ -230,7 +230,7 @@ mod tests {
     use poise_engine::ports::{
         AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot,
         ExchangeInfo, ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, MarketDataPort,
-        MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position,
+        MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position, RecentTrackPnlRecords,
     };
     use poise_protocol::TrackPositionQuantityUnitView;
     use tokio::sync::mpsc;
@@ -494,6 +494,13 @@ total_loss_limit = 0.03
             _instrument: &Instrument,
         ) -> Result<AccountCapacitySnapshot> {
             panic!("dry-run capacity estimation is introduced in task 3.3")
+        }
+
+        async fn get_recent_track_pnl_records(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<RecentTrackPnlRecords> {
+            Ok(RecentTrackPnlRecords::Unsupported)
         }
 
         async fn subscribe_user_data(

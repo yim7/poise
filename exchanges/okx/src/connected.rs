@@ -5,12 +5,11 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use poise_core::track::Instrument;
-use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
     MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position,
-    UserDataEvent,
+    RecentTrackPnlRecords, UserDataEvent,
 };
 
 use crate::{
@@ -172,10 +171,12 @@ impl AccountPort for OkxAccount {
     async fn get_recent_track_pnl_records(
         &self,
         instrument: &Instrument,
-    ) -> Result<Vec<TrackPnlRecord>> {
-        self.rest
-            .get_recent_track_pnl_records(&instrument.symbol)
-            .await
+    ) -> Result<RecentTrackPnlRecords> {
+        Ok(RecentTrackPnlRecords::Available(
+            self.rest
+                .get_recent_track_pnl_records(&instrument.symbol)
+                .await?,
+        ))
     }
 }
 
@@ -196,6 +197,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use chrono::{DateTime, Utc};
+    use poise_core::track::Venue;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -270,6 +272,43 @@ mod tests {
         assert_eq!(summary.equity, 12_500.5);
         assert_eq!(summary.available, 9_800.25);
         assert_eq!(server.requests()[0].path, "/api/v5/account/balance");
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_are_available_when_exchange_history_is_empty() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","instType":"SWAP","ctType":"linear","settleCcy":"USDT","ctVal":"0.01","ctValCcy":"BTC","tickSz":"0.1","lotSz":"0.01","minSz":"0.01","maxLmtSz":"1000"}]}"#,
+            ),
+            MockResponse::json(200, r#"{"code":"0","msg":"","data":[]}"#),
+            MockResponse::json(200, r#"{"code":"0","msg":"","data":[]}"#),
+            MockResponse::json(200, r#"{"code":"0","msg":"","data":[]}"#),
+        ])
+        .await;
+        let rest = Arc::new(OkxRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            Config {
+                deployment: Deployment::Demo,
+                api_key: Some("api-key".to_string()),
+                api_secret: Some("secret-key".to_string()),
+                passphrase: Some("passphrase".to_string()),
+            }
+            .credentials()
+            .unwrap(),
+            true,
+            Arc::new(fixed_datetime),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        ));
+        let connected = ports_from_clients(rest, Arc::new(dummy_ws_client()));
+
+        let outcome = connected
+            .account()
+            .get_recent_track_pnl_records(&Instrument::new(Venue::Okx, "BTC-USDT-SWAP"))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, RecentTrackPnlRecords::Available(Vec::new()));
     }
 
     fn fixed_datetime() -> DateTime<Utc> {

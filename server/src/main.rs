@@ -157,7 +157,7 @@ mod tests {
     use poise_engine::ports::{
         AccountPort, ClockPort, ExchangeInfo, ExchangeOpenOrderSnapshot, ExchangePorts,
         ExecutionPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, OrderStatus,
-        Position,
+        Position, RecentTrackPnlRecords,
     };
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
@@ -777,6 +777,13 @@ total_loss_limit = 600.0
             Ok(poise_engine::ports::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,
             })
+        }
+
+        async fn get_recent_track_pnl_records(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<RecentTrackPnlRecords> {
+            Ok(RecentTrackPnlRecords::Available(Vec::new()))
         }
 
         async fn subscribe_user_data(

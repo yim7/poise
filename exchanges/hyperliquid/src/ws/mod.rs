@@ -5,7 +5,6 @@ use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use poise_core::track::{Instrument, Venue};
 use poise_core::types::Side;
-use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{
     ExchangeOrder, ExecutionQuote, ExecutionQuoteTick, MarkPriceTick, MarketDataTick, OrderStatus,
     UserDataEvent, UserDataPayload,
@@ -17,12 +16,14 @@ use tokio::{
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::client_order_id::ClientOrderIdMapper;
+use crate::mapper::{track_pnl_record_from_fill, track_pnl_record_from_ws_funding};
+use crate::rest::models::{UserFillResponse, WsUserFundingResponse};
 
 const DEFAULT_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 
 pub struct HyperliquidWsClient {
     ws_url: String,
-    wallet_address: String,
+    account_address: String,
     reconnect_delay: Duration,
     client_order_ids: Arc<ClientOrderIdMapper>,
 }
@@ -30,12 +31,12 @@ pub struct HyperliquidWsClient {
 impl HyperliquidWsClient {
     pub(crate) fn new_with_client_order_id_mapper(
         ws_url: impl Into<String>,
-        wallet_address: impl Into<String>,
+        account_address: impl Into<String>,
         client_order_ids: Arc<ClientOrderIdMapper>,
     ) -> Self {
         Self {
             ws_url: ws_url.into(),
-            wallet_address: wallet_address.into(),
+            account_address: account_address.into(),
             reconnect_delay: DEFAULT_RECONNECT_DELAY,
             client_order_ids,
         }
@@ -44,12 +45,12 @@ impl HyperliquidWsClient {
     #[cfg(test)]
     fn with_reconnect_delay(
         ws_url: impl Into<String>,
-        wallet_address: impl Into<String>,
+        account_address: impl Into<String>,
         reconnect_delay: Duration,
     ) -> Self {
         Self {
             ws_url: ws_url.into(),
-            wallet_address: wallet_address.into(),
+            account_address: account_address.into(),
             reconnect_delay,
             client_order_ids: ClientOrderIdMapper::shared(),
         }
@@ -73,14 +74,14 @@ impl HyperliquidWsClient {
     pub async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
         let (sender, receiver) = mpsc::channel(128);
         let ws_url = self.ws_url.clone();
-        let wallet_address = self.wallet_address.clone();
+        let account_address = self.account_address.clone();
         let reconnect_delay = self.reconnect_delay;
         let client_order_ids = Arc::clone(&self.client_order_ids);
 
         tokio::spawn(async move {
             run_user_stream(
                 ws_url,
-                wallet_address,
+                account_address,
                 sender,
                 reconnect_delay,
                 client_order_ids,
@@ -154,7 +155,7 @@ async fn run_market_stream(
 
 async fn run_user_stream(
     ws_url: String,
-    wallet_address: String,
+    account_address: String,
     sender: mpsc::Sender<UserDataEvent>,
     reconnect_delay: Duration,
     client_order_ids: Arc<ClientOrderIdMapper>,
@@ -165,7 +166,7 @@ async fn run_user_stream(
         match connect_async(&ws_url).await {
             Ok((mut ws, _)) => {
                 attempt = 0;
-                if let Err(error) = subscribe_user(&mut ws, &wallet_address).await {
+                if let Err(error) = subscribe_user(&mut ws, &account_address).await {
                     tracing::warn!("failed to subscribe Hyperliquid user stream: {error}");
                 } else {
                     while let Some(message) = ws.next().await {
@@ -232,29 +233,29 @@ where
     Ok(())
 }
 
-async fn subscribe_user<S>(ws: &mut S, wallet_address: &str) -> Result<()>
+async fn subscribe_user<S>(ws: &mut S, account_address: &str) -> Result<()>
 where
     S: futures_util::Sink<Message> + Unpin,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
     send_subscription(
         ws,
-        serde_json::json!({ "type": "orderUpdates", "user": wallet_address }),
+        serde_json::json!({ "type": "orderUpdates", "user": account_address }),
     )
     .await?;
     send_subscription(
         ws,
-        serde_json::json!({ "type": "userEvents", "user": wallet_address }),
+        serde_json::json!({ "type": "userEvents", "user": account_address }),
     )
     .await?;
     send_subscription(
         ws,
-        serde_json::json!({ "type": "userFills", "user": wallet_address, "aggregateByTime": false }),
+        serde_json::json!({ "type": "userFills", "user": account_address, "aggregateByTime": false }),
     )
     .await?;
     send_subscription(
         ws,
-        serde_json::json!({ "type": "userFundings", "user": wallet_address }),
+        serde_json::json!({ "type": "userFundings", "user": account_address }),
     )
     .await?;
     Ok(())
@@ -443,42 +444,22 @@ fn parse_user_fundings(data: &serde_json::Value) -> Result<Vec<UserDataEvent>> {
 }
 
 fn parse_fill(value: &serde_json::Value) -> Result<UserDataEvent> {
-    let symbol = required_str(value, "coin")?;
-    let time = required_i64(value, "time")?;
-    let trade_id = required_u64(value, "tid")?.to_string();
-    let order_id = required_u64(value, "oid")?.to_string();
+    let fill: UserFillResponse = serde_json::from_value(value.clone())
+        .context("failed to deserialize Hyperliquid user fill")?;
+    let record = track_pnl_record_from_fill(&fill)?;
     Ok(UserDataEvent {
-        event_time: millis_to_utc(time)?,
-        payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade(
-            Instrument::new(Venue::Hyperliquid, symbol),
-            millis_to_utc(time)?,
-            "hyperliquid:fill".to_string(),
-            Some(format!("hyperliquid:fill:{symbol}:{trade_id}")),
-            Some(order_id),
-            Some(trade_id),
-            parse_side(required_str(value, "side")?)?,
-            parse_decimal("fill.px", required_str(value, "px")?)?,
-            parse_decimal("fill.sz", required_str(value, "sz")?)?,
-            parse_decimal("fill.closedPnl", required_str(value, "closedPnl")?)?,
-            parse_decimal("fill.fee", required_str(value, "fee")?)?,
-            "USDC",
-        )),
+        event_time: record.occurred_at,
+        payload: UserDataPayload::TrackPnl(record),
     })
 }
 
 fn parse_funding(value: &serde_json::Value) -> Result<UserDataEvent> {
-    let symbol = required_str(value, "coin")?;
-    let time = required_i64(value, "time")?;
+    let funding: WsUserFundingResponse = serde_json::from_value(value.clone())
+        .context("failed to deserialize Hyperliquid user funding")?;
+    let record = track_pnl_record_from_ws_funding(&funding)?;
     Ok(UserDataEvent {
-        event_time: millis_to_utc(time)?,
-        payload: UserDataPayload::TrackPnl(TrackPnlRecord::funding(
-            Instrument::new(Venue::Hyperliquid, symbol),
-            millis_to_utc(time)?,
-            "hyperliquid:funding".to_string(),
-            Some(format!("hyperliquid:funding:{symbol}:{time}")),
-            parse_decimal("funding.usdc", required_str(value, "usdc")?)?,
-            "USDC",
-        )),
+        event_time: record.occurred_at,
+        payload: UserDataPayload::TrackPnl(record),
     })
 }
 
@@ -764,6 +745,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_user_fill_fee_paid_in_non_usdc_asset() {
+        let error = parse_user_data_message(
+            r#"{"channel":"userFills","data":{"isSnapshot":false,"user":"0x2222222222222222222222222222222222222222","fills":[{"coin":"BTC","px":"65000.5","sz":"0.02","side":"B","time":1700000000000,"closedPnl":"3.25","hash":"0xabc","oid":12345,"tid":999,"fee":"0.12","feeToken":"HYPE"}]}}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("feeToken"));
+        assert!(error.to_string().contains("HYPE"));
+    }
+
+    #[test]
     fn ignores_user_fills_snapshot_to_avoid_replaying_old_events_on_restart() {
         let events = parse_user_data_message(
             r#"{"channel":"userFills","data":{"isSnapshot":true,"user":"0x2222222222222222222222222222222222222222","fills":[{"coin":"ETH","px":"2376.0","sz":"0.0064","side":"B","time":1700000000000,"closedPnl":"-0.100416","hash":"0xabc","oid":411114920977,"tid":321706137923647,"fee":"0.002189","feeToken":"USDC","crossed":false,"startPosition":"-0.1573","dir":"Close Short"}]}}"#,
@@ -1001,6 +993,9 @@ mod tests {
                 == 2
         );
         assert!(messages.iter().all(|message| !message.contains(r#""dex""#)));
+        assert!(messages.iter().all(|message| {
+            message.contains(r#""user":"0x2222222222222222222222222222222222222222""#)
+        }));
         assert_eq!(first.event_time.timestamp_millis(), 1_700_000_000_001);
         assert_eq!(second.event_time.timestamp_millis(), 1_700_000_005_001);
     }

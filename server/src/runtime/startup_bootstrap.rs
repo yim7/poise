@@ -524,8 +524,8 @@ mod tests {
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
         AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort,
-        MarketDataTick, MetadataPort, OrderReceipt, OrderStatus, Position, UserDataEvent,
-        UserDataPayload,
+        MarketDataTick, MetadataPort, OrderReceipt, OrderStatus, Position, RecentTrackPnlRecords,
+        UserDataEvent, UserDataPayload,
     };
     use poise_engine::runtime::{TerminationCause, TrackStatus};
     use poise_storage::sqlite::SqliteStorage;
@@ -1646,6 +1646,13 @@ mod tests {
             Ok(poise_engine::ports::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,
             })
+        }
+
+        async fn get_recent_track_pnl_records(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<RecentTrackPnlRecords> {
+            Ok(RecentTrackPnlRecords::Available(Vec::new()))
         }
 
         async fn subscribe_user_data(

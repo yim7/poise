@@ -1,12 +1,16 @@
-use anyhow::{Context, Result, anyhow};
-use chrono::Utc;
+use anyhow::{Context, Result, anyhow, ensure};
+use chrono::{DateTime, Utc};
 use poise_core::track::{Instrument, Venue};
 use poise_core::types::{ExchangeRules, Side};
+use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{
     AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderStatus, Position,
 };
 
-use crate::rest::models::{ClearinghouseStateResponse, MetaResponse, OpenOrderResponse};
+use crate::rest::models::{
+    ClearinghouseStateResponse, MetaResponse, OpenOrderResponse, UserFillResponse,
+    UserFundingResponse, WsUserFundingResponse,
+};
 use crate::rules::{perp_price_precision, representative_perp_price_tick};
 const MIN_NOTIONAL_USD: f64 = 10.0;
 const VIP0_MAKER_FEE_RATE: f64 = 0.00015;
@@ -102,6 +106,58 @@ pub(crate) fn open_order_from_response(value: OpenOrderResponse) -> Result<Excha
     })
 }
 
+pub(crate) fn track_pnl_record_from_fill(value: &UserFillResponse) -> Result<TrackPnlRecord> {
+    ensure!(
+        value.fee_token.trim() == "USDC",
+        "unsupported Hyperliquid fill feeToken `{}`; expected `USDC`",
+        value.fee_token
+    );
+    ensure_non_empty("fill.hash", &value.hash)?;
+    let occurred_at = millis_to_utc(value.time)?;
+    let trade_id = value.tid.to_string();
+    Ok(TrackPnlRecord::trade(
+        Instrument::new(Venue::Hyperliquid, &value.coin),
+        occurred_at,
+        "hyperliquid:fill".to_string(),
+        Some(format!("hyperliquid:fill:{}:{trade_id}", value.coin)),
+        Some(value.oid.to_string()),
+        Some(trade_id),
+        parse_side(&value.side)?,
+        parse_finite_decimal("fill.px", &value.px)?,
+        parse_finite_decimal("fill.sz", &value.sz)?,
+        parse_finite_decimal("fill.closedPnl", &value.closed_pnl)?,
+        parse_finite_decimal("fill.fee", &value.fee)?,
+        "USDC",
+    ))
+}
+
+pub(crate) fn track_pnl_record_from_funding(value: &UserFundingResponse) -> Result<TrackPnlRecord> {
+    ensure!(
+        value.delta.kind == "funding",
+        "unsupported Hyperliquid funding delta type `{}`",
+        value.delta.kind
+    );
+    ensure_non_empty("funding.hash", &value.hash)?;
+    funding_record(&value.delta.coin, value.time, &value.delta.usdc)
+}
+
+pub(crate) fn track_pnl_record_from_ws_funding(
+    value: &WsUserFundingResponse,
+) -> Result<TrackPnlRecord> {
+    funding_record(&value.coin, value.time, &value.usdc)
+}
+
+fn funding_record(coin: &str, time: i64, usdc: &str) -> Result<TrackPnlRecord> {
+    Ok(TrackPnlRecord::funding(
+        Instrument::new(Venue::Hyperliquid, coin),
+        millis_to_utc(time)?,
+        "hyperliquid:funding".to_string(),
+        Some(format!("hyperliquid:funding:{coin}:{time}")),
+        parse_finite_decimal("funding.usdc", usdc)?,
+        "USDC",
+    ))
+}
+
 fn decimal_step(decimals: i32) -> f64 {
     10_f64.powi(-decimals)
 }
@@ -116,8 +172,29 @@ fn parse_side(value: &str) -> Result<Side> {
 
 fn parse_decimal(field: &str, value: &str) -> Result<f64> {
     value
+        .trim()
         .parse::<f64>()
         .with_context(|| format!("invalid Hyperliquid decimal `{field}`: {value}"))
+}
+
+fn parse_finite_decimal(field: &str, value: &str) -> Result<f64> {
+    let parsed = parse_decimal(field, value)?;
+    ensure!(
+        parsed.is_finite(),
+        "invalid Hyperliquid decimal `{field}`: {value} is not finite"
+    );
+    Ok(parsed)
+}
+
+fn millis_to_utc(value: i64) -> Result<DateTime<Utc>> {
+    DateTime::from_timestamp_millis(value)
+        .ok_or_else(|| anyhow!("invalid Hyperliquid timestamp: {value}"))
+}
+
+fn ensure_non_empty<'a>(field: &str, value: &'a str) -> Result<&'a str> {
+    let value = value.trim();
+    ensure!(!value.is_empty(), "missing Hyperliquid `{field}`");
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -127,13 +204,14 @@ mod tests {
     use poise_engine::ports::{ExchangeOrder, OrderStatus, Position};
 
     use crate::rest::models::{
-        AssetPosition, ClearinghouseStateResponse, MarginSummary, MetaResponse, OpenOrderResponse,
-        PerpAssetMeta, PositionData,
+        AssetPosition, ClearinghouseStateResponse, FundingDeltaResponse, MarginSummary,
+        MetaResponse, OpenOrderResponse, PerpAssetMeta, PositionData, UserFundingResponse,
+        WsUserFundingResponse,
     };
 
     use super::{
         account_summary_from_state, build_exchange_info, open_order_from_response,
-        position_from_state,
+        position_from_state, track_pnl_record_from_funding, track_pnl_record_from_ws_funding,
     };
 
     #[test]
@@ -285,5 +363,32 @@ mod tests {
 
         assert_eq!(order.client_order_id, "12345");
         assert_eq!(order.side, Side::Sell);
+    }
+
+    #[test]
+    fn rest_and_ws_funding_records_share_source_key() {
+        let rest_record = track_pnl_record_from_funding(&UserFundingResponse {
+            delta: FundingDeltaResponse {
+                kind: "funding".to_string(),
+                coin: "BTC".to_string(),
+                usdc: "-0.15".to_string(),
+            },
+            time: 1_700_000_000_000,
+            hash: "0xabc".to_string(),
+        })
+        .unwrap();
+        let ws_record = track_pnl_record_from_ws_funding(&WsUserFundingResponse {
+            coin: "BTC".to_string(),
+            time: 1_700_000_000_000,
+            usdc: "-0.15".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(rest_record.source_key, ws_record.source_key);
+        assert_eq!(
+            rest_record.source_key.as_deref(),
+            Some("hyperliquid:funding:BTC:1700000000000")
+        );
+        assert_eq!(rest_record.funding_fee, ws_record.funding_fee);
     }
 }

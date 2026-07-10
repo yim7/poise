@@ -102,6 +102,12 @@ impl Credentials {
     pub fn vault_address(&self) -> Option<&str> {
         self.vault_address.as_deref()
     }
+
+    pub fn account_address(&self) -> &str {
+        self.vault_address
+            .as_deref()
+            .unwrap_or(&self.wallet_address)
+    }
 }
 
 fn required_field(value: Option<&str>, field_name: &str) -> Result<String> {
@@ -296,6 +302,12 @@ mod tests {
                     assert_eq!(
                         credentials.vault_address(),
                         vault_address,
+                        "case `{}`",
+                        case.name
+                    );
+                    assert_eq!(
+                        credentials.account_address(),
+                        vault_address.unwrap_or(wallet_address),
                         "case `{}`",
                         case.name
                     );

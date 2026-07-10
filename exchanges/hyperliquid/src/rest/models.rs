@@ -79,6 +79,45 @@ pub(crate) struct OpenOrderResponse {
     pub sz: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct UserFillResponse {
+    pub coin: String,
+    pub px: String,
+    pub sz: String,
+    pub side: String,
+    pub time: i64,
+    #[serde(rename = "closedPnl")]
+    pub closed_pnl: String,
+    pub hash: String,
+    pub oid: u64,
+    pub tid: u64,
+    pub fee: String,
+    #[serde(rename = "feeToken")]
+    pub fee_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct UserFundingResponse {
+    pub delta: FundingDeltaResponse,
+    pub time: i64,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct FundingDeltaResponse {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub coin: String,
+    pub usdc: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct WsUserFundingResponse {
+    pub time: i64,
+    pub coin: String,
+    pub usdc: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

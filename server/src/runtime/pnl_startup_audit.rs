@@ -1,7 +1,8 @@
+use anyhow::{Result, bail};
 use poise_core::events::DomainEvent;
 use poise_core::track::TrackId;
 
-use crate::pnl_audit::RecentFillCoverage;
+use crate::pnl_audit::{RecentFillCoverage, RecentFillsAuditError, RecentPnlAvailability};
 use crate::server_context::RuntimeState;
 
 const MISSING_SOURCE_KEY_SAMPLE_LIMIT: usize = 5;
@@ -14,13 +15,14 @@ pub(super) struct StartupPnlAuditSummary {
     pub failures: usize,
 }
 
-pub(super) async fn run_startup_pnl_audit(state: &RuntimeState) -> StartupPnlAuditSummary {
+pub(super) async fn run_startup_pnl_audit(state: &RuntimeState) -> Result<StartupPnlAuditSummary> {
     let tracks = state
         .reconcile
         .observation_service
         .track_instruments()
         .await;
     let mut summary = StartupPnlAuditSummary::default();
+    let mut available_audits = Vec::new();
 
     for track in tracks {
         let track_id = TrackId::new(&track.id);
@@ -30,18 +32,43 @@ pub(super) async fn run_startup_pnl_audit(state: &RuntimeState) -> StartupPnlAud
             .await
         {
             Ok(audit) => audit,
-            Err(error) => {
+            Err(RecentFillsAuditError::Exchange(error)) => {
                 summary.failures += 1;
-                state.runtime_health.record_error_now(
-                    super::RuntimeHealthComponent::PnlBackfill,
-                    format!("startup pnl audit failed for track `{}`: {error}", track.id),
-                );
+                state.pnl_backfill_status.record_error_now(format!(
+                    "startup pnl audit failed for track `{}`: {error}",
+                    track.id
+                ));
                 tracing::warn!("startup pnl audit failed for track `{}`: {error}", track.id);
                 continue;
             }
+            Err(error @ RecentFillsAuditError::Store(_)) => {
+                state.pnl_backfill_status.record_error_now(format!(
+                    "startup pnl audit failed for track `{}`: {error}",
+                    track.id
+                ));
+                return Err(anyhow::anyhow!(
+                    "startup pnl audit failed for track `{}`: {error}",
+                    track.id
+                ));
+            }
         };
 
+        if audit.availability == RecentPnlAvailability::Unsupported {
+            let error = format!(
+                "required recent PNL recovery is unsupported for track `{}` instrument `{}:{}`",
+                track.id,
+                track.instrument.venue.as_str(),
+                track.instrument.symbol
+            );
+            state.pnl_backfill_status.record_error_now(&error);
+            bail!(error);
+        }
+
         summary.tracks_audited += 1;
+        available_audits.push((track.id, audit));
+    }
+
+    for (track_id, audit) in available_audits {
         if audit.records_missing == 0 {
             continue;
         }
@@ -60,7 +87,7 @@ pub(super) async fn run_startup_pnl_audit(state: &RuntimeState) -> StartupPnlAud
         match state
             .reconcile
             .observation_service
-            .record_track_events(&track.id, &[event])
+            .record_track_events(&track_id, &[event])
             .await
         {
             Ok(()) => {
@@ -69,27 +96,29 @@ pub(super) async fn run_startup_pnl_audit(state: &RuntimeState) -> StartupPnlAud
             }
             Err(error) => {
                 summary.failures += 1;
-                state.runtime_health.record_error_now(
-                    super::RuntimeHealthComponent::PnlBackfill,
-                    format!(
-                        "startup pnl audit diagnostic write failed for track `{}`: {error}",
-                        track.id
-                    ),
-                );
+                state.pnl_backfill_status.record_error_now(format!(
+                    "startup pnl audit diagnostic write failed for track `{}`: {error}",
+                    track_id
+                ));
                 tracing::warn!(
                     "startup pnl audit diagnostic write failed for track `{}`: {error}",
-                    track.id
+                    track_id
                 );
             }
         }
     }
 
-    summary
+    if summary.failures == 0 {
+        state.pnl_backfill_status.record_success_now();
+    }
+
+    Ok(summary)
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
@@ -101,15 +130,17 @@ mod tests {
     use poise_core::types::{ExchangeRules, Side};
     use poise_engine::ledger::TrackPnlRecord;
     use poise_engine::manager::TrackManager;
-    use poise_engine::ports::{AccountCapacitySnapshot, AccountPort, UserDataEvent};
+    use poise_engine::ports::{
+        AccountCapacitySnapshot, AccountPort, RecentTrackPnlRecords, UserDataEvent,
+    };
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
     use crate::assembly::SystemClock;
     use crate::pnl_audit::RecentFillsAuditor;
     use crate::test_support::{
-        build_runtime_and_effect_worker_test_contexts, build_test_application_services,
-        unavailable_account_monitor,
+        RecordingExecutionPort, build_runtime_and_effect_worker_test_contexts,
+        build_test_application_services, unavailable_account_monitor,
     };
 
     use super::run_startup_pnl_audit;
@@ -136,8 +167,8 @@ mod tests {
         );
         let mut state = runtime_context.runtime_state();
         state.recent_fills_auditor = Arc::new(RecentFillsAuditor::new(
-            Arc::new(FakeRecentFillsAccount {
-                records: vec![TrackPnlRecord::trade(
+            Arc::new(FakeRecentFillsAccount::new(
+                FakeRecentFillsResponse::Available(vec![TrackPnlRecord::trade(
                     Instrument::new(Venue::Binance, "BTCUSDT"),
                     Utc.with_ymd_and_hms(2026, 6, 17, 1, 2, 3).unwrap(),
                     "okx:fills".to_string(),
@@ -150,12 +181,12 @@ mod tests {
                     0.0001,
                     0.00001,
                     "USDT",
-                )],
-            }),
+                )]),
+            )),
             repository.clone() as Arc<dyn TrackQueryStore>,
         ));
 
-        let summary = run_startup_pnl_audit(&state).await;
+        let summary = run_startup_pnl_audit(&state).await.unwrap();
 
         assert_eq!(summary.tracks_audited, 1);
         assert_eq!(summary.missing_records, 1);
@@ -173,6 +204,138 @@ mod tests {
                 } if sample_source_keys == &vec!["okx:fills:missing".to_string()]
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn startup_pnl_audit_rejects_unsupported_required_history() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let mut state = test_runtime_state(repository.clone()).await;
+        state.recent_fills_auditor = Arc::new(RecentFillsAuditor::new(
+            Arc::new(FakeRecentFillsAccount::new(
+                FakeRecentFillsResponse::Unsupported,
+            )),
+            repository as Arc<dyn TrackQueryStore>,
+        ));
+
+        let error = run_startup_pnl_audit(&state).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("required recent PNL recovery is unsupported")
+        );
+        assert!(error.to_string().contains("btc-core"));
+        assert!(error.to_string().contains("binance:BTCUSDT"));
+    }
+
+    #[tokio::test]
+    async fn startup_pnl_audit_keeps_transient_query_failure_degraded_but_nonfatal() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let mut state = test_runtime_state(repository.clone()).await;
+        state.recent_fills_auditor = Arc::new(RecentFillsAuditor::new(
+            Arc::new(FakeRecentFillsAccount::new(FakeRecentFillsResponse::Error(
+                "temporary exchange outage".to_string(),
+            ))),
+            repository as Arc<dyn TrackQueryStore>,
+        ));
+
+        let summary = run_startup_pnl_audit(&state).await.unwrap();
+
+        assert_eq!(summary.failures, 1);
+        assert_eq!(summary.tracks_audited, 0);
+        let health = state.pnl_backfill_status.snapshot();
+        assert_eq!(
+            health.health_status(),
+            crate::runtime::RuntimeHealthStatus::Degraded
+        );
+        assert!(
+            health
+                .last_error
+                .unwrap()
+                .contains("temporary exchange outage")
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_history_stops_runtime_before_exchange_cleanup() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            test_manager(),
+            repository.clone() as Arc<dyn TrackMutationStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
+            notifications.clone(),
+            account_margin_guard,
+        );
+        let account_monitor = unavailable_account_monitor(notifications);
+        let (runtime_context, effect_worker_context) =
+            build_runtime_and_effect_worker_test_contexts(
+                &services,
+                repository.clone() as Arc<dyn TrackQueryStore>,
+                repository.clone() as Arc<dyn TrackEffectJournal>,
+                account_monitor,
+            );
+        let account = Arc::new(FakeRecentFillsAccount::new(
+            FakeRecentFillsResponse::Unsupported,
+        ));
+        let mut state = runtime_context.runtime_state();
+        state.recent_fills_auditor = Arc::new(RecentFillsAuditor::new(
+            account.clone(),
+            repository as Arc<dyn TrackQueryStore>,
+        ));
+        let execution = Arc::new(RecordingExecutionPort::default());
+        let unexpected = Arc::new(UnexpectedStartupPort);
+        let runtime = crate::runtime::ServerRuntime::new(
+            state,
+            effect_worker_context.effect_worker_state,
+            crate::runtime::RuntimePorts::new(
+                execution.clone(),
+                unexpected.clone(),
+                unexpected.clone(),
+                account.clone(),
+                unexpected,
+                Arc::new(SystemClock),
+            ),
+            vec![crate::runtime::RuntimeStartupDefinition::new(
+                test_track(),
+                1,
+            )],
+        );
+
+        let error = runtime.start().await.err().unwrap();
+
+        assert!(
+            error
+                .to_string()
+                .contains("required recent PNL recovery is unsupported")
+        );
+        assert_eq!(execution.cancel_all_call_count(), 0);
+        assert_eq!(account.subscribe_call_count(), 0);
+    }
+
+    async fn test_runtime_state(
+        repository: Arc<SqliteStorage>,
+    ) -> crate::server_context::RuntimeState {
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            test_manager(),
+            repository.clone() as Arc<dyn TrackMutationStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
+            notifications.clone(),
+            account_margin_guard,
+        );
+        let account_monitor = unavailable_account_monitor(notifications);
+        let (runtime_context, _) = build_runtime_and_effect_worker_test_contexts(
+            &services,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository as Arc<dyn TrackEffectJournal>,
+            account_monitor,
+        );
+        runtime_context.runtime_state()
     }
 
     fn test_manager() -> TrackManager {
@@ -224,7 +387,60 @@ mod tests {
     }
 
     struct FakeRecentFillsAccount {
-        records: Vec<TrackPnlRecord>,
+        response: FakeRecentFillsResponse,
+        subscribe_calls: AtomicUsize,
+    }
+
+    impl FakeRecentFillsAccount {
+        fn new(response: FakeRecentFillsResponse) -> Self {
+            Self {
+                response,
+                subscribe_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn subscribe_call_count(&self) -> usize {
+            self.subscribe_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    enum FakeRecentFillsResponse {
+        Available(Vec<TrackPnlRecord>),
+        Unsupported,
+        Error(String),
+    }
+
+    struct UnexpectedStartupPort;
+
+    #[async_trait::async_trait]
+    impl poise_engine::ports::AccountSummaryPort for UnexpectedStartupPort {
+        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+            anyhow::bail!("account summary should not run before PNL capability gate")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl poise_engine::ports::MarketDataPort for UnexpectedStartupPort {
+        async fn subscribe_prices(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<mpsc::Receiver<poise_engine::ports::MarketDataTick>> {
+            anyhow::bail!("market data should not run before PNL capability gate")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl poise_engine::ports::MetadataPort for UnexpectedStartupPort {
+        async fn get_exchange_info(
+            &self,
+            _instrument: &Instrument,
+        ) -> Result<poise_engine::ports::ExchangeInfo> {
+            anyhow::bail!("metadata should not run before PNL capability gate")
+        }
+
+        async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
+            anyhow::bail!("server time should not run before PNL capability gate")
+        }
     }
 
     #[async_trait::async_trait]
@@ -241,11 +457,18 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
-        ) -> Result<Vec<TrackPnlRecord>> {
-            Ok(self.records.clone())
+        ) -> Result<RecentTrackPnlRecords> {
+            match &self.response {
+                FakeRecentFillsResponse::Available(records) => {
+                    Ok(RecentTrackPnlRecords::Available(records.clone()))
+                }
+                FakeRecentFillsResponse::Unsupported => Ok(RecentTrackPnlRecords::Unsupported),
+                FakeRecentFillsResponse::Error(message) => anyhow::bail!(message.clone()),
+            }
         }
 
         async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
+            self.subscribe_calls.fetch_add(1, Ordering::SeqCst);
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
         }

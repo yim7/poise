@@ -9,7 +9,7 @@ use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
     MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position,
-    UserDataEvent,
+    RecentTrackPnlRecords, UserDataEvent,
 };
 
 use crate::{
@@ -134,6 +134,13 @@ impl AccountPort for BybitAccount {
             .await
     }
 
+    async fn get_recent_track_pnl_records(
+        &self,
+        _instrument: &Instrument,
+    ) -> Result<RecentTrackPnlRecords> {
+        Ok(RecentTrackPnlRecords::Unsupported)
+    }
+
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
         self.ws.subscribe_user_data().await
     }
@@ -184,6 +191,24 @@ mod tests {
         let _account_summary = connected.account_summary();
         let _account = connected.account();
         let _metadata = connected.metadata();
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_are_explicitly_unsupported() {
+        let config = Config {
+            deployment: crate::Deployment::Mainnet,
+            api_key: Some("demo-key".to_string()),
+            api_secret: Some("demo-secret".to_string()),
+        };
+        let connected = connect(&config).await.unwrap();
+
+        let outcome = connected
+            .account()
+            .get_recent_track_pnl_records(&Instrument::new(Venue::Bybit, "BTCUSDT"))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, RecentTrackPnlRecords::Unsupported);
     }
 
     #[test]

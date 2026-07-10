@@ -283,12 +283,16 @@ pub trait AccountPort: Send + Sync {
 
     async fn get_recent_track_pnl_records(
         &self,
-        _instrument: &Instrument,
-    ) -> Result<Vec<TrackPnlRecord>> {
-        Ok(Vec::new())
-    }
+        instrument: &Instrument,
+    ) -> Result<RecentTrackPnlRecords>;
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecentTrackPnlRecords {
+    Available(Vec<TrackPnlRecord>),
+    Unsupported,
 }
 
 #[async_trait]

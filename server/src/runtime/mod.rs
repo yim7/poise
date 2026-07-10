@@ -262,13 +262,13 @@ impl ServerRuntime {
     }
 
     pub async fn start(&self) -> Result<RuntimeHandles> {
+        pnl_startup_audit::run_startup_pnl_audit(&self.state).await?;
         let mut user_receiver = self.account.subscribe_user_data().await?;
         let startup_cutoff = startup_bootstrap::retry_startup_step("get_server_time", || {
             self.metadata.get_server_time()
         })
         .await?;
         startup_bootstrap::complete_startup(self, &mut user_receiver, startup_cutoff).await?;
-        pnl_startup_audit::run_startup_pnl_audit(&self.state).await;
         account_refresh::refresh_once(&self.state).await?;
         let account_task = self.spawn_account_task(self.shutdown_tx.subscribe());
         let recovery_task = self.spawn_recovery_task(self.shutdown_tx.subscribe());
