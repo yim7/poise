@@ -562,8 +562,12 @@ decision revision
 - price gate 直接投影真实滞回状态，不从 Open 重新计算。
 - 纯 snapshot/diagnostic 变化不触发 durable write。
 - snapshot-only 的 live mutation 不写 durable store，但回滚 speculative frame 后必须保留新 snapshot。
+- live-only 同轮更新的 desired_exposure 与 snapshot 一起保留，不能形成两个 current-session owner。
 - applied risk cap 只由 committed snapshot 持有；desired_exposure 继续保留为 execution/recovery 运行字段。
 - account capacity 更新使用窄的 runtime/manager setter，不再借 rollback 修改 frame，避免清空 live quote。
+- decision 与 market deadline 查询使用同一个 per-track mutation owner，持久化成功或失败回滚前不得读取 speculative frame。
+- 调用方取消 future 时，commit transaction 继续持有 guard 完成提交或回滚，不能发布未持久化 snapshot。
+- resume 不预提交会丢弃 effects 的 planning 结果，也不清空 current-session order bindings；下一次完整 reconcile 才生成新 revision。
 
 最小验证：
 
