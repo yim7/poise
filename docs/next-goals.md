@@ -531,9 +531,11 @@ git diff --check
 
 改动范围：
 
+- engine/src/reconciler.rs
 - engine/src/runtime.rs
 - engine/src/mutation_frame.rs
 - engine/src/manager.rs
+- application/src/mutation_executor.rs
 - application read source
 
 snapshot 至少包含：
@@ -559,6 +561,9 @@ decision revision
 - runtime query 不再用 Utc::now() 重跑 reconciler。
 - price gate 直接投影真实滞回状态，不从 Open 重新计算。
 - 纯 snapshot/diagnostic 变化不触发 durable write。
+- snapshot-only 的 live mutation 不写 durable store，但回滚 speculative frame 后必须保留新 snapshot。
+- applied risk cap 只由 committed snapshot 持有；desired_exposure 继续保留为 execution/recovery 运行字段。
+- account capacity 更新使用窄的 runtime/manager setter，不再借 rollback 修改 frame，避免清空 live quote。
 
 最小验证：
 
