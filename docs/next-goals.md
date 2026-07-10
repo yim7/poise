@@ -4,7 +4,7 @@
 
 本文是当前已确认的实现任务清单，不是长期架构事实源。长期架构和运行语义仍以 [system-overview.md](system-overview.md) 为准。
 
-当前状态：执行中。当前 task 是 0.4 消除 PNL backfill 空成功并补齐当前实用 venue。
+当前状态：执行中。当前 task 是 0.5 修复 REST 旧快照覆盖 WS 新事实。
 
 本文的生命周期：
 
@@ -146,8 +146,8 @@ Task 清单：
 | 0.1 修复跨零新增风险计算 | completed | 反方向目标只把平仓后的新方向仓位计为新增风险 | 8c10ece |
 | 0.2 收紧配置数值与默认值契约 | completed | Rust、server、Workbench 对非法值和默认值结论一致 | de69e29 |
 | 0.3 建立 track identity guard | completed | track_id 不能把旧控制或 PNL 重新解释成另一 instrument | 903ab2c |
-| 0.4 消除 PNL backfill 空成功并补齐当前实用 venue | in_progress | Available(empty)、Unsupported、transient error 明确分离 | — |
-| 0.5 修复 REST 旧快照覆盖 WS 新事实 | pending | observation revision 改变时旧 REST 快照不能应用 | — |
+| 0.4 消除 PNL backfill 空成功并补齐当前实用 venue | completed | Available(empty)、Unsupported、transient error 明确分离 | 9f35f74 |
+| 0.5 修复 REST 旧快照覆盖 WS 新事实 | in_progress | observation revision 改变时旧 REST 快照不能应用 | — |
 | 0.6 增加 trading readiness 并校正文档中的 journal 语义 | pending | readiness 区分 blocker 与 warning，journal 不参与恢复 | — |
 
 ### Task 0.1 修复跨零新增风险计算
