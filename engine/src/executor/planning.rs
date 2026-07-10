@@ -73,6 +73,13 @@ pub struct PendingSubmitHint {
     pub desired_exposure: Exposure,
     pub submit_purpose: SubmitPurpose,
     pub recovery_token: SubmitRecoveryToken,
+    pub phase: PendingSubmitPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingSubmitPhase {
+    DispatchInFlight,
+    AwaitingExchangeState,
 }
 
 const CURVE_MAKER_LEVELS_PER_SIDE: usize = 3;
@@ -207,6 +214,36 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     )
 }
 
+pub fn maintain_protected_bindings(input: ExecutorInput<'_>) -> ExecutorPlan {
+    let ExecutorInput {
+        submit_intent,
+        executor_state,
+    } = input;
+    let mut state = executor_state
+        .cloned()
+        .unwrap_or_else(|| ExecutorState::empty(submit_intent.observed_at))
+        .ensure_revision(submit_intent.config, submit_intent.current_exposure.clone());
+
+    if state.recovery_anomaly.is_some() {
+        return noop_plan(state);
+    }
+
+    let position_epsilon = position_exposure_epsilon(&submit_intent);
+    if state.ledger_state.has_unexplained_exposure_drift(
+        &submit_intent.current_exposure,
+        active_binding_exposure_budget(&state.bindings),
+        position_epsilon,
+    ) {
+        state.recovery_anomaly = Some(RecoveryAnomaly::ExpectedExposureMismatch);
+        return noop_plan(state);
+    }
+
+    let mut effects =
+        apply_price_gate_to_existing_bindings(&mut state, submit_intent.price_execution_gate);
+    effects.extend(cancel_inventory_increasing_bindings(&mut state));
+    finish_plan(state, Vec::new(), effects)
+}
+
 pub fn refresh_state(
     previous_state: &ExecutorState,
     config: &TrackConfig,
@@ -248,7 +285,9 @@ fn refresh_curve_maker_due_grace_start(
         if binding.proposal_key.policy != PolicyKind::CurveMaker
             || !matches!(
                 binding.status,
-                BindingStatus::SubmitPending | BindingStatus::Working
+                BindingStatus::SubmitPending
+                    | BindingStatus::SubmitAuthorized
+                    | BindingStatus::Working
             )
         {
             continue;
@@ -280,7 +319,7 @@ fn apply_price_gate_to_existing_bindings(
     for binding in &mut state.bindings {
         if !matches!(
             binding.status,
-            BindingStatus::SubmitPending | BindingStatus::Working
+            BindingStatus::SubmitPending | BindingStatus::SubmitAuthorized | BindingStatus::Working
         ) {
             continue;
         }
@@ -300,11 +339,15 @@ fn apply_execution_gate_to_existing_bindings(
         return Vec::new();
     }
 
+    cancel_inventory_increasing_bindings(state)
+}
+
+fn cancel_inventory_increasing_bindings(state: &mut ExecutorState) -> Vec<TrackEffect> {
     let mut effects = Vec::new();
     for binding in &mut state.bindings {
         if !matches!(
             binding.status,
-            BindingStatus::SubmitPending | BindingStatus::Working
+            BindingStatus::SubmitPending | BindingStatus::SubmitAuthorized | BindingStatus::Working
         ) {
             continue;
         }
@@ -409,17 +452,35 @@ fn binding_is_active(binding: &LiveOrderBinding) -> bool {
 }
 
 fn cancel_binding(binding: &mut LiveOrderBinding, effects: &mut Vec<TrackEffect>) {
-    if binding.status == BindingStatus::CancelPending {
-        return;
-    }
-    binding.status = BindingStatus::CancelPending;
-    if let Some(order_id) = binding.order_id.clone() {
-        effects.push(TrackEffect::CancelOrder {
-            instrument: binding.request.instrument.clone(),
-            order_id,
-        });
-    } else {
-        binding.status = BindingStatus::Terminal;
+    match binding.status {
+        BindingStatus::SubmitPending => {
+            binding.status = BindingStatus::Terminal;
+        }
+        BindingStatus::SubmitAuthorized => {
+            binding.status = BindingStatus::CancelAfterSubmit;
+        }
+        BindingStatus::Working => {
+            let Some(order_id) = binding.order_id.clone() else {
+                binding.status = BindingStatus::Terminal;
+                return;
+            };
+            binding.status = BindingStatus::CancelPending;
+            effects.push(TrackEffect::CancelOrder {
+                instrument: binding.request.instrument.clone(),
+                order_id,
+            });
+        }
+        BindingStatus::CancelAfterSubmit => {
+            let Some(order_id) = binding.order_id.clone() else {
+                return;
+            };
+            binding.status = BindingStatus::CancelPending;
+            effects.push(TrackEffect::CancelOrder {
+                instrument: binding.request.instrument.clone(),
+                order_id,
+            });
+        }
+        BindingStatus::CancelPending | BindingStatus::Terminal => {}
     }
 }
 
@@ -1064,6 +1125,57 @@ mod tests {
     }
 
     #[test]
+    fn pre_receipt_lifecycle_owns_operation_without_replacement_submit() {
+        let config = config();
+        let rules = rules();
+
+        for status in [
+            BindingStatus::SubmitAuthorized,
+            BindingStatus::CancelAfterSubmit,
+        ] {
+            let mut previous = plan(input(&config, &rules, Exposure(0.0), Exposure(2.0))).state;
+            let existing = previous
+                .bindings
+                .iter_mut()
+                .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
+                .expect("catch-up binding should exist");
+            existing.status = status;
+            let client_order_id = existing.request.client_order_id.clone();
+
+            let next = plan(ExecutorInput::new(
+                SubmitIntentInput {
+                    instrument: instrument(),
+                    config: &config,
+                    exchange_rules: &rules,
+                    native_qty_per_unit: 1.0,
+                    min_rebalance_units: config.min_rebalance_units,
+                    current_exposure: Exposure(0.0),
+                    desired_exposure: Exposure(2.0),
+                    execution_target_exposure: Exposure(2.0),
+                    execution_gate_decision: Default::default(),
+                    execution_quote: Some(ExecutionQuote {
+                        best_bid: 100.0,
+                        best_ask: 100.2,
+                    }),
+                    policy_context: PolicyContext::Normal,
+                    price_execution_gate: PriceExecutionGate::Open,
+                    submit_purpose: SubmitPurpose::AutoReconcile,
+                    observed_at: Utc::now(),
+                },
+                Some(&previous),
+            ));
+
+            assert!(next.effects.iter().all(|effect| !matches!(
+                effect,
+                TrackEffect::SubmitOrder { .. } | TrackEffect::CancelOrder { .. }
+            )));
+            assert!(next.state.bindings.iter().any(|binding| {
+                binding.request.client_order_id == client_order_id && binding.status == status
+            }));
+        }
+    }
+
+    #[test]
     fn working_reduce_only_catch_up_blocks_replacement_until_terminal() {
         let config = config();
         let rules = rules();
@@ -1378,6 +1490,42 @@ mod tests {
                 .any(|effect| matches!(effect, TrackEffect::SubmitOrder { .. }))
         );
         assert_eq!(plan.state.bindings[0].status, BindingStatus::CancelPending);
+    }
+
+    #[test]
+    fn execution_gate_defers_cancel_until_authorized_submit_gets_order_identity() {
+        let config = config();
+        let rules = rules();
+        let mut previous = plan(input(&config, &rules, Exposure(0.0), Exposure(2.0))).state;
+        previous.bindings[0].status = BindingStatus::SubmitAuthorized;
+
+        let plan = plan(input_with_execution_gate(
+            &config,
+            &rules,
+            Exposure(0.0),
+            Exposure(2.0),
+            ExecutionGateDecision::NoSubmit {
+                reason: poise_core::events::ExecutionGateReason::AccountCapacityInsufficient {
+                    required_notional: 200.0,
+                    available_notional: 0.0,
+                },
+            },
+            &previous,
+        ));
+
+        assert_eq!(plan.state.bindings.len(), 1);
+        assert_eq!(
+            plan.state.bindings[0].status,
+            BindingStatus::CancelAfterSubmit
+        );
+        assert!(plan.state.bindings[0].is_active());
+        assert!(
+            plan.effects.iter().all(|effect| !matches!(
+                effect,
+                TrackEffect::SubmitOrder { .. } | TrackEffect::CancelOrder { .. }
+            )),
+            "authorized submit has no exchange order id yet and must not be replaced"
+        );
     }
 
     #[test]

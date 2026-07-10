@@ -1,3 +1,4 @@
+use crate::execution_plan::TrackEffect;
 use crate::observation::OrderObservation;
 use crate::ports::{OrderReceipt, OrderRequest, OrderStatus};
 use crate::runtime::{ExecutorState, RecentTerminalOrder};
@@ -8,7 +9,10 @@ use super::ledger::BoundaryProgress;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SubmitReceiptResolution {
-    Recorded { state: ExecutorState },
+    Recorded {
+        state: ExecutorState,
+        effects: Vec<TrackEffect>,
+    },
     Unmatched,
 }
 
@@ -22,6 +26,7 @@ pub enum OrderUpdateAbsorbResult {
 pub struct OrderObservationApplication {
     pub state: ExecutorState,
     pub absorb_result: OrderUpdateAbsorbResult,
+    pub effects: Vec<TrackEffect>,
 }
 
 pub fn record_submit_receipt(
@@ -37,18 +42,30 @@ pub fn record_submit_receipt(
                 .as_deref()
                 .is_none_or(|order_id| order_id == receipt.order_id)
     }) else {
+        if is_recent_terminal_receipt(previous_state, request, receipt) {
+            return SubmitReceiptResolution::Recorded {
+                state: previous_state.clone(),
+                effects: Vec::new(),
+            };
+        }
         return SubmitReceiptResolution::Unmatched;
     };
 
+    let previous_status = previous_state.bindings[index].status;
     let mut state = previous_state.clone();
     state.bindings[index].order_id = Some(receipt.order_id.clone());
     absorb_binding_fill_progress(&mut state, index, receipt.filled_qty, receipt.status);
-    state.bindings[index].status = if receipt.status.keeps_working_order() {
-        BindingStatus::Working
-    } else {
-        BindingStatus::Terminal
-    };
-    SubmitReceiptResolution::Recorded { state }
+    let (status, effects) = status_after_order_fact(
+        &state.bindings[index],
+        previous_status,
+        &receipt.order_id,
+        receipt.status,
+    );
+    state.bindings[index].status = status;
+    if receipt.status.clears_working_order() {
+        remember_terminal_order(&mut state, &request.client_order_id, &receipt.order_id);
+    }
+    SubmitReceiptResolution::Recorded { state, effects }
 }
 
 pub fn record_submit_failure(
@@ -99,9 +116,19 @@ pub fn apply_order_observation_with_result(
         return OrderObservationApplication {
             state: previous_state.clone(),
             absorb_result,
+            effects: Vec::new(),
         };
     };
 
+    apply_order_observation_to_binding_with_result(previous_state, index, observation)
+}
+
+pub(super) fn apply_order_observation_to_binding_with_result(
+    previous_state: &ExecutorState,
+    index: usize,
+    observation: &OrderObservation,
+) -> OrderObservationApplication {
+    let previous_status = previous_state.bindings[index].status;
     let mut state = previous_state.clone();
     state.bindings[index].order_id = Some(observation.order_id.clone());
     state.bindings[index].request.price = observation.price;
@@ -113,10 +140,14 @@ pub fn apply_order_observation_with_result(
         observation.status,
     );
 
-    if observation.status.keeps_working_order() {
-        state.bindings[index].status = BindingStatus::Working;
-    } else if observation.status.clears_working_order() {
-        state.bindings[index].status = BindingStatus::Terminal;
+    let (status, effects) = status_after_order_fact(
+        &state.bindings[index],
+        previous_status,
+        &observation.order_id,
+        observation.status,
+    );
+    state.bindings[index].status = status;
+    if observation.status.clears_working_order() {
         remember_terminal_order(
             &mut state,
             &observation.client_order_id,
@@ -132,6 +163,35 @@ pub fn apply_order_observation_with_result(
     OrderObservationApplication {
         state,
         absorb_result,
+        effects,
+    }
+}
+
+fn status_after_order_fact(
+    binding: &LiveOrderBinding,
+    previous_status: BindingStatus,
+    order_id: &str,
+    order_status: OrderStatus,
+) -> (BindingStatus, Vec<TrackEffect>) {
+    if previous_status == BindingStatus::Terminal {
+        return (BindingStatus::Terminal, Vec::new());
+    }
+    if order_status.clears_working_order() {
+        return (BindingStatus::Terminal, Vec::new());
+    }
+    if !order_status.keeps_working_order() {
+        return (previous_status, Vec::new());
+    }
+    match previous_status {
+        BindingStatus::CancelAfterSubmit => (
+            BindingStatus::CancelPending,
+            vec![TrackEffect::CancelOrder {
+                instrument: binding.request.instrument.clone(),
+                order_id: order_id.to_string(),
+            }],
+        ),
+        BindingStatus::CancelPending => (BindingStatus::CancelPending, Vec::new()),
+        _ => (BindingStatus::Working, Vec::new()),
     }
 }
 
@@ -321,6 +381,16 @@ fn is_recent_terminal_order(state: &ExecutorState, observation: &OrderObservatio
     })
 }
 
+fn is_recent_terminal_receipt(
+    state: &ExecutorState,
+    request: &OrderRequest,
+    receipt: &OrderReceipt,
+) -> bool {
+    state.recent_terminal_orders.iter().any(|order| {
+        order.client_order_id == request.client_order_id && order.order_id == receipt.order_id
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -341,6 +411,239 @@ mod tests {
             .values()
             .next()
             .expect("test ledger should contain one progress entry")
+    }
+
+    fn pending_submit_state() -> ExecutorState {
+        let config = TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 100.0,
+            min_rebalance_units: 1.0,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: BandProtectionPolicy::Freeze,
+            risk_acquisition: Default::default(),
+        };
+        let rules = ExchangeRules {
+            price_tick: 0.1,
+            price_precision: Default::default(),
+            quantity_kind: Default::default(),
+            contract_notional: None,
+            settlement_asset: "USDT".to_string(),
+            quantity_step: 0.01,
+            min_qty: 0.0,
+            min_notional: 0.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+        };
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+        plan(ExecutorInput::new(
+            SubmitIntentInput {
+                instrument: &instrument,
+                config: &config,
+                exchange_rules: &rules,
+                native_qty_per_unit: 1.0,
+                min_rebalance_units: 1.0,
+                current_exposure: Exposure(0.0),
+                desired_exposure: Exposure(1.0),
+                execution_target_exposure: Exposure(1.0),
+                execution_gate_decision: Default::default(),
+                execution_quote: Some(ExecutionQuote {
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                }),
+                policy_context: PolicyContext::Normal,
+                price_execution_gate: PriceExecutionGate::Open,
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                observed_at: Utc::now(),
+            },
+            None,
+        ))
+        .state
+    }
+
+    #[test]
+    fn order_update_emits_cancel_once_for_cancel_after_submit_binding() {
+        let mut state = pending_submit_state();
+        state.bindings[0].status = BindingStatus::CancelAfterSubmit;
+        let binding = state.bindings[0].clone();
+        let observation = OrderObservation {
+            order_id: "protected-order".to_string(),
+            client_order_id: binding.request.client_order_id.clone(),
+            side: binding.request.side,
+            price: binding.request.price,
+            quantity: binding.request.quantity,
+            filled_qty: 0.0,
+            status: OrderStatus::New,
+        };
+
+        let applied = apply_order_observation_with_result(&state, &observation);
+
+        assert_eq!(
+            applied.state.bindings[0].status,
+            BindingStatus::CancelPending
+        );
+        assert_eq!(
+            applied
+                .effects
+                .iter()
+                .filter(|effect| matches!(
+                    effect,
+                    TrackEffect::CancelOrder { order_id, .. } if order_id == "protected-order"
+                ))
+                .count(),
+            1
+        );
+
+        let replay = apply_order_observation_with_result(&applied.state, &observation);
+        assert_eq!(
+            replay.state.bindings[0].status,
+            BindingStatus::CancelPending
+        );
+        assert!(replay.effects.is_empty());
+
+        let SubmitReceiptResolution::Recorded {
+            state: receipt_state,
+            effects: receipt_effects,
+        } = record_submit_receipt(
+            &applied.state,
+            &binding.request,
+            binding.desired_exposure,
+            &OrderReceipt {
+                order_id: "protected-order".to_string(),
+                client_order_id: binding.request.client_order_id.clone(),
+                filled_qty: 0.0,
+                status: OrderStatus::New,
+            },
+        )
+        else {
+            panic!("replayed receipt should still match the binding");
+        };
+        assert_eq!(
+            receipt_state.bindings[0].status,
+            BindingStatus::CancelPending
+        );
+        assert!(receipt_effects.is_empty());
+    }
+
+    #[test]
+    fn terminal_submit_receipt_does_not_cancel_after_submit() {
+        let mut state = pending_submit_state();
+        state.bindings[0].status = BindingStatus::CancelAfterSubmit;
+        let binding = state.bindings[0].clone();
+        let receipt = OrderReceipt {
+            order_id: "filled-before-cancel".to_string(),
+            client_order_id: binding.request.client_order_id.clone(),
+            filled_qty: binding.request.quantity,
+            status: OrderStatus::Filled,
+        };
+
+        let SubmitReceiptResolution::Recorded {
+            state: recorded,
+            effects,
+        } = record_submit_receipt(&state, &binding.request, binding.desired_exposure, &receipt)
+        else {
+            panic!("terminal receipt should match the authorized binding");
+        };
+
+        assert_eq!(recorded.bindings[0].status, BindingStatus::Terminal);
+        assert!(effects.is_empty());
+        assert_eq!(recorded.ledger_state.progress.len(), 1);
+
+        let mut pruned = recorded;
+        pruned.bindings.clear();
+        let stale_working = apply_order_observation_with_result(
+            &pruned,
+            &OrderObservation {
+                order_id: receipt.order_id,
+                client_order_id: receipt.client_order_id,
+                side: binding.request.side,
+                price: binding.request.price,
+                quantity: binding.request.quantity,
+                filled_qty: 0.0,
+                status: OrderStatus::New,
+            },
+        );
+        assert_eq!(
+            stale_working.absorb_result,
+            OrderUpdateAbsorbResult::DuplicateReplay,
+            "a stale working fact must remain recognized after the terminal binding is pruned"
+        );
+        assert!(stale_working.state.bindings.is_empty());
+        assert!(stale_working.effects.is_empty());
+    }
+
+    #[test]
+    fn definitive_submit_failure_terminalizes_authorized_lifecycle_states() {
+        for status in [
+            BindingStatus::SubmitAuthorized,
+            BindingStatus::CancelAfterSubmit,
+        ] {
+            let mut state = pending_submit_state();
+            state.bindings[0].status = status;
+            let client_order_id = state.bindings[0].request.client_order_id.clone();
+
+            let recorded = record_submit_failure(&state, &client_order_id);
+
+            assert_eq!(recorded.bindings[0].status, BindingStatus::Terminal);
+        }
+    }
+
+    #[test]
+    fn stale_working_facts_do_not_revive_terminal_submit_binding() {
+        let mut state = pending_submit_state();
+        state.bindings[0].status = BindingStatus::SubmitAuthorized;
+        let binding = state.bindings[0].clone();
+        let terminal = OrderObservation {
+            order_id: "terminal-before-submit-ack".to_string(),
+            client_order_id: binding.request.client_order_id.clone(),
+            side: binding.request.side,
+            price: binding.request.price,
+            quantity: binding.request.quantity,
+            filled_qty: binding.request.quantity,
+            status: OrderStatus::Filled,
+        };
+        let terminal_applied = apply_order_observation_with_result(&state, &terminal);
+        assert_eq!(
+            terminal_applied.state.bindings[0].status,
+            BindingStatus::Terminal
+        );
+
+        let stale_working = OrderObservation {
+            filled_qty: 0.0,
+            status: OrderStatus::New,
+            ..terminal.clone()
+        };
+        let stale_applied =
+            apply_order_observation_with_result(&terminal_applied.state, &stale_working);
+        assert_eq!(
+            stale_applied.state.bindings[0].status,
+            BindingStatus::Terminal
+        );
+        assert!(stale_applied.effects.is_empty());
+
+        let mut pruned_terminal = terminal_applied.state;
+        pruned_terminal.bindings.clear();
+        let SubmitReceiptResolution::Recorded {
+            state: duplicate_state,
+            effects,
+        } = record_submit_receipt(
+            &pruned_terminal,
+            &binding.request,
+            binding.desired_exposure,
+            &OrderReceipt {
+                order_id: terminal.order_id,
+                client_order_id: binding.request.client_order_id.clone(),
+                filled_qty: 0.0,
+                status: OrderStatus::New,
+            },
+        )
+        else {
+            panic!("late submit ack should match recent terminal identity");
+        };
+        assert!(duplicate_state.bindings.is_empty());
+        assert!(effects.is_empty());
     }
 
     #[test]
@@ -760,7 +1063,7 @@ mod tests {
             status: OrderStatus::Filled,
         };
 
-        let SubmitReceiptResolution::Recorded { state } = record_submit_receipt(
+        let SubmitReceiptResolution::Recorded { state, .. } = record_submit_receipt(
             &planned.state,
             &binding.request,
             binding.desired_exposure.clone(),

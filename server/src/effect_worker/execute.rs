@@ -60,7 +60,7 @@ pub(super) async fn execute_submit(
             if !worker
                 .state
                 .session_effect_queue
-                .record_submit_exchange_accepted(&effect.effect_id)
+                .record_submit_awaiting_resolution(&effect.effect_id)
             {
                 return Ok(SessionEffectOutcome::Blocked {
                     reason: format!(

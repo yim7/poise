@@ -783,7 +783,10 @@ fn project_binding_policy(policy: PolicyKind) -> TrackReadBindingPolicy {
 
 fn project_binding_status(status: BindingStatus) -> TrackReadBindingStatus {
     match status {
-        BindingStatus::SubmitPending => TrackReadBindingStatus::SubmitPending,
+        BindingStatus::SubmitPending | BindingStatus::SubmitAuthorized => {
+            TrackReadBindingStatus::SubmitPending
+        }
+        BindingStatus::CancelAfterSubmit => TrackReadBindingStatus::CancelPending,
         BindingStatus::Working => TrackReadBindingStatus::Working,
         BindingStatus::CancelPending => TrackReadBindingStatus::CancelPending,
         BindingStatus::Terminal => {
@@ -820,13 +823,26 @@ mod tests {
 
     use super::{
         AccountAssetExposureReadModel, AccountAssetQuantitySource, TrackActivityLevel,
-        TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadModel,
-        TrackReadPnlStats, TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
-        TrackStrategyPriceStatus,
+        TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent,
+        TrackReadBindingStatus, TrackReadModel, TrackReadPnlStats, TrackReadStatus,
+        TrackRecoveryIssue, TrackRiskAcquisitionDirection, TrackStrategyPriceStatus,
+        project_binding_status,
     };
     use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
     use crate::track_read_source::TrackReadSource;
     use crate::{AccountReadModel, AccountRiskSignal};
+
+    #[test]
+    fn read_model_folds_internal_submit_lifecycle_into_stable_public_statuses() {
+        assert_eq!(
+            project_binding_status(BindingStatus::SubmitAuthorized),
+            TrackReadBindingStatus::SubmitPending
+        );
+        assert_eq!(
+            project_binding_status(BindingStatus::CancelAfterSubmit),
+            TrackReadBindingStatus::CancelPending
+        );
+    }
 
     fn test_track_config() -> TrackConfig {
         TrackConfig {

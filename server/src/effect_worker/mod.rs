@@ -215,17 +215,19 @@ impl Cancellation {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use chrono::Utc;
     use poise_core::track::{Instrument, TrackId, Venue};
+    use poise_engine::observation::MarketObservation;
     use poise_engine::ports::{
-        ExchangeOpenOrderSnapshot, ExecutionPort, OrderReceipt, OrderRequest, OrderStatus, Position,
+        ExchangeOpenOrderSnapshot, ExecutionPort, ExecutionQuote, OrderReceipt, OrderRequest,
+        OrderStatus, Position,
     };
     use poise_storage::sqlite::SqliteStorage;
-    use tokio::sync::{Notify, watch};
+    use tokio::sync::{Notify, Semaphore, watch};
     use tokio::time::timeout;
 
     use crate::effect_worker::EffectWorker;
@@ -242,6 +244,75 @@ mod tests {
 
         assert!(super::is_insufficient_margin_failure(&typed_error));
         assert!(!super::is_insufficient_margin_failure(&string_only_error));
+    }
+
+    #[tokio::test]
+    async fn protection_after_submit_prepare_dispatches_cancel_follow_up() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let effect_worker_context = build_effect_worker_context_for_repository(repository);
+        let observation_service = Arc::clone(
+            &effect_worker_context
+                .effect_worker_state
+                .reconcile
+                .observation_service,
+        );
+        observation_service
+            .observe_market(
+                "btc-core",
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 94.9,
+                        best_ask: 95.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+        let execution = Arc::new(BlockingSubmitExecution::default());
+        let worker = EffectWorker::new(
+            effect_worker_context.clone(),
+            execution.clone(),
+            Arc::new(NoopAccountPort),
+            Duration::from_millis(1),
+        );
+        let worker_task = tokio::spawn(async move { worker.run_once().await });
+
+        timeout(Duration::from_secs(1), execution.wait_for_submit_started())
+            .await
+            .expect("submit should reach the exchange after prepare");
+        observation_service
+            .observe_market(
+                "btc-core",
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 84.9,
+                        best_ask: 85.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        execution.release_submit();
+
+        timeout(Duration::from_secs(1), worker_task)
+            .await
+            .expect("worker should finish submit writeback and cancel follow-up")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(execution.submit_call_count(), 1);
+        assert_eq!(
+            execution.cancelled_order_ids(),
+            vec!["accepted-before-protection".to_string()]
+        );
+        assert_eq!(
+            effect_worker_context
+                .effect_worker_state
+                .session_effect_queue
+                .pending_effect_count_for_test(&TrackId::new("btc-core")),
+            0
+        );
     }
 
     #[tokio::test]
@@ -357,6 +428,117 @@ mod tests {
         cancel_all_calls: AtomicUsize,
         reconcile_notify: Notify,
         cancel_all_notify: Notify,
+    }
+
+    struct BlockingSubmitExecution {
+        submit_calls: AtomicUsize,
+        submit_started: Notify,
+        submit_release: Semaphore,
+        cancelled_order_ids: Mutex<Vec<String>>,
+    }
+
+    impl Default for BlockingSubmitExecution {
+        fn default() -> Self {
+            Self {
+                submit_calls: AtomicUsize::new(0),
+                submit_started: Notify::new(),
+                submit_release: Semaphore::new(0),
+                cancelled_order_ids: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl BlockingSubmitExecution {
+        async fn wait_for_submit_started(&self) {
+            loop {
+                if self.submit_calls.load(Ordering::SeqCst) > 0 {
+                    return;
+                }
+                self.submit_started.notified().await;
+            }
+        }
+
+        fn release_submit(&self) {
+            self.submit_release.add_permits(1);
+        }
+
+        fn submit_call_count(&self) -> usize {
+            self.submit_calls.load(Ordering::SeqCst)
+        }
+
+        fn cancelled_order_ids(&self) -> Vec<String> {
+            self.cancelled_order_ids.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutionPort for BlockingSubmitExecution {
+        async fn submit_order(
+            &self,
+            request: OrderRequest,
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            let call = self.submit_calls.fetch_add(1, Ordering::SeqCst);
+            self.submit_started.notify_waiters();
+            if call == 0 {
+                let _permit = self
+                    .submit_release
+                    .acquire()
+                    .await
+                    .expect("submit release semaphore should stay open");
+            }
+            Ok(OrderReceipt {
+                order_id: "accepted-before-protection".to_string(),
+                client_order_id: request.client_order_id,
+                filled_qty: 0.0,
+                status: OrderStatus::New,
+            })
+        }
+
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            order_id: &str,
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            self.cancelled_order_ids
+                .lock()
+                .unwrap()
+                .push(order_id.to_string());
+            Ok(OrderReceipt {
+                order_id: order_id.to_string(),
+                client_order_id: String::new(),
+                filled_qty: 0.0,
+                status: OrderStatus::Canceled,
+            })
+        }
+
+        async fn cancel_all(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<()> {
+            Ok(())
+        }
+
+        async fn get_position(
+            &self,
+            instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<Position> {
+            Ok(Position {
+                instrument: instrument.clone(),
+                qty: 0.0,
+                avg_price: 0.0,
+                unrealized_pnl: 0.0,
+                mark_price: None,
+            })
+        }
+
+        async fn get_open_orders(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
+            Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                Vec::new(),
+            ))
+        }
     }
 
     impl ReconcileFailThenRecordExecution {

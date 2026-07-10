@@ -258,11 +258,12 @@ impl TrackManager {
         observation: OrderObservation,
     ) -> Result<(TrackTransition, executor::OrderUpdateAbsorbResult)> {
         let should_reconcile = observation.status.should_reconcile_after_order_update();
-        let absorb_result = self.observe_order(id, observation)?;
-        let (events, effects) = match (should_reconcile, self.live_strategy_price(id)?) {
+        let (absorb_result, mut effects) = self.observe_order(id, observation)?;
+        let (events, reconcile_effects) = match (should_reconcile, self.live_strategy_price(id)?) {
             (true, Some(strategy_price)) => self.reconcile_track(id, strategy_price)?,
             _ => (vec![], vec![]),
         };
+        effects.extend(reconcile_effects);
 
         Ok((self.transition_for(id, events, effects)?, absorb_result))
     }
@@ -612,30 +613,33 @@ impl TrackManager {
         request: &OrderRequest,
         desired_exposure: poise_core::types::Exposure,
         receipt: &OrderReceipt,
-    ) -> Result<()> {
-        let track = self
-            .tracks
-            .get_mut(id)
-            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        track.advance_exchange_observation_revision();
-        let resolution = executor::record_submit_receipt(
-            &track.executor_state,
-            request,
-            desired_exposure,
-            receipt,
-        );
-        match resolution {
-            executor::SubmitReceiptResolution::Recorded { state } => {
-                track.replace_executor_state(state);
-                Ok(())
+    ) -> Result<TrackTransition> {
+        let effects = {
+            let track = self
+                .tracks
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+            track.advance_exchange_observation_revision();
+            let resolution = executor::record_submit_receipt(
+                &track.executor_state,
+                request,
+                desired_exposure,
+                receipt,
+            );
+            match resolution {
+                executor::SubmitReceiptResolution::Recorded { state, effects } => {
+                    track.replace_executor_state(state);
+                    effects
+                }
+                executor::SubmitReceiptResolution::Unmatched => bail!(
+                    "submit receipt did not match executor binding: track=`{}`, client_order_id=`{}`, order_id=`{}`",
+                    id.as_str(),
+                    request.client_order_id,
+                    receipt.order_id,
+                ),
             }
-            executor::SubmitReceiptResolution::Unmatched => bail!(
-                "submit receipt did not match executor binding: track=`{}`, client_order_id=`{}`, order_id=`{}`",
-                id.as_str(),
-                request.client_order_id,
-                receipt.order_id,
-            ),
-        }
+        };
+        self.transition_for(id, vec![], effects)
     }
 
     pub fn record_submit_failure(&mut self, id: &TrackId, client_order_id: &str) -> Result<()> {
@@ -875,7 +879,7 @@ impl TrackManager {
         &mut self,
         id: &TrackId,
         observation: OrderObservation,
-    ) -> Result<executor::OrderUpdateAbsorbResult> {
+    ) -> Result<(executor::OrderUpdateAbsorbResult, Vec<TrackEffect>)> {
         let track = self
             .tracks
             .get_mut(id)
@@ -884,14 +888,18 @@ impl TrackManager {
         track.advance_exchange_observation_revision();
 
         if track.executor_state.recovery_anomaly.is_some() {
-            return Ok(executor::OrderUpdateAbsorbResult::DuplicateReplay);
+            return Ok((
+                executor::OrderUpdateAbsorbResult::DuplicateReplay,
+                Vec::new(),
+            ));
         }
 
         let applied =
             executor::apply_order_observation_with_result(&track.executor_state, &observation);
+        let effects = applied.effects;
         track.replace_executor_state(applied.state);
 
-        Ok(applied.absorb_result)
+        Ok((applied.absorb_result, effects))
     }
 
     fn apply_exchange_state_sync(
@@ -917,6 +925,7 @@ impl TrackManager {
             exchange_rules: &track.exchange_rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
+            pending_submit_hints: &pending_submit_hints,
             observed_at,
         });
 
@@ -929,7 +938,10 @@ impl TrackManager {
                 track.replace_executor_state(state);
                 Ok((vec![], vec![TrackEffect::NoOp]))
             }
-            executor::RecoveryResolution::Rebuilt { state } => {
+            executor::RecoveryResolution::Rebuilt {
+                state,
+                effects: mut recovery_effects,
+            } => {
                 let mut planned_track = track.clone();
                 planned_track.replace_executor_state(state);
 
@@ -939,7 +951,7 @@ impl TrackManager {
                         .get_mut(id)
                         .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
                     track.replace_executor_state(planned_track.executor_state);
-                    return Ok((vec![], vec![]));
+                    return Ok((vec![], recovery_effects));
                 }
 
                 let Some(strategy_price) = Self::live_strategy_price_for(&planned_track) else {
@@ -948,7 +960,7 @@ impl TrackManager {
                         .get_mut(id)
                         .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
                     track.replace_executor_state(planned_track.executor_state);
-                    return Ok((vec![], vec![]));
+                    return Ok((vec![], recovery_effects));
                 };
 
                 if !mode.allows_follow_up_reconcile() {
@@ -957,7 +969,7 @@ impl TrackManager {
                         .get_mut(id)
                         .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
                     track.replace_executor_state(planned_track.executor_state);
-                    return Ok((vec![], vec![]));
+                    return Ok((vec![], recovery_effects));
                 }
 
                 if self.guard_market_data_freshness(id)? {
@@ -966,26 +978,27 @@ impl TrackManager {
                         .get_mut(id)
                         .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
                     track.replace_executor_state(planned_track.executor_state);
-                    return Ok((vec![], vec![]));
+                    return Ok((vec![], recovery_effects));
                 }
 
                 let planned =
                     self.plan_inventory_execution_for_track(&planned_track, strategy_price)?;
-                let effects = planned
-                    .effects
-                    .iter()
-                    .filter(|effect| {
-                        !matches!(
-                            effect,
-                            TrackEffect::SubmitOrder { recovery_token, .. }
-                                if pending_submit_hints.iter().any(|hint| {
-                                    hint.recovery_token
-                                        .matches_submission_identity(recovery_token)
-                                })
-                        )
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
+                recovery_effects.extend(
+                    planned
+                        .effects
+                        .iter()
+                        .filter(|effect| {
+                            !matches!(
+                                effect,
+                                TrackEffect::SubmitOrder { recovery_token, .. }
+                                    if pending_submit_hints.iter().any(|hint| {
+                                        hint.recovery_token
+                                            .matches_submission_identity(recovery_token)
+                                    })
+                            )
+                        })
+                        .cloned(),
+                );
                 let track = self
                     .tracks
                     .get_mut(id)
@@ -1000,7 +1013,7 @@ impl TrackManager {
                     planned.applied_risk_cap,
                 );
                 track.replace_executor_state(planned.executor_state);
-                Ok((planned.events, effects))
+                Ok((planned.events, recovery_effects))
             }
         }
     }
@@ -1095,6 +1108,7 @@ impl TrackManager {
         desired_exposure: poise_core::types::Exposure,
         execution_target_exposure: poise_core::types::Exposure,
         execution_gate_decision: ExecutionGateDecision,
+        policy_context: executor::PolicyContext,
         observed_at: chrono::DateTime<chrono::Utc>,
     ) -> executor::SubmitIntentInput<'a> {
         let submit_purpose = self.submit_purpose_for_track(track, &desired_exposure);
@@ -1109,15 +1123,15 @@ impl TrackManager {
             execution_target_exposure,
             execution_gate_decision,
             execution_quote: Self::execution_quote_for_track(track),
-            policy_context: Self::policy_context_for_track(track),
+            policy_context,
             price_execution_gate: track.price_execution_gate,
             submit_purpose,
             observed_at,
         }
     }
 
-    fn policy_context_for_track(track: &TrackRuntime) -> executor::PolicyContext {
-        match &track.track_state {
+    fn policy_context_for_state(track_state: &TrackState) -> executor::PolicyContext {
+        match track_state {
             TrackState::Running(ControlState::Manual(_)) => executor::PolicyContext::ManualOverride,
             TrackState::Running(ControlState::Automatic(
                 AutoState::Frozen { .. }
@@ -1127,6 +1141,15 @@ impl TrackManager {
             | TrackState::Terminated { .. } => executor::PolicyContext::ReduceOnly,
             _ => executor::PolicyContext::Normal,
         }
+    }
+
+    fn holds_protected_target(track_state: &TrackState) -> bool {
+        matches!(
+            track_state,
+            TrackState::Running(ControlState::Automatic(
+                AutoState::Frozen { .. } | AutoState::FlattenPending { .. }
+            ))
+        )
     }
 
     fn risk_exposure_gate_active(track: &TrackRuntime, next_state: &Option<TrackState>) -> bool {
@@ -1163,9 +1186,17 @@ impl TrackManager {
             &target.execution_gate_decision,
             ExecutionGateDecision::NoSubmit { .. }
         );
+        let effective_track_state = target
+            .new_runtime_state
+            .as_ref()
+            .unwrap_or(&track.track_state);
+        let policy_context = Self::policy_context_for_state(effective_track_state);
+        let maintain_protected_bindings =
+            target.target_pursuit_suppressed && Self::holds_protected_target(effective_track_state);
         if target.target_pursuit_suppressed
             && !risk_exposure_gate_active
             && !execution_gate_blocks_submit
+            && policy_context != executor::PolicyContext::ReduceOnly
         {
             let executor_state = executor::refresh_state(
                 &track.executor_state,
@@ -1189,9 +1220,15 @@ impl TrackManager {
             target.desired_exposure.clone(),
             target.execution_target_exposure.clone(),
             target.execution_gate_decision.clone(),
+            policy_context,
             observed_at,
         );
-        let plan = executor::plan(executor::ExecutorInput::new(submit_intent, executor_state));
+        let executor_input = executor::ExecutorInput::new(submit_intent, executor_state);
+        let plan = if maintain_protected_bindings {
+            executor::maintain_protected_bindings(executor_input)
+        } else {
+            executor::plan(executor_input)
+        };
 
         Ok(PlannedInventoryExecution {
             events: target.events,
@@ -1552,6 +1589,52 @@ mod tests {
             track.executor_state =
                 ExecutorState::empty(Utc.with_ymd_and_hms(2026, 4, 22, 8, 0, 0).unwrap())
                     .ensure_revision(track.config(), track.current_exposure.clone());
+            track.executor_state.bindings.push(LiveOrderBinding {
+                binding_id: "protected-increase-binding".to_string(),
+                proposal_key: crate::executor::binding::BindingProposalKey {
+                    policy: PolicyKind::CatchUp,
+                    operations: Vec::new(),
+                },
+                allocations: Vec::new(),
+                absorbed_exposure_qty: 0.0,
+                request: crate::ports::OrderRequest {
+                    instrument: track.instrument().clone(),
+                    side: Side::Buy,
+                    price: 85.1,
+                    quantity: 1.0,
+                    client_order_id: "protected-increase-client".to_string(),
+                    reduce_only: false,
+                },
+                desired_exposure: Exposure(4.0),
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                order_id: Some("protected-increase-order".to_string()),
+                status: crate::executor::binding::BindingStatus::Working,
+                policy_state: crate::executor::binding::BindingPolicyState::Stateless,
+            });
+            track.executor_state.bindings.push(LiveOrderBinding {
+                binding_id: "protected-reduce-only-binding".to_string(),
+                proposal_key: crate::executor::binding::BindingProposalKey {
+                    policy: PolicyKind::CurveMaker,
+                    operations: Vec::new(),
+                },
+                allocations: Vec::new(),
+                absorbed_exposure_qty: 0.0,
+                request: crate::ports::OrderRequest {
+                    instrument: track.instrument().clone(),
+                    side: Side::Sell,
+                    price: 94.9,
+                    quantity: 0.5,
+                    client_order_id: "protected-reduce-only-client".to_string(),
+                    reduce_only: true,
+                },
+                desired_exposure: Exposure(0.5),
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                order_id: Some("protected-reduce-only-order".to_string()),
+                status: crate::executor::binding::BindingStatus::Working,
+                policy_state: crate::executor::binding::BindingPolicyState::CurveMaker {
+                    due_grace_started_at: None,
+                },
+            });
         }
 
         let transition = manager.observe(&id, market(85.0)).unwrap();
@@ -1561,6 +1644,24 @@ mod tests {
             track.track_state,
             TrackState::Running(ControlState::Automatic(AutoState::Frozen { .. }))
         ));
+        assert!(transition.effects.iter().any(|effect| matches!(
+            effect,
+            TrackEffect::CancelOrder { order_id, .. }
+                if order_id == "protected-increase-order"
+        )));
+        assert!(track.executor_state.bindings.iter().any(|binding| {
+            binding.request.client_order_id == "protected-increase-client"
+                && binding.status == crate::executor::binding::BindingStatus::CancelPending
+        }));
+        assert!(track.executor_state.bindings.iter().any(|binding| {
+            binding.request.client_order_id == "protected-reduce-only-client"
+                && binding.status == crate::executor::binding::BindingStatus::Working
+        }));
+        assert!(!transition.effects.iter().any(|effect| matches!(
+            effect,
+            TrackEffect::CancelOrder { order_id, .. }
+                if order_id == "protected-reduce-only-order"
+        )));
         assert!(!transition.effects.iter().any(|effect| matches!(
             effect,
             TrackEffect::SubmitOrder { request, .. } if !request.reduce_only
@@ -1607,20 +1708,16 @@ mod tests {
 
     #[test]
     fn manager_maps_manual_track_state_to_manual_override_policy_context() {
-        let (manager, id) = manager();
-        let mut track = manager.tracks.get(&id).unwrap().clone();
-        track.track_state = TrackState::Running(ControlState::Manual(ManualState::Flattened));
+        let track_state = TrackState::Running(ControlState::Manual(ManualState::Flattened));
 
         assert_eq!(
-            TrackManager::policy_context_for_track(&track),
+            TrackManager::policy_context_for_state(&track_state),
             PolicyContext::ManualOverride
         );
     }
 
     #[test]
     fn manager_maps_protected_track_states_to_reduce_only_policy_context() {
-        let (manager, id) = manager();
-        let base_track = manager.tracks.get(&id).unwrap().clone();
         let cases = vec![
             TrackState::Running(ControlState::Automatic(AutoState::Frozen {
                 target_anchor: Exposure(0.0),
@@ -1638,13 +1735,36 @@ mod tests {
         ];
 
         for track_state in cases {
-            let mut track = base_track.clone();
-            track.track_state = track_state;
             assert_eq!(
-                TrackManager::policy_context_for_track(&track),
+                TrackManager::policy_context_for_state(&track_state),
                 PolicyContext::ReduceOnly
             );
         }
+    }
+
+    #[test]
+    fn manager_uses_maintenance_only_for_target_holding_protected_states() {
+        assert!(TrackManager::holds_protected_target(&TrackState::Running(
+            ControlState::Automatic(AutoState::Frozen {
+                target_anchor: Exposure(1.0),
+            })
+        )));
+        assert!(TrackManager::holds_protected_target(&TrackState::Running(
+            ControlState::Automatic(AutoState::FlattenPending {
+                target_anchor: Exposure(1.0),
+                boundary: poise_core::strategy::BandBoundary::Below,
+            })
+        )));
+        assert!(!TrackManager::holds_protected_target(&TrackState::Running(
+            ControlState::Automatic(AutoState::Flattening {
+                boundary: poise_core::strategy::BandBoundary::Below,
+            })
+        )));
+        assert!(!TrackManager::holds_protected_target(
+            &TrackState::Terminated {
+                cause: TerminationCause::ManualCommand,
+            }
+        ));
     }
 
     #[test]

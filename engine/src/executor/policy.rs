@@ -224,7 +224,10 @@ pub(super) fn classify_binding_reconciliation(
     if let Some(index) =
         find_reusable_binding_by_proposal_key(bindings, &desired.proposal.proposal_key())
     {
-        if bindings[index].status == BindingStatus::SubmitPending {
+        if matches!(
+            bindings[index].status,
+            BindingStatus::SubmitPending | BindingStatus::SubmitAuthorized
+        ) {
             return BindingReconciliationDecision::CoveredByExisting {
                 indexes: vec![index],
             };
@@ -476,7 +479,7 @@ fn find_reusable_binding_by_proposal_key(
         .rev()
         .find(|(_index, binding)| {
             binding_is_active(binding)
-                && binding.status != BindingStatus::CancelPending
+                && !binding_is_cancel_pending(binding)
                 && &binding.proposal_key == proposal_key
         })
         .map(|(index, _binding)| index)
@@ -488,7 +491,7 @@ fn has_cancel_pending_owner(
 ) -> bool {
     bindings
         .iter()
-        .filter(|binding| binding.status == BindingStatus::CancelPending)
+        .filter(|binding| binding_is_cancel_pending(binding))
         .any(|binding| allocations_overlap(&binding.allocations, allocations))
 }
 
@@ -501,7 +504,7 @@ fn non_cancel_pending_owner_indexes_for_allocations(
         .enumerate()
         .filter(|(_index, binding)| {
             binding_is_active(binding)
-                && binding.status != BindingStatus::CancelPending
+                && !binding_is_cancel_pending(binding)
                 && allocations_overlap(&binding.allocations, allocations)
         })
         .map(|(index, _binding)| index)
@@ -544,7 +547,7 @@ fn binding_is_passive_covering_owner(
 ) -> bool {
     if binding.proposal_key.policy != PolicyKind::CurveMaker
         || !binding_is_active(binding)
-        || binding.status == BindingStatus::CancelPending
+        || binding_is_cancel_pending(binding)
         || curve_maker_grace_expired(binding, observed_at, curve_maker_grace_ms)
         || binding.request.side != desired.request.side
         || binding.request.reduce_only != desired.request.reduce_only
@@ -585,9 +588,7 @@ fn has_active_owner(
     allocations.iter().any(|desired_allocation| {
         bindings
             .iter()
-            .filter(|binding| {
-                binding_is_active(binding) && binding.status != BindingStatus::CancelPending
-            })
+            .filter(|binding| binding_is_active(binding) && !binding_is_cancel_pending(binding))
             .any(|binding| {
                 binding
                     .allocations
@@ -607,7 +608,7 @@ fn replaceable_owner_indexes(
         .filter_map(|(index, binding)| {
             if binding.proposal_key.policy == PolicyKind::CatchUp
                 || !binding_is_active(binding)
-                || binding.status == BindingStatus::CancelPending
+                || binding_is_cancel_pending(binding)
                 || !allocations_overlap(&binding.allocations, allocations)
             {
                 return None;
@@ -626,6 +627,13 @@ fn allocations_overlap(
             .iter()
             .any(|right_allocation| left_allocation.operation == right_allocation.operation)
     })
+}
+
+fn binding_is_cancel_pending(binding: &LiveOrderBinding) -> bool {
+    matches!(
+        binding.status,
+        BindingStatus::CancelAfterSubmit | BindingStatus::CancelPending
+    )
 }
 
 fn binding_request_matches_desired(

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use poise_core::track::TrackId;
 use poise_engine::execution_plan::TrackEffect;
-use poise_engine::executor::PendingSubmitHint;
+use poise_engine::executor::{PendingSubmitHint, PendingSubmitPhase};
 use poise_engine::observation::CompleteOpenOrderSnapshot;
 use uuid::Uuid;
 
@@ -121,7 +121,7 @@ pub(crate) enum SessionPendingEffectKind {
 pub(crate) enum SessionPendingEffectState {
     Queued,
     InFlight,
-    SubmittedAwaitingWriteback,
+    SubmitAwaitingResolution,
     Deferred { until: DeferredUntil },
     AwaitingFollowUp,
 }
@@ -202,7 +202,7 @@ pub(crate) struct SessionExchangeStateRevision(u64);
 pub(crate) struct ExchangeSnapshotQueueContext {
     pub(crate) follow_up_plan: CancelFollowUpResolutionPlan,
     pub(crate) pending_submit_hints: Vec<PendingSubmitHint>,
-    pub(crate) submitted_awaiting_effect_ids: Vec<String>,
+    pub(crate) submit_awaiting_resolution_effect_ids: Vec<String>,
     pub(crate) exchange_state_wake_token: Option<ExchangeStateWakeToken>,
 }
 
@@ -294,7 +294,7 @@ struct QueuedEffect {
 enum QueuedEffectState {
     Queued,
     InFlight,
-    SubmittedAwaitingWriteback,
+    SubmitAwaitingResolution,
     AwaitingFollowUp,
 }
 
@@ -357,35 +357,16 @@ impl SessionEffectQueue {
             .into_iter()
             .flat_map(|track| track.batches.iter())
             .flat_map(|batch| batch.effects.iter())
-            .filter(|item| {
-                matches!(
-                    item.dispatch_state,
-                    QueuedEffectState::InFlight | QueuedEffectState::SubmittedAwaitingWriteback
-                )
-            })
-            .filter_map(|item| match &item.effect.effect {
-                TrackEffect::SubmitOrder {
-                    request,
-                    desired_exposure,
-                    submit_purpose,
-                    recovery_token,
-                } => Some(PendingSubmitHint {
-                    request: request.clone(),
-                    desired_exposure: desired_exposure.clone(),
-                    submit_purpose: *submit_purpose,
-                    recovery_token: recovery_token.clone(),
-                }),
-                _ => None,
-            })
+            .filter_map(QueuedEffect::pending_submit_hint)
             .collect();
-        let submitted_awaiting_effect_ids = inner
+        let submit_awaiting_resolution_effect_ids = inner
             .tracks
             .get(track_id)
             .into_iter()
             .flat_map(|track| track.batches.iter())
             .flat_map(|batch| batch.effects.iter())
             .filter(|item| {
-                item.dispatch_state == QueuedEffectState::SubmittedAwaitingWriteback
+                item.dispatch_state == QueuedEffectState::SubmitAwaitingResolution
                     && matches!(item.effect.effect, TrackEffect::SubmitOrder { .. })
             })
             .map(|item| item.effect.effect_id.clone())
@@ -403,7 +384,7 @@ impl SessionEffectQueue {
         Some(apply(ExchangeSnapshotQueueContext {
             follow_up_plan,
             pending_submit_hints,
-            submitted_awaiting_effect_ids,
+            submit_awaiting_resolution_effect_ids,
             exchange_state_wake_token,
         }))
     }
@@ -500,17 +481,21 @@ impl SessionEffectQueue {
         None
     }
 
-    pub fn record_submit_exchange_accepted(&self, effect_id: &str) -> bool {
+    pub fn record_submit_awaiting_resolution(&self, effect_id: &str) -> bool {
         let mut inner = self.inner.lock().unwrap();
         let Some((track_id, effect)) = inner.effect_mut(effect_id) else {
             return false;
         };
-        if !matches!(effect.effect.effect, TrackEffect::SubmitOrder { .. })
-            || effect.dispatch_state != QueuedEffectState::InFlight
-        {
+        if !matches!(effect.effect.effect, TrackEffect::SubmitOrder { .. }) {
             return false;
         }
-        effect.dispatch_state = QueuedEffectState::SubmittedAwaitingWriteback;
+        match effect.dispatch_state {
+            QueuedEffectState::InFlight => {
+                effect.dispatch_state = QueuedEffectState::SubmitAwaitingResolution;
+            }
+            QueuedEffectState::SubmitAwaitingResolution => return true,
+            QueuedEffectState::Queued | QueuedEffectState::AwaitingFollowUp => return false,
+        }
         inner.mark_track_ready(&track_id);
         inner.advance_exchange_state_revision(&track_id);
         true
@@ -568,7 +553,7 @@ impl SessionEffectQueue {
                     track.set_paused_until(Some(until));
                     if let Some(effect) = track.front_effect_mut()
                         && effect.effect.effect_id == effect_id
-                        && effect.dispatch_state != QueuedEffectState::SubmittedAwaitingWriteback
+                        && effect.dispatch_state != QueuedEffectState::SubmitAwaitingResolution
                     {
                         effect.dispatch_state = QueuedEffectState::Queued;
                     }
@@ -719,7 +704,7 @@ impl SessionEffectQueue {
             .filter(|item| {
                 matches!(
                     item.dispatch_state,
-                    QueuedEffectState::InFlight | QueuedEffectState::SubmittedAwaitingWriteback
+                    QueuedEffectState::InFlight | QueuedEffectState::SubmitAwaitingResolution
                 ) && matches!(item.effect.effect, TrackEffect::SubmitOrder { .. })
             })
             .map(|item| item.effect.effect_id.clone())
@@ -739,30 +724,11 @@ impl SessionEffectQueue {
             .batches
             .iter()
             .flat_map(|batch| batch.effects.iter())
-            .filter(|item| {
-                matches!(
-                    item.dispatch_state,
-                    QueuedEffectState::InFlight | QueuedEffectState::SubmittedAwaitingWriteback
-                )
-            })
-            .filter_map(|item| match &item.effect.effect {
-                TrackEffect::SubmitOrder {
-                    request,
-                    desired_exposure,
-                    submit_purpose,
-                    recovery_token,
-                } => Some(PendingSubmitHint {
-                    request: request.clone(),
-                    desired_exposure: desired_exposure.clone(),
-                    submit_purpose: *submit_purpose,
-                    recovery_token: recovery_token.clone(),
-                }),
-                _ => None,
-            })
+            .filter_map(QueuedEffect::pending_submit_hint)
             .collect()
     }
 
-    pub(crate) fn resolve_submitted_awaiting_exchange_state_effects(
+    pub(crate) fn resolve_submit_awaiting_resolution_effects(
         &self,
         track_id: &TrackId,
         eligible_effect_ids: &[String],
@@ -771,6 +737,30 @@ impl SessionEffectQueue {
             return Vec::new();
         }
         let eligible_effect_ids = eligible_effect_ids.iter().collect::<HashSet<_>>();
+        self.resolve_submit_awaiting_resolution_where(track_id, |effect| {
+            eligible_effect_ids.contains(&effect.effect_id)
+        })
+    }
+
+    pub(crate) fn resolve_submit_awaiting_resolution_by_client_order_id(
+        &self,
+        track_id: &TrackId,
+        client_order_id: &str,
+    ) -> Vec<String> {
+        self.resolve_submit_awaiting_resolution_where(track_id, |effect| {
+            matches!(
+                &effect.effect,
+                TrackEffect::SubmitOrder { request, .. }
+                    if request.client_order_id == client_order_id
+            )
+        })
+    }
+
+    fn resolve_submit_awaiting_resolution_where(
+        &self,
+        track_id: &TrackId,
+        mut matches_effect: impl FnMut(&SessionTrackEffect) -> bool,
+    ) -> Vec<String> {
         let mut inner = self.inner.lock().unwrap();
         let mut resolved = Vec::new();
         {
@@ -781,9 +771,9 @@ impl SessionEffectQueue {
             for batch in &mut track.batches {
                 let mut retained = VecDeque::new();
                 while let Some(item) = batch.effects.pop_front() {
-                    if item.dispatch_state == QueuedEffectState::SubmittedAwaitingWriteback
+                    if item.dispatch_state == QueuedEffectState::SubmitAwaitingResolution
                         && matches!(item.effect.effect, TrackEffect::SubmitOrder { .. })
-                        && eligible_effect_ids.contains(&item.effect.effect_id)
+                        && matches_effect(&item.effect)
                     {
                         resolved.push(item.effect.effect_id.clone());
                     } else {
@@ -1162,6 +1152,34 @@ impl SessionEffectQueueInner {
     }
 }
 
+impl QueuedEffect {
+    fn pending_submit_hint(&self) -> Option<PendingSubmitHint> {
+        let phase = match self.dispatch_state {
+            QueuedEffectState::InFlight => PendingSubmitPhase::DispatchInFlight,
+            QueuedEffectState::SubmitAwaitingResolution => {
+                PendingSubmitPhase::AwaitingExchangeState
+            }
+            QueuedEffectState::Queued | QueuedEffectState::AwaitingFollowUp => return None,
+        };
+        let TrackEffect::SubmitOrder {
+            request,
+            desired_exposure,
+            submit_purpose,
+            recovery_token,
+        } = &self.effect.effect
+        else {
+            return None;
+        };
+        Some(PendingSubmitHint {
+            request: request.clone(),
+            desired_exposure: desired_exposure.clone(),
+            submit_purpose: *submit_purpose,
+            recovery_token: recovery_token.clone(),
+            phase,
+        })
+    }
+}
+
 impl TrackQueue {
     fn set_paused_until(&mut self, paused_until: Option<DeferredUntil>) {
         self.paused_until = paused_until;
@@ -1203,7 +1221,7 @@ impl From<QueuedEffectState> for SessionPendingEffectState {
         match value {
             QueuedEffectState::Queued => Self::Queued,
             QueuedEffectState::InFlight => Self::InFlight,
-            QueuedEffectState::SubmittedAwaitingWriteback => Self::SubmittedAwaitingWriteback,
+            QueuedEffectState::SubmitAwaitingResolution => Self::SubmitAwaitingResolution,
             QueuedEffectState::AwaitingFollowUp => Self::AwaitingFollowUp,
         }
     }
@@ -1233,7 +1251,7 @@ mod tests {
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
-    use poise_engine::executor::SubmitRecoveryToken;
+    use poise_engine::executor::{PendingSubmitPhase, SubmitRecoveryToken};
     use poise_engine::observation::{CompleteOpenOrderSnapshot, OrderObservation};
     use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::price_gate::SubmitPurpose;
@@ -1430,38 +1448,45 @@ mod tests {
     }
 
     #[test]
-    fn submit_exchange_accepted_records_writeback_window() {
-        let queue = SessionEffectQueue::default();
-        let enqueued = enqueue_effects(&queue, "btc-core", &[submit_effect("client-1")]);
-
-        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
-        assert!(
-            queue.record_submit_exchange_accepted(&enqueued[0]),
-            "queue should own submit dispatch progress"
-        );
-
-        let snapshot = queue.snapshot_for_track(&TrackId::new("btc-core"));
-        assert_eq!(
-            snapshot.pending_effects[0].state,
-            SessionPendingEffectState::SubmittedAwaitingWriteback
-        );
-        assert_eq!(
-            queue
-                .active_submit_hints_for_track(&TrackId::new("btc-core"))
-                .len(),
-            1,
-            "accepted submit remains visible to exchange sync until writeback finishes"
-        );
-    }
-
-    #[test]
-    fn submitted_writeback_unknown_keeps_active_hint_until_exchange_sync() {
+    fn submit_dispatch_phase_advances_idempotently_to_awaiting_resolution() {
         let queue = SessionEffectQueue::default();
         let track_id = TrackId::new("btc-core");
         let enqueued = enqueue_effects(&queue, "btc-core", &[submit_effect("client-1")]);
 
         assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
-        assert!(queue.record_submit_exchange_accepted(&enqueued[0]));
+        assert_eq!(
+            queue.active_submit_hints_for_track(&track_id)[0].phase,
+            PendingSubmitPhase::DispatchInFlight
+        );
+        assert!(
+            queue.record_submit_awaiting_resolution(&enqueued[0]),
+            "queue should own submit dispatch progress"
+        );
+        assert!(
+            queue.record_submit_awaiting_resolution(&enqueued[0]),
+            "repeated unknown-outcome handling must preserve the same queue owner"
+        );
+
+        let snapshot = queue.snapshot_for_track(&track_id);
+        assert_eq!(
+            snapshot.pending_effects[0].state,
+            SessionPendingEffectState::SubmitAwaitingResolution
+        );
+        assert_eq!(
+            queue.active_submit_hints_for_track(&track_id)[0].phase,
+            PendingSubmitPhase::AwaitingExchangeState,
+            "the next complete exchange snapshot may now resolve the submit"
+        );
+    }
+
+    #[test]
+    fn unresolved_submit_keeps_active_hint_until_exchange_sync() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = enqueue_effects(&queue, "btc-core", &[submit_effect("client-1")]);
+
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        assert!(queue.record_submit_awaiting_resolution(&enqueued[0]));
         queue.record_outcome(
             &enqueued[0],
             SessionEffectOutcome::Deferred {
@@ -1480,7 +1505,7 @@ mod tests {
         );
 
         assert_eq!(
-            queue.resolve_submitted_awaiting_exchange_state_effects(
+            queue.resolve_submit_awaiting_resolution_effects(
                 &track_id,
                 std::slice::from_ref(&enqueued[0]),
             ),
@@ -1489,6 +1514,42 @@ mod tests {
         assert!(
             queue.active_submit_hints_for_track(&track_id).is_empty(),
             "complete exchange sync should retire the active submit hint"
+        );
+    }
+
+    #[test]
+    fn matching_order_fact_resolves_awaiting_submit_and_unblocks_cancel() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = enqueue_effects(
+            &queue,
+            "btc-core",
+            &[submit_effect("client-1"), cancel_effect()],
+        );
+
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        assert!(queue.record_submit_awaiting_resolution(&enqueued[0]));
+        queue.record_outcome(
+            &enqueued[0],
+            SessionEffectOutcome::Deferred {
+                until: DeferredUntil::ExchangeState,
+            },
+        );
+
+        assert!(
+            queue
+                .resolve_submit_awaiting_resolution_by_client_order_id(&track_id, "other-client",)
+                .is_empty()
+        );
+        assert!(queue.claim_next().is_none());
+        assert_eq!(
+            queue.resolve_submit_awaiting_resolution_by_client_order_id(&track_id, "client-1"),
+            vec![enqueued[0].clone()]
+        );
+        assert_eq!(
+            queue.claim_next().unwrap().effect_id,
+            enqueued[1],
+            "the cancel generated from the matching order fact must become dispatchable"
         );
     }
 
@@ -1572,16 +1633,16 @@ mod tests {
                 &track_id,
                 revision,
                 &complete_open_orders(&[]),
-                |context| context.submitted_awaiting_effect_ids,
+                |context| context.submit_awaiting_resolution_effect_ids,
             )
             .unwrap();
         assert!(eligible.is_empty());
 
-        assert!(queue.record_submit_exchange_accepted(&enqueued[0]));
+        assert!(queue.record_submit_awaiting_resolution(&enqueued[0]));
 
         assert!(
             queue
-                .resolve_submitted_awaiting_exchange_state_effects(&track_id, &eligible)
+                .resolve_submit_awaiting_resolution_effects(&track_id, &eligible)
                 .is_empty()
         );
         assert_eq!(

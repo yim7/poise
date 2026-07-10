@@ -211,7 +211,7 @@ impl TransitionResult for SubmitRecoveryPlan {
     }
 
     fn effects(&self) -> &[TrackEffect] {
-        &[]
+        &self.effects
     }
 }
 
@@ -588,12 +588,44 @@ impl MutationExecutor {
         id: &str,
         observation: OrderObservation,
     ) -> Result<(TrackTransition, OrderUpdateAbsorbResult)> {
-        let result = self
-            .mutate_track(id, |manager| {
-                manager.observe_order_update(&TrackId::new(id), observation.clone())
-            })
+        let _mutation_guard = self.lock_track_mutation(id).await;
+        let client_order_id = observation.client_order_id.clone();
+        let (previous_frame, result, next_frame) = {
+            let mut manager = self.manager.write().await;
+            let previous_frame = manager
+                .mutation_frame(id)
+                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
+            self.sync_account_capacity_gate_state(&mut manager, id)
+                .map_err(TrackMutationError::Mutation)?;
+            let result = manager
+                .observe_order_update(&TrackId::new(id), observation)
+                .map_err(|error| {
+                    manager
+                        .rollback_track_state(&previous_frame)
+                        .expect("failed to restore previous frame after order observation error");
+                    TrackMutationError::Mutation(error)
+                })?;
+            let next_frame = manager
+                .mutation_frame(id)
+                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
+            (previous_frame, result, next_frame)
+        };
+
+        self.commit_track_mutation(id, &previous_frame, &next_frame, &result, None, false, None)
             .await
             .map_err(anyhow::Error::new)?;
+
+        if result.1 != OrderUpdateAbsorbResult::Unabsorbed && !next_frame.recovery_anomaly_active()
+        {
+            let resolved_effect_ids = self
+                .session_effect_queue
+                .resolve_submit_awaiting_resolution_by_client_order_id(
+                    &TrackId::new(id),
+                    &client_order_id,
+                );
+            self.record_effects_succeeded(id, &resolved_effect_ids)
+                .await?;
+        }
 
         Ok(result)
     }
@@ -701,7 +733,7 @@ impl MutationExecutor {
             transition,
             next_frame,
             follow_up_plan,
-            submitted_awaiting_effect_ids,
+            submit_awaiting_resolution_effect_ids,
             exchange_state_wake_token,
         ) = {
             let mut manager = self.manager.write().await;
@@ -764,7 +796,7 @@ impl MutationExecutor {
                             transition,
                             next_frame,
                             follow_up_plan,
-                            queue_context.submitted_awaiting_effect_ids,
+                            queue_context.submit_awaiting_resolution_effect_ids,
                             queue_context.exchange_state_wake_token,
                         ))
                     },
@@ -793,12 +825,15 @@ impl MutationExecutor {
         self.handle_follow_up_queue_actions(id, &follow_up_actions)
             .await?;
 
-        let resolved_submit_effect_ids = self
-            .session_effect_queue
-            .resolve_submitted_awaiting_exchange_state_effects(
-                &token.track_id,
-                &submitted_awaiting_effect_ids,
-            );
+        let resolved_submit_effect_ids = if next_frame.recovery_anomaly_active() {
+            Vec::new()
+        } else {
+            self.session_effect_queue
+                .resolve_submit_awaiting_resolution_effects(
+                    &token.track_id,
+                    &submit_awaiting_resolution_effect_ids,
+                )
+        };
         self.record_effects_succeeded(id, &resolved_submit_effect_ids)
             .await?;
 
@@ -931,8 +966,7 @@ impl MutationExecutor {
                     request,
                     desired_exposure.clone(),
                     receipt,
-                )?;
-                Ok(())
+                )
             },
         )
         .await
@@ -1071,6 +1105,7 @@ impl MutationExecutor {
                 SubmitRecoveryResolution::Proceed {
                     request,
                     desired_exposure,
+                    ..
                 } => SubmitExecutionRecovery::Dispatch {
                     request,
                     desired_exposure,
@@ -1923,13 +1958,17 @@ pub(crate) mod test_support {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::session_effect_queue::{SessionPendingEffectState, WakeSignal};
+    use crate::session_effect_queue::{
+        DeferredUntil, SessionEffectOutcome, SessionPendingEffectState, WakeSignal,
+    };
     use crate::{CancelReceiptResolution, EffectStatus, SessionEffectQueue, TrackEffectJournal};
     use poise_core::risk::RiskTerminationCause;
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
-    use poise_engine::executor::{BindingStatus, RecoveryAnomaly, SubmitRecoveryToken};
+    use poise_engine::executor::{
+        BindingStatus, OrderUpdateAbsorbResult, RecoveryAnomaly, SubmitRecoveryToken,
+    };
     use poise_engine::ledger::{TrackPnlRecord, TrackPnlStats};
     use poise_engine::manager::SubmitRecoveryOrderLookup;
     use poise_engine::mutation_frame::TrackMutationFrame;
@@ -2140,6 +2179,268 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(reused, ExchangeStateSyncOutcome::RevisionChanged));
+    }
+
+    #[tokio::test]
+    async fn anomalous_exchange_snapshot_keeps_submitted_effect_ownership() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository);
+        let track_id = TrackId::new("btc-core");
+        services
+            .observation
+            .observe_market(
+                track_id.as_str(),
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 94.9,
+                        best_ask: 95.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let claimed = services
+            .session_effect_queue
+            .claim_next()
+            .expect("test requires a submit effect");
+        let effect_id = claimed.effect_id.clone();
+        let TrackEffect::SubmitOrder {
+            request,
+            recovery_token,
+            ..
+        } = claimed.effect
+        else {
+            panic!("first effect should be a submit");
+        };
+        let attempt = services
+            .submit_effect
+            .recover_or_dispatch(
+                track_id.as_str(),
+                &effect_id,
+                recovery_token,
+                SubmitRecoveryOrderLookup::NotQueried,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            attempt,
+            crate::submit_effect_service::SubmitAttempt::Dispatch(_)
+        ));
+        assert!(
+            services
+                .session_effect_queue
+                .record_submit_awaiting_resolution(&effect_id)
+        );
+
+        services
+            .observation
+            .observe_market(
+                track_id.as_str(),
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 84.9,
+                        best_ask: 85.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let token = services
+            .observation
+            .prepare_exchange_state_sync(track_id.as_str())
+            .await
+            .unwrap();
+        let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(vec![
+            OrderObservation {
+                order_id: "protected-live-order".to_string(),
+                client_order_id: request.client_order_id.clone(),
+                side: request.side,
+                price: request.price,
+                quantity: request.quantity,
+                filled_qty: 0.0,
+                status: OrderStatus::New,
+            },
+            OrderObservation {
+                order_id: "unknown-live-order".to_string(),
+                client_order_id: "unknown-client".to_string(),
+                side: Side::Sell,
+                price: 80.0,
+                quantity: 3.0,
+                filled_qty: 0.0,
+                status: OrderStatus::New,
+            },
+        ]);
+
+        let outcome = services
+            .observation
+            .sync_exchange_state_without_reconcile(
+                token,
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+                open_orders,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ExchangeStateSyncOutcome::Applied(_)));
+
+        let queue = services.session_effect_queue.snapshot_for_track(&track_id);
+        let submitted = queue
+            .pending_effects
+            .iter()
+            .find(|effect| effect.effect_id == effect_id)
+            .expect("anomalous snapshot must retain submit ownership");
+        assert_eq!(
+            submitted.state,
+            SessionPendingEffectState::SubmitAwaitingResolution
+        );
+        let frame = services
+            .submit_effect
+            .manager()
+            .read()
+            .await
+            .mutation_frame(track_id.as_str())
+            .expect("track frame");
+        assert!(frame.recovery_anomaly_active());
+        let (_, status) = frame
+            .binding_receipt_for_client_order_id(&request.client_order_id)
+            .expect("authorized binding should remain owned");
+        assert_eq!(status, BindingStatus::CancelAfterSubmit);
+    }
+
+    #[tokio::test]
+    async fn matching_order_fact_resolves_submit_owner_and_unblocks_protection_cancel() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository);
+        let track_id = TrackId::new("btc-core");
+        services
+            .observation
+            .observe_market(
+                track_id.as_str(),
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 94.9,
+                        best_ask: 95.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let claimed = services
+            .session_effect_queue
+            .claim_next()
+            .expect("test requires a submit effect");
+        let effect_id = claimed.effect_id.clone();
+        let TrackEffect::SubmitOrder {
+            request,
+            recovery_token,
+            ..
+        } = claimed.effect
+        else {
+            panic!("first effect should be a submit");
+        };
+        let attempt = services
+            .submit_effect
+            .recover_or_dispatch(
+                track_id.as_str(),
+                &effect_id,
+                recovery_token,
+                SubmitRecoveryOrderLookup::NotQueried,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            attempt,
+            crate::submit_effect_service::SubmitAttempt::Dispatch(_)
+        ));
+        assert!(
+            services
+                .session_effect_queue
+                .record_submit_awaiting_resolution(&effect_id)
+        );
+        services.session_effect_queue.record_outcome(
+            &effect_id,
+            SessionEffectOutcome::Deferred {
+                until: DeferredUntil::ExchangeState,
+            },
+        );
+
+        services
+            .observation
+            .observe_market(
+                track_id.as_str(),
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 84.9,
+                        best_ask: 85.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let (_, unabsorbed) = services
+            .observation
+            .observe_order_with_absorb_result(
+                track_id.as_str(),
+                OrderObservation {
+                    order_id: "unmatched-order".to_string(),
+                    client_order_id: "other-client".to_string(),
+                    side: Side::Sell,
+                    price: 80.0,
+                    quantity: 1.0,
+                    filled_qty: 0.0,
+                    status: OrderStatus::New,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(unabsorbed, OrderUpdateAbsorbResult::Unabsorbed);
+        assert!(
+            services
+                .session_effect_queue
+                .snapshot_for_track(&track_id)
+                .pending_effects
+                .iter()
+                .any(|effect| effect.effect_id == effect_id),
+            "an unrelated order fact must not release submit ownership"
+        );
+        let (_, absorb_result) = services
+            .observation
+            .observe_order_with_absorb_result(
+                track_id.as_str(),
+                OrderObservation {
+                    order_id: "protected-live-order".to_string(),
+                    client_order_id: request.client_order_id.clone(),
+                    side: request.side,
+                    price: request.price,
+                    quantity: request.quantity,
+                    filled_qty: 0.0,
+                    status: OrderStatus::New,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(absorb_result, OrderUpdateAbsorbResult::Applied);
+
+        assert!(
+            services
+                .session_effect_queue
+                .snapshot_for_track(&track_id)
+                .pending_effects
+                .iter()
+                .all(|effect| effect.effect_id != effect_id),
+            "the matching order fact should retire the unresolved submit owner"
+        );
+        let cancel = services
+            .session_effect_queue
+            .claim_next()
+            .expect("protection cancel should be unblocked after resolving submit ownership");
+        assert!(matches!(
+            cancel.effect,
+            TrackEffect::CancelOrder { order_id, .. }
+                if order_id == "protected-live-order"
+        ));
     }
 
     #[tokio::test]

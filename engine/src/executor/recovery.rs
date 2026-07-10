@@ -4,6 +4,7 @@ use poise_core::types::{ExchangeRules, Exposure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+use crate::execution_plan::TrackEffect;
 use crate::observation::{CompleteOpenOrderSnapshot, OrderObservation};
 use crate::ports::{OrderReceipt, OrderRequest};
 use crate::runtime::ExecutorState;
@@ -12,6 +13,7 @@ use super::binding::SubmitRecoveryToken;
 use super::binding::{BindingStatus, LiveOrderBinding};
 use super::boundary::profile_revision_for_config;
 use super::ledger::BoundaryLedgerState;
+use super::planning::{PendingSubmitHint, PendingSubmitPhase};
 use super::recording;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,12 +34,14 @@ pub struct RecoveryInput<'a> {
     pub exchange_rules: &'a ExchangeRules,
     pub previous_state: Option<&'a ExecutorState>,
     pub open_orders: &'a CompleteOpenOrderSnapshot,
+    pub pending_submit_hints: &'a [PendingSubmitHint],
     pub observed_at: DateTime<Utc>,
 }
 
 pub enum RecoveryResolution {
     Rebuilt {
         state: ExecutorState,
+        effects: Vec<TrackEffect>,
     },
     Anomaly {
         state: ExecutorState,
@@ -58,6 +62,7 @@ pub struct SubmitRecoveryInput<'a> {
 
 pub enum SubmitRecoveryResolution {
     Proceed {
+        state: ExecutorState,
         request: OrderRequest,
         desired_exposure: Exposure,
     },
@@ -79,12 +84,16 @@ impl SubmitRecoveryResolution {
     }
 
     pub fn state(&self) -> Option<&ExecutorState> {
-        self.recovered_state()
+        match self {
+            Self::Proceed { state, .. } => Some(state),
+            _ => self.recovered_state(),
+        }
     }
 }
 
 pub struct SubmitRecoveryPlan {
     pub resolution: SubmitRecoveryResolution,
+    pub effects: Vec<TrackEffect>,
 }
 
 pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPlan {
@@ -107,20 +116,25 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
             target.desired_exposure.clone(),
             &receipt,
         );
-        if let recording::SubmitReceiptResolution::Recorded { state } = resolution {
+        if let recording::SubmitReceiptResolution::Recorded { state, effects } = resolution {
             return SubmitRecoveryPlan {
                 resolution: SubmitRecoveryResolution::Recovered { state },
+                effects,
             };
         }
     }
 
     match binding_target {
         SubmitBindingRecovery::Dispatchable(current) => {
+            let mut state = input.previous_state.clone();
+            state.bindings[current.binding_index].status = BindingStatus::SubmitAuthorized;
             return SubmitRecoveryPlan {
                 resolution: SubmitRecoveryResolution::Proceed {
+                    state,
                     request: current.request,
                     desired_exposure: current.desired_exposure,
                 },
+                effects: Vec::new(),
             };
         }
         SubmitBindingRecovery::Superseded => {
@@ -128,6 +142,7 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
                 resolution: SubmitRecoveryResolution::Superseded {
                     state: input.previous_state.clone(),
                 },
+                effects: Vec::new(),
             };
         }
         SubmitBindingRecovery::Recoverable(_) | SubmitBindingRecovery::Missing => {}
@@ -135,11 +150,13 @@ pub fn recover_submit_effect(input: SubmitRecoveryInput<'_>) -> SubmitRecoveryPl
 
     SubmitRecoveryPlan {
         resolution: SubmitRecoveryResolution::AwaitExchangeState,
+        effects: Vec::new(),
     }
 }
 
 #[derive(Debug, Clone)]
 struct SubmitRecoveryTarget {
+    binding_index: usize,
     request: OrderRequest,
     desired_exposure: Exposure,
 }
@@ -159,22 +176,26 @@ fn binding_target_for_recovery_token(
         return SubmitBindingRecovery::Missing;
     };
 
-    let Some(binding) = previous_state
+    let Some((binding_index, binding)) = previous_state
         .bindings
         .iter()
-        .find(|binding| binding.binding_id == target.binding_id)
+        .enumerate()
+        .find(|(_index, binding)| binding.binding_id == target.binding_id)
     else {
-        return SubmitBindingRecovery::Missing;
+        return SubmitBindingRecovery::Superseded;
     };
 
     let target = SubmitRecoveryTarget {
+        binding_index,
         request: binding.request.clone(),
         desired_exposure: binding.desired_exposure.clone(),
     };
 
     match binding.status {
         BindingStatus::SubmitPending => SubmitBindingRecovery::Dispatchable(target),
-        BindingStatus::Working => SubmitBindingRecovery::Recoverable(target),
+        BindingStatus::SubmitAuthorized
+        | BindingStatus::CancelAfterSubmit
+        | BindingStatus::Working => SubmitBindingRecovery::Recoverable(target),
         BindingStatus::CancelPending | BindingStatus::Terminal => SubmitBindingRecovery::Superseded,
     }
 }
@@ -185,12 +206,20 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
         .cloned()
         .unwrap_or_else(|| ExecutorState::empty(input.observed_at));
 
+    let mut effects = Vec::new();
     if input.open_orders.is_empty() {
-        state
-            .bindings
-            .retain(|binding| binding.status == BindingStatus::SubmitPending);
+        state.bindings.retain(|binding| match binding.status {
+            BindingStatus::SubmitPending => true,
+            BindingStatus::SubmitAuthorized | BindingStatus::CancelAfterSubmit => {
+                pending_dispatch_hint_matches_binding(input.pending_submit_hints, binding)
+            }
+            BindingStatus::Working | BindingStatus::CancelPending | BindingStatus::Terminal => {
+                false
+            }
+        });
     } else {
         let mut claimed_binding_indexes = BTreeSet::new();
+        let mut matched_live_orders = Vec::new();
         for live_order in input.open_orders.orders() {
             let matches =
                 binding_candidates_for_live_order(&state, live_order, input.exchange_rules);
@@ -202,22 +231,25 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
             if !claimed_binding_indexes.insert(candidate.index()) {
                 return recovery_anomaly(state, RecoveryAnomaly::DuplicateLiveOrders);
             }
-            match candidate {
-                RecoveryBindingCandidate::Existing { index } => {
-                    state.bindings[index].order_id = Some(live_order.order_id.clone());
-                    state.bindings[index].request.price = live_order.price;
-                    state.bindings[index].request.quantity = live_order.quantity;
-                    state.bindings[index].status = BindingStatus::Working;
-                    state = recording::apply_order_observation(&state, live_order);
-                }
-            }
+            matched_live_orders.push((candidate.index(), live_order));
         }
-        terminalize_exchange_absent_bindings(&mut state, &claimed_binding_indexes);
+        for (index, live_order) in matched_live_orders {
+            let applied = recording::apply_order_observation_to_binding_with_result(
+                &state, index, live_order,
+            );
+            state = applied.state;
+            effects.extend(applied.effects);
+        }
+        terminalize_exchange_absent_bindings(
+            &mut state,
+            &claimed_binding_indexes,
+            input.pending_submit_hints,
+        );
     }
 
     reanchor_executor_ledger(&mut state, input.config, input.current_exposure.clone());
     state.recovery_anomaly = None;
-    RecoveryResolution::Rebuilt { state }
+    RecoveryResolution::Rebuilt { state, effects }
 }
 
 #[derive(Debug, Clone)]
@@ -236,6 +268,7 @@ impl RecoveryBindingCandidate {
 fn terminalize_exchange_absent_bindings(
     state: &mut ExecutorState,
     claimed_binding_indexes: &BTreeSet<usize>,
+    pending_submit_hints: &[PendingSubmitHint],
 ) {
     for (index, binding) in state.bindings.iter_mut().enumerate() {
         if claimed_binding_indexes.contains(&index) {
@@ -244,10 +277,25 @@ fn terminalize_exchange_absent_bindings(
         if matches!(
             binding.status,
             BindingStatus::Working | BindingStatus::CancelPending
-        ) {
+        ) || matches!(
+            binding.status,
+            BindingStatus::SubmitAuthorized | BindingStatus::CancelAfterSubmit
+        ) && !pending_dispatch_hint_matches_binding(pending_submit_hints, binding)
+        {
             binding.status = BindingStatus::Terminal;
         }
     }
+}
+
+fn pending_dispatch_hint_matches_binding(
+    pending_submit_hints: &[PendingSubmitHint],
+    binding: &LiveOrderBinding,
+) -> bool {
+    let token = SubmitRecoveryToken::from_binding(binding);
+    pending_submit_hints.iter().any(|hint| {
+        hint.phase == PendingSubmitPhase::DispatchInFlight
+            && hint.recovery_token.matches_submission_identity(&token)
+    })
 }
 
 fn reanchor_executor_ledger(
@@ -319,6 +367,8 @@ fn structural_matches_for_live_order(
             matches!(
                 binding.status,
                 BindingStatus::SubmitPending
+                    | BindingStatus::SubmitAuthorized
+                    | BindingStatus::CancelAfterSubmit
                     | BindingStatus::Working
                     | BindingStatus::CancelPending
             )
@@ -477,6 +527,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: Some(previous_state),
             open_orders: &open_orders,
+            pending_submit_hints: &[],
             observed_at: Utc::now(),
         })
     }
@@ -491,7 +542,7 @@ mod tests {
 
         let recovery = recover_with(&previous_state, &live_orders);
 
-        let RecoveryResolution::Rebuilt { state } = recovery else {
+        let RecoveryResolution::Rebuilt { state, .. } = recovery else {
             panic!("expected recovery to rebuild from structural match");
         };
         assert_eq!(state.bindings[0].order_id.as_deref(), Some("live-order-1"));
@@ -555,10 +606,11 @@ mod tests {
             exchange_rules: &rules,
             previous_state: Some(&ExecutorState::empty(Utc::now())),
             open_orders: &open_orders,
+            pending_submit_hints: &[],
             observed_at: Utc::now(),
         });
 
-        let RecoveryResolution::Rebuilt { state } = recovery else {
+        let RecoveryResolution::Rebuilt { state, .. } = recovery else {
             panic!("expected rebuilt state");
         };
         assert!(state.ledger_state.progress.is_empty());
@@ -579,6 +631,7 @@ mod tests {
             exchange_rules: &rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
+            pending_submit_hints: &[],
             observed_at: Utc::now(),
         });
 
@@ -608,10 +661,11 @@ mod tests {
             exchange_rules: &rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
+            pending_submit_hints: &[],
             observed_at: Utc::now(),
         });
 
-        let RecoveryResolution::Rebuilt { state } = recovery else {
+        let RecoveryResolution::Rebuilt { state, .. } = recovery else {
             panic!("expected recovery to reuse the existing binding");
         };
         assert_eq!(state.bindings.len(), 1);
@@ -641,10 +695,11 @@ mod tests {
             exchange_rules: &rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
+            pending_submit_hints: &[],
             observed_at: Utc::now(),
         });
 
-        let RecoveryResolution::Rebuilt { state } = recovery else {
+        let RecoveryResolution::Rebuilt { state, .. } = recovery else {
             panic!("expected recovery to rebuild from exchange open orders");
         };
         assert_eq!(state.bindings[0].status, BindingStatus::Terminal);
@@ -671,10 +726,11 @@ mod tests {
             exchange_rules: &rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
+            pending_submit_hints: &[],
             observed_at: Utc::now(),
         });
 
-        let RecoveryResolution::Rebuilt { state } = recovery else {
+        let RecoveryResolution::Rebuilt { state, .. } = recovery else {
             panic!("expected recovery to rebuild partial live order progress");
         };
         assert!((state.bindings[0].absorbed_exposure_qty - 0.4).abs() < 1e-9);
@@ -708,10 +764,11 @@ mod tests {
             exchange_rules: &rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
+            pending_submit_hints: &[],
             observed_at: Utc::now(),
         });
 
-        let RecoveryResolution::Rebuilt { state } = recovery else {
+        let RecoveryResolution::Rebuilt { state, .. } = recovery else {
             panic!("expected complete exchange snapshot to reanchor executor ledger");
         };
         assert_eq!(state.recovery_anomaly, None);
@@ -739,10 +796,11 @@ mod tests {
             exchange_rules: &rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
+            pending_submit_hints: &[],
             observed_at: Utc::now(),
         });
 
-        let RecoveryResolution::Rebuilt { state } = recovery else {
+        let RecoveryResolution::Rebuilt { state, .. } = recovery else {
             panic!("expected complete exchange snapshot to reanchor executor ledger");
         };
         assert_eq!(state.recovery_anomaly, None);
@@ -777,10 +835,11 @@ mod tests {
             exchange_rules: &rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
+            pending_submit_hints: &[],
             observed_at: Utc::now(),
         });
 
-        let RecoveryResolution::Rebuilt { state } = recovery else {
+        let RecoveryResolution::Rebuilt { state, .. } = recovery else {
             panic!("expected complete exchange snapshot to discard invalid boundary progress");
         };
         assert_eq!(state.recovery_anomaly, None);
@@ -807,6 +866,7 @@ mod tests {
         });
 
         let SubmitRecoveryResolution::Proceed {
+            state,
             request,
             desired_exposure,
         } = recovery.resolution
@@ -819,6 +879,322 @@ mod tests {
         assert_eq!(request.reduce_only, target_request.reduce_only);
         assert_eq!(request.client_order_id, target_request.client_order_id);
         assert_eq!(desired_exposure, target_desired_exposure);
+        assert_eq!(
+            state.bindings[0].status,
+            BindingStatus::SubmitAuthorized,
+            "dispatch capability must be recorded before Proceed is returned"
+        );
+
+        let duplicate = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &state,
+            recovery_token: &target_recovery_token,
+            current_exposure: &Exposure(0.0),
+            live_order: None,
+        });
+        assert!(matches!(
+            duplicate.resolution,
+            SubmitRecoveryResolution::AwaitExchangeState
+        ));
+    }
+
+    #[test]
+    fn submit_recovery_supersedes_valid_token_after_pending_binding_was_withdrawn() {
+        let rules = rules();
+        let withdrawn = binding("withdrawn-submit", Side::Buy, 100.0, 1.0);
+        let recovery_token = SubmitRecoveryToken::from_binding(&withdrawn);
+        let previous_state = ExecutorState::empty(Utc::now());
+
+        let recovery = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &previous_state,
+            recovery_token: &recovery_token,
+            current_exposure: &Exposure(0.0),
+            live_order: None,
+        });
+
+        assert!(matches!(
+            recovery.resolution,
+            SubmitRecoveryResolution::Superseded { .. }
+        ));
+    }
+
+    #[test]
+    fn submit_recovery_turns_cancel_after_submit_live_order_into_one_cancel() {
+        let rules = rules();
+        let mut protected = binding("protected-submit", Side::Buy, 100.0, 1.0);
+        protected.status = BindingStatus::CancelAfterSubmit;
+        let recovery_token = SubmitRecoveryToken::from_binding(&protected);
+        let live_order = live_order("protected-submit", Side::Buy, 100.0, 1.0);
+        let mut previous_state = ExecutorState::empty(Utc::now());
+        previous_state.bindings.push(protected);
+
+        let recovery = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &previous_state,
+            recovery_token: &recovery_token,
+            current_exposure: &Exposure(0.0),
+            live_order: Some(&live_order),
+        });
+
+        let SubmitRecoveryResolution::Recovered { state } = recovery.resolution else {
+            panic!("live order should recover the authorized submit");
+        };
+        assert_eq!(state.bindings[0].status, BindingStatus::CancelPending);
+        assert_eq!(state.bindings[0].order_id.as_deref(), Some("live-order-1"));
+        assert_eq!(
+            recovery
+                .effects
+                .iter()
+                .filter(|effect| matches!(
+                    effect,
+                    TrackEffect::CancelOrder { order_id, .. } if order_id == "live-order-1"
+                ))
+                .count(),
+            1
+        );
+
+        let duplicate = recover_submit_effect(SubmitRecoveryInput {
+            exchange_rules: &rules,
+            previous_state: &state,
+            recovery_token: &recovery_token,
+            current_exposure: &Exposure(0.0),
+            live_order: Some(&live_order),
+        });
+        assert!(duplicate.effects.is_empty());
+        let SubmitRecoveryResolution::Superseded {
+            state: duplicate_state,
+        } = duplicate.resolution
+        else {
+            panic!("cancel-pending submit should not dispatch or cancel twice");
+        };
+        assert_eq!(
+            duplicate_state.bindings[0].status,
+            BindingStatus::CancelPending
+        );
+    }
+
+    #[test]
+    fn complete_snapshot_keeps_authorized_submit_only_while_session_hint_is_active() {
+        let rules = rules();
+        let mut authorized = binding("authorized-submit", Side::Buy, 100.0, 1.0);
+        authorized.status = BindingStatus::SubmitAuthorized;
+        let recovery_token = SubmitRecoveryToken::from_binding(&authorized);
+        let hint = PendingSubmitHint {
+            request: authorized.request.clone(),
+            desired_exposure: authorized.desired_exposure.clone(),
+            submit_purpose: authorized.submit_purpose,
+            recovery_token,
+            phase: PendingSubmitPhase::DispatchInFlight,
+        };
+        let mut previous_state = ExecutorState::empty(Utc::now());
+        previous_state.bindings.push(authorized);
+        let empty_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new());
+
+        let active = recover_working_orders(RecoveryInput {
+            config: config(),
+            current_exposure: &Exposure(0.0),
+            desired_exposure: None,
+            exchange_rules: &rules,
+            previous_state: Some(&previous_state),
+            open_orders: &empty_orders,
+            pending_submit_hints: std::slice::from_ref(&hint),
+            observed_at: Utc::now(),
+        });
+        let RecoveryResolution::Rebuilt {
+            state: active_state,
+            ..
+        } = active
+        else {
+            panic!("active submit hint should rebuild cleanly");
+        };
+        assert_eq!(
+            active_state.bindings[0].status,
+            BindingStatus::SubmitAuthorized
+        );
+
+        let awaiting_exchange_state_hint = PendingSubmitHint {
+            phase: PendingSubmitPhase::AwaitingExchangeState,
+            ..hint.clone()
+        };
+        let resolved = recover_working_orders(RecoveryInput {
+            config: config(),
+            current_exposure: &Exposure(0.0),
+            desired_exposure: None,
+            exchange_rules: &rules,
+            previous_state: Some(&previous_state),
+            open_orders: &empty_orders,
+            pending_submit_hints: std::slice::from_ref(&awaiting_exchange_state_hint),
+            observed_at: Utc::now(),
+        });
+        let RecoveryResolution::Rebuilt {
+            state: resolved_state,
+            ..
+        } = resolved
+        else {
+            panic!("complete snapshot should resolve an awaiting submit");
+        };
+        assert!(
+            resolved_state.bindings.is_empty(),
+            "a complete empty snapshot should terminalize a submit awaiting exchange state"
+        );
+
+        let inactive = recover_working_orders(RecoveryInput {
+            config: config(),
+            current_exposure: &Exposure(0.0),
+            desired_exposure: None,
+            exchange_rules: &rules,
+            previous_state: Some(&previous_state),
+            open_orders: &empty_orders,
+            pending_submit_hints: &[],
+            observed_at: Utc::now(),
+        });
+        let RecoveryResolution::Rebuilt {
+            state: inactive_state,
+            ..
+        } = inactive
+        else {
+            panic!("inactive submit should rebuild cleanly");
+        };
+        assert!(inactive_state.bindings.is_empty());
+    }
+
+    #[test]
+    fn complete_snapshot_emits_one_cancel_when_it_resolves_cancel_after_submit_order() {
+        let rules = rules();
+        let mut protected = binding("protected-submit", Side::Buy, 100.0, 1.0);
+        protected.status = BindingStatus::CancelAfterSubmit;
+        let mut previous_state = ExecutorState::empty(Utc::now());
+        previous_state.bindings.push(protected);
+        let live_orders =
+            CompleteOpenOrderSnapshot::from_complete_exchange_query(vec![live_order(
+                "protected-submit",
+                Side::Buy,
+                100.0,
+                1.0,
+            )]);
+
+        let recovery = recover_working_orders(RecoveryInput {
+            config: config(),
+            current_exposure: &Exposure(0.0),
+            desired_exposure: None,
+            exchange_rules: &rules,
+            previous_state: Some(&previous_state),
+            open_orders: &live_orders,
+            pending_submit_hints: &[],
+            observed_at: Utc::now(),
+        });
+        let RecoveryResolution::Rebuilt { state, effects } = recovery else {
+            panic!("live authorized order should rebuild cleanly");
+        };
+        assert_eq!(state.bindings[0].status, BindingStatus::CancelPending);
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(
+                    effect,
+                    TrackEffect::CancelOrder { order_id, .. } if order_id == "live-order-1"
+                ))
+                .count(),
+            1
+        );
+
+        let replay = recover_working_orders(RecoveryInput {
+            config: config(),
+            current_exposure: &Exposure(0.0),
+            desired_exposure: None,
+            exchange_rules: &rules,
+            previous_state: Some(&state),
+            open_orders: &live_orders,
+            pending_submit_hints: &[],
+            observed_at: Utc::now(),
+        });
+        let RecoveryResolution::Rebuilt {
+            state: replay_state,
+            effects: replay_effects,
+        } = replay
+        else {
+            panic!("replayed live order should rebuild cleanly");
+        };
+        assert_eq!(
+            replay_state.bindings[0].status,
+            BindingStatus::CancelPending
+        );
+        assert!(replay_effects.is_empty());
+    }
+
+    #[test]
+    fn anomalous_snapshot_does_not_partially_consume_cancel_after_submit_binding() {
+        let rules = rules();
+        let mut protected = binding("protected-submit", Side::Buy, 100.0, 1.0);
+        protected.status = BindingStatus::CancelAfterSubmit;
+        let mut previous_state = ExecutorState::empty(Utc::now());
+        previous_state.bindings.push(protected);
+        let unknown = OrderObservation {
+            order_id: "unknown-order".to_string(),
+            client_order_id: "unknown-client".to_string(),
+            side: Side::Sell,
+            price: 80.0,
+            quantity: 3.0,
+            filled_qty: 0.0,
+            status: OrderStatus::New,
+        };
+        let live_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(vec![
+            live_order("protected-submit", Side::Buy, 100.0, 1.0),
+            unknown,
+        ]);
+
+        let recovery = recover_working_orders(RecoveryInput {
+            config: config(),
+            current_exposure: &Exposure(0.0),
+            desired_exposure: None,
+            exchange_rules: &rules,
+            previous_state: Some(&previous_state),
+            open_orders: &live_orders,
+            pending_submit_hints: &[],
+            observed_at: Utc::now(),
+        });
+        let RecoveryResolution::Anomaly { state, anomaly } = recovery else {
+            panic!("unknown live order should block the whole snapshot");
+        };
+        assert_eq!(anomaly, RecoveryAnomaly::UnknownLiveOrder);
+        assert_eq!(state.bindings[0].status, BindingStatus::CancelAfterSubmit);
+        assert!(state.bindings[0].order_id.is_none());
+    }
+
+    #[test]
+    fn non_empty_snapshot_terminalizes_unclaimed_authorized_submit_without_hint() {
+        let rules = rules();
+        let mut authorized = binding("authorized-submit", Side::Buy, 100.0, 1.0);
+        authorized.status = BindingStatus::SubmitAuthorized;
+        let mut other = binding("other-live", Side::Sell, 105.0, 1.0);
+        other.status = BindingStatus::Working;
+        other.order_id = Some("live-order-1".to_string());
+        let mut previous_state = ExecutorState::empty(Utc::now());
+        previous_state.bindings.extend([authorized, other]);
+        let live_orders =
+            CompleteOpenOrderSnapshot::from_complete_exchange_query(vec![live_order(
+                "other-live",
+                Side::Sell,
+                105.0,
+                1.0,
+            )]);
+
+        let recovery = recover_working_orders(RecoveryInput {
+            config: config(),
+            current_exposure: &Exposure(0.0),
+            desired_exposure: None,
+            exchange_rules: &rules,
+            previous_state: Some(&previous_state),
+            open_orders: &live_orders,
+            pending_submit_hints: &[],
+            observed_at: Utc::now(),
+        });
+        let RecoveryResolution::Rebuilt { state, .. } = recovery else {
+            panic!("complete snapshot should rebuild cleanly");
+        };
+        assert_eq!(state.bindings[0].status, BindingStatus::Terminal);
+        assert_eq!(state.bindings[1].status, BindingStatus::Working);
     }
 
     #[test]

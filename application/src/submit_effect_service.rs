@@ -438,6 +438,162 @@ mod tests {
         assert_eq!(persisted.status, EffectStatus::Succeeded);
     }
 
+    #[tokio::test]
+    async fn authorized_submit_stays_matchable_when_protection_precedes_writeback() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository.clone());
+
+        services
+            .observation
+            .observe_market(
+                "btc-core",
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 94.9,
+                        best_ask: 95.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+        let target = pending_submit_effects(&repository)
+            .into_iter()
+            .next()
+            .expect("test requires a submit effect");
+        let claimed = services
+            .session_effect_queue
+            .claim_next()
+            .expect("submit effect should be queued");
+        assert_eq!(claimed.effect_id, target.effect_id);
+
+        let attempt = services
+            .submit_effect
+            .recover_or_dispatch(
+                "btc-core",
+                &target.effect_id,
+                target.recovery_token.clone(),
+                SubmitRecoveryOrderLookup::NotQueried,
+            )
+            .await
+            .unwrap();
+        let super::SubmitAttempt::Dispatch(dispatch) = attempt else {
+            panic!("submit should be authorized for dispatch");
+        };
+
+        services
+            .observation
+            .observe_market(
+                "btc-core",
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 84.9,
+                        best_ask: 85.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            services
+                .session_effect_queue
+                .record_submit_awaiting_resolution(&target.effect_id),
+            "accepted submit should still own the in-flight queue item"
+        );
+
+        let writeback = dispatch
+            .record_receipt(&OrderReceipt {
+                order_id: "accepted-before-protection".into(),
+                client_order_id: target.request.client_order_id.clone(),
+                filled_qty: 0.0,
+                status: OrderStatus::New,
+            })
+            .await;
+        if let Err(failure) = writeback {
+            let (error, _dispatch) = failure.into_parts();
+            panic!(
+                "an authorized submit must retain its binding through receipt writeback: {error}"
+            );
+        }
+
+        let manager = services.submit_effect.manager();
+        let snapshot = manager
+            .read()
+            .await
+            .mutation_frame("btc-core")
+            .expect("track snapshot");
+        let (order_id, status) = snapshot
+            .binding_receipt_for_client_order_id(&target.request.client_order_id)
+            .expect("accepted submit should remain bound until cancellation completes");
+        assert_eq!(order_id.as_deref(), Some("accepted-before-protection"));
+        assert_eq!(status, poise_engine::executor::BindingStatus::CancelPending);
+        assert!(repository.pending_effects().iter().any(|effect| matches!(
+            &effect.effect,
+            TrackEffect::CancelOrder { order_id, .. }
+                if order_id == "accepted-before-protection"
+        )));
+    }
+
+    #[tokio::test]
+    async fn protection_before_submit_authorization_supersedes_effect_without_dispatch() {
+        let repository = Arc::new(MemoryRepository::default());
+        let (services, _) = track_write_services(seeded_manager(), repository.clone());
+
+        services
+            .observation
+            .observe_market(
+                "btc-core",
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 94.9,
+                        best_ask: 95.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let target = pending_submit_effects(&repository)
+            .into_iter()
+            .next()
+            .expect("test requires a submit effect");
+
+        services
+            .observation
+            .observe_market(
+                "btc-core",
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 84.9,
+                        best_ask: 85.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+        let attempt = services
+            .submit_effect
+            .recover_or_dispatch(
+                "btc-core",
+                &target.effect_id,
+                target.recovery_token,
+                SubmitRecoveryOrderLookup::NotQueried,
+            )
+            .await
+            .unwrap();
+        let super::SubmitAttempt::Finished(result) = attempt else {
+            panic!("withdrawn submit must not receive dispatch capability");
+        };
+        assert!(result.invalidates_pending_submit());
+        let persisted = repository
+            .pending_effects()
+            .into_iter()
+            .find(|effect| effect.effect_id == target.effect_id)
+            .expect("submit journal entry should remain diagnosable");
+        assert_eq!(persisted.status, EffectStatus::Superseded);
+    }
+
     fn test_service(
         repository: Arc<MemoryRepository>,
     ) -> (

@@ -24,7 +24,13 @@ pub struct LiveOrderBinding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BindingStatus {
+    /// The session effect exists but dispatch has not been authorized and may still be withdrawn.
     SubmitPending,
+    /// The per-track mutation guard granted an irreversible dispatch capability.
+    SubmitAuthorized,
+    /// Dispatch was authorized before cancellation was requested; retain identity until an
+    /// exchange order id is observed, then cancel it.
+    CancelAfterSubmit,
     Working,
     CancelPending,
     Terminal,
@@ -112,7 +118,11 @@ pub struct BindingProposalKey {
 pub fn binding_is_active(binding: &LiveOrderBinding) -> bool {
     matches!(
         binding.status,
-        BindingStatus::SubmitPending | BindingStatus::Working | BindingStatus::CancelPending
+        BindingStatus::SubmitPending
+            | BindingStatus::SubmitAuthorized
+            | BindingStatus::CancelAfterSubmit
+            | BindingStatus::Working
+            | BindingStatus::CancelPending
     )
 }
 

@@ -7,8 +7,10 @@ mod recording;
 mod recovery;
 
 pub use binding::{BindingStatus, SubmitRecoveryToken};
-pub(crate) use planning::{ExecutorInput, SubmitIntentInput, plan, refresh_state};
-pub use planning::{OrderRole, PendingSubmitHint};
+pub(crate) use planning::{
+    ExecutorInput, SubmitIntentInput, maintain_protected_bindings, plan, refresh_state,
+};
+pub use planning::{OrderRole, PendingSubmitHint, PendingSubmitPhase};
 pub use policy::{PolicyContext, PolicyKind};
 pub use recording::OrderUpdateAbsorbResult;
 pub(crate) use recording::{
