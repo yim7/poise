@@ -4,7 +4,7 @@
 
 本文是当前已确认的实现任务清单，不是长期架构事实源。长期架构和运行语义仍以 [system-overview.md](system-overview.md) 为准。
 
-当前状态：执行中。当前 task 是 0.7 固化 protected-state 订单维护与 current-session submit 授权生命周期；Task 1.2 暂停，等待 0.8 完成。
+当前状态：执行中。当前 task 是 0.8 区分 submit final failure 与 outcome unknown；Task 1.2 暂停，等待 0.8 完成。
 
 本文的生命周期：
 
@@ -152,8 +152,8 @@ Task 清单：
 | 0.4 消除 PNL backfill 空成功并补齐当前实用 venue | completed | Available(empty)、Unsupported、transient error 明确分离 | 9f35f74 |
 | 0.5 修复 REST 旧快照覆盖 WS 新事实 | completed | observation revision 改变时旧 REST 快照不能应用 | f0fcc4a |
 | 0.6 增加 trading readiness 并校正文档中的 journal 语义 | completed | readiness 区分 blocker 与 warning，journal 不参与恢复 | e2708bd |
-| 0.7 固化 protected-state 订单维护与 current-session submit 授权生命周期 | in_progress | 已授权 submit 在 receipt、order fact 或完整快照裁决前不丢失订单身份 | — |
-| 0.8 区分 submit final failure 与 outcome unknown | pending | 结果未知时先保留所有权并完整对账，不盲目提交替代订单 | — |
+| 0.7 固化 protected-state 订单维护与 current-session submit 授权生命周期 | completed | 已授权 submit 在 receipt、order fact 或完整快照裁决前不丢失订单身份 | a6ee855 |
+| 0.8 区分 submit final failure 与 outcome unknown | in_progress | 结果未知时先保留所有权并完整对账，不盲目提交替代订单 | — |
 
 ### Task 0.1 修复跨零新增风险计算
 
