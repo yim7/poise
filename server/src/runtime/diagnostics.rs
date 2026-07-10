@@ -74,6 +74,7 @@ mod tests {
             },
             current_exposure: Exposure(0.0),
             position_qty: 0.0,
+            inventory_decision: None,
             desired_exposure: None,
             execution_target_exposure: None,
             risk_acquisition: Default::default(),

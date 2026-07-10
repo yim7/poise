@@ -9,7 +9,7 @@ use crate::execution_gate::ExecutionGateState;
 use crate::executor::{BindingStatus, RecoveryAnomaly};
 use crate::ledger::TrackPnlStats;
 use crate::ports::OrderReceipt;
-use crate::runtime::{ExecutorState, RiskState, TrackState};
+use crate::runtime::{ExecutorState, InventoryDecisionSnapshot, RiskState, TrackState};
 use poise_core::track::{Instrument, TrackId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +35,8 @@ pub struct TrackMutationFrame {
     pub(crate) current_exposure: Exposure,
     pub(crate) current_position_qty: f64,
     pub(crate) desired_exposure: Option<Exposure>,
+    pub(crate) inventory_decision: Option<InventoryDecisionSnapshot>,
+    pub(crate) inventory_decision_revision: u64,
     pub(crate) executor_state: ExecutorState,
     pub(crate) execution_gate_state: ExecutionGateState,
     pub(crate) pnl_stats: TrackPnlStats,
@@ -68,6 +70,11 @@ impl TrackMutationFrame {
     #[cfg(any(test, feature = "test-support"))]
     pub fn desired_exposure(&self) -> Option<&Exposure> {
         self.desired_exposure.as_ref()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inventory_decision(&self) -> Option<&InventoryDecisionSnapshot> {
+        self.inventory_decision.as_ref()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -131,18 +138,6 @@ impl TrackMutationFrame {
     #[cfg(any(test, feature = "test-support"))]
     pub fn executor_ledger_anchor_exposure(&self) -> &Exposure {
         &self.executor_state.ledger_state.ledger_anchor_exposure
-    }
-
-    pub fn set_account_capacity_available_notional(&mut self, available_notional: Option<f64>) {
-        self.execution_gate_state
-            .account_capacity
-            .available_notional = available_notional;
-    }
-
-    pub fn account_capacity_available_notional(&self) -> Option<f64> {
-        self.execution_gate_state
-            .account_capacity
-            .available_notional
     }
 
     #[cfg(any(test, feature = "test-support"))]

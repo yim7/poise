@@ -16,6 +16,7 @@ use crate::runtime::{
 
 pub struct TargetReconcileResult {
     pub events: Vec<DomainEvent>,
+    pub policy_target: Exposure,
     pub curve_target: Exposure,
     pub desired_exposure: Exposure,
     pub execution_target_exposure: Exposure,
@@ -44,6 +45,7 @@ pub fn reconcile_target_at(
             events: exposure_target_change_event(track, &target)
                 .into_iter()
                 .collect(),
+            policy_target: target.clone(),
             curve_target: target.clone(),
             execution_target_exposure: target.clone(),
             desired_exposure: target,
@@ -66,6 +68,7 @@ pub fn reconcile_target_at(
             events: exposure_target_change_event(track, &target_override)
                 .into_iter()
                 .collect(),
+            policy_target: target_override.clone(),
             curve_target: target_override.clone(),
             execution_target_exposure: target_override.clone(),
             desired_exposure: target_override,
@@ -118,15 +121,16 @@ pub fn reconcile_target_at(
             (capped, Some(applied_risk_cap), event.into_iter().collect())
         }
         RiskOutcome::Terminate(cause) => {
-            let target = Exposure(0.0);
-            let delta = track.current_exposure.delta(&target);
+            let termination_target = Exposure(0.0);
+            let delta = track.current_exposure.delta(&termination_target);
             return TargetReconcileResult {
-                events: exposure_target_change_event(track, &target)
+                events: exposure_target_change_event(track, &termination_target)
                     .into_iter()
                     .collect(),
-                curve_target: target.clone(),
-                execution_target_exposure: target.clone(),
-                desired_exposure: target,
+                policy_target: target,
+                curve_target: termination_target.clone(),
+                execution_target_exposure: termination_target.clone(),
+                desired_exposure: termination_target,
                 applied_risk_cap: None,
                 new_runtime_state: Some(TrackState::Terminated {
                     cause: TerminationCause::Risk(cause),
@@ -160,6 +164,7 @@ pub fn reconcile_target_at(
     ) {
         return TargetReconcileResult {
             events,
+            policy_target: target.clone(),
             curve_target: desired_exposure.clone(),
             desired_exposure,
             execution_target_exposure,
@@ -190,6 +195,7 @@ pub fn reconcile_target_at(
         }
         return TargetReconcileResult {
             events,
+            policy_target: target.clone(),
             curve_target: desired_exposure.clone(),
             desired_exposure,
             execution_target_exposure,
@@ -206,6 +212,7 @@ pub fn reconcile_target_at(
     if delta.is_zero() {
         return TargetReconcileResult {
             events,
+            policy_target: target.clone(),
             curve_target: desired_exposure.clone(),
             desired_exposure,
             execution_target_exposure,
@@ -224,6 +231,7 @@ pub fn reconcile_target_at(
 
     TargetReconcileResult {
         events,
+        policy_target: target,
         curve_target: desired_exposure.clone(),
         desired_exposure,
         execution_target_exposure,
@@ -238,7 +246,7 @@ pub fn reconcile_target_at(
 
 fn pnl_asset_mismatch_result(
     track: &TrackRuntime,
-    curve_target: &Exposure,
+    policy_target: &Exposure,
     new_runtime_state: Option<TrackState>,
 ) -> TargetReconcileResult {
     let current = track.current_exposure.clone();
@@ -251,7 +259,8 @@ fn pnl_asset_mismatch_result(
         events: vec![DomainEvent::ExecutionGateApplied {
             reason: reason.clone(),
         }],
-        curve_target: curve_target.clone(),
+        policy_target: policy_target.clone(),
+        curve_target: policy_target.clone(),
         desired_exposure: current.clone(),
         execution_target_exposure: current,
         applied_risk_cap: None,
@@ -281,12 +290,14 @@ fn risk_cap_applied_event(
     track: &TrackRuntime,
     applied_risk_cap: &AppliedRiskCap,
 ) -> Option<DomainEvent> {
-    (track.active_risk_cap.as_ref() != Some(applied_risk_cap)).then_some(
-        DomainEvent::RiskCapApplied {
-            intended: applied_risk_cap.intended.clone(),
-            capped: applied_risk_cap.capped.clone(),
-        },
-    )
+    (track
+        .inventory_decision()
+        .and_then(|decision| decision.applied_risk_cap.as_ref())
+        != Some(applied_risk_cap))
+    .then_some(DomainEvent::RiskCapApplied {
+        intended: applied_risk_cap.intended.clone(),
+        capped: applied_risk_cap.capped.clone(),
+    })
 }
 
 fn apply_risk_exposure_gate(
@@ -572,7 +583,8 @@ mod tests {
     use super::*;
     use crate::risk_exposure_gate::RiskExposureGateState;
     use crate::runtime::{
-        AutoState, ControlState, ManualState, TerminationCause, TrackState, TrackStatus,
+        AutoState, ControlState, InventoryDecisionSnapshot, ManualState, TerminationCause,
+        TrackState, TrackStatus,
     };
     use chrono::{TimeZone, Utc};
     use poise_core::risk::LossLimits;
@@ -1521,6 +1533,7 @@ mod tests {
 
         let result = reconcile_target(&track, 90.0);
 
+        assert_eq!(result.policy_target, Exposure(8.0));
         assert_eq!(result.desired_exposure, Exposure(4.0));
         assert!(result.events.iter().any(|event| matches!(
             event,
@@ -1592,10 +1605,21 @@ mod tests {
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(0.0);
         track.desired_exposure = Some(Exposure(4.0));
-        track.active_risk_cap = Some(AppliedRiskCap {
+        let applied_risk_cap = AppliedRiskCap {
             intended: Exposure(8.0),
             capped: Exposure(4.0),
-        });
+        };
+        track.apply_inventory_decision(Some(InventoryDecisionSnapshot {
+            observed_at: Utc.with_ymd_and_hms(2026, 4, 8, 0, 0, 0).unwrap(),
+            policy_target: Exposure(8.0),
+            risk_approved_target: Exposure(4.0),
+            acquisition_frontier: None,
+            execution_target: Exposure(4.0),
+            applied_risk_cap: Some(applied_risk_cap.clone()),
+            price_execution_gate: crate::price_gate::PriceExecutionGate::Open,
+            revision: 1,
+            risk_acquisition: None,
+        }));
         set_max_notional(&mut track, 1500.0);
 
         let result = reconcile_target(&track, 90.0);
@@ -1608,7 +1632,7 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, DomainEvent::RiskCapApplied { .. }))
         );
-        assert_eq!(result.applied_risk_cap, track.active_risk_cap);
+        assert_eq!(result.applied_risk_cap, Some(applied_risk_cap));
     }
 
     #[test]

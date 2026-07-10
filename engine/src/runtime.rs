@@ -222,11 +222,17 @@ pub enum RiskAcquisitionDirection {
     Short,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
-struct LiveTargetProjection {
-    desired_exposure: Option<Exposure>,
-    execution_target_exposure: Option<Exposure>,
-    risk_acquisition: Option<RiskAcquisitionRuntimeView>,
+#[derive(Debug, Clone, PartialEq)]
+pub struct InventoryDecisionSnapshot {
+    pub observed_at: DateTime<Utc>,
+    pub policy_target: Exposure,
+    pub risk_approved_target: Exposure,
+    pub acquisition_frontier: Option<Exposure>,
+    pub execution_target: Exposure,
+    pub applied_risk_cap: Option<AppliedRiskCap>,
+    pub price_execution_gate: PriceExecutionGate,
+    pub revision: u64,
+    pub risk_acquisition: Option<RiskAcquisitionRuntimeView>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -272,6 +278,7 @@ pub struct TrackRuntimeView {
     pub exchange_rules: ExchangeRules,
     pub current_exposure: Exposure,
     pub position_qty: f64,
+    pub inventory_decision: Option<InventoryDecisionSnapshot>,
     pub desired_exposure: Option<Exposure>,
     pub execution_target_exposure: Option<Exposure>,
     pub risk_acquisition: Option<RiskAcquisitionRuntimeView>,
@@ -388,7 +395,8 @@ pub struct TrackRuntime {
     pub(crate) current_position_qty: f64,
     // Reconcile owns desired_exposure; exchange sync/restore own observed order and risk fields.
     pub(crate) desired_exposure: Option<Exposure>,
-    pub(crate) active_risk_cap: Option<AppliedRiskCap>,
+    pub(crate) inventory_decision: Option<InventoryDecisionSnapshot>,
+    pub(crate) inventory_decision_revision: u64,
     pub(crate) executor_state: ExecutorState,
     pub(crate) pnl_stats: TrackPnlStats,
     pub(crate) risk_state: RiskState,
@@ -467,7 +475,8 @@ impl TrackRuntime {
             current_exposure: Exposure(0.0),
             current_position_qty: 0.0,
             desired_exposure: None,
-            active_risk_cap: None,
+            inventory_decision: None,
+            inventory_decision_revision: 0,
             executor_state: ExecutorState::empty(started_at),
             pnl_stats: TrackPnlStats::default(),
             risk_state: RiskState::default(),
@@ -637,8 +646,37 @@ impl TrackRuntime {
             fresh.last_tick_at = Some(market_data.observed_at);
         }
 
-        fresh.price_execution_gate = fresh.quote_health_view().price_execution_gate;
+        fresh.price_execution_gate = evaluate_price_execution_gate(
+            PriceExecutionGate::Open,
+            fresh.mark_price,
+            match (fresh.best_bid, fresh.best_ask) {
+                (Some(best_bid), Some(best_ask)) => Some(ExecutionQuote { best_bid, best_ask }),
+                _ => None,
+            },
+        );
         fresh
+    }
+
+    pub fn inventory_decision(&self) -> Option<&InventoryDecisionSnapshot> {
+        self.inventory_decision.as_ref()
+    }
+
+    pub(crate) fn next_inventory_decision_revision(&self) -> u64 {
+        self.inventory_decision_revision
+            .checked_add(1)
+            .expect("inventory decision revision exhausted")
+    }
+
+    pub(crate) fn apply_inventory_decision(&mut self, decision: Option<InventoryDecisionSnapshot>) {
+        if let Some(decision) = &decision {
+            assert_eq!(
+                decision.revision,
+                self.next_inventory_decision_revision(),
+                "inventory decision revision must advance exactly once"
+            );
+            self.inventory_decision_revision = decision.revision;
+        }
+        self.inventory_decision = decision;
     }
 
     pub fn mutation_frame(&self) -> TrackMutationFrame {
@@ -649,6 +687,8 @@ impl TrackRuntime {
             current_exposure: self.current_exposure.clone(),
             current_position_qty: self.current_position_qty,
             desired_exposure: self.desired_exposure.clone(),
+            inventory_decision: self.inventory_decision.clone(),
+            inventory_decision_revision: self.inventory_decision_revision,
             executor_state: self.executor_state.clone(),
             execution_gate_state: self.execution_gate_state.clone(),
             pnl_stats: self.pnl_stats.clone(),
@@ -680,7 +720,8 @@ impl TrackRuntime {
         self.current_exposure = frame.current_exposure.clone();
         self.current_position_qty = frame.current_position_qty;
         self.desired_exposure = frame.desired_exposure.clone();
-        self.active_risk_cap = None;
+        self.inventory_decision = frame.inventory_decision.clone();
+        self.inventory_decision_revision = frame.inventory_decision_revision;
         self.executor_state = frame.executor_state.clone();
         self.pnl_stats = frame.pnl_stats.clone();
         self.risk_state = frame.risk.clone();
@@ -724,36 +765,31 @@ impl TrackRuntime {
             } else {
                 StrategyPriceStatus::Stale
             },
-            price_execution_gate: evaluate_price_execution_gate(
-                PriceExecutionGate::Open,
-                self.mark_price,
-                match (self.best_bid, self.best_ask) {
-                    (Some(best_bid), Some(best_ask)) => Some(ExecutionQuote { best_bid, best_ask }),
-                    _ => None,
-                },
-            ),
+            price_execution_gate: self.price_execution_gate,
         }
     }
 
     pub fn strategy_target_view(&self) -> StrategyTargetView {
-        let live_target = self.live_target_projection();
         StrategyTargetView {
-            desired_exposure: live_target.desired_exposure,
+            desired_exposure: self
+                .inventory_decision
+                .as_ref()
+                .map(|decision| decision.risk_approved_target.clone()),
         }
     }
 
     pub fn live_view(&self) -> TrackLiveView {
         let quote_health = self.quote_health_view();
-        let live_target = self.live_target_projection();
+        let decision = self.inventory_decision.as_ref();
         TrackLiveView {
             strategy_price: self.strategy_price,
             strategy_price_status: quote_health.strategy_price_status,
             mark_price: self.mark_price,
             best_bid: self.best_bid,
             best_ask: self.best_ask,
-            desired_exposure: live_target.desired_exposure.map(|value| value.0),
-            execution_target_exposure: live_target.execution_target_exposure.map(|value| value.0),
-            risk_acquisition: live_target.risk_acquisition,
+            desired_exposure: decision.map(|decision| decision.risk_approved_target.0),
+            execution_target_exposure: decision.map(|decision| decision.execution_target.0),
+            risk_acquisition: decision.and_then(|decision| decision.risk_acquisition.clone()),
             price_execution_block_reason: match quote_health.price_execution_gate {
                 PriceExecutionGate::Open => None,
                 PriceExecutionGate::ManualRiskReductionOnly { reason }
@@ -769,11 +805,8 @@ impl TrackRuntime {
             exchange_rules: self.exchange_rules.clone(),
             current_exposure: self.current_exposure.clone(),
             position_qty: self.current_position_qty,
-            desired_exposure: live
-                .desired_exposure
-                .as_ref()
-                .map(|value| Exposure(*value))
-                .or_else(|| self.desired_exposure.clone()),
+            inventory_decision: self.inventory_decision.clone(),
+            desired_exposure: live.desired_exposure.map(Exposure),
             execution_target_exposure: live.execution_target_exposure.map(Exposure),
             risk_acquisition: live.risk_acquisition,
             manual_target_override: self.manual_target_override(),
@@ -799,31 +832,7 @@ impl TrackRuntime {
         }
     }
 
-    fn live_target_projection(&self) -> LiveTargetProjection {
-        if self.track_state.is_paused() {
-            return LiveTargetProjection::default();
-        }
-
-        let Some(strategy_price) = matches!(self.strategy_price_status, StrategyPriceStatus::Live)
-            .then_some(self.strategy_price)
-            .flatten()
-        else {
-            return LiveTargetProjection::default();
-        };
-
-        let observed_at = Utc::now();
-        let target = reconciler::reconcile_target_at(self, strategy_price, observed_at);
-        let risk_acquisition =
-            self.live_risk_acquisition_view(&target, strategy_price, observed_at);
-
-        LiveTargetProjection {
-            desired_exposure: Some(target.desired_exposure),
-            execution_target_exposure: Some(target.execution_target_exposure),
-            risk_acquisition,
-        }
-    }
-
-    fn live_risk_acquisition_view(
+    pub(crate) fn risk_acquisition_runtime_view(
         &self,
         target: &reconciler::TargetReconcileResult,
         strategy_price: f64,
@@ -926,6 +935,12 @@ fn validate_frame_invariants(frame: &TrackMutationFrame) -> Result<()> {
         anyhow::bail!("manual_flattening requires manual_target_override = 0");
     }
 
+    if let Some(decision) = &frame.inventory_decision
+        && decision.revision != frame.inventory_decision_revision
+    {
+        anyhow::bail!("inventory decision revision does not match frame revision");
+    }
+
     Ok(())
 }
 
@@ -983,6 +998,35 @@ mod tests {
     }
 
     #[test]
+    fn quote_health_view_projects_committed_price_gate_hysteresis() {
+        let mut runtime = test_runtime();
+        runtime.mark_price = Some(100.0);
+        runtime.best_bid = Some(97.5);
+        runtime.best_ask = Some(97.5);
+        runtime.price_execution_gate = PriceExecutionGate::ManualRiskReductionOnly {
+            reason: PriceExecutionBlockReason::MarkBookDivergence,
+        };
+
+        assert_eq!(
+            runtime.quote_health_view().price_execution_gate,
+            runtime.price_execution_gate,
+            "read paths must project the committed hysteresis state"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "inventory decision revision must advance exactly once")]
+    fn inventory_decision_rejects_same_revision_replacement() {
+        let mut runtime = test_runtime();
+        let observed_at = Utc.with_ymd_and_hms(2026, 4, 23, 8, 0, 0).unwrap();
+        commit_inventory_decision_for_test(&mut runtime, 95.0, observed_at);
+        let mut replacement = runtime.inventory_decision().unwrap().clone();
+        replacement.risk_approved_target = Exposure(9.0);
+
+        runtime.apply_inventory_decision(Some(replacement));
+    }
+
+    #[test]
     fn live_view_exposes_risk_acquisition_backlog() {
         let mut config = test_config();
         config.risk_acquisition = poise_core::strategy::RiskAcquisitionConfig::default();
@@ -997,6 +1041,11 @@ mod tests {
         runtime.mark_price = Some(95.0);
         runtime.best_bid = Some(94.9);
         runtime.best_ask = Some(95.1);
+        commit_inventory_decision_for_test(
+            &mut runtime,
+            95.0,
+            Utc.with_ymd_and_hms(2026, 4, 23, 8, 0, 0).unwrap(),
+        );
 
         let live = runtime.live_view();
         assert!((live.execution_target_exposure.unwrap() - 2.0).abs() < 1e-9);
@@ -1031,6 +1080,11 @@ mod tests {
         runtime.mark_price = Some(99.375);
         runtime.best_bid = Some(99.3);
         runtime.best_ask = Some(99.4);
+        commit_inventory_decision_for_test(
+            &mut runtime,
+            99.375,
+            Utc.with_ymd_and_hms(2026, 4, 23, 8, 0, 0).unwrap(),
+        );
 
         let live = runtime.live_view();
 
@@ -1065,6 +1119,11 @@ mod tests {
         runtime.last_tick_at = Some(Utc.with_ymd_and_hms(2026, 4, 23, 8, 0, 0).unwrap());
         runtime.market_data_stale_since =
             Some(Utc.with_ymd_and_hms(2026, 4, 23, 7, 59, 0).unwrap());
+        commit_inventory_decision_for_test(
+            &mut runtime,
+            101.0,
+            Utc.with_ymd_and_hms(2026, 4, 23, 8, 0, 0).unwrap(),
+        );
 
         let fresh = runtime.fresh_start(
             TrackState::WaitingMarketData,
@@ -1121,6 +1180,8 @@ mod tests {
             Some(Utc.with_ymd_and_hms(2026, 4, 23, 8, 1, 0).unwrap())
         );
         assert!(fresh.market_data_stale_since.is_none());
+        assert!(fresh.inventory_decision().is_none());
+        assert_eq!(fresh.inventory_decision_revision, 0);
         assert_eq!(fresh.pnl_stats.gross_realized_pnl_cumulative, 55.0);
     }
 
@@ -1179,6 +1240,30 @@ mod tests {
             profile_revision_for_config(&test_config())
         );
         assert_eq!(reset.ledger_state.ledger_anchor_exposure, Exposure(2.5));
+    }
+
+    fn commit_inventory_decision_for_test(
+        runtime: &mut TrackRuntime,
+        strategy_price: f64,
+        observed_at: DateTime<Utc>,
+    ) {
+        let target = reconciler::reconcile_target_at(runtime, strategy_price, observed_at);
+        let decision = InventoryDecisionSnapshot {
+            observed_at,
+            policy_target: target.policy_target.clone(),
+            risk_approved_target: target.desired_exposure.clone(),
+            acquisition_frontier: target.risk_release_frontier.clone(),
+            execution_target: target.execution_target_exposure.clone(),
+            applied_risk_cap: target.applied_risk_cap.clone(),
+            price_execution_gate: runtime.price_execution_gate,
+            revision: runtime.next_inventory_decision_revision(),
+            risk_acquisition: runtime.risk_acquisition_runtime_view(
+                &target,
+                strategy_price,
+                observed_at,
+            ),
+        };
+        runtime.apply_inventory_decision(Some(decision));
     }
 
     fn test_config() -> TrackConfig {
