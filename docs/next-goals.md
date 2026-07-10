@@ -4,7 +4,7 @@
 
 本文是当前已确认的实现任务清单，不是长期架构事实源。长期架构和运行语义仍以 [system-overview.md](system-overview.md) 为准。
 
-当前状态：执行中。当前 task 是 1.2 建立 committed InventoryDecisionSnapshot。
+当前状态：执行中。当前 task 是 1.3 统一公开词汇并增加 DecisionReason。
 
 本文的生命周期：
 
@@ -491,8 +491,8 @@ Task 清单：
 | Task | 状态 | 验收摘要 | Commit |
 | --- | --- | --- | --- |
 | 1.1 让 executor 只消费 final execution target | completed | executor 不再读取 frontier 或重复计算 backlog target | 89f6761 |
-| 1.2 建立 committed InventoryDecisionSnapshot | in_progress | 查询只投影已提交决策，不推进 gate 或 timer；依赖 Task 0.8 | — |
-| 1.3 统一公开词汇并增加 DecisionReason | pending | API、WebSocket、TUI 使用同一 revision 和原因 | — |
+| 1.2 建立 committed InventoryDecisionSnapshot | completed | 查询只投影已提交决策，不推进 gate 或 timer；依赖 Task 0.8 | b5e8e25 |
+| 1.3 统一公开词汇并增加 DecisionReason | in_progress | API、WebSocket、TUI 使用同一 revision 和原因 | — |
 | 1.4 固定保守 fresh-session acquisition 语义 | pending | 重启本身不授予新增风险，离线时间不触发 stale | — |
 
 ### Task 1.1 让 executor 只消费 final execution target
