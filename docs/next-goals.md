@@ -4,7 +4,7 @@
 
 本文是当前已确认的实现任务清单，不是长期架构事实源。长期架构和运行语义仍以 [system-overview.md](system-overview.md) 为准。
 
-当前状态：执行中。当前 task 是 0.8 区分 submit final failure 与 outcome unknown；Task 1.2 暂停，等待 0.8 完成。
+当前状态：执行中。当前 task 是 1.2 建立 committed InventoryDecisionSnapshot。
 
 本文的生命周期：
 
@@ -133,8 +133,8 @@ track events 和 track effects 只用于审计与诊断，不参与启动恢复�
 
 | 顺序 | Goal | 优先级 | 难度 | 状态 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| 0 | 建立正确性与交易事实底线 | P0 | L | in_progress | 无 |
-| 1 | 统一决策 owner 与可解释性 | P1 | L | pending | Goal 0 |
+| 0 | 建立正确性与交易事实底线 | P0 | L | completed | 无 |
+| 1 | 统一决策 owner 与可解释性 | P1 | L | in_progress | Goal 0 |
 | 2 | 建立真实 decision replay 与 Workbench 评估 | P2 | L | pending | Goal 1 |
 | 3 | 完成整体验收与长期文档同步 | P1 | M | pending | Goal 0 到 Goal 2 |
 
@@ -153,7 +153,7 @@ Task 清单：
 | 0.5 修复 REST 旧快照覆盖 WS 新事实 | completed | observation revision 改变时旧 REST 快照不能应用 | f0fcc4a |
 | 0.6 增加 trading readiness 并校正文档中的 journal 语义 | completed | readiness 区分 blocker 与 warning，journal 不参与恢复 | e2708bd |
 | 0.7 固化 protected-state 订单维护与 current-session submit 授权生命周期 | completed | 已授权 submit 在 receipt、order fact 或完整快照裁决前不丢失订单身份 | a6ee855 |
-| 0.8 区分 submit final failure 与 outcome unknown | in_progress | 结果未知时先保留所有权并完整对账，不盲目提交替代订单 | — |
+| 0.8 区分 submit final failure 与 outcome unknown | completed | 结果未知时先保留所有权并完整对账，不盲目提交替代订单 | 3f74224 |
 
 ### Task 0.1 修复跨零新增风险计算
 
@@ -491,7 +491,7 @@ Task 清单：
 | Task | 状态 | 验收摘要 | Commit |
 | --- | --- | --- | --- |
 | 1.1 让 executor 只消费 final execution target | completed | executor 不再读取 frontier 或重复计算 backlog target | 89f6761 |
-| 1.2 建立 committed InventoryDecisionSnapshot | pending | 查询只投影已提交决策，不推进 gate 或 timer；依赖 Task 0.8 | — |
+| 1.2 建立 committed InventoryDecisionSnapshot | in_progress | 查询只投影已提交决策，不推进 gate 或 timer；依赖 Task 0.8 | — |
 | 1.3 统一公开词汇并增加 DecisionReason | pending | API、WebSocket、TUI 使用同一 revision 和原因 | — |
 | 1.4 固定保守 fresh-session acquisition 语义 | pending | 重启本身不授予新增风险，离线时间不触发 stale | — |
 
