@@ -680,6 +680,7 @@ git diff --check
 - server/src/projector.rs
 - server/src/websocket.rs
 - tui/
+- tools/track-tuning-workbench/ 的 server live panel
 
 验收矩阵：
 
@@ -708,6 +709,7 @@ initial_release_units
 - marker 由 TrackRuntime 持有并进入 TrackMutationFrame；manager 只在一次已安装的 automatic risk-gate 决策中消费，rollback 不得误消费。
 - fresh-session 初始化使用独立入口，不改变同一运行 session 内普通 acquisition episode 的 initial_ratio 语义。
 - acquisition session 使用 risk acquisition backlog 的 sibling view 公开；即使第一笔决策只减仓、没有 backlog，也能看到 reset reason、session start、initial frontier 和 initial release units。
+- Workbench 作为 server wire contract 的直接消费者同步可选 acquisition session 类型，并在 live panel 展示同一份 sibling view；本 task 不把它并入 Task 2.3 的 replay evaluator。
 - 不保存 frontier、anchor、stale timer 或旧 target。
 - inherited orders 仍按现有 startup cleanup 清理。
 - 如果实现需要区分首次启用和进程重启并引入 durable activation intent，先停止确认；本 task 默认所有 fresh process session 都采用保守规则。
@@ -721,6 +723,8 @@ cargo test -p poise-engine runtime::tests::
 cargo test -p poise-server runtime::startup_bootstrap::tests::
 cargo test -p poise-protocol
 cargo test -p poise-tui
+(cd tools/track-tuning-workbench && pnpm test)
+(cd tools/track-tuning-workbench && pnpm build)
 git diff --check
 ~~~
 
