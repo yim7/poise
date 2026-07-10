@@ -27,6 +27,12 @@ pub struct RiskAcquisitionRelease {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct FreshAcquisitionInitialization {
+    pub initial_frontier: Exposure,
+    pub initial_release_units: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RiskExposureGateInput {
     pub config: RiskAcquisitionConfig,
     pub min_rebalance_units: f64,
@@ -42,6 +48,43 @@ pub struct RiskExposureGateDecision {
     pub risk_release_frontier: Exposure,
     pub state: Option<RiskExposureGateState>,
     pub next_release: Option<RiskAcquisitionRelease>,
+}
+
+pub fn initialize_fresh_session(
+    input: RiskExposureGateInput,
+) -> (RiskExposureGateDecision, FreshAcquisitionInitialization) {
+    debug_assert!(
+        input.state.is_none(),
+        "fresh acquisition initialization must not reuse an existing gate state"
+    );
+    let initial_frontier =
+        conservative_fresh_frontier(input.current_exposure.clone(), input.curve_target.clone());
+    let state = (initial_frontier != input.curve_target).then(|| RiskExposureGateState {
+        risk_release_frontier: initial_frontier.clone(),
+        release_anchor_price: input.strategy_price,
+        release_anchor_target: input.curve_target.clone(),
+        stale_since: input.observed_at,
+    });
+    let next_release = state.as_ref().and_then(|state| {
+        next_release(
+            input.config,
+            input.min_rebalance_units,
+            state,
+            input.curve_target,
+        )
+    });
+
+    (
+        RiskExposureGateDecision {
+            risk_release_frontier: initial_frontier.clone(),
+            state,
+            next_release,
+        },
+        FreshAcquisitionInitialization {
+            initial_frontier,
+            initial_release_units: 0.0,
+        },
+    )
 }
 
 pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
@@ -234,6 +277,16 @@ fn startup_state(
         release_anchor_price: strategy_price,
         release_anchor_target: curve_target,
         stale_since: observed_at,
+    }
+}
+
+fn conservative_fresh_frontier(current_exposure: Exposure, curve_target: Exposure) -> Exposure {
+    if crosses_zero(current_exposure.0, curve_target.0) {
+        Exposure(0.0)
+    } else if inside_or_equal(curve_target.0, current_exposure.0) {
+        curve_target
+    } else {
+        current_exposure
     }
 }
 
@@ -511,6 +564,53 @@ mod tests {
             })
         );
         assert!(decision.next_release.is_some());
+    }
+
+    #[test]
+    fn fresh_session_initialization_is_conservative_across_inventory_shapes() {
+        let cases = [
+            (2.0, 8.0, 2.0, true),
+            (8.0, 2.0, 2.0, false),
+            (2.0, -4.0, 0.0, true),
+            (0.0, 8.0, 0.0, true),
+            (-2.0, -8.0, -2.0, true),
+            (-8.0, -2.0, -2.0, false),
+            (-2.0, 4.0, 0.0, true),
+            (0.0, -8.0, 0.0, true),
+        ];
+
+        for (current, target, expected_frontier, expects_gate) in cases {
+            let (decision, initialization) =
+                initialize_fresh_session(input(None, current, target, 100.0));
+
+            assert_eq!(decision.risk_release_frontier, Exposure(expected_frontier));
+            assert_eq!(decision.state.is_some(), expects_gate);
+            assert_eq!(initialization.initial_frontier, Exposure(expected_frontier));
+            assert_eq!(initialization.initial_release_units, 0.0);
+        }
+    }
+
+    #[test]
+    fn fresh_session_cross_zero_anchor_waits_for_new_advantage() {
+        let first_observation = observed_at();
+        let (first, _) = initialize_fresh_session(input(None, 2.0, -4.0, 100.0));
+        let state = first
+            .state
+            .expect("cross-zero fresh start should keep backlog");
+
+        assert_eq!(state.risk_release_frontier, Exposure(0.0));
+        assert_eq!(state.release_anchor_target, Exposure(-4.0));
+        assert_eq!(state.stale_since, first_observation);
+
+        let unchanged_next_tick = apply(input_at(
+            Some(state),
+            0.0,
+            -4.0,
+            100.0,
+            first_observation + Duration::minutes(1),
+        ));
+
+        assert_eq!(unchanged_next_tick.risk_release_frontier, Exposure(0.0));
     }
 
     #[test]

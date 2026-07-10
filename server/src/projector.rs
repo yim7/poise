@@ -1,28 +1,30 @@
 use poise_protocol::{
-    ActivityLevelView, BandFlattenTrigger as ProtocolTrigger,
-    BandProtectionPolicy as ProtocolPolicy, BandRecoverPolicy as ProtocolRecoverPolicy,
-    DecisionReasonView, ExecutionBadgeView, ExecutionBindingIntentView, ExecutionBindingOrderView,
-    ExecutionBindingPolicyView, ExecutionBindingStatusView, ExecutionBindingView,
-    ExecutionStateView, ExecutionStatusView, ExposureSummaryView, InstrumentView,
-    InventoryDecisionView, PriceExecutionBlockReasonView, RiskAcquisitionConfigView,
-    RiskAcquisitionDirectionView, RiskAcquisitionView, ShapeFamily as ProtocolShapeFamily,
-    Side as ProtocolSide, StrategyPriceStatusView, TrackActivityItemView, TrackCommandType,
-    TrackCommandView, TrackDetailView, TrackExecutionView, TrackIdentityView, TrackLifecycleView,
-    TrackListItemView, TrackListPnlView, TrackLossLimitsView, TrackMarketView, TrackPnlView,
-    TrackPositionQuantityUnitView, TrackPositionView, TrackStatus as ProtocolTrackStatus,
-    TrackStatusPanelView, TrackStrategyView,
+    AcquisitionResetReasonView, AcquisitionSessionView, ActivityLevelView,
+    BandFlattenTrigger as ProtocolTrigger, BandProtectionPolicy as ProtocolPolicy,
+    BandRecoverPolicy as ProtocolRecoverPolicy, DecisionReasonView, ExecutionBadgeView,
+    ExecutionBindingIntentView, ExecutionBindingOrderView, ExecutionBindingPolicyView,
+    ExecutionBindingStatusView, ExecutionBindingView, ExecutionStateView, ExecutionStatusView,
+    ExposureSummaryView, InstrumentView, InventoryDecisionView, PriceExecutionBlockReasonView,
+    RiskAcquisitionConfigView, RiskAcquisitionDirectionView, RiskAcquisitionView,
+    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, StrategyPriceStatusView,
+    TrackActivityItemView, TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionView,
+    TrackIdentityView, TrackLifecycleView, TrackListItemView, TrackListPnlView,
+    TrackLossLimitsView, TrackMarketView, TrackPnlView, TrackPositionQuantityUnitView,
+    TrackPositionView, TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
 };
 
 use poise_core::track::Instrument;
 use poise_core::types::{ExchangeRules, QuantityKind};
 
 use poise_application::{
-    TrackActivityLevel, TrackInventoryDecisionReadModel, TrackListReadModel,
-    TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadBindingPolicy,
-    TrackReadBindingStatus, TrackReadModel, TrackReadStatus, TrackRecoveryIssue,
-    TrackRiskAcquisitionDirection, TrackRiskAcquisitionReadModel, TrackStrategyPriceStatus,
+    TrackAcquisitionSessionReadModel, TrackActivityLevel, TrackInventoryDecisionReadModel,
+    TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent,
+    TrackReadBindingPolicy, TrackReadBindingStatus, TrackReadModel, TrackReadStatus,
+    TrackRecoveryIssue, TrackRiskAcquisitionDirection, TrackRiskAcquisitionReadModel,
+    TrackStrategyPriceStatus,
 };
 use poise_engine::execution_plan::DecisionReason;
+use poise_engine::runtime::AcquisitionResetReason;
 
 pub struct TrackProjector;
 
@@ -134,6 +136,10 @@ impl TrackProjector {
                     .price_execution_block_reason
                     .map(project_price_execution_block_reason),
                 active_binding_count: source.active_binding_count,
+                acquisition_session: source
+                    .acquisition_session
+                    .as_ref()
+                    .map(project_read_model_acquisition_session),
                 risk_acquisition: source
                     .risk_acquisition
                     .as_ref()
@@ -318,6 +324,35 @@ fn project_risk_acquisition_runtime(source: &TrackRiskAcquisitionReadModel) -> R
         next_advantage_price: source.next_advantage_price,
         next_release_units: source.next_release_units,
         next_release_target: source.next_release_target,
+    }
+}
+
+fn project_read_model_acquisition_session(
+    source: &TrackAcquisitionSessionReadModel,
+) -> AcquisitionSessionView {
+    project_acquisition_session(
+        source.acquisition_reset_reason,
+        source.acquisition_session_started_at,
+        source.initial_frontier,
+        source.initial_release_units,
+    )
+}
+
+pub(crate) fn project_acquisition_session(
+    reset_reason: AcquisitionResetReason,
+    started_at: chrono::DateTime<chrono::Utc>,
+    initial_frontier: Option<f64>,
+    initial_release_units: Option<f64>,
+) -> AcquisitionSessionView {
+    AcquisitionSessionView {
+        acquisition_reset_reason: match reset_reason {
+            AcquisitionResetReason::FreshSessionStart => {
+                AcquisitionResetReasonView::FreshSessionStart
+            }
+        },
+        acquisition_session_started_at: started_at.to_rfc3339(),
+        initial_frontier,
+        initial_release_units,
     }
 }
 
@@ -586,20 +621,21 @@ fn project_available_commands(source: &TrackReadModel) -> Vec<TrackCommandView> 
 mod tests {
     use chrono::{TimeZone, Utc};
     use poise_application::{
-        ReadModelBinding, TrackActivityEntry, TrackActivityLevel, TrackInventoryDecisionReadModel,
-        TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent,
-        TrackReadBindingPolicy, TrackReadBindingStatus, TrackReadModel, TrackReadPnlStats,
-        TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
+        ReadModelBinding, TrackAcquisitionSessionReadModel, TrackActivityEntry, TrackActivityLevel,
+        TrackInventoryDecisionReadModel, TrackListReadModel, TrackPriceExecutionBlockReason,
+        TrackReadBindingIntent, TrackReadBindingPolicy, TrackReadBindingStatus, TrackReadModel,
+        TrackReadPnlStats, TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
         TrackRiskAcquisitionReadModel, TrackStrategyPriceStatus,
     };
     use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily};
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::{ExchangeRules, QuantityKind, Side};
     use poise_engine::execution_plan::DecisionReason;
+    use poise_engine::runtime::AcquisitionResetReason;
     use poise_protocol::{
-        ActivityLevelView, DecisionReasonView, ExecutionBindingIntentView,
-        ExecutionBindingPolicyView, ExecutionBindingStatusView, ExecutionStateView,
-        ExecutionStatusView, PriceExecutionBlockReasonView, TrackCommandType,
+        AcquisitionResetReasonView, ActivityLevelView, DecisionReasonView,
+        ExecutionBindingIntentView, ExecutionBindingPolicyView, ExecutionBindingStatusView,
+        ExecutionStateView, ExecutionStatusView, PriceExecutionBlockReasonView, TrackCommandType,
         TrackPositionQuantityUnitView,
     };
 
@@ -1280,6 +1316,36 @@ mod tests {
     }
 
     #[test]
+    fn projects_fresh_acquisition_session_without_backlog() {
+        let mut source = source_with_submitting_effect();
+        source.risk_acquisition = None;
+        source.acquisition_session = Some(TrackAcquisitionSessionReadModel {
+            acquisition_reset_reason: AcquisitionResetReason::FreshSessionStart,
+            acquisition_session_started_at: Utc.with_ymd_and_hms(2026, 7, 1, 8, 0, 0).unwrap(),
+            initial_frontier: Some(2.0),
+            initial_release_units: Some(0.0),
+        });
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert!(detail.execution.risk_acquisition.is_none());
+        let session = detail
+            .execution
+            .acquisition_session
+            .expect("fresh acquisition session should be projected independently");
+        assert_eq!(
+            session.acquisition_reset_reason,
+            AcquisitionResetReasonView::FreshSessionStart
+        );
+        assert_eq!(
+            session.acquisition_session_started_at,
+            "2026-07-01T08:00:00+00:00"
+        );
+        assert_eq!(session.initial_frontier, Some(2.0));
+        assert_eq!(session.initial_release_units, Some(0.0));
+    }
+
+    #[test]
     fn projects_execution_pnl_observability() {
         let detail = TrackProjector::new().project_detail(&source_with_submitting_effect());
 
@@ -1440,6 +1506,7 @@ mod tests {
                 execution_target: Some(4.0),
                 reason: DecisionReason::SubmitPlanned,
             },
+            acquisition_session: None,
             risk_acquisition: Default::default(),
             pnl_stats: TrackReadPnlStats {
                 pnl_asset: Some("USDT".to_string()),

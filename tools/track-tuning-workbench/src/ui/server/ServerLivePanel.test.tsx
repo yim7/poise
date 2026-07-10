@@ -201,6 +201,46 @@ describe('ServerLivePanel', () => {
     expect(within(panel).getByText('backlog +0.0235')).toBeInTheDocument();
     expect(within(panel).getByText('next +0.0235 → 4.8235')).toBeInTheDocument();
   });
+
+  it('shows the fresh acquisition session without backlog and replaces it from live events', async () => {
+    const detail = trackDetail();
+    detail.execution.acquisition_session = {
+      acquisition_reset_reason: 'fresh_session_start',
+      acquisition_session_started_at: '2026-07-01T08:00:00+00:00',
+      initial_frontier: null,
+      initial_release_units: null,
+    };
+    const { client, emit } = createFakeServerClient(detail);
+
+    render(<ServerLivePanel enabled client={client} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '连接 Server' }));
+    });
+
+    const panel = screen.getByRole('region', { name: 'Server live inspector' });
+    expect(within(panel).getByText('Acquisition session')).toBeInTheDocument();
+    expect(within(panel).getByText('fresh_session_start')).toBeInTheDocument();
+    expect(within(panel).getByText(
+      'start 2026-07-01T08:00:00+00:00 · frontier -- · release --',
+    )).toBeInTheDocument();
+
+    const live = liveTrackEvent();
+    live.live.acquisition_session = {
+      acquisition_reset_reason: 'fresh_session_start',
+      acquisition_session_started_at: '2026-07-01T08:00:00+00:00',
+      initial_frontier: 2,
+      initial_release_units: 0,
+    };
+    act(() => {
+      emit(live);
+    });
+
+    expect(within(panel).getByText(
+      'start 2026-07-01T08:00:00+00:00 · frontier 2.0000 · release +0.0000',
+    )).toBeInTheDocument();
+    expect(detail.execution.risk_acquisition).toBeUndefined();
+  });
 });
 
 function createFakeServerClient(detail = trackDetail()) {

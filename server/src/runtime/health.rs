@@ -661,6 +661,7 @@ mod tests {
                 execution_target: Some(0.0),
                 reason: DecisionReason::AtExecutionTarget,
             },
+            acquisition_session: None,
             risk_acquisition: None,
             pnl_stats: TrackReadPnlStats::default(),
             unrealized_pnl: 0.0,

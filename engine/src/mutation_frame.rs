@@ -9,7 +9,13 @@ use crate::execution_gate::ExecutionGateState;
 use crate::executor::{BindingStatus, RecoveryAnomaly};
 use crate::ledger::TrackPnlStats;
 use crate::ports::OrderReceipt;
-use crate::runtime::{ExecutorState, InventoryDecisionSnapshot, RiskState, TrackState};
+#[cfg(any(test, feature = "test-support"))]
+use crate::risk_exposure_gate::RiskExposureGateState;
+#[cfg(any(test, feature = "test-support"))]
+use crate::runtime::{AutoState, ControlState};
+use crate::runtime::{
+    ExecutorState, FreshAcquisitionSession, InventoryDecisionSnapshot, RiskState, TrackState,
+};
 use poise_core::track::{Instrument, TrackId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +43,7 @@ pub struct TrackMutationFrame {
     pub(crate) desired_exposure: Option<Exposure>,
     pub(crate) inventory_decision: Option<InventoryDecisionSnapshot>,
     pub(crate) inventory_decision_revision: u64,
+    pub(crate) fresh_acquisition_session: Option<FreshAcquisitionSession>,
     pub(crate) executor_state: ExecutorState,
     pub(crate) execution_gate_state: ExecutionGateState,
     pub(crate) pnl_stats: TrackPnlStats,
@@ -63,6 +70,25 @@ impl TrackMutationFrame {
     }
 
     #[cfg(any(test, feature = "test-support"))]
+    pub fn set_risk_exposure_gate_state(
+        &mut self,
+        frontier: Exposure,
+        anchor_price: f64,
+        anchor_target: Exposure,
+        stale_since: DateTime<Utc>,
+    ) {
+        self.runtime_state =
+            TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
+                gate: RiskExposureGateState {
+                    risk_release_frontier: frontier,
+                    release_anchor_price: anchor_price,
+                    release_anchor_target: anchor_target,
+                    stale_since,
+                },
+            }));
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub fn current_exposure(&self) -> &Exposure {
         &self.current_exposure
     }
@@ -81,6 +107,14 @@ impl TrackMutationFrame {
         self.inventory_decision
             .as_ref()
             .map(|decision| decision.revision)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fresh_acquisition_pending(&self) -> bool {
+        matches!(
+            self.fresh_acquisition_session,
+            Some(FreshAcquisitionSession::Pending { .. })
+        )
     }
 
     pub fn market_data_stale(&self) -> bool {

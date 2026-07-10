@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::projector::project_inventory_decision;
+use crate::projector::{project_acquisition_session, project_inventory_decision};
 use crate::server_context::WebSocketState;
 
 #[cfg(not(test))]
@@ -652,6 +652,14 @@ fn project_live_view(live_view: poise_engine::runtime::TrackLiveView) -> Protoco
             live_view.decision.execution_target,
             live_view.decision.reason,
         ),
+        acquisition_session: live_view.acquisition_session.map(|source| {
+            project_acquisition_session(
+                source.acquisition_reset_reason,
+                source.acquisition_session_started_at,
+                source.initial_frontier.map(|frontier| frontier.0),
+                source.initial_release_units,
+            )
+        }),
         risk_acquisition: live_view
             .risk_acquisition
             .map(project_live_risk_acquisition),
@@ -776,12 +784,12 @@ mod tests {
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::ClockPort;
     use poise_engine::runtime::{
-        InventoryDecisionView, RiskAcquisitionDirection, RiskAcquisitionRuntimeView,
-        StrategyPriceStatus, TrackLiveView,
+        AcquisitionResetReason, AcquisitionSessionRuntimeView, InventoryDecisionView,
+        RiskAcquisitionDirection, RiskAcquisitionRuntimeView, StrategyPriceStatus, TrackLiveView,
     };
     use poise_protocol::{
-        DecisionReasonView, ExecutionStateView, ExecutionStatusView, RiskSignalView, StreamEvent,
-        TrackStatus,
+        AcquisitionResetReasonView, DecisionReasonView, ExecutionStateView, ExecutionStatusView,
+        RiskSignalView, StreamEvent, TrackStatus,
     };
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
@@ -853,6 +861,12 @@ mod tests {
                 execution_target: Some(1.2),
                 reason: DecisionReason::WaitingRiskRelease,
             },
+            acquisition_session: Some(AcquisitionSessionRuntimeView {
+                acquisition_reset_reason: AcquisitionResetReason::FreshSessionStart,
+                acquisition_session_started_at: Utc.with_ymd_and_hms(2026, 7, 1, 8, 0, 0).unwrap(),
+                initial_frontier: Some(Exposure(1.2)),
+                initial_release_units: Some(0.0),
+            }),
             risk_acquisition: Some(RiskAcquisitionRuntimeView {
                 direction: RiskAcquisitionDirection::Long,
                 risk_approved_target: Exposure(3.0),
@@ -885,6 +899,15 @@ mod tests {
         assert_eq!(live.decision.acquisition_frontier, Some(1.2));
         assert_eq!(live.decision.execution_target, Some(1.2));
         assert_eq!(live.decision.reason, DecisionReasonView::WaitingRiskRelease);
+        let acquisition_session = live
+            .acquisition_session
+            .expect("acquisition session should be projected in live view");
+        assert_eq!(
+            acquisition_session.acquisition_reset_reason,
+            AcquisitionResetReasonView::FreshSessionStart
+        );
+        assert_eq!(acquisition_session.initial_frontier, Some(1.2));
+        assert_eq!(acquisition_session.initial_release_units, Some(0.0));
         assert_eq!(risk_acquisition.next_advantage_price, Some(92.5));
         let json = serde_json::to_value(risk_acquisition).unwrap();
         assert!(json.get("curve_target").is_none());

@@ -188,6 +188,7 @@ impl App {
             detail.market.best_bid = live.best_bid;
             detail.market.best_ask = live.best_ask;
             detail.decision = live.decision;
+            detail.execution.acquisition_session = live.acquisition_session;
             detail.execution.risk_acquisition = live.risk_acquisition;
             apply_live_execution_attention(
                 &mut detail.execution.execution_status,
@@ -325,8 +326,9 @@ fn apply_live_execution_attention(
 #[cfg(test)]
 mod tests {
     use crate::protocol::{
-        AccountSummaryView, ExecutionStateView, ExecutionStatusView, PriceExecutionBlockReasonView,
-        RiskSignalView, StreamEvent, TrackDetailView, TrackDiagnosticsView, TrackListItemView,
+        AccountSummaryView, AcquisitionResetReasonView, AcquisitionSessionView, ExecutionStateView,
+        ExecutionStatusView, PriceExecutionBlockReasonView, RiskSignalView, StreamEvent,
+        TrackDetailView, TrackDiagnosticsView, TrackListItemView,
     };
 
     use super::{App, View};
@@ -389,6 +391,32 @@ mod tests {
         assert_eq!(
             app.current_track_detail().unwrap().decision,
             expected_decision
+        );
+    }
+
+    #[test]
+    fn apply_track_live_view_replaces_acquisition_session_in_detail() {
+        let mut app = App::new(track_list_items());
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+        app.apply_track_detail(detail_view("btc-core"));
+        let mut live = live_view();
+        let expected_session = AcquisitionSessionView {
+            acquisition_reset_reason: AcquisitionResetReasonView::FreshSessionStart,
+            acquisition_session_started_at: "2026-07-01T08:00:00+00:00".to_string(),
+            initial_frontier: Some(2.0),
+            initial_release_units: Some(0.0),
+        };
+        live.acquisition_session = Some(expected_session.clone());
+
+        app.apply_track_live_view("btc-core", live);
+
+        assert_eq!(
+            app.current_track_detail()
+                .unwrap()
+                .execution
+                .acquisition_session,
+            Some(expected_session)
         );
     }
 

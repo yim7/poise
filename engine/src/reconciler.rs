@@ -8,7 +8,8 @@ use crate::execution_gate::{AccountCapacityGate, AccountCapacityGateInput, Execu
 use crate::execution_plan::DecisionReason;
 use crate::loss_guard::build_loss_guard_snapshot_for_asset;
 use crate::risk_exposure_gate::{
-    self, RiskAcquisitionRelease, RiskExposureGateInput, RiskExposureGateState,
+    self, FreshAcquisitionInitialization, RiskAcquisitionRelease, RiskExposureGateInput,
+    RiskExposureGateState,
 };
 use crate::runtime::{
     AppliedRiskCap, AutoState, BandTerminationCause, ControlState, ManualState, TerminationCause,
@@ -28,6 +29,7 @@ pub struct TargetReconcileResult {
     pub target_pursuit_suppressed: bool,
     pub acquisition_frontier: Option<Exposure>,
     pub risk_acquisition: Option<RiskAcquisitionRelease>,
+    pub fresh_acquisition_initialization: Option<FreshAcquisitionInitialization>,
 }
 
 pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReconcileResult {
@@ -56,6 +58,7 @@ pub fn reconcile_target_at(
             target_pursuit_suppressed: delta.is_zero(),
             acquisition_frontier: None,
             risk_acquisition: Default::default(),
+            fresh_acquisition_initialization: None,
         };
     }
 
@@ -79,6 +82,7 @@ pub fn reconcile_target_at(
             target_pursuit_suppressed: delta.is_zero(),
             acquisition_frontier: None,
             risk_acquisition: Default::default(),
+            fresh_acquisition_initialization: None,
         };
     }
 
@@ -140,12 +144,18 @@ pub fn reconcile_target_at(
                 target_pursuit_suppressed: delta.is_zero(),
                 acquisition_frontier: None,
                 risk_acquisition: Default::default(),
+                fresh_acquisition_initialization: None,
             };
         }
     };
 
     let risk_approved_target = approved_target.clone();
-    let (acquisition_frontier, new_runtime_state, risk_acquisition) = apply_risk_exposure_gate(
+    let (
+        acquisition_frontier,
+        new_runtime_state,
+        risk_acquisition,
+        fresh_acquisition_initialization,
+    ) = apply_risk_exposure_gate(
         track,
         strategy_price,
         risk_approved_target.clone(),
@@ -171,6 +181,7 @@ pub fn reconcile_target_at(
             target_pursuit_suppressed: true,
             acquisition_frontier,
             risk_acquisition,
+            fresh_acquisition_initialization,
         };
     }
 
@@ -207,6 +218,7 @@ pub fn reconcile_target_at(
             target_pursuit_suppressed: true,
             acquisition_frontier,
             risk_acquisition,
+            fresh_acquisition_initialization,
         };
     }
 
@@ -229,6 +241,7 @@ pub fn reconcile_target_at(
             target_pursuit_suppressed: true,
             acquisition_frontier,
             risk_acquisition,
+            fresh_acquisition_initialization,
         };
     }
 
@@ -248,6 +261,7 @@ pub fn reconcile_target_at(
         target_pursuit_suppressed: false,
         acquisition_frontier,
         risk_acquisition,
+        fresh_acquisition_initialization,
     }
 }
 
@@ -276,6 +290,7 @@ fn pnl_asset_mismatch_result(
         target_pursuit_suppressed: true,
         acquisition_frontier: None,
         risk_acquisition: None,
+        fresh_acquisition_initialization: None,
     }
 }
 
@@ -317,6 +332,7 @@ fn apply_risk_exposure_gate(
     Option<Exposure>,
     Option<TrackState>,
     Option<RiskAcquisitionRelease>,
+    Option<FreshAcquisitionInitialization>,
 ) {
     let effective_state = effective_runtime_state(track, &new_runtime_state);
     let gate_state = match effective_state {
@@ -324,22 +340,30 @@ fn apply_risk_exposure_gate(
         TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated { gate })) => {
             Some(gate)
         }
-        _ => return (None, new_runtime_state, None),
+        _ => return (None, new_runtime_state, None, None),
     };
 
-    let decision = risk_exposure_gate::apply(RiskExposureGateInput {
+    let input = RiskExposureGateInput {
         config: track.config().risk_acquisition,
         min_rebalance_units: track.config().min_rebalance_units,
-        state: gate_state,
+        state: gate_state.clone(),
         current_exposure: track.current_exposure.clone(),
         curve_target: approved_target.clone(),
         strategy_price,
         observed_at,
-    });
+    };
+    let (decision, fresh_acquisition_initialization) =
+        if track.fresh_acquisition_pending() && gate_state.is_none() {
+            let (decision, initialization) = risk_exposure_gate::initialize_fresh_session(input);
+            (decision, Some(initialization))
+        } else {
+            (risk_exposure_gate::apply(input), None)
+        };
     let next_state = merge_gate_state(
         new_runtime_state,
         &track.track_state,
         decision.state.clone(),
+        fresh_acquisition_initialization.is_some(),
     );
     let risk_release_frontier = decision
         .state
@@ -350,17 +374,23 @@ fn apply_risk_exposure_gate(
                 .then_some(decision.risk_release_frontier.clone())
         });
 
-    (risk_release_frontier, next_state, decision.next_release)
+    (
+        risk_release_frontier,
+        next_state,
+        decision.next_release,
+        fresh_acquisition_initialization,
+    )
 }
 
 fn merge_gate_state(
     base_state: Option<TrackState>,
     current_state: &TrackState,
     gate_state: Option<RiskExposureGateState>,
+    fresh_initialization: bool,
 ) -> Option<TrackState> {
     match gate_state {
         Some(gate) => {
-            if is_flattening_reentry(base_state.as_ref(), current_state) {
+            if !fresh_initialization && is_flattening_reentry(base_state.as_ref(), current_state) {
                 return base_state;
             }
             Some(TrackState::Running(ControlState::Automatic(
@@ -766,6 +796,26 @@ mod tests {
         track
     }
 
+    fn fresh_session_runtime(current_exposure: f64) -> TrackRuntime {
+        let mut config = test_config();
+        config.long_exposure_units = 10.0;
+        config.short_exposure_units = 10.0;
+        config.risk_acquisition = RiskAcquisitionConfig::default();
+        let track = test_runtime_with(config, test_max_notional(), test_loss_limits());
+        let exchange_rules = track.exchange_rules.clone();
+        track.fresh_start(
+            TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)),
+            crate::ledger::TrackPnlStats::default(),
+            crate::runtime::FreshSessionExternalInputs {
+                current_exposure: Exposure(current_exposure),
+                position_qty: current_exposure,
+                market_data: None,
+                exchange_rules,
+            },
+            Utc.with_ymd_and_hms(2026, 6, 1, 9, 0, 0).unwrap(),
+        )
+    }
+
     fn strategy_target_at(price: f64) -> Exposure {
         match strategy::band_status(price, test_runtime().config()) {
             BandStatus::InBand { target } => target,
@@ -803,6 +853,135 @@ mod tests {
         ));
         assert!(!result.target_pursuit_suppressed);
         assert!(result.risk_acquisition.is_some());
+    }
+
+    #[test]
+    fn fresh_session_first_decision_never_grants_new_risk() {
+        let observed_at = Utc.with_ymd_and_hms(2026, 7, 1, 9, 0, 0).unwrap();
+        let cases = [
+            (2.0, 92.0, 8.0, 2.0),
+            (8.0, 98.0, 2.0, 2.0),
+            (2.0, 104.0, -4.0, 0.0),
+            (0.0, 92.0, 8.0, 0.0),
+        ];
+
+        for (current, price, approved, expected_execution) in cases {
+            let track = fresh_session_runtime(current);
+
+            let result = reconcile_target_at(&track, price, observed_at);
+
+            assert_eq!(result.risk_approved_target, Exposure(approved));
+            assert_eq!(
+                result.execution_target,
+                Exposure(expected_execution),
+                "current={current}, approved={approved}"
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_session_stale_wait_starts_at_first_valid_observation() {
+        let first_observation = Utc.with_ymd_and_hms(2026, 7, 1, 9, 0, 0).unwrap();
+        let mut track = fresh_session_runtime(2.0);
+
+        let first = reconcile_target_at(&track, 92.0, first_observation);
+        let initialization = first
+            .fresh_acquisition_initialization
+            .clone()
+            .expect("fresh decision should initialize the acquisition session");
+        track.track_state = first.new_runtime_state.unwrap();
+        track.apply_fresh_acquisition_initialization(Some(initialization));
+
+        let before_stale = reconcile_target_at(
+            &track,
+            92.0,
+            first_observation + chrono::Duration::minutes(59),
+        );
+        assert_eq!(before_stale.execution_target, Exposure(2.0));
+
+        track.track_state = before_stale.new_runtime_state.unwrap();
+        let at_stale = reconcile_target_at(
+            &track,
+            92.0,
+            first_observation + chrono::Duration::minutes(60),
+        );
+        assert!(at_stale.execution_target.0 > 2.0);
+    }
+
+    #[test]
+    fn fresh_session_reduction_then_new_episode_uses_initial_ratio() {
+        let observed_at = Utc.with_ymd_and_hms(2026, 7, 1, 9, 0, 0).unwrap();
+        let mut track = fresh_session_runtime(8.0);
+
+        let reduction = reconcile_target_at(&track, 98.0, observed_at);
+        let initialization = reduction
+            .fresh_acquisition_initialization
+            .clone()
+            .expect("fresh reduction should consume the session marker");
+        assert_eq!(reduction.execution_target, Exposure(2.0));
+        if let Some(new_runtime_state) = reduction.new_runtime_state {
+            track.track_state = new_runtime_state;
+        }
+        track.current_exposure = Exposure(2.0);
+        track.apply_fresh_acquisition_initialization(Some(initialization));
+
+        let new_episode =
+            reconcile_target_at(&track, 92.0, observed_at + chrono::Duration::minutes(1));
+
+        assert_eq!(new_episode.risk_approved_target, Exposure(8.0));
+        assert_eq!(new_episode.execution_target, Exposure(4.0));
+        assert!(new_episode.fresh_acquisition_initialization.is_none());
+    }
+
+    #[test]
+    fn fresh_session_flattening_reentry_keeps_zero_frontier_on_same_price() {
+        let observed_at = Utc.with_ymd_and_hms(2026, 7, 1, 9, 0, 0).unwrap();
+        let mut track = fresh_session_runtime(2.0);
+        set_out_of_band_policy(
+            &mut track,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::Immediate,
+                recover: BandRecoverPolicy::BackInBand,
+            },
+        );
+
+        let flattening = reconcile_target_at(&track, 80.0, observed_at);
+        assert!(flattening.fresh_acquisition_initialization.is_none());
+        track.track_state = flattening.new_runtime_state.unwrap();
+        track.current_exposure = Exposure(0.0);
+        track.desired_exposure = Some(Exposure(0.0));
+
+        let reentry = reconcile_target_at(&track, 92.0, observed_at + chrono::Duration::minutes(1));
+        let initialization = reentry
+            .fresh_acquisition_initialization
+            .clone()
+            .expect("first automatic reentry decision should initialize the fresh session");
+        assert_eq!(reentry.execution_target, Exposure(0.0));
+        track.track_state = reentry.new_runtime_state.unwrap();
+        track.apply_fresh_acquisition_initialization(Some(initialization));
+
+        let same_price =
+            reconcile_target_at(&track, 92.0, observed_at + chrono::Duration::minutes(2));
+
+        assert_eq!(same_price.risk_approved_target, Exposure(8.0));
+        assert_eq!(same_price.execution_target, Exposure(0.0));
+        assert!(same_price.fresh_acquisition_initialization.is_none());
+    }
+
+    #[test]
+    fn risk_input_invalid_does_not_initialize_fresh_session() {
+        let mut track = fresh_session_runtime(2.0);
+        track.pnl_stats.pnl_asset = Some("BTC".to_string());
+
+        let result = reconcile_target_at(
+            &track,
+            92.0,
+            Utc.with_ymd_and_hms(2026, 7, 1, 9, 0, 0).unwrap(),
+        );
+
+        assert_eq!(result.reason, Some(DecisionReason::RiskInputInvalid));
+        assert!(result.fresh_acquisition_initialization.is_none());
+        assert!(track.fresh_acquisition_pending());
     }
 
     #[test]

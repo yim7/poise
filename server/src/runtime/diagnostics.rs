@@ -76,6 +76,7 @@ mod tests {
             current_exposure: Exposure(0.0),
             position_qty: 0.0,
             decision: InventoryDecisionView::default(),
+            acquisition_session: None,
             risk_acquisition: Default::default(),
             manual_target_override: None,
             executor: ExecutorView {

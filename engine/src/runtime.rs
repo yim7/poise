@@ -24,7 +24,8 @@ use crate::price_gate::{
 };
 use crate::reconciler;
 use crate::risk_exposure_gate::{
-    self, RiskAcquisitionRelease, RiskExposureGateState, RiskIncreaseDirection,
+    self, FreshAcquisitionInitialization, RiskAcquisitionRelease, RiskExposureGateState,
+    RiskIncreaseDirection,
 };
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -196,6 +197,31 @@ pub struct FreshSessionExternalInputs {
     pub exchange_rules: ExchangeRules,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcquisitionResetReason {
+    FreshSessionStart,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcquisitionSessionRuntimeView {
+    pub acquisition_reset_reason: AcquisitionResetReason,
+    pub acquisition_session_started_at: DateTime<Utc>,
+    pub initial_frontier: Option<Exposure>,
+    pub initial_release_units: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FreshAcquisitionSession {
+    Pending {
+        started_at: DateTime<Utc>,
+    },
+    Initialized {
+        started_at: DateTime<Utc>,
+        initial_frontier: Exposure,
+        initial_release_units: f64,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StrategyTargetView {
     pub risk_approved_target: Option<Exposure>,
@@ -291,6 +317,7 @@ pub struct TrackLiveView {
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
     pub decision: InventoryDecisionView,
+    pub acquisition_session: Option<AcquisitionSessionRuntimeView>,
     pub risk_acquisition: Option<RiskAcquisitionRuntimeView>,
     pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
 }
@@ -320,6 +347,7 @@ pub struct TrackRuntimeView {
     pub current_exposure: Exposure,
     pub position_qty: f64,
     pub decision: InventoryDecisionView,
+    pub acquisition_session: Option<AcquisitionSessionRuntimeView>,
     pub risk_acquisition: Option<RiskAcquisitionRuntimeView>,
     pub manual_target_override: Option<Exposure>,
     pub executor: ExecutorView,
@@ -436,6 +464,7 @@ pub struct TrackRuntime {
     pub(crate) desired_exposure: Option<Exposure>,
     pub(crate) inventory_decision: Option<InventoryDecisionSnapshot>,
     pub(crate) inventory_decision_revision: u64,
+    pub(crate) fresh_acquisition_session: Option<FreshAcquisitionSession>,
     pub(crate) executor_state: ExecutorState,
     pub(crate) pnl_stats: TrackPnlStats,
     pub(crate) risk_state: RiskState,
@@ -516,6 +545,7 @@ impl TrackRuntime {
             desired_exposure: None,
             inventory_decision: None,
             inventory_decision_revision: 0,
+            fresh_acquisition_session: None,
             executor_state: ExecutorState::empty(started_at),
             pnl_stats: TrackPnlStats::default(),
             risk_state: RiskState::default(),
@@ -668,6 +698,7 @@ impl TrackRuntime {
         fresh.current_exposure = current_exposure.clone();
         fresh.current_position_qty = position_qty;
         fresh.desired_exposure = track_state.manual_target_override();
+        fresh.fresh_acquisition_session = Some(FreshAcquisitionSession::Pending { started_at });
         fresh.executor_state =
             ExecutorState::empty(started_at).ensure_revision(fresh.config(), current_exposure);
         fresh.pnl_stats = pnl_stats;
@@ -694,6 +725,59 @@ impl TrackRuntime {
             },
         );
         fresh
+    }
+
+    pub(crate) fn fresh_acquisition_pending(&self) -> bool {
+        matches!(
+            self.fresh_acquisition_session,
+            Some(FreshAcquisitionSession::Pending { .. })
+        )
+    }
+
+    pub(crate) fn apply_fresh_acquisition_initialization(
+        &mut self,
+        initialization: Option<FreshAcquisitionInitialization>,
+    ) {
+        let Some(initialization) = initialization else {
+            return;
+        };
+        let Some(FreshAcquisitionSession::Pending { started_at }) =
+            self.fresh_acquisition_session.as_ref()
+        else {
+            debug_assert!(
+                false,
+                "fresh acquisition initialization requires a pending session"
+            );
+            return;
+        };
+        self.fresh_acquisition_session = Some(FreshAcquisitionSession::Initialized {
+            started_at: *started_at,
+            initial_frontier: initialization.initial_frontier,
+            initial_release_units: initialization.initial_release_units,
+        });
+    }
+
+    pub fn acquisition_session_view(&self) -> Option<AcquisitionSessionRuntimeView> {
+        self.fresh_acquisition_session
+            .as_ref()
+            .map(|session| match session {
+                FreshAcquisitionSession::Pending { started_at } => AcquisitionSessionRuntimeView {
+                    acquisition_reset_reason: AcquisitionResetReason::FreshSessionStart,
+                    acquisition_session_started_at: *started_at,
+                    initial_frontier: None,
+                    initial_release_units: None,
+                },
+                FreshAcquisitionSession::Initialized {
+                    started_at,
+                    initial_frontier,
+                    initial_release_units,
+                } => AcquisitionSessionRuntimeView {
+                    acquisition_reset_reason: AcquisitionResetReason::FreshSessionStart,
+                    acquisition_session_started_at: *started_at,
+                    initial_frontier: Some(initial_frontier.clone()),
+                    initial_release_units: Some(*initial_release_units),
+                },
+            })
     }
 
     pub fn inventory_decision(&self) -> Option<&InventoryDecisionSnapshot> {
@@ -728,6 +812,7 @@ impl TrackRuntime {
             desired_exposure: self.desired_exposure.clone(),
             inventory_decision: self.inventory_decision.clone(),
             inventory_decision_revision: self.inventory_decision_revision,
+            fresh_acquisition_session: self.fresh_acquisition_session.clone(),
             executor_state: self.executor_state.clone(),
             execution_gate_state: self.execution_gate_state.clone(),
             pnl_stats: self.pnl_stats.clone(),
@@ -761,6 +846,7 @@ impl TrackRuntime {
         self.desired_exposure = frame.desired_exposure.clone();
         self.inventory_decision = frame.inventory_decision.clone();
         self.inventory_decision_revision = frame.inventory_decision_revision;
+        self.fresh_acquisition_session = frame.fresh_acquisition_session.clone();
         self.executor_state = frame.executor_state.clone();
         self.pnl_stats = frame.pnl_stats.clone();
         self.risk_state = frame.risk.clone();
@@ -847,6 +933,7 @@ impl TrackRuntime {
             best_bid: self.best_bid,
             best_ask: self.best_ask,
             decision: self.inventory_decision_view(),
+            acquisition_session: self.acquisition_session_view(),
             risk_acquisition: committed.and_then(|decision| decision.risk_acquisition.clone()),
             price_execution_block_reason: match quote_health.price_execution_gate {
                 PriceExecutionGate::Open => None,
@@ -864,6 +951,7 @@ impl TrackRuntime {
             current_exposure: self.current_exposure.clone(),
             position_qty: self.current_position_qty,
             decision: live.decision,
+            acquisition_session: live.acquisition_session,
             risk_acquisition: live.risk_acquisition,
             manual_target_override: self.manual_target_override(),
             executor: self.executor_state.view(),
@@ -1285,6 +1373,54 @@ mod tests {
         assert!(fresh.inventory_decision().is_none());
         assert_eq!(fresh.inventory_decision_revision, 0);
         assert_eq!(fresh.pnl_stats.gross_realized_pnl_cumulative, 55.0);
+        assert_eq!(
+            fresh.acquisition_session_view(),
+            Some(AcquisitionSessionRuntimeView {
+                acquisition_reset_reason: AcquisitionResetReason::FreshSessionStart,
+                acquisition_session_started_at: Utc.with_ymd_and_hms(2026, 4, 23, 8, 2, 0).unwrap(),
+                initial_frontier: None,
+                initial_release_units: None,
+            })
+        );
+    }
+
+    #[test]
+    fn acquisition_session_initialization_round_trips_through_mutation_frame() {
+        let started_at = Utc.with_ymd_and_hms(2026, 4, 23, 8, 2, 0).unwrap();
+        let mut runtime = test_runtime().fresh_start(
+            TrackState::WaitingMarketData,
+            TrackPnlStats::default(),
+            FreshSessionExternalInputs {
+                current_exposure: Exposure(2.0),
+                position_qty: 2.0,
+                market_data: None,
+                exchange_rules: test_rules(0.1),
+            },
+            started_at,
+        );
+        let pending_frame = runtime.mutation_frame();
+
+        runtime.apply_fresh_acquisition_initialization(Some(FreshAcquisitionInitialization {
+            initial_frontier: Exposure(2.0),
+            initial_release_units: 0.0,
+        }));
+        assert_eq!(
+            runtime.acquisition_session_view(),
+            Some(AcquisitionSessionRuntimeView {
+                acquisition_reset_reason: AcquisitionResetReason::FreshSessionStart,
+                acquisition_session_started_at: started_at,
+                initial_frontier: Some(Exposure(2.0)),
+                initial_release_units: Some(0.0),
+            })
+        );
+
+        runtime.rollback_to_frame(&pending_frame).unwrap();
+
+        assert!(runtime.fresh_acquisition_pending());
+        assert_eq!(
+            runtime.acquisition_session_view().unwrap().initial_frontier,
+            None
+        );
     }
 
     #[test]

@@ -371,6 +371,8 @@ pub struct TrackLiveView {
     pub best_ask: Option<f64>,
     pub decision: InventoryDecisionView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquisition_session: Option<AcquisitionSessionView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk_acquisition: Option<RiskAcquisitionView>,
     pub price_execution_block_reason: Option<PriceExecutionBlockReasonView>,
 }
@@ -421,6 +423,8 @@ pub struct TrackExecutionView {
     #[serde(default)]
     pub active_binding_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquisition_session: Option<AcquisitionSessionView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk_acquisition: Option<RiskAcquisitionView>,
     #[serde(default)]
     pub bindings: Vec<ExecutionBindingView>,
@@ -440,6 +444,20 @@ pub struct RiskAcquisitionView {
     pub next_advantage_price: Option<f64>,
     pub next_release_units: f64,
     pub next_release_target: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcquisitionSessionView {
+    pub acquisition_reset_reason: AcquisitionResetReasonView,
+    pub acquisition_session_started_at: String,
+    pub initial_frontier: Option<f64>,
+    pub initial_release_units: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcquisitionResetReasonView {
+    FreshSessionStart,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -871,7 +889,8 @@ impl fmt::Display for Side {
 mod tests {
     use super::{
         AccountAnalysisView, AccountAssetExposureView, AccountAssetQuantitySourceView,
-        AccountHedgeLikeView, AccountSummaryView, AccountTrackAnalysisView, BandFlattenTrigger,
+        AccountHedgeLikeView, AccountSummaryView, AccountTrackAnalysisView,
+        AcquisitionResetReasonView, AcquisitionSessionView, BandFlattenTrigger,
         BandProtectionPolicy, BandRecoverPolicy, DecisionReasonView, ExecutionBindingIntentView,
         ExecutionBindingOrderView, ExecutionBindingPolicyView, ExecutionBindingStatusView,
         ExecutionBindingView, ExecutionStateView, ExecutionStatusView, InstrumentView,
@@ -1133,6 +1152,35 @@ mod tests {
     }
 
     #[test]
+    fn acquisition_session_wire_contract_keeps_pending_and_initialized_states_explicit() {
+        let pending = AcquisitionSessionView {
+            acquisition_reset_reason: AcquisitionResetReasonView::FreshSessionStart,
+            acquisition_session_started_at: "2026-07-01T08:00:00+00:00".to_string(),
+            initial_frontier: None,
+            initial_release_units: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&pending).unwrap(),
+            serde_json::json!({
+                "acquisition_reset_reason": "fresh_session_start",
+                "acquisition_session_started_at": "2026-07-01T08:00:00+00:00",
+                "initial_frontier": null,
+                "initial_release_units": null
+            })
+        );
+
+        let initialized: AcquisitionSessionView = serde_json::from_value(serde_json::json!({
+            "acquisition_reset_reason": "fresh_session_start",
+            "acquisition_session_started_at": "2026-07-01T08:00:00+00:00",
+            "initial_frontier": 2.0,
+            "initial_release_units": 0.0
+        }))
+        .unwrap();
+        assert_eq!(initialized.initial_frontier, Some(2.0));
+        assert_eq!(initialized.initial_release_units, Some(0.0));
+    }
+
+    #[test]
     fn deserializes_track_list_response() {
         let response: TrackListResponse = serde_json::from_str(
             r#"{
@@ -1232,6 +1280,7 @@ mod tests {
             attention_reasons: Vec::new(),
             price_execution_block_reason: None,
             active_binding_count: 1,
+            acquisition_session: None,
             risk_acquisition: Default::default(),
             bindings: vec![ExecutionBindingView {
                 id: "binding-instance-1".into(),
@@ -1263,6 +1312,7 @@ mod tests {
             attention_reasons: Vec::new(),
             price_execution_block_reason: None,
             active_binding_count: 0,
+            acquisition_session: None,
             risk_acquisition: Some(RiskAcquisitionView {
                 direction: RiskAcquisitionDirectionView::Long,
                 backlog_units: 3.625,

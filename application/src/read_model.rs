@@ -11,8 +11,9 @@ use poise_engine::executor::{BindingStatus, PolicyKind, RecoveryAnomaly};
 use poise_engine::ledger::TrackPnlStats;
 use poise_engine::price_gate::PriceExecutionBlockReason;
 use poise_engine::runtime::{
-    InventoryDecisionView, RiskAcquisitionDirection, RiskAcquisitionRuntimeView,
-    StrategyPriceStatus, TrackRuntimeView, TrackStatus,
+    AcquisitionResetReason, AcquisitionSessionRuntimeView, InventoryDecisionView,
+    RiskAcquisitionDirection, RiskAcquisitionRuntimeView, StrategyPriceStatus, TrackRuntimeView,
+    TrackStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +48,7 @@ pub struct TrackListReadModel {
     pub current_exposure: f64,
     pub position_qty: f64,
     pub decision: TrackInventoryDecisionReadModel,
+    pub acquisition_session: Option<TrackAcquisitionSessionReadModel>,
     pub risk_acquisition: Option<TrackRiskAcquisitionReadModel>,
     pub pnl_stats: TrackReadPnlStats,
     pub unrealized_pnl: f64,
@@ -281,6 +283,7 @@ pub struct TrackReadModel {
     pub current_exposure: f64,
     pub position_qty: f64,
     pub decision: TrackInventoryDecisionReadModel,
+    pub acquisition_session: Option<TrackAcquisitionSessionReadModel>,
     pub risk_acquisition: Option<TrackRiskAcquisitionReadModel>,
     pub pnl_stats: TrackReadPnlStats,
     pub unrealized_pnl: f64,
@@ -318,6 +321,14 @@ pub struct TrackRiskAcquisitionReadModel {
     pub next_advantage_price: Option<f64>,
     pub next_release_units: f64,
     pub next_release_target: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackAcquisitionSessionReadModel {
+    pub acquisition_reset_reason: AcquisitionResetReason,
+    pub acquisition_session_started_at: DateTime<Utc>,
+    pub initial_frontier: Option<f64>,
+    pub initial_release_units: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -502,6 +513,10 @@ impl TrackReadModel {
             current_exposure: list_view.current_exposure,
             position_qty: list_view.position_qty,
             decision: list_view.decision.clone(),
+            acquisition_session: runtime
+                .acquisition_session
+                .clone()
+                .map(TrackAcquisitionSessionReadModel::from),
             risk_acquisition: list_view.risk_acquisition.clone(),
             pnl_stats: list_view.pnl_stats.clone(),
             unrealized_pnl: list_view.unrealized_pnl,
@@ -534,6 +549,10 @@ impl TrackListReadModel {
             current_exposure: runtime.current_exposure.0,
             position_qty: runtime.position_qty,
             decision: TrackInventoryDecisionReadModel::from(&runtime.decision),
+            acquisition_session: runtime
+                .acquisition_session
+                .clone()
+                .map(TrackAcquisitionSessionReadModel::from),
             risk_acquisition: runtime
                 .risk_acquisition
                 .clone()
@@ -568,6 +587,7 @@ impl From<&TrackReadModel> for TrackListReadModel {
             current_exposure: value.current_exposure,
             position_qty: value.position_qty,
             decision: value.decision.clone(),
+            acquisition_session: value.acquisition_session.clone(),
             risk_acquisition: value.risk_acquisition.clone(),
             pnl_stats: value.pnl_stats.clone(),
             unrealized_pnl: value.unrealized_pnl,
@@ -606,6 +626,17 @@ impl From<RiskAcquisitionRuntimeView> for TrackRiskAcquisitionReadModel {
             next_advantage_price: value.next_advantage_price,
             next_release_units: value.next_release_units,
             next_release_target: value.next_release_target.0,
+        }
+    }
+}
+
+impl From<AcquisitionSessionRuntimeView> for TrackAcquisitionSessionReadModel {
+    fn from(value: AcquisitionSessionRuntimeView) -> Self {
+        Self {
+            acquisition_reset_reason: value.acquisition_reset_reason,
+            acquisition_session_started_at: value.acquisition_session_started_at,
+            initial_frontier: value.initial_frontier.map(|frontier| frontier.0),
+            initial_release_units: value.initial_release_units,
         }
     }
 }
@@ -819,8 +850,9 @@ mod tests {
     use poise_engine::executor::{BindingStatus, PolicyKind, SubmitRecoveryToken};
     use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::{
-        BindingView, ExecutorView, InventoryDecisionView, RiskAcquisitionDirection,
-        RiskAcquisitionRuntimeView, StrategyPriceStatus, TrackRuntimeView, TrackStatus,
+        AcquisitionResetReason, AcquisitionSessionRuntimeView, BindingView, ExecutorView,
+        InventoryDecisionView, RiskAcquisitionDirection, RiskAcquisitionRuntimeView,
+        StrategyPriceStatus, TrackRuntimeView, TrackStatus,
     };
 
     use super::{
@@ -897,6 +929,7 @@ mod tests {
             current_exposure: Exposure(1.0),
             position_qty: 1.0,
             decision,
+            acquisition_session: None,
             risk_acquisition: None,
             manual_target_override: None,
             executor: ExecutorView::default(),
@@ -926,6 +959,7 @@ mod tests {
             current_exposure: 0.0,
             position_qty: 0.42,
             decision: TrackInventoryDecisionReadModel::from(&InventoryDecisionView::default()),
+            acquisition_session: None,
             risk_acquisition: None,
             pnl_stats: TrackReadPnlStats::default(),
             unrealized_pnl: 0.0,
@@ -1084,6 +1118,40 @@ mod tests {
         assert_eq!(detail.decision.acquisition_frontier, Some(1.5));
         assert_eq!(detail.decision.execution_target, Some(1.25));
         assert_eq!(detail.decision.reason, DecisionReason::WaitingRiskRelease);
+    }
+
+    #[test]
+    fn acquisition_session_projects_without_active_backlog() {
+        let started_at = Utc.with_ymd_and_hms(2026, 7, 1, 8, 0, 0).unwrap();
+        let mut runtime = test_runtime_view(InventoryDecisionView::default());
+        runtime.acquisition_session = Some(AcquisitionSessionRuntimeView {
+            acquisition_reset_reason: AcquisitionResetReason::FreshSessionStart,
+            acquisition_session_started_at: started_at,
+            initial_frontier: Some(Exposure(2.0)),
+            initial_release_units: Some(0.0),
+        });
+        assert!(runtime.risk_acquisition.is_none());
+        let updated_at = Utc.with_ymd_and_hms(2026, 7, 1, 8, 1, 0).unwrap();
+
+        let list = TrackListReadModel::from_parts(&test_track_definition(), &runtime, updated_at);
+        let detail = TrackReadModel::from_source(TrackReadSource {
+            definition: test_track_definition(),
+            runtime,
+            updated_at,
+            recent_track_events: Vec::new(),
+            recent_effects: Vec::new(),
+        });
+
+        assert_eq!(list.acquisition_session, detail.acquisition_session);
+        let session = detail.acquisition_session.unwrap();
+        assert_eq!(
+            session.acquisition_reset_reason,
+            AcquisitionResetReason::FreshSessionStart
+        );
+        assert_eq!(session.acquisition_session_started_at, started_at);
+        assert_eq!(session.initial_frontier, Some(2.0));
+        assert_eq!(session.initial_release_units, Some(0.0));
+        assert!(detail.risk_acquisition.is_none());
     }
 
     #[test]

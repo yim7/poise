@@ -108,6 +108,7 @@ export interface TrackLiveView {
   best_bid: number | null;
   best_ask: number | null;
   decision: InventoryDecisionView;
+  acquisition_session?: AcquisitionSessionView | null;
   risk_acquisition?: RiskAcquisitionView | null;
   price_execution_block_reason: PriceExecutionBlockReasonView | null;
 }
@@ -136,6 +137,7 @@ export interface TrackExecutionView {
   attention_reasons: string[];
   price_execution_block_reason: PriceExecutionBlockReasonView | null;
   active_binding_count: number;
+  acquisition_session?: AcquisitionSessionView | null;
   risk_acquisition?: RiskAcquisitionView | null;
   bindings: ExecutionBindingView[];
 }
@@ -148,6 +150,15 @@ export interface RiskAcquisitionConfigView {
   catchup_ratio: number;
   stale_release_minutes: number;
 }
+
+export interface AcquisitionSessionView {
+  acquisition_reset_reason: AcquisitionResetReasonView;
+  acquisition_session_started_at: string;
+  initial_frontier: number | null;
+  initial_release_units: number | null;
+}
+
+export type AcquisitionResetReasonView = 'fresh_session_start';
 
 export interface RiskAcquisitionView {
   direction: RiskAcquisitionDirectionView;

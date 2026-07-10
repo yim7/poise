@@ -850,7 +850,17 @@ mod tests {
     #[tokio::test]
     async fn complete_startup_cancels_inherited_orders_and_rebuilds_fresh_executor_state() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let manager = seeded_manager();
+        let mut manager = seeded_manager();
+        {
+            let mut snapshot = manager.mutation_frame("btc-core").unwrap();
+            snapshot.set_risk_exposure_gate_state(
+                Exposure(9.0),
+                90.0,
+                Exposure(10.0),
+                Utc.with_ymd_and_hms(2026, 5, 1, 8, 0, 0).unwrap(),
+            );
+            manager.rollback_track_state(&snapshot).unwrap();
+        }
         seed_persisted_pending_submit_effect(repository.as_ref(), "btc-core")
             .await
             .unwrap();
@@ -932,6 +942,7 @@ mod tests {
         assert!(!snapshot.has_executor_bindings());
         assert!(!snapshot.recovery_anomaly_active());
         assert_eq!(snapshot.status(), TrackStatus::WaitingMarketData);
+        assert!(snapshot.fresh_acquisition_pending());
     }
 
     #[tokio::test]

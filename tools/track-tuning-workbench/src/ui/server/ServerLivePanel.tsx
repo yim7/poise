@@ -262,6 +262,9 @@ function TrackRuntimeSummary({
   const markPrice = live?.mark_price ?? detail?.market.mark_price ?? null;
   const currentExposure = detail?.position.current_exposure ?? track.exposure.current;
   const decision = live?.decision ?? detail?.decision ?? track.decision;
+  const acquisitionSession = live
+    ? live.acquisition_session ?? null
+    : detail?.execution.acquisition_session ?? null;
   const riskAcquisition = live
     ? live.risk_acquisition ?? null
     : detail?.execution.risk_acquisition ?? null;
@@ -304,6 +307,13 @@ function TrackRuntimeSummary({
         <RuntimeMetric label="价格" value={`策略价 ${formatPrice(strategyPrice)}`} note={`标记价 ${formatPrice(markPrice)}`} />
         <RuntimeMetric label="仓位" value={`当前 ${formatExposure(currentExposure)}`} note="以执行目标为基准" />
         <RuntimeMetric label="决策" value={revision} note={decision.reason} />
+        {acquisitionSession ? (
+          <RuntimeMetric
+            label="Acquisition session"
+            value={acquisitionSession.acquisition_reset_reason}
+            note={`start ${acquisitionSession.acquisition_session_started_at} · frontier ${formatExposure(acquisitionSession.initial_frontier)} · release ${formatSignedExposure(acquisitionSession.initial_release_units)}`}
+          />
+        ) : null}
         {targetMetrics}
         <RuntimeMetric label="差额" value={gapValue} note={gapNote} />
       </div>

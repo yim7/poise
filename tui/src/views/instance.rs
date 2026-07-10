@@ -6,9 +6,10 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::app::App;
 use crate::exposure_presentation::instance_exposure_annotation;
 use crate::protocol::{
-    ActivityLevelView, DecisionReasonView, ExecutionBindingIntentView, ExecutionBindingStatusView,
-    ExecutionStateView, ExecutionStatusView, InventoryDecisionView, RiskAcquisitionDirectionView,
-    RiskAcquisitionView, TrackCommandType, TrackCommandView,
+    AcquisitionResetReasonView, AcquisitionSessionView, ActivityLevelView, DecisionReasonView,
+    ExecutionBindingIntentView, ExecutionBindingStatusView, ExecutionStateView,
+    ExecutionStatusView, InventoryDecisionView, RiskAcquisitionDirectionView, RiskAcquisitionView,
+    TrackCommandType, TrackCommandView,
 };
 use crate::signal::{exposure_signal, pnl_signal};
 use crate::theme::Theme;
@@ -357,6 +358,7 @@ fn execution_body_line_count(detail: &crate::protocol::TrackDetailView) -> usize
         ExecutionStatusView::AttentionRequired
     ));
     let target_lines = 2;
+    let acquisition_session_lines = usize::from(execution.acquisition_session.is_some());
     let risk_acquisition_lines = execution.risk_acquisition.as_ref().map_or(0, |_| 2);
     let binding_lines = if execution.bindings.is_empty() && execution.risk_acquisition.is_none() {
         1
@@ -364,7 +366,7 @@ fn execution_body_line_count(detail: &crate::protocol::TrackDetailView) -> usize
         execution.bindings.len()
     };
 
-    target_lines + alert_lines + risk_acquisition_lines + binding_lines
+    target_lines + alert_lines + acquisition_session_lines + risk_acquisition_lines + binding_lines
 }
 
 fn execution_lines(
@@ -397,6 +399,10 @@ fn execution_lines(
                 execution.attention_reasons.join(" | ")
             )));
         }
+    }
+
+    if let Some(acquisition_session) = &execution.acquisition_session {
+        lines.push(format_acquisition_session_line(acquisition_session));
     }
 
     if let Some(risk_acquisition) = &execution.risk_acquisition {
@@ -533,6 +539,18 @@ fn format_risk_acquisition_lines(risk_acquisition: &RiskAcquisitionView) -> Vec<
             format_signed_exposure(risk_acquisition.release_anchor_target),
         )),
     ]
+}
+
+fn format_acquisition_session_line(session: &AcquisitionSessionView) -> Line<'static> {
+    let reset_reason = match session.acquisition_reset_reason {
+        AcquisitionResetReasonView::FreshSessionStart => "fresh_session_start",
+    };
+    Line::from(format!(
+        "acq session: {reset_reason} @ {} | initial frontier {} | initial release {}",
+        format_local_timestamp_for_display(&session.acquisition_session_started_at),
+        format_optional_signed_exposure(session.initial_frontier),
+        format_optional_signed_exposure(session.initial_release_units),
+    ))
 }
 
 fn format_release_trigger_conditions(risk_acquisition: &RiskAcquisitionView) -> String {
@@ -1165,6 +1183,36 @@ mod tests {
 
         assert!(!text.contains("acq: init"));
         assert!(!text.contains("acq: long"));
+    }
+
+    #[test]
+    fn renders_fresh_acquisition_session_without_backlog() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        value["execution"]["acquisition_session"] = serde_json::json!({
+            "acquisition_reset_reason": "fresh_session_start",
+            "acquisition_session_started_at": "2026-07-01T08:00:00+00:00",
+            "initial_frontier": 2.0,
+            "initial_release_units": 0.0
+        });
+        let detail: TrackDetailView = serde_json::from_value(value).unwrap();
+        assert!(detail.execution.risk_acquisition.is_none());
+
+        let lines = execution_lines(
+            &detail,
+            DetailLayoutMode::Standard,
+            execution_body_line_count(&detail),
+        )
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>();
+
+        assert!(lines.iter().any(|line| {
+            line.contains("acq session: fresh_session_start")
+                && line.contains("initial frontier +2.0000")
+                && line.contains("initial release +0.0000")
+        }));
     }
 
     #[test]
