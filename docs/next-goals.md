@@ -4,7 +4,7 @@
 
 本文只记录当前已确认计划的执行状态，不是长期架构事实源。长期架构和运行语义以 [system-overview.md](system-overview.md) 为准。
 
-当前状态：执行中。当前 task 是 3.1 最终验收并同步长期文档。
+当前状态：已完成。Task 3.1 的验收提交是 `edcf3e6`，等待执行本文的生命周期删除。
 
 生命周期：
 
@@ -16,7 +16,7 @@
 
 | Task | 状态 | 验收摘要 | Commit |
 | --- | --- | --- | --- |
-| 3.1 最终验收并同步长期文档 | in_progress | workspace、Workbench 和长期文档已通过，等待提交与生命周期清理 | — |
+| 3.1 最终验收并同步长期文档 | completed | workspace、Workbench 和长期文档全部通过 | edcf3e6 |
 
 ## Task 3.1 最终验收并同步长期文档
 
