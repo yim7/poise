@@ -4,7 +4,7 @@
 
 本文是当前已确认的实现任务清单，不是长期架构事实源。长期架构和运行语义仍以 [system-overview.md](system-overview.md) 为准。
 
-当前状态：执行中。当前 task 是 2.2 增加黄金场景和 Immediate/Delayed 指标。
+当前状态：执行中。当前 task 是 2.3 Workbench 改用 Rust decision evaluator。
 
 本文的生命周期：
 
@@ -739,8 +739,8 @@ Task 清单：
 | Task | 状态 | 验收摘要 | Commit |
 | --- | --- | --- | --- |
 | 2.1 建立确定性 decision scenario runner | completed | 时间戳输入通过真实 manager 路径产生稳定报告 | dc8b408 |
-| 2.2 增加黄金场景和 Immediate/Delayed 指标 | in_progress | backlog、restart、cross-zero、fill model 可量化比较 | — |
-| 2.3 Workbench 改用 Rust decision evaluator | pending | risk acquisition 参数真实改变指标，不再只改变 TOML | — |
+| 2.2 增加黄金场景和 Immediate/Delayed 指标 | completed | backlog、restart、cross-zero、fill model 可量化比较 | 8eeece8 |
+| 2.3 Workbench 改用 Rust decision evaluator | in_progress | risk acquisition 参数真实改变指标，不再只改变 TOML | — |
 
 ### Task 2.1 建立确定性 decision scenario runner
 
