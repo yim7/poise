@@ -763,6 +763,17 @@ ImmediateFullAtOrderPrice
 NeverFill
 ~~~
 
+已确认 runner 契约：
+
+- 输入显式包含 `started_at` 和 `initial_position`；runner 先注入私有可推进 clock，再按 `add_track -> fresh_start_track(WaitingMarketData) -> Position observation` 建立与真实启动一致的非零仓位 ledger anchor。step 时间允许相同但不得倒退。
+- action 只包含 `Market`、`Position`、`Order` 和 `Restart`。显式 order observation 使用 runner 分配的 `order-1`、`order-2` 引用，不要求调用方知道随机 client order id。
+- 每个 step 先调用真实 manager observation，再按 FIFO 处理本轮产生的 effect 及同步 fill feedback，最后读取该步最终 committed snapshot；`Restart` 或仍在 waiting market data 时 snapshot 明确为空。
+- submit effect 在模拟成交前先走真实 submit recovery/authorization；superseded submit 不执行。receipt、position feedback、cancel receipt 和它们产生的后续 effect 都继续走 TrackManager 公共路径。
+- `ImmediateFullAtOrderPrice` 在订单价立即全成，并把合成 Position observation 回送 manager；`NeverFill` 只接受为 working order。第一版 cancel 视为成功，不模拟撤单失败。
+- 报告只公开语义化 submit/cancel 和稳定 `order_ref`，不公开 raw TrackEffect、recovery token、binding id、随机 client order id 或 UUID。
+- `Restart` 保留模拟交易所当前仓位和 PNL stats，清空旧模拟 open orders，以 `market_data = None` 调用真实 fresh-start；不恢复 frontier、anchor、stale timer 或 executor state。
+- 合成成交统一按 taker fee 估算，字段明确命名为 `estimated_taker_fee`。base/inverse settlement fee 换算由 `core::replay` 的共享 helper 单点负责；不从 client id 或私有 binding 反推 maker/taker policy。
+
 输出：
 
 - 每一步 committed InventoryDecisionSnapshot。
