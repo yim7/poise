@@ -117,6 +117,8 @@ track events 和 track effects 只用于审计与诊断，不参与启动恢复�
 - DecisionReason：非持久化诊断枚举。
 - fresh acquisition pending marker：fresh start 后只存在于 runtime 的私有标记。
 - DecisionReplayInput / DecisionReplayReport：engine 的纯评估 API。
+- AppliedRiskAcquisitionRelease：只绑定当前 decision revision 的非持久化诊断事实，用于 replay 准确统计 release；不进入 DomainEvent、protocol 或启动恢复。
+- DecisionEvaluationInput / DecisionEvaluationReport：在纯 runner 之外组合 curve-immediate benchmark、delayed report 和统一指标口径。
 - readiness response/blocker：protocol 契约，不持久化。
 
 本轮不新增：
@@ -831,6 +833,23 @@ git diff --check
 - estimated fees。
 - max notional 和 margin。
 - restart sensitivity。
+
+已确认 evaluation 契约：
+
+- `DecisionEvaluationInput` 包含已有 `DecisionReplayInput`、`leverage` 和显式 `ended_at`；不把 leverage 或统计 horizon 塞回纯 decision runner。要求 leverage 大于 0、`ended_at` 不早于任一步、至少有一个 ExecutionQuote，且可计 live duration 大于 0。
+- `DecisionReplayStepReport` 投影 manager 已提交的 `strategy_price`；curve-immediate benchmark 只消费 ExecutionQuote 后 manager 实际使用的 strategy price，不在 evaluator 复制 midpoint 或把 MarkPrice 误当策略价。
+- 时间积分使用 post-step 状态覆盖到下一 step 或 `ended_at`，相同时间戳按输入顺序处理且前序状态权重为 0。`Restart` 是 session discontinuity：不积分以 Restart 为右端点的未知停机区间，也不积分 Restart 到新 session 第一笔 ExecutionQuote；mean 指标的分母只累计 live interval。
+- curve-immediate 与 delayed lane 都相对同一份 core curve target 计算绝对 tracking error；分别报告两条 time-weighted tracking error，并以 `delayed - curve_immediate` 表示 delayed 额外付出的 tracking loss。第一版不把它换算成货币化 opportunity cost。
+- max/mean backlog 和 authorized-but-unfilled gap 使用 delayed step 的 committed decision 与模拟交易所仓位；不可见 decision 不反推内部旧 snapshot。mean 使用上述 live-duration 权重。
+- release 不能由 frontier 差分猜测。risk acquisition gate 在真正授权 frontier 向新增风险方向移动时产生 revision-bound applied release，trigger 区分 `InitialRatio`、`PriceAdvantage` 和 `StaleTimeout`；fresh conservative initialization、cross-zero 投影、position ratchet、curve clamp 和 Restart 都不产生 release。Advantage 与 stale 同轮满足时只记录一次 PriceAdvantage。`release_count` 统计全部 applied release；`max_single_catch_up_units` 只统计 PriceAdvantage/StaleTimeout，不把 initial_ratio 混入 catch-up。
+- applied release 只沿现有 gate -> reconciler -> committed snapshot 元数据传递；decision replay 在每次 manager transition 返回时立即按 `(session, decision revision)` 去重并投影为语义 effect，避免同步 fill 后的新 revision 覆盖，也不升级成持久化 DomainEvent。
+- `FillOrder` 额外记录 `trade_notional`、`risk_increase_native_qty` 和成交前后模拟仓位。跨零新增风险复用 execution gate 已有的 `added_risk_units` 口径；turnover 使用全部成交名义价值，long/short weighted fill price 只使用对应方向的新增风险成交量。显式 order observation 仍按原订单价估算，不声称是真实成交价。
+- 两条 lane 的最大 notional 和 margin 都在相同 timestamp、相同 strategy price 和相同 live-window 上用 ExchangeRules 重算，不直接比较 core 以 band center 估值的旧汇总字段。
+- 价格改善只比较两条 lane 按时间顺序截取的共同新增风险成交量：long 为 `curve price - delayed price`，short 为 `delayed price - curve price`，正值才表示有利。报告同时给两边总新增风险量、matched volume 和 matched weighted prices；不把成交量不同的全量均价直接称为价格改善。
+- restart sensitivity 只在输入含 Restart 时输出。counterfactual 保留其余 action、时间戳和 fill model，仅删除 Restart，并与 restart 路径共用原场景的 live-interval mask；同时报告两条路径 execution target 与模拟仓位暴露差的 time-weighted mean/max，前者直接显示授权差异，后者显示在当前 fill model 下已经形成的仓位差异。Restart 后含显式 `Order(order_ref)` 时拒绝自动比较，避免两个分支把同一稳定引用解释成不同订单。
+- `DecisionEvaluationReport` 显式保留 fill model，并用字段名区分 `curve_immediate_benchmark` 与 `delayed_decision_replay`；所有成交、费用和价格改善都只是确定性评估假设，不描述为真实成交预测。
+
+黄金场景放在 engine 的公共 API 集成测试中，复用一套固定 TrackDefinition/ExchangeRules fixture，只断言决策关系、trigger、边界时刻和指标方向，不保存包含随机身份或大段浮点数的 snapshot。
 
 验收：
 
