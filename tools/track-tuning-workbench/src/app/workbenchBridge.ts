@@ -10,7 +10,6 @@ import type {
 import {
   createTrackDraft,
   type BandProtectionPolicyPayload,
-  DEFAULT_RISK_ACQUISITION_DRAFT,
   type RiskAcquisitionDraft,
   type TrackDraft,
   type TrackDraftFieldKey,
@@ -18,7 +17,14 @@ import {
 } from '@/domain/trackDraft';
 
 export interface WorkbenchBridgeCommandError {
-  kind: 'config' | 'io' | 'session_store' | 'dialog' | 'clipboard' | 'internal';
+  kind:
+    | 'config'
+    | 'io'
+    | 'session_store'
+    | 'dialog'
+    | 'clipboard'
+    | 'evaluation'
+    | 'internal';
   message: string;
 }
 
@@ -39,6 +45,165 @@ export interface WorkbenchBridgeQuoteRequest {
   exchangeVenue?: string | null;
 }
 
+export type WorkbenchRulesFixtureId = 'base_asset_v1' | 'inverse_contract_v1';
+
+export interface WorkbenchEvaluationRequest {
+  draft: TrackDraft;
+  exchangeVenue: string;
+  rulesFixture: WorkbenchRulesFixtureId;
+}
+
+export type WorkbenchEvaluationPricePrecision =
+  | { kind: 'fixed_tick' }
+  | {
+      kind: 'significant_figures';
+      maxDecimals: number;
+      significantFigures: number;
+    };
+
+export interface WorkbenchEvaluationRules {
+  fixtureId: WorkbenchRulesFixtureId;
+  priceTick: number;
+  pricePrecision: WorkbenchEvaluationPricePrecision;
+  quantityKind: 'base_asset' | 'inverse_contract';
+  contractNotional: number | null;
+  settlementAsset: string;
+  quantityStep: number;
+  minQty: number;
+  minNotional: number;
+  makerFeeRate: number;
+  takerFeeRate: number;
+  nativeQtyPerExposureUnit: number;
+}
+
+export interface WorkbenchEvaluationAssumptions {
+  rulesNotice: string;
+  fillModelNotice: string;
+  initialNativeQuantity: number;
+  initialExposure: number;
+}
+
+export interface WorkbenchCurvePoint {
+  price: number;
+  targetExposure: number;
+}
+
+export interface WorkbenchEvaluationHorizon {
+  firstLiveAt: string;
+  endedAt: string;
+  wallClockDurationSeconds: number;
+  liveDurationSeconds: number;
+}
+
+export interface WorkbenchScenarioAssumptions {
+  initialNativeQuantity: number;
+  initialExposure: number;
+  deterministicFillNotice: string;
+}
+
+export interface WorkbenchRiskIncreaseFillMetrics {
+  nativeQty: number;
+  weightedFillPrice: number | null;
+}
+
+export interface WorkbenchExecutionMetrics {
+  longRiskIncrease: WorkbenchRiskIncreaseFillMetrics;
+  shortRiskIncrease: WorkbenchRiskIncreaseFillMetrics;
+  turnoverNotional: number;
+  estimatedTakerFee: number;
+  feeAsset: string;
+  maxAbsNotional: number;
+  maxMarginRequirement: number;
+}
+
+export interface WorkbenchTrackingMetrics {
+  timeWeightedTrackingErrorUnits: number;
+  maxTrackingErrorUnits: number;
+}
+
+export interface WorkbenchEvaluationLane {
+  execution: WorkbenchExecutionMetrics;
+  tracking: WorkbenchTrackingMetrics;
+}
+
+export interface WorkbenchDelayedBacklogMetrics {
+  maxBacklogUnits: number;
+  timeWeightedMeanBacklogUnits: number;
+  maxAuthorizedButUnfilledGapUnits: number;
+  timeWeightedMeanAuthorizedButUnfilledGapUnits: number;
+  releaseCount: number;
+  maxSingleCatchUpUnits: number;
+}
+
+export interface WorkbenchDelayedEvaluationLane extends WorkbenchEvaluationLane {
+  backlog: WorkbenchDelayedBacklogMetrics;
+}
+
+export interface WorkbenchMatchedPriceComparison {
+  curveImmediateTotalNativeQty: number;
+  delayedTotalNativeQty: number;
+  matchedNativeQty: number;
+  curveImmediateMatchedWeightedPrice: number | null;
+  delayedMatchedWeightedPrice: number | null;
+  favorablePriceImprovement: number | null;
+}
+
+export interface WorkbenchEvaluationComparison {
+  curveImmediateTimeWeightedTrackingErrorUnits: number;
+  delayedTimeWeightedTrackingErrorUnits: number;
+  additionalDelayedTrackingErrorUnits: number;
+  curveImmediateMaxTrackingErrorUnits: number;
+  delayedMaxTrackingErrorUnits: number;
+  longRiskIncreasePrice: WorkbenchMatchedPriceComparison;
+  shortRiskIncreasePrice: WorkbenchMatchedPriceComparison;
+}
+
+export interface WorkbenchAppliedRelease {
+  trigger: 'initial_ratio' | 'price_advantage' | 'stale_timeout';
+  direction: 'long' | 'short';
+  frontierBefore: number;
+  frontierAfter: number;
+  releaseUnits: number;
+}
+
+export interface WorkbenchReplayRow {
+  observedAt: string;
+  action: string;
+  strategyPrice: number | null;
+  simulatedPositionNativeQuantity: number;
+  simulatedPositionExposure: number;
+  observedPositionNativeQuantity: number;
+  observedPositionExposure: number;
+  signedFilledNativeQuantity: number;
+  policyTarget: number | null;
+  riskApprovedTarget: number | null;
+  acquisitionFrontier: number | null;
+  executionTarget: number | null;
+  reason: string | null;
+  revision: number | null;
+  appliedReleases: WorkbenchAppliedRelease[];
+}
+
+export interface WorkbenchScenarioReport {
+  id: string;
+  title: string;
+  direction: 'long' | 'short';
+  fillModel: 'immediate_full_at_order_price';
+  horizon: WorkbenchEvaluationHorizon;
+  assumptions: WorkbenchScenarioAssumptions;
+  curveImmediateBenchmark: WorkbenchEvaluationLane;
+  delayedDecisionReplay: WorkbenchDelayedEvaluationLane;
+  comparison: WorkbenchEvaluationComparison;
+  replayRows: WorkbenchReplayRow[];
+}
+
+export interface WorkbenchEvaluationReport {
+  rules: WorkbenchEvaluationRules;
+  assumptions: WorkbenchEvaluationAssumptions;
+  curvePoints: WorkbenchCurvePoint[];
+  scenarios: WorkbenchScenarioReport[];
+}
+
 export interface WorkbenchBridge {
   isTauriEnvironment(): boolean;
   openConfigFile(): Promise<string | null>;
@@ -50,6 +215,7 @@ export interface WorkbenchBridge {
   exportAllTracks(drafts: TrackDraft[]): Promise<string>;
   copyText(text: string): Promise<void>;
   fetchBinanceQuote(request: WorkbenchBridgeQuoteRequest): Promise<WorkbenchBridgeQuotePayload>;
+  evaluateTrack(request: WorkbenchEvaluationRequest): Promise<WorkbenchEvaluationReport>;
 }
 
 interface LoadedConfigFilePayload {
@@ -251,6 +417,15 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
         errorMessage: payload.error_message,
       };
     },
+    async evaluateTrack(request) {
+      return tauriInvoke<WorkbenchEvaluationReport>('evaluate_track', {
+        request: {
+          draft: toTrackDraftPayload(request.draft),
+          exchange_venue: request.exchangeVenue,
+          rules_fixture: request.rulesFixture,
+        },
+      });
+    },
   };
 }
 
@@ -268,7 +443,7 @@ function createBrowserWorkbenchBridge(): WorkbenchBridge {
     },
     async saveDraft() {},
     async loadRiskAcquisitionDefaults() {
-      return { ...DEFAULT_RISK_ACQUISITION_DRAFT };
+      throw new Error('浏览器预览中 Rust defaults 不可用。');
     },
     async exportCurrentTrack() {
       throw new Error('浏览器开发模式不支持导出命令，请在 Tauri 桌面应用中使用。');
@@ -290,6 +465,9 @@ function createBrowserWorkbenchBridge(): WorkbenchBridge {
         errorKind: 'temporarily_unavailable',
         errorMessage: '浏览器预览不连接交易所报价，请在 Tauri 桌面应用中使用实时数据。',
       };
+    },
+    async evaluateTrack() {
+      throw new Error('浏览器预览中 Rust evaluator 不可用；没有 TypeScript 计算回退。');
     },
   };
 }
@@ -364,7 +542,7 @@ function toTrackDraftPayload(draft: TrackDraft) {
       notional_per_unit: parseRequiredNumber(draft.rawNumbers.notionalPerUnit),
       max_notional: parseRequiredNumber(draft.rawNumbers.maxNotional),
       min_rebalance_units: parseRequiredNumber(draft.rawNumbers.minRebalanceUnits),
-      leverage: Math.trunc(parseRequiredNumber(draft.rawNumbers.leverage)),
+      leverage: parseRequiredNumber(draft.rawNumbers.leverage),
       out_of_band_policy:
         draft.enums.bandProtectionPolicy,
       daily_loss_limit: parseRequiredNumber(draft.rawNumbers.dailyLossLimit),

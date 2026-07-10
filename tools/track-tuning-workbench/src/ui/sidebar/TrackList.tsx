@@ -12,6 +12,7 @@ export interface TrackListItem {
 export interface TrackListProps {
   items: TrackListItem[];
   selectedTrackId: string | null;
+  canAddBlank: boolean;
   onSelect(draftId: string): void;
   onAddBlank(): void;
   onDuplicateSelected(): void;
@@ -21,6 +22,7 @@ export interface TrackListProps {
 export function TrackList({
   items,
   selectedTrackId,
+  canAddBlank,
   onSelect,
   onAddBlank,
   onDuplicateSelected,
@@ -37,7 +39,12 @@ export function TrackList({
       </div>
 
       <div className="track-list__toolbar">
-        <button className="button button--secondary" type="button" onClick={onAddBlank}>
+        <button
+          className="button button--secondary"
+          type="button"
+          onClick={onAddBlank}
+          disabled={!canAddBlank}
+        >
           空白新建
         </button>
         <button

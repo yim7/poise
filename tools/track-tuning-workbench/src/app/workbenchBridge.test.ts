@@ -14,7 +14,18 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { createWorkbenchBridge } from '@/app/workbenchBridge';
-import { bandProtectionKindFromPolicy } from '@/domain/trackDraft';
+import { bandProtectionKindFromPolicy, createTrackDraft } from '@/domain/trackDraft';
+
+function riskAcquisitionFixture() {
+  return {
+    initialRatio: '0.5',
+    advantageSteps: '2',
+    minReleaseSteps: '1',
+    maxReleaseSteps: '4',
+    catchupRatio: '0.25',
+    staleReleaseMinutes: '60',
+  };
+}
 
 describe('createWorkbenchBridge', () => {
   beforeEach(() => {
@@ -51,7 +62,7 @@ describe('createWorkbenchBridge', () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it('hydrates loaded tracks with default Binance futures fee rates', async () => {
+  it('hydrates the exchange venue without injecting partial exchange rules', async () => {
     invokeMock.mockResolvedValueOnce({
       config_path: '/tmp/strategies/grid.toml',
       exchange_venue: 'okx',
@@ -95,10 +106,7 @@ describe('createWorkbenchBridge', () => {
       bandProtectionKindFromPolicy(loaded.projectedTracks[0].enums.bandProtectionPolicy),
     ).toBe('freeze');
     expect('bandProtectionKind' in loaded.projectedTracks[0].enums).toBe(false);
-    expect(loaded.projectedTracks[0].attachments.exchangeRules).toEqual({
-      makerFeeRate: 0.0002,
-      takerFeeRate: 0.0005,
-    });
+    expect(loaded.projectedTracks[0].attachments).not.toHaveProperty('exchangeRules');
     expect(loaded.projectedTracks[0].attachments.exchangeVenue).toBe('okx');
   });
 
@@ -257,6 +265,245 @@ describe('createWorkbenchBridge', () => {
     });
   });
 
+  it('sends one snake-case request and consumes the camel-case Rust report unchanged', async () => {
+    invokeMock.mockResolvedValueOnce({
+      rules: {
+        fixtureId: 'inverse_contract_v1',
+        priceTick: 0.5,
+        pricePrecision: { kind: 'fixed_tick' },
+        quantityKind: 'inverse_contract',
+        contractNotional: 100,
+        settlementAsset: 'BTC',
+        quantityStep: 1,
+        minQty: 1,
+        minNotional: 100,
+        makerFeeRate: 0.0002,
+        takerFeeRate: 0.0005,
+        nativeQtyPerExposureUnit: 3,
+      },
+      assumptions: {
+        rulesNotice: 'RULES_SENTINEL',
+        fillModelNotice: 'FILL_SENTINEL',
+        initialNativeQuantity: 0,
+        initialExposure: 0,
+      },
+      curvePoints: [
+        { price: 90, targetExposure: 7.125 },
+      ],
+      scenarios: [
+        {
+          id: 'price_advantage_sweep_long',
+          title: 'SENTINEL_SCENARIO',
+          direction: 'long',
+          fillModel: 'immediate_full_at_order_price',
+          horizon: {
+            firstLiveAt: '2026-01-01T00:00:00Z',
+            endedAt: '2026-01-01T00:03:00Z',
+            wallClockDurationSeconds: 180,
+            liveDurationSeconds: 180,
+          },
+          assumptions: {
+            initialNativeQuantity: 0,
+            initialExposure: 0,
+            deterministicFillNotice: 'SCENARIO_ASSUMPTION',
+          },
+          curveImmediateBenchmark: {
+            execution: {
+              longRiskIncrease: { nativeQty: 11, weightedFillPrice: 91.25 },
+              shortRiskIncrease: { nativeQty: 0, weightedFillPrice: null },
+              turnoverNotional: 1100,
+              estimatedTakerFee: 0.55,
+              feeAsset: 'BTC',
+              maxAbsNotional: 2121,
+              maxMarginRequirement: 707,
+            },
+            tracking: {
+              timeWeightedTrackingErrorUnits: 0.125,
+              maxTrackingErrorUnits: 0.25,
+            },
+          },
+          delayedDecisionReplay: {
+            execution: {
+              longRiskIncrease: { nativeQty: 5, weightedFillPrice: 88.75 },
+              shortRiskIncrease: { nativeQty: 0, weightedFillPrice: null },
+              turnoverNotional: 500,
+              estimatedTakerFee: 0.25,
+              feeAsset: 'BTC',
+              maxAbsNotional: 989,
+              maxMarginRequirement: 329.666,
+            },
+            tracking: {
+              timeWeightedTrackingErrorUnits: 4.25,
+              maxTrackingErrorUnits: 5.5,
+            },
+            backlog: {
+              maxBacklogUnits: 6.5,
+              timeWeightedMeanBacklogUnits: 3.25,
+              maxAuthorizedButUnfilledGapUnits: 1.5,
+              timeWeightedMeanAuthorizedButUnfilledGapUnits: 0.75,
+              releaseCount: 2,
+              maxSingleCatchUpUnits: 2.75,
+            },
+          },
+          comparison: {
+            curveImmediateTimeWeightedTrackingErrorUnits: 0.125,
+            delayedTimeWeightedTrackingErrorUnits: 4.25,
+            additionalDelayedTrackingErrorUnits: 4.125,
+            curveImmediateMaxTrackingErrorUnits: 0.25,
+            delayedMaxTrackingErrorUnits: 5.5,
+            longRiskIncreasePrice: {
+              curveImmediateTotalNativeQty: 11,
+              delayedTotalNativeQty: 5,
+              matchedNativeQty: 5,
+              curveImmediateMatchedWeightedPrice: 91.25,
+              delayedMatchedWeightedPrice: 88.75,
+              favorablePriceImprovement: 2.5,
+            },
+            shortRiskIncreasePrice: {
+              curveImmediateTotalNativeQty: 0,
+              delayedTotalNativeQty: 0,
+              matchedNativeQty: 0,
+              curveImmediateMatchedWeightedPrice: null,
+              delayedMatchedWeightedPrice: null,
+              favorablePriceImprovement: null,
+            },
+          },
+          replayRows: [
+            {
+              observedAt: '2026-01-01T00:01:00Z',
+              action: 'execution_quote',
+              strategyPrice: 95,
+              simulatedPositionNativeQuantity: 5,
+              simulatedPositionExposure: 1.75,
+              observedPositionNativeQuantity: 4,
+              observedPositionExposure: 1.5,
+              signedFilledNativeQuantity: 5,
+              policyTarget: 7.125,
+              riskApprovedTarget: 3.5,
+              acquisitionFrontier: 3.25,
+              executionTarget: 3,
+              reason: 'waiting_risk_release',
+              revision: 77,
+              appliedReleases: [
+                {
+                  trigger: 'price_advantage',
+                  direction: 'long',
+                  frontierBefore: 1.25,
+                  frontierAfter: 3.25,
+                  releaseUnits: 2,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    const draft = createTrackDraft({
+      draftId: 'draft-btc',
+      riskAcquisition: riskAcquisitionFixture(),
+      raw: {
+        trackId: 'btc',
+        symbol: 'BTCUSD',
+        lowerPrice: '90',
+        upperPrice: '110',
+        longExposureUnits: '8',
+        shortExposureUnits: '8',
+        notionalPerUnit: '300',
+        maxNotional: '3000',
+        minRebalanceUnits: '1',
+        leverage: '3.7',
+        dailyLossLimit: '120',
+        totalLossLimit: '500',
+        shapeFamily: 'linear',
+        bandProtectionPolicy: 'freeze',
+      },
+    });
+
+    const bridge = createWorkbenchBridge();
+    const report = await bridge.evaluateTrack({
+      draft,
+      exchangeVenue: 'binance',
+      rulesFixture: 'inverse_contract_v1',
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith('evaluate_track', {
+      request: {
+        draft: expect.objectContaining({
+          draft_id: 'draft-btc',
+          fields: expect.objectContaining({
+            track_id: 'btc',
+            leverage: 3.7,
+            risk_acquisition: expect.objectContaining({ initial_ratio: 0.5 }),
+          }),
+        }),
+        exchange_venue: 'binance',
+        rules_fixture: 'inverse_contract_v1',
+      },
+    });
+    expect(report.rules).toMatchObject({
+      fixtureId: 'inverse_contract_v1',
+      quantityKind: 'inverse_contract',
+      nativeQtyPerExposureUnit: 3,
+    });
+    expect(report.curvePoints).toEqual([{ price: 90, targetExposure: 7.125 }]);
+    expect(report.scenarios[0]).toMatchObject({
+      id: 'price_advantage_sweep_long',
+      curveImmediateBenchmark: {
+        execution: { maxAbsNotional: 2121 },
+      },
+      delayedDecisionReplay: {
+        backlog: { maxBacklogUnits: 6.5 },
+      },
+      replayRows: [
+        expect.objectContaining({
+          policyTarget: 7.125,
+          riskApprovedTarget: 3.5,
+          acquisitionFrontier: 3.25,
+          executionTarget: 3,
+          reason: 'waiting_risk_release',
+          revision: 77,
+          appliedReleases: [expect.objectContaining({ releaseUnits: 2 })],
+        }),
+      ],
+    });
+  });
+
+  it('surfaces an evaluation command error without a TypeScript fallback', async () => {
+    invokeMock.mockRejectedValueOnce({
+      kind: 'evaluation',
+      message: 'EVALUATION_FIXTURE_SENTINEL',
+    });
+    const bridge = createWorkbenchBridge();
+    const draft = createTrackDraft({
+      draftId: 'draft-error',
+      riskAcquisition: riskAcquisitionFixture(),
+      raw: {
+        trackId: 'error',
+        symbol: 'BTCUSDT',
+        lowerPrice: '90',
+        upperPrice: '110',
+        longExposureUnits: '8',
+        shortExposureUnits: '8',
+        notionalPerUnit: '100',
+        maxNotional: '3000',
+        minRebalanceUnits: '1',
+        leverage: '3',
+        dailyLossLimit: '120',
+        totalLossLimit: '500',
+        shapeFamily: 'linear',
+        bandProtectionPolicy: 'freeze',
+      },
+    });
+
+    await expect(bridge.evaluateTrack({
+      draft,
+      exchangeVenue: 'binance',
+      rulesFixture: 'base_asset_v1',
+    })).rejects.toThrow('EVALUATION_FIXTURE_SENTINEL');
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps browser preview out of real config loading', async () => {
     delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     const createElementSpy = vi.spyOn(document, 'createElement');
@@ -289,5 +536,102 @@ describe('createWorkbenchBridge', () => {
     expect(fetchMock).not.toHaveBeenCalled();
 
     fetchMock.mockRestore();
+  });
+
+  it('does not provide a TypeScript evaluator fallback in browser preview', async () => {
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    const bridge = createWorkbenchBridge();
+    const draft = createTrackDraft({
+      draftId: 'draft-browser',
+      riskAcquisition: riskAcquisitionFixture(),
+      raw: {
+        trackId: 'browser',
+        symbol: 'BTCUSDT',
+        lowerPrice: '90',
+        upperPrice: '110',
+        longExposureUnits: '8',
+        shortExposureUnits: '8',
+        notionalPerUnit: '100',
+        maxNotional: '3000',
+        minRebalanceUnits: '1',
+        leverage: '3',
+        dailyLossLimit: '120',
+        totalLossLimit: '500',
+        shapeFamily: 'linear',
+        bandProtectionPolicy: 'freeze',
+      },
+    });
+
+    await expect(bridge.evaluateTrack({
+      draft,
+      exchangeVenue: 'binance',
+      rulesFixture: 'base_asset_v1',
+    })).rejects.toThrow('Rust evaluator 不可用');
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('does not recreate Rust risk defaults in browser preview', async () => {
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+
+    await expect(createWorkbenchBridge().loadRiskAcquisitionDefaults()).rejects.toThrow(
+      'Rust defaults 不可用',
+    );
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('returns the camel-case Rust evaluation read model without a second field mapper', async () => {
+    const payload = {
+      rules: {
+        fixtureId: 'base_asset_v1' as const,
+        priceTick: 0.1,
+        pricePrecision: { kind: 'fixed_tick' as const },
+        quantityKind: 'base_asset' as const,
+        contractNotional: null,
+        settlementAsset: 'USDT',
+        quantityStep: 0.001,
+        minQty: 0,
+        minNotional: 0,
+        makerFeeRate: 0.0002,
+        takerFeeRate: 0.001,
+        nativeQtyPerExposureUnit: 1,
+      },
+      assumptions: {
+        rulesNotice: 'RULES',
+        fillModelNotice: 'FILL',
+        initialNativeQuantity: 0,
+        initialExposure: 0,
+      },
+      curvePoints: [],
+      scenarios: [],
+    };
+    invokeMock.mockResolvedValueOnce(payload);
+    const draft = createTrackDraft({
+      draftId: 'camel-report',
+      riskAcquisition: riskAcquisitionFixture(),
+      raw: {
+        trackId: 'camel-report',
+        symbol: 'BTCUSDT',
+        lowerPrice: '90',
+        upperPrice: '110',
+        longExposureUnits: '8',
+        shortExposureUnits: '8',
+        notionalPerUnit: '100',
+        maxNotional: '800',
+        minRebalanceUnits: '1',
+        leverage: '3',
+        dailyLossLimit: '120',
+        totalLossLimit: '500',
+        shapeFamily: 'linear',
+        bandProtectionPolicy: 'freeze',
+      },
+    });
+
+    const report = await createWorkbenchBridge().evaluateTrack({
+      draft,
+      exchangeVenue: 'binance',
+      rulesFixture: 'base_asset_v1',
+    });
+
+    expect(report).toBe(payload);
   });
 });

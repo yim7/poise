@@ -27,6 +27,14 @@ function makeDraft(draftId: string, overrides: Partial<TrackDraft> = {}): TrackD
     parsedNumbers: overrides.parsedNumbers,
     ui: overrides.ui,
     attachments: overrides.attachments,
+    riskAcquisition: {
+      initialRatio: '0.5',
+      advantageSteps: '2',
+      minReleaseSteps: '1',
+      maxReleaseSteps: '4',
+      catchupRatio: '0.25',
+      staleReleaseMinutes: '60',
+    },
   });
 }
 
@@ -58,8 +66,8 @@ describe('useSelectedTrackWorkbench', () => {
       canRedo: false,
     });
 
-    expect(model.selectedVisualSnapshot?.ui.quotePrice).toBe(101.25);
     expect(model.priceStatus.badge).toBe('Binance 实时');
+    expect(model.priceStatus.note).toContain('最新合约报价已接通');
   });
 
   it('labels live OKX quotes with the OKX venue', () => {
@@ -95,7 +103,6 @@ describe('useSelectedTrackWorkbench', () => {
       canRedo: false,
     });
 
-    expect(model.selectedVisualSnapshot?.ui.quotePrice).toBe(1515.8);
     expect(model.priceStatus.badge).toBe('OKX 实时');
     expect(model.priceStatus.note).not.toContain('Binance');
   });
@@ -128,8 +135,8 @@ describe('useSelectedTrackWorkbench', () => {
       canRedo: false,
     });
 
-    expect(model.selectedVisualSnapshot?.ui.quotePrice).toBe(98.5);
     expect(model.priceStatus.badge).toBe('临时价格覆盖');
+    expect(model.priceStatus.note).toContain('只影响报价栏');
   });
 
   it('keeps a load-issue track visible but not trialable', () => {
@@ -167,6 +174,9 @@ describe('useSelectedTrackWorkbench', () => {
     });
 
     expect(model.trackItems[0]?.hasErrors).toBe(true);
-    expect(model.selectedVisualSnapshot).toBeNull();
+    expect(model.selectedValidation?.issues).toContainEqual({
+      field: 'lowerPrice',
+      message: 'track #1: missing numeric field `lower_price`',
+    });
   });
 });

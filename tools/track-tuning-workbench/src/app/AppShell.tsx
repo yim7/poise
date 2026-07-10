@@ -3,9 +3,9 @@ import { useEffect, useState } from 'react';
 import {
   createSourceSnapshot,
   type WorkbenchBridge,
+  type WorkbenchRulesFixtureId,
 } from '@/app/workbenchBridge';
 import {
-  DEFAULT_RISK_ACQUISITION_DRAFT,
   createTrackDraft,
   defaultBandProtectionPolicy,
   riskAcquisitionFieldKey,
@@ -17,6 +17,7 @@ import { clearResolvedLoadIssues, parseFiniteNumber } from '@/domain/trackValida
 import { useWorkbenchSnapshot, useWorkbenchStore } from '@/state/workbenchStore';
 import { TrackWorkbenchChart } from '@/ui/chart/TrackWorkbenchChart';
 import { useSelectedTrackWorkbench } from '@/ui/app/useSelectedTrackWorkbench';
+import { useTrackEvaluation } from '@/ui/app/useTrackEvaluation';
 import { InlineNotice } from '@/ui/common/InlineNotice';
 import { TrackEditor } from '@/ui/editor/TrackEditor';
 import { MetricCards } from '@/ui/metrics/MetricCards';
@@ -40,14 +41,13 @@ export function AppShell({ bridge }: AppShellProps) {
   const snapshot = useWorkbenchSnapshot();
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const [riskAcquisitionDefaults, setRiskAcquisitionDefaults] =
-    useState<RiskAcquisitionDraft>({
-      ...DEFAULT_RISK_ACQUISITION_DRAFT,
-    });
+    useState<RiskAcquisitionDraft | null>(null);
+  const [rulesFixture, setRulesFixture] =
+    useState<WorkbenchRulesFixtureId | null>(null);
+  const [selectedScenarioId, setSelectedScenarioId] = useState('');
   const {
     selectedDraft,
     selectedValidation,
-    selectedVisualSnapshot,
-    selectedMetrics,
     trackItems,
     priceStatus,
   } = useSelectedTrackWorkbench(snapshot);
@@ -55,10 +55,16 @@ export function AppShell({ bridge }: AppShellProps) {
   const selectedDraftId = selectedDraft?.draftId ?? null;
   const selectedSymbol = selectedDraft?.additional.symbol.trim() ?? '';
   const selectedExchangeVenue = selectedDraft?.attachments.exchangeVenue?.trim() || 'binance';
+  const evaluation = useTrackEvaluation({
+    bridge: resolvedBridge,
+    draft: selectedDraft,
+    exchangeVenue: selectedExchangeVenue,
+    rulesFixture,
+  });
 
   useEffect(() => {
-    if (!resolvedBridge || !selectedDraftId) {
-      setRiskAcquisitionDefaults({ ...DEFAULT_RISK_ACQUISITION_DRAFT });
+    if (!resolvedBridge?.isTauriEnvironment()) {
+      setRiskAcquisitionDefaults(null);
       return;
     }
 
@@ -72,6 +78,7 @@ export function AppShell({ bridge }: AppShellProps) {
         }
       } catch (error) {
         if (!cancelled) {
+          setRiskAcquisitionDefaults(null);
           setNotice({
             tone: 'warning',
             message: error instanceof Error ? error.message : String(error),
@@ -85,7 +92,7 @@ export function AppShell({ bridge }: AppShellProps) {
     return () => {
       cancelled = true;
     };
-  }, [resolvedBridge, selectedDraftId]);
+  }, [resolvedBridge]);
 
   useEffect(() => {
     if (!resolvedBridge || !selectedDraftId) {
@@ -171,7 +178,7 @@ export function AppShell({ bridge }: AppShellProps) {
           <h1 className="app-shell__headline">Track Tuning Workbench</h1>
         </div>
         <p className="app-shell__summary">
-          主图负责把价格带、仓位曲线和风险边缘放到同一个判断面里；左侧管理文件和 Track，右侧直接围绕真实试算结果调参。
+          主图展示 Rust curve points 与 delayed replay；左侧管理文件和 Track，右侧围绕同一份 decision evaluator 报告调参。
         </p>
       </header>
 
@@ -271,11 +278,15 @@ export function AppShell({ bridge }: AppShellProps) {
           <TrackList
             items={trackItems}
             selectedTrackId={selectedDraft?.draftId ?? null}
+            canAddBlank={riskAcquisitionDefaults !== null}
             onSelect={(draftId) => {
               store.selectDraft(draftId);
               setNotice(null);
             }}
             onAddBlank={() => {
+              if (!riskAcquisitionDefaults) {
+                return;
+              }
               const blankDraft = createBlankDraft(
                 snapshot.drafts.length,
                 riskAcquisitionDefaults,
@@ -315,13 +326,16 @@ export function AppShell({ bridge }: AppShellProps) {
           <div className="app-shell__analysis">
             <ServerLivePanel enabled={Boolean(resolvedBridge?.isTauriEnvironment())} />
             <MetricCards
-              snapshot={selectedVisualSnapshot}
-              metrics={selectedMetrics}
+              evaluation={evaluation}
+              rulesFixture={rulesFixture}
+              onRulesFixtureChange={setRulesFixture}
+              selectedScenarioId={selectedScenarioId}
+              onSelectedScenarioChange={setSelectedScenarioId}
               priceStatus={priceStatus}
             />
             <TrackWorkbenchChart
-              snapshot={selectedVisualSnapshot}
-              metrics={selectedMetrics}
+              report={evaluation.report}
+              selectedScenarioId={selectedScenarioId}
             />
           </div>
 
@@ -366,9 +380,6 @@ export function AppShell({ bridge }: AppShellProps) {
                   return;
                 }
                 store.updateDraft(selectedDraft.draftId, (draft) => {
-                  draft.riskAcquisition ??= {
-                    ...riskAcquisitionDefaults,
-                  };
                   draft.riskAcquisition[field] = value;
                   clearResolvedLoadIssues(draft, riskAcquisitionFieldKey(field));
                 });

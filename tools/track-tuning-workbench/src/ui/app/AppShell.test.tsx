@@ -7,6 +7,7 @@ import { AppShell } from '@/app/AppShell';
 import { createTrackDraft, type TrackDraft } from '@/domain/trackDraft';
 import { WorkbenchStoreProvider, createWorkbenchStore } from '@/state/workbenchStore';
 import type { WorkbenchBridge } from '@/app/workbenchBridge';
+import type { WorkbenchEvaluationReport } from '@/app/workbenchBridge';
 
 interface DraftOverrides {
   additional?: TrackDraft['additional'];
@@ -38,7 +39,14 @@ function makeDraft(draftId: string, overrides: DraftOverrides = {}): TrackDraft 
     },
     additional: overrides.additional,
     enums: overrides.enums,
-    riskAcquisition: overrides.riskAcquisition,
+    riskAcquisition: overrides.riskAcquisition ?? {
+      initialRatio: '0.5',
+      advantageSteps: '2',
+      minReleaseSteps: '1',
+      maxReleaseSteps: '4',
+      catchupRatio: '0.25',
+      staleReleaseMinutes: '60',
+    },
     ui: {
       quotePriceInput: overrides.ui?.quotePriceInput ?? '100',
     },
@@ -58,11 +66,6 @@ async function renderShell() {
         },
         attachments: {
           currentExposure: 2.25,
-          exchangeRules: {
-            priceTick: 0.1,
-            quantityStep: 0.01,
-            takerFeeRate: 0.0005,
-          },
         },
       }),
       makeDraft('draft-gold', {
@@ -122,12 +125,152 @@ function createMockBridge(
       errorKind: null,
       errorMessage: null,
     })),
+    evaluateTrack: vi.fn(async () => sentinelEvaluationReport()),
     ...overrides,
   };
 }
 
+function sentinelEvaluationReport(): WorkbenchEvaluationReport {
+  const immediateExecution = {
+    longRiskIncrease: { nativeQty: 11, weightedFillPrice: 91.25 },
+    shortRiskIncrease: { nativeQty: 0, weightedFillPrice: null },
+    turnoverNotional: 1100,
+    estimatedTakerFee: 0.55,
+    feeAsset: 'USDT',
+    maxAbsNotional: 2121,
+    maxMarginRequirement: 707,
+  };
+  const delayedExecution = {
+    longRiskIncrease: { nativeQty: 5, weightedFillPrice: 88.75 },
+    shortRiskIncrease: { nativeQty: 0, weightedFillPrice: null },
+    turnoverNotional: 500,
+    estimatedTakerFee: 0.25,
+    feeAsset: 'USDT',
+    maxAbsNotional: 989,
+    maxMarginRequirement: 329.666,
+  };
+  return {
+    rules: {
+      fixtureId: 'base_asset_v1',
+      priceTick: 0.1,
+      pricePrecision: { kind: 'fixed_tick' },
+      quantityKind: 'base_asset',
+      contractNotional: null,
+      settlementAsset: 'USDT',
+      quantityStep: 0.001,
+      minQty: 0.001,
+      minNotional: 5,
+      makerFeeRate: 0.0002,
+      takerFeeRate: 0.0005,
+      nativeQtyPerExposureUnit: 0.123456,
+    },
+    assumptions: {
+      rulesNotice: 'RULES_SENTINEL：确定性评估假设，不是实时规则',
+      fillModelNotice: 'FILL_SENTINEL：不是成交概率、滑点或 PnL 预测',
+      initialNativeQuantity: 0,
+      initialExposure: 0,
+    },
+    curvePoints: [
+      { price: 90, targetExposure: 7.125 },
+      { price: 100, targetExposure: 0.375 },
+      { price: 110, targetExposure: -6.875 },
+    ],
+    scenarios: [
+      {
+        id: 'price_advantage_sweep_long',
+        title: 'SENTINEL 价格优势 long',
+        direction: 'long',
+        fillModel: 'immediate_full_at_order_price',
+        horizon: {
+          firstLiveAt: '2026-01-01T00:00:00Z',
+          endedAt: '2026-01-01T00:03:00Z',
+          wallClockDurationSeconds: 180,
+          liveDurationSeconds: 180,
+        },
+        assumptions: {
+          initialNativeQuantity: 0,
+          initialExposure: 0,
+          deterministicFillNotice: 'SCENARIO_FILL_SENTINEL',
+        },
+        curveImmediateBenchmark: {
+          execution: immediateExecution,
+          tracking: {
+            timeWeightedTrackingErrorUnits: 0.125,
+            maxTrackingErrorUnits: 0.25,
+          },
+        },
+        delayedDecisionReplay: {
+          execution: delayedExecution,
+          tracking: {
+            timeWeightedTrackingErrorUnits: 4.25,
+            maxTrackingErrorUnits: 5.5,
+          },
+          backlog: {
+            maxBacklogUnits: 6.5,
+            timeWeightedMeanBacklogUnits: 3.25,
+            maxAuthorizedButUnfilledGapUnits: 1.5,
+            timeWeightedMeanAuthorizedButUnfilledGapUnits: 0.75,
+            releaseCount: 2,
+            maxSingleCatchUpUnits: 2.75,
+          },
+        },
+        comparison: {
+          curveImmediateTimeWeightedTrackingErrorUnits: 0.125,
+          delayedTimeWeightedTrackingErrorUnits: 4.25,
+          additionalDelayedTrackingErrorUnits: 4.125,
+          curveImmediateMaxTrackingErrorUnits: 0.25,
+          delayedMaxTrackingErrorUnits: 5.5,
+          longRiskIncreasePrice: {
+            curveImmediateTotalNativeQty: 11,
+            delayedTotalNativeQty: 5,
+            matchedNativeQty: 5,
+            curveImmediateMatchedWeightedPrice: 91.25,
+            delayedMatchedWeightedPrice: 88.75,
+            favorablePriceImprovement: 2.5,
+          },
+          shortRiskIncreasePrice: {
+            curveImmediateTotalNativeQty: 0,
+            delayedTotalNativeQty: 0,
+            matchedNativeQty: 0,
+            curveImmediateMatchedWeightedPrice: null,
+            delayedMatchedWeightedPrice: null,
+            favorablePriceImprovement: null,
+          },
+        },
+        replayRows: [
+          {
+            observedAt: '2026-01-01T00:01:00Z',
+            action: 'execution_quote',
+            strategyPrice: 95,
+            simulatedPositionNativeQuantity: 5,
+            simulatedPositionExposure: 1.75,
+            observedPositionNativeQuantity: 4,
+            observedPositionExposure: 1.5,
+            signedFilledNativeQuantity: 5,
+            policyTarget: 7.125,
+            riskApprovedTarget: 3.5,
+            acquisitionFrontier: 3.25,
+            executionTarget: 3,
+            reason: 'waiting_risk_release',
+            revision: 77,
+            appliedReleases: [
+              {
+                trigger: 'price_advantage',
+                direction: 'long',
+                frontierBefore: 1.25,
+                frontierAfter: 3.25,
+                releaseUnits: 2,
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
 describe('AppShell', () => {
-  it('renders the primary actions and metric cards for the selected track', async () => {
+  it('renders the primary actions and the Rust evaluator boundary for the selected track', async () => {
     await renderShell();
 
     expect(screen.getByRole('region', { name: '文件操作区' })).toBeInTheDocument();
@@ -144,13 +287,9 @@ describe('AppShell', () => {
     expect(screen.getByRole('button', { name: '复制全部 Tracks' })).toBeInTheDocument();
 
     const metricRegion = screen.getByRole('region', { name: '关键指标区' });
-    expect(within(metricRegion).getByText('当前价格')).toBeInTheDocument();
-    expect(within(metricRegion).getByText('最小步长对应价格')).toBeInTheDocument();
-    expect(within(metricRegion).getByText('每步理论净利')).toBeInTheDocument();
-    expect(within(metricRegion).getByText('当前价到风险边缘')).toBeInTheDocument();
-    expect(within(metricRegion).getByText('从 0 建仓到边缘均价')).toBeInTheDocument();
-    expect(within(metricRegion).getByText('从 0 到边缘理论浮亏')).toBeInTheDocument();
-    expect(within(metricRegion).getByText('从 0 到边缘净亏估算')).toBeInTheDocument();
+    expect(within(metricRegion).getByText('曲线立即执行与延迟决策对照')).toBeInTheDocument();
+    expect(within(metricRegion).getByLabelText('评估规则 fixture')).toBeInTheDocument();
+    expect(within(metricRegion).getByText(/Rust evaluator 不可用/)).toBeInTheDocument();
   });
 
   it('keeps server live disabled outside the Tauri bridge', async () => {
@@ -161,7 +300,7 @@ describe('AppShell', () => {
     expect(within(serverPanel).getByText('server live 只在 Tauri 桌面版启用。')).toBeInTheDocument();
   });
 
-  it('enables server live when AppShell receives a Tauri bridge', () => {
+  it('enables server live when AppShell receives a Tauri bridge', async () => {
     const bridge = createMockBridge({
       isTauriEnvironment: () => true,
     });
@@ -173,15 +312,185 @@ describe('AppShell', () => {
       },
     });
 
+    await act(async () => {
+      render(
+        <WorkbenchStoreProvider store={store}>
+          <AppShell bridge={bridge} />
+        </WorkbenchStoreProvider>,
+      );
+    });
+
+    const serverPanel = screen.getByRole('region', { name: 'Server live inspector' });
+    expect(within(serverPanel).queryByText('浏览器预览模式')).toBeNull();
+    expect(within(serverPanel).getByRole('button', { name: '连接 Server' })).toBeEnabled();
+  });
+
+  it('renders Rust sentinel assumptions, independent lanes, and delayed decision rows', async () => {
+    const bridge = createMockBridge({ isTauriEnvironment: () => true });
+    const store = createWorkbenchStore({
+      initialSnapshot: {
+        selectedDraftId: 'draft-sentinel',
+        drafts: [makeDraft('draft-sentinel', { ui: { quotePriceInput: '' } })],
+        temporaryPriceOverrides: {},
+      },
+    });
+
+    await act(async () => {
+      render(
+        <WorkbenchStoreProvider store={store}>
+          <AppShell bridge={bridge} />
+        </WorkbenchStoreProvider>,
+      );
+    });
+
+    expect(screen.getByLabelText('评估规则 fixture')).toHaveValue('');
+    expect(bridge.evaluateTrack).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('评估规则 fixture'), {
+      target: { value: 'base_asset_v1' },
+    });
+    expect(await screen.findByText(/RULES_SENTINEL/)).toBeInTheDocument();
+    expect(screen.getAllByText(/FILL_SENTINEL/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('tick 0.1000')).toBeInTheDocument();
+    expect(screen.getByText(/quantity step 0\.0010/)).toBeInTheDocument();
+    expect(screen.getByText('qty 0.0010')).toBeInTheDocument();
+    expect(screen.getByText(/notional 5\.0000/)).toBeInTheDocument();
+    expect(screen.getByText('contract notional --')).toBeInTheDocument();
+    expect(screen.getByText('settlement USDT')).toBeInTheDocument();
+
+    const immediate = screen.getByRole('region', { name: 'Curve-immediate benchmark' });
+    const delayed = screen.getByRole('region', { name: 'Delayed decision replay' });
+    expect(within(immediate).getByText('2,121.0000')).toBeInTheDocument();
+    expect(within(immediate).getByText('native qty 11.0000')).toBeInTheDocument();
+    expect(within(immediate).getByText('weighted price 91.2500')).toBeInTheDocument();
+    expect(within(delayed).getByText('989.0000')).toBeInTheDocument();
+    expect(within(delayed).getByText('native qty 5.0000')).toBeInTheDocument();
+    expect(within(delayed).getByText('weighted price 88.7500')).toBeInTheDocument();
+    expect(within(delayed).getByText('6.5000')).toBeInTheDocument();
+    expect(within(delayed).getByText('policy 7.1250')).toBeInTheDocument();
+    expect(within(delayed).getByText('risk approved 3.5000')).toBeInTheDocument();
+    expect(within(delayed).getByText('frontier 3.2500')).toBeInTheDocument();
+    expect(within(delayed).getByText('execution 3.0000')).toBeInTheDocument();
+    expect(within(delayed).getByText('waiting_risk_release')).toBeInTheDocument();
+    expect(within(delayed).getByText('revision 77')).toBeInTheDocument();
+    expect(screen.getByText(/matched native qty 5\.0000/)).toBeInTheDocument();
+    expect(screen.getByText(/immediate matched weighted price 91\.2500/)).toBeInTheDocument();
+    expect(screen.getByText(/delayed matched weighted price 88\.7500/)).toBeInTheDocument();
+    expect(screen.getByText(/favorable improvement 2\.5000/)).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Rust evaluator 曲线与 replay' })).toBeInTheDocument();
+  });
+
+  it('uses the same selected scenario for metrics and the replay chart', async () => {
+    const report = sentinelEvaluationReport();
+    const staleScenario = structuredClone(report.scenarios[0]);
+    staleScenario.id = 'stale_hold_short';
+    staleScenario.title = 'SENTINEL stale short';
+    staleScenario.direction = 'short';
+    staleScenario.replayRows[0].strategyPrice = 108;
+    staleScenario.replayRows[0].simulatedPositionExposure = -4.5;
+    report.scenarios.push(staleScenario);
+    const bridge = createMockBridge({
+      isTauriEnvironment: () => true,
+      evaluateTrack: vi.fn(async () => report),
+    });
+    const store = createWorkbenchStore({
+      initialSnapshot: {
+        selectedDraftId: 'draft-sentinel',
+        drafts: [makeDraft('draft-sentinel')],
+        temporaryPriceOverrides: {},
+      },
+    });
+
+    render(
+      <WorkbenchStoreProvider store={store}>
+        <AppShell bridge={bridge} />
+      </WorkbenchStoreProvider>,
+    );
+    fireEvent.change(screen.getByLabelText('评估规则 fixture'), {
+      target: { value: 'base_asset_v1' },
+    });
+    await screen.findByRole('heading', { name: 'SENTINEL 价格优势 long' });
+    const firstReplayPath = document.querySelector('.track-workbench-chart__risk-line')
+      ?.getAttribute('d');
+
+    fireEvent.change(screen.getByLabelText('评估场景'), {
+      target: { value: 'stale_hold_short' },
+    });
+    expect(await screen.findByRole('heading', { name: 'SENTINEL stale short' })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(document.querySelector('.track-workbench-chart__risk-line')?.getAttribute('d'))
+        .not.toBe(firstReplayPath);
+    });
+  });
+
+  it('requires an explicit fixture and re-evaluates when the local selector changes', async () => {
+    const bridge = createMockBridge({ isTauriEnvironment: () => true });
+    const store = createWorkbenchStore({
+      initialSnapshot: {
+        selectedDraftId: 'draft-sentinel',
+        drafts: [makeDraft('draft-sentinel')],
+        temporaryPriceOverrides: {},
+      },
+    });
+
+    render(
+      <WorkbenchStoreProvider store={store}>
+        <AppShell bridge={bridge} />
+      </WorkbenchStoreProvider>,
+    );
+    expect(screen.getByLabelText('评估规则 fixture')).toHaveValue('');
+    expect(bridge.evaluateTrack).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText('评估规则 fixture'), {
+      target: { value: 'base_asset_v1' },
+    });
+    await waitFor(() => expect(bridge.evaluateTrack).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(screen.getByLabelText('评估规则 fixture'), {
+      target: { value: 'inverse_contract_v1' },
+    });
+    await waitFor(() => expect(bridge.evaluateTrack).toHaveBeenLastCalledWith(
+      expect.objectContaining({ rulesFixture: 'inverse_contract_v1' }),
+    ));
+    expect(store.getState().drafts[0].attachments).not.toHaveProperty('rulesFixture');
+  });
+
+  it('shows evaluator loading and error states without retaining an old report', async () => {
+    let rejectEvaluation!: (reason: unknown) => void;
+    const pending = new Promise<WorkbenchEvaluationReport>((_resolve, reject) => {
+      rejectEvaluation = reject;
+    });
+    const bridge = createMockBridge({
+      isTauriEnvironment: () => true,
+      evaluateTrack: vi.fn(() => pending),
+    });
+    const store = createWorkbenchStore({
+      initialSnapshot: {
+        selectedDraftId: 'draft-sentinel',
+        drafts: [makeDraft('draft-sentinel')],
+        temporaryPriceOverrides: {},
+      },
+    });
+
     render(
       <WorkbenchStoreProvider store={store}>
         <AppShell bridge={bridge} />
       </WorkbenchStoreProvider>,
     );
 
-    const serverPanel = screen.getByRole('region', { name: 'Server live inspector' });
-    expect(within(serverPanel).queryByText('浏览器预览模式')).toBeNull();
-    expect(within(serverPanel).getByRole('button', { name: '连接 Server' })).toBeEnabled();
+    fireEvent.change(screen.getByLabelText('评估规则 fixture'), {
+      target: { value: 'base_asset_v1' },
+    });
+    expect(await screen.findByText('Rust evaluator 正在运行…')).toBeInTheDocument();
+    await act(async () => rejectEvaluation(new Error('EVALUATION_SENTINEL_ERROR')));
+    expect(await screen.findByText('EVALUATION_SENTINEL_ERROR')).toBeInTheDocument();
+    expect(screen.queryByText(/RULES_SENTINEL/)).toBeNull();
+  });
+
+  it('states that browser preview has no Rust evaluator or TypeScript fallback', async () => {
+    await renderShell();
+
+    expect(screen.getByText(/Rust evaluator 不可用/)).toBeInTheDocument();
+    expect(screen.getByText(/不会运行 TypeScript 计算回退/)).toBeInTheDocument();
   });
 
   it('keeps analysis panels and the editor in separate workspace rails', async () => {
@@ -209,7 +518,7 @@ describe('AppShell', () => {
     const metricRegion = screen.getByRole('region', { name: '关键指标区' });
     const editorRegion = screen.getByRole('region', { name: '参数编辑区' });
 
-    expect(metricRegion.querySelector('.metric-cards--compact')).not.toBeNull();
+    expect(metricRegion.querySelector('.evaluation-controls')).not.toBeNull();
     expect(editorRegion.querySelector('.field-grid--three')).toBeNull();
     expect(editorRegion.querySelector('.field-grid--two')).not.toBeNull();
   });
@@ -249,10 +558,7 @@ describe('AppShell', () => {
 
     expect(screen.getByText('daily_loss_limit 必须大于 0')).toBeInTheDocument();
     expect(screen.getByDisplayValue('0')).toBeInTheDocument();
-    expect(screen.getByRole('img', { name: 'Track 调参主图' })).toBeInTheDocument();
-    expect(
-      within(screen.getByRole('region', { name: '关键指标区' })).getByText('当前价格'),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: 'Rust evaluator 曲线与 replay' })).toBeNull();
   });
 
   it('edits risk acquisition settings in the selected draft', async () => {
@@ -297,6 +603,7 @@ describe('AppShell', () => {
 
   it('uses bridge risk acquisition defaults when creating a blank draft', async () => {
     const bridge = createMockBridge({
+      isTauriEnvironment: () => true,
       loadRiskAcquisitionDefaults: vi.fn(async () => ({
         initialRatio: '0.4',
         advantageSteps: '1.5',
@@ -343,23 +650,51 @@ describe('AppShell', () => {
     });
   });
 
-  it('recomputes min rebalance metrics when the min rebalance units field changes', async () => {
-    await renderShell();
-
-    const metricRegion = screen.getByRole('region', { name: '关键指标区' });
-    expect(within(metricRegion).getByText('最小位移 0.63 / 0.63')).toBeInTheDocument();
-    expect(within(metricRegion).getByText('下 1.04 / 上 1.04')).toBeInTheDocument();
-    expect(within(metricRegion).getByText('毛利 1.17 / 1.17 · 费 0.13 / 0.13')).toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText('最小调仓单位'), {
-      target: { value: '1.0' },
+  it('loads Rust defaults before enabling blank creation in an empty workspace', async () => {
+    let resolveDefaults!: (value: TrackDraft['riskAcquisition']) => void;
+    const pendingDefaults = new Promise<TrackDraft['riskAcquisition']>((resolve) => {
+      resolveDefaults = resolve;
+    });
+    const bridge = createMockBridge({
+      isTauriEnvironment: () => true,
+      loadRiskAcquisitionDefaults: vi.fn(() => pendingDefaults),
+    });
+    const store = createWorkbenchStore({
+      initialSnapshot: {
+        selectedDraftId: '',
+        drafts: [],
+        temporaryPriceOverrides: {},
+      },
     });
 
-    expect(screen.getByDisplayValue('1.0')).toBeInTheDocument();
-    expect(within(metricRegion).getByText('最小位移 1.25 / 1.25')).toBeInTheDocument();
-    expect(within(metricRegion).getByText('下 98.75 / 上 101.25')).toBeInTheDocument();
-    expect(within(metricRegion).getByText('下 4.43 / 上 4.42')).toBeInTheDocument();
-    expect(within(metricRegion).getByText('毛利 4.69 / 4.69 · 费 0.26 / 0.26')).toBeInTheDocument();
+    await act(async () => {
+      render(
+        <WorkbenchStoreProvider store={store}>
+          <AppShell bridge={bridge} />
+        </WorkbenchStoreProvider>,
+      );
+    });
+
+    expect(bridge.loadRiskAcquisitionDefaults).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: '空白新建' })).toBeDisabled();
+
+    await act(async () => {
+      resolveDefaults({
+        initialRatio: '0.41',
+        advantageSteps: '1.6',
+        minReleaseSteps: '0.8',
+        maxReleaseSteps: '3.2',
+        catchupRatio: '0.21',
+        staleReleaseMinutes: '21',
+      });
+      await pendingDefaults;
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: '空白新建' })).toBeEnabled());
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '空白新建' }));
+    });
+
+    expect(store.getState().drafts[0]?.riskAcquisition.initialRatio).toBe('0.41');
   });
 
   it('copies current track through the export bridge and only writes [[tracks]] text', async () => {
@@ -429,8 +764,9 @@ describe('AppShell', () => {
       </WorkbenchStoreProvider>,
     );
 
-    expect(await screen.findByText('Binance 合约不支持 symbol `BADPAIR`')).toBeInTheDocument();
-    expect(screen.getByText('symbol 不支持')).toBeInTheDocument();
+    expect((await screen.findAllByText('Binance 合约不支持 symbol `BADPAIR`')).length)
+      .toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('symbol 不支持').length).toBeGreaterThanOrEqual(1);
   });
 
   it('passes the loaded exchange venue when refreshing remote quotes', async () => {

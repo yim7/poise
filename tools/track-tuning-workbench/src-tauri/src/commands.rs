@@ -12,6 +12,9 @@ use crate::{
     config_projection,
     error::{CommandError, CommandErrorKind},
     session_store::SessionStore,
+    workbench_evaluation::{
+        WorkbenchEvaluationReportDto, WorkbenchEvaluationRequest, evaluate_workbench_draft,
+    },
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -144,6 +147,13 @@ pub fn save_draft(
 #[tauri::command]
 pub fn risk_acquisition_defaults() -> RiskAcquisitionConfig {
     RiskAcquisitionConfig::default()
+}
+
+#[tauri::command]
+pub fn evaluate_track(
+    request: WorkbenchEvaluationRequest,
+) -> Result<WorkbenchEvaluationReportDto, CommandError> {
+    evaluate_workbench_draft(request)
 }
 
 #[tauri::command]

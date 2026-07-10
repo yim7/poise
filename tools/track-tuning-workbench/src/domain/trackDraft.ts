@@ -84,15 +84,6 @@ export interface TrackDraftLoadIssue {
   message: string;
 }
 
-export interface TrackExchangeRulesDraft {
-  priceTick?: number;
-  quantityStep?: number;
-  minQty?: number;
-  minNotional?: number;
-  makerFeeRate?: number;
-  takerFeeRate?: number;
-}
-
 export interface TrackLossGuardDraft {
   netRealizedPnlToday: number;
   netRealizedPnlCumulative: number;
@@ -102,15 +93,9 @@ export interface TrackLossGuardDraft {
 export interface TrackDraftAttachments {
   currentExposure?: number;
   exchangeVenue?: string;
-  exchangeRules?: TrackExchangeRulesDraft;
   lossGuard?: TrackLossGuardDraft;
   loadIssues?: TrackDraftLoadIssue[];
 }
-
-export const DEFAULT_BINANCE_FUTURES_EXCHANGE_RULES = Object.freeze({
-  makerFeeRate: 0.0002,
-  takerFeeRate: 0.0005,
-});
 
 export interface TrackDraftUiState {
   quotePriceInput: string;
@@ -149,7 +134,7 @@ export interface CreateTrackDraftInput {
       bandProtectionPolicy: BandProtectionPolicyPayload;
     };
   parsedNumbers?: Partial<TrackDraftNumericFields>;
-  riskAcquisition?: RiskAcquisitionDraft;
+  riskAcquisition: RiskAcquisitionDraft;
   enums?: TrackDraftEnumFields;
   additional?: TrackDraftAdditionalFields;
   ui?: Partial<TrackDraftUiState>;
@@ -192,15 +177,6 @@ const RISK_ACQUISITION_FIELD_KEY_BY_DRAFT_FIELD: Record<
   staleReleaseMinutes: 'riskAcquisition.staleReleaseMinutes',
 };
 
-export const DEFAULT_RISK_ACQUISITION_DRAFT: RiskAcquisitionDraft = Object.freeze({
-  initialRatio: '0.5',
-  advantageSteps: '2',
-  minReleaseSteps: '1',
-  maxReleaseSteps: '4',
-  catchupRatio: '0.25',
-  staleReleaseMinutes: '60',
-});
-
 export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {
   const rawNumbers = extractRawNumbers(input.raw);
   const bandProtectionPolicy = input.enums?.bandProtectionPolicy ?? input.raw.bandProtectionPolicy;
@@ -212,10 +188,7 @@ export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {
       symbol: input.raw.symbol,
     },
     rawNumbers,
-    riskAcquisition: {
-      ...DEFAULT_RISK_ACQUISITION_DRAFT,
-      ...(input.riskAcquisition ?? {}),
-    },
+    riskAcquisition: { ...input.riskAcquisition },
     parsedNumbers: input.parsedNumbers ?? parseTrackDraftRawNumbers(rawNumbers),
     enums: {
       shapeFamily: input.enums?.shapeFamily ?? input.raw.shapeFamily,
@@ -224,7 +197,7 @@ export function createTrackDraft(input: CreateTrackDraftInput): TrackDraft {
     ui: {
       quotePriceInput: input.ui?.quotePriceInput ?? '',
     },
-    attachments: withDefaultBinanceFuturesExchangeRules(input.attachments ?? {}),
+    attachments: input.attachments ?? {},
   };
 }
 
@@ -307,16 +280,4 @@ function parseFiniteNumber(input: string): number | null {
   }
 
   return value;
-}
-
-export function withDefaultBinanceFuturesExchangeRules(
-  attachments: TrackDraftAttachments,
-): TrackDraftAttachments {
-  return {
-    ...attachments,
-    exchangeRules: {
-      ...DEFAULT_BINANCE_FUTURES_EXCHANGE_RULES,
-      ...attachments.exchangeRules,
-    },
-  };
 }

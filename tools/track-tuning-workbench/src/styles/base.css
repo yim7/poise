@@ -579,6 +579,93 @@ a {
   text-align: right;
 }
 
+.evaluation-controls {
+  padding: 0 var(--space-5) var(--space-5);
+}
+
+.evaluation-summary,
+.evaluation-scenario {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.evaluation-scenario__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 0 var(--space-5);
+}
+
+.evaluation-scenario__header h3 {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+.evaluation-scenario > .metric-card__source {
+  padding: 0 var(--space-5);
+}
+
+.evaluation-lanes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  padding: 0 var(--space-5);
+}
+
+.evaluation-lane {
+  min-width: 0;
+  padding: var(--space-4);
+  border: 1px solid rgba(22, 38, 48, 0.1);
+  border-radius: var(--radius-md);
+  background: rgba(249, 246, 241, 0.68);
+}
+
+.evaluation-lane h3 {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-md);
+}
+
+.evaluation-lane .metric-cards {
+  padding-right: 0;
+  padding-left: 0;
+}
+
+.evaluation-replay {
+  display: grid;
+  gap: var(--space-3);
+  max-height: 22rem;
+  overflow: auto;
+}
+
+.evaluation-replay__row {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.evaluation-replay__meta,
+.evaluation-targets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+}
+
+.evaluation-replay__meta {
+  color: var(--color-muted);
+}
+
+.evaluation-targets {
+  font-family: var(--font-mono);
+}
+
+.evaluation-matched-price p {
+  margin: 0 0 var(--space-2);
+}
+
 .metric-cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -665,6 +752,7 @@ a {
 }
 
 .track-workbench-chart__risk-line {
+  fill: none;
   stroke: var(--color-danger-strong);
   stroke-width: 3;
 }
@@ -864,6 +952,10 @@ a {
   .metric-cards {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .evaluation-lanes {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 760px) {
@@ -877,6 +969,7 @@ a {
   }
 
   .metric-cards,
+  .evaluation-lanes,
   .field-grid--two,
   .field-grid--three,
   .track-list__toolbar,

@@ -4,6 +4,7 @@ pub mod config_document;
 pub mod config_projection;
 pub mod error;
 pub mod session_store;
+pub mod workbench_evaluation;
 
 pub fn run() -> tauri::Result<()> {
     tauri::Builder::default()
@@ -14,6 +15,7 @@ pub fn run() -> tauri::Result<()> {
             commands::load_saved_draft,
             commands::save_draft,
             commands::risk_acquisition_defaults,
+            commands::evaluate_track,
             commands::copy_text,
             commands::fetch_binance_quote,
             commands::export_current_track,

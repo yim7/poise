@@ -16,6 +16,7 @@ interface DraftOverrides {
   parsedNumbers?: TrackDraft['parsedNumbers'];
   ui?: TrackDraft['ui'];
   attachments?: TrackDraft['attachments'];
+  riskAcquisition?: TrackDraft['riskAcquisition'];
 }
 
 function makeDraft(
@@ -45,6 +46,14 @@ function makeDraft(
     parsedNumbers: overrides.parsedNumbers,
     ui: overrides.ui,
     attachments: overrides.attachments,
+    riskAcquisition: overrides.riskAcquisition ?? {
+      initialRatio: '0.5',
+      advantageSteps: '2',
+      minReleaseSteps: '1',
+      maxReleaseSteps: '4',
+      catchupRatio: '0.25',
+      staleReleaseMinutes: '60',
+    },
   });
 }
 
@@ -424,25 +433,38 @@ describe('workbench store', () => {
     expect(reopenedStore.getState().temporaryPriceOverrides['draft-a']).toBe(104);
   });
 
-  it('applies current Binance futures fee defaults when a loaded draft omits fee rules', async () => {
-    const snapshotWithoutFeeRules = makeSnapshot({
-      drafts: [
-        makeDraft('draft-a', {
-          attachments: {},
-        }),
-      ],
-    });
-    const persistence = makePersistence(snapshotWithoutFeeRules);
+  it('removes legacy partial exchange rules when restoring a session', async () => {
+    const legacyDraft = makeDraft('draft-a');
+    (legacyDraft.attachments as Record<string, unknown>).exchangeRules = {
+      makerFeeRate: 0.0002,
+      takerFeeRate: 0.0005,
+    };
+    const persistence = makePersistence(makeSnapshot({ drafts: [legacyDraft] }));
     const reopenedStore = createWorkbenchStore({
       sessionSync: createSessionSync(persistence, { debounceMs: 0 }),
     });
 
     await reopenedStore.load('config/track.json');
 
-    expect(reopenedStore.getState().drafts[0]?.attachments.exchangeRules).toEqual({
-      makerFeeRate: 0.0002,
-      takerFeeRate: 0.0005,
+    expect(reopenedStore.getState().drafts[0]?.attachments).not.toHaveProperty(
+      'exchangeRules',
+    );
+  });
+
+  it('rejects a saved draft that lacks Rust-provided risk acquisition config', async () => {
+    const sourceSnapshot = makeSnapshot({ selectedDraftId: 'draft-b' });
+    sourceSnapshot.drafts[1]!.riskAcquisition.initialRatio = '0.61';
+    const legacySnapshot = makeSnapshot({ selectedDraftId: 'draft-a' });
+    delete (legacySnapshot.drafts[0] as Partial<TrackDraft>).riskAcquisition;
+    const store = createWorkbenchStore({
+      initialSnapshot: sourceSnapshot,
+      sessionSync: createSessionSync(makePersistence(legacySnapshot), { debounceMs: 0 }),
     });
+
+    await store.load('/tmp/config.toml', sourceSnapshot);
+
+    expect(store.getState().selectedDraftId).toBe('draft-b');
+    expect(store.getState().drafts[1]?.riskAcquisition.initialRatio).toBe('0.61');
   });
 
   it('marks the copied track as exported without clearing other track baselines', () => {

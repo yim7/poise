@@ -14,11 +14,10 @@ import type {
 } from '@/state/sessionSync';
 import { createSessionSync } from '@/state/sessionSync';
 import {
-  DEFAULT_RISK_ACQUISITION_DRAFT,
+  RISK_ACQUISITION_FIELD_KEYS,
   refreshTrackDraftParsedNumbers,
   type TrackDraft,
 } from '@/domain/trackDraft';
-import { withBinanceFuturesDefaults } from '@/domain/binanceFuturesDefaults';
 
 export type WorkbenchSnapshot = SessionSnapshot;
 
@@ -410,23 +409,22 @@ function prepareLoadedSnapshot(snapshot: WorkbenchSnapshot): WorkbenchSnapshot {
 }
 
 function prepareLoadedDraft(draft: TrackDraft): TrackDraft {
-  const nextDraft = withBinanceFuturesDefaults(cloneDraft(draft));
-  nextDraft.riskAcquisition = {
-    ...DEFAULT_RISK_ACQUISITION_DRAFT,
-    ...(nextDraft.riskAcquisition ?? {}),
-  };
+  const nextDraft = cloneDraft(draft);
+  removeLegacyExchangeRules(nextDraft);
   refreshTrackDraftParsedNumbers(nextDraft);
   return nextDraft;
 }
 
 function normalizeDraft(draft: TrackDraft): TrackDraft {
   const nextDraft = cloneDraft(draft);
-  nextDraft.riskAcquisition = {
-    ...DEFAULT_RISK_ACQUISITION_DRAFT,
-    ...(nextDraft.riskAcquisition ?? {}),
-  };
+  removeLegacyExchangeRules(nextDraft);
   refreshTrackDraftParsedNumbers(nextDraft);
   return nextDraft;
+}
+
+function removeLegacyExchangeRules(draft: TrackDraft) {
+  const attachments = draft.attachments as TrackDraft['attachments'] & Record<string, unknown>;
+  delete attachments.exchangeRules;
 }
 
 function isSupportedSnapshot(snapshot: WorkbenchSnapshot): boolean {
@@ -435,7 +433,16 @@ function isSupportedSnapshot(snapshot: WorkbenchSnapshot): boolean {
 }
 
 function isSupportedDraft(draft: TrackDraft): boolean {
-  return isSupportedBandProtectionPolicy(draft.enums.bandProtectionPolicy);
+  return isSupportedBandProtectionPolicy(draft.enums.bandProtectionPolicy)
+    && isCompleteRiskAcquisitionDraft(draft.riskAcquisition);
+}
+
+function isCompleteRiskAcquisitionDraft(value: unknown): boolean {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const fields = value as Record<string, unknown>;
+  return RISK_ACQUISITION_FIELD_KEYS.every((field) => typeof fields[field] === 'string');
 }
 
 function isSupportedBandProtectionPolicy(value: unknown): boolean {

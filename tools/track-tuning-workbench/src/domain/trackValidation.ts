@@ -103,7 +103,7 @@ export function validateTrackDraft(draft: TrackDraft): TrackDraftValidationResul
     });
   }
 
-  if (issues.length === 0) {
+  if (TRACK_NUMERIC_FIELD_KEYS.every((field) => Number.isFinite(parsedNumbers[field]))) {
     validateStrategySemantics(parsedNumbers, issues);
   }
 
@@ -231,6 +231,13 @@ function validateStrategySemantics(
     issues.push({
       field: 'minRebalanceUnits',
       message: 'min_rebalance_units 必须大于 0',
+    });
+  }
+
+  if (!Number.isInteger(numbers.leverage) || numbers.leverage <= 0) {
+    issues.push({
+      field: 'leverage',
+      message: 'leverage 必须是正整数',
     });
   }
 
