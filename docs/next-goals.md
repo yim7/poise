@@ -4,7 +4,7 @@
 
 本文是当前已确认的实现任务清单，不是长期架构事实源。长期架构和运行语义仍以 [system-overview.md](system-overview.md) 为准。
 
-当前状态：执行中。当前 task 是 1.2 建立 committed InventoryDecisionSnapshot。
+当前状态：执行中。当前 task 是 0.7 固化 protected-state 订单维护与 current-session submit 授权生命周期；Task 1.2 暂停，等待 0.8 完成。
 
 本文的生命周期：
 
@@ -111,6 +111,8 @@ track events 和 track effects 只用于审计与诊断，不参与启动恢复�
 - track identity 持久表：本地历史归属事实。
 - RecentTrackPnlRecords：端口返回契约，只区分 Available 与 Unsupported。
 - exchange observation revision：私有运行时并发有效性字段。
+- current-session submit 授权生命周期：私有运行时协议，保证已经越过 dispatch 边界的订单身份继续被 binding 和 effect queue 拥有。
+- SubmitOutcomeUnknown：ExecutionPort 错误契约，只表示 submit 可能已被交易所接受但本地没有权威结果。
 - InventoryDecisionSnapshot：当前 session 的只读 committed decision。
 - DecisionReason：非持久化诊断枚举。
 - fresh acquisition pending marker：fresh start 后只存在于 runtime 的私有标记。
@@ -121,6 +123,7 @@ track events 和 track effects 只用于审计与诊断，不参与启动恢复�
 
 - runtime snapshot、risk acquisition checkpoint 或 warm-restart cache。
 - durable outbox、effect replay worker、actor 或 event sourcing。
+- submit effect 自动重派，或跨进程恢复旧 session 的 submit 生命周期。
 - 通用 capability registry。
 - 每层 target 对应的一组 DTO、service 或 adapter。
 - strategy plugin 框架。
@@ -130,8 +133,8 @@ track events 和 track effects 只用于审计与诊断，不参与启动恢复�
 
 | 顺序 | Goal | 优先级 | 难度 | 状态 | 依赖 |
 | --- | --- | --- | --- | --- | --- |
-| 0 | 建立正确性与交易事实底线 | P0 | L | completed | 无 |
-| 1 | 统一决策 owner 与可解释性 | P1 | L | in_progress | Goal 0 |
+| 0 | 建立正确性与交易事实底线 | P0 | L | in_progress | 无 |
+| 1 | 统一决策 owner 与可解释性 | P1 | L | pending | Goal 0 |
 | 2 | 建立真实 decision replay 与 Workbench 评估 | P2 | L | pending | Goal 1 |
 | 3 | 完成整体验收与长期文档同步 | P1 | M | pending | Goal 0 到 Goal 2 |
 
@@ -149,6 +152,8 @@ Task 清单：
 | 0.4 消除 PNL backfill 空成功并补齐当前实用 venue | completed | Available(empty)、Unsupported、transient error 明确分离 | 9f35f74 |
 | 0.5 修复 REST 旧快照覆盖 WS 新事实 | completed | observation revision 改变时旧 REST 快照不能应用 | f0fcc4a |
 | 0.6 增加 trading readiness 并校正文档中的 journal 语义 | completed | readiness 区分 blocker 与 warning，journal 不参与恢复 | e2708bd |
+| 0.7 固化 protected-state 订单维护与 current-session submit 授权生命周期 | in_progress | 已授权 submit 在 receipt、order fact 或完整快照裁决前不丢失订单身份 | — |
+| 0.8 区分 submit final failure 与 outcome unknown | pending | 结果未知时先保留所有权并完整对账，不盲目提交替代订单 | — |
 
 ### Task 0.1 修复跨零新增风险计算
 
@@ -383,6 +388,93 @@ cargo test -p poise-protocol
 git diff --check
 ~~~
 
+### Task 0.7 固化 protected-state 订单维护与 current-session submit 授权生命周期
+
+改动范围：
+
+- engine/src/executor/
+- engine/src/manager.rs
+- application/src/submit_effect_service.rs
+- application/src/session_effect_queue.rs
+- application/src/mutation_executor.rs
+- application/src/read_model.rs
+- server/src/effect_worker/
+
+验收：
+
+- submit dispatch 前进入保护态时，pending binding 被 supersede，且不调用交易所。
+- submit 已越过 dispatch 边界后进入保护态时，binding 和 current-session effect queue 继续拥有同一 client order id。
+- receipt、WS order fact 或完整 open-orders 快照找到该订单后，若已不再需要，恰好产生一次 cancel。
+- receipt 与保护态并发时，不出现 binding 已删除但真实订单无人管理的窗口。
+- Frozen 与 FlattenPending 只做 maintenance：撤销风险增加订单，保留方向和数量仍安全的 reduce-only maker，且不产生新 submit。
+- Flattening 与 Terminated 继续完整 ReduceOnly，不保留普通 maker。
+- 异常或不完整的交易所快照不部分消费 binding，也不释放 queue ownership。
+- terminal order fact 对后到的旧 New/PartiallyFilled fact 保持单调，不复活 binding。
+
+实现约束：
+
+- 生命周期只存在于当前进程，复用现有 binding、session effect queue 和 exchange sync owner。
+- 不新增 durable outbox、effect replay、数据库表或跨进程恢复。
+- 不在 read model、server 或 exchange adapter 复制生命周期决策。
+
+最小验证：
+
+~~~bash
+cargo test -p poise-engine executor::
+cargo test -p poise-engine manager::tests::
+cargo test -p poise-application submit_effect_service::tests::
+cargo test -p poise-application mutation_executor::tests::
+cargo test -p poise-server effect_worker::tests::
+git diff --check
+~~~
+
+### Task 0.8 区分 submit final failure 与 outcome unknown
+
+改动范围：
+
+- engine/src/ports.rs
+- application/src/session_effect_queue.rs
+- server/src/order_outcome.rs
+- server/src/effect_worker/
+- exchanges/binance/
+- exchanges/bybit/
+- exchanges/hyperliquid/
+- exchanges/okx/
+
+验收：
+
+- 明确的交易所拒单、余额不足、非法价格精度和确定的限频响应继续作为 final failure。
+- metadata、序列化、签名、请求构建和明确的 connect failure 等发送前错误继续作为 final failure。
+- 请求可能已经越过发送边界，但发生 timeout、连接中断、响应体读取失败或成功响应无法解析时，adapter 返回 typed SubmitOutcomeUnknown。
+- SubmitOutcomeUnknown 不 terminalize binding，不把 effect 记为 failed/superseded，也不重新 dispatch 同一仓位缺口。
+- worker 标记 exchange state stale，触发完整 position/open-orders sync，并把当前 submit effect deferred 到 ExchangeState。
+- receipt、WS order fact 或完整快照找到同一 client order id 时，复用 Task 0.7 生命周期吸收事实。
+- 只有无 anomaly 的完整快照确认订单不存在，才能结束旧 submit effect 并允许后续重新规划。
+- 对账失败、revision 变化或 recovery anomaly 时继续 deferred，不释放 ownership。
+- fresh-session 边界不变：进程重启仍从交易所重建，不恢复旧 queue 或 binding。
+
+实现约束：
+
+- 由 exchange adapter 拥有“请求是否可能已发送”的知识；server 不解析错误字符串猜测结果。
+- submit 不使用会跨 transport、5xx 或 429 自动重派的通用 HTTP retry；一次 dispatch 只发送一次，后续依靠稳定 client order id 和完整交易所对账。
+- submit 与 cancel 使用 operation-specific error mapping，不能让 cancel-only 错误种类泄漏到 submit。
+- 只新增 ExecutionPortErrorKind::SubmitOutcomeUnknown，不新增 submit service、DTO 或持久化状态。
+- 不自动重派；是否需要新订单由完整对账后的正常 reconcile 决定。
+
+最小验证：
+
+~~~bash
+cargo test -p poise-engine ports
+cargo test -p poise-application session_effect_queue::tests::
+cargo test -p poise-server order_outcome::tests::
+cargo test -p poise-server effect_worker::tests::
+cargo test -p poise-binance
+cargo test -p poise-bybit
+cargo test -p poise-hyperliquid
+cargo test -p poise-okx
+git diff --check
+~~~
+
 ## Goal 1. 统一决策 owner 与可解释性
 
 目标：让同一次库存决策只计算一次、只提交一次，并能直接解释为什么没有新 submit。
@@ -392,7 +484,7 @@ Task 清单：
 | Task | 状态 | 验收摘要 | Commit |
 | --- | --- | --- | --- |
 | 1.1 让 executor 只消费 final execution target | completed | executor 不再读取 frontier 或重复计算 backlog target | 89f6761 |
-| 1.2 建立 committed InventoryDecisionSnapshot | in_progress | 查询只投影已提交决策，不推进 gate 或 timer | — |
+| 1.2 建立 committed InventoryDecisionSnapshot | pending | 查询只投影已提交决策，不推进 gate 或 timer；依赖 Task 0.8 | — |
 | 1.3 统一公开词汇并增加 DecisionReason | pending | API、WebSocket、TUI 使用同一 revision 和原因 | — |
 | 1.4 固定保守 fresh-session acquisition 语义 | pending | 重启本身不授予新增风险，离线时间不触发 stale | — |
 
