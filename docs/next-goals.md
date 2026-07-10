@@ -4,7 +4,7 @@
 
 本文是当前已确认的实现任务清单，不是长期架构事实源。长期架构和运行语义仍以 [system-overview.md](system-overview.md) 为准。
 
-当前状态：执行中。当前 task 是 2.3 Workbench 改用 Rust decision evaluator。
+当前状态：执行中。当前 task 是 3.1 最终验收并同步长期文档。
 
 本文的生命周期：
 
@@ -137,8 +137,8 @@ track events 和 track effects 只用于审计与诊断，不参与启动恢复�
 | --- | --- | --- | --- | --- | --- |
 | 0 | 建立正确性与交易事实底线 | P0 | L | completed | 无 |
 | 1 | 统一决策 owner 与可解释性 | P1 | L | completed | Goal 0 |
-| 2 | 建立真实 decision replay 与 Workbench 评估 | P2 | L | in_progress | Goal 1 |
-| 3 | 完成整体验收与长期文档同步 | P1 | M | pending | Goal 0 到 Goal 2 |
+| 2 | 建立真实 decision replay 与 Workbench 评估 | P2 | L | completed | Goal 1 |
+| 3 | 完成整体验收与长期文档同步 | P1 | M | in_progress | Goal 0 到 Goal 2 |
 
 ## Goal 0. 建立正确性与交易事实底线
 
@@ -740,7 +740,7 @@ Task 清单：
 | --- | --- | --- | --- |
 | 2.1 建立确定性 decision scenario runner | completed | 时间戳输入通过真实 manager 路径产生稳定报告 | dc8b408 |
 | 2.2 增加黄金场景和 Immediate/Delayed 指标 | completed | backlog、restart、cross-zero、fill model 可量化比较 | 8eeece8 |
-| 2.3 Workbench 改用 Rust decision evaluator | in_progress | risk acquisition 参数真实改变指标，不再只改变 TOML | — |
+| 2.3 Workbench 改用 Rust decision evaluator | completed | risk acquisition 参数真实改变指标，不再只改变 TOML | 96bf7bf |
 
 ### Task 2.1 建立确定性 decision scenario runner
 
@@ -921,7 +921,7 @@ Task 清单：
 
 | Task | 状态 | 验收摘要 | Commit |
 | --- | --- | --- | --- |
-| 3.1 最终验收并同步长期文档 | pending | workspace、Workbench 和长期文档全部通过，已完成任务被清理 | — |
+| 3.1 最终验收并同步长期文档 | in_progress | workspace、Workbench 和长期文档全部通过，已完成任务被清理 | — |
 
 ### Task 3.1 最终验收并同步长期文档
 
@@ -930,6 +930,7 @@ Task 清单：
 - README.md
 - docs/system-overview.md
 - docs/next-goals.md
+- tools/track-tuning-workbench/README.md
 
 功能验收：
 
