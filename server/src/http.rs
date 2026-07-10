@@ -12,12 +12,14 @@ use poise_protocol::{
     HealthTaskView, InstrumentView, PnlBackfillStatusView, RecentFillAuditItemView,
     RecentFillCoverageView, RecentFillsAuditResponse, RecentPnlAvailabilityView,
     TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
-    TrackDiagnosticItemView, TrackDiagnosticsView, TrackListResponse,
+    TrackDiagnosticItemView, TrackDiagnosticsView, TrackListResponse, TradingReadinessResponse,
 };
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
 
-use crate::runtime::{RuntimeHealthSnapshot, RuntimeHealthStatus, RuntimeTaskHealthSnapshot};
+use crate::runtime::{
+    RuntimeHealthSnapshot, RuntimeHealthStatus, RuntimeTaskHealthSnapshot, assess_trading_readiness,
+};
 use crate::server_context::{HttpState, WebSocketState};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -28,6 +30,7 @@ struct ErrorResponse {
 pub fn router(http_state: HttpState, websocket_state: WebSocketState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/readiness", get(readiness))
         .route("/account", get(get_account))
         .route("/tracks", get(list_tracks))
         .route("/tracks/:id", get(get_track_detail))
@@ -43,6 +46,33 @@ pub fn router(http_state: HttpState, websocket_state: WebSocketState) -> Router 
         )
         .layer(CorsLayer::permissive())
         .with_state(http_state)
+}
+
+async fn readiness(
+    State(state): State<HttpState>,
+) -> Result<(StatusCode, Json<TradingReadinessResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let tracks = state
+        .query_service
+        .list_track_sources()
+        .await
+        .map_err(map_query_error)?;
+    let account = state.account_monitor.current_summary().await;
+    let stale_exchange_state = state.exchange_freshness.stale_tracks().await;
+    let response = assess_trading_readiness(
+        &tracks,
+        account.as_ref(),
+        &state.runtime_health.snapshot(),
+        &state.pnl_backfill_status.snapshot(),
+        &state.effect_journal_diagnostics.snapshot(),
+        &state.account_margin_guard.block_snapshot(),
+        &stale_exchange_state,
+    );
+    let status = if response.ready_to_trade {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    Ok((status, Json(response)))
 }
 
 async fn list_tracks(
@@ -421,6 +451,7 @@ mod tests {
         ExecutionStatusView, RecentFillCoverageView, RecentFillsAuditResponse,
         RecentPnlAvailabilityView, RiskSignalView, TrackCommandAccepted, TrackCommandRequest,
         TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackListResponse, TrackStatus,
+        TradingReadinessResponse,
     };
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
@@ -545,6 +576,19 @@ mod tests {
         build_test_state(repository).await
     }
 
+    fn mark_runtime_tasks_healthy(state: &HttpState) {
+        for component in [
+            RuntimeHealthComponent::MarketData,
+            RuntimeHealthComponent::UserData,
+            RuntimeHealthComponent::EffectWorker,
+            RuntimeHealthComponent::Recovery,
+            RuntimeHealthComponent::AccountMonitor,
+        ] {
+            state.runtime_health.record_success_now(component);
+        }
+        state.pnl_backfill_status.record_success_now();
+    }
+
     async fn build_test_state<R>(repository: Arc<R>) -> HttpTestState
     where
         R: TrackMutationStore + TrackEffectJournal + TrackQueryStore + 'static,
@@ -664,6 +708,9 @@ mod tests {
                 account_projector.clone(),
                 Arc::new(RuntimeHealth::new()),
                 Arc::new(PnlBackfillStatus::new()),
+                services.effect_journal_diagnostics.clone(),
+                Arc::new(crate::exchange_freshness::ExchangeFreshness::default()),
+                services.account_margin_guard.clone(),
                 Arc::new(RecentFillsAuditor::new(account, query_store.clone())),
             ),
             websocket_state: build_websocket_state(
@@ -898,6 +945,159 @@ mod tests {
         assert_eq!(payload["pnl_backfill"]["failures"], 0);
         assert!(payload["pnl_backfill"]["last_error_at"].is_null());
         assert!(payload["pnl_backfill"]["last_error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn readiness_blocks_unknown_critical_tasks_while_health_keeps_observing() {
+        let response = router(app_state().await)
+            .oneshot(
+                Request::builder()
+                    .uri("/readiness")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: TradingReadinessResponse = serde_json::from_slice(&body).unwrap();
+        assert!(!payload.ready_to_trade);
+        for component in [
+            "market_data",
+            "user_data",
+            "effect_worker",
+            "recovery",
+            "account_monitor",
+            "pnl_backfill",
+        ] {
+            assert!(
+                payload
+                    .blockers
+                    .iter()
+                    .any(|issue| issue.component == component),
+                "missing readiness blocker for {component}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn readiness_returns_ok_after_all_current_facts_are_healthy() {
+        let state = app_state_with_account_summary().await;
+        mark_runtime_tasks_healthy(&state.http_state);
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/readiness")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: TradingReadinessResponse = serde_json::from_slice(&body).unwrap();
+        assert!(payload.ready_to_trade);
+        assert!(payload.blockers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn readiness_blocks_while_exchange_state_requires_reconciliation() {
+        let state = app_state_with_account_summary().await;
+        mark_runtime_tasks_healthy(&state.http_state);
+        state
+            .http_state
+            .exchange_freshness
+            .mark_stale(
+                "btc-core",
+                crate::exchange_freshness::ExchangeFreshnessReason::SubmitOutcomeUnknown,
+            )
+            .await;
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/readiness")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: TradingReadinessResponse = serde_json::from_slice(&body).unwrap();
+        assert!(payload.blockers.iter().any(|issue| {
+            issue.component == "exchange_state"
+                && issue.reason.contains("submit outcome is unknown")
+        }));
+    }
+
+    #[tokio::test]
+    async fn readiness_keeps_effect_journal_failure_as_non_blocking_warning() {
+        let state = app_state_with_account_summary().await;
+        mark_runtime_tasks_healthy(&state.http_state);
+        state
+            .http_state
+            .effect_journal_diagnostics
+            .record_failure_for_test(
+                &TrackId::new("btc-core"),
+                "append_entries",
+                "journal disk is read-only",
+            );
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/readiness")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: TradingReadinessResponse = serde_json::from_slice(&body).unwrap();
+        assert!(payload.ready_to_trade);
+        assert!(payload.blockers.is_empty());
+        assert!(payload.warnings.iter().any(|issue| {
+            issue.component == "effect_journal"
+                && issue.reason.contains("journal disk is read-only")
+        }));
+    }
+
+    #[tokio::test]
+    async fn readiness_reads_the_active_account_margin_guard_directly() {
+        let state = app_state_with_account_summary().await;
+        mark_runtime_tasks_healthy(&state.http_state);
+        state
+            .http_state
+            .account_margin_guard
+            .activate_insufficient_margin(
+                &Instrument::new(Venue::Binance, "BTCUSDT"),
+                "exchange rejected submit for insufficient margin",
+                Utc::now(),
+            );
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/readiness")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: TradingReadinessResponse = serde_json::from_slice(&body).unwrap();
+        assert!(payload.blockers.iter().any(|issue| {
+            issue.component == "account_capacity" && issue.reason.contains("insufficient margin")
+        }));
     }
 
     #[tokio::test]

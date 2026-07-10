@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
-    AccountMonitor, ApplicationNotification, SessionEffectQueue, TrackCommandService,
-    TrackDebugQueryService, TrackEffectService, TrackObservationService, TrackQueryService,
-    TrackRuntimeLifecycleService,
+    AccountMonitor, ApplicationNotification, EffectJournalDiagnostics, SessionEffectQueue,
+    TrackCommandService, TrackDebugQueryService, TrackEffectService, TrackObservationService,
+    TrackQueryService, TrackRuntimeLifecycleService,
 };
 use tokio::sync::broadcast;
 
@@ -28,6 +28,9 @@ pub struct HttpState {
     pub account_projector: Arc<AccountProjector>,
     pub runtime_health: Arc<RuntimeHealth>,
     pub pnl_backfill_status: Arc<PnlBackfillStatus>,
+    pub effect_journal_diagnostics: Arc<EffectJournalDiagnostics>,
+    pub exchange_freshness: Arc<ExchangeFreshness>,
+    pub account_margin_guard: Arc<AccountMarginGuardStore>,
     pub recent_fills_auditor: Arc<RecentFillsAuditor>,
 }
 

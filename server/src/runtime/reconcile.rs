@@ -19,8 +19,8 @@ use crate::order_outcome::reconcile_execution;
 use crate::server_context::ReconcileState;
 
 use super::{
-    ReconcileExecution, ReconcileRequest, ReconcileStateAccess, RuntimeHealthComponent,
-    ServerRuntime,
+    ReconcileExecution, ReconcileRequest, ReconcileStateAccess, RuntimeHealth,
+    RuntimeHealthComponent, ServerRuntime,
     diagnostics::{describe_open_orders, describe_runtime_bindings},
     exchange_state, preserve_track_mutation_error,
 };
@@ -104,11 +104,17 @@ pub(super) fn spawn_recovery_task(
             .observation_service
             .track_instruments()
             .await;
-        let mut tracked =
-            seed_recovery_tracking(&state.reconcile, &instruments, retry_interval).await;
-        state
-            .runtime_health
-            .record_success_now(RuntimeHealthComponent::Recovery);
+        state.runtime_health.register_track_scopes(
+            RuntimeHealthComponent::Recovery,
+            instruments.iter().map(|track| track.id.clone()).collect(),
+        );
+        let mut tracked = seed_recovery_tracking(
+            &state.reconcile,
+            &state.runtime_health,
+            &instruments,
+            retry_interval,
+        )
+        .await;
         let mut next_audit_at = instruments
             .iter()
             .map(|track| (track.id.clone(), Instant::now() + audit_interval))
@@ -127,6 +133,7 @@ pub(super) fn spawn_recovery_task(
             if !pending_workset.is_empty() {
                 apply_recovery_workset(
                     &state.reconcile,
+                    &state.runtime_health,
                     &instruments,
                     &mut tracked,
                     &mut pending_workset,
@@ -178,9 +185,10 @@ pub(super) fn spawn_recovery_task(
                             ExchangeSyncMode::RecoverAndReconcile,
                         )
                         .await {
-                            state.runtime_health.record_error_now(
+                            state.runtime_health.record_track_error_now(
                                 RuntimeHealthComponent::Recovery,
-                                error.message(),
+                                &track_id,
+                                format!("track `{track_id}`: {}", error.message()),
                             );
                             tracing::warn!(
                                 "failed to auto-resync recovery anomaly for {}: {}",
@@ -188,9 +196,10 @@ pub(super) fn spawn_recovery_task(
                                 error.message()
                             );
                         } else {
-                            state
-                                .runtime_health
-                                .record_success_now(RuntimeHealthComponent::Recovery);
+                            state.runtime_health.record_track_success_now(
+                                RuntimeHealthComponent::Recovery,
+                                &track_id,
+                            );
                         }
                     }
                 }
@@ -421,17 +430,41 @@ fn update_recovery_tracking(
 
 async fn seed_recovery_tracking(
     state: &ReconcileState,
+    runtime_health: &RuntimeHealth,
     instruments: &[TrackInstrument],
     retry_interval: Duration,
 ) -> HashMap<String, RecoveryTrackedTrack> {
     let mut tracked = HashMap::new();
     for track in instruments {
-        let Ok(Some(recovery_view)) = state
+        let recovery_view = state
             .runtime_lifecycle_service
             .load_track_recovery_summary(&TrackId::new(&track.id))
-            .await
-        else {
-            continue;
+            .await;
+        let recovery_view = match recovery_view {
+            Ok(Some(recovery_view)) => {
+                runtime_health
+                    .record_track_success_now(RuntimeHealthComponent::Recovery, &track.id);
+                recovery_view
+            }
+            Ok(None) => {
+                runtime_health.record_track_error_now(
+                    RuntimeHealthComponent::Recovery,
+                    &track.id,
+                    format!("track `{}` has no live recovery summary", track.id),
+                );
+                continue;
+            }
+            Err(error) => {
+                runtime_health.record_track_error_now(
+                    RuntimeHealthComponent::Recovery,
+                    &track.id,
+                    format!(
+                        "failed to load recovery summary for track `{}`: {error}",
+                        track.id
+                    ),
+                );
+                continue;
+            }
         };
         update_recovery_tracking(
             &mut tracked,
@@ -446,6 +479,7 @@ async fn seed_recovery_tracking(
 
 async fn apply_recovery_workset(
     state: &ReconcileState,
+    runtime_health: &RuntimeHealth,
     instruments: &[TrackInstrument],
     tracked: &mut HashMap<String, RecoveryTrackedTrack>,
     workset: &mut RecoveryWorkset,
@@ -454,7 +488,7 @@ async fn apply_recovery_workset(
     let workset = std::mem::take(workset);
 
     if workset.reseed_required {
-        *tracked = seed_recovery_tracking(state, instruments, retry_interval).await;
+        *tracked = seed_recovery_tracking(state, runtime_health, instruments, retry_interval).await;
         return;
     }
 

@@ -77,6 +77,21 @@ pub struct HealthResponse {
     pub pnl_backfill: PnlBackfillStatusView,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessIssueView {
+    pub component: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TradingReadinessResponse {
+    pub ready_to_trade: bool,
+    pub blockers: Vec<ReadinessIssueView>,
+    pub warnings: Vec<ReadinessIssueView>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecentFillCoverageView {
@@ -825,11 +840,12 @@ mod tests {
         BandProtectionPolicy, BandRecoverPolicy, ExecutionBindingIntentView,
         ExecutionBindingOrderView, ExecutionBindingPolicyView, ExecutionBindingStatusView,
         ExecutionBindingView, ExecutionStateView, ExecutionStatusView, InstrumentView,
-        PnlBackfillStatusView, RecentFillsAuditResponse, RecentPnlAvailabilityView,
-        RiskAcquisitionConfigView, RiskAcquisitionDirectionView, RiskAcquisitionView,
-        RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView, StreamEvent,
-        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
+        PnlBackfillStatusView, ReadinessIssueView, RecentFillsAuditResponse,
+        RecentPnlAvailabilityView, RiskAcquisitionConfigView, RiskAcquisitionDirectionView,
+        RiskAcquisitionView, RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView,
+        StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
         TrackDiagnosticsView, TrackExecutionView, TrackListResponse, TrackStatus,
+        TradingReadinessResponse,
     };
 
     #[test]
@@ -862,6 +878,46 @@ mod tests {
 
         assert_eq!(payload["available_tracks"], 2);
         assert_eq!(payload["unsupported_tracks"], 1);
+    }
+
+    #[test]
+    fn trading_readiness_response_roundtrips_exact_json() {
+        let response = TradingReadinessResponse {
+            ready_to_trade: false,
+            blockers: vec![ReadinessIssueView {
+                component: "market_data".to_string(),
+                reason: "task status is unknown".to_string(),
+            }],
+            warnings: vec![ReadinessIssueView {
+                component: "effect_journal".to_string(),
+                reason: "failed to append effect journal entries".to_string(),
+            }],
+        };
+
+        let encoded = serde_json::to_string(&response).unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"ready_to_trade":false,"blockers":[{"component":"market_data","reason":"task status is unknown"}],"warnings":[{"component":"effect_journal","reason":"failed to append effect journal entries"}]}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<TradingReadinessResponse>(&encoded).unwrap(),
+            response
+        );
+    }
+
+    #[test]
+    fn trading_readiness_contract_denies_unknown_fields() {
+        let response_error = serde_json::from_str::<TradingReadinessResponse>(
+            r#"{"ready_to_trade":true,"blockers":[],"warnings":[],"extra":true}"#,
+        )
+        .unwrap_err();
+        assert!(response_error.to_string().contains("unknown field `extra`"));
+
+        let issue_error = serde_json::from_str::<ReadinessIssueView>(
+            r#"{"component":"market_data","reason":"degraded","extra":true}"#,
+        )
+        .unwrap_err();
+        assert!(issue_error.to_string().contains("unknown field `extra`"));
     }
 
     #[test]

@@ -349,7 +349,39 @@ mod tests {
 
         assert!(layout.contains("exec \\\"$POISE_REPO_ROOT/scripts/run-instance-tui.sh\\\""));
         assert!(layout.contains("exec \\\"$POISE_REPO_ROOT/scripts/run-instance-server.sh\\\""));
-        assert!(layout.contains("exec \\\"$POISE_REPO_ROOT/scripts/probe-health.sh\\\""));
+        assert!(
+            layout.contains(
+                "exec \\\"$POISE_REPO_ROOT/scripts/probe-health.sh\\\" --check readiness"
+            )
+        );
+    }
+
+    #[test]
+    fn probe_health_requires_explicit_check() {
+        let output = Command::new("bash")
+            .arg(probe_health_script_path())
+            .arg("--dry-run")
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("missing required --check"));
+    }
+
+    #[test]
+    fn probe_health_dry_run_reports_check_and_endpoint() {
+        let output = Command::new("bash")
+            .arg(probe_health_script_path())
+            .args(["--check", "readiness", "--dry-run"])
+            .env("POISE_BASE_URL", "http://127.0.0.1:18000")
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("check=readiness"));
+        assert!(stdout.contains("endpoint=/readiness"));
     }
 
     async fn wait_for_child_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
@@ -392,6 +424,7 @@ mod tests {
 
         let mut child = Command::new("bash")
             .arg(probe_health_script_path())
+            .args(["--check", "health"])
             .env("POISE_BASE_URL", format!("http://{bind_address}"))
             .env("POISE_INSTANCE_DIR", temp_dir.path())
             .env("POISE_HEALTH_INTERVAL_SECS", "1")
@@ -428,7 +461,7 @@ mod tests {
             get(|| async {
                 (
                     StatusCode::OK,
-                    r#"{"status":"ok","track_count":1,"attention_required_count":0}"#,
+                    r#"{"status":"ok","track_count":1,"attention_required_count":0,"tasks":[],"pnl_backfill":{}}"#,
                 )
             }),
         );
@@ -448,7 +481,7 @@ mod tests {
         let output = tokio::task::spawn_blocking(move || {
             Command::new("bash")
                 .arg(script_path)
-                .arg("--once")
+                .args(["--check", "health", "--once"])
                 .env("POISE_BASE_URL", base_url)
                 .output()
                 .unwrap()
@@ -459,6 +492,116 @@ mod tests {
         assert!(output.status.success());
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(stdout.contains("http_status=200"));
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn probe_health_once_rejects_http_200_with_mismatched_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bind_address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/health",
+            get(|| async { (StatusCode::OK, r#"{"metadata":{"status":"ok"}}"#) }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let script_path = probe_health_script_path();
+        let base_url = format!("http://{bind_address}");
+        let output = tokio::task::spawn_blocking(move || {
+            Command::new("bash")
+                .arg(script_path)
+                .args(["--check", "health", "--once"])
+                .env("POISE_BASE_URL", base_url)
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(output.status.code(), Some(4));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("response_contract_mismatch"));
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn probe_readiness_once_uses_ready_to_trade_contract() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bind_address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/readiness",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    r#"{"metadata":{"ready_to_trade":true},"blockers":[],"warnings":[]}"#,
+                )
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let script_path = probe_health_script_path();
+        let base_url = format!("http://{bind_address}");
+        let output = tokio::task::spawn_blocking(move || {
+            Command::new("bash")
+                .arg(script_path)
+                .args(["--check", "readiness", "--once"])
+                .env("POISE_BASE_URL", base_url)
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(output.status.code(), Some(4));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("response_contract_mismatch"));
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn probe_readiness_once_accepts_ready_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bind_address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/readiness",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    r#"{"ready_to_trade":true,"blockers":[],"warnings":[]}"#,
+                )
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let script_path = probe_health_script_path();
+        let base_url = format!("http://{bind_address}");
+        let output = tokio::task::spawn_blocking(move || {
+            Command::new("bash")
+                .arg(script_path)
+                .args(["--check", "readiness", "--once"])
+                .env("POISE_BASE_URL", base_url)
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("check=readiness"));
+        assert!(stdout.contains("endpoint=/readiness"));
 
         server.abort();
         let _ = server.await;

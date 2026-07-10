@@ -41,6 +41,7 @@ pub struct TrackServiceSet {
     pub submit_effect: crate::submit_effect_service::SubmitEffectService,
     pub runtime_lifecycle: crate::TrackRuntimeLifecycleService,
     pub session_effect_queue: SessionEffectQueue,
+    pub effect_journal_diagnostics: Arc<crate::EffectJournalDiagnostics>,
 }
 
 pub trait AccountCapacityGuard: Send + Sync {
@@ -100,6 +101,7 @@ pub(crate) struct MutationExecutor {
     manager: SharedManager,
     mutation_store: Arc<dyn TrackMutationStore>,
     effect_journal: Arc<dyn TrackEffectJournal>,
+    effect_journal_diagnostics: Arc<crate::EffectJournalDiagnostics>,
     session_effect_queue: SessionEffectQueue,
     mutation_guards: Arc<TrackMutationGuards>,
     notifications: broadcast::Sender<ApplicationNotification>,
@@ -274,10 +276,12 @@ impl MutationExecutor {
         account_margin_guard: Arc<dyn AccountCapacityGuard>,
         recovery_anomaly_observer: Arc<dyn RecoveryAnomalyObserver>,
     ) -> Self {
+        let effect_journal_diagnostics = Arc::new(crate::EffectJournalDiagnostics::new());
         Self {
             manager: Arc::new(RwLock::new(manager)),
             mutation_store,
             effect_journal,
+            effect_journal_diagnostics,
             session_effect_queue,
             mutation_guards: Arc::new(TrackMutationGuards::default()),
             notifications,
@@ -326,6 +330,16 @@ impl MutationExecutor {
 
     pub(crate) fn emit_internal_notification(&self, notification: ApplicationNotification) {
         let _ = self.notifications.send(notification);
+    }
+
+    fn record_effect_journal_failure(
+        &self,
+        id: &str,
+        operation: &'static str,
+        error: impl ToString,
+    ) {
+        self.effect_journal_diagnostics
+            .record_failure(&TrackId::new(id), operation, error);
     }
 
     pub(crate) async fn has_track(&self, id: &str) -> bool {
@@ -392,6 +406,7 @@ impl TrackServiceSet {
             account_margin_guard,
             recovery_anomaly_observer,
         ));
+        let effect_journal_diagnostics = Arc::clone(&executor.effect_journal_diagnostics);
         let observation = Arc::new(crate::TrackObservationService::from_executor(
             executor.clone(),
         ));
@@ -408,6 +423,7 @@ impl TrackServiceSet {
                 observation,
             ),
             session_effect_queue,
+            effect_journal_diagnostics,
         }
     }
 }
@@ -835,6 +851,7 @@ impl MutationExecutor {
                 .record_effect_outcomes(&journal_outcomes)
                 .await
         {
+            self.record_effect_journal_failure(id, "record_cancel_follow_up_outcomes", &error);
             tracing::warn!(
                 track_id = id,
                 "failed to record cancel follow-up journal outcomes: {error}"
@@ -885,6 +902,7 @@ impl MutationExecutor {
         }
 
         if let Err(error) = self.effect_journal.record_effect_outcomes(&outcomes).await {
+            self.record_effect_journal_failure(id, "record_outcomes", &error);
             tracing::warn!(
                 track_id = id,
                 "failed to record {status_label} effect journal outcomes: {error}"
@@ -1372,6 +1390,7 @@ impl MutationExecutor {
             let journal_entries =
                 effect_journal_entries_from_enqueued(enqueued_effects.journal_projection_entries());
             if let Err(error) = self.effect_journal.append_entries(&journal_entries).await {
+                self.record_effect_journal_failure(id, "append_entries", &error);
                 tracing::warn!(
                     track_id = id,
                     "failed to append effect journal entries: {error}"
@@ -1385,6 +1404,7 @@ impl MutationExecutor {
                 .record_effect_outcomes(effect_status_updates)
                 .await
         {
+            self.record_effect_journal_failure(id, "record_outcomes", &error);
             tracing::warn!(
                 track_id = id,
                 "failed to record effect journal outcomes: {error}"
@@ -1504,6 +1524,8 @@ pub(crate) mod test_support {
         effects: Mutex<Vec<PersistedTrackEffect>>,
         business_write_calls: Mutex<usize>,
         effect_outcome_write_calls: Mutex<usize>,
+        effect_journal_append_error: Mutex<Option<String>>,
+        effect_journal_outcome_error: Mutex<Option<String>>,
     }
 
     impl MemoryRepository {
@@ -1517,6 +1539,14 @@ pub(crate) mod test_support {
 
         pub(crate) fn business_write_call_count(&self) -> usize {
             *self.business_write_calls.lock().unwrap()
+        }
+
+        pub(crate) fn fail_effect_journal_appends(&self, error: impl Into<String>) {
+            *self.effect_journal_append_error.lock().unwrap() = Some(error.into());
+        }
+
+        pub(crate) fn fail_next_effect_journal_outcome(&self, error: impl Into<String>) {
+            *self.effect_journal_outcome_error.lock().unwrap() = Some(error.into());
         }
 
         pub(crate) fn seed_pending_submit_effect(&self) {
@@ -1791,6 +1821,9 @@ pub(crate) mod test_support {
     #[async_trait]
     impl TrackEffectJournal for MemoryRepository {
         async fn append_entries(&self, entries: &[EffectJournalEntry]) -> Result<()> {
+            if let Some(error) = self.effect_journal_append_error.lock().unwrap().clone() {
+                anyhow::bail!(error);
+            }
             self.effects
                 .lock()
                 .unwrap()
@@ -1799,6 +1832,9 @@ pub(crate) mod test_support {
         }
 
         async fn record_effect_outcomes(&self, outcomes: &[EffectStatusUpdate]) -> Result<()> {
+            if let Some(error) = self.effect_journal_outcome_error.lock().unwrap().take() {
+                anyhow::bail!(error);
+            }
             if !outcomes.is_empty() {
                 *self.effect_outcome_write_calls.lock().unwrap() += 1;
             }
@@ -2655,6 +2691,92 @@ mod tests {
             .expect("current session effect should be enqueued");
 
         assert_eq!(next.track_id, TrackId::new("btc-core"));
+    }
+
+    #[tokio::test]
+    async fn effect_journal_append_failure_warns_without_rolling_back_current_session_work() {
+        let repository = Arc::new(MemoryRepository::default());
+        repository.fail_effect_journal_appends("journal disk is read-only");
+        let (services, _) = track_write_services(seeded_manager(), repository.clone());
+
+        let transition = services
+            .observation
+            .observe_market(
+                "btc-core",
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 94.9,
+                        best_ask: 95.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !transition.effects.is_empty(),
+            "test requires a session effect"
+        );
+        assert_eq!(
+            repository.business_write_call_count(),
+            1,
+            "the durable business transition must remain committed"
+        );
+        assert!(
+            repository.pending_effects().is_empty(),
+            "a failed best-effort journal append must not be presented as a durable outbox row"
+        );
+        assert!(
+            services.session_effect_queue.claim_next().is_some(),
+            "journal failure must not remove executable work from the current session"
+        );
+
+        let diagnostics = services.effect_journal_diagnostics.snapshot();
+        assert_eq!(diagnostics.failure_count, 1);
+        let failure = diagnostics.last_failure.unwrap();
+        assert_eq!(failure.track_id, TrackId::new("btc-core"));
+        assert_eq!(failure.operation, "append_entries");
+        assert!(failure.error.contains("journal disk is read-only"));
+    }
+
+    #[tokio::test]
+    async fn effect_journal_outcome_failure_is_best_effort_and_warning_stays_sticky() {
+        let repository = Arc::new(MemoryRepository::default());
+        repository.seed_pending_submit_effect();
+        repository.fail_next_effect_journal_outcome("journal outcome write timed out");
+        let (services, _) = track_write_services(seeded_manager(), repository.clone());
+
+        services
+            .effect
+            .complete_effect_succeeded("btc-core", "btc-core:batch-1:0")
+            .await
+            .unwrap();
+        assert_eq!(
+            repository.pending_effects()[0].status,
+            EffectStatus::Pending,
+            "the diagnostic projection may remain stale when its best-effort write fails"
+        );
+        let first_diagnostics = services.effect_journal_diagnostics.snapshot();
+        assert_eq!(first_diagnostics.failure_count, 1);
+        assert_eq!(
+            first_diagnostics.last_failure.as_ref().unwrap().operation,
+            "record_outcomes"
+        );
+
+        services
+            .effect
+            .complete_effect_succeeded("btc-core", "btc-core:batch-1:0")
+            .await
+            .unwrap();
+        assert_eq!(
+            repository.pending_effects()[0].status,
+            EffectStatus::Succeeded
+        );
+        assert_eq!(
+            services.effect_journal_diagnostics.snapshot().failure_count,
+            1,
+            "a later successful outcome write cannot repair the earlier journal gap"
+        );
     }
 
     #[tokio::test]

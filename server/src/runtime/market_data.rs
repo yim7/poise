@@ -22,6 +22,10 @@ pub(super) fn spawn_market_task(
             .observation_service
             .track_instruments()
             .await;
+        runtime_health.register_track_scopes(
+            RuntimeHealthComponent::MarketData,
+            tracks.iter().map(|track| track.id.clone()).collect(),
+        );
         tracing::info!("starting market data task for {} tracks", tracks.len());
         let mut workers = JoinSet::new();
 
@@ -33,7 +37,8 @@ pub(super) fn spawn_market_task(
             let instrument = track.instrument.clone();
             match market_data.subscribe_prices(&instrument).await {
                 Ok(mut receiver) => {
-                    runtime_health.record_success_now(RuntimeHealthComponent::MarketData);
+                    runtime_health
+                        .record_track_success_now(RuntimeHealthComponent::MarketData, &track.id);
                     tracing::info!(
                         "subscribed market data for track {} ({})",
                         track.id,
@@ -58,8 +63,9 @@ pub(super) fn spawn_market_task(
                                 }
                                 tick = receiver.recv() => {
                                     let Some(tick) = tick else {
-                                        runtime_health.record_error_now(
+                                        runtime_health.record_track_error_now(
                                             RuntimeHealthComponent::MarketData,
+                                            &track.id,
                                             format!(
                                                 "market data receiver closed for track {} ({})",
                                                 track.id,
@@ -94,8 +100,9 @@ pub(super) fn spawn_market_task(
                                         .await
                                     {
                                         Ok(_) => {
-                                            runtime_health.record_success_now(
+                                            runtime_health.record_track_success_now(
                                                 RuntimeHealthComponent::MarketData,
+                                                &track.id,
                                             );
                                             let _ = state
                                                 .live_view_notifications
@@ -103,9 +110,13 @@ pub(super) fn spawn_market_task(
                                             market_data_health_state.mark_dirty(&track.id);
                                         }
                                         Err(error) => {
-                                            runtime_health.record_error_now(
+                                            runtime_health.record_track_error_now(
                                                 RuntimeHealthComponent::MarketData,
-                                                error.to_string(),
+                                                &track.id,
+                                                format!(
+                                                    "track `{}` ({}): {error}",
+                                                    track.id, instrument.symbol
+                                                ),
                                             );
                                             tracing::warn!(
                                                 "failed to apply market data update for {}: {}",
@@ -120,8 +131,11 @@ pub(super) fn spawn_market_task(
                     });
                 }
                 Err(error) => {
-                    runtime_health
-                        .record_error_now(RuntimeHealthComponent::MarketData, error.to_string());
+                    runtime_health.record_track_error_now(
+                        RuntimeHealthComponent::MarketData,
+                        &track.id,
+                        format!("track `{}` ({}): {error}", track.id, instrument.symbol),
+                    );
                     tracing::warn!(
                         "failed to subscribe market data for {}: {error}",
                         instrument.symbol
@@ -132,6 +146,10 @@ pub(super) fn spawn_market_task(
 
         while let Some(result) = workers.join_next().await {
             if let Err(error) = result {
+                runtime_health.record_error_now(
+                    RuntimeHealthComponent::MarketData,
+                    format!("market data worker join error: {error}"),
+                );
                 tracing::warn!("market worker join error: {error}");
             }
         }

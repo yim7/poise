@@ -35,7 +35,7 @@ mod user_data;
 pub use guards::{AccountMarginGuardStore, TrackReconcileGuards};
 pub(crate) use health::{
     RuntimeHealth, RuntimeHealthComponent, RuntimeHealthSnapshot, RuntimeHealthStatus,
-    RuntimeTaskHealthSnapshot,
+    RuntimeTaskHealthSnapshot, assess_trading_readiness,
 };
 pub(crate) use pnl_backfill::{PnlBackfillSnapshot, PnlBackfillStatus};
 pub(crate) use reconcile::{RecoveryAnomalyDirtyObserver, RecoveryDirtyState};

@@ -75,6 +75,10 @@ impl AccountMarginGuardStore {
             max_increase_notional: snapshot.map(|snapshot| snapshot.max_increase_notional),
         }
     }
+
+    pub(crate) fn block_snapshot(&self) -> AccountMarginBlock {
+        self.block.lock().unwrap().clone()
+    }
 }
 
 impl poise_application::AccountCapacityGuard for AccountMarginGuardStore {

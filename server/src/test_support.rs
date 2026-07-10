@@ -3,9 +3,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
-    AccountCapacityGuard, AccountMonitor, ApplicationNotification, TrackCommandService,
-    TrackDefinitionRegistry, TrackEffectJournal, TrackEffectService, TrackMutationStore,
-    TrackObservationService, TrackQueryStore, TrackRuntimeLifecycleService, TrackServiceSet,
+    AccountCapacityGuard, AccountMonitor, ApplicationNotification, EffectJournalDiagnostics,
+    TrackCommandService, TrackDefinitionRegistry, TrackEffectJournal, TrackEffectService,
+    TrackMutationStore, TrackObservationService, TrackQueryStore, TrackRuntimeLifecycleService,
+    TrackServiceSet,
 };
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
@@ -42,6 +43,7 @@ pub(crate) struct TestApplicationServices {
     pub(crate) submit_effect_service: Arc<SubmitEffectService>,
     pub(crate) runtime_lifecycle_service: Arc<TrackRuntimeLifecycleService>,
     pub(crate) session_effect_queue: poise_application::SessionEffectQueue,
+    pub(crate) effect_journal_diagnostics: Arc<EffectJournalDiagnostics>,
     pub(crate) notifications: broadcast::Sender<ApplicationNotification>,
     pub(crate) account_margin_guard: Arc<AccountMarginGuardStore>,
     pub(crate) recovery_dirty_state: Arc<RecoveryDirtyState>,
@@ -152,6 +154,7 @@ pub(crate) fn build_test_application_services_with_recovery_dirty_state(
         submit_effect_service: Arc::new(services.submit_effect),
         runtime_lifecycle_service: Arc::new(services.runtime_lifecycle),
         session_effect_queue: services.session_effect_queue,
+        effect_journal_diagnostics: services.effect_journal_diagnostics,
         notifications,
         account_margin_guard,
         recovery_dirty_state,
@@ -459,6 +462,9 @@ pub(crate) fn build_http_state(
         account_projector,
         Arc::new(RuntimeHealth::new()),
         Arc::new(PnlBackfillStatus::new()),
+        services.effect_journal_diagnostics.clone(),
+        Arc::new(ExchangeFreshness::default()),
+        services.account_margin_guard.clone(),
         Arc::new(RecentFillsAuditor::new(
             Arc::new(NoopAccountPort),
             query_store,

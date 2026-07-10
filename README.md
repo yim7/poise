@@ -253,7 +253,7 @@ cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet" --dr
 cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet"
 ```
 
-启动后服务端会读取配置、初始化 SQLite、连接交易所、执行 startup-only 杠杆设置、恢复本地业务状态，并启动 HTTP / WebSocket 控制面。
+启动后服务端会读取配置、初始化 SQLite、连接交易所、执行 startup-only 杠杆设置，加载可跨进程恢复的控制状态和 PNL 明细，并以交易所当前仓位、订单和新行情建立新的运行 session。旧 effect journal 只作为诊断历史，不会被恢复或重放。随后服务端启动 HTTP / WebSocket 控制面。
 
 ### 5. 启动 TUI
 
@@ -277,6 +277,7 @@ cargo run -p poise-tui
 
 ```bash
 curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/readiness
 curl http://127.0.0.1:8000/account
 curl http://127.0.0.1:8000/tracks
 curl http://127.0.0.1:8000/tracks/btc-core
@@ -285,6 +286,7 @@ curl http://127.0.0.1:8000/tracks/btc-core
 当前公开入口：
 
 - `GET /health`
+- `GET /readiness`
 - `GET /account`
 - `GET /tracks`
 - `GET /tracks/:id`
@@ -294,9 +296,11 @@ curl http://127.0.0.1:8000/tracks/btc-core
 
 协议 DTO 以 [protocol/src/lib.rs](protocol/src/lib.rs) 和序列化测试为准，不再维护单独协议文档。
 
+`/health` 用于查看进程、track 和 runtime task 的观测状态；`/readiness` 判断当前实例是否具备交易条件，并明确返回 blockers 与 warnings。两者语义不同，HTTP 200 不能互相替代。
+
 ## zellij 值守
 
-本地连续跑测试网实例时，可以用仓库里的 zellij 脚本托管 server、TUI 和 health probe。
+本地连续跑测试网实例时，可以用仓库里的 zellij 脚本托管 server、TUI 和 trading readiness probe。
 
 ```bash
 export POISE_INSTANCE_DIR="$HOME/poise-instances/testnet"
@@ -335,7 +339,8 @@ POISE_ZELLIJ_ATTACH=1 ./scripts/start-instance-zellij.sh
 POISE_INSTANCE_DIR="$HOME/poise-instances/testnet" ./scripts/start-instance-zellij.sh --dry-run
 POISE_INSTANCE_DIR="$HOME/poise-instances/testnet" ./scripts/run-instance-server.sh --dry-run
 POISE_INSTANCE_DIR="$HOME/poise-instances/testnet" ./scripts/run-instance-tui.sh --dry-run
-POISE_BASE_URL=http://127.0.0.1:8000 ./scripts/probe-health.sh --dry-run
+POISE_BASE_URL=http://127.0.0.1:8000 ./scripts/probe-health.sh --check health --dry-run
+POISE_BASE_URL=http://127.0.0.1:8000 ./scripts/probe-health.sh --check readiness --dry-run
 ```
 
 ## 开发与验证

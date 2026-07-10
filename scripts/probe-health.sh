@@ -10,13 +10,16 @@ RAW_INSTANCE_DIR="${POISE_INSTANCE_DIR:-}"
 INTERVAL_SECS="${POISE_HEALTH_INTERVAL_SECS:-60}"
 FAILURE_THRESHOLD="${POISE_HEALTH_FAILURE_THRESHOLD:-3}"
 ALERT_HOOK="${POISE_HEALTH_ALERT_HOOK:-}"
+CHECK=""
+ENDPOINT=""
 RUN_ONCE=0
 DRY_RUN=0
 
 usage() {
   cat <<'EOF'
 用法:
-  scripts/probe-health.sh [--once] [--dry-run]
+  scripts/probe-health.sh --check health [--once] [--dry-run]
+  scripts/probe-health.sh --check readiness [--once] [--dry-run]
 
 环境变量:
   POISE_INSTANCE_DIR          实例目录，用于默认日志路径
@@ -31,6 +34,29 @@ EOF
 
 while (($# > 0)); do
   case "$1" in
+    --check)
+      if (($# < 2)); then
+        echo "missing value for --check" >&2
+        usage >&2
+        exit 1
+      fi
+      if [[ -n "$CHECK" ]]; then
+        echo "--check may only be specified once" >&2
+        usage >&2
+        exit 1
+      fi
+      case "$2" in
+        health|readiness)
+          CHECK="$2"
+          ;;
+        *)
+          echo "invalid --check value: $2" >&2
+          usage >&2
+          exit 1
+          ;;
+      esac
+      shift 2
+      ;;
     --once)
       RUN_ONCE=1
       shift
@@ -50,6 +76,21 @@ while (($# > 0)); do
       ;;
   esac
 done
+
+if [[ -z "$CHECK" ]]; then
+  echo "missing required --check health|readiness" >&2
+  usage >&2
+  exit 1
+fi
+
+case "$CHECK" in
+  health)
+    ENDPOINT="/health"
+    ;;
+  readiness)
+    ENDPOINT="/readiness"
+    ;;
+esac
 
 if [[ -n "$RAW_INSTANCE_DIR" ]]; then
   INSTANCE_DIR="$(poise_absolutize_path "$RAW_INSTANCE_DIR")"
@@ -96,6 +137,21 @@ log_stderr() {
   fi
 }
 
+response_matches_contract() {
+  local body compact_body
+  body="$1"
+  compact_body="$(printf '%s' "$body" | tr -d '[:space:]')"
+
+  case "$CHECK" in
+    health)
+      [[ "$compact_body" =~ ^\{\"status\":\"ok\",\"track_count\":[0-9]+,\"attention_required_count\":0,\"tasks\":\[.*\],\"pnl_backfill\":\{.*\}\}$ ]]
+      ;;
+    readiness)
+      [[ "$compact_body" =~ ^\{\"ready_to_trade\":true,\"blockers\":\[\],\"warnings\":\[.*\]\}$ ]]
+      ;;
+  esac
+}
+
 probe_once() {
   local now response status body
   now="$(date '+%Y-%m-%d %H:%M:%S')"
@@ -107,12 +163,13 @@ probe_once() {
       --max-time 10 \
       --noproxy "127.0.0.1,localhost,::1" \
       --write-out $'\n%{http_code}' \
-      "${BASE_URL}/health"
+      "${BASE_URL}${ENDPOINT}"
   )"; then
     LAST_PROBE_RESULT="transport_error"
     LAST_PROBE_STATUS="transport_error"
     LAST_PROBE_BODY=""
-    log_stderr '[%s] transport_error base_url=%s\n' "$now" "$BASE_URL"
+    log_stderr '[%s] transport_error check=%s endpoint=%s base_url=%s\n' \
+      "$now" "$CHECK" "$ENDPOINT" "$BASE_URL"
     return 2
   fi
 
@@ -120,10 +177,17 @@ probe_once() {
   body="${response%$'\n'*}"
   LAST_PROBE_STATUS="$status"
   LAST_PROBE_BODY="$body"
-  log_stdout '[%s] http_status=%s body=%s\n' "$now" "$status" "$body"
+  log_stdout '[%s] check=%s endpoint=%s http_status=%s body=%s\n' \
+    "$now" "$CHECK" "$ENDPOINT" "$status" "$body"
 
   case "$status" in
     200)
+      if ! response_matches_contract "$body"; then
+        LAST_PROBE_RESULT="response_contract_mismatch"
+        log_stderr '[%s] response_contract_mismatch check=%s endpoint=%s http_status=%s body=%s\n' \
+          "$now" "$CHECK" "$ENDPOINT" "$status" "$body"
+        return 4
+      fi
       LAST_PROBE_RESULT="ok"
       return 0
       ;;
@@ -144,12 +208,14 @@ emit_alert() {
   exit_code="$2"
   now="$(date '+%Y-%m-%d %H:%M:%S')"
 
-  printf '[%s] ALERT failure_count=%s result=%s status=%s exit_code=%s base_url=%s\n' \
+  printf '[%s] ALERT failure_count=%s result=%s status=%s exit_code=%s check=%s endpoint=%s base_url=%s\n' \
     "$now" \
     "$failure_count" \
     "$LAST_PROBE_RESULT" \
     "$LAST_PROBE_STATUS" \
     "$exit_code" \
+    "$CHECK" \
+    "$ENDPOINT" \
     "$BASE_URL" | {
       if [[ -n "$LOG_PATH" ]]; then
         tee -a "$LOG_PATH" >&2
@@ -164,6 +230,8 @@ emit_alert() {
       POISE_HEALTH_LAST_STATUS="$LAST_PROBE_STATUS" \
       POISE_HEALTH_LAST_BODY="$LAST_PROBE_BODY" \
       POISE_HEALTH_LAST_EXIT_CODE="$exit_code" \
+      POISE_HEALTH_CHECK="$CHECK" \
+      POISE_HEALTH_ENDPOINT="$ENDPOINT" \
       POISE_BASE_URL="$BASE_URL" \
       bash -lc "$ALERT_HOOK"; then
       log_stderr '[%s] ALERT_HOOK_FAILED command=%s\n' "$now" "$ALERT_HOOK"
@@ -174,6 +242,8 @@ emit_alert() {
 if [[ "$DRY_RUN" -eq 1 ]]; then
   cat <<EOF
 base_url=$BASE_URL
+check=$CHECK
+endpoint=$ENDPOINT
 interval_secs=$INTERVAL_SECS
 failure_threshold=$FAILURE_THRESHOLD
 alert_hook=$([[ -n "$ALERT_HOOK" ]] && echo configured || echo disabled)

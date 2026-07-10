@@ -28,7 +28,10 @@ pub use account_monitor::{AccountMonitor, AccountMonitorConfig};
 pub use account_monitor_store::{AccountMonitorStore, StoredAccountMonitorState};
 pub use account_read_model::{AccountReadModel, AccountRiskSignal};
 pub use debug_query_service::TrackDebugQueryService;
-pub use diagnostics::{DiagnosticSeverity, TrackDiagnosticItem};
+pub use diagnostics::{
+    DiagnosticSeverity, EffectJournalDiagnostics, EffectJournalDiagnosticsSnapshot,
+    EffectJournalFailure, TrackDiagnosticItem,
+};
 pub use mutation_executor::{
     AccountCapacityGuard, ExchangeStateSyncOutcome, ExchangeStateSyncToken,
     RecoveryAnomalyObserver, TrackInstrument, TrackMutationError, TrackServiceSet,

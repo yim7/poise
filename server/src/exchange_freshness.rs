@@ -10,10 +10,25 @@ pub enum ExchangeFreshnessReason {
     CancelOutcomeUnknown,
 }
 
+impl ExchangeFreshnessReason {
+    pub(crate) fn readiness_reason(self) -> &'static str {
+        match self {
+            Self::UnabsorbedOrderUpdate => "an order update could not be absorbed",
+            Self::SubmitOutcomeUnknown => "a submit outcome is unknown",
+            Self::CancelOutcomeUnknown => "a cancel outcome is unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StaleExchangeStateSnapshot {
+    pub track_id: String,
+    pub reason: ExchangeFreshnessReason,
+}
+
 #[derive(Debug, Clone)]
 struct TrackFreshnessState {
     generation: u64,
-    #[cfg(test)]
     last_reason: ExchangeFreshnessReason,
 }
 
@@ -48,7 +63,6 @@ impl ExchangeFreshness {
             track_id.to_string(),
             TrackFreshnessState {
                 generation: next_generation,
-                #[cfg(test)]
                 last_reason: reason,
             },
         );
@@ -81,6 +95,21 @@ impl ExchangeFreshness {
 
     pub async fn is_stale(&self, track_id: &str) -> bool {
         self.inner.lock().unwrap().contains_key(track_id)
+    }
+
+    pub(crate) async fn stale_tracks(&self) -> Vec<StaleExchangeStateSnapshot> {
+        let mut tracks = self
+            .inner
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(track_id, state)| StaleExchangeStateSnapshot {
+                track_id: track_id.clone(),
+                reason: state.last_reason,
+            })
+            .collect::<Vec<_>>();
+        tracks.sort_by(|left, right| left.track_id.cmp(&right.track_id));
+        tracks
     }
 
     pub async fn decide_effect(

@@ -208,6 +208,7 @@ async fn assemble_with_state_store(
             recovery_dirty_state.clone(),
         )),
     );
+    let effect_journal_diagnostics = write_services.effect_journal_diagnostics.clone();
     let session_effect_queue = write_services.session_effect_queue.clone();
     let command_service = Arc::new(write_services.command);
     let observation_service = Arc::new(write_services.observation);
@@ -270,6 +271,9 @@ async fn assemble_with_state_store(
         account_projector.clone(),
         runtime_health.clone(),
         pnl_backfill_status.clone(),
+        effect_journal_diagnostics,
+        exchange_freshness.clone(),
+        account_margin_guard.clone(),
         recent_fills_auditor.clone(),
     );
     let websocket_state = build_websocket_state(
@@ -395,6 +399,9 @@ pub(crate) fn build_http_state(
     account_projector: Arc<AccountProjector>,
     runtime_health: Arc<RuntimeHealth>,
     pnl_backfill_status: Arc<PnlBackfillStatus>,
+    effect_journal_diagnostics: Arc<poise_application::EffectJournalDiagnostics>,
+    exchange_freshness: Arc<ExchangeFreshness>,
+    account_margin_guard: Arc<AccountMarginGuardStore>,
     recent_fills_auditor: Arc<RecentFillsAuditor>,
 ) -> HttpState {
     HttpState {
@@ -406,6 +413,9 @@ pub(crate) fn build_http_state(
         account_projector,
         runtime_health,
         pnl_backfill_status,
+        effect_journal_diagnostics,
+        exchange_freshness,
+        account_margin_guard,
         recent_fills_auditor,
     }
 }

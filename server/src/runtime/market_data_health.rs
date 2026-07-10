@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 
 use crate::server_context::ReconcileState;
 
-use super::ServerRuntime;
+use super::{RuntimeHealth, RuntimeHealthComponent, ServerRuntime};
 
 #[derive(Default)]
 pub(crate) struct MarketDataHealthState {
@@ -41,6 +41,7 @@ pub(super) fn spawn_market_data_health_task(
     let state = runtime.state.clone();
     let clock = Arc::clone(&runtime.clock);
     let market_data_health_state = Arc::clone(&runtime.market_data_health_state);
+    let runtime_health = Arc::clone(&runtime.state.runtime_health);
     let max_sleep_interval = runtime.market_data_health_max_sleep_interval;
 
     tokio::spawn(async move {
@@ -53,6 +54,7 @@ pub(super) fn spawn_market_data_health_task(
         for track in &tracks {
             update_deadline(
                 &state.reconcile,
+                &runtime_health,
                 clock.as_ref(),
                 &track.id,
                 max_sleep_interval,
@@ -68,6 +70,7 @@ pub(super) fn spawn_market_data_health_task(
 
             apply_dirty_tracks(
                 &state.reconcile,
+                &runtime_health,
                 clock.as_ref(),
                 &market_data_health_state,
                 max_sleep_interval,
@@ -80,6 +83,7 @@ pub(super) fn spawn_market_data_health_task(
             if !due_track_ids.is_empty() {
                 refresh_due_tracks(
                     &state.reconcile,
+                    &runtime_health,
                     clock.as_ref(),
                     &due_track_ids,
                     max_sleep_interval,
@@ -117,18 +121,28 @@ pub(super) fn spawn_market_data_health_task(
 
 async fn apply_dirty_tracks(
     state: &ReconcileState,
+    runtime_health: &RuntimeHealth,
     clock: &dyn poise_engine::ports::ClockPort,
     market_data_health_state: &MarketDataHealthState,
     max_sleep_interval: Duration,
     deadlines: &mut HashMap<String, DateTime<Utc>>,
 ) {
     for track_id in market_data_health_state.take_dirty() {
-        update_deadline(state, clock, &track_id, max_sleep_interval, deadlines).await;
+        update_deadline(
+            state,
+            runtime_health,
+            clock,
+            &track_id,
+            max_sleep_interval,
+            deadlines,
+        )
+        .await;
     }
 }
 
 async fn refresh_due_tracks(
     state: &ReconcileState,
+    runtime_health: &RuntimeHealth,
     clock: &dyn poise_engine::ports::ClockPort,
     due_track_ids: &[String],
     max_sleep_interval: Duration,
@@ -140,6 +154,11 @@ async fn refresh_due_tracks(
             .refresh_market_data_health(track_id)
             .await
         {
+            runtime_health.record_track_health_error_now(
+                RuntimeHealthComponent::MarketData,
+                track_id,
+                format!("failed to refresh market data health for `{track_id}`: {error}"),
+            );
             tracing::warn!("failed to refresh market data health for {track_id}: {error}");
             deadlines.insert(
                 track_id.clone(),
@@ -148,12 +167,23 @@ async fn refresh_due_tracks(
             continue;
         }
 
-        update_deadline(state, clock, track_id, max_sleep_interval, deadlines).await;
+        runtime_health
+            .record_track_health_success_now(RuntimeHealthComponent::MarketData, track_id);
+        update_deadline(
+            state,
+            runtime_health,
+            clock,
+            track_id,
+            max_sleep_interval,
+            deadlines,
+        )
+        .await;
     }
 }
 
 async fn update_deadline(
     state: &ReconcileState,
+    runtime_health: &RuntimeHealth,
     clock: &dyn poise_engine::ports::ClockPort,
     track_id: &str,
     max_sleep_interval: Duration,
@@ -166,11 +196,20 @@ async fn update_deadline(
     {
         Ok(Some(deadline)) => {
             deadlines.insert(track_id.to_string(), deadline);
+            runtime_health
+                .record_track_health_success_now(RuntimeHealthComponent::MarketData, track_id);
         }
         Ok(None) => {
             deadlines.remove(track_id);
+            runtime_health
+                .record_track_health_success_now(RuntimeHealthComponent::MarketData, track_id);
         }
         Err(error) => {
+            runtime_health.record_track_health_error_now(
+                RuntimeHealthComponent::MarketData,
+                track_id,
+                format!("failed to load market data health deadline for `{track_id}`: {error}"),
+            );
             tracing::warn!("failed to load market data health deadline for {track_id}: {error}");
             deadlines.insert(
                 track_id.to_string(),

@@ -69,9 +69,11 @@ pub(super) fn spawn_user_task(
             if let Err(error) =
                 apply_user_data_event(&state.reconcile, execution.as_ref(), &track_id, event).await
             {
-                state
-                    .runtime_health
-                    .record_error_now(RuntimeHealthComponent::UserData, error.message());
+                state.runtime_health.record_track_error_now(
+                    RuntimeHealthComponent::UserData,
+                    &track_id,
+                    format!("track `{track_id}`: {}", error.message()),
+                );
                 tracing::warn!(
                     "failed to apply user data update for {}: {}",
                     instrument.symbol,
@@ -79,6 +81,9 @@ pub(super) fn spawn_user_task(
                 );
                 continue;
             }
+            state
+                .runtime_health
+                .record_track_success_now(RuntimeHealthComponent::UserData, &track_id);
             state
                 .runtime_health
                 .record_success_now(RuntimeHealthComponent::UserData);

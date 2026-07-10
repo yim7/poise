@@ -8,7 +8,7 @@ layout {
                 args "-lc" "exec \"$POISE_REPO_ROOT/scripts/run-instance-server.sh\""
             }
             pane size="32%" command="bash" {
-                args "-lc" "exec \"$POISE_REPO_ROOT/scripts/probe-health.sh\""
+                args "-lc" "exec \"$POISE_REPO_ROOT/scripts/probe-health.sh\" --check readiness"
             }
         }
     }

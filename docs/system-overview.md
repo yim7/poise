@@ -43,7 +43,7 @@ server::config::TrackSpec
 2. 单 track 决策闭环：在 `engine/` 建 `TrackRuntime`、`reconciler` 和最小 `manager`。输入是静态定义、当前仓位、策略价格和风险状态；输出是 `desired_exposure`、运行时状态和领域事件。此时不接真实交易所，先用测试证明自动、暂停、手动、带外和风险 cap 的目标计算成立。
 3. 执行规划闭环：在 `engine/src/executor/` 建 `ExecutorState`、交易规则输入、binding ledger 和 policy。输入是当前仓位、执行目标、盘口和 exchange rules；输出是 `TrackEffect`，不是直接下单。测试要覆盖 catch up、reduce-only maker、订单复用、撤单、恢复和异常状态。
 4. mutation 闭环：用 `TrackMutationFrame` 把一次决策前后的 runtime 状态包起来，`manager` 负责提交或回滚当前进程状态。验收点是：没有 effect 的 live-only tick 不做持久写；有事件、effect 或 durable 控制状态变化时才进入 application 写路径。
-5. application / storage 闭环：`application/` 定义 mutation、query、read model、effect queue 和持久化 port；`storage/` 只实现这些 port。SQLite 持久化 durable 控制状态、领域事件、effect journal 和 PNL 明细；读模型从当前 config registry、live runtime view 和持久记录投影出来。
+5. application / storage 闭环：`application/` 定义 mutation、query、read model、当前 session effect queue 和持久化 port；`storage/` 只实现这些 port。SQLite 持久化 durable 控制状态、领域事件、best-effort effect journal 和 PNL 明细；读模型从当前 config registry、live runtime view 和持久记录投影出来。effect journal 只服务审计与诊断，不承担派发或恢复。
 6. server 装配闭环：`server/` 读取实例目录配置，构造 `TrackDefinitionRegistry`，准备 SQLite，连接交易所 ports，设置启动期杠杆，加载交易规则，把 tracks 注册进 `TrackManager`，再启动 runtime task 和 HTTP / WebSocket。验收点是 config、assembly、startup preparation 和 projector 的局部测试。
 7. 交易所闭环：每个 `exchanges/<venue>/` 先在私有模块完成签名、REST / WebSocket DTO、symbol 规则、账户模式和错误映射，再通过 `connected.rs` 输出 `ExchangePorts`。新增交易所只把 venue 分支接到 core/server/assembly，不把交易所私有字段上移到共享领域层。
 8. 协议和界面闭环：`protocol/` 定义 wire DTO，`server` projector 负责从 read model 投影，`tui/` 只消费 HTTP / WebSocket。TUI 可以合并 `track_detail_changed` 和 `track_live_view_changed`，但不能重新实现目标计算。
@@ -102,9 +102,11 @@ server::config::TrackSpec
 3. `assembly::assemble(...)` 构造交易所连接，按 track 执行 startup-only 杠杆设置，加载交易所规则，并把每个 `TrackDefinition` 注册进 `TrackManager`。
 4. `RuntimeStartupDefinition` 把 `TrackDefinition` 和 startup leverage 组合成 server runtime 内部输入。
 5. 启动恢复用 instrument 对应的 available balance 和 track startup leverage 计算可增加名义金额。
-6. `ServerRuntime::start()` 完成 live exchange state bootstrap，然后启动 market data、user data、recovery、effect worker、account monitor 和 health 相关 task。
+6. `ServerRuntime::start()` 先验证 recent PNL 恢复能力，订阅 user data，清理 inherited open orders，再从持久控制状态、PNL 明细和交易所当前仓位、规则、余额及启动窗口内事件建立 fresh session；随后启动 market data、user data、recovery、effect worker、account monitor、PNL backfill 和 health 相关 task。
 
 启动遇到持久状态与当前配置不兼容时会失败，操作者应显式处理实例目录或数据库。
+
+启动恢复是 fresh-session rebuild，不是 warm restart。旧 bindings、执行进度、price gate、recovery anomaly 和当前 session effect queue 全部作废；`track_effects` 中旧 journal 行不会重新入队或重放。交易所仓位和订单始终从交易所重新确认，离线时间也不会沿用旧 session 的等待计时。
 
 配置 dry-run 是启动前只读检查，入口是 `poise-server --instance-dir <dir> --dry-run`。它读取同一份 `config.toml`，连接交易所只读 port，加载账户摘要、symbol metadata 和可用的 mark price，然后输出 JSON 格式的 `ConfigDryRunResponse`。dry-run 不初始化 SQLite，不执行 startup-only 杠杆设置，不下单，不订阅 market data 或 user data，也不启动 runtime task。输出中的配置解释和容量估算只是当前配置与交易所 metadata/account snapshot 的读模型，不写入持久化，也不作为 engine、PNL 或恢复流程的事实源。
 
@@ -200,13 +202,13 @@ execution_target_exposure = +3.9
 
 SQLite 文件位于 `<instance-dir>/.data/poise-server.sqlite`。
 
-持久化边界保存 durable 业务事实，不保存完整当前配置定义，也不把 read model 当成事实源。读侧需要静态定义时，从当前配置构造出的 `TrackDefinitionRegistry` 读取。
+持久化边界保存可跨进程恢复的业务事实，以及用于审计和诊断的历史记录。诊断记录不会因此自动成为恢复输入。持久化层不保存完整当前配置定义，也不把 read model 当成事实源；读侧需要静态定义时，从当前配置构造出的 `TrackDefinitionRegistry` 读取。
 
 当前持久化事实：
 
 - `track_control_state`：只保存可跨进程恢复的控制状态，例如自动、暂停、手动目标和终止。自动运行中的 `RiskExposureGated`、冻结确认、flatten pending 等运行阶段在写入持久控制状态时折回对应的 durable 控制模式。
 - `track_events`：保存领域事件，用于审计和读侧更新。
-- `track_effects`：保存 effect journal、执行状态、重试次数和错误摘要。它是 effect worker 的持久队列事实，不是交易所订单事实的完整替代。
+- `track_effects`：best-effort effect journal，保存计划派发和结果的诊断投影、重试次数及错误摘要。它不是当前 session effect queue、可靠 outbox 或交易所订单事实；写入失败不会回滚已经提交的业务状态，旧行也不参与启动恢复或订单重放。当前进程中的 journal 写入失败通过日志、diagnostics 和 readiness warning 暴露，因此 journal 本身可能不完整。
 - `track_pnl_records`：保存可归属到 track 的成交盈亏、交易手续费和资金费明细。
 - `persisted_track_presence`：读模型辅助表，只用于 listing 和 updated-at 元数据。
 - `account_monitor_state`：账户监控的跨进程基线，包括交易日、基线权益和基线捕获时间；不保存当前账户摘要。
@@ -215,13 +217,14 @@ SQLite 文件位于 `<instance-dir>/.data/poise-server.sqlite`。
 
 - `TrackMutationFrame` 是一次 mutation 的当前进程快照，用于提交、回滚和 durable-write 判断；它不是持久文档。
 - `ExecutorState`、binding ledger、recovery anomaly、risk exposure gate、`desired_exposure` 和 live market fields 属于 runtime 当前会话状态。需要展示时从 live runtime 投影；重启后根据 durable 控制状态、当前配置、交易所快照和新行情重新建立。
+- `SessionEffectQueue` 是当前进程内唯一的 effect 派发事实，随 fresh session 新建；它不从 `track_effects` 恢复。
 - 当前账户摘要、`available_by_asset` 和 hedge-like account asset 数量来自启动后的 `AccountSummaryPort` 刷新或订阅更新，不从 `account_monitor_state` 恢复。
 - `TrackRuntimeView`、read model 和 protocol DTO 都是投影结果。它们可以被查询和推送，但不能反向作为 engine 或 persistence 的事实源。
 
 读模型链路：
 
 ```text
-TrackDefinitionRegistry + TrackRuntimeView + persisted events/effects
+TrackDefinitionRegistry + TrackRuntimeView + persisted event/journal projections
   -> application read model
   -> server projector
   -> protocol DTO
@@ -240,13 +243,14 @@ Track PNL 统计只把本地可归属到 track 的明细作为事实来源：
 - 资金费如果无法归属到某个 track，就不进入 track PNL 统计。
 - HTTP / WebSocket 公开读模型使用 `pnl` 字段，不再用旧的 `ledger` 命名承载 PNL 统计。
 
-OKX recent fills 和可归属 funding bills 都映射为 `TrackPnlRecord`，不进入第二套 PNL 事实表。runtime 的 PNL backfill task 使用交易所 recent records 补写本地缺失明细，并通过 `/health` 暴露最近完成时间、写入数量、跳过数量和最近错误；重复回补依赖 source key 保持幂等。`GET /debug/tracks/:id/recent-fills-audit` 只比较交易所最近成交和本地 `track_pnl_records` 的覆盖情况，是排查投影，不写事实。启动后的 recent fills audit 如果发现本地缺失，会写入 `PnlAuditMissingRecords` 诊断事件；该事件说明“启动时发现缺失”，不替代 PNL 明细，也不表示缺失一定尚未被后续 backfill 修复。
+OKX recent fills 和可归属 funding bills 都映射为 `TrackPnlRecord`，不进入第二套 PNL 事实表。runtime 的 PNL backfill task 使用交易所 recent records 补写本地缺失明细，并通过 `/health` 暴露最近完成时间、写入数量、跳过数量和最近错误；PNL capability 或 backfill 仍为 unknown 或出现关键异常时，也会成为 `/readiness` blocker。重复回补依赖 source key 保持幂等。`GET /debug/tracks/:id/recent-fills-audit` 只比较交易所最近成交和本地 `track_pnl_records` 的覆盖情况，是排查投影，不写事实。启动后的 recent fills audit 如果发现本地缺失，会写入 `PnlAuditMissingRecords` 诊断事件；该事件说明“启动时发现缺失”，不替代 PNL 明细，也不表示缺失一定尚未被后续 backfill 修复。
 
 ## HTTP / WebSocket
 
 当前公开入口：
 
 - `GET /health`
+- `GET /readiness`
 - `GET /account`
 - `GET /tracks`
 - `GET /tracks/:id`
@@ -255,6 +259,8 @@ OKX recent fills 和可归属 funding bills 都映射为 `TrackPnlRecord`，不�
 - `GET /ws`
 
 协议字段不再单独维护长文档。修改协议时必须更新 `protocol/src/lib.rs` 和序列化测试；需要说明语义时，在本文只保留高层约束。
+
+`/health` 保留进程、track 和 runtime task 的观测语义；task 的 `Unknown` 状态会如实展示，但不会仅因此改变既有 health 结论。`/readiness` 是更严格的当前交易条件投影：关键 runtime task 或 PNL 状态为 `Unknown` / `Degraded`，以及 track 等待行情、行情陈旧、price execution gate、recovery anomaly、需要重新对账的 exchange freshness 或账户保证金 gate 时，返回 `ready_to_trade=false` 和 blockers。账户监控的 `Critical` 状态阻止交易，`Attention` 状态只进入 warnings。effect journal 写入失败也只进入 warnings，不恢复旧 effect、不回滚业务状态，也不把 journal 升级为 outbox。readiness 只读取当前内存和读模型快照，不持久化，也不重新运行 engine 状态机。
 
 WebSocket 当前推送：
 
