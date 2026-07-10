@@ -1,3 +1,11 @@
+//! Shared deterministic replay primitives and a curve-immediate benchmark.
+//!
+//! [`run_replay`] applies `strategy::desired_exposure` directly at each price sample and assumes an
+//! immediate full taker fill once `min_rebalance_units` is reached. That benchmark does not run the
+//! engine manager, reconciler, risk-acquisition gate, executor lifecycle, or fresh-session logic,
+//! so it must not be treated as a complete strategy or decision replay. Fee conversion and replay
+//! exchange-rule validation are shared with the engine decision replay.
+
 use serde::{Deserialize, Serialize};
 
 use crate::strategy::{TrackConfig, desired_exposure, validate_config};
@@ -35,7 +43,7 @@ impl ReplayInput {
             return Err("leverage must be positive".to_string());
         }
         validate_config(&self.track_config)?;
-        validate_exchange_rules(&self.exchange_rules)?;
+        validate_replay_exchange_rules(&self.exchange_rules)?;
         Ok(())
     }
 }
@@ -174,6 +182,11 @@ fn replay_comparison_item(
     })
 }
 
+/// Runs the curve-immediate benchmark.
+///
+/// The result describes immediate curve tracking under a simplified taker-fill assumption. Use
+/// the engine decision replay when manager, risk-acquisition, executor, or restart semantics are
+/// part of the question.
 pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
     input.validate()?;
     let native_quantity_per_unit = input.exchange_rules.native_qty_per_exposure_unit(
@@ -212,7 +225,12 @@ pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
             trade_notional = input
                 .exchange_rules
                 .notional_from_native_qty(trade_native_quantity, *price);
-            sample_fee = estimate_fee(&input.exchange_rules, trade_notional, *price)?;
+            sample_fee = estimate_settlement_fee(
+                &input.exchange_rules,
+                trade_notional,
+                *price,
+                input.exchange_rules.taker_fee_rate,
+            )?;
             estimated_fee += sample_fee;
             trade_count += 1;
             position_native_quantity = target_native_quantity;
@@ -262,22 +280,48 @@ pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
     })
 }
 
-fn estimate_fee(rules: &ExchangeRules, trade_notional: f64, price: f64) -> Result<f64, String> {
-    let fee_notional = trade_notional * rules.taker_fee_rate;
-    match rules.quantity_kind {
-        QuantityKind::BaseAsset => Ok(fee_notional),
-        QuantityKind::InverseContract => {
-            if !price.is_finite() || price <= 0.0 {
-                return Err(format!(
-                    "fee price must be finite and positive, got {price}"
-                ));
-            }
-            Ok(fee_notional / price)
-        }
+/// Converts a fee charged on trade notional into the exchange settlement asset.
+///
+/// Base-asset contracts settle the notional fee directly. Inverse contracts settle in the base
+/// asset, so the notional fee is divided by the fill price.
+pub fn estimate_settlement_fee(
+    rules: &ExchangeRules,
+    trade_notional: f64,
+    price: f64,
+    fee_rate: f64,
+) -> Result<f64, String> {
+    if !trade_notional.is_finite() || trade_notional < 0.0 {
+        return Err(format!(
+            "trade_notional must be finite and non-negative, got {trade_notional}"
+        ));
     }
+    if !price.is_finite() || price <= 0.0 {
+        return Err(format!(
+            "fee price must be finite and positive, got {price}"
+        ));
+    }
+    if !fee_rate.is_finite() || fee_rate < 0.0 {
+        return Err(format!(
+            "fee_rate must be finite and non-negative, got {fee_rate}"
+        ));
+    }
+
+    let fee_notional = trade_notional * fee_rate;
+    if !fee_notional.is_finite() {
+        return Err("settlement fee notional must be finite".to_string());
+    }
+    let settlement_fee = match rules.quantity_kind {
+        QuantityKind::BaseAsset => fee_notional,
+        QuantityKind::InverseContract => fee_notional / price,
+    };
+    if !settlement_fee.is_finite() {
+        return Err("settlement fee must be finite".to_string());
+    }
+    Ok(settlement_fee)
 }
 
-fn validate_exchange_rules(rules: &ExchangeRules) -> Result<(), String> {
+/// Validates exchange rules required by deterministic replay evaluators.
+pub fn validate_replay_exchange_rules(rules: &ExchangeRules) -> Result<(), String> {
     if !rules.price_tick.is_finite() || rules.price_tick <= 0.0 {
         return Err(format!(
             "price_tick must be finite and positive, got {}",
@@ -335,7 +379,41 @@ mod tests {
     use crate::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use crate::types::{ExchangeRules, QuantityKind};
 
-    use super::{ReplayInput, run_replay};
+    use super::{ReplayInput, estimate_settlement_fee, run_replay};
+
+    #[test]
+    fn settlement_fee_keeps_base_asset_fee_in_settlement_notional() {
+        let fee = estimate_settlement_fee(&base_rules(), 1_500.0, 65_000.0, 0.0005).unwrap();
+
+        assert_close(fee, 0.75);
+    }
+
+    #[test]
+    fn settlement_fee_converts_inverse_notional_to_settlement_asset() {
+        let fee = estimate_settlement_fee(&inverse_rules(), 1_500.0, 65_000.0, 0.0005).unwrap();
+
+        assert_close(fee, 0.000011538461538461538);
+    }
+
+    #[test]
+    fn settlement_fee_rejects_invalid_notional_price_and_rate() {
+        for (trade_notional, price, fee_rate, expected_field) in [
+            (f64::NAN, 65_000.0, 0.0005, "trade_notional"),
+            (-1.0, 65_000.0, 0.0005, "trade_notional"),
+            (1_500.0, f64::INFINITY, 0.0005, "price"),
+            (1_500.0, 0.0, 0.0005, "price"),
+            (1_500.0, 65_000.0, f64::NAN, "fee_rate"),
+            (1_500.0, 65_000.0, -0.0005, "fee_rate"),
+        ] {
+            let error = estimate_settlement_fee(&inverse_rules(), trade_notional, price, fee_rate)
+                .unwrap_err();
+
+            assert!(
+                error.contains(expected_field),
+                "expected fee error to mention {expected_field}, got {error}"
+            );
+        }
+    }
 
     #[test]
     fn replay_input_deserializes_price_sequence_initial_position_fees_and_track_config() {
@@ -589,6 +667,15 @@ mod tests {
             min_notional: 0.0,
             maker_fee_rate: 0.0002,
             taker_fee_rate: 0.0005,
+        }
+    }
+
+    fn base_rules() -> ExchangeRules {
+        ExchangeRules {
+            quantity_kind: QuantityKind::BaseAsset,
+            contract_notional: None,
+            settlement_asset: "USDT".to_string(),
+            ..inverse_rules()
         }
     }
 

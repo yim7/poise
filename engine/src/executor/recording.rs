@@ -262,7 +262,7 @@ fn absorb_binding_fill_progress(
     }
 
     let normalized_filled_qty =
-        normalized_reported_filled_qty(reported_filled_qty, binding.request.quantity, status);
+        status.effective_cumulative_filled_qty(reported_filled_qty, binding.request.quantity);
     let target_absorbed_exposure_qty =
         normalized_filled_qty / binding.request.quantity * total_allocated_exposure_qty;
     let delta_exposure_qty =
@@ -278,17 +278,6 @@ fn absorb_binding_fill_progress(
         delta_exposure_qty,
     );
     state.bindings[binding_index].absorbed_exposure_qty = target_absorbed_exposure_qty;
-}
-
-fn normalized_reported_filled_qty(
-    reported_filled_qty: f64,
-    request_quantity: f64,
-    status: OrderStatus,
-) -> f64 {
-    if status == OrderStatus::Filled && reported_filled_qty <= f64::EPSILON {
-        return request_quantity;
-    }
-    reported_filled_qty.max(0.0)
 }
 
 fn apply_binding_progress_delta(

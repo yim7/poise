@@ -151,6 +151,21 @@ pub enum OrderStatus {
 }
 
 impl OrderStatus {
+    /// Returns the cumulative filled quantity represented by an exchange order fact.
+    ///
+    /// Some venues report a terminal `Filled` status with a zero filled quantity. In that case the
+    /// full order quantity is the only consistent interpretation of the terminal fact.
+    pub(crate) fn effective_cumulative_filled_qty(
+        self,
+        reported_filled_qty: f64,
+        order_quantity: f64,
+    ) -> f64 {
+        if self == Self::Filled && reported_filled_qty <= f64::EPSILON {
+            return order_quantity;
+        }
+        reported_filled_qty.max(0.0)
+    }
+
     pub fn keeps_working_order(self) -> bool {
         matches!(
             self,
@@ -365,6 +380,18 @@ impl ExchangePorts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filled_status_without_reported_quantity_means_full_order_quantity() {
+        assert_eq!(
+            OrderStatus::Filled.effective_cumulative_filled_qty(0.0, 1.25),
+            1.25
+        );
+        assert_eq!(
+            OrderStatus::PartiallyFilled.effective_cumulative_filled_qty(0.5, 1.25),
+            0.5
+        );
+    }
 
     #[test]
     fn execution_result_uses_execution_port_error() {

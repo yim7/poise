@@ -913,7 +913,9 @@ impl TrackRuntime {
             })
     }
 
-    fn publicly_committed_inventory_decision(&self) -> Option<&InventoryDecisionSnapshot> {
+    pub(crate) fn publicly_committed_inventory_decision(
+        &self,
+    ) -> Option<&InventoryDecisionSnapshot> {
         if matches!(self.track_state, TrackState::WaitingMarketData)
             || self.strategy_price_status == StrategyPriceStatus::Stale
             || self.market_data_stale_since.is_some()
