@@ -877,6 +877,20 @@ git diff --check
 - tools/track-tuning-workbench/src/app/
 - tools/track-tuning-workbench/src/ui/
 
+已确认 Workbench evaluator 契约：
+
+- Workbench 当前没有真实交易所的完整 `ExchangeRules`，远端报价接口只提供价格，draft 中也只有费率附件，不能据此推断 `quantity_kind`、`contract_notional`、quantity step、minimum 或 settlement asset。本 task 不伪装成实时 venue metadata：评估请求必须显式选择 Rust 定义的版本化 rules fixture，第一版提供 `base_asset_v1` 和 `inverse_contract_v1`；fixture 包含完整 `ExchangeRules`，随报告回传并在界面标为“确定性评估假设，不是交易所实时规则”。缺失或未知 fixture 直接返回 evaluation error，不静默回退到 `BaseAsset`。
+- rules fixture 是 Workbench 临时评估上下文，不写入 track draft、session snapshot 或导出的 TOML。评估请求只包含完整 draft、独立的 `exchange_venue` 和 fixture id；TypeScript 不能传入、补全或重算规则字段。未来接入真实 venue metadata 时，替换的是这一输入边界，不改 evaluator、报告和 UI lane 的语义。
+- Rust adapter 把已验证的 `TrackDraftPayload` 和 venue 转成 `TrackDefinition`，构造完整 `ExchangeRules`、时间戳 action、初始仓位、fill model 和统计 horizon，再调用 `poise_engine::run_decision_evaluation`。不能在 Tauri 层复制 curve、risk gate、quantity、fee 或指标算法，也不能把 engine 原始 report 直接序列化成前端协议。
+- 第一版由 Rust 生成 `price_advantage_sweep` 与 `stale_hold` 两类场景，并为 long/short 中每个非零容量方向各生成一个 concrete scenario；scenario id 和输出都带 direction，short-only 合法配置不能得到固定做多路径产生的空报告。两类场景都从 0 native quantity / 0 exposure 开始，使用 `ImmediateFullAtOrderPrice`：先在 band center 完成 fresh-session 初始化，1 分钟后走到对应方向的半个价格带形成新增风险与 backlog。price-advantage 场景在第 2 分钟继续走到同方向 band 边界，并在第 3 分钟结束；stale 场景保持第二个价格不变，在 configured threshold 前一秒（阈值大于 0 时）和恰好达到 threshold 时采样，并在 threshold 后 1 分钟结束。这样前者能产生可比较的成交/价格与 release clamp，后者能显示真实等待边界。场景的归一化价格路径、时间、fill model 与 ended_at 都归 Rust 所有，TypeScript 不发送 steps 或自行生成时间线。
+- 场景报告必须显式返回 scenario id、中文标题、fill model、horizon 和 assumptions。两条 lane 分别为 `curve_immediate_benchmark` 与 `delayed_decision_replay`，共享同一 Rust 场景和 rules；界面必须说明 fill model 只是确定性成交假设，不是成交概率、滑点或 PnL 预测。
+- Tauri 使用专用稳定 DTO 投影 evaluator 结果。顶层返回所选 rules fixture 的完整摘要、Rust 生成的 curve points 和场景列表；每个场景返回两条 lane 的执行/资金指标、tracking comparison、delayed backlog/release 指标，以及按时间排序的 replay rows。delayed row 至少包含 strategy price、模拟/已观察仓位、`policy_target`、`risk_approved_target`、`acquisition_frontier`、`execution_target`、`DecisionReason`、decision revision 和 applied release；decision 不可见时保持 `null`，不沿用旧值。
+- Rust 单元测试是数学和场景的主验收层。固定线性 `90..110`、双向 8 units、`notional_per_unit = 100`、`min_rebalance_units = 1` 的 base fixture，并先用中心价初始化 fresh session；每组从同一基线只修改一个 risk acquisition 字段，分别证明 `initial_ratio`、`advantage_steps`、`min_release_steps`、`max_release_steps`、`catchup_ratio` 和 `stale_release_minutes` 会改变对应 trigger、release、backlog、execution target 或时间指标。min/max/catch-up 测试必须让各自 clamp 成为主导项，不能使用会互相遮蔽的默认参数；另加 short-only fixture，证明场景方向、价格路径和 release 都会反向且仍非空。
+- inverse 验收使用 `quantity_kind = inverse_contract`、`contract_notional = 100`、`notional_per_unit = 300`、settlement asset `BTC` 和 leverage 3 的 Rust fixture；Workbench adapter 输出必须与直接调用 engine evaluator 的 native quantity、notional、margin 和 fee asset 一致，不能在 adapter 或 TypeScript 重算。
+- TypeScript bridge 测试只验证完整 draft 和 fixture id 的传输、DTO 映射与 evaluation error；UI 测试使用故意不符合前端旧公式的 sentinel report，只验证两个独立 lane、四层 target、reason、revision、assumption 和错误状态的展示。不得把 Rust 数学改写成 TypeScript golden snapshot。
+- evaluator report 是异步、可丢弃的 read model，不进入持久化 store。draft 或 fixture 变化后只对策略配置即时校验通过的输入发起评估；合成场景不依赖实时 quote，因此报价缺失或网络失败不能阻断 evaluator，但非法的手工 quote 仍在报价栏显示自身错误。连续请求使用 generation guard，旧请求晚返回不能覆盖新结果。新请求期间明确显示 loading，失败时清除旧报告并显示可见错误，不能继续展示与当前配置不一致的结果。
+- 非 Tauri browser preview 明确显示 Rust evaluator 不可用，不运行 TypeScript fallback。保留表单即时校验、draft/history/session、配置导入导出、quote、server live panel 和 SVG 坐标/交互；删除 `trackCurve.ts`、`trackCurvePath.ts`、`trackRisk.ts`、`trackMetrics.ts` 及其公式 golden tests，图表只把 Rust curve points 和 replay rows 映射为视觉坐标。现有 `TrackExchangeRulesDraft`、Binance fee 默认注入和 session restore 兼容逻辑也一并删除，只保留独立 `exchangeVenue`；否则它仍会成为与 Rust rules fixture 冲突的第二事实源。
+
 验收：
 
 - Tauri 调用 poise-engine 的 decision replay API。
@@ -887,6 +901,8 @@ git diff --check
 - inverse fixture 与 Rust ExchangeRules 结果一致。
 - Workbench 展示四层 target、DecisionReason 和 decision revision。
 - curve-immediate benchmark 与 delayed decision replay 并列展示。
+- 未选择完整 rules fixture、输入非法、Rust evaluator 失败和 browser preview 不可用时，都有明确状态且不存在 TypeScript 计算回退。
+- 快速连续修改参数时，只有最后一次请求可以更新报告。
 
 最小验证：
 
