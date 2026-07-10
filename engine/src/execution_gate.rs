@@ -50,7 +50,7 @@ impl AccountCapacityGate {
             return ExecutionGateDecision::Open;
         };
 
-        let increase_units = (input.approved_target.0.abs() - input.current.0.abs()).max(0.0);
+        let increase_units = added_risk_units(input.current.0, input.approved_target.0);
         let required_notional = increase_units * input.unit_notional;
 
         if required_notional > available_notional + f64::EPSILON {
@@ -66,18 +66,37 @@ impl AccountCapacityGate {
     }
 }
 
+fn added_risk_units(current: f64, approved_target: f64) -> f64 {
+    let crosses_zero =
+        (current > 0.0 && approved_target < 0.0) || (current < 0.0 && approved_target > 0.0);
+    if crosses_zero {
+        approved_target.abs()
+    } else {
+        (approved_target.abs() - current.abs()).max(0.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn evaluate(
+        current: f64,
+        approved_target: f64,
+        unit_notional: f64,
+        available_notional: f64,
+    ) -> ExecutionGateDecision {
+        AccountCapacityGate::evaluate(AccountCapacityGateInput {
+            current: Exposure(current),
+            approved_target: Exposure(approved_target),
+            unit_notional,
+            available_notional: Some(available_notional),
+        })
+    }
+
     #[test]
     fn account_capacity_gate_blocks_increase_without_risk_outcome() {
-        let decision = AccountCapacityGate::evaluate(AccountCapacityGateInput {
-            current: Exposure(2.0),
-            approved_target: Exposure(6.0),
-            unit_notional: 375.0,
-            available_notional: Some(1_000.0),
-        });
+        let decision = evaluate(2.0, 6.0, 375.0, 1_000.0);
 
         assert_eq!(
             decision,
@@ -87,6 +106,68 @@ mod tests {
                     available_notional: 1_000.0,
                 },
             },
+        );
+    }
+
+    #[test]
+    fn account_capacity_gate_counts_new_short_risk_after_flattening_long() {
+        assert_eq!(
+            evaluate(3.0, -0.5, 100.0, 49.0),
+            ExecutionGateDecision::NoSubmit {
+                reason: ExecutionGateReason::AccountCapacityInsufficient {
+                    required_notional: 50.0,
+                    available_notional: 49.0,
+                },
+            },
+        );
+        assert_eq!(
+            evaluate(3.0, -0.5, 100.0, 50.0),
+            ExecutionGateDecision::Open,
+        );
+    }
+
+    #[test]
+    fn account_capacity_gate_counts_new_long_risk_after_flattening_short() {
+        assert_eq!(
+            evaluate(-3.0, 0.5, 100.0, 49.0),
+            ExecutionGateDecision::NoSubmit {
+                reason: ExecutionGateReason::AccountCapacityInsufficient {
+                    required_notional: 50.0,
+                    available_notional: 49.0,
+                },
+            },
+        );
+        assert_eq!(
+            evaluate(-3.0, 0.5, 100.0, 50.0),
+            ExecutionGateDecision::Open,
+        );
+    }
+
+    #[test]
+    fn account_capacity_gate_does_not_charge_for_reducing_or_flattening_risk() {
+        for (current, approved_target) in [(3.0, 1.0), (-3.0, -1.0), (3.0, 0.0), (-3.0, 0.0)] {
+            assert_eq!(
+                evaluate(current, approved_target, 100.0, 0.0),
+                ExecutionGateDecision::Open,
+                "current={current}, approved_target={approved_target}",
+            );
+        }
+    }
+
+    #[test]
+    fn account_capacity_gate_counts_full_target_when_starting_flat() {
+        assert_eq!(
+            evaluate(0.0, 0.5, 100.0, 49.0),
+            ExecutionGateDecision::NoSubmit {
+                reason: ExecutionGateReason::AccountCapacityInsufficient {
+                    required_notional: 50.0,
+                    available_notional: 49.0,
+                },
+            },
+        );
+        assert_eq!(
+            evaluate(0.0, -0.5, 100.0, 50.0),
+            ExecutionGateDecision::Open,
         );
     }
 }
