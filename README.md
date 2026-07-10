@@ -153,17 +153,17 @@ total_loss_limit = 750.0
 | --- | --- | --- |
 | `track_id` | 必填 | 稳定业务标识，不由 `symbol` 派生。 |
 | `symbol` | 必填 | Binance / Bybit 使用 `BTCUSDT` 这类合约符号；Hyperliquid 默认 perpetuals 使用 `BTC`、`ETH` 这类 coin 名称，HIP-3 perpetuals 使用 `xyz:CBRS` 这类 `{dex}:{coin}` wire name；OKX SWAP 使用 `BTC-USDT-SWAP` 这类 instrument id。 |
-| `lower_price` | 必填 | 价格带下沿，必须小于 `upper_price`。 |
-| `upper_price` | 必填 | 价格带上沿。 |
-| `long_exposure_units` | 必填 | 价格到达下沿时的多头目标容量，必须非负。 |
-| `short_exposure_units` | 必填 | 价格到达上沿时的空头目标容量，必须非负；多空容量不能同时为 `0`。 |
-| `notional_per_unit` | 必填 | 每个 exposure unit 对应的名义金额，必须大于 `0`。 |
-| `daily_loss_limit` | 必填 | 当日亏损终止阈值，必须大于 `0`。 |
-| `total_loss_limit` | 必填 | 累计亏损终止阈值，必须大于 `0`。 |
-| `min_rebalance_units` | `0.5` | 最小调仓单位；目标变化小于该值时不触发新的执行动作。 |
+| `lower_price` | 必填 | 价格带下沿，必须为有限正数且小于 `upper_price`。 |
+| `upper_price` | 必填 | 价格带上沿，必须为有限正数。 |
+| `long_exposure_units` | 必填 | 价格到达下沿时的多头目标容量，必须有限且非负。 |
+| `short_exposure_units` | 必填 | 价格到达上沿时的空头目标容量，必须有限且非负；多空容量不能同时为 `0`。 |
+| `notional_per_unit` | 必填 | 每个 exposure unit 对应的名义金额，必须为有限正数。 |
+| `daily_loss_limit` | 必填 | 当日亏损终止阈值，必须为有限正数。 |
+| `total_loss_limit` | 必填 | 累计亏损终止阈值，必须为有限正数。 |
+| `min_rebalance_units` | `0.5` | 有限正数；目标变化小于该值时不触发新的执行动作。 |
 | `shape_family` | `linear` | 曲线形状，支持 `linear`、`inertial`、`responsive`。 |
 | `out_of_band_policy` | `freeze` | 价格离开主价格带后的处理策略，见下面的带外配置。 |
-| `max_notional` | `max(long_exposure_units, short_exposure_units) * notional_per_unit` | track 最大绝对名义金额，必须大于 `0`。 |
+| `max_notional` | `max(long_exposure_units, short_exposure_units) * notional_per_unit` | track 最大绝对名义金额，必须为有限正数。 |
 | `leverage` | `10` | 启动时按 track 下发到交易所；这是 server-owned startup-only 配置，不进入策略曲线。 |
 | `tick_timeout_secs` | `30` | 策略价格超过该秒数未更新时视为 stale，自动执行会等待新价格。 |
 | `[tracks.risk_acquisition]` | 全部字段有默认值 | 增加风险暴露时的延迟获取参数，见下面的风险暴露获取配置。 |
@@ -202,7 +202,7 @@ track_id = "btc-core"
 # ...这个 track 的其他字段...
 
 [tracks.risk_acquisition]
-initial_ratio = 0.3
+initial_ratio = 0.5
 advantage_steps = 2.0
 min_release_steps = 1.0
 max_release_steps = 4.0
@@ -212,7 +212,7 @@ stale_release_minutes = 60.0
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `initial_ratio` | `0.3` | 从零启动或重新进入同方向 backlog 时，先允许建立目标暴露的一部分；如果目标不小于 `min_rebalance_units`，至少释放一个最小调仓单位。取值范围是 `(0, 1]`。 |
+| `initial_ratio` | `0.5` | 从零启动或重新进入同方向 backlog 时，先允许建立目标暴露的一部分；如果目标不小于 `min_rebalance_units`，至少释放一个最小调仓单位。取值范围是 `(0, 1]`。 |
 | `advantage_steps` | `2.0` | 等待曲线目标相对锚点多走多少个 `min_rebalance_units` 后释放 backlog。 |
 | `min_release_steps` | `1.0` | 每次释放 backlog 的最小单位倍数。 |
 | `max_release_steps` | `4.0` | 每次释放 backlog 的最大单位倍数，必须大于等于 `min_release_steps`。 |

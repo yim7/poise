@@ -152,6 +152,14 @@ describe('track domain fixtures', () => {
       makerFeeRate: 0.0002,
       takerFeeRate: 0.0005,
     });
+    expect(draft.riskAcquisition).toEqual({
+      initialRatio: '0.5',
+      advantageSteps: '2',
+      minReleaseSteps: '1',
+      maxReleaseSteps: '4',
+      catchupRatio: '0.25',
+      staleReleaseMinutes: '60',
+    });
   });
 
   it('builds a parsed snapshot for valid editable drafts', () => {
@@ -160,6 +168,19 @@ describe('track domain fixtures', () => {
     expectClose(snapshot.ui.quotePrice, 100);
     expectClose(snapshot.parsedNumbers.lowerPrice, 90);
     expectClose(snapshot.parsedNumbers.maxNotional, 3000);
+  });
+
+  it('accepts a finite positive capacity smaller than machine epsilon', () => {
+    const result = validateTrackDraft(
+      makeDraft({
+        parsedNumbers: makeNumericFields({
+          longExposureUnits: Number.EPSILON / 2,
+          shortExposureUnits: 0,
+        }),
+      }),
+    );
+
+    expect(result.isValid).toBe(true);
   });
 
   it('surfaces invalid raw numbers even when parsed cache still holds the last valid value', () => {
@@ -212,6 +233,63 @@ describe('track domain fixtures', () => {
     expect(result.issues).toContainEqual({
       field: 'longExposureUnits',
       message: 'long_exposure_units 和 short_exposure_units 不能同时为 0',
+    });
+  });
+
+  it('rejects capacity totals that overflow finite arithmetic', () => {
+    const result = validateTrackDraft(
+      makeDraft({
+        parsedNumbers: makeNumericFields({
+          longExposureUnits: Number.MAX_VALUE,
+          shortExposureUnits: Number.MAX_VALUE,
+        }),
+      }),
+    );
+
+    expect(result.isValid).toBe(false);
+    expect(result.parsed).toBeUndefined();
+    expect(result.issues).toContainEqual({
+      field: 'longExposureUnits',
+      message: 'long_exposure_units 和 short_exposure_units 的合计必须是有限数字',
+    });
+  });
+
+  it('rejects non-positive price bounds', () => {
+    const lowerResult = validateTrackDraft(
+      makeDraft({
+        parsedNumbers: makeNumericFields({ lowerPrice: 0 }),
+      }),
+    );
+    const upperResult = validateTrackDraft(
+      makeDraft({
+        parsedNumbers: makeNumericFields({ upperPrice: 0 }),
+      }),
+    );
+
+    expect(lowerResult.isValid).toBe(false);
+    expect(lowerResult.issues).toContainEqual({
+      field: 'lowerPrice',
+      message: 'lower_price 必须大于 0',
+    });
+    expect(upperResult.isValid).toBe(false);
+    expect(upperResult.issues).toContainEqual({
+      field: 'upperPrice',
+      message: 'upper_price 必须大于 0',
+    });
+  });
+
+  it('rejects zero min rebalance units', () => {
+    const result = validateTrackDraft(
+      makeDraft({
+        parsedNumbers: makeNumericFields({ minRebalanceUnits: 0 }),
+      }),
+    );
+
+    expect(result.isValid).toBe(false);
+    expect(result.parsed).toBeUndefined();
+    expect(result.issues).toContainEqual({
+      field: 'minRebalanceUnits',
+      message: 'min_rebalance_units 必须大于 0',
     });
   });
 

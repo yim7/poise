@@ -779,6 +779,36 @@ min_rebalance_units = -0.1
     }
 
     #[test]
+    fn rejects_zero_min_rebalance_units_at_config_boundary() {
+        let error = parse_config(
+            r#"
+[exchange]
+venue = "binance"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+min_rebalance_units = 0.0
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("btc-core"), "unexpected error: {error}");
+        assert!(
+            error.contains("min_rebalance_units"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn rejects_non_finite_min_rebalance_units_at_config_boundary() {
         let error = parse_config(
             r#"
@@ -801,6 +831,32 @@ min_rebalance_units = nan
         .unwrap_err();
 
         assert!(error.to_string().contains("min_rebalance_units"));
+    }
+
+    #[test]
+    fn rejects_non_finite_curve_value_at_config_boundary() {
+        let error = parse_config(
+            r#"
+[exchange]
+venue = "binance"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = nan
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 8.0
+notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("btc-core"), "unexpected error: {error}");
+        assert!(error.contains("lower_price"), "unexpected error: {error}");
     }
 
     #[test]

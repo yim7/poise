@@ -266,6 +266,15 @@ mod tests {
     }
 
     #[test]
+    fn validate_max_notional_rejects_non_finite_value() {
+        for max_notional in [f64::NAN, f64::INFINITY] {
+            let error = validate_max_notional(max_notional).unwrap_err();
+
+            assert!(error.contains("max_notional"));
+        }
+    }
+
+    #[test]
     fn validate_loss_limits_rejects_non_positive_daily_loss_limit() {
         let error = validate_loss_limits(&LossLimits {
             daily_loss_limit: 0.0,
@@ -285,6 +294,24 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("total_loss_limit"));
+    }
+
+    #[test]
+    fn validate_loss_limits_reject_non_finite_values() {
+        for (daily_loss_limit, total_loss_limit, field) in [
+            (f64::NAN, 500.0, "daily_loss_limit"),
+            (f64::INFINITY, 500.0, "daily_loss_limit"),
+            (120.0, f64::NAN, "total_loss_limit"),
+            (120.0, f64::INFINITY, "total_loss_limit"),
+        ] {
+            let error = validate_loss_limits(&LossLimits {
+                daily_loss_limit,
+                total_loss_limit,
+            })
+            .unwrap_err();
+
+            assert!(error.contains(field), "unexpected error: {error}");
+        }
     }
 
     #[test]

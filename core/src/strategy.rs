@@ -105,23 +105,33 @@ pub enum BandBoundary {
 }
 
 pub fn validate_config(config: &TrackConfig) -> Result<(), String> {
+    if !config.lower_price.is_finite() || config.lower_price <= 0.0 {
+        return Err("lower_price must be finite and > 0".into());
+    }
+    if !config.upper_price.is_finite() || config.upper_price <= 0.0 {
+        return Err("upper_price must be finite and > 0".into());
+    }
     if config.lower_price >= config.upper_price {
         return Err("lower_price must be less than upper_price".into());
     }
-    if config.long_exposure_units < 0.0 || config.short_exposure_units < 0.0 {
-        return Err("capacities must not be negative".into());
+    if !config.long_exposure_units.is_finite() || config.long_exposure_units < 0.0 {
+        return Err("long_exposure_units must be finite and >= 0".into());
     }
-    if config.long_exposure_units + config.short_exposure_units <= f64::EPSILON {
+    if !config.short_exposure_units.is_finite() || config.short_exposure_units < 0.0 {
+        return Err("short_exposure_units must be finite and >= 0".into());
+    }
+    let combined_capacity = config.long_exposure_units + config.short_exposure_units;
+    if !combined_capacity.is_finite() {
+        return Err("combined exposure capacity must be finite".into());
+    }
+    if combined_capacity == 0.0 {
         return Err("at least one capacity must be positive".into());
     }
-    if config.notional_per_unit <= 0.0 {
-        return Err("notional_per_unit must be positive".into());
+    if !config.notional_per_unit.is_finite() || config.notional_per_unit <= 0.0 {
+        return Err("notional_per_unit must be finite and > 0".into());
     }
-    if !config.min_rebalance_units.is_finite() {
-        return Err("min_rebalance_units must be finite".into());
-    }
-    if config.min_rebalance_units < 0.0 {
-        return Err("min_rebalance_units must not be negative".into());
+    if !config.min_rebalance_units.is_finite() || config.min_rebalance_units <= 0.0 {
+        return Err("min_rebalance_units must be finite and > 0".into());
     }
     validate_risk_acquisition(config.risk_acquisition)?;
     Ok(())
@@ -469,12 +479,72 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_non_positive_prices() {
+        for (lower_price, upper_price, field) in [
+            (0.0, 110.0, "lower_price"),
+            (-1.0, 110.0, "lower_price"),
+            (90.0, 0.0, "upper_price"),
+            (90.0, -1.0, "upper_price"),
+        ] {
+            let config = TrackConfig {
+                lower_price,
+                upper_price,
+                ..neutral_config()
+            };
+
+            let error = validate_config(&config).unwrap_err();
+
+            assert!(error.contains(field), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_prices() {
+        for (lower_price, upper_price, field) in [
+            (f64::NAN, 110.0, "lower_price"),
+            (f64::NEG_INFINITY, 110.0, "lower_price"),
+            (90.0, f64::NAN, "upper_price"),
+            (90.0, f64::INFINITY, "upper_price"),
+        ] {
+            let config = TrackConfig {
+                lower_price,
+                upper_price,
+                ..neutral_config()
+            };
+
+            let error = validate_config(&config).unwrap_err();
+
+            assert!(error.contains(field), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
     fn validate_rejects_negative_capacity() {
         let config = TrackConfig {
             long_exposure_units: -1.0,
             ..neutral_config()
         };
         assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_capacities() {
+        for (long_exposure_units, short_exposure_units, field) in [
+            (f64::NAN, 8.0, "long_exposure_units"),
+            (f64::INFINITY, 8.0, "long_exposure_units"),
+            (8.0, f64::NAN, "short_exposure_units"),
+            (8.0, f64::INFINITY, "short_exposure_units"),
+        ] {
+            let config = TrackConfig {
+                long_exposure_units,
+                short_exposure_units,
+                ..neutral_config()
+            };
+
+            let error = validate_config(&config).unwrap_err();
+
+            assert!(error.contains(field), "unexpected error: {error}");
+        }
     }
 
     #[test]
@@ -485,6 +555,19 @@ mod tests {
             ..neutral_config()
         };
         assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_capacity_sum_overflow() {
+        let config = TrackConfig {
+            long_exposure_units: f64::MAX,
+            short_exposure_units: f64::MAX,
+            ..neutral_config()
+        };
+
+        let error = validate_config(&config).unwrap_err();
+
+        assert!(error.contains("capacity"), "unexpected error: {error}");
     }
 
     #[test]
@@ -633,6 +716,13 @@ mod tests {
     fn validate_accepts_valid_config() {
         assert!(validate_config(&neutral_config()).is_ok());
         assert!(validate_config(&long_only_config()).is_ok());
+
+        let tiny_long_only = TrackConfig {
+            long_exposure_units: f64::EPSILON / 2.0,
+            short_exposure_units: 0.0,
+            ..neutral_config()
+        };
+        assert!(validate_config(&tiny_long_only).is_ok());
     }
 
     #[test]
@@ -703,12 +793,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_negative_min_rebalance_units() {
-        let config = TrackConfig {
-            min_rebalance_units: -0.1,
-            ..neutral_config()
-        };
-        assert!(validate_config(&config).is_err());
+    fn validate_rejects_non_positive_min_rebalance_units() {
+        for min_rebalance_units in [0.0, -0.1] {
+            let config = TrackConfig {
+                min_rebalance_units,
+                ..neutral_config()
+            };
+
+            let error = validate_config(&config).unwrap_err();
+
+            assert!(error.contains("min_rebalance_units"));
+        }
     }
 
     #[test]
@@ -717,7 +812,38 @@ mod tests {
             min_rebalance_units: f64::NAN,
             ..neutral_config()
         };
-        assert!(validate_config(&config).is_err());
+
+        let error = validate_config(&config).unwrap_err();
+
+        assert!(error.contains("min_rebalance_units"));
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_notional_per_unit() {
+        for notional_per_unit in [f64::NAN, f64::INFINITY] {
+            let config = TrackConfig {
+                notional_per_unit,
+                ..neutral_config()
+            };
+
+            let error = validate_config(&config).unwrap_err();
+
+            assert!(error.contains("notional_per_unit"));
+        }
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_notional_per_unit() {
+        for notional_per_unit in [0.0, -1.0] {
+            let config = TrackConfig {
+                notional_per_unit,
+                ..neutral_config()
+            };
+
+            let error = validate_config(&config).unwrap_err();
+
+            assert!(error.contains("notional_per_unit"));
+        }
     }
 
     #[test]

@@ -179,6 +179,20 @@ function validateStrategySemantics(
   numbers: TrackDraftNumericFields,
   issues: TrackDraftIssue[],
 ) {
+  if (numbers.lowerPrice <= 0) {
+    issues.push({
+      field: 'lowerPrice',
+      message: 'lower_price 必须大于 0',
+    });
+  }
+
+  if (numbers.upperPrice <= 0) {
+    issues.push({
+      field: 'upperPrice',
+      message: 'upper_price 必须大于 0',
+    });
+  }
+
   if (numbers.lowerPrice >= numbers.upperPrice) {
     issues.push({
       field: 'lowerPrice',
@@ -193,7 +207,13 @@ function validateStrategySemantics(
     });
   }
 
-  if (numbers.longExposureUnits + numbers.shortExposureUnits <= Number.EPSILON) {
+  const combinedCapacity = numbers.longExposureUnits + numbers.shortExposureUnits;
+  if (!Number.isFinite(combinedCapacity)) {
+    issues.push({
+      field: 'longExposureUnits',
+      message: 'long_exposure_units 和 short_exposure_units 的合计必须是有限数字',
+    });
+  } else if (combinedCapacity === 0) {
     issues.push({
       field: 'longExposureUnits',
       message: 'long_exposure_units 和 short_exposure_units 不能同时为 0',
@@ -207,10 +227,10 @@ function validateStrategySemantics(
     });
   }
 
-  if (numbers.minRebalanceUnits < 0) {
+  if (numbers.minRebalanceUnits <= 0) {
     issues.push({
       field: 'minRebalanceUnits',
-      message: 'min_rebalance_units 不能为负数',
+      message: 'min_rebalance_units 必须大于 0',
     });
   }
 
