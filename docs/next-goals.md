@@ -596,6 +596,7 @@ git diff --check
 - server/src/effect_worker/dispatch.rs
 - storage/src/sqlite.rs 中的 effect 验收测试
 - tui/
+- tools/track-tuning-workbench 中直接消费 server HTTP/WebSocket 契约的 client、panel 和测试 fixture
 
 统一公开词汇：
 
@@ -634,6 +635,7 @@ submit_planned
 - 有 committed decision 时，`revision`、`policy_target`、`risk_approved_target` 和 `execution_target` 必须同时存在，`acquisition_frontier` 可为空，所有值都来自同一 snapshot。
 - fresh start、paused、market data stale 或 resume 后尚未完成一次 reconcile 时，公开 decision 的 revision 和四层 target 全部为空，reason 分别为 `waiting_market_data` 或 `paused`。runtime 可保留旧 snapshot 作为当前 session 内部状态，但公开投影不得把旧 revision/target 与当前 lifecycle reason 混合。
 - 删除公开模型中分散的 `desired_exposure`、`execution_target_exposure` 和 target fallback；TUI 只整体替换 InventoryDecisionView，dashboard 只使用其 `execution_target`。
+- Track Tuning Workbench 在本 task 只同步 server wire contract，整体消费 InventoryDecisionView 并删除旧 target fallback；Rust decision evaluator、指标计算和完整四层分析仍属于 Task 2.3。
 - executor binding/effect 内部的 `desired_exposure` 表示订单绑定所有权，不是四层 decision 的公开字段，本 task 不为字面统一而改变它的语义。
 - TrackEffect 不再表示“无事发生”；manager、executor、session effect queue、mutation commit、worker 和 storage 测试统一使用空 effects。
 - 删除 NoOp 枚举前先只读审计本地实例的 track_effects；若存在历史 NoOp JSON 则先停止实现并制定一次性数据处理，不保留长期 serde 兼容变体。
@@ -646,6 +648,7 @@ submit_planned
 - 删除 TrackEffect::NoOp，空 effects 表示没有副作用。
 - 有 reason 不代表跳过订单维护；例如 price gate blocked 时仍可产生必要 cancel。
 - HTTP、WebSocket 和 TUI 展示同一个 decision revision、四层 target 和 reason。
+- Track Tuning Workbench 不再读取已删除的 server target 字段，其 live panel 使用同一份 decision revision、四层 target 和 reason。
 - 探索阶段不保留长期双字段兼容层，所有直接消费者在同一 task 内更新。
 
 最小验证：
@@ -657,6 +660,8 @@ cargo test -p poise-server projector::tests::
 cargo test -p poise-server websocket::tests::
 cargo test -p poise-protocol
 cargo test -p poise-tui
+(cd tools/track-tuning-workbench && pnpm test)
+(cd tools/track-tuning-workbench && pnpm build)
 git diff --check
 ~~~
 
