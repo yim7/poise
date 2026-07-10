@@ -11,7 +11,9 @@ use poise_engine::runtime::{QuoteHealthView, StrategyTargetView, TrackLiveView, 
 #[cfg(any(test, feature = "server-test-support"))]
 use tokio::sync::RwLock;
 
-use crate::mutation_executor::{MutationExecutor, TrackInstrument};
+use crate::mutation_executor::{
+    ExchangeStateSyncOutcome, ExchangeStateSyncToken, MutationExecutor, TrackInstrument,
+};
 
 #[derive(Clone)]
 pub struct TrackObservationService {
@@ -105,25 +107,29 @@ impl TrackObservationService {
         self.executor.record_track_events(id, events).await
     }
 
+    pub async fn prepare_exchange_state_sync(&self, id: &str) -> Result<ExchangeStateSyncToken> {
+        self.executor.prepare_exchange_state_sync(id).await
+    }
+
     pub async fn sync_exchange_state(
         &self,
-        id: &str,
+        token: ExchangeStateSyncToken,
         position: PositionObservation,
         open_orders: CompleteOpenOrderSnapshot,
-    ) -> Result<poise_engine::transition::TrackTransition> {
+    ) -> Result<ExchangeStateSyncOutcome> {
         self.executor
-            .sync_exchange_state(id, position, open_orders)
+            .sync_exchange_state(token, position, open_orders)
             .await
     }
 
     pub async fn sync_exchange_state_without_reconcile(
         &self,
-        id: &str,
+        token: ExchangeStateSyncToken,
         position: PositionObservation,
         open_orders: CompleteOpenOrderSnapshot,
-    ) -> Result<poise_engine::transition::TrackTransition> {
+    ) -> Result<ExchangeStateSyncOutcome> {
         self.executor
-            .sync_exchange_state_without_reconcile(id, position, open_orders)
+            .sync_exchange_state_without_reconcile(token, position, open_orders)
             .await
     }
 

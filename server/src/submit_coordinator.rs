@@ -4,6 +4,7 @@ use anyhow::{Error, Result};
 use poise_application::SessionTrackEffect;
 use poise_application::submit_effect_service::{
     SubmitAttempt, SubmitAttemptResult, SubmitDispatch, SubmitEffectService,
+    SubmitRecoveryOrderLookup,
 };
 use poise_engine::executor::SubmitRecoveryToken;
 use poise_engine::ports::{ExecutionPort, OrderReceipt, OrderRequest};
@@ -40,17 +41,18 @@ impl SubmitCoordinator {
             .submit_preflight
             .decide(&effect.effect_id, &request.client_order_id)
             .await;
-        let live_order = match preflight_decision {
-            SubmitPreflightDecision::Direct => None,
-            SubmitPreflightDecision::NeedsLiveOrderLookup { .. } => Some(
-                self.execution
-                    .get_open_orders(&request.instrument)
-                    .await?
-                    .into_orders()
-                    .into_iter()
-                    .find(|order| order.client_order_id == request.client_order_id),
-            )
-            .flatten(),
+        let order_lookup = match preflight_decision {
+            SubmitPreflightDecision::Direct => SubmitRecoveryOrderLookup::NotQueried,
+            SubmitPreflightDecision::NeedsLiveOrderLookup { .. } => {
+                SubmitRecoveryOrderLookup::Complete(
+                    self.execution
+                        .get_open_orders(&request.instrument)
+                        .await?
+                        .into_orders()
+                        .into_iter()
+                        .find(|order| order.client_order_id == request.client_order_id),
+                )
+            }
         };
 
         let attempt = self
@@ -59,7 +61,7 @@ impl SubmitCoordinator {
                 effect.track_id.as_str(),
                 &effect.effect_id,
                 recovery_token,
-                live_order.as_ref(),
+                order_lookup,
             )
             .await?;
 

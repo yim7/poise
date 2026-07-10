@@ -195,6 +195,23 @@ pub(crate) struct CancelFollowUpResolutionPlan {
     resolutions: Vec<PlannedCancelFollowUpResolution>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SessionExchangeStateRevision(u64);
+
+#[derive(Debug)]
+pub(crate) struct ExchangeSnapshotQueueContext {
+    pub(crate) follow_up_plan: CancelFollowUpResolutionPlan,
+    pub(crate) pending_submit_hints: Vec<PendingSubmitHint>,
+    pub(crate) submitted_awaiting_effect_ids: Vec<String>,
+    pub(crate) exchange_state_wake_token: Option<ExchangeStateWakeToken>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExchangeStateWakeToken {
+    effect_id: String,
+    deferral_epoch: u64,
+}
+
 impl CancelFollowUpResolutionPlan {
     pub(crate) fn requires_reconcile(&self) -> bool {
         self.resolutions
@@ -237,6 +254,8 @@ pub struct SessionEffectQueue {
 struct SessionEffectQueueInner {
     session_id: String,
     tracks: HashMap<TrackId, TrackQueue>,
+    // Retained after a track queue becomes empty so an old REST token cannot match through ABA.
+    exchange_state_revisions: HashMap<TrackId, SessionExchangeStateRevision>,
     ready_tracks: VecDeque<TrackId>,
     effect_index: HashMap<String, TrackId>,
     follow_up_tokens: HashMap<InternalFollowUpKey, FollowUpPointer>,
@@ -258,6 +277,7 @@ impl Default for SessionEffectQueue {
 struct TrackQueue {
     batches: VecDeque<SessionEffectBatch>,
     paused_until: Option<DeferredUntil>,
+    deferral_epoch: u64,
     in_ready_ring: bool,
 }
 
@@ -285,6 +305,109 @@ struct FollowUpPointer {
 }
 
 impl SessionEffectQueue {
+    pub(crate) fn exchange_state_revision(
+        &self,
+        track_id: &TrackId,
+    ) -> SessionExchangeStateRevision {
+        self.inner.lock().unwrap().exchange_state_revision(track_id)
+    }
+
+    pub(crate) fn with_exchange_snapshot_context_if_current<R>(
+        &self,
+        track_id: &TrackId,
+        expected: SessionExchangeStateRevision,
+        open_orders: &CompleteOpenOrderSnapshot,
+        apply: impl FnOnce(ExchangeSnapshotQueueContext) -> R,
+    ) -> Option<R> {
+        let inner = self.inner.lock().unwrap();
+        if inner.exchange_state_revision(track_id) != expected {
+            return None;
+        }
+
+        let open_order_ids = open_orders
+            .orders()
+            .iter()
+            .map(|order| order.order_id.as_str())
+            .collect::<HashSet<_>>();
+        let follow_up_plan = CancelFollowUpResolutionPlan {
+            resolutions: inner
+                .follow_up_tokens
+                .iter()
+                .filter_map(|(token, pointer)| {
+                    if &pointer.track_id != track_id {
+                        return None;
+                    }
+                    let result = if open_order_ids.contains(pointer.closed_order_id.as_str()) {
+                        PlannedCancelFollowUpResult::StillOpen {
+                            order_id: pointer.closed_order_id.clone(),
+                        }
+                    } else {
+                        PlannedCancelFollowUpResult::Closed
+                    };
+                    Some(PlannedCancelFollowUpResolution {
+                        token: token.clone(),
+                        result,
+                    })
+                })
+                .collect(),
+        };
+        let pending_submit_hints = inner
+            .tracks
+            .get(track_id)
+            .into_iter()
+            .flat_map(|track| track.batches.iter())
+            .flat_map(|batch| batch.effects.iter())
+            .filter(|item| {
+                matches!(
+                    item.dispatch_state,
+                    QueuedEffectState::InFlight | QueuedEffectState::SubmittedAwaitingWriteback
+                )
+            })
+            .filter_map(|item| match &item.effect.effect {
+                TrackEffect::SubmitOrder {
+                    request,
+                    desired_exposure,
+                    submit_purpose,
+                    recovery_token,
+                } => Some(PendingSubmitHint {
+                    request: request.clone(),
+                    desired_exposure: desired_exposure.clone(),
+                    submit_purpose: *submit_purpose,
+                    recovery_token: recovery_token.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        let submitted_awaiting_effect_ids = inner
+            .tracks
+            .get(track_id)
+            .into_iter()
+            .flat_map(|track| track.batches.iter())
+            .flat_map(|batch| batch.effects.iter())
+            .filter(|item| {
+                item.dispatch_state == QueuedEffectState::SubmittedAwaitingWriteback
+                    && matches!(item.effect.effect, TrackEffect::SubmitOrder { .. })
+            })
+            .map(|item| item.effect.effect_id.clone())
+            .collect();
+        let exchange_state_wake_token = inner.tracks.get(track_id).and_then(|track| {
+            if track.paused_until != Some(DeferredUntil::ExchangeState) {
+                return None;
+            }
+            track.front_effect().map(|effect| ExchangeStateWakeToken {
+                effect_id: effect.effect.effect_id.clone(),
+                deferral_epoch: track.deferral_epoch,
+            })
+        });
+
+        Some(apply(ExchangeSnapshotQueueContext {
+            follow_up_plan,
+            pending_submit_hints,
+            submitted_awaiting_effect_ids,
+            exchange_state_wake_token,
+        }))
+    }
+
     pub(crate) fn enqueue_transition_effects(
         &self,
         track_id: &TrackId,
@@ -346,6 +469,7 @@ impl SessionEffectQueue {
                 effects: queued_effects,
             });
             inner.mark_track_ready(&track_id);
+            inner.advance_exchange_state_revision(&track_id);
         }
     }
 
@@ -367,7 +491,9 @@ impl SessionEffectQueue {
                 };
                 if effect.dispatch_state == QueuedEffectState::Queued {
                     effect.dispatch_state = QueuedEffectState::InFlight;
-                    return Some(effect.effect.clone());
+                    let claimed = effect.effect.clone();
+                    inner.advance_exchange_state_revision(&track_id);
+                    return Some(claimed);
                 }
             }
         }
@@ -386,22 +512,39 @@ impl SessionEffectQueue {
         }
         effect.dispatch_state = QueuedEffectState::SubmittedAwaitingWriteback;
         inner.mark_track_ready(&track_id);
+        inner.advance_exchange_state_revision(&track_id);
         true
     }
 
     pub(crate) fn wake_track_for(&self, track_id: &TrackId, signal: WakeSignal) {
         let mut inner = self.inner.lock().unwrap();
-        let Some(track) = inner.tracks.get_mut(track_id) else {
-            return;
-        };
-        let Some(paused_until) = track.paused_until else {
-            inner.mark_track_ready(track_id);
-            return;
-        };
-        if paused_until.matches(signal) {
-            track.paused_until = None;
-            inner.mark_track_ready(track_id);
+        if inner.wake_track_for(track_id, signal) {
+            inner.advance_exchange_state_revision(track_id);
         }
+    }
+
+    pub(crate) fn wake_track_for_if_current_deferral(
+        &self,
+        track_id: &TrackId,
+        token: &ExchangeStateWakeToken,
+        signal: WakeSignal,
+    ) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let matches_current_deferral = inner.tracks.get(track_id).is_some_and(|track| {
+            track.paused_until == Some(DeferredUntil::ExchangeState)
+                && track.deferral_epoch == token.deferral_epoch
+                && track
+                    .front_effect()
+                    .is_some_and(|effect| effect.effect.effect_id == token.effect_id)
+        });
+        if !matches_current_deferral {
+            return false;
+        }
+        let changed = inner.wake_track_for(track_id, signal);
+        if changed {
+            inner.advance_exchange_state_revision(track_id);
+        }
+        changed
     }
 
     pub fn record_outcome(
@@ -414,7 +557,7 @@ impl SessionEffectQueue {
             return SessionQueueAction::Continue;
         };
 
-        match outcome {
+        let action = match outcome {
             SessionEffectOutcome::Finished | SessionEffectOutcome::Superseded => {
                 inner.remove_effect(&track_id, effect_id);
                 inner.mark_track_ready(&track_id);
@@ -422,7 +565,7 @@ impl SessionEffectQueue {
             }
             SessionEffectOutcome::Deferred { until } => {
                 if let Some(track) = inner.tracks.get_mut(&track_id) {
-                    track.paused_until = Some(until);
+                    track.set_paused_until(Some(until));
                     if let Some(effect) = track.front_effect_mut()
                         && effect.effect.effect_id == effect_id
                         && effect.dispatch_state != QueuedEffectState::SubmittedAwaitingWriteback
@@ -440,7 +583,9 @@ impl SessionEffectQueue {
                     requires_reconcile: true,
                 }
             }
-        }
+        };
+        inner.advance_exchange_state_revision(&track_id);
+        action
     }
 
     pub fn record_cancel_resolution(
@@ -455,7 +600,7 @@ impl SessionEffectQueue {
             };
         };
 
-        match resolution {
+        let action = match resolution {
             CancelReceiptResolution::ClosedWithoutFill => {
                 inner.remove_effect(&track_id, effect_id);
                 inner.mark_track_ready(&track_id);
@@ -471,7 +616,7 @@ impl SessionEffectQueue {
             }
             CancelReceiptResolution::StillWorking => {
                 if let Some(track) = inner.tracks.get_mut(&track_id) {
-                    track.paused_until = Some(DeferredUntil::ExchangeState);
+                    track.set_paused_until(Some(DeferredUntil::ExchangeState));
                     if let Some(effect) = track.front_effect_mut() {
                         effect.dispatch_state = QueuedEffectState::Queued;
                     }
@@ -487,9 +632,12 @@ impl SessionEffectQueue {
                 }
                 CancelQueueAction::AwaitingCancelFollowUp { reason }
             }
-        }
+        };
+        inner.advance_exchange_state_revision(&track_id);
+        action
     }
 
+    #[cfg(test)]
     pub(crate) fn plan_cancel_follow_ups_from_open_order_snapshot(
         &self,
         track_id: &TrackId,
@@ -533,7 +681,18 @@ impl SessionEffectQueue {
         if let Some(blocked) = inner.validate_cancel_follow_up_plan(&plan) {
             return vec![blocked];
         }
-        plan.resolutions
+        let track_ids = plan
+            .resolutions
+            .iter()
+            .filter_map(|resolution| {
+                inner
+                    .follow_up_tokens
+                    .get(&resolution.token)
+                    .map(|pointer| pointer.track_id.clone())
+            })
+            .collect::<HashSet<_>>();
+        let actions = plan
+            .resolutions
             .into_iter()
             .map(|resolution| match resolution.result {
                 PlannedCancelFollowUpResult::StillOpen { .. } => {
@@ -543,7 +702,11 @@ impl SessionEffectQueue {
                     inner.record_follow_up_closed_by_token(resolution.token)
                 }
             })
-            .collect()
+            .collect();
+        for track_id in track_ids {
+            inner.advance_exchange_state_revision(&track_id);
+        }
+        actions
     }
 
     pub fn active_submit_effect_ids(&self) -> HashSet<String> {
@@ -563,6 +726,7 @@ impl SessionEffectQueue {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn active_submit_hints_for_track(
         &self,
         track_id: &TrackId,
@@ -598,10 +762,15 @@ impl SessionEffectQueue {
             .collect()
     }
 
-    pub(crate) fn resolve_submitted_awaiting_exchange_state_for_track(
+    pub(crate) fn resolve_submitted_awaiting_exchange_state_effects(
         &self,
         track_id: &TrackId,
+        eligible_effect_ids: &[String],
     ) -> Vec<String> {
+        if eligible_effect_ids.is_empty() {
+            return Vec::new();
+        }
+        let eligible_effect_ids = eligible_effect_ids.iter().collect::<HashSet<_>>();
         let mut inner = self.inner.lock().unwrap();
         let mut resolved = Vec::new();
         {
@@ -614,6 +783,7 @@ impl SessionEffectQueue {
                 while let Some(item) = batch.effects.pop_front() {
                     if item.dispatch_state == QueuedEffectState::SubmittedAwaitingWriteback
                         && matches!(item.effect.effect, TrackEffect::SubmitOrder { .. })
+                        && eligible_effect_ids.contains(&item.effect.effect_id)
                     {
                         resolved.push(item.effect.effect_id.clone());
                     } else {
@@ -626,13 +796,14 @@ impl SessionEffectQueue {
             if resolved.is_empty() {
                 return resolved;
             }
-            track.paused_until = None;
+            track.set_paused_until(None);
         }
         for effect_id in &resolved {
             inner.effect_index.remove(effect_id.as_str());
         }
         inner.remove_empty_track(track_id);
         inner.mark_track_ready(track_id);
+        inner.advance_exchange_state_revision(track_id);
         resolved
     }
 
@@ -703,6 +874,7 @@ impl SessionEffectQueue {
         inner
             .follow_up_tokens
             .retain(|_, pointer| &pointer.track_id != track_id);
+        inner.advance_exchange_state_revision(track_id);
     }
 }
 
@@ -711,12 +883,47 @@ impl SessionEffectQueueInner {
         Self {
             session_id,
             tracks: HashMap::new(),
+            exchange_state_revisions: HashMap::new(),
             ready_tracks: VecDeque::new(),
             effect_index: HashMap::new(),
             follow_up_tokens: HashMap::new(),
             next_follow_up_token: 0,
             next_batch_id: 0,
         }
+    }
+
+    fn exchange_state_revision(&self, track_id: &TrackId) -> SessionExchangeStateRevision {
+        self.exchange_state_revisions
+            .get(track_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn advance_exchange_state_revision(&mut self, track_id: &TrackId) {
+        let revision = self
+            .exchange_state_revisions
+            .entry(track_id.clone())
+            .or_default();
+        revision.0 = revision
+            .0
+            .checked_add(1)
+            .expect("session exchange-state revision exhausted");
+    }
+
+    fn wake_track_for(&mut self, track_id: &TrackId, signal: WakeSignal) -> bool {
+        let Some(track) = self.tracks.get_mut(track_id) else {
+            return false;
+        };
+        let Some(paused_until) = track.paused_until else {
+            self.mark_track_ready(track_id);
+            return false;
+        };
+        if !paused_until.matches(signal) {
+            return false;
+        }
+        track.set_paused_until(None);
+        self.mark_track_ready(track_id);
+        true
     }
 
     fn validate_cancel_follow_up_plan(
@@ -793,7 +1000,7 @@ impl SessionEffectQueueInner {
             };
         }
         effect.dispatch_state = QueuedEffectState::Queued;
-        track.paused_until = Some(DeferredUntil::ExchangeState);
+        track.set_paused_until(Some(DeferredUntil::ExchangeState));
         FollowUpQueueAction::StillOpen { order_id }
     }
 
@@ -956,6 +1163,14 @@ impl SessionEffectQueueInner {
 }
 
 impl TrackQueue {
+    fn set_paused_until(&mut self, paused_until: Option<DeferredUntil>) {
+        self.paused_until = paused_until;
+        self.deferral_epoch = self
+            .deferral_epoch
+            .checked_add(1)
+            .expect("session effect deferral epoch exhausted");
+    }
+
     fn front_effect(&self) -> Option<&QueuedEffect> {
         self.batches.front().and_then(|batch| batch.effects.front())
     }
@@ -1265,12 +1480,114 @@ mod tests {
         );
 
         assert_eq!(
-            queue.resolve_submitted_awaiting_exchange_state_for_track(&track_id),
+            queue.resolve_submitted_awaiting_exchange_state_effects(
+                &track_id,
+                std::slice::from_ref(&enqueued[0]),
+            ),
             vec![enqueued[0].clone()]
         );
         assert!(
             queue.active_submit_hints_for_track(&track_id).is_empty(),
             "complete exchange sync should retire the active submit hint"
+        );
+    }
+
+    #[test]
+    fn older_exchange_snapshot_cannot_wake_a_newer_exchange_state_deferral() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = enqueue_effects(&queue, "btc-core", &[cancel_effect()]);
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        let old_revision = queue.exchange_state_revision(&track_id);
+        let old_wake_token = queue
+            .with_exchange_snapshot_context_if_current(
+                &track_id,
+                old_revision,
+                &complete_open_orders(&[]),
+                |context| context.exchange_state_wake_token,
+            )
+            .unwrap();
+        assert!(old_wake_token.is_none());
+
+        assert!(matches!(
+            queue.record_cancel_resolution(&enqueued[0], CancelReceiptResolution::StillWorking),
+            CancelQueueAction::Deferred {
+                until: DeferredUntil::ExchangeState
+            }
+        ));
+
+        assert!(
+            queue.claim_next().is_none(),
+            "the newer deferral must remain blocked until a newer snapshot arrives"
+        );
+    }
+
+    #[test]
+    fn exchange_snapshot_can_wake_same_deferral_after_unrelated_queue_change() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = enqueue_effects(&queue, "btc-core", &[cancel_effect()]);
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        assert!(matches!(
+            queue.record_cancel_resolution(&enqueued[0], CancelReceiptResolution::StillWorking),
+            CancelQueueAction::Deferred {
+                until: DeferredUntil::ExchangeState
+            }
+        ));
+
+        let revision = queue.exchange_state_revision(&track_id);
+        let wake_token = queue
+            .with_exchange_snapshot_context_if_current(
+                &track_id,
+                revision,
+                &complete_open_orders(&[]),
+                |context| context.exchange_state_wake_token,
+            )
+            .unwrap()
+            .expect("the current exchange-state deferral should produce a wake token");
+
+        enqueue_effects(&queue, "btc-core", &[submit_effect("client-2")]);
+
+        assert!(queue.wake_track_for_if_current_deferral(
+            &track_id,
+            &wake_token,
+            WakeSignal::ExchangeState,
+        ));
+        assert_eq!(
+            queue.claim_next().unwrap().effect_id,
+            enqueued[0],
+            "an unrelated queue change must not strand the deferral observed by the snapshot"
+        );
+    }
+
+    #[test]
+    fn exchange_snapshot_only_resolves_submits_that_were_awaiting_at_linearization() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = enqueue_effects(&queue, "btc-core", &[submit_effect("client-1")]);
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        let revision = queue.exchange_state_revision(&track_id);
+        let eligible = queue
+            .with_exchange_snapshot_context_if_current(
+                &track_id,
+                revision,
+                &complete_open_orders(&[]),
+                |context| context.submitted_awaiting_effect_ids,
+            )
+            .unwrap();
+        assert!(eligible.is_empty());
+
+        assert!(queue.record_submit_exchange_accepted(&enqueued[0]));
+
+        assert!(
+            queue
+                .resolve_submitted_awaiting_exchange_state_effects(&track_id, &eligible)
+                .is_empty()
+        );
+        assert_eq!(
+            queue.active_submit_hints_for_track(&track_id).len(),
+            1,
+            "an older snapshot must not retire a submit accepted after its linearization point"
         );
     }
 

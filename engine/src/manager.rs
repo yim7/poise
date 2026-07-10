@@ -21,9 +21,10 @@ use crate::price_gate::{SubmitPurpose, evaluate_price_execution_gate};
 use crate::reconciler;
 use crate::risk_exposure_gate::RiskAcquisitionRelease;
 use crate::runtime::{
-    AutoState, ControlState, ExecutorState, FreshSessionExternalInputs, ManualState,
-    QuoteHealthView, StrategyPriceStatus, StrategyTargetView, TerminationCause, TrackLiveView,
-    TrackRuntime, TrackRuntimeView, TrackState,
+    AutoState, ControlState, ExchangeObservationRevision, ExecutorState,
+    FreshSessionExternalInputs, ManualState, QuoteHealthView, StrategyPriceStatus,
+    StrategyTargetView, TerminationCause, TrackLiveView, TrackRuntime, TrackRuntimeView,
+    TrackState,
 };
 use crate::transition::TrackTransition;
 use poise_core::track::{DEFAULT_TICK_TIMEOUT_SECS, Instrument, TrackDefinition, TrackId};
@@ -38,6 +39,25 @@ pub enum ExchangeSyncMode {
 pub enum MarketMutationOutcome {
     LiveOnly,
     Durable(Box<TrackTransition>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubmitRecoveryOrderLookup {
+    NotQueried,
+    Complete(Option<ExchangeOrder>),
+}
+
+impl SubmitRecoveryOrderLookup {
+    fn live_order(&self) -> Option<&ExchangeOrder> {
+        match self {
+            Self::NotQueried => None,
+            Self::Complete(live_order) => live_order.as_ref(),
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete(_))
+    }
 }
 
 impl ExchangeSyncMode {
@@ -107,6 +127,16 @@ impl TrackManager {
         self.instruments.get(instrument).cloned()
     }
 
+    pub fn exchange_observation_revision(
+        &self,
+        id: &TrackId,
+    ) -> Result<ExchangeObservationRevision> {
+        self.tracks
+            .get(id)
+            .map(TrackRuntime::exchange_observation_revision)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))
+    }
+
     pub fn observe(
         &mut self,
         id: &TrackId,
@@ -151,6 +181,11 @@ impl TrackManager {
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
             .mutation_frame();
+        let previous_exchange_observation_revision = self
+            .tracks
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
+            .exchange_observation_revision();
         let previous_active_risk_cap = self
             .tracks
             .get(id)
@@ -202,6 +237,9 @@ impl TrackManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         track.rollback_to_frame(&previous_frame)?;
+        track.restore_revision_after_speculative_market_mutation(
+            previous_exchange_observation_revision,
+        );
         track.active_risk_cap = previous_active_risk_cap;
         track.strategy_price = strategy_price;
         track.strategy_price_status = strategy_price_status;
@@ -355,11 +393,12 @@ impl TrackManager {
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        track.executor_state = track.executor_state.reset_for_activation(
+        let executor_state = track.executor_state.reset_for_activation(
             track.config(),
             track.current_exposure.clone(),
             activated_at,
         );
+        track.replace_executor_state(executor_state);
         Ok(())
     }
 
@@ -428,11 +467,12 @@ impl TrackManager {
             if let Some(strategy_price) = Self::live_strategy_price_for(track) {
                 let mut resumed = track.clone();
                 resumed.track_state = TrackState::WaitingMarketData;
-                resumed.executor_state = track.executor_state.reset_for_activation(
+                let executor_state = track.executor_state.reset_for_activation(
                     track.config(),
                     track.current_exposure.clone(),
                     resumed_at,
                 );
+                resumed.replace_executor_state(executor_state);
                 let result = self.plan_inventory_execution_for_track(&resumed, strategy_price)?;
                 (
                     result.new_runtime_state.unwrap_or(TrackState::Running(
@@ -471,7 +511,7 @@ impl TrackManager {
         track.track_state = runtime_state;
         track.execution_gate_state.last_decision = execution_gate_decision;
         Self::apply_targeting_state(track, exposure, None);
-        track.executor_state = executor_state;
+        track.replace_executor_state(executor_state);
 
         Ok((vec![], vec![]))
     }
@@ -580,6 +620,7 @@ impl TrackManager {
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+        track.advance_exchange_observation_revision();
         let resolution = executor::record_submit_receipt(
             &track.executor_state,
             request,
@@ -588,9 +629,7 @@ impl TrackManager {
         );
         match resolution {
             executor::SubmitReceiptResolution::Recorded { state } => {
-                if state != track.executor_state {
-                    track.executor_state = state;
-                }
+                track.replace_executor_state(state);
                 Ok(())
             }
             executor::SubmitReceiptResolution::Unmatched => bail!(
@@ -608,9 +647,7 @@ impl TrackManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         let next_state = executor::record_submit_failure(&track.executor_state, client_order_id);
-        if next_state != track.executor_state {
-            track.executor_state = next_state;
-        }
+        track.replace_executor_state(next_state);
         Ok(())
     }
 
@@ -627,9 +664,7 @@ impl TrackManager {
             &track.executor_state,
             recovery_token,
         );
-        if next_state != track.executor_state {
-            track.executor_state = next_state;
-        }
+        track.replace_executor_state(next_state);
         Ok(())
     }
 
@@ -643,11 +678,10 @@ impl TrackManager {
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+        track.advance_exchange_observation_revision();
         let next_state =
             executor::record_cancel_order_receipt(&track.executor_state, order_id, receipt);
-        if next_state != track.executor_state {
-            track.executor_state = next_state;
-        }
+        track.replace_executor_state(next_state);
         Ok(())
     }
 
@@ -657,13 +691,15 @@ impl TrackManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         let next_state = executor::clear_all_working_orders(&track.executor_state);
-        if next_state != track.executor_state {
-            track.executor_state = next_state;
-        }
+        track.replace_executor_state(next_state);
         Ok(())
     }
 
     pub fn record_cancel_all_success(&mut self, id: &TrackId) -> Result<()> {
+        self.tracks
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
+            .advance_exchange_observation_revision();
         self.clear_all_working_orders(id)
     }
 
@@ -671,8 +707,9 @@ impl TrackManager {
         &mut self,
         id: &TrackId,
         recovery_token: &executor::SubmitRecoveryToken,
-        live_order: Option<&ExchangeOrder>,
+        order_lookup: &SubmitRecoveryOrderLookup,
     ) -> Result<executor::SubmitRecoveryPlan> {
+        let live_order = order_lookup.live_order();
         let live_order_observation = live_order.map(|order| OrderObservation {
             order_id: order.order_id.clone(),
             client_order_id: order.client_order_id.clone(),
@@ -701,10 +738,13 @@ impl TrackManager {
                 .tracks
                 .get_mut(id)
                 .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+            if order_lookup.is_complete() {
+                track.advance_exchange_observation_revision();
+            }
             if let Some(state) = plan.resolution.state()
                 && state != &track.executor_state
             {
-                track.executor_state = state.clone();
+                track.replace_executor_state(state.clone());
             }
         };
 
@@ -830,6 +870,7 @@ impl TrackManager {
         track.current_exposure = track.exposure_from_position_qty(observation.qty);
         track.current_position_qty = observation.qty;
         track.risk_state.unrealized_pnl = observation.unrealized_pnl;
+        track.advance_exchange_observation_revision();
         Ok(())
     }
 
@@ -843,15 +884,15 @@ impl TrackManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
 
+        track.advance_exchange_observation_revision();
+
         if track.executor_state.recovery_anomaly.is_some() {
             return Ok(executor::OrderUpdateAbsorbResult::DuplicateReplay);
         }
 
         let applied =
             executor::apply_order_observation_with_result(&track.executor_state, &observation);
-        if applied.state != track.executor_state {
-            track.executor_state = applied.state;
-        }
+        track.replace_executor_state(applied.state);
 
         Ok(applied.absorb_result)
     }
@@ -888,19 +929,19 @@ impl TrackManager {
                     .tracks
                     .get_mut(id)
                     .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-                track.executor_state = state;
+                track.replace_executor_state(state);
                 Ok((vec![], vec![TrackEffect::NoOp]))
             }
             executor::RecoveryResolution::Rebuilt { state } => {
                 let mut planned_track = track.clone();
-                planned_track.executor_state = state;
+                planned_track.replace_executor_state(state);
 
                 if planned_track.track_state.is_paused() {
                     let track = self
                         .tracks
                         .get_mut(id)
                         .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-                    track.executor_state = planned_track.executor_state;
+                    track.replace_executor_state(planned_track.executor_state);
                     return Ok((vec![], vec![]));
                 }
 
@@ -909,7 +950,7 @@ impl TrackManager {
                         .tracks
                         .get_mut(id)
                         .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-                    track.executor_state = planned_track.executor_state;
+                    track.replace_executor_state(planned_track.executor_state);
                     return Ok((vec![], vec![]));
                 };
 
@@ -918,7 +959,7 @@ impl TrackManager {
                         .tracks
                         .get_mut(id)
                         .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-                    track.executor_state = planned_track.executor_state;
+                    track.replace_executor_state(planned_track.executor_state);
                     return Ok((vec![], vec![]));
                 }
 
@@ -927,7 +968,7 @@ impl TrackManager {
                         .tracks
                         .get_mut(id)
                         .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-                    track.executor_state = planned_track.executor_state;
+                    track.replace_executor_state(planned_track.executor_state);
                     return Ok((vec![], vec![]));
                 }
 
@@ -961,7 +1002,7 @@ impl TrackManager {
                     Some(planned.desired_exposure),
                     planned.applied_risk_cap,
                 );
-                track.executor_state = planned.executor_state;
+                track.replace_executor_state(planned.executor_state);
                 Ok((planned.events, effects))
             }
         }
@@ -1006,7 +1047,7 @@ impl TrackManager {
         }
         track.execution_gate_state.last_decision = execution_gate_decision;
         Self::apply_targeting_state(track, Some(desired_exposure), applied_risk_cap);
-        track.executor_state = executor_state;
+        track.replace_executor_state(executor_state);
 
         Ok((events, effects))
     }

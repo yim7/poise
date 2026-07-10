@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::session_effect_queue::{EnqueuedEffectJournalEntry, FollowUpQueueAction, WakeSignal};
+use crate::session_effect_queue::{
+    EnqueuedEffectJournalEntry, FollowUpQueueAction, SessionExchangeStateRevision, WakeSignal,
+};
 use crate::{
     ApplicationNotification, CancelReceiptResolution, EffectJournalEntry, EffectStatus,
     EffectStatusUpdate, SessionEffectQueue, TrackControlCommand, TrackControlState,
@@ -17,15 +19,15 @@ use poise_engine::executor::{
 };
 use poise_engine::ledger::{TrackPnlRecord, TrackPnlStats};
 use poise_engine::manager::MarketMutationOutcome;
-use poise_engine::manager::{ExchangeSyncMode, TrackManager};
+use poise_engine::manager::{ExchangeSyncMode, SubmitRecoveryOrderLookup, TrackManager};
 use poise_engine::observation::{
     CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
     TrackObservation,
 };
-use poise_engine::ports::{ExchangeOrder, OrderReceipt, OrderRequest};
+use poise_engine::ports::{OrderReceipt, OrderRequest};
 use poise_engine::runtime::{
-    FreshSessionExternalInputs, QuoteHealthView, StrategyTargetView, TerminationCause,
-    TrackLiveView, TrackRuntimeView, TrackState,
+    ExchangeObservationRevision, FreshSessionExternalInputs, QuoteHealthView, StrategyTargetView,
+    TerminationCause, TrackLiveView, TrackRuntimeView, TrackState,
 };
 use poise_engine::transition::TrackTransition;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
@@ -43,12 +45,6 @@ pub struct TrackServiceSet {
 
 pub trait AccountCapacityGuard: Send + Sync {
     fn available_notional_for(&self, instrument: &Instrument) -> Option<f64>;
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct FollowUpQueueHandling {
-    requires_reconcile: bool,
-    exchange_state_wake_consumed: bool,
 }
 
 fn effect_journal_entries_from_enqueued(
@@ -115,6 +111,19 @@ pub(crate) struct MutationExecutor {
 pub struct TrackInstrument {
     pub id: String,
     pub instrument: Instrument,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExchangeStateSyncToken {
+    track_id: TrackId,
+    observation_revision: ExchangeObservationRevision,
+    queue_revision: SessionExchangeStateRevision,
+}
+
+#[derive(Debug, Clone)]
+pub enum ExchangeStateSyncOutcome {
+    Applied(TrackTransition),
+    RevisionChanged,
 }
 
 #[derive(Debug)]
@@ -618,14 +627,33 @@ impl MutationExecutor {
         Ok(())
     }
 
-    pub async fn sync_exchange_state(
+    pub(crate) async fn prepare_exchange_state_sync(
         &self,
         id: &str,
+    ) -> Result<ExchangeStateSyncToken> {
+        let _mutation_guard = self.lock_track_mutation(id).await;
+        let track_id = TrackId::new(id);
+        let observation_revision = self
+            .manager
+            .read()
+            .await
+            .exchange_observation_revision(&track_id)?;
+        let queue_revision = self.session_effect_queue.exchange_state_revision(&track_id);
+        Ok(ExchangeStateSyncToken {
+            track_id,
+            observation_revision,
+            queue_revision,
+        })
+    }
+
+    pub async fn sync_exchange_state(
+        &self,
+        token: ExchangeStateSyncToken,
         position: PositionObservation,
         open_orders: CompleteOpenOrderSnapshot,
-    ) -> Result<TrackTransition> {
+    ) -> Result<ExchangeStateSyncOutcome> {
         self.sync_exchange_state_inner(
-            id,
+            token,
             position,
             open_orders,
             ExchangeSyncMode::RecoverAndReconcile,
@@ -635,74 +663,100 @@ impl MutationExecutor {
 
     pub async fn sync_exchange_state_without_reconcile(
         &self,
-        id: &str,
+        token: ExchangeStateSyncToken,
         position: PositionObservation,
         open_orders: CompleteOpenOrderSnapshot,
-    ) -> Result<TrackTransition> {
-        self.sync_exchange_state_inner(id, position, open_orders, ExchangeSyncMode::RecoverOnly)
+    ) -> Result<ExchangeStateSyncOutcome> {
+        self.sync_exchange_state_inner(token, position, open_orders, ExchangeSyncMode::RecoverOnly)
             .await
     }
 
     async fn sync_exchange_state_inner(
         &self,
-        id: &str,
+        token: ExchangeStateSyncToken,
         position: PositionObservation,
         open_orders: CompleteOpenOrderSnapshot,
         mode: ExchangeSyncMode,
-    ) -> Result<TrackTransition> {
+    ) -> Result<ExchangeStateSyncOutcome> {
+        let id = token.track_id.as_str();
         let _mutation_guard = self.lock_track_mutation(id).await;
-        let track_id = TrackId::new(id);
-        let follow_up_plan = self
-            .session_effect_queue
-            .plan_cancel_follow_ups_from_open_order_snapshot(&track_id, &open_orders);
-        let effective_mode = if follow_up_plan.requires_reconcile() {
-            ExchangeSyncMode::RecoverAndReconcile
-        } else {
-            mode
-        };
-        let pending_submit_hints = self
-            .session_effect_queue
-            .active_submit_hints_for_track(&track_id);
-        let (previous_frame, transition, next_frame) = {
+        let (
+            previous_frame,
+            transition,
+            next_frame,
+            follow_up_plan,
+            submitted_awaiting_effect_ids,
+            exchange_state_wake_token,
+        ) = {
             let mut manager = self.manager.write().await;
-            let previous_frame = manager
-                .mutation_frame(id)
-                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
-            self.sync_account_capacity_gate_state(&mut manager, id)
-                .map_err(TrackMutationError::Mutation)?;
-            let transition = if effective_mode.allows_follow_up_reconcile() {
-                manager
-                    .sync_exchange_state(
-                        &TrackId::new(id),
-                        position,
-                        open_orders.clone(),
-                        pending_submit_hints,
-                    )
-                    .map_err(|error| {
-                        manager
-                            .rollback_track_state(&previous_frame)
-                            .expect("failed to restore previous frame after sync_exchange_state mutation error");
-                        TrackMutationError::Mutation(error)
-                    })?
-            } else {
-                manager
-                    .sync_exchange_state_without_reconcile(
-                        &TrackId::new(id),
-                        position,
-                        open_orders.clone(),
-                        pending_submit_hints,
-                    )
-                    .map_err(|error| {
-                        manager
-                            .rollback_track_state(&previous_frame)
-                            .expect("failed to restore previous frame after sync_exchange_state_without_reconcile mutation error");
-                        TrackMutationError::Mutation(error)
-                    })?
+            if manager.exchange_observation_revision(&token.track_id)? != token.observation_revision
+            {
+                return Ok(ExchangeStateSyncOutcome::RevisionChanged);
+            }
+            let Some(result) = self
+                .session_effect_queue
+                .with_exchange_snapshot_context_if_current(
+                    &token.track_id,
+                    token.queue_revision,
+                    &open_orders,
+                    |queue_context| {
+                        let follow_up_plan = queue_context.follow_up_plan;
+                        let effective_mode = if follow_up_plan.requires_reconcile() {
+                            ExchangeSyncMode::RecoverAndReconcile
+                        } else {
+                            mode
+                        };
+                        let previous_frame = manager.mutation_frame(id).ok_or_else(|| {
+                            TrackMutationError::Mutation(anyhow!("track `{id}` not found"))
+                        })?;
+                        self.sync_account_capacity_gate_state(&mut manager, id)
+                            .map_err(TrackMutationError::Mutation)?;
+                        let transition = if effective_mode.allows_follow_up_reconcile() {
+                            manager
+                                .sync_exchange_state(
+                                    &token.track_id,
+                                    position,
+                                    open_orders.clone(),
+                                    queue_context.pending_submit_hints,
+                                )
+                                .map_err(|error| {
+                                    manager
+                                        .rollback_track_state(&previous_frame)
+                                        .expect("failed to restore previous frame after sync_exchange_state mutation error");
+                                    TrackMutationError::Mutation(error)
+                                })?
+                        } else {
+                            manager
+                                .sync_exchange_state_without_reconcile(
+                                    &token.track_id,
+                                    position,
+                                    open_orders.clone(),
+                                    queue_context.pending_submit_hints,
+                                )
+                                .map_err(|error| {
+                                    manager
+                                        .rollback_track_state(&previous_frame)
+                                        .expect("failed to restore previous frame after sync_exchange_state_without_reconcile mutation error");
+                                    TrackMutationError::Mutation(error)
+                                })?
+                        };
+                        let next_frame = manager.mutation_frame(id).ok_or_else(|| {
+                            TrackMutationError::Mutation(anyhow!("track `{id}` not found"))
+                        })?;
+                        Ok::<_, TrackMutationError>((
+                            previous_frame,
+                            transition,
+                            next_frame,
+                            follow_up_plan,
+                            queue_context.submitted_awaiting_effect_ids,
+                            queue_context.exchange_state_wake_token,
+                        ))
+                    },
+                )
+            else {
+                return Ok(ExchangeStateSyncOutcome::RevisionChanged);
             };
-            let next_frame = manager
-                .mutation_frame(id)
-                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
-            (previous_frame, transition, next_frame)
+            result.map_err(anyhow::Error::new)?
         };
 
         self.commit_track_mutation(
@@ -720,31 +774,35 @@ impl MutationExecutor {
         let follow_up_actions = self
             .session_effect_queue
             .commit_cancel_follow_up_resolution(follow_up_plan);
-        let follow_up_handling = self
-            .handle_follow_up_queue_actions(id, &follow_up_actions)
+        self.handle_follow_up_queue_actions(id, &follow_up_actions)
             .await?;
 
         let resolved_submit_effect_ids = self
             .session_effect_queue
-            .resolve_submitted_awaiting_exchange_state_for_track(&track_id);
+            .resolve_submitted_awaiting_exchange_state_effects(
+                &token.track_id,
+                &submitted_awaiting_effect_ids,
+            );
         self.record_effects_succeeded(id, &resolved_submit_effect_ids)
             .await?;
 
-        if !follow_up_handling.exchange_state_wake_consumed {
+        if let Some(wake_token) = exchange_state_wake_token.as_ref() {
             self.session_effect_queue
-                .wake_track_for(&track_id, WakeSignal::ExchangeState);
+                .wake_track_for_if_current_deferral(
+                    &token.track_id,
+                    wake_token,
+                    WakeSignal::ExchangeState,
+                );
         }
 
-        Ok(transition)
+        Ok(ExchangeStateSyncOutcome::Applied(transition))
     }
 
     async fn handle_follow_up_queue_actions(
         &self,
         id: &str,
         actions: &[FollowUpQueueAction],
-    ) -> std::result::Result<FollowUpQueueHandling, TrackMutationError> {
-        let mut requires_reconcile = false;
-        let mut exchange_state_wake_consumed = false;
+    ) -> std::result::Result<(), TrackMutationError> {
         let mut journal_outcomes = Vec::new();
 
         for action in actions {
@@ -752,9 +810,8 @@ impl MutationExecutor {
                 FollowUpQueueAction::Closed {
                     cancel_effect_id,
                     superseded_downstream_effect_ids,
-                    requires_reconcile: action_requires_reconcile,
+                    requires_reconcile: _,
                 } => {
-                    requires_reconcile |= *action_requires_reconcile;
                     journal_outcomes.push(EffectStatusUpdate::succeeded(cancel_effect_id.clone()));
                     journal_outcomes.extend(
                         superseded_downstream_effect_ids
@@ -763,9 +820,7 @@ impl MutationExecutor {
                             .map(EffectStatusUpdate::superseded),
                     );
                 }
-                FollowUpQueueAction::StillOpen { .. } => {
-                    exchange_state_wake_consumed = true;
-                }
+                FollowUpQueueAction::StillOpen { .. } => {}
                 FollowUpQueueAction::Blocked { reason } => {
                     return Err(TrackMutationError::Mutation(anyhow!(
                         "failed to resolve cancel follow-ups for track `{id}`: {reason}"
@@ -786,10 +841,7 @@ impl MutationExecutor {
             );
         }
 
-        Ok(FollowUpQueueHandling {
-            requires_reconcile,
-            exchange_state_wake_consumed,
-        })
+        Ok(())
     }
 
     pub(crate) async fn record_effects_superseded(
@@ -991,11 +1043,11 @@ impl MutationExecutor {
         id: &str,
         effect_id: &str,
         recovery_token: &SubmitRecoveryToken,
-        live_order: Option<&ExchangeOrder>,
+        order_lookup: &SubmitRecoveryOrderLookup,
     ) -> Result<SubmitExecutionRecovery> {
         Ok(
             match self
-                .recover_submit_effect(id, effect_id, recovery_token, live_order)
+                .recover_submit_effect(id, effect_id, recovery_token, order_lookup)
                 .await?
             {
                 SubmitRecoveryResolution::Proceed {
@@ -1023,7 +1075,7 @@ impl MutationExecutor {
         id: &str,
         effect_id: &str,
         recovery_token: &SubmitRecoveryToken,
-        live_order: Option<&ExchangeOrder>,
+        order_lookup: &SubmitRecoveryOrderLookup,
     ) -> Result<SubmitRecoveryResolution> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let (previous_frame, plan, next_frame) = {
@@ -1037,7 +1089,7 @@ impl MutationExecutor {
                 .recover_submit_effect(
                     &TrackId::new(id),
                     recovery_token,
-                    live_order,
+                    order_lookup,
                 )
                 .map_err(|error| {
                     manager
@@ -1841,19 +1893,26 @@ mod tests {
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
-    use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
+    use poise_engine::executor::{BindingStatus, RecoveryAnomaly, SubmitRecoveryToken};
+    use poise_engine::ledger::{TrackPnlRecord, TrackPnlStats};
+    use poise_engine::manager::SubmitRecoveryOrderLookup;
     use poise_engine::mutation_frame::TrackMutationFrame;
     use poise_engine::observation::{
         CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
     };
     use poise_engine::ports::{ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus};
-    use poise_engine::runtime::{AutoState, ControlState, TerminationCause, TrackState};
+    use poise_engine::runtime::{
+        AutoState, ControlState, FreshSessionExternalInputs, TerminationCause, TrackState,
+    };
     use poise_engine::transition::TrackTransition;
     use tokio::sync::broadcast;
     use tokio::sync::broadcast::error::TryRecvError;
 
     use super::test_support::{MemoryRepository, NoopGuard, seeded_manager, track_write_services};
-    use super::{MutationExecutor, RecoveryAnomalyObserver, effect_journal_entries_from_enqueued};
+    use super::{
+        ExchangeStateSyncOutcome, MutationExecutor, RecoveryAnomalyObserver,
+        effect_journal_entries_from_enqueued,
+    };
     use crate::{TrackControlState, TrackMutationStore, TrackQueryStore};
 
     #[derive(Default)]
@@ -2002,6 +2061,434 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exchange_sync_applies_only_for_the_matching_observation_revision() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository, observer);
+        let token = executor
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
+
+        let outcome = executor
+            .sync_exchange_state_without_reconcile(
+                token.clone(),
+                PositionObservation {
+                    qty: 0.75,
+                    unrealized_pnl: 12.0,
+                },
+                CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ExchangeStateSyncOutcome::Applied(_)));
+        let snapshot = executor
+            .manager()
+            .read()
+            .await
+            .mutation_frame("btc-core")
+            .unwrap();
+        assert!(snapshot.current_exposure().0 > 0.0);
+        assert_eq!(snapshot.unrealized_pnl(), 12.0);
+
+        let reused = executor
+            .sync_exchange_state_without_reconcile(
+                token,
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+                CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(reused, ExchangeStateSyncOutcome::RevisionChanged));
+    }
+
+    #[tokio::test]
+    async fn position_observation_invalidates_an_older_snapshot_even_when_value_repeats() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository.clone(), observer);
+        let token = executor
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
+
+        executor
+            .observe_position(
+                "btc-core",
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+            )
+            .await
+            .unwrap();
+        let writes_before_stale_sync = repository.business_write_call_count();
+        let outcome = executor
+            .sync_exchange_state_without_reconcile(
+                token,
+                PositionObservation {
+                    qty: 1.0,
+                    unrealized_pnl: -25.0,
+                },
+                CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ExchangeStateSyncOutcome::RevisionChanged));
+        let snapshot = executor
+            .manager()
+            .read()
+            .await
+            .mutation_frame("btc-core")
+            .unwrap();
+        assert_eq!(snapshot.current_exposure(), &Exposure(0.0));
+        assert_eq!(snapshot.unrealized_pnl(), 0.0);
+        assert_eq!(
+            repository.business_write_call_count(),
+            writes_before_stale_sync,
+            "a superseded snapshot must not write durable state"
+        );
+    }
+
+    #[tokio::test]
+    async fn order_observation_invalidates_an_older_snapshot_even_when_unabsorbed() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository, observer);
+        let token = executor
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
+
+        let (_, absorb_result) = executor
+            .observe_order_with_absorb_result(
+                "btc-core",
+                OrderObservation {
+                    order_id: "new-exchange-order".to_string(),
+                    client_order_id: "unknown-client".to_string(),
+                    side: Side::Buy,
+                    price: 100.0,
+                    quantity: 0.1,
+                    filled_qty: 0.0,
+                    status: OrderStatus::New,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            absorb_result,
+            poise_engine::executor::OrderUpdateAbsorbResult::Unabsorbed
+        );
+
+        let outcome = executor
+            .sync_exchange_state_without_reconcile(
+                token,
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+                CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ExchangeStateSyncOutcome::RevisionChanged));
+    }
+
+    #[tokio::test]
+    async fn same_state_cancel_receipt_still_invalidates_an_older_snapshot() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository, observer);
+        let token = executor
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
+
+        executor
+            .record_cancel_order_success(
+                "btc-core",
+                "cancel-effect",
+                "already-absent-order",
+                &OrderReceipt {
+                    order_id: "already-absent-order".to_string(),
+                    client_order_id: "already-terminal-client".to_string(),
+                    filled_qty: 0.0,
+                    status: OrderStatus::Canceled,
+                },
+            )
+            .await
+            .unwrap();
+
+        let outcome = executor
+            .sync_exchange_state_without_reconcile(
+                token,
+                PositionObservation {
+                    qty: 1.0,
+                    unrealized_pnl: -10.0,
+                },
+                CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ExchangeStateSyncOutcome::RevisionChanged));
+    }
+
+    #[tokio::test]
+    async fn complete_absent_submit_lookup_invalidates_only_after_exchange_was_queried() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository, observer);
+        let untouched_token = executor
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
+
+        executor
+            .recover_submit_effect(
+                "btc-core",
+                "submit-effect",
+                &SubmitRecoveryToken::empty(),
+                &SubmitRecoveryOrderLookup::NotQueried,
+            )
+            .await
+            .unwrap();
+        let after_unqueried = executor
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
+        assert_eq!(
+            untouched_token, after_unqueried,
+            "a direct submit path without an exchange query is not a newer exchange fact"
+        );
+
+        executor
+            .recover_submit_effect(
+                "btc-core",
+                "submit-effect",
+                &SubmitRecoveryToken::empty(),
+                &SubmitRecoveryOrderLookup::Complete(None),
+            )
+            .await
+            .unwrap();
+        let outcome = executor
+            .sync_exchange_state_without_reconcile(
+                after_unqueried,
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+                CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ExchangeStateSyncOutcome::RevisionChanged));
+    }
+
+    #[tokio::test]
+    async fn cancel_follow_up_created_after_token_is_not_consumed_by_the_older_snapshot() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository, observer);
+        let track_id = TrackId::new("btc-core");
+        let enqueued = executor.session_effect_queue.enqueue_transition_effects(
+            &track_id,
+            &[TrackEffect::CancelOrder {
+                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                order_id: "cancelled-order".to_string(),
+            }],
+            chrono::Utc::now(),
+        );
+        let effect_id = enqueued.effect_ids()[0].clone();
+        executor.session_effect_queue.claim_next().unwrap();
+        let token = executor
+            .prepare_exchange_state_sync(track_id.as_str())
+            .await
+            .unwrap();
+
+        executor.session_effect_queue.record_cancel_resolution(
+            &effect_id,
+            CancelReceiptResolution::Unknown {
+                order_id: "cancelled-order".to_string(),
+                reason: "timeout".to_string(),
+            },
+        );
+        let before = executor.session_effect_queue.snapshot_for_track(&track_id);
+        let outcome = executor
+            .sync_exchange_state_without_reconcile(
+                token,
+                PositionObservation {
+                    qty: 0.0,
+                    unrealized_pnl: 0.0,
+                },
+                CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ExchangeStateSyncOutcome::RevisionChanged));
+        assert_eq!(
+            executor.session_effect_queue.snapshot_for_track(&track_id),
+            before,
+            "the old empty snapshot must not close a newer cancel follow-up"
+        );
+        assert_eq!(
+            before.pending_effects[0].state,
+            SessionPendingEffectState::AwaitingFollowUp
+        );
+    }
+
+    #[tokio::test]
+    async fn mutation_rollback_does_not_make_an_old_exchange_snapshot_token_current_again() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository, observer);
+        let token = executor
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
+
+        let mutation: std::result::Result<TrackTransition, super::TrackMutationError> = executor
+            .mutate_track("btc-core", |manager| {
+                let _ = manager.observe(
+                    &TrackId::new("btc-core"),
+                    poise_engine::observation::TrackObservation::Position(PositionObservation {
+                        qty: 0.0,
+                        unrealized_pnl: 0.0,
+                    }),
+                )?;
+                anyhow::bail!("forced mutation rollback")
+            })
+            .await;
+        assert!(mutation.is_err());
+
+        let outcome = executor
+            .sync_exchange_state_without_reconcile(
+                token,
+                PositionObservation {
+                    qty: 1.0,
+                    unrealized_pnl: -10.0,
+                },
+                CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ExchangeStateSyncOutcome::RevisionChanged));
+    }
+
+    #[tokio::test]
+    async fn fresh_start_does_not_reset_the_observation_revision_to_an_old_token() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository, observer);
+        let token = executor
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
+        let exchange_rules = executor
+            .manager()
+            .read()
+            .await
+            .get_track("btc-core")
+            .unwrap()
+            .exchange_rules()
+            .clone();
+
+        assert!(
+            executor
+                .fresh_start_track_runtime(
+                    &TrackId::new("btc-core"),
+                    TrackControlState::default(),
+                    TrackPnlStats::default(),
+                    FreshSessionExternalInputs {
+                        current_exposure: Exposure(0.0),
+                        position_qty: 0.0,
+                        market_data: None,
+                        exchange_rules,
+                    },
+                )
+                .await
+                .unwrap()
+        );
+
+        let outcome = executor
+            .sync_exchange_state_without_reconcile(
+                token,
+                PositionObservation {
+                    qty: 1.0,
+                    unrealized_pnl: -10.0,
+                },
+                CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ExchangeStateSyncOutcome::RevisionChanged));
+    }
+
+    #[tokio::test]
+    async fn pnl_and_pure_market_updates_do_not_invalidate_exchange_snapshot_tokens() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let executor = test_executor(repository, observer);
+        let initial = executor
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
+
+        executor
+            .record_track_pnl(
+                "btc-core",
+                TrackPnlRecord::funding(
+                    Instrument::new(Venue::Binance, "BTCUSDT"),
+                    chrono::Utc::now(),
+                    "test:funding".to_string(),
+                    Some("test:funding:1".to_string()),
+                    -0.25,
+                    "USDT",
+                ),
+            )
+            .await
+            .unwrap();
+        executor
+            .observe_market(
+                "btc-core",
+                MarketObservation::MarkPrice { mark_price: 100.0 },
+            )
+            .await
+            .unwrap();
+        let after_pnl_and_mark = executor
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
+
+        assert_eq!(initial, after_pnl_and_mark);
+
+        executor
+            .observe_market(
+                "btc-core",
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 94.9,
+                        best_ask: 95.1,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let after_binding_change = executor
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
+
+        assert_ne!(after_pnl_and_mark, after_binding_change);
+    }
+
+    #[tokio::test]
     async fn observe_market_live_only_tick_does_not_emit_track_changed() {
         let repository = Arc::new(MemoryRepository::default());
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
@@ -2036,6 +2523,10 @@ mod tests {
                 .rollback_track_state(&updated)
                 .expect("failed to seed active exposure state");
         }
+        let token_before_tick = executor
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
 
         let transition = executor
             .observe_market(
@@ -2049,9 +2540,14 @@ mod tests {
             )
             .await
             .unwrap();
+        let token_after_tick = executor
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
 
         assert!(transition.events.is_empty());
         assert!(transition.effects.is_empty());
+        assert_eq!(token_before_tick, token_after_tick);
         assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
         assert!(
             repository
@@ -2257,11 +2753,16 @@ mod tests {
                 reason: "exchange timeout".into(),
             },
         );
+        let token = services
+            .observation
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
 
         services
             .observation
             .sync_exchange_state_without_reconcile(
-                "btc-core",
+                token,
                 PositionObservation {
                     qty: 0.0,
                     unrealized_pnl: 0.0,
@@ -2319,14 +2820,7 @@ mod tests {
 
         let result = services
             .observation
-            .sync_exchange_state_without_reconcile(
-                track_id.as_str(),
-                PositionObservation {
-                    qty: 0.0,
-                    unrealized_pnl: 0.0,
-                },
-                CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
-            )
+            .prepare_exchange_state_sync(track_id.as_str())
             .await;
 
         assert!(result.is_err());
@@ -2376,11 +2870,16 @@ mod tests {
                 reason: "exchange timeout".into(),
             },
         );
+        let token = services
+            .observation
+            .prepare_exchange_state_sync(track_id.as_str())
+            .await
+            .unwrap();
 
-        let transition = services
+        let outcome = services
             .observation
             .sync_exchange_state_without_reconcile(
-                track_id.as_str(),
+                token,
                 PositionObservation {
                     qty: 0.0,
                     unrealized_pnl: 0.0,
@@ -2389,6 +2888,9 @@ mod tests {
             )
             .await
             .unwrap();
+        let ExchangeStateSyncOutcome::Applied(transition) = outcome else {
+            panic!("current exchange snapshot should apply");
+        };
 
         assert!(
             !transition.effects.is_empty(),
@@ -2440,11 +2942,16 @@ mod tests {
                 reason: "exchange timeout".into(),
             },
         );
+        let token = services
+            .observation
+            .prepare_exchange_state_sync("btc-core")
+            .await
+            .unwrap();
 
         services
             .observation
             .sync_exchange_state_without_reconcile(
-                "btc-core",
+                token,
                 PositionObservation {
                     qty: 0.0,
                     unrealized_pnl: 0.0,

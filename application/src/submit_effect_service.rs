@@ -3,9 +3,10 @@ use std::sync::Arc;
 use anyhow::{Error, Result};
 use poise_core::track::TrackId;
 use poise_engine::executor::SubmitRecoveryToken;
+pub use poise_engine::manager::SubmitRecoveryOrderLookup;
 #[cfg(any(test, feature = "server-test-support"))]
 use poise_engine::manager::TrackManager;
-use poise_engine::ports::{ExchangeOrder, OrderReceipt, OrderRequest};
+use poise_engine::ports::{OrderReceipt, OrderRequest};
 #[cfg(any(test, feature = "server-test-support"))]
 use tokio::sync::RwLock;
 
@@ -166,11 +167,11 @@ impl SubmitEffectService {
         id: &str,
         effect_id: &str,
         recovery_token: SubmitRecoveryToken,
-        live_order: Option<&ExchangeOrder>,
+        order_lookup: SubmitRecoveryOrderLookup,
     ) -> Result<SubmitAttempt> {
         let recovery = self
             .executor
-            .recover_submit_execution(id, effect_id, &recovery_token, live_order)
+            .recover_submit_execution(id, effect_id, &recovery_token, &order_lookup)
             .await?;
 
         Ok(submit_attempt_from_recovery(
@@ -228,7 +229,8 @@ mod tests {
     use tokio::time::timeout;
 
     use super::{
-        SubmitDispatch, SubmitEffectService, SubmitExecutionRecovery, submit_attempt_from_recovery,
+        SubmitDispatch, SubmitEffectService, SubmitExecutionRecovery, SubmitRecoveryOrderLookup,
+        submit_attempt_from_recovery,
     };
 
     #[tokio::test]
@@ -242,7 +244,7 @@ mod tests {
                 "btc-core",
                 "btc-core:batch-1:0",
                 SubmitRecoveryToken::empty(),
-                None,
+                SubmitRecoveryOrderLookup::NotQueried,
             ),
         )
         .await
@@ -406,7 +408,7 @@ mod tests {
                 "btc-core",
                 &target.effect_id,
                 target.recovery_token.clone(),
-                Some(&live_order),
+                SubmitRecoveryOrderLookup::Complete(Some(live_order)),
             )
             .await
             .unwrap();

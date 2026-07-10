@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use poise_application::{
-    RecoveryAnomalyObserver, TrackInstrument, TrackMutationError, TrackRecoveryIssue,
+    ExchangeStateSyncOutcome, RecoveryAnomalyObserver, TrackInstrument, TrackMutationError,
+    TrackRecoveryIssue,
 };
 use poise_core::track::TrackId;
 use poise_engine::manager::ExchangeSyncMode;
@@ -25,6 +26,7 @@ use super::{
 };
 
 const ORDER_SET_RECOVERY_RESET_RETRY_ATTEMPTS: usize = 5;
+const EXCHANGE_STATE_SNAPSHOT_MAX_ATTEMPTS: usize = 3;
 #[cfg(test)]
 const ORDER_SET_RECOVERY_RESET_RETRY_DELAY: Duration = Duration::from_millis(1);
 #[cfg(not(test))]
@@ -228,27 +230,33 @@ pub(super) async fn sync_exchange_state_from_exchange(
 ) -> std::result::Result<(), TrackMutationError> {
     let state = state.reconcile_state_view();
     let _reconcile_guard = state.reconcile_guards.lock(track_id).await;
-    let sync_token = state.exchange_freshness.prepare_sync(track_id).await;
-    let recovery_view = state
-        .runtime_lifecycle_service
-        .load_track_recovery_summary(&TrackId::new(track_id))
-        .await
-        .map_err(TrackMutationError::Persistence)?;
-    let mut position = execution
-        .get_position(instrument)
-        .await
-        .map_err(execution_persistence_error)?;
-    let mut open_orders = execution
-        .get_open_orders(instrument)
-        .await
-        .map_err(execution_persistence_error)?;
+    for attempt in 1..=EXCHANGE_STATE_SNAPSHOT_MAX_ATTEMPTS {
+        let snapshot_token = state
+            .observation_service
+            .prepare_exchange_state_sync(track_id)
+            .await
+            .map_err(preserve_track_mutation_error)?;
+        let freshness_token = state.exchange_freshness.prepare_sync(track_id).await;
+        let recovery_view = state
+            .runtime_lifecycle_service
+            .load_track_recovery_summary(&TrackId::new(track_id))
+            .await
+            .map_err(TrackMutationError::Persistence)?;
+        let mut position = execution
+            .get_position(instrument)
+            .await
+            .map_err(execution_persistence_error)?;
+        let mut open_orders = execution
+            .get_open_orders(instrument)
+            .await
+            .map_err(execution_persistence_error)?;
 
-    if recovery_view
-        .as_ref()
-        .and_then(|view| view.issue)
-        .is_some_and(order_set_reset_required_for_recovery_issue)
-    {
-        if !open_orders.is_empty() {
+        if recovery_view
+            .as_ref()
+            .and_then(|view| view.issue)
+            .is_some_and(order_set_reset_required_for_recovery_issue)
+            && !open_orders.is_empty()
+        {
             let runtime = state
                 .observation_service
                 .track_runtime_view(track_id)
@@ -273,39 +281,63 @@ pub(super) async fn sync_exchange_state_from_exchange(
                 .await
                 .map_err(execution_persistence_error)?;
         }
+
+        let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(
+            open_orders
+                .orders()
+                .iter()
+                .map(exchange_state::order_observation)
+                .collect(),
+        );
+
+        let outcome = if matches!(mode, ExchangeSyncMode::RecoverAndReconcile) {
+            state
+                .observation_service
+                .sync_exchange_state(
+                    snapshot_token,
+                    exchange_state::position_observation(&position),
+                    open_orders,
+                )
+                .await
+                .map_err(preserve_track_mutation_error)?
+        } else {
+            state
+                .observation_service
+                .sync_exchange_state_without_reconcile(
+                    snapshot_token,
+                    exchange_state::position_observation(&position),
+                    open_orders,
+                )
+                .await
+                .map_err(preserve_track_mutation_error)?
+        };
+
+        match outcome {
+            ExchangeStateSyncOutcome::Applied(_) => {
+                state
+                    .exchange_freshness
+                    .clear_if_current(freshness_token)
+                    .await;
+                return Ok(());
+            }
+            ExchangeStateSyncOutcome::RevisionChanged
+                if attempt < EXCHANGE_STATE_SNAPSHOT_MAX_ATTEMPTS =>
+            {
+                tracing::debug!(
+                    track_id,
+                    attempt,
+                    "discarded superseded exchange REST snapshot; retrying"
+                );
+            }
+            ExchangeStateSyncOutcome::RevisionChanged => {
+                return Err(TrackMutationError::Mutation(anyhow!(
+                    "exchange state changed during all {EXCHANGE_STATE_SNAPSHOT_MAX_ATTEMPTS} REST snapshot attempts for track `{track_id}`"
+                )));
+            }
+        }
     }
 
-    let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(
-        open_orders
-            .orders()
-            .iter()
-            .map(exchange_state::order_observation)
-            .collect(),
-    );
-
-    if matches!(mode, ExchangeSyncMode::RecoverAndReconcile) {
-        let _ = state
-            .observation_service
-            .sync_exchange_state(
-                track_id,
-                exchange_state::position_observation(&position),
-                open_orders,
-            )
-            .await
-            .map_err(preserve_track_mutation_error)?;
-    } else {
-        let _ = state
-            .observation_service
-            .sync_exchange_state_without_reconcile(
-                track_id,
-                exchange_state::position_observation(&position),
-                open_orders,
-            )
-            .await
-            .map_err(preserve_track_mutation_error)?;
-    }
-    state.exchange_freshness.clear_if_current(sync_token).await;
-    Ok(())
+    unreachable!("exchange state snapshot attempt loop must return")
 }
 
 fn order_set_reset_required_for_recovery_issue(issue: TrackRecoveryIssue) -> bool {
@@ -462,12 +494,13 @@ mod tests {
 
     use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
     use poise_core::track::{Instrument, TrackId, Venue};
+    use poise_engine::command::TrackCommand;
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
     use poise_engine::manager::ExchangeSyncMode;
     use poise_engine::ports::{
         ExchangeOpenOrderSnapshot, ExchangeOrder, ExecutionPort, OrderReceipt, OrderRequest,
-        OrderStatus, Position,
+        OrderStatus, Position, UserDataEvent, UserDataPayload,
     };
     use poise_storage::sqlite::SqliteStorage;
 
@@ -535,6 +568,598 @@ mod tests {
                 reseed_required: true,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn blocked_rest_position_snapshot_retries_after_newer_ws_position() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            test_manager("btc-core"),
+            repository.clone() as Arc<dyn TrackMutationStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
+            notifications.clone(),
+            account_margin_guard,
+        );
+        let account_monitor = unavailable_account_monitor(notifications);
+        let (runtime_context, _) = build_runtime_and_effect_worker_test_contexts(
+            &services,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository as Arc<dyn TrackEffectJournal>,
+            account_monitor,
+        );
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+        let exchange = Arc::new(BlockingPositionSnapshotExchange::new(instrument.clone()));
+        let sync_context = runtime_context.clone();
+        let sync_exchange = exchange.clone();
+        let sync_instrument = instrument.clone();
+        let sync_task = tokio::spawn(async move {
+            sync_exchange_state_from_exchange(
+                &sync_context,
+                sync_exchange.as_ref(),
+                "btc-core",
+                &sync_instrument,
+                ExchangeSyncMode::RecoverOnly,
+            )
+            .await
+        });
+
+        exchange.first_position_started.notified().await;
+        runtime_context
+            .exchange_freshness
+            .mark_stale(
+                "btc-core",
+                crate::exchange_freshness::ExchangeFreshnessReason::SubmitOutcomeUnknown,
+            )
+            .await;
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            exchange_state::apply_user_data_event(
+                &runtime_context,
+                exchange.as_ref(),
+                "btc-core",
+                UserDataEvent {
+                    event_time: chrono::Utc::now(),
+                    payload: UserDataPayload::PositionUpdate(Position {
+                        instrument: instrument.clone(),
+                        qty: 0.75,
+                        avg_price: 100.0,
+                        unrealized_pnl: 9.0,
+                        mark_price: Some(101.0),
+                    }),
+                },
+            ),
+        )
+        .await
+        .expect("WS position mutation must not wait for the blocked REST request")
+        .unwrap();
+        exchange.release_first_position.notify_one();
+
+        exchange.second_position_started.notified().await;
+        let during_retry = services
+            .runtime_lifecycle_service
+            .manager()
+            .read()
+            .await
+            .mutation_frame("btc-core")
+            .unwrap();
+        assert_eq!(during_retry.unrealized_pnl(), 9.0);
+        assert!(during_retry.current_exposure().0 > 0.0);
+        exchange.release_second_position.notify_one();
+
+        sync_task.await.unwrap().unwrap();
+        let final_frame = services
+            .runtime_lifecycle_service
+            .manager()
+            .read()
+            .await
+            .mutation_frame("btc-core")
+            .unwrap();
+        assert_eq!(final_frame.unrealized_pnl(), 9.0);
+        assert!(final_frame.current_exposure().0 > 0.0);
+        assert_eq!(exchange.get_position_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(exchange.get_open_orders_calls.load(Ordering::SeqCst), 2);
+        assert!(
+            !runtime_context
+                .exchange_freshness
+                .is_stale("btc-core")
+                .await,
+            "the retry must use a fresh freshness token and clear the fact it reconciled"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_position_revisions_exhaust_exactly_three_rest_snapshot_attempts() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            test_manager("btc-core"),
+            repository.clone() as Arc<dyn TrackMutationStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
+            notifications.clone(),
+            account_margin_guard,
+        );
+        let account_monitor = unavailable_account_monitor(notifications);
+        let (runtime_context, _) = build_runtime_and_effect_worker_test_contexts(
+            &services,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository as Arc<dyn TrackEffectJournal>,
+            account_monitor,
+        );
+        runtime_context
+            .exchange_freshness
+            .mark_stale(
+                "btc-core",
+                crate::exchange_freshness::ExchangeFreshnessReason::SubmitOutcomeUnknown,
+            )
+            .await;
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+        let exchange = Arc::new(ExhaustingPositionSnapshotExchange::new(instrument.clone()));
+        let sync_context = runtime_context.clone();
+        let sync_exchange = exchange.clone();
+        let sync_instrument = instrument.clone();
+        let sync_task = tokio::spawn(async move {
+            sync_exchange_state_from_exchange(
+                &sync_context,
+                sync_exchange.as_ref(),
+                "btc-core",
+                &sync_instrument,
+                ExchangeSyncMode::RecoverOnly,
+            )
+            .await
+        });
+
+        for attempt in 0..EXCHANGE_STATE_SNAPSHOT_MAX_ATTEMPTS {
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                exchange.position_started[attempt].notified(),
+            )
+            .await
+            .expect("REST position attempt should start");
+            exchange_state::apply_user_data_event(
+                &runtime_context,
+                exchange.as_ref(),
+                "btc-core",
+                UserDataEvent {
+                    event_time: chrono::Utc::now(),
+                    payload: UserDataPayload::PositionUpdate(Position {
+                        instrument: instrument.clone(),
+                        qty: 0.25 * (attempt + 1) as f64,
+                        avg_price: 100.0,
+                        unrealized_pnl: 10.0 + attempt as f64,
+                        mark_price: Some(101.0),
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+            exchange.release_position[attempt].notify_one();
+        }
+
+        let error = tokio::time::timeout(Duration::from_secs(1), sync_task)
+            .await
+            .expect("three superseded snapshots should terminate with an error")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            error.message(),
+            "exchange state changed during all 3 REST snapshot attempts for track `btc-core`"
+        );
+        assert_eq!(
+            exchange.get_position_calls.load(Ordering::SeqCst),
+            EXCHANGE_STATE_SNAPSHOT_MAX_ATTEMPTS
+        );
+        assert_eq!(
+            exchange.get_open_orders_calls.load(Ordering::SeqCst),
+            EXCHANGE_STATE_SNAPSHOT_MAX_ATTEMPTS
+        );
+        assert!(
+            runtime_context
+                .exchange_freshness
+                .is_stale("btc-core")
+                .await,
+            "exhausted stale snapshots must not clear exchange freshness"
+        );
+        let final_frame = services
+            .runtime_lifecycle_service
+            .manager()
+            .read()
+            .await
+            .mutation_frame("btc-core")
+            .unwrap();
+        assert_eq!(final_frame.unrealized_pnl(), 12.0);
+        assert!(
+            final_frame.current_exposure().0 > 0.0,
+            "the third WS position must survive the final stale REST snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_rest_open_orders_snapshot_retries_after_newer_ws_order() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            test_manager("btc-core"),
+            repository.clone() as Arc<dyn TrackMutationStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
+            notifications.clone(),
+            account_margin_guard,
+        );
+        let account_monitor = unavailable_account_monitor(notifications);
+        let (runtime_context, _) = build_runtime_and_effect_worker_test_contexts(
+            &services,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository as Arc<dyn TrackEffectJournal>,
+            account_monitor,
+        );
+        let transition = runtime_context
+            .observe_market("btc-core", 95.0)
+            .await
+            .unwrap();
+        let tracked_request = transition
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                TrackEffect::SubmitOrder { request, .. } => Some(request.clone()),
+                _ => None,
+            })
+            .expect("seed market should create a tracked submit order");
+        services
+            .command_service
+            .command("btc-core", TrackCommand::Pause)
+            .await
+            .unwrap();
+        let working_order = ExchangeOrder {
+            instrument: tracked_request.instrument.clone(),
+            order_id: "tracked-order".to_string(),
+            client_order_id: tracked_request.client_order_id.clone(),
+            side: tracked_request.side,
+            price: tracked_request.price,
+            qty: tracked_request.quantity,
+            filled_qty: 0.0,
+            status: OrderStatus::New,
+        };
+        let exchange = Arc::new(BlockingOpenOrdersSnapshotExchange::new(
+            tracked_request.instrument.clone(),
+            working_order.clone(),
+        ));
+        let sync_context = runtime_context.clone();
+        let sync_exchange = exchange.clone();
+        let sync_instrument = tracked_request.instrument.clone();
+        let sync_task = tokio::spawn(async move {
+            sync_exchange_state_from_exchange(
+                &sync_context,
+                sync_exchange.as_ref(),
+                "btc-core",
+                &sync_instrument,
+                ExchangeSyncMode::RecoverOnly,
+            )
+            .await
+        });
+
+        exchange.first_open_orders_started.notified().await;
+        let mut filled_order = working_order;
+        filled_order.filled_qty = filled_order.qty;
+        filled_order.status = OrderStatus::Filled;
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            exchange_state::apply_user_data_event(
+                &runtime_context,
+                exchange.as_ref(),
+                "btc-core",
+                UserDataEvent {
+                    event_time: chrono::Utc::now(),
+                    payload: UserDataPayload::OrderUpdate(filled_order),
+                },
+            ),
+        )
+        .await
+        .expect("WS order mutation must not wait for the blocked REST request")
+        .unwrap();
+        exchange.release_first_open_orders.notify_one();
+
+        exchange.second_open_orders_started.notified().await;
+        let during_retry = services
+            .runtime_lifecycle_service
+            .manager()
+            .read()
+            .await
+            .mutation_frame("btc-core")
+            .unwrap();
+        assert_eq!(
+            during_retry.binding_is_active_for_client_order_id(&tracked_request.client_order_id),
+            Some(false),
+            "the old working-order snapshot must not revive the filled binding"
+        );
+        exchange.release_second_open_orders.notify_one();
+
+        sync_task.await.unwrap().unwrap();
+        let final_frame = services
+            .runtime_lifecycle_service
+            .manager()
+            .read()
+            .await
+            .mutation_frame("btc-core")
+            .unwrap();
+        assert_ne!(
+            final_frame.binding_is_active_for_client_order_id(&tracked_request.client_order_id),
+            Some(true)
+        );
+        assert!(!final_frame.recovery_anomaly_active());
+        assert_eq!(exchange.get_position_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(exchange.get_open_orders_calls.load(Ordering::SeqCst), 2);
+    }
+
+    struct BlockingPositionSnapshotExchange {
+        instrument: Instrument,
+        first_position_started: Notify,
+        release_first_position: Notify,
+        second_position_started: Notify,
+        release_second_position: Notify,
+        get_position_calls: AtomicUsize,
+        get_open_orders_calls: AtomicUsize,
+    }
+
+    impl BlockingPositionSnapshotExchange {
+        fn new(instrument: Instrument) -> Self {
+            Self {
+                instrument,
+                first_position_started: Notify::new(),
+                release_first_position: Notify::new(),
+                second_position_started: Notify::new(),
+                release_second_position: Notify::new(),
+                get_position_calls: AtomicUsize::new(0),
+                get_open_orders_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    struct ExhaustingPositionSnapshotExchange {
+        instrument: Instrument,
+        position_started: [Notify; EXCHANGE_STATE_SNAPSHOT_MAX_ATTEMPTS],
+        release_position: [Notify; EXCHANGE_STATE_SNAPSHOT_MAX_ATTEMPTS],
+        get_position_calls: AtomicUsize,
+        get_open_orders_calls: AtomicUsize,
+    }
+
+    impl ExhaustingPositionSnapshotExchange {
+        fn new(instrument: Instrument) -> Self {
+            Self {
+                instrument,
+                position_started: std::array::from_fn(|_| Notify::new()),
+                release_position: std::array::from_fn(|_| Notify::new()),
+                get_position_calls: AtomicUsize::new(0),
+                get_open_orders_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    struct BlockingOpenOrdersSnapshotExchange {
+        instrument: Instrument,
+        first_order: ExchangeOrder,
+        first_open_orders_started: Notify,
+        release_first_open_orders: Notify,
+        second_open_orders_started: Notify,
+        release_second_open_orders: Notify,
+        get_position_calls: AtomicUsize,
+        get_open_orders_calls: AtomicUsize,
+    }
+
+    impl BlockingOpenOrdersSnapshotExchange {
+        fn new(instrument: Instrument, first_order: ExchangeOrder) -> Self {
+            Self {
+                instrument,
+                first_order,
+                first_open_orders_started: Notify::new(),
+                release_first_open_orders: Notify::new(),
+                second_open_orders_started: Notify::new(),
+                release_second_open_orders: Notify::new(),
+                get_position_calls: AtomicUsize::new(0),
+                get_open_orders_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutionPort for BlockingPositionSnapshotExchange {
+        async fn submit_order(
+            &self,
+            _req: OrderRequest,
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            unreachable!("submit_order is not used")
+        }
+
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            _order_id: &str,
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            unreachable!("cancel_order is not used")
+        }
+
+        async fn cancel_all(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<()> {
+            unreachable!("cancel_all is not used")
+        }
+
+        async fn get_position(
+            &self,
+            instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<Position> {
+            assert_eq!(instrument, &self.instrument);
+            let call = self.get_position_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            match call {
+                1 => {
+                    self.first_position_started.notify_one();
+                    self.release_first_position.notified().await;
+                    Ok(Position {
+                        instrument: instrument.clone(),
+                        qty: 0.0,
+                        avg_price: 0.0,
+                        unrealized_pnl: 0.0,
+                        mark_price: None,
+                    })
+                }
+                2 => {
+                    self.second_position_started.notify_one();
+                    self.release_second_position.notified().await;
+                    Ok(Position {
+                        instrument: instrument.clone(),
+                        qty: 0.75,
+                        avg_price: 100.0,
+                        unrealized_pnl: 9.0,
+                        mark_price: Some(101.0),
+                    })
+                }
+                _ => panic!("unexpected get_position call {call}"),
+            }
+        }
+
+        async fn get_open_orders(
+            &self,
+            instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
+            assert_eq!(instrument, &self.instrument);
+            self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                Vec::new(),
+            ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutionPort for ExhaustingPositionSnapshotExchange {
+        async fn submit_order(
+            &self,
+            _req: OrderRequest,
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            unreachable!("submit_order is not used")
+        }
+
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            _order_id: &str,
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            unreachable!("cancel_order is not used")
+        }
+
+        async fn cancel_all(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<()> {
+            unreachable!("cancel_all is not used")
+        }
+
+        async fn get_position(
+            &self,
+            instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<Position> {
+            assert_eq!(instrument, &self.instrument);
+            let attempt = self.get_position_calls.fetch_add(1, Ordering::SeqCst);
+            let started = self
+                .position_started
+                .get(attempt)
+                .unwrap_or_else(|| panic!("unexpected fourth get_position call"));
+            let release = self
+                .release_position
+                .get(attempt)
+                .expect("each allowed position attempt must have a release gate");
+            started.notify_one();
+            release.notified().await;
+            Ok(Position {
+                instrument: instrument.clone(),
+                qty: 0.0,
+                avg_price: 0.0,
+                unrealized_pnl: 0.0,
+                mark_price: None,
+            })
+        }
+
+        async fn get_open_orders(
+            &self,
+            instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
+            assert_eq!(instrument, &self.instrument);
+            self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                Vec::new(),
+            ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutionPort for BlockingOpenOrdersSnapshotExchange {
+        async fn submit_order(
+            &self,
+            _req: OrderRequest,
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            unreachable!("submit_order is not used")
+        }
+
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            _order_id: &str,
+        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+            unreachable!("cancel_order is not used")
+        }
+
+        async fn cancel_all(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<()> {
+            unreachable!("cancel_all is not used")
+        }
+
+        async fn get_position(
+            &self,
+            instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<Position> {
+            assert_eq!(instrument, &self.instrument);
+            self.get_position_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Position {
+                instrument: instrument.clone(),
+                qty: 0.0,
+                avg_price: 0.0,
+                unrealized_pnl: 0.0,
+                mark_price: None,
+            })
+        }
+
+        async fn get_open_orders(
+            &self,
+            instrument: &Instrument,
+        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
+            assert_eq!(instrument, &self.instrument);
+            let call = self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            match call {
+                1 => {
+                    let snapshot = ExchangeOpenOrderSnapshot::from_complete_exchange_query(vec![
+                        self.first_order.clone(),
+                    ]);
+                    self.first_open_orders_started.notify_one();
+                    self.release_first_open_orders.notified().await;
+                    Ok(snapshot)
+                }
+                2 => {
+                    self.second_open_orders_started.notify_one();
+                    self.release_second_open_orders.notified().await;
+                    Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                        Vec::new(),
+                    ))
+                }
+                _ => panic!("unexpected get_open_orders call {call}"),
+            }
+        }
     }
 
     #[tokio::test]

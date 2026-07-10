@@ -50,6 +50,19 @@ pub struct RiskState {
     pub unrealized_pnl: f64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExchangeObservationRevision(u64);
+
+impl ExchangeObservationRevision {
+    fn next(self) -> Self {
+        Self(
+            self.0
+                .checked_add(1)
+                .expect("exchange observation revision exhausted"),
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppliedRiskCap {
     pub intended: Exposure,
@@ -366,6 +379,9 @@ impl ExecutorState {
 #[derive(Debug, Clone)]
 pub struct TrackRuntime {
     definition: TrackDefinition,
+    // Process-local invalidation clock for composite REST snapshots. It is intentionally not part
+    // of TrackMutationFrame: rolling business state back must never make an old token current.
+    exchange_observation_revision: ExchangeObservationRevision,
     pub(crate) exchange_rules: ExchangeRules,
     pub(crate) track_state: TrackState,
     pub(crate) current_exposure: Exposure,
@@ -445,6 +461,7 @@ impl TrackRuntime {
     ) -> Self {
         Self {
             definition,
+            exchange_observation_revision: ExchangeObservationRevision::default(),
             exchange_rules,
             track_state: TrackState::WaitingMarketData,
             current_exposure: Exposure(0.0),
@@ -524,6 +541,28 @@ impl TrackRuntime {
         &self.exchange_rules
     }
 
+    pub fn exchange_observation_revision(&self) -> ExchangeObservationRevision {
+        self.exchange_observation_revision
+    }
+
+    pub(crate) fn advance_exchange_observation_revision(&mut self) {
+        self.exchange_observation_revision = self.exchange_observation_revision.next();
+    }
+
+    pub(crate) fn restore_revision_after_speculative_market_mutation(
+        &mut self,
+        revision: ExchangeObservationRevision,
+    ) {
+        self.exchange_observation_revision = revision;
+    }
+
+    pub(crate) fn replace_executor_state(&mut self, executor_state: ExecutorState) {
+        if self.executor_state != executor_state {
+            self.executor_state = executor_state;
+            self.advance_exchange_observation_revision();
+        }
+    }
+
     pub fn native_qty_per_exposure_unit(&self) -> f64 {
         native_qty_per_exposure_unit(self.config(), &self.exchange_rules)
     }
@@ -576,6 +615,7 @@ impl TrackRuntime {
             started_at,
             self.tick_timeout_secs,
         );
+        fresh.exchange_observation_revision = self.exchange_observation_revision.next();
         fresh.track_state = track_state.clone();
         fresh.current_exposure = current_exposure.clone();
         fresh.current_position_qty = position_qty;
