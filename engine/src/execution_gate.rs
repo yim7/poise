@@ -66,7 +66,7 @@ impl AccountCapacityGate {
     }
 }
 
-fn added_risk_units(current: f64, approved_target: f64) -> f64 {
+pub(crate) fn added_risk_units(current: f64, approved_target: f64) -> f64 {
     let crosses_zero =
         (current > 0.0 && approved_target < 0.0) || (current < 0.0 && approved_target > 0.0);
     if crosses_zero {

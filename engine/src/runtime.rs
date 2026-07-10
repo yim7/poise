@@ -24,8 +24,8 @@ use crate::price_gate::{
 };
 use crate::reconciler;
 use crate::risk_exposure_gate::{
-    self, FreshAcquisitionInitialization, RiskAcquisitionRelease, RiskExposureGateState,
-    RiskIncreaseDirection,
+    self, AppliedRiskAcquisitionRelease, FreshAcquisitionInitialization, RiskAcquisitionRelease,
+    RiskExposureGateState, RiskIncreaseDirection,
 };
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -464,6 +464,7 @@ pub struct TrackRuntime {
     pub(crate) desired_exposure: Option<Exposure>,
     pub(crate) inventory_decision: Option<InventoryDecisionSnapshot>,
     pub(crate) inventory_decision_revision: u64,
+    pub(crate) applied_risk_acquisition_release: Option<AppliedRiskAcquisitionRelease>,
     pub(crate) fresh_acquisition_session: Option<FreshAcquisitionSession>,
     pub(crate) executor_state: ExecutorState,
     pub(crate) pnl_stats: TrackPnlStats,
@@ -545,6 +546,7 @@ impl TrackRuntime {
             desired_exposure: None,
             inventory_decision: None,
             inventory_decision_revision: 0,
+            applied_risk_acquisition_release: None,
             fresh_acquisition_session: None,
             executor_state: ExecutorState::empty(started_at),
             pnl_stats: TrackPnlStats::default(),
@@ -790,7 +792,20 @@ impl TrackRuntime {
             .expect("inventory decision revision exhausted")
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_inventory_decision(&mut self, decision: Option<InventoryDecisionSnapshot>) {
+        self.apply_inventory_decision_with_release(decision, None);
+    }
+
+    pub(crate) fn apply_inventory_decision_with_release(
+        &mut self,
+        decision: Option<InventoryDecisionSnapshot>,
+        applied_release: Option<AppliedRiskAcquisitionRelease>,
+    ) {
+        assert!(
+            decision.is_some() || applied_release.is_none(),
+            "applied risk acquisition release requires an inventory decision"
+        );
         if let Some(decision) = &decision {
             assert_eq!(
                 decision.revision,
@@ -800,6 +815,7 @@ impl TrackRuntime {
             self.inventory_decision_revision = decision.revision;
         }
         self.inventory_decision = decision;
+        self.applied_risk_acquisition_release = applied_release;
     }
 
     pub fn mutation_frame(&self) -> TrackMutationFrame {
@@ -812,6 +828,7 @@ impl TrackRuntime {
             desired_exposure: self.desired_exposure.clone(),
             inventory_decision: self.inventory_decision.clone(),
             inventory_decision_revision: self.inventory_decision_revision,
+            applied_risk_acquisition_release: self.applied_risk_acquisition_release.clone(),
             fresh_acquisition_session: self.fresh_acquisition_session.clone(),
             executor_state: self.executor_state.clone(),
             execution_gate_state: self.execution_gate_state.clone(),
@@ -846,6 +863,7 @@ impl TrackRuntime {
         self.desired_exposure = frame.desired_exposure.clone();
         self.inventory_decision = frame.inventory_decision.clone();
         self.inventory_decision_revision = frame.inventory_decision_revision;
+        self.applied_risk_acquisition_release = frame.applied_risk_acquisition_release.clone();
         self.fresh_acquisition_session = frame.fresh_acquisition_session.clone();
         self.executor_state = frame.executor_state.clone();
         self.pnl_stats = frame.pnl_stats.clone();
@@ -1089,6 +1107,9 @@ fn validate_frame_invariants(frame: &TrackMutationFrame) -> Result<()> {
         && decision.revision != frame.inventory_decision_revision
     {
         anyhow::bail!("inventory decision revision does not match frame revision");
+    }
+    if frame.inventory_decision.is_none() && frame.applied_risk_acquisition_release.is_some() {
+        anyhow::bail!("applied risk acquisition release requires an inventory decision");
     }
 
     Ok(())

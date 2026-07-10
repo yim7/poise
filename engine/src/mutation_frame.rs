@@ -9,6 +9,7 @@ use crate::execution_gate::ExecutionGateState;
 use crate::executor::{BindingStatus, RecoveryAnomaly};
 use crate::ledger::TrackPnlStats;
 use crate::ports::OrderReceipt;
+use crate::risk_exposure_gate::AppliedRiskAcquisitionRelease;
 #[cfg(any(test, feature = "test-support"))]
 use crate::risk_exposure_gate::RiskExposureGateState;
 #[cfg(any(test, feature = "test-support"))]
@@ -43,6 +44,7 @@ pub struct TrackMutationFrame {
     pub(crate) desired_exposure: Option<Exposure>,
     pub(crate) inventory_decision: Option<InventoryDecisionSnapshot>,
     pub(crate) inventory_decision_revision: u64,
+    pub(crate) applied_risk_acquisition_release: Option<AppliedRiskAcquisitionRelease>,
     pub(crate) fresh_acquisition_session: Option<FreshAcquisitionSession>,
     pub(crate) executor_state: ExecutorState,
     pub(crate) execution_gate_state: ExecutionGateState,

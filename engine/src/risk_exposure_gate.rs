@@ -26,6 +26,22 @@ pub struct RiskAcquisitionRelease {
     pub advantage_target: Exposure,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppliedRiskAcquisitionReleaseTrigger {
+    InitialRatio,
+    PriceAdvantage,
+    StaleTimeout,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AppliedRiskAcquisitionRelease {
+    pub trigger: AppliedRiskAcquisitionReleaseTrigger,
+    pub direction: RiskIncreaseDirection,
+    pub frontier_before: Exposure,
+    pub frontier_after: Exposure,
+    pub release_units: f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FreshAcquisitionInitialization {
     pub initial_frontier: Exposure,
@@ -48,6 +64,7 @@ pub struct RiskExposureGateDecision {
     pub risk_release_frontier: Exposure,
     pub state: Option<RiskExposureGateState>,
     pub next_release: Option<RiskAcquisitionRelease>,
+    pub(crate) applied_release: Option<AppliedRiskAcquisitionRelease>,
 }
 
 pub fn initialize_fresh_session(
@@ -79,6 +96,7 @@ pub fn initialize_fresh_session(
             risk_release_frontier: initial_frontier.clone(),
             state,
             next_release,
+            applied_release: None,
         },
         FreshAcquisitionInitialization {
             initial_frontier,
@@ -89,6 +107,7 @@ pub fn initialize_fresh_session(
 
 pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
     let config = input.config;
+    let mut applied_release = None;
 
     let mut gate_state = input.state.clone();
     let mut previous_frontier = gate_state
@@ -118,14 +137,21 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
     };
 
     let mut state = gate_state.unwrap_or_else(|| {
-        startup_state(
+        let state = startup_state(
             config,
             input.min_rebalance_units,
             input.current_exposure.clone(),
             input.curve_target.clone(),
             input.strategy_price,
             input.observed_at,
-        )
+        );
+        applied_release = build_applied_release(
+            AppliedRiskAcquisitionReleaseTrigger::InitialRatio,
+            direction,
+            input.current_exposure.clone(),
+            state.risk_release_frontier.clone(),
+        );
+        state
     });
 
     if !same_direction_backlog(
@@ -140,6 +166,12 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
             input.curve_target.clone(),
             input.strategy_price,
             input.observed_at,
+        );
+        applied_release = build_applied_release(
+            AppliedRiskAcquisitionReleaseTrigger::InitialRatio,
+            direction,
+            input.current_exposure.clone(),
+            state.risk_release_frontier.clone(),
         );
     }
 
@@ -177,6 +209,7 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
 
     let reached_stale_release = stale_release_due(config, &state, input.observed_at);
     if reached_advantage || reached_stale_release {
+        let frontier_before = state.risk_release_frontier.clone();
         let release_units = release_units(
             config,
             input.min_rebalance_units,
@@ -187,6 +220,17 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
             state.risk_release_frontier,
             input.curve_target.clone(),
             release_units,
+        );
+        let trigger = if reached_advantage {
+            AppliedRiskAcquisitionReleaseTrigger::PriceAdvantage
+        } else {
+            AppliedRiskAcquisitionReleaseTrigger::StaleTimeout
+        };
+        applied_release = build_applied_release(
+            trigger,
+            direction,
+            frontier_before,
+            state.risk_release_frontier.clone(),
         );
         if reached_advantage {
             state.release_anchor_price = input.strategy_price;
@@ -206,6 +250,7 @@ pub fn apply(input: RiskExposureGateInput) -> RiskExposureGateDecision {
         risk_release_frontier: state.risk_release_frontier.clone(),
         state: Some(state),
         next_release,
+        applied_release,
     }
 }
 
@@ -222,6 +267,7 @@ fn clamp_released_frontier(
         risk_release_frontier,
         state: None,
         next_release: None,
+        applied_release: None,
     }
 }
 
@@ -248,7 +294,27 @@ fn clamp_state_to_frontier(
         risk_release_frontier,
         state: Some(state),
         next_release: None,
+        applied_release: None,
     }
+}
+
+fn build_applied_release(
+    trigger: AppliedRiskAcquisitionReleaseTrigger,
+    direction: RiskIncreaseDirection,
+    frontier_before: Exposure,
+    frontier_after: Exposure,
+) -> Option<AppliedRiskAcquisitionRelease> {
+    let release_units = match direction {
+        RiskIncreaseDirection::Long => frontier_after.0 - frontier_before.0,
+        RiskIncreaseDirection::Short => frontier_before.0 - frontier_after.0,
+    };
+    (release_units > f64::EPSILON).then_some(AppliedRiskAcquisitionRelease {
+        trigger,
+        direction,
+        frontier_before,
+        frontier_after,
+        release_units,
+    })
 }
 
 fn startup_state(
@@ -555,6 +621,16 @@ mod tests {
 
         assert_eq!(decision.risk_release_frontier, Exposure(2.5));
         assert_eq!(
+            decision.applied_release,
+            Some(AppliedRiskAcquisitionRelease {
+                trigger: AppliedRiskAcquisitionReleaseTrigger::InitialRatio,
+                direction: RiskIncreaseDirection::Long,
+                frontier_before: Exposure(0.0),
+                frontier_after: Exposure(2.5),
+                release_units: 2.5,
+            })
+        );
+        assert_eq!(
             decision.state,
             Some(RiskExposureGateState {
                 risk_release_frontier: Exposure(2.5),
@@ -564,6 +640,22 @@ mod tests {
             })
         );
         assert!(decision.next_release.is_some());
+    }
+
+    #[test]
+    fn startup_release_counts_only_new_risk_beyond_current_exposure() {
+        let decision = apply(input(None, 2.0, 5.0, 100.0));
+
+        assert_eq!(
+            decision.applied_release,
+            Some(AppliedRiskAcquisitionRelease {
+                trigger: AppliedRiskAcquisitionReleaseTrigger::InitialRatio,
+                direction: RiskIncreaseDirection::Long,
+                frontier_before: Exposure(2.0),
+                frontier_after: Exposure(2.5),
+                release_units: 0.5,
+            })
+        );
     }
 
     #[test]
@@ -585,6 +677,7 @@ mod tests {
 
             assert_eq!(decision.risk_release_frontier, Exposure(expected_frontier));
             assert_eq!(decision.state.is_some(), expects_gate);
+            assert_eq!(decision.applied_release, None);
             assert_eq!(initialization.initial_frontier, Exposure(expected_frontier));
             assert_eq!(initialization.initial_release_units, 0.0);
         }
@@ -618,6 +711,7 @@ mod tests {
         let decision = apply(input(None, -0.25, 0.75, 100.0));
 
         assert_eq!(decision.risk_release_frontier, Exposure(0.0));
+        assert_eq!(decision.applied_release, None);
         assert_eq!(
             decision.state,
             Some(RiskExposureGateState {
@@ -654,6 +748,7 @@ mod tests {
         let decision = apply(input(Some(state.clone()), 1.5, 5.9, 99.6));
 
         assert_eq!(decision.risk_release_frontier, Exposure(1.5));
+        assert_eq!(decision.applied_release, None);
         assert_eq!(decision.state, Some(state));
     }
 
@@ -664,6 +759,16 @@ mod tests {
         let decision = apply(input(Some(state), 1.5, 6.0, 99.5));
 
         assert_eq!(decision.risk_release_frontier, Exposure(2.625));
+        assert_eq!(
+            decision.applied_release,
+            Some(AppliedRiskAcquisitionRelease {
+                trigger: AppliedRiskAcquisitionReleaseTrigger::PriceAdvantage,
+                direction: RiskIncreaseDirection::Long,
+                frontier_before: Exposure(1.5),
+                frontier_after: Exposure(2.625),
+                release_units: 1.125,
+            })
+        );
         assert_eq!(
             decision.state,
             Some(RiskExposureGateState {
@@ -684,12 +789,42 @@ mod tests {
 
         assert_eq!(decision.risk_release_frontier, Exposure(2.5));
         assert_eq!(
+            decision.applied_release,
+            Some(AppliedRiskAcquisitionRelease {
+                trigger: AppliedRiskAcquisitionReleaseTrigger::StaleTimeout,
+                direction: RiskIncreaseDirection::Long,
+                frontier_before: Exposure(1.5),
+                frontier_after: Exposure(2.5),
+                release_units: 1.0,
+            })
+        );
+        assert_eq!(
             decision.state,
             Some(RiskExposureGateState {
                 risk_release_frontier: Exposure(2.5),
                 release_anchor_price: 100.0,
                 release_anchor_target: Exposure(5.0),
                 stale_since: later,
+            })
+        );
+    }
+
+    #[test]
+    fn advantage_wins_trigger_and_excludes_same_round_ratchet_from_release_units() {
+        let state = gate_state(1.5, 100.0, 5.0);
+        let later = observed_at() + Duration::minutes(60);
+
+        let decision = apply(input_at(Some(state), 2.0, 6.0, 99.5, later));
+
+        assert_eq!(decision.risk_release_frontier, Exposure(3.0));
+        assert_eq!(
+            decision.applied_release,
+            Some(AppliedRiskAcquisitionRelease {
+                trigger: AppliedRiskAcquisitionReleaseTrigger::PriceAdvantage,
+                direction: RiskIncreaseDirection::Long,
+                frontier_before: Exposure(2.0),
+                frontier_after: Exposure(3.0),
+                release_units: 1.0,
             })
         );
     }
@@ -806,6 +941,7 @@ mod tests {
         let decision = apply(input(Some(state), 2.0, 5.5, 99.8));
 
         assert_eq!(decision.risk_release_frontier, Exposure(2.0));
+        assert_eq!(decision.applied_release, None);
         assert_eq!(
             decision.state,
             Some(RiskExposureGateState {
@@ -903,6 +1039,7 @@ mod tests {
         let decision = apply(input(Some(state), 1.5, 1.0, 102.0));
 
         assert_eq!(decision.risk_release_frontier, Exposure(1.0));
+        assert_eq!(decision.applied_release, None);
         assert_eq!(
             decision.state,
             Some(RiskExposureGateState {

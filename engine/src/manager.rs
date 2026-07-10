@@ -19,7 +19,7 @@ use crate::observation::{
 use crate::ports::{ClockPort, ExchangeOrder, ExecutionQuote, OrderReceipt, OrderRequest};
 use crate::price_gate::{SubmitPurpose, evaluate_price_execution_gate};
 use crate::reconciler;
-use crate::risk_exposure_gate::FreshAcquisitionInitialization;
+use crate::risk_exposure_gate::{AppliedRiskAcquisitionRelease, FreshAcquisitionInitialization};
 use crate::runtime::{
     AutoState, ControlState, ExchangeObservationRevision, ExecutorState,
     FreshSessionExternalInputs, InventoryDecisionSnapshot, ManualState, QuoteHealthView,
@@ -212,6 +212,7 @@ impl TrackManager {
             desired_exposure,
             inventory_decision,
             inventory_decision_revision,
+            applied_risk_acquisition_release,
             fresh_acquisition_session,
             executor_state,
         ) = {
@@ -230,6 +231,7 @@ impl TrackManager {
                 track.desired_exposure.clone(),
                 track.inventory_decision.clone(),
                 track.inventory_decision_revision,
+                track.applied_risk_acquisition_release.clone(),
                 track.fresh_acquisition_session.clone(),
                 track.executor_state.clone(),
             )
@@ -246,6 +248,7 @@ impl TrackManager {
         track.desired_exposure = desired_exposure;
         track.inventory_decision = inventory_decision;
         track.inventory_decision_revision = inventory_decision_revision;
+        track.applied_risk_acquisition_release = applied_risk_acquisition_release;
         track.fresh_acquisition_session = fresh_acquisition_session;
         retain_live_only_executor_state(
             track,
@@ -517,7 +520,7 @@ impl TrackManager {
             track.track_state = TrackState::Terminated {
                 cause: TerminationCause::ManualCommand,
             };
-            Self::apply_targeting_state(track, Some(Exposure(0.0)), None);
+            Self::apply_targeting_state(track, Some(Exposure(0.0)), None, None);
             Self::live_strategy_price_for(track)
         };
 
@@ -539,7 +542,7 @@ impl TrackManager {
             }
 
             track.track_state = TrackState::Running(ControlState::Manual(ManualState::Flattened));
-            Self::apply_targeting_state(track, Some(Exposure(0.0)), None);
+            Self::apply_targeting_state(track, Some(Exposure(0.0)), None, None);
             Self::live_strategy_price_for(track)
         };
 
@@ -1051,6 +1054,7 @@ impl TrackManager {
             execution_gate_decision,
             executor_state,
             fresh_acquisition_initialization,
+            applied_risk_acquisition_release,
         } = planned;
         if let Some(new_runtime_state) = new_runtime_state {
             track.track_state = new_runtime_state;
@@ -1058,23 +1062,32 @@ impl TrackManager {
         track.execution_gate_state.last_decision = execution_gate_decision;
         track.apply_fresh_acquisition_initialization(fresh_acquisition_initialization);
         let desired_exposure = inventory_decision.risk_approved_target.clone();
-        Self::apply_targeting_state(track, Some(desired_exposure), Some(inventory_decision));
+        Self::apply_targeting_state(
+            track,
+            Some(desired_exposure),
+            Some(inventory_decision),
+            applied_risk_acquisition_release,
+        );
         track.replace_executor_state(executor_state);
 
         (events, effects)
     }
 
     fn clear_targeting_state(track: &mut TrackRuntime) {
-        Self::apply_targeting_state(track, None, None);
+        Self::apply_targeting_state(track, None, None, None);
     }
 
     fn apply_targeting_state(
         track: &mut TrackRuntime,
         desired_exposure: Option<Exposure>,
         inventory_decision: Option<InventoryDecisionSnapshot>,
+        applied_risk_acquisition_release: Option<AppliedRiskAcquisitionRelease>,
     ) {
         track.desired_exposure = desired_exposure;
-        track.apply_inventory_decision(inventory_decision);
+        track.apply_inventory_decision_with_release(
+            inventory_decision,
+            applied_risk_acquisition_release,
+        );
     }
 
     fn guard_market_data_freshness(&mut self, id: &TrackId) -> Result<bool> {
@@ -1169,7 +1182,10 @@ impl TrackManager {
         let normalized_track = self.track_with_current_pnl_day(track);
         let track = &normalized_track;
         let observed_at = self.clock.now();
-        let target = reconciler::reconcile_target_at(track, strategy_price, observed_at);
+        let reconciliation =
+            reconciler::reconcile_target_at_with_metadata(track, strategy_price, observed_at);
+        let applied_risk_acquisition_release = reconciliation.applied_risk_acquisition_release;
+        let target = reconciliation.result;
         let fresh_acquisition_initialization = target.fresh_acquisition_initialization.clone();
         if track.executor_state.recovery_anomaly.is_some() {
             let reason = Self::select_primary_decision_reason(
@@ -1191,6 +1207,7 @@ impl TrackManager {
                 execution_gate_decision: target.execution_gate_decision,
                 executor_state: track.executor_state.clone(),
                 fresh_acquisition_initialization,
+                applied_risk_acquisition_release,
             });
         }
         let risk_exposure_gate_active =
@@ -1238,6 +1255,7 @@ impl TrackManager {
                 execution_gate_decision: target.execution_gate_decision,
                 executor_state,
                 fresh_acquisition_initialization,
+                applied_risk_acquisition_release,
             });
         }
         let executor_state = Some(&track.executor_state);
@@ -1267,6 +1285,7 @@ impl TrackManager {
             execution_gate_decision: target.execution_gate_decision,
             executor_state: plan.state,
             fresh_acquisition_initialization,
+            applied_risk_acquisition_release,
         })
     }
 
@@ -1353,6 +1372,7 @@ struct PlannedInventoryExecution {
     execution_gate_decision: ExecutionGateDecision,
     executor_state: ExecutorState,
     fresh_acquisition_initialization: Option<FreshAcquisitionInitialization>,
+    applied_risk_acquisition_release: Option<AppliedRiskAcquisitionRelease>,
 }
 
 fn market_mutation_requires_durable_write(
@@ -1371,6 +1391,8 @@ fn market_mutation_requires_durable_write(
         normalized_next.desired_exposure = previous_frame.desired_exposure.clone();
         normalized_next.inventory_decision = previous_frame.inventory_decision.clone();
         normalized_next.inventory_decision_revision = previous_frame.inventory_decision_revision;
+        normalized_next.applied_risk_acquisition_release =
+            previous_frame.applied_risk_acquisition_release.clone();
         normalized_next.fresh_acquisition_session =
             previous_frame.fresh_acquisition_session.clone();
         if !has_non_target_events && !has_execution_effects {

@@ -8,8 +8,8 @@ use crate::execution_gate::{AccountCapacityGate, AccountCapacityGateInput, Execu
 use crate::execution_plan::DecisionReason;
 use crate::loss_guard::build_loss_guard_snapshot_for_asset;
 use crate::risk_exposure_gate::{
-    self, FreshAcquisitionInitialization, RiskAcquisitionRelease, RiskExposureGateInput,
-    RiskExposureGateState,
+    self, AppliedRiskAcquisitionRelease, FreshAcquisitionInitialization, RiskAcquisitionRelease,
+    RiskExposureGateInput, RiskExposureGateState,
 };
 use crate::runtime::{
     AppliedRiskCap, AutoState, BandTerminationCause, ControlState, ManualState, TerminationCause,
@@ -36,30 +36,46 @@ pub fn reconcile_target(track: &TrackRuntime, strategy_price: f64) -> TargetReco
     reconcile_target_at(track, strategy_price, Utc::now())
 }
 
+pub(crate) struct TargetReconcileWithMetadata {
+    pub(crate) result: TargetReconcileResult,
+    pub(crate) applied_risk_acquisition_release: Option<AppliedRiskAcquisitionRelease>,
+}
+
 pub fn reconcile_target_at(
     track: &TrackRuntime,
     strategy_price: f64,
     observed_at: DateTime<Utc>,
 ) -> TargetReconcileResult {
+    reconcile_target_at_with_metadata(track, strategy_price, observed_at).result
+}
+
+pub(crate) fn reconcile_target_at_with_metadata(
+    track: &TrackRuntime,
+    strategy_price: f64,
+    observed_at: DateTime<Utc>,
+) -> TargetReconcileWithMetadata {
     if let TrackState::Terminated { .. } = &track.track_state {
         let target = Exposure(0.0);
         let delta = track.current_exposure.delta(&target);
-        return TargetReconcileResult {
-            events: exposure_target_change_event(track, &target)
-                .into_iter()
-                .collect(),
-            policy_target: target.clone(),
-            risk_approved_target: target.clone(),
-            execution_target: target,
-            reason: delta.is_zero().then_some(DecisionReason::AtExecutionTarget),
-            applied_risk_cap: None,
-            new_runtime_state: Some(track.track_state.clone()),
-            execution_gate_decision: ExecutionGateDecision::Open,
-            target_pursuit_suppressed: delta.is_zero(),
-            acquisition_frontier: None,
-            risk_acquisition: Default::default(),
-            fresh_acquisition_initialization: None,
-        };
+        return reconcile_with_metadata(
+            TargetReconcileResult {
+                events: exposure_target_change_event(track, &target)
+                    .into_iter()
+                    .collect(),
+                policy_target: target.clone(),
+                risk_approved_target: target.clone(),
+                execution_target: target,
+                reason: delta.is_zero().then_some(DecisionReason::AtExecutionTarget),
+                applied_risk_cap: None,
+                new_runtime_state: Some(track.track_state.clone()),
+                execution_gate_decision: ExecutionGateDecision::Open,
+                target_pursuit_suppressed: delta.is_zero(),
+                acquisition_frontier: None,
+                risk_acquisition: Default::default(),
+                fresh_acquisition_initialization: None,
+            },
+            None,
+        );
     }
 
     if let TrackState::Running(ControlState::Manual(manual_state)) = &track.track_state {
@@ -68,22 +84,25 @@ pub fn reconcile_target_at(
             ManualState::TargetOverride { target } => target.clone(),
         };
         let delta = track.current_exposure.delta(&target_override);
-        return TargetReconcileResult {
-            events: exposure_target_change_event(track, &target_override)
-                .into_iter()
-                .collect(),
-            policy_target: target_override.clone(),
-            risk_approved_target: target_override.clone(),
-            execution_target: target_override,
-            reason: delta.is_zero().then_some(DecisionReason::AtExecutionTarget),
-            applied_risk_cap: None,
-            new_runtime_state: Some(track.track_state.clone()),
-            execution_gate_decision: ExecutionGateDecision::Open,
-            target_pursuit_suppressed: delta.is_zero(),
-            acquisition_frontier: None,
-            risk_acquisition: Default::default(),
-            fresh_acquisition_initialization: None,
-        };
+        return reconcile_with_metadata(
+            TargetReconcileResult {
+                events: exposure_target_change_event(track, &target_override)
+                    .into_iter()
+                    .collect(),
+                policy_target: target_override.clone(),
+                risk_approved_target: target_override.clone(),
+                execution_target: target_override,
+                reason: delta.is_zero().then_some(DecisionReason::AtExecutionTarget),
+                applied_risk_cap: None,
+                new_runtime_state: Some(track.track_state.clone()),
+                execution_gate_decision: ExecutionGateDecision::Open,
+                target_pursuit_suppressed: delta.is_zero(),
+                acquisition_frontier: None,
+                risk_acquisition: Default::default(),
+                fresh_acquisition_initialization: None,
+            },
+            None,
+        );
     }
 
     let band = strategy::band_status(strategy_price, track.config());
@@ -102,7 +121,10 @@ pub fn reconcile_target_at(
     ) {
         Ok(snapshot) => snapshot,
         Err(_error) => {
-            return pnl_asset_mismatch_result(track, &target, new_runtime_state);
+            return reconcile_with_metadata(
+                pnl_asset_mismatch_result(track, &target, new_runtime_state),
+                None,
+            );
         }
     };
 
@@ -128,34 +150,38 @@ pub fn reconcile_target_at(
         RiskOutcome::Terminate(cause) => {
             let termination_target = Exposure(0.0);
             let delta = track.current_exposure.delta(&termination_target);
-            return TargetReconcileResult {
-                events: exposure_target_change_event(track, &termination_target)
-                    .into_iter()
-                    .collect(),
-                policy_target: target,
-                risk_approved_target: termination_target.clone(),
-                execution_target: termination_target,
-                reason: delta.is_zero().then_some(DecisionReason::AtExecutionTarget),
-                applied_risk_cap: None,
-                new_runtime_state: Some(TrackState::Terminated {
-                    cause: TerminationCause::Risk(cause),
-                }),
-                execution_gate_decision: ExecutionGateDecision::Open,
-                target_pursuit_suppressed: delta.is_zero(),
-                acquisition_frontier: None,
-                risk_acquisition: Default::default(),
-                fresh_acquisition_initialization: None,
-            };
+            return reconcile_with_metadata(
+                TargetReconcileResult {
+                    events: exposure_target_change_event(track, &termination_target)
+                        .into_iter()
+                        .collect(),
+                    policy_target: target,
+                    risk_approved_target: termination_target.clone(),
+                    execution_target: termination_target,
+                    reason: delta.is_zero().then_some(DecisionReason::AtExecutionTarget),
+                    applied_risk_cap: None,
+                    new_runtime_state: Some(TrackState::Terminated {
+                        cause: TerminationCause::Risk(cause),
+                    }),
+                    execution_gate_decision: ExecutionGateDecision::Open,
+                    target_pursuit_suppressed: delta.is_zero(),
+                    acquisition_frontier: None,
+                    risk_acquisition: Default::default(),
+                    fresh_acquisition_initialization: None,
+                },
+                None,
+            );
         }
     };
 
     let risk_approved_target = approved_target.clone();
-    let (
+    let RiskAcquisitionApplication {
         acquisition_frontier,
         new_runtime_state,
-        risk_acquisition,
-        fresh_acquisition_initialization,
-    ) = apply_risk_exposure_gate(
+        next_release: risk_acquisition,
+        fresh_initialization: fresh_acquisition_initialization,
+        applied_release: applied_risk_acquisition_release,
+    } = apply_risk_exposure_gate(
         track,
         strategy_price,
         risk_approved_target.clone(),
@@ -169,20 +195,23 @@ pub fn reconcile_target_at(
     );
 
     if should_suppress_protected_risk_increase(track, &new_runtime_state, &execution_target) {
-        return TargetReconcileResult {
-            events,
-            policy_target: target.clone(),
-            risk_approved_target,
-            execution_target,
-            reason: Some(DecisionReason::BandPolicyBlocked),
-            applied_risk_cap,
-            new_runtime_state,
-            execution_gate_decision: ExecutionGateDecision::Open,
-            target_pursuit_suppressed: true,
-            acquisition_frontier,
-            risk_acquisition,
-            fresh_acquisition_initialization,
-        };
+        return reconcile_with_metadata(
+            TargetReconcileResult {
+                events,
+                policy_target: target.clone(),
+                risk_approved_target,
+                execution_target,
+                reason: Some(DecisionReason::BandPolicyBlocked),
+                applied_risk_cap,
+                new_runtime_state,
+                execution_gate_decision: ExecutionGateDecision::Open,
+                target_pursuit_suppressed: true,
+                acquisition_frontier,
+                risk_acquisition,
+                fresh_acquisition_initialization,
+            },
+            applied_risk_acquisition_release,
+        );
     }
 
     let execution_gate_decision = AccountCapacityGate::evaluate(AccountCapacityGateInput {
@@ -201,25 +230,30 @@ pub fn reconcile_target_at(
                 reason: reason.clone(),
             });
         }
-        return TargetReconcileResult {
-            events,
-            policy_target: target.clone(),
-            risk_approved_target,
-            execution_target,
-            reason: Some(match reason {
-                ExecutionGateReason::AccountCapacityInsufficient { .. } => {
-                    DecisionReason::AccountCapacityBlocked
-                }
-                ExecutionGateReason::PnlAssetMismatch { .. } => DecisionReason::RiskInputInvalid,
-            }),
-            applied_risk_cap,
-            new_runtime_state,
-            execution_gate_decision,
-            target_pursuit_suppressed: true,
-            acquisition_frontier,
-            risk_acquisition,
-            fresh_acquisition_initialization,
-        };
+        return reconcile_with_metadata(
+            TargetReconcileResult {
+                events,
+                policy_target: target.clone(),
+                risk_approved_target,
+                execution_target,
+                reason: Some(match reason {
+                    ExecutionGateReason::AccountCapacityInsufficient { .. } => {
+                        DecisionReason::AccountCapacityBlocked
+                    }
+                    ExecutionGateReason::PnlAssetMismatch { .. } => {
+                        DecisionReason::RiskInputInvalid
+                    }
+                }),
+                applied_risk_cap,
+                new_runtime_state,
+                execution_gate_decision,
+                target_pursuit_suppressed: true,
+                acquisition_frontier,
+                risk_acquisition,
+                fresh_acquisition_initialization,
+            },
+            applied_risk_acquisition_release,
+        );
     }
 
     let delta = track.current_exposure.delta(&execution_target);
@@ -229,39 +263,55 @@ pub fn reconcile_target_at(
         } else {
             DecisionReason::AtExecutionTarget
         };
-        return TargetReconcileResult {
-            events,
-            policy_target: target.clone(),
-            risk_approved_target,
-            execution_target,
-            reason: Some(reason),
-            applied_risk_cap,
-            new_runtime_state,
-            execution_gate_decision,
-            target_pursuit_suppressed: true,
-            acquisition_frontier,
-            risk_acquisition,
-            fresh_acquisition_initialization,
-        };
+        return reconcile_with_metadata(
+            TargetReconcileResult {
+                events,
+                policy_target: target.clone(),
+                risk_approved_target,
+                execution_target,
+                reason: Some(reason),
+                applied_risk_cap,
+                new_runtime_state,
+                execution_gate_decision,
+                target_pursuit_suppressed: true,
+                acquisition_frontier,
+                risk_acquisition,
+                fresh_acquisition_initialization,
+            },
+            applied_risk_acquisition_release,
+        );
     }
 
     if let Some(event) = exposure_target_change_event(track, &risk_approved_target) {
         events.push(event);
     }
 
-    TargetReconcileResult {
-        events,
-        policy_target: target,
-        risk_approved_target,
-        execution_target,
-        reason: None,
-        applied_risk_cap,
-        new_runtime_state,
-        execution_gate_decision,
-        target_pursuit_suppressed: false,
-        acquisition_frontier,
-        risk_acquisition,
-        fresh_acquisition_initialization,
+    reconcile_with_metadata(
+        TargetReconcileResult {
+            events,
+            policy_target: target,
+            risk_approved_target,
+            execution_target,
+            reason: None,
+            applied_risk_cap,
+            new_runtime_state,
+            execution_gate_decision,
+            target_pursuit_suppressed: false,
+            acquisition_frontier,
+            risk_acquisition,
+            fresh_acquisition_initialization,
+        },
+        applied_risk_acquisition_release,
+    )
+}
+
+fn reconcile_with_metadata(
+    result: TargetReconcileResult,
+    applied_risk_acquisition_release: Option<AppliedRiskAcquisitionRelease>,
+) -> TargetReconcileWithMetadata {
+    TargetReconcileWithMetadata {
+        result,
+        applied_risk_acquisition_release,
     }
 }
 
@@ -328,19 +378,22 @@ fn apply_risk_exposure_gate(
     approved_target: Exposure,
     new_runtime_state: Option<TrackState>,
     observed_at: DateTime<Utc>,
-) -> (
-    Option<Exposure>,
-    Option<TrackState>,
-    Option<RiskAcquisitionRelease>,
-    Option<FreshAcquisitionInitialization>,
-) {
+) -> RiskAcquisitionApplication {
     let effective_state = effective_runtime_state(track, &new_runtime_state);
     let gate_state = match effective_state {
         TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)) => None,
         TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated { gate })) => {
             Some(gate)
         }
-        _ => return (None, new_runtime_state, None, None),
+        _ => {
+            return RiskAcquisitionApplication {
+                acquisition_frontier: None,
+                new_runtime_state,
+                next_release: None,
+                fresh_initialization: None,
+                applied_release: None,
+            };
+        }
     };
 
     let input = RiskExposureGateInput {
@@ -363,7 +416,6 @@ fn apply_risk_exposure_gate(
         new_runtime_state,
         &track.track_state,
         decision.state.clone(),
-        fresh_acquisition_initialization.is_some(),
     );
     let risk_release_frontier = decision
         .state
@@ -374,29 +426,32 @@ fn apply_risk_exposure_gate(
                 .then_some(decision.risk_release_frontier.clone())
         });
 
-    (
-        risk_release_frontier,
-        next_state,
-        decision.next_release,
-        fresh_acquisition_initialization,
-    )
+    RiskAcquisitionApplication {
+        acquisition_frontier: risk_release_frontier,
+        new_runtime_state: next_state,
+        next_release: decision.next_release,
+        fresh_initialization: fresh_acquisition_initialization,
+        applied_release: decision.applied_release,
+    }
+}
+
+struct RiskAcquisitionApplication {
+    acquisition_frontier: Option<Exposure>,
+    new_runtime_state: Option<TrackState>,
+    next_release: Option<RiskAcquisitionRelease>,
+    fresh_initialization: Option<FreshAcquisitionInitialization>,
+    applied_release: Option<AppliedRiskAcquisitionRelease>,
 }
 
 fn merge_gate_state(
     base_state: Option<TrackState>,
     current_state: &TrackState,
     gate_state: Option<RiskExposureGateState>,
-    fresh_initialization: bool,
 ) -> Option<TrackState> {
     match gate_state {
-        Some(gate) => {
-            if !fresh_initialization && is_flattening_reentry(base_state.as_ref(), current_state) {
-                return base_state;
-            }
-            Some(TrackState::Running(ControlState::Automatic(
-                AutoState::RiskExposureGated { gate },
-            )))
-        }
+        Some(gate) => Some(TrackState::Running(ControlState::Automatic(
+            AutoState::RiskExposureGated { gate },
+        ))),
         None => {
             let was_risk_exposure_gated = matches!(
                 base_state.as_ref().unwrap_or(current_state),
@@ -411,18 +466,6 @@ fn merge_gate_state(
             }
         }
     }
-}
-
-fn is_flattening_reentry(base_state: Option<&TrackState>, current_state: &TrackState) -> bool {
-    matches!(
-        current_state,
-        TrackState::Running(ControlState::Automatic(AutoState::Flattening { .. }))
-    ) && matches!(
-        base_state,
-        Some(TrackState::Running(ControlState::Automatic(
-            AutoState::FollowingBand
-        )))
-    )
 }
 
 fn resolve_in_band(
@@ -966,6 +1009,119 @@ mod tests {
         assert_eq!(same_price.risk_approved_target, Exposure(8.0));
         assert_eq!(same_price.execution_target, Exposure(0.0));
         assert!(same_price.fresh_acquisition_initialization.is_none());
+    }
+
+    #[test]
+    fn non_fresh_flattening_reentry_installs_initial_release_once_when_unfilled() {
+        let observed_at = Utc.with_ymd_and_hms(2026, 7, 1, 9, 0, 0).unwrap();
+        let mut track = test_runtime();
+        enable_risk_acquisition(&mut track);
+        set_out_of_band_policy(
+            &mut track,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::Immediate,
+                recover: BandRecoverPolicy::BackInBand,
+            },
+        );
+        track.track_state = TrackState::Running(ControlState::Automatic(AutoState::Flattening {
+            boundary: BandBoundary::Below,
+        }));
+        track.current_exposure = Exposure(0.0);
+        track.desired_exposure = Some(Exposure(0.0));
+
+        let first = reconcile_target_at_with_metadata(&track, 92.0, observed_at);
+        let first_release = first
+            .applied_risk_acquisition_release
+            .clone()
+            .expect("reentry should apply one initial-ratio release");
+        let first = first.result;
+        assert_eq!(
+            first_release.trigger,
+            crate::risk_exposure_gate::AppliedRiskAcquisitionReleaseTrigger::InitialRatio
+        );
+        let Some(TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
+            gate,
+        }))) = first.new_runtime_state.as_ref()
+        else {
+            panic!("reentry should install its initial-ratio release gate");
+        };
+        assert_eq!(gate.risk_release_frontier, first_release.frontier_after);
+
+        track.track_state = first.new_runtime_state.unwrap();
+        track.desired_exposure = Some(first.risk_approved_target);
+        let second = reconcile_target_at_with_metadata(
+            &track,
+            92.0,
+            observed_at + chrono::Duration::minutes(1),
+        );
+
+        assert_eq!(second.applied_risk_acquisition_release, None);
+        assert_eq!(
+            second.result.acquisition_frontier,
+            first.acquisition_frontier
+        );
+    }
+
+    #[test]
+    fn non_fresh_flattening_reentry_preserves_zero_frontier_before_advantage() {
+        let observed_at = Utc.with_ymd_and_hms(2026, 7, 1, 9, 0, 0).unwrap();
+        let mut track = test_runtime();
+        enable_risk_acquisition(&mut track);
+        set_out_of_band_policy(
+            &mut track,
+            BandProtectionPolicy::Flatten {
+                trigger: BandFlattenTrigger::Immediate,
+                recover: BandRecoverPolicy::BackInBand,
+            },
+        );
+        track.track_state = TrackState::Running(ControlState::Automatic(AutoState::Flattening {
+            boundary: BandBoundary::Below,
+        }));
+        track.current_exposure = Exposure(1.5);
+        track.desired_exposure = Some(Exposure(0.0));
+
+        let first = reconcile_target_at_with_metadata(&track, 100.625, observed_at);
+
+        assert_eq!(first.applied_risk_acquisition_release, None);
+        let first = first.result;
+        assert_eq!(first.risk_approved_target, Exposure(-0.5));
+        assert_eq!(first.execution_target, Exposure(0.0));
+        let Some(TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
+            gate,
+        }))) = first.new_runtime_state.as_ref()
+        else {
+            panic!("cross-zero reentry should preserve its zero release anchor");
+        };
+        assert_eq!(gate.risk_release_frontier, Exposure(0.0));
+
+        track.track_state = first.new_runtime_state.unwrap();
+        track.desired_exposure = Some(first.risk_approved_target);
+        let second = reconcile_target_at_with_metadata(
+            &track,
+            100.625,
+            observed_at + chrono::Duration::minutes(1),
+        );
+
+        assert_eq!(second.applied_risk_acquisition_release, None);
+        let second = second.result;
+        assert_eq!(second.acquisition_frontier, Some(Exposure(0.0)));
+        assert_eq!(second.execution_target, Exposure(0.0));
+
+        track.track_state = second.new_runtime_state.unwrap();
+        track.current_exposure = Exposure(0.0);
+        track.desired_exposure = Some(second.risk_approved_target);
+        let after_immediate_flat = reconcile_target_at_with_metadata(
+            &track,
+            100.625,
+            observed_at + chrono::Duration::minutes(1),
+        );
+
+        assert_eq!(
+            after_immediate_flat.result.acquisition_frontier,
+            Some(Exposure(0.0))
+        );
+        assert_eq!(after_immediate_flat.result.execution_target, Exposure(0.0));
+        assert_eq!(after_immediate_flat.applied_risk_acquisition_release, None);
     }
 
     #[test]
@@ -1677,14 +1833,20 @@ mod tests {
             }));
         below_track.current_exposure = Exposure(8.0);
 
-        let below_result = reconcile_target(&below_track, 109.5);
+        let below_result = reconcile_target_at_with_metadata(&below_track, 109.5, Utc::now());
 
-        assert_eq!(
-            below_result.new_runtime_state,
-            Some(TrackState::Running(ControlState::Automatic(
-                AutoState::FollowingBand,
-            ))),
-        );
+        let release = below_result
+            .applied_risk_acquisition_release
+            .clone()
+            .expect("cross-zero reentry should apply the reached advantage release");
+        let below_result = below_result.result;
+        let Some(TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
+            gate,
+        }))) = below_result.new_runtime_state.as_ref()
+        else {
+            panic!("cross-zero reentry should install its applied release gate");
+        };
+        assert_eq!(gate.risk_release_frontier, release.frontier_after);
         assert_eq!(below_result.risk_approved_target, strategy_target_at(109.5));
 
         let mut above_track = test_runtime();

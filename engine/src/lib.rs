@@ -1,4 +1,5 @@
 pub mod command;
+pub mod decision_evaluation;
 pub mod decision_replay;
 pub mod execution_gate;
 pub mod execution_plan;

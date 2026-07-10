@@ -15,6 +15,7 @@ use poise_core::strategy::TrackConfig;
 use poise_core::track::TrackDefinition;
 use poise_core::types::{ExchangeRules, Exposure, Side};
 
+use crate::execution_gate::added_risk_units;
 use crate::execution_plan::TrackEffect;
 use crate::executor::SubmitRecoveryResolution;
 use crate::ledger::TrackPnlStats;
@@ -24,9 +25,12 @@ use crate::observation::{
 };
 use crate::ports::{ClockPort, ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus};
 use crate::price_gate::SubmitPurpose;
+use crate::risk_exposure_gate::AppliedRiskAcquisitionReleaseTrigger;
 use crate::runtime::{
-    FreshSessionExternalInputs, InventoryDecisionSnapshot, TrackState, exposure_from_position_qty,
+    FreshSessionExternalInputs, InventoryDecisionSnapshot, RiskAcquisitionDirection, TrackState,
+    exposure_from_position_qty,
 };
+use crate::transition::TrackTransition;
 
 const MAX_EFFECTS_PER_STEP: usize = 100_000;
 
@@ -41,6 +45,14 @@ pub enum DecisionReplayFillModel {
     ImmediateFullAtOrderPrice,
     /// Accepts submitted orders as working but never synthesizes a fill.
     NeverFill,
+}
+
+/// Why the risk-acquisition frontier was actively released in one decision revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionReplayReleaseTrigger {
+    InitialRatio,
+    PriceAdvantage,
+    StaleTimeout,
 }
 
 /// Complete deterministic decision-replay scenario.
@@ -84,6 +96,7 @@ pub struct DecisionOrderObservation {
 /// Deterministic aggregate and per-step decision-replay result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionReplayReport {
+    pub fill_model: DecisionReplayFillModel,
     pub steps: Vec<DecisionReplayStepReport>,
     pub final_simulated_position_qty: f64,
     pub final_simulated_exposure: Exposure,
@@ -98,6 +111,7 @@ pub struct DecisionReplayReport {
 pub struct DecisionReplayStepReport {
     pub observed_at: DateTime<Utc>,
     pub action: DecisionScenarioAction,
+    pub strategy_price: Option<f64>,
     pub committed_decision: Option<InventoryDecisionSnapshot>,
     pub effects: Vec<DecisionReplayEffect>,
     /// Signed native fill delta for this step: buys are positive and sells are negative.
@@ -127,7 +141,18 @@ pub enum DecisionReplayEffect {
         side: Side,
         price: f64,
         quantity: f64,
+        trade_notional: f64,
+        risk_increase_native_qty: f64,
+        position_before_qty: f64,
+        position_after_qty: f64,
         estimated_taker_fee: f64,
+    },
+    RiskReleaseApplied {
+        trigger: DecisionReplayReleaseTrigger,
+        direction: RiskAcquisitionDirection,
+        frontier_before: Exposure,
+        frontier_after: Exposure,
+        release_units: f64,
     },
     CancelOrder {
         order_ref: String,
@@ -178,6 +203,7 @@ struct DecisionReplayRunner {
     session: u64,
     next_order_number: u64,
     orders: Vec<SimulatedOrder>,
+    last_reported_release_key: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -260,6 +286,7 @@ impl DecisionReplayRunner {
             session: 1,
             next_order_number: 1,
             orders: Vec::new(),
+            last_reported_release_key: None,
         })
     }
 
@@ -283,6 +310,7 @@ impl DecisionReplayRunner {
             .track_runtime_view(&self.track_id)
             .context("load final decision replay runtime")?;
         Ok(DecisionReplayReport {
+            fill_model: self.fill_model,
             steps: reports,
             final_simulated_position_qty: self.simulated_position_qty,
             final_simulated_exposure: self.simulated_exposure(),
@@ -301,23 +329,23 @@ impl DecisionReplayRunner {
                 if let MarketObservation::ExecutionQuote { execution_quote } = observation {
                     self.execution_quote = Some(*execution_quote);
                 }
-                self.manager
-                    .observe(
-                        &self.track_id,
-                        TrackObservation::Market(observation.clone()),
-                    )?
-                    .effects
+                let transition = self.manager.observe(
+                    &self.track_id,
+                    TrackObservation::Market(observation.clone()),
+                )?;
+                self.collect_transition_release(&transition, &mut accumulator);
+                transition.effects
             }
             DecisionScenarioAction::Position(observation) => {
                 validate_position(observation)?;
                 self.simulated_position_qty = observation.qty;
                 self.simulated_unrealized_pnl = observation.unrealized_pnl;
-                self.manager
-                    .observe(
-                        &self.track_id,
-                        TrackObservation::Position(observation.clone()),
-                    )?
-                    .effects
+                let transition = self.manager.observe(
+                    &self.track_id,
+                    TrackObservation::Position(observation.clone()),
+                )?;
+                self.collect_transition_release(&transition, &mut accumulator);
+                transition.effects
             }
             DecisionScenarioAction::Order(observation) => {
                 self.apply_explicit_order_observation(observation, &mut accumulator)?
@@ -346,6 +374,7 @@ impl DecisionReplayRunner {
         Ok(DecisionReplayStepReport {
             observed_at: step.observed_at,
             action: step.action.clone(),
+            strategy_price: observed.strategy_price,
             committed_decision,
             effects: accumulator.effects,
             signed_filled_native_qty: accumulator.signed_filled_native_qty,
@@ -355,6 +384,44 @@ impl DecisionReplayRunner {
             observed_position_exposure: observed.current_exposure,
             estimated_taker_fee: accumulator.estimated_taker_fee,
         })
+    }
+
+    fn collect_transition_release(
+        &mut self,
+        transition: &TrackTransition,
+        accumulator: &mut StepAccumulator,
+    ) {
+        let Some(decision) = transition.frame.inventory_decision.as_ref() else {
+            return;
+        };
+        let Some(release) = transition.frame.applied_risk_acquisition_release.as_ref() else {
+            return;
+        };
+        let key = (self.session, decision.revision);
+        if self.last_reported_release_key == Some(key) {
+            return;
+        }
+        self.last_reported_release_key = Some(key);
+        let trigger = match release.trigger {
+            AppliedRiskAcquisitionReleaseTrigger::InitialRatio => {
+                DecisionReplayReleaseTrigger::InitialRatio
+            }
+            AppliedRiskAcquisitionReleaseTrigger::PriceAdvantage => {
+                DecisionReplayReleaseTrigger::PriceAdvantage
+            }
+            AppliedRiskAcquisitionReleaseTrigger::StaleTimeout => {
+                DecisionReplayReleaseTrigger::StaleTimeout
+            }
+        };
+        accumulator
+            .effects
+            .push(DecisionReplayEffect::RiskReleaseApplied {
+                trigger,
+                direction: RiskAcquisitionDirection::from(release.direction),
+                frontier_before: release.frontier_before.clone(),
+                frontier_after: release.frontier_after.clone(),
+                release_units: release.release_units,
+            });
     }
 
     fn drain_effects(
@@ -471,6 +538,7 @@ impl DecisionReplayRunner {
             desired_exposure,
             &receipt,
         )?;
+        self.collect_transition_release(&receipt_transition, accumulator);
         queue.extend(receipt_transition.effects);
 
         if status == OrderStatus::Filled {
@@ -488,6 +556,7 @@ impl DecisionReplayRunner {
                     unrealized_pnl: self.simulated_unrealized_pnl,
                 }),
             )?;
+            self.collect_transition_release(&position_transition, accumulator);
             queue.extend(position_transition.effects);
         }
         Ok(())
@@ -538,6 +607,7 @@ impl DecisionReplayRunner {
         let order_transition = self
             .manager
             .observe(&self.track_id, TrackObservation::Order(order_observation))?;
+        self.collect_transition_release(&order_transition, accumulator);
         if fill_delta > f64::EPSILON {
             self.apply_simulated_fill(&order_ref, side, fill_delta, price, accumulator)?;
         }
@@ -548,6 +618,7 @@ impl DecisionReplayRunner {
                 unrealized_pnl: self.simulated_unrealized_pnl,
             }),
         )?;
+        self.collect_transition_release(&position_transition, accumulator);
         let mut effects = order_transition.effects;
         effects.extend(position_transition.effects);
         Ok(effects)
@@ -645,6 +716,7 @@ impl DecisionReplayRunner {
         let (transition, _absorb_result) = self
             .manager
             .observe_order_update(&self.track_id, order_observation)?;
+        self.collect_transition_release(&transition, accumulator);
         // Manager absorption and exchange truth are different facts. A late fill can arrive after
         // the manager has already pruned a canceled binding, so simulator position/fee deltas use
         // the stable order's own cumulative baseline even when the manager reports a duplicate.
@@ -677,7 +749,10 @@ impl DecisionReplayRunner {
             Side::Buy => quantity,
             Side::Sell => -quantity,
         };
-        self.simulated_position_qty += signed_quantity;
+        let position_before_qty = self.simulated_position_qty;
+        let position_after_qty = position_before_qty + signed_quantity;
+        let risk_increase_native_qty = added_risk_units(position_before_qty, position_after_qty);
+        self.simulated_position_qty = position_after_qty;
         accumulator.signed_filled_native_qty += signed_quantity;
         let trade_notional = self
             .exchange_rules
@@ -696,6 +771,10 @@ impl DecisionReplayRunner {
             side,
             price,
             quantity,
+            trade_notional,
+            risk_increase_native_qty,
+            position_before_qty,
+            position_after_qty,
             estimated_taker_fee: fee,
         });
         Ok(())
@@ -824,6 +903,79 @@ mod tests {
             order_refs
                 .iter()
                 .all(|order_ref| order_ref.starts_with("order-"))
+        );
+        assert_eq!(first.fill_model, input.fill_model);
+        assert_eq!(first.steps[0].strategy_price, Some(95.0));
+    }
+
+    #[test]
+    fn decision_replay_preserves_one_applied_release_across_synchronous_fill_revisions() {
+        for fill_model in [
+            DecisionReplayFillModel::ImmediateFullAtOrderPrice,
+            DecisionReplayFillModel::NeverFill,
+        ] {
+            let report = run_decision_replay(&replay_input(0.0, fill_model)).unwrap();
+            let releases = report.steps[1]
+                .effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    DecisionReplayEffect::RiskReleaseApplied {
+                        trigger,
+                        direction,
+                        frontier_before,
+                        frontier_after,
+                        release_units,
+                    } => Some((
+                        *trigger,
+                        *direction,
+                        frontier_before.0,
+                        frontier_after.0,
+                        *release_units,
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                releases,
+                vec![(
+                    DecisionReplayReleaseTrigger::PriceAdvantage,
+                    crate::runtime::RiskAcquisitionDirection::Long,
+                    0.0,
+                    1.5,
+                    1.5,
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn decision_replay_release_revision_dedup_is_scoped_to_restart_session() {
+        let mut input = replay_input(0.0, DecisionReplayFillModel::NeverFill);
+        input.steps.extend([
+            DecisionScenarioStep {
+                observed_at: input.started_at + Duration::minutes(2),
+                action: DecisionScenarioAction::Restart,
+            },
+            market_step(input.started_at + Duration::minutes(2), 95.0),
+            market_step(input.started_at + Duration::minutes(3), 92.5),
+        ]);
+
+        let report = run_decision_replay(&input).unwrap();
+        let releases = report
+            .steps
+            .iter()
+            .flat_map(|step| &step.effects)
+            .filter(|effect| matches!(effect, DecisionReplayEffect::RiskReleaseApplied { .. }))
+            .count();
+
+        assert_eq!(releases, 2);
+        assert!(report.steps[2].committed_decision.is_none());
+        assert!(
+            !report.steps[2]
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, DecisionReplayEffect::RiskReleaseApplied { .. }))
         );
     }
 
@@ -1168,14 +1320,29 @@ mod tests {
 
         assert!(report.steps[1].signed_filled_native_qty > 0.0);
         assert!(report.steps[1].simulated_position_qty > 0.0);
+        assert!(report.steps[1].effects.iter().any(|effect| matches!(
+            effect,
+            DecisionReplayEffect::FillOrder {
+                side: Side::Buy,
+                trade_notional,
+                risk_increase_native_qty,
+                position_before_qty,
+                position_after_qty,
+                ..
+            } if (*trade_notional - 92.6).abs() < 1e-12
+                && (*risk_increase_native_qty - 1.0).abs() < 1e-12
+                && position_before_qty.abs() < f64::EPSILON
+                && (*position_after_qty - 1.0).abs() < f64::EPSILON
+        )));
         assert!(report.steps[2].signed_filled_native_qty < 0.0);
         assert!(report.steps[2].effects.iter().any(|effect| matches!(
             effect,
             DecisionReplayEffect::FillOrder {
                 order_ref,
                 side: Side::Sell,
+                risk_increase_native_qty,
                 ..
-            } if order_ref == "order-2"
+            } if order_ref == "order-2" && risk_increase_native_qty.abs() < f64::EPSILON
         )));
         assert!(report.final_simulated_position_qty.abs() < f64::EPSILON);
     }
