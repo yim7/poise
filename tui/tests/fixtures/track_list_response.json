@@ -13,12 +13,21 @@
       "strategy_price": 101.25,
       "strategy_price_status": "live",
       "exposure": {
-        "current": 3.5,
-        "target": 4.0
+        "current": 3.5
+      },
+      "decision": {
+        "revision": 42,
+        "policy_target": 4.0,
+        "risk_approved_target": 4.0,
+        "acquisition_frontier": 4.0,
+        "execution_target": 4.0,
+        "reason": "submit_planned"
       },
       "execution": {
         "state": "open",
         "execution_status": "normal",
+        "attention_reasons": [],
+        "price_execution_block_reason": null,
         "active_binding_count": 1
       },
       "pnl": {

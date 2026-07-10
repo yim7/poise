@@ -11,6 +11,7 @@ export interface TrackListItemView {
   strategy_price: number | null;
   strategy_price_status: StrategyPriceStatusView;
   exposure: ExposureSummaryView;
+  decision: InventoryDecisionView;
   execution: ExecutionBadgeView;
   pnl: TrackListPnlView;
 }
@@ -27,7 +28,15 @@ export interface TrackLifecycleView {
 
 export interface ExposureSummaryView {
   current: number;
-  target?: number | null;
+}
+
+export interface InventoryDecisionView {
+  revision: number | null;
+  policy_target: number | null;
+  risk_approved_target: number | null;
+  acquisition_frontier: number | null;
+  execution_target: number | null;
+  reason: DecisionReason;
 }
 
 export interface TrackListPnlView {
@@ -38,6 +47,8 @@ export interface TrackListPnlView {
 export interface ExecutionBadgeView {
   state: ExecutionStateView;
   execution_status: ExecutionStatusView;
+  attention_reasons: string[];
+  price_execution_block_reason: PriceExecutionBlockReasonView | null;
   active_binding_count: number;
 }
 
@@ -49,6 +60,7 @@ export interface TrackDetailView {
   loss_limits: TrackLossLimitsView;
   market: TrackMarketView;
   position: TrackPositionView;
+  decision: InventoryDecisionView;
   pnl: TrackPnlView;
   execution: TrackExecutionView;
   activity: TrackActivityItemView[];
@@ -95,14 +107,13 @@ export interface TrackLiveView {
   mark_price: number | null;
   best_bid: number | null;
   best_ask: number | null;
-  desired_exposure: number | null;
+  decision: InventoryDecisionView;
   risk_acquisition?: RiskAcquisitionView | null;
   price_execution_block_reason: PriceExecutionBlockReasonView | null;
 }
 
 export interface TrackPositionView {
   current_exposure: number;
-  desired_exposure?: number | null;
   quantity_unit?: "base_asset" | "contracts";
   quantity?: number;
   notional?: number;
@@ -123,7 +134,7 @@ export interface TrackExecutionView {
   state: ExecutionStateView;
   execution_status: ExecutionStatusView;
   attention_reasons: string[];
-  inventory_gap: number;
+  price_execution_block_reason: PriceExecutionBlockReasonView | null;
   active_binding_count: number;
   risk_acquisition?: RiskAcquisitionView | null;
   bindings: ExecutionBindingView[];
@@ -140,8 +151,6 @@ export interface RiskAcquisitionConfigView {
 
 export interface RiskAcquisitionView {
   direction: RiskAcquisitionDirectionView;
-  curve_target: number;
-  risk_release_frontier: number;
   backlog_units: number;
   release_anchor_price: number;
   release_anchor_target: number;
@@ -259,6 +268,22 @@ export interface AccountHedgeLikeView {
 }
 
 export type AccountAssetQuantitySourceView = 'account_summary_available_by_asset';
+
+export type DecisionReason =
+  | 'waiting_market_data'
+  | 'paused'
+  | 'risk_input_invalid'
+  | 'band_policy_blocked'
+  | 'at_execution_target'
+  | 'waiting_risk_release'
+  | 'account_capacity_blocked'
+  | 'price_gate_blocked'
+  | 'below_rebalance'
+  | 'below_venue_minimum'
+  | 'covered_by_working_order'
+  | 'recovery_required'
+  | 'waiting_cancel'
+  | 'submit_planned';
 
 export type TrackStatus =
   | 'waiting_market_data'

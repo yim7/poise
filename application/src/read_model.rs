@@ -6,13 +6,13 @@ use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, RiskAcquisitionConfig, ShapeFamily};
 use poise_core::track::{Instrument, TrackDefinition};
 use poise_core::types::{ExchangeRules, QuantityKind, Side};
-use poise_engine::execution_plan::TrackEffect;
+use poise_engine::execution_plan::{DecisionReason, TrackEffect};
 use poise_engine::executor::{BindingStatus, PolicyKind, RecoveryAnomaly};
 use poise_engine::ledger::TrackPnlStats;
 use poise_engine::price_gate::PriceExecutionBlockReason;
 use poise_engine::runtime::{
-    RiskAcquisitionDirection, RiskAcquisitionRuntimeView, StrategyPriceStatus, TrackRuntimeView,
-    TrackStatus,
+    InventoryDecisionView, RiskAcquisitionDirection, RiskAcquisitionRuntimeView,
+    StrategyPriceStatus, TrackRuntimeView, TrackStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -46,8 +46,7 @@ pub struct TrackListReadModel {
     pub strategy_price_status: TrackStrategyPriceStatus,
     pub current_exposure: f64,
     pub position_qty: f64,
-    pub desired_exposure: Option<f64>,
-    pub execution_target_exposure: Option<f64>,
+    pub decision: TrackInventoryDecisionReadModel,
     pub risk_acquisition: Option<TrackRiskAcquisitionReadModel>,
     pub pnl_stats: TrackReadPnlStats,
     pub unrealized_pnl: f64,
@@ -56,6 +55,16 @@ pub struct TrackListReadModel {
     pub has_stale_market_data: bool,
     pub price_execution_block_reason: Option<TrackPriceExecutionBlockReason>,
     pub active_binding_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackInventoryDecisionReadModel {
+    pub revision: Option<u64>,
+    pub policy_target: Option<f64>,
+    pub risk_approved_target: Option<f64>,
+    pub acquisition_frontier: Option<f64>,
+    pub execution_target: Option<f64>,
+    pub reason: DecisionReason,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -271,12 +280,10 @@ pub struct TrackReadModel {
     pub best_ask: Option<f64>,
     pub current_exposure: f64,
     pub position_qty: f64,
-    pub desired_exposure: Option<f64>,
-    pub execution_target_exposure: Option<f64>,
+    pub decision: TrackInventoryDecisionReadModel,
     pub risk_acquisition: Option<TrackRiskAcquisitionReadModel>,
     pub pnl_stats: TrackReadPnlStats,
     pub unrealized_pnl: f64,
-    pub inventory_gap: f64,
     pub recovery_issue: Option<TrackRecoveryIssue>,
     pub has_account_margin_guard: bool,
     pub has_stale_market_data: bool,
@@ -302,8 +309,6 @@ pub struct ReadModelBinding {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackRiskAcquisitionReadModel {
     pub direction: TrackRiskAcquisitionDirection,
-    pub curve_target: f64,
-    pub risk_release_frontier: f64,
     pub backlog_units: f64,
     pub release_anchor_price: f64,
     pub release_anchor_target: f64,
@@ -471,12 +476,6 @@ impl TrackReadModel {
         let recent_activity = project_recent_activity(recent_track_events, recent_effects);
 
         let bindings = project_bindings(&runtime);
-        let execution_target_exposure = runtime
-            .execution_target_exposure
-            .as_ref()
-            .map(|target| target.0);
-        let inventory_gap =
-            execution_target_exposure.map_or(0.0, |target| target - runtime.current_exposure.0);
 
         Self {
             track_id: list_view.track_id.clone(),
@@ -502,12 +501,10 @@ impl TrackReadModel {
             best_ask: runtime.best_ask,
             current_exposure: list_view.current_exposure,
             position_qty: list_view.position_qty,
-            desired_exposure: list_view.desired_exposure,
-            execution_target_exposure,
+            decision: list_view.decision.clone(),
             risk_acquisition: list_view.risk_acquisition.clone(),
             pnl_stats: list_view.pnl_stats.clone(),
             unrealized_pnl: list_view.unrealized_pnl,
-            inventory_gap,
             recovery_issue: list_view.recovery_issue,
             has_account_margin_guard: list_view.has_account_margin_guard,
             has_stale_market_data: list_view.has_stale_market_data,
@@ -536,11 +533,7 @@ impl TrackListReadModel {
             strategy_price_status: TrackStrategyPriceStatus::from(runtime.strategy_price_status),
             current_exposure: runtime.current_exposure.0,
             position_qty: runtime.position_qty,
-            desired_exposure: runtime.desired_exposure.clone().map(|value| value.0),
-            execution_target_exposure: runtime
-                .execution_target_exposure
-                .clone()
-                .map(|value| value.0),
+            decision: TrackInventoryDecisionReadModel::from(&runtime.decision),
             risk_acquisition: runtime
                 .risk_acquisition
                 .clone()
@@ -574,8 +567,7 @@ impl From<&TrackReadModel> for TrackListReadModel {
             strategy_price_status: value.strategy_price_status,
             current_exposure: value.current_exposure,
             position_qty: value.position_qty,
-            desired_exposure: value.desired_exposure,
-            execution_target_exposure: value.execution_target_exposure,
+            decision: value.decision.clone(),
             risk_acquisition: value.risk_acquisition.clone(),
             pnl_stats: value.pnl_stats.clone(),
             unrealized_pnl: value.unrealized_pnl,
@@ -588,12 +580,23 @@ impl From<&TrackReadModel> for TrackListReadModel {
     }
 }
 
+impl From<&InventoryDecisionView> for TrackInventoryDecisionReadModel {
+    fn from(value: &InventoryDecisionView) -> Self {
+        Self {
+            revision: value.revision,
+            policy_target: value.policy_target,
+            risk_approved_target: value.risk_approved_target,
+            acquisition_frontier: value.acquisition_frontier,
+            execution_target: value.execution_target,
+            reason: value.reason,
+        }
+    }
+}
+
 impl From<RiskAcquisitionRuntimeView> for TrackRiskAcquisitionReadModel {
     fn from(value: RiskAcquisitionRuntimeView) -> Self {
         Self {
             direction: TrackRiskAcquisitionDirection::from(value.direction),
-            curve_target: value.curve_target.0,
-            risk_release_frontier: value.risk_release_frontier.0,
             backlog_units: value.backlog_units,
             release_anchor_price: value.release_anchor_price,
             release_anchor_target: value.release_anchor_target.0,
@@ -734,7 +737,6 @@ fn project_effect_message(effect: &PersistedTrackEffect) -> String {
             EffectStatus::Executing => format!("cancel all {} executing", instrument.symbol),
             EffectStatus::Pending => format!("cancel all {} pending", instrument.symbol),
         },
-        TrackEffect::NoOp => "no-op".into(),
     }
 }
 
@@ -813,20 +815,20 @@ mod tests {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_core::types::{ExchangeRules, Exposure, QuantityKind, Side};
-    use poise_engine::execution_plan::TrackEffect;
+    use poise_engine::execution_plan::{DecisionReason, TrackEffect};
     use poise_engine::executor::{BindingStatus, PolicyKind, SubmitRecoveryToken};
     use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::{
-        BindingView, ExecutorView, RiskAcquisitionDirection, RiskAcquisitionRuntimeView,
-        StrategyPriceStatus, TrackRuntimeView, TrackStatus,
+        BindingView, ExecutorView, InventoryDecisionView, RiskAcquisitionDirection,
+        RiskAcquisitionRuntimeView, StrategyPriceStatus, TrackRuntimeView, TrackStatus,
     };
 
     use super::{
         AccountAssetExposureReadModel, AccountAssetQuantitySource, TrackActivityLevel,
-        TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent,
-        TrackReadBindingStatus, TrackReadModel, TrackReadPnlStats, TrackReadStatus,
-        TrackRecoveryIssue, TrackRiskAcquisitionDirection, TrackStrategyPriceStatus,
-        project_binding_status,
+        TrackInventoryDecisionReadModel, TrackListReadModel, TrackPriceExecutionBlockReason,
+        TrackReadBindingIntent, TrackReadBindingStatus, TrackReadModel, TrackReadPnlStats,
+        TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
+        TrackRiskAcquisitionReadModel, TrackStrategyPriceStatus, project_binding_status,
     };
     use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
     use crate::track_read_source::TrackReadSource;
@@ -888,6 +890,30 @@ mod tests {
         }
     }
 
+    fn test_runtime_view(decision: InventoryDecisionView) -> TrackRuntimeView {
+        TrackRuntimeView {
+            status: TrackStatus::Active,
+            exchange_rules: test_exchange_rules(),
+            current_exposure: Exposure(1.0),
+            position_qty: 1.0,
+            decision,
+            risk_acquisition: None,
+            manual_target_override: None,
+            executor: ExecutorView::default(),
+            pnl_stats: Default::default(),
+            unrealized_pnl: 0.0,
+            has_account_margin_guard: false,
+            price_execution_block_reason: None,
+            strategy_price: Some(101.25),
+            strategy_price_status: StrategyPriceStatus::Live,
+            mark_price: Some(101.5),
+            best_bid: Some(101.0),
+            best_ask: Some(101.5),
+            last_tick_at: None,
+            market_data_stale_since: None,
+        }
+    }
+
     fn test_track_list_read_model() -> TrackListReadModel {
         TrackListReadModel {
             track_id: "btc-core".to_string(),
@@ -899,8 +925,7 @@ mod tests {
             strategy_price_status: TrackStrategyPriceStatus::Live,
             current_exposure: 0.0,
             position_qty: 0.42,
-            desired_exposure: Some(0.0),
-            execution_target_exposure: Some(0.0),
+            decision: TrackInventoryDecisionReadModel::from(&InventoryDecisionView::default()),
             risk_acquisition: None,
             pnl_stats: TrackReadPnlStats::default(),
             unrealized_pnl: 0.0,
@@ -1031,31 +1056,140 @@ mod tests {
     }
 
     #[test]
+    fn list_and_detail_project_one_atomic_inventory_decision() {
+        let decision = InventoryDecisionView {
+            revision: Some(7),
+            policy_target: Some(8.0),
+            risk_approved_target: Some(4.0),
+            acquisition_frontier: Some(1.5),
+            execution_target: Some(1.25),
+            reason: DecisionReason::WaitingRiskRelease,
+        };
+        let runtime = test_runtime_view(decision);
+        let updated_at = Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap();
+
+        let list = TrackListReadModel::from_parts(&test_track_definition(), &runtime, updated_at);
+        let detail = TrackReadModel::from_source(TrackReadSource {
+            definition: test_track_definition(),
+            runtime,
+            updated_at,
+            recent_track_events: Vec::new(),
+            recent_effects: Vec::new(),
+        });
+
+        assert_eq!(list.decision, detail.decision);
+        assert_eq!(detail.decision.revision, Some(7));
+        assert_eq!(detail.decision.policy_target, Some(8.0));
+        assert_eq!(detail.decision.risk_approved_target, Some(4.0));
+        assert_eq!(detail.decision.acquisition_frontier, Some(1.5));
+        assert_eq!(detail.decision.execution_target, Some(1.25));
+        assert_eq!(detail.decision.reason, DecisionReason::WaitingRiskRelease);
+    }
+
+    #[test]
+    fn unavailable_inventory_decision_preserves_reason_with_empty_targets() {
+        let runtime = test_runtime_view(InventoryDecisionView {
+            revision: None,
+            policy_target: None,
+            risk_approved_target: None,
+            acquisition_frontier: None,
+            execution_target: None,
+            reason: DecisionReason::Paused,
+        });
+
+        let list = TrackListReadModel::from_parts(
+            &test_track_definition(),
+            &runtime,
+            Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+        );
+
+        assert_eq!(list.decision.revision, None);
+        assert_eq!(list.decision.policy_target, None);
+        assert_eq!(list.decision.risk_approved_target, None);
+        assert_eq!(list.decision.acquisition_frontier, None);
+        assert_eq!(list.decision.execution_target, None);
+        assert_eq!(list.decision.reason, DecisionReason::Paused);
+    }
+
+    #[test]
+    fn risk_acquisition_projection_contains_only_acquisition_diagnostics() {
+        let mut runtime = test_runtime_view(InventoryDecisionView {
+            revision: Some(7),
+            policy_target: Some(8.0),
+            risk_approved_target: Some(4.0),
+            acquisition_frontier: Some(1.5),
+            execution_target: Some(1.25),
+            reason: DecisionReason::WaitingRiskRelease,
+        });
+        runtime.risk_acquisition = Some(RiskAcquisitionRuntimeView {
+            direction: RiskAcquisitionDirection::Long,
+            risk_approved_target: Exposure(4.0),
+            acquisition_frontier: Exposure(1.5),
+            backlog_units: 2.5,
+            release_anchor_price: 95.0,
+            release_anchor_target: Exposure(1.5),
+            stale_release_elapsed_minutes: 12.0,
+            stale_release_minutes: 30.0,
+            next_advantage_target: Exposure(6.0),
+            next_advantage_price: Some(92.5),
+            next_release_units: 1.0,
+            next_release_target: Exposure(2.5),
+        });
+
+        let read_model = TrackReadModel::from_source(TrackReadSource {
+            definition: test_track_definition(),
+            runtime,
+            updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
+            recent_track_events: Vec::new(),
+            recent_effects: Vec::new(),
+        });
+        let TrackRiskAcquisitionReadModel {
+            direction,
+            backlog_units,
+            release_anchor_price,
+            release_anchor_target,
+            stale_release_elapsed_minutes,
+            stale_release_minutes,
+            next_advantage_target,
+            next_advantage_price,
+            next_release_units,
+            next_release_target,
+        } = read_model
+            .risk_acquisition
+            .expect("risk acquisition diagnostics should be projected");
+
+        assert_eq!(direction, TrackRiskAcquisitionDirection::Long);
+        assert_eq!(backlog_units, 2.5);
+        assert_eq!(release_anchor_price, 95.0);
+        assert_eq!(release_anchor_target, 1.5);
+        assert_eq!(stale_release_elapsed_minutes, 12.0);
+        assert_eq!(stale_release_minutes, 30.0);
+        assert_eq!(next_advantage_target, 6.0);
+        assert_eq!(next_advantage_price, Some(92.5));
+        assert_eq!(next_release_units, 1.0);
+        assert_eq!(next_release_target, 2.5);
+    }
+
+    #[test]
     fn read_model_from_source_flattens_runtime_view() {
         let read_model = TrackReadModel::from_source(TrackReadSource {
             definition: test_track_definition(),
             runtime: TrackRuntimeView {
-                status: TrackStatus::Active,
-                exchange_rules: test_exchange_rules(),
                 current_exposure: Exposure(3.5),
                 position_qty: 0.42,
-                inventory_decision: None,
-                desired_exposure: Some(Exposure(4.0)),
-                execution_target_exposure: Some(Exposure(4.0)),
-                risk_acquisition: Default::default(),
-                manual_target_override: None,
-                executor: ExecutorView::default(),
-                pnl_stats: Default::default(),
-                unrealized_pnl: 0.0,
-                has_account_margin_guard: false,
-                price_execution_block_reason: None,
                 strategy_price: None,
                 strategy_price_status: StrategyPriceStatus::Stale,
                 mark_price: None,
                 best_bid: None,
                 best_ask: None,
-                last_tick_at: None,
-                market_data_stale_since: None,
+                ..test_runtime_view(InventoryDecisionView {
+                    revision: Some(1),
+                    policy_target: Some(4.0),
+                    risk_approved_target: Some(4.0),
+                    acquisition_frontier: None,
+                    execution_target: Some(4.0),
+                    reason: DecisionReason::SubmitPlanned,
+                })
             },
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             recent_track_events: vec![StoredTrackEvent {
@@ -1119,29 +1253,18 @@ mod tests {
         let read_model = TrackReadModel::from_source(TrackReadSource {
             definition: test_track_definition(),
             runtime: TrackRuntimeView {
-                status: TrackStatus::Active,
-                exchange_rules: test_exchange_rules(),
-                current_exposure: Exposure(1.0),
-                position_qty: 1.0,
-                inventory_decision: None,
-                desired_exposure: Some(Exposure(2.0)),
-                execution_target_exposure: Some(Exposure(2.0)),
-                risk_acquisition: Default::default(),
-                manual_target_override: None,
-                executor: ExecutorView::default(),
-                pnl_stats: Default::default(),
-                unrealized_pnl: 0.0,
-                has_account_margin_guard: false,
                 price_execution_block_reason: Some(
                     poise_engine::price_gate::PriceExecutionBlockReason::MissingExecutionQuote,
                 ),
-                strategy_price: Some(101.25),
                 strategy_price_status: StrategyPriceStatus::Stale,
-                mark_price: Some(101.5),
-                best_bid: Some(101.0),
-                best_ask: Some(101.5),
-                last_tick_at: None,
-                market_data_stale_since: None,
+                ..test_runtime_view(InventoryDecisionView {
+                    revision: Some(2),
+                    policy_target: Some(2.0),
+                    risk_approved_target: Some(2.0),
+                    acquisition_frontier: None,
+                    execution_target: Some(2.0),
+                    reason: DecisionReason::PriceGateBlocked,
+                })
             },
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             recent_track_events: Vec::new(),
@@ -1163,33 +1286,21 @@ mod tests {
     }
 
     #[test]
-    fn read_model_uses_runtime_view_for_market_and_target_fields() {
+    fn read_model_uses_runtime_view_for_market_and_decision_fields() {
         let read_model = TrackReadModel::from_source(TrackReadSource {
             definition: test_track_definition(),
             runtime: TrackRuntimeView {
-                status: TrackStatus::Active,
-                exchange_rules: test_exchange_rules(),
-                current_exposure: Exposure(1.0),
-                position_qty: 1.0,
-                inventory_decision: None,
-                desired_exposure: Some(Exposure(2.0)),
-                execution_target_exposure: Some(Exposure(2.0)),
-                risk_acquisition: Default::default(),
-                manual_target_override: None,
-                executor: ExecutorView::default(),
-                pnl_stats: Default::default(),
-                unrealized_pnl: 0.0,
-                has_account_margin_guard: false,
                 price_execution_block_reason: Some(
                     poise_engine::price_gate::PriceExecutionBlockReason::MissingExecutionQuote,
                 ),
-                strategy_price: Some(101.25),
-                strategy_price_status: StrategyPriceStatus::Live,
-                mark_price: Some(101.5),
-                best_bid: Some(101.0),
-                best_ask: Some(101.5),
-                last_tick_at: None,
-                market_data_stale_since: None,
+                ..test_runtime_view(InventoryDecisionView {
+                    revision: Some(3),
+                    policy_target: Some(3.0),
+                    risk_approved_target: Some(2.0),
+                    acquisition_frontier: Some(1.5),
+                    execution_target: Some(1.25),
+                    reason: DecisionReason::WaitingRiskRelease,
+                })
             },
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             recent_track_events: Vec::new(),
@@ -1204,7 +1315,11 @@ mod tests {
         assert_eq!(read_model.mark_price, Some(101.5));
         assert_eq!(read_model.best_bid, Some(101.0));
         assert_eq!(read_model.best_ask, Some(101.5));
-        assert_eq!(read_model.desired_exposure, Some(2.0));
+        assert_eq!(read_model.decision.revision, Some(3));
+        assert_eq!(read_model.decision.policy_target, Some(3.0));
+        assert_eq!(read_model.decision.risk_approved_target, Some(2.0));
+        assert_eq!(read_model.decision.acquisition_frontier, Some(1.5));
+        assert_eq!(read_model.decision.execution_target, Some(1.25));
         assert_eq!(
             read_model.price_execution_block_reason,
             Some(TrackPriceExecutionBlockReason::MissingExecutionQuote)
@@ -1216,17 +1331,10 @@ mod tests {
         let read_model = TrackReadModel::from_source(TrackReadSource {
             definition: test_track_definition(),
             runtime: TrackRuntimeView {
-                status: TrackStatus::Active,
-                exchange_rules: test_exchange_rules(),
-                current_exposure: Exposure(1.0),
-                position_qty: 1.0,
-                inventory_decision: None,
-                desired_exposure: Some(Exposure(4.0)),
-                execution_target_exposure: Some(Exposure(1.2)),
                 risk_acquisition: Some(RiskAcquisitionRuntimeView {
                     direction: RiskAcquisitionDirection::Long,
-                    curve_target: Exposure(4.0),
-                    risk_release_frontier: Exposure(1.2),
+                    risk_approved_target: Exposure(4.0),
+                    acquisition_frontier: Exposure(1.2),
                     backlog_units: 2.8,
                     release_anchor_price: 95.0,
                     release_anchor_target: Exposure(4.0),
@@ -1237,19 +1345,18 @@ mod tests {
                     next_release_units: 1.0,
                     next_release_target: Exposure(2.2),
                 }),
-                manual_target_override: None,
-                executor: ExecutorView::default(),
-                pnl_stats: Default::default(),
-                unrealized_pnl: 0.0,
-                has_account_margin_guard: false,
-                price_execution_block_reason: None,
                 strategy_price: Some(95.0),
-                strategy_price_status: StrategyPriceStatus::Live,
                 mark_price: Some(95.0),
                 best_bid: Some(94.9),
                 best_ask: Some(95.1),
-                last_tick_at: None,
-                market_data_stale_since: None,
+                ..test_runtime_view(InventoryDecisionView {
+                    revision: Some(4),
+                    policy_target: Some(6.0),
+                    risk_approved_target: Some(4.0),
+                    acquisition_frontier: Some(1.2),
+                    execution_target: Some(1.2),
+                    reason: DecisionReason::WaitingRiskRelease,
+                })
             },
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             recent_track_events: Vec::new(),
@@ -1260,15 +1367,14 @@ mod tests {
             .risk_acquisition
             .expect("risk acquisition should be projected");
 
-        assert_eq!(read_model.desired_exposure, Some(4.0));
-        assert_eq!(read_model.execution_target_exposure, Some(1.2));
-        assert!((read_model.inventory_gap - 0.2).abs() < 1e-9);
+        assert_eq!(read_model.decision.policy_target, Some(6.0));
+        assert_eq!(read_model.decision.risk_approved_target, Some(4.0));
+        assert_eq!(read_model.decision.acquisition_frontier, Some(1.2));
+        assert_eq!(read_model.decision.execution_target, Some(1.2));
         assert_eq!(
             risk_acquisition.direction,
             TrackRiskAcquisitionDirection::Long
         );
-        assert!((risk_acquisition.curve_target - 4.0).abs() < 1e-9);
-        assert!((risk_acquisition.risk_release_frontier - 1.2).abs() < 1e-9);
         assert!((risk_acquisition.backlog_units - 2.8).abs() < 1e-9);
         assert_eq!(risk_acquisition.next_advantage_price, Some(92.5));
     }
@@ -1276,15 +1382,6 @@ mod tests {
     #[test]
     fn read_model_projects_binding_intent_from_runtime_view() {
         let runtime = TrackRuntimeView {
-            status: TrackStatus::Active,
-            exchange_rules: test_exchange_rules(),
-            current_exposure: Exposure(1.0),
-            position_qty: 1.0,
-            inventory_decision: None,
-            desired_exposure: Some(Exposure(0.0)),
-            execution_target_exposure: Some(Exposure(0.0)),
-            risk_acquisition: Default::default(),
-            manual_target_override: None,
             executor: ExecutorView {
                 bindings: vec![BindingView {
                     id: "curve-maker:positive-retrace".into(),
@@ -1298,17 +1395,18 @@ mod tests {
                 }],
                 recovery_anomaly: None,
             },
-            pnl_stats: Default::default(),
-            unrealized_pnl: 0.0,
-            has_account_margin_guard: false,
-            price_execution_block_reason: None,
             strategy_price: Some(101.0),
-            strategy_price_status: StrategyPriceStatus::Live,
             mark_price: Some(101.0),
             best_bid: Some(100.9),
             best_ask: Some(101.1),
-            last_tick_at: None,
-            market_data_stale_since: None,
+            ..test_runtime_view(InventoryDecisionView {
+                revision: Some(5),
+                policy_target: Some(0.0),
+                risk_approved_target: Some(0.0),
+                acquisition_frontier: None,
+                execution_target: Some(0.0),
+                reason: DecisionReason::SubmitPlanned,
+            })
         };
 
         let bindings = super::project_bindings(&runtime);

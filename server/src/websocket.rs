@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::projector::project_inventory_decision;
 use crate::server_context::WebSocketState;
 
 #[cfg(not(test))]
@@ -643,8 +644,14 @@ fn project_live_view(live_view: poise_engine::runtime::TrackLiveView) -> Protoco
         mark_price: live_view.mark_price,
         best_bid: live_view.best_bid,
         best_ask: live_view.best_ask,
-        desired_exposure: live_view.desired_exposure,
-        execution_target_exposure: live_view.execution_target_exposure,
+        decision: project_inventory_decision(
+            live_view.decision.revision,
+            live_view.decision.policy_target,
+            live_view.decision.risk_approved_target,
+            live_view.decision.acquisition_frontier,
+            live_view.decision.execution_target,
+            live_view.decision.reason,
+        ),
         risk_acquisition: live_view
             .risk_acquisition
             .map(project_live_risk_acquisition),
@@ -666,8 +673,6 @@ fn project_live_risk_acquisition(
                 RiskAcquisitionDirectionView::Short
             }
         },
-        curve_target: source.curve_target.0,
-        risk_release_frontier: source.risk_release_frontier.0,
         backlog_units: source.backlog_units,
         release_anchor_price: source.release_anchor_price,
         release_anchor_target: source.release_anchor_target.0,
@@ -767,14 +772,16 @@ mod tests {
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_core::types::{ExchangeRules, Exposure};
     use poise_engine::command::TrackCommand;
-    use poise_engine::execution_plan::TrackEffect;
+    use poise_engine::execution_plan::{DecisionReason, TrackEffect};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::ClockPort;
     use poise_engine::runtime::{
-        RiskAcquisitionDirection, RiskAcquisitionRuntimeView, StrategyPriceStatus, TrackLiveView,
+        InventoryDecisionView, RiskAcquisitionDirection, RiskAcquisitionRuntimeView,
+        StrategyPriceStatus, TrackLiveView,
     };
     use poise_protocol::{
-        ExecutionStateView, ExecutionStatusView, RiskSignalView, StreamEvent, TrackStatus,
+        DecisionReasonView, ExecutionStateView, ExecutionStatusView, RiskSignalView, StreamEvent,
+        TrackStatus,
     };
     use tokio::net::TcpListener;
     use tokio_tungstenite::connect_async;
@@ -831,19 +838,25 @@ mod tests {
     }
 
     #[test]
-    fn projects_live_risk_acquisition_observability() {
+    fn projects_live_decision_reason_and_risk_acquisition_observability() {
         let live = super::project_live_view(TrackLiveView {
             strategy_price: Some(95.0),
             strategy_price_status: StrategyPriceStatus::Live,
             mark_price: Some(95.0),
             best_bid: Some(94.9),
             best_ask: Some(95.1),
-            desired_exposure: Some(1.2),
-            execution_target_exposure: Some(1.2),
+            decision: InventoryDecisionView {
+                revision: Some(44),
+                policy_target: Some(4.0),
+                risk_approved_target: Some(3.0),
+                acquisition_frontier: Some(1.2),
+                execution_target: Some(1.2),
+                reason: DecisionReason::WaitingRiskRelease,
+            },
             risk_acquisition: Some(RiskAcquisitionRuntimeView {
                 direction: RiskAcquisitionDirection::Long,
-                curve_target: Exposure(4.0),
-                risk_release_frontier: Exposure(1.2),
+                risk_approved_target: Exposure(3.0),
+                acquisition_frontier: Exposure(1.2),
                 backlog_units: 2.8,
                 release_anchor_price: 95.0,
                 release_anchor_target: Exposure(4.0),
@@ -865,10 +878,32 @@ mod tests {
             risk_acquisition.direction,
             poise_protocol::RiskAcquisitionDirectionView::Long
         );
-        assert!((risk_acquisition.curve_target - 4.0).abs() < f64::EPSILON);
         assert!((risk_acquisition.backlog_units - 2.8).abs() < f64::EPSILON);
-        assert_eq!(live.execution_target_exposure, Some(1.2));
+        assert_eq!(live.decision.revision, Some(44));
+        assert_eq!(live.decision.policy_target, Some(4.0));
+        assert_eq!(live.decision.risk_approved_target, Some(3.0));
+        assert_eq!(live.decision.acquisition_frontier, Some(1.2));
+        assert_eq!(live.decision.execution_target, Some(1.2));
+        assert_eq!(live.decision.reason, DecisionReasonView::WaitingRiskRelease);
         assert_eq!(risk_acquisition.next_advantage_price, Some(92.5));
+        let json = serde_json::to_value(risk_acquisition).unwrap();
+        assert!(json.get("curve_target").is_none());
+        assert!(json.get("risk_release_frontier").is_none());
+    }
+
+    #[test]
+    fn projects_unavailable_live_decision_without_legacy_target_fallback() {
+        let live = super::project_live_view(TrackLiveView::default());
+        let json = serde_json::to_value(&live).unwrap();
+
+        assert_eq!(live.decision.revision, None);
+        assert_eq!(live.decision.policy_target, None);
+        assert_eq!(live.decision.risk_approved_target, None);
+        assert_eq!(live.decision.acquisition_frontier, None);
+        assert_eq!(live.decision.execution_target, None);
+        assert_eq!(live.decision.reason, DecisionReasonView::WaitingMarketData);
+        assert!(json.get("desired_exposure").is_none());
+        assert!(json.get("execution_target_exposure").is_none());
     }
 
     async fn spawn_server_with_capacity(
@@ -1212,7 +1247,7 @@ mod tests {
     #[tokio::test]
     async fn broadcasts_track_list_item_changed_after_effect_state_change() {
         let repository = seeded_repository();
-        repository.seed_pending_noop_effect();
+        repository.seed_pending_cancel_all_effect();
         let (url, state) = spawn_server(repository.clone()).await;
         let effect_worker_state = build_effect_worker_state_for_notification_test(
             repository,
@@ -1230,7 +1265,7 @@ mod tests {
         assert!(state.notifications.receiver_count() > 0);
         effect_worker_state
             .effect_service
-            .complete_effect_succeeded("btc-core", "effect-1")
+            .complete_effect_failed("btc-core", "effect-1", "injected cancel failure")
             .await
             .unwrap();
 
@@ -1674,13 +1709,15 @@ mod tests {
             *self.load_snapshot_calls.lock().unwrap()
         }
 
-        fn seed_pending_noop_effect(&self) {
+        fn seed_pending_cancel_all_effect(&self) {
             self.effects.lock().unwrap().push(PersistedTrackEffect {
                 effect_id: "effect-1".into(),
                 track_id: TrackId::new("btc-core"),
                 batch_id: "batch-1".into(),
                 sequence: 0,
-                effect: TrackEffect::NoOp,
+                effect: TrackEffect::CancelAll {
+                    instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+                },
                 status: EffectStatus::Pending,
                 attempt_count: 0,
                 last_error: None,

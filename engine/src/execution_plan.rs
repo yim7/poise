@@ -1,17 +1,29 @@
 use serde::{Deserialize, Serialize};
 
 use crate::executor::binding::SubmitRecoveryToken;
-use poise_core::events::DomainEvent;
 use poise_core::types::{ExchangeRules, Exposure};
 
 use crate::ports::OrderRequest;
 use crate::price_gate::SubmitPurpose;
 use poise_core::track::Instrument;
 
-#[derive(Debug, Clone)]
-pub struct ExecutionPlan {
-    pub actions: Vec<TrackEffect>,
-    pub events: Vec<DomainEvent>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionReason {
+    WaitingMarketData,
+    Paused,
+    AtExecutionTarget,
+    WaitingRiskRelease,
+    AccountCapacityBlocked,
+    RiskInputInvalid,
+    BandPolicyBlocked,
+    PriceGateBlocked,
+    BelowRebalance,
+    BelowVenueMinimum,
+    CoveredByWorkingOrder,
+    RecoveryRequired,
+    WaitingCancel,
+    SubmitPlanned,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29,7 +41,6 @@ pub enum TrackEffect {
     CancelAll {
         instrument: Instrument,
     },
-    NoOp,
 }
 
 pub fn round_to_step(value: f64, step: f64) -> f64 {
@@ -50,31 +61,11 @@ pub fn is_meetable_minimum(price: f64, quantity: f64, rules: &ExchangeRules) -> 
     true
 }
 
-impl ExecutionPlan {
-    pub fn noop() -> Self {
-        Self {
-            actions: vec![TrackEffect::NoOp],
-            events: vec![],
-        }
-    }
-
-    pub fn hold(_reason: String) -> Self {
-        Self {
-            actions: vec![TrackEffect::NoOp],
-            events: vec![],
-        }
-    }
-
-    pub fn has_actions(&self) -> bool {
-        self.actions.iter().any(|a| !matches!(a, TrackEffect::NoOp))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use poise_core::types::{ExchangeRules, QuantityKind};
 
-    use super::is_meetable_minimum;
+    use super::{DecisionReason, is_meetable_minimum};
 
     fn inverse_rules(min_notional: f64) -> ExchangeRules {
         ExchangeRules {
@@ -97,5 +88,17 @@ mod tests {
 
         assert!(!is_meetable_minimum(50_000.0, 4.0, &rules));
         assert!(is_meetable_minimum(50_000.0, 5.0, &rules));
+    }
+
+    #[test]
+    fn decision_reason_serializes_as_public_snake_case_vocabulary() {
+        assert_eq!(
+            serde_json::to_string(&DecisionReason::WaitingRiskRelease).unwrap(),
+            r#""waiting_risk_release""#
+        );
+        assert_eq!(
+            serde_json::from_str::<DecisionReason>(r#""submit_planned""#).unwrap(),
+            DecisionReason::SubmitPlanned
+        );
     }
 }

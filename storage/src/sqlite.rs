@@ -1402,18 +1402,13 @@ mod tests {
         let entries = effects
             .iter()
             .enumerate()
-            .filter_map(|(sequence, effect)| {
-                if matches!(effect, TrackEffect::NoOp) {
-                    return None;
-                }
-                Some(EffectJournalEntry {
-                    effect_id: format!("{}:{}:{}", track_id, batch_id, sequence),
-                    track_id: TrackId::new(track_id),
-                    batch_id: batch_id.clone(),
-                    sequence: sequence as u32,
-                    effect: effect.clone(),
-                    created_at,
-                })
+            .map(|(sequence, effect)| EffectJournalEntry {
+                effect_id: format!("{}:{}:{}", track_id, batch_id, sequence),
+                track_id: TrackId::new(track_id),
+                batch_id: batch_id.clone(),
+                sequence: sequence as u32,
+                effect: effect.clone(),
+                created_at,
             })
             .collect::<Vec<_>>();
         storage.append_entries(&entries).await.unwrap();

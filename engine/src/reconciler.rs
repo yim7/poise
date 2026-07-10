@@ -5,6 +5,7 @@ use poise_core::strategy::{self, BandBoundary, BandProtectionPolicy, BandStatus}
 use poise_core::types::Exposure;
 
 use crate::execution_gate::{AccountCapacityGate, AccountCapacityGateInput, ExecutionGateDecision};
+use crate::execution_plan::DecisionReason;
 use crate::loss_guard::build_loss_guard_snapshot_for_asset;
 use crate::risk_exposure_gate::{
     self, RiskAcquisitionRelease, RiskExposureGateInput, RiskExposureGateState,
@@ -17,15 +18,15 @@ use crate::runtime::{
 pub struct TargetReconcileResult {
     pub events: Vec<DomainEvent>,
     pub policy_target: Exposure,
-    pub curve_target: Exposure,
-    pub desired_exposure: Exposure,
-    pub execution_target_exposure: Exposure,
+    pub risk_approved_target: Exposure,
+    pub execution_target: Exposure,
+    pub reason: Option<DecisionReason>,
     pub applied_risk_cap: Option<AppliedRiskCap>,
     pub new_runtime_state: Option<TrackState>,
     pub execution_gate_decision: ExecutionGateDecision,
     // Suppresses active pursuit of the target; binding maintenance and gate cleanup may still run.
     pub target_pursuit_suppressed: bool,
-    pub risk_release_frontier: Option<Exposure>,
+    pub acquisition_frontier: Option<Exposure>,
     pub risk_acquisition: Option<RiskAcquisitionRelease>,
 }
 
@@ -46,14 +47,14 @@ pub fn reconcile_target_at(
                 .into_iter()
                 .collect(),
             policy_target: target.clone(),
-            curve_target: target.clone(),
-            execution_target_exposure: target.clone(),
-            desired_exposure: target,
+            risk_approved_target: target.clone(),
+            execution_target: target,
+            reason: delta.is_zero().then_some(DecisionReason::AtExecutionTarget),
             applied_risk_cap: None,
             new_runtime_state: Some(track.track_state.clone()),
             execution_gate_decision: ExecutionGateDecision::Open,
             target_pursuit_suppressed: delta.is_zero(),
-            risk_release_frontier: None,
+            acquisition_frontier: None,
             risk_acquisition: Default::default(),
         };
     }
@@ -69,14 +70,14 @@ pub fn reconcile_target_at(
                 .into_iter()
                 .collect(),
             policy_target: target_override.clone(),
-            curve_target: target_override.clone(),
-            execution_target_exposure: target_override.clone(),
-            desired_exposure: target_override,
+            risk_approved_target: target_override.clone(),
+            execution_target: target_override,
+            reason: delta.is_zero().then_some(DecisionReason::AtExecutionTarget),
             applied_risk_cap: None,
             new_runtime_state: Some(track.track_state.clone()),
             execution_gate_decision: ExecutionGateDecision::Open,
             target_pursuit_suppressed: delta.is_zero(),
-            risk_release_frontier: None,
+            acquisition_frontier: None,
             risk_acquisition: Default::default(),
         };
     }
@@ -128,58 +129,54 @@ pub fn reconcile_target_at(
                     .into_iter()
                     .collect(),
                 policy_target: target,
-                curve_target: termination_target.clone(),
-                execution_target_exposure: termination_target.clone(),
-                desired_exposure: termination_target,
+                risk_approved_target: termination_target.clone(),
+                execution_target: termination_target,
+                reason: delta.is_zero().then_some(DecisionReason::AtExecutionTarget),
                 applied_risk_cap: None,
                 new_runtime_state: Some(TrackState::Terminated {
                     cause: TerminationCause::Risk(cause),
                 }),
                 execution_gate_decision: ExecutionGateDecision::Open,
                 target_pursuit_suppressed: delta.is_zero(),
-                risk_release_frontier: None,
+                acquisition_frontier: None,
                 risk_acquisition: Default::default(),
             };
         }
     };
 
-    let desired_exposure = approved_target.clone();
-    let (risk_release_frontier, new_runtime_state, risk_acquisition) = apply_risk_exposure_gate(
+    let risk_approved_target = approved_target.clone();
+    let (acquisition_frontier, new_runtime_state, risk_acquisition) = apply_risk_exposure_gate(
         track,
         strategy_price,
-        desired_exposure.clone(),
+        risk_approved_target.clone(),
         new_runtime_state,
         observed_at,
     );
-    let execution_target_exposure = risk_exposure_gate::execution_target_exposure(
+    let execution_target = risk_exposure_gate::execution_target_exposure(
         &track.current_exposure,
-        &desired_exposure,
-        risk_release_frontier.as_ref(),
+        &risk_approved_target,
+        acquisition_frontier.as_ref(),
     );
 
-    if should_suppress_protected_risk_increase(
-        track,
-        &new_runtime_state,
-        &execution_target_exposure,
-    ) {
+    if should_suppress_protected_risk_increase(track, &new_runtime_state, &execution_target) {
         return TargetReconcileResult {
             events,
             policy_target: target.clone(),
-            curve_target: desired_exposure.clone(),
-            desired_exposure,
-            execution_target_exposure,
+            risk_approved_target,
+            execution_target,
+            reason: Some(DecisionReason::BandPolicyBlocked),
             applied_risk_cap,
             new_runtime_state,
             execution_gate_decision: ExecutionGateDecision::Open,
             target_pursuit_suppressed: true,
-            risk_release_frontier,
+            acquisition_frontier,
             risk_acquisition,
         };
     }
 
     let execution_gate_decision = AccountCapacityGate::evaluate(AccountCapacityGateInput {
         current: track.current_exposure.clone(),
-        approved_target: execution_target_exposure.clone(),
+        approved_target: execution_target.clone(),
         unit_notional: track.config().notional_per_unit,
         available_notional: track
             .execution_gate_state
@@ -196,50 +193,60 @@ pub fn reconcile_target_at(
         return TargetReconcileResult {
             events,
             policy_target: target.clone(),
-            curve_target: desired_exposure.clone(),
-            desired_exposure,
-            execution_target_exposure,
+            risk_approved_target,
+            execution_target,
+            reason: Some(match reason {
+                ExecutionGateReason::AccountCapacityInsufficient { .. } => {
+                    DecisionReason::AccountCapacityBlocked
+                }
+                ExecutionGateReason::PnlAssetMismatch { .. } => DecisionReason::RiskInputInvalid,
+            }),
             applied_risk_cap,
             new_runtime_state,
             execution_gate_decision,
             target_pursuit_suppressed: true,
-            risk_release_frontier,
+            acquisition_frontier,
             risk_acquisition,
         };
     }
 
-    let delta = track.current_exposure.delta(&execution_target_exposure);
+    let delta = track.current_exposure.delta(&execution_target);
     if delta.is_zero() {
+        let reason = if execution_target != risk_approved_target {
+            DecisionReason::WaitingRiskRelease
+        } else {
+            DecisionReason::AtExecutionTarget
+        };
         return TargetReconcileResult {
             events,
             policy_target: target.clone(),
-            curve_target: desired_exposure.clone(),
-            desired_exposure,
-            execution_target_exposure,
+            risk_approved_target,
+            execution_target,
+            reason: Some(reason),
             applied_risk_cap,
             new_runtime_state,
             execution_gate_decision,
             target_pursuit_suppressed: true,
-            risk_release_frontier,
+            acquisition_frontier,
             risk_acquisition,
         };
     }
 
-    if let Some(event) = exposure_target_change_event(track, &desired_exposure) {
+    if let Some(event) = exposure_target_change_event(track, &risk_approved_target) {
         events.push(event);
     }
 
     TargetReconcileResult {
         events,
         policy_target: target,
-        curve_target: desired_exposure.clone(),
-        desired_exposure,
-        execution_target_exposure,
+        risk_approved_target,
+        execution_target,
+        reason: None,
         applied_risk_cap,
         new_runtime_state,
         execution_gate_decision,
         target_pursuit_suppressed: false,
-        risk_release_frontier,
+        acquisition_frontier,
         risk_acquisition,
     }
 }
@@ -260,14 +267,14 @@ fn pnl_asset_mismatch_result(
             reason: reason.clone(),
         }],
         policy_target: policy_target.clone(),
-        curve_target: policy_target.clone(),
-        desired_exposure: current.clone(),
-        execution_target_exposure: current,
+        risk_approved_target: current.clone(),
+        execution_target: current,
+        reason: Some(DecisionReason::RiskInputInvalid),
         applied_risk_cap: None,
         new_runtime_state,
         execution_gate_decision: ExecutionGateDecision::NoSubmit { reason },
         target_pursuit_suppressed: true,
-        risk_release_frontier: None,
+        acquisition_frontier: None,
         risk_acquisition: None,
     }
 }
@@ -571,11 +578,14 @@ fn should_suppress_protected_risk_increase(
     next_state: &Option<TrackState>,
     approved_target: &Exposure,
 ) -> bool {
+    let crosses_zero = (track.current_exposure.0 > f64::EPSILON
+        && approved_target.0 < -f64::EPSILON)
+        || (track.current_exposure.0 < -f64::EPSILON && approved_target.0 > f64::EPSILON);
     matches!(
         effective_runtime_state(track, next_state),
         TrackState::Running(ControlState::Automatic(AutoState::Frozen { .. }))
             | TrackState::Running(ControlState::Automatic(AutoState::FlattenPending { .. }))
-    ) && approved_target.0.abs() > track.current_exposure.0.abs()
+    ) && (approved_target.0.abs() > track.current_exposure.0.abs() || crosses_zero)
 }
 
 #[cfg(test)]
@@ -772,7 +782,7 @@ mod tests {
         let result = reconcile_target(&track, 100.0);
 
         assert!(result.target_pursuit_suppressed);
-        assert_eq!(result.desired_exposure, Exposure(0.0));
+        assert_eq!(result.risk_approved_target, Exposure(0.0));
     }
 
     #[test]
@@ -782,9 +792,9 @@ mod tests {
 
         let result = reconcile_target(&track, 93.75);
 
-        assert_eq!(result.desired_exposure, Exposure(5.0));
-        assert_eq!(result.execution_target_exposure, Exposure(2.5));
-        assert_eq!(result.risk_release_frontier, Some(Exposure(2.5)));
+        assert_eq!(result.risk_approved_target, Exposure(5.0));
+        assert_eq!(result.execution_target, Exposure(2.5));
+        assert_eq!(result.acquisition_frontier, Some(Exposure(2.5)));
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
@@ -806,8 +816,8 @@ mod tests {
 
         let result = reconcile_target(&track, 93.75);
 
-        assert_eq!(result.desired_exposure, Exposure(5.0));
-        assert_eq!(result.execution_target_exposure, Exposure(2.5));
+        assert_eq!(result.risk_approved_target, Exposure(5.0));
+        assert_eq!(result.execution_target, Exposure(2.5));
         assert_eq!(result.execution_gate_decision, ExecutionGateDecision::Open);
         assert!(!result.target_pursuit_suppressed);
     }
@@ -821,9 +831,9 @@ mod tests {
 
         let result = reconcile_target(&track, 99.375);
 
-        assert_eq!(result.desired_exposure, Exposure(0.5));
-        assert_eq!(result.execution_target_exposure, Exposure(0.0));
-        assert_eq!(result.risk_release_frontier, Some(Exposure(0.0)));
+        assert_eq!(result.risk_approved_target, Exposure(0.5));
+        assert_eq!(result.execution_target, Exposure(0.0));
+        assert_eq!(result.acquisition_frontier, Some(Exposure(0.0)));
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
@@ -846,9 +856,9 @@ mod tests {
 
         let result = reconcile_target(&track, 98.75);
 
-        assert_eq!(result.desired_exposure, Exposure(1.0));
-        assert_eq!(result.execution_target_exposure, Exposure(0.5));
-        assert_eq!(result.risk_release_frontier, Some(Exposure(0.5)));
+        assert_eq!(result.risk_approved_target, Exposure(1.0));
+        assert_eq!(result.execution_target, Exposure(0.5));
+        assert_eq!(result.acquisition_frontier, Some(Exposure(0.5)));
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
@@ -871,9 +881,9 @@ mod tests {
 
         let result = reconcile_target(&track, 98.75);
 
-        assert_eq!(result.desired_exposure, Exposure(1.0));
-        assert_eq!(result.execution_target_exposure, Exposure(1.0));
-        assert_eq!(result.risk_release_frontier, Some(Exposure(1.0)));
+        assert_eq!(result.risk_approved_target, Exposure(1.0));
+        assert_eq!(result.execution_target, Exposure(1.0));
+        assert_eq!(result.acquisition_frontier, Some(Exposure(1.0)));
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
@@ -896,10 +906,11 @@ mod tests {
 
         let result = reconcile_target(&track, 93.125);
 
-        assert_eq!(result.desired_exposure, Exposure(5.5));
-        assert_eq!(result.execution_target_exposure, Exposure(2.0));
-        assert_eq!(result.risk_release_frontier, Some(Exposure(2.0)));
+        assert_eq!(result.risk_approved_target, Exposure(5.5));
+        assert_eq!(result.execution_target, Exposure(2.0));
+        assert_eq!(result.acquisition_frontier, Some(Exposure(2.0)));
         assert!(result.target_pursuit_suppressed);
+        assert_eq!(result.reason, Some(DecisionReason::WaitingRiskRelease));
     }
 
     #[test]
@@ -915,9 +926,9 @@ mod tests {
 
         let result = reconcile_target(&track, 93.75);
 
-        assert_eq!(result.desired_exposure, Exposure(5.0));
-        assert_eq!(result.execution_target_exposure, Exposure(2.625));
-        assert_eq!(result.risk_release_frontier, Some(Exposure(2.625)));
+        assert_eq!(result.risk_approved_target, Exposure(5.0));
+        assert_eq!(result.execution_target, Exposure(2.625));
+        assert_eq!(result.acquisition_frontier, Some(Exposure(2.625)));
         assert!(result.target_pursuit_suppressed);
     }
 
@@ -934,9 +945,9 @@ mod tests {
 
         let result = reconcile_target(&track, 97.5);
 
-        assert_eq!(result.desired_exposure, Exposure(2.0));
-        assert_eq!(result.execution_target_exposure, Exposure(2.0));
-        assert_eq!(result.risk_release_frontier, Some(Exposure(1.5)));
+        assert_eq!(result.risk_approved_target, Exposure(2.0));
+        assert_eq!(result.execution_target, Exposure(2.0));
+        assert_eq!(result.acquisition_frontier, Some(Exposure(1.5)));
         assert!(!result.target_pursuit_suppressed);
     }
 
@@ -953,9 +964,9 @@ mod tests {
 
         let result = reconcile_target(&track, 97.5);
 
-        assert_eq!(result.desired_exposure, Exposure(2.0));
-        assert_eq!(result.execution_target_exposure, Exposure(2.0));
-        assert_eq!(result.risk_release_frontier, Some(Exposure(2.0)));
+        assert_eq!(result.risk_approved_target, Exposure(2.0));
+        assert_eq!(result.execution_target, Exposure(2.0));
+        assert_eq!(result.acquisition_frontier, Some(Exposure(2.0)));
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
@@ -978,9 +989,9 @@ mod tests {
 
         let result = reconcile_target(&track, 100.625);
 
-        assert_eq!(result.desired_exposure, Exposure(-0.5));
-        assert_eq!(result.execution_target_exposure, Exposure(0.0));
-        assert_eq!(result.risk_release_frontier, Some(Exposure(0.0)));
+        assert_eq!(result.risk_approved_target, Exposure(-0.5));
+        assert_eq!(result.execution_target, Exposure(0.0));
+        assert_eq!(result.acquisition_frontier, Some(Exposure(0.0)));
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
@@ -1003,9 +1014,9 @@ mod tests {
 
         let result = reconcile_target(&track, 99.375);
 
-        assert_eq!(result.desired_exposure, Exposure(0.5));
-        assert_eq!(result.execution_target_exposure, Exposure(0.0));
-        assert_eq!(result.risk_release_frontier, Some(Exposure(0.0)));
+        assert_eq!(result.risk_approved_target, Exposure(0.5));
+        assert_eq!(result.execution_target, Exposure(0.0));
+        assert_eq!(result.acquisition_frontier, Some(Exposure(0.0)));
         assert!(result.risk_acquisition.is_some());
         assert!(result.target_pursuit_suppressed);
     }
@@ -1022,7 +1033,7 @@ mod tests {
 
         let result = reconcile_target(&track, 95.0);
 
-        assert_eq!(result.desired_exposure, Exposure(0.0));
+        assert_eq!(result.risk_approved_target, Exposure(0.0));
         assert_eq!(
             result.new_runtime_state,
             Some(TrackState::Terminated {
@@ -1049,7 +1060,19 @@ mod tests {
                 }
             ))),
         );
-        assert_eq!(result.desired_exposure, Exposure(4.0));
+        assert_eq!(result.risk_approved_target, Exposure(4.0));
+    }
+
+    #[test]
+    fn freeze_policy_identifies_cross_zero_target_as_band_blocked() {
+        let mut track = test_runtime_with_strategy_target(Exposure(-0.5));
+        track.current_exposure = Exposure(3.0);
+        set_out_of_band_policy(&mut track, BandProtectionPolicy::Freeze);
+
+        let result = reconcile_target(&track, 89.0);
+
+        assert!(result.target_pursuit_suppressed);
+        assert_eq!(result.reason, Some(DecisionReason::BandPolicyBlocked));
     }
 
     #[test]
@@ -1062,8 +1085,8 @@ mod tests {
 
         let result = reconcile_target(&track, 105.0);
 
-        assert_eq!(result.desired_exposure, strategy_target_at(105.0));
-        assert_eq!(result.execution_target_exposure, Exposure(-2.0));
+        assert_eq!(result.risk_approved_target, strategy_target_at(105.0));
+        assert_eq!(result.execution_target, Exposure(-2.0));
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
@@ -1095,7 +1118,7 @@ mod tests {
                 },
             ))),
         );
-        assert_eq!(result.desired_exposure, Exposure(4.0));
+        assert_eq!(result.risk_approved_target, Exposure(4.0));
     }
 
     #[test]
@@ -1116,8 +1139,8 @@ mod tests {
 
         let result = reconcile_target(&track, 105.0);
 
-        assert_eq!(result.desired_exposure, strategy_target_at(105.0));
-        assert_eq!(result.execution_target_exposure, Exposure(-2.0));
+        assert_eq!(result.risk_approved_target, strategy_target_at(105.0));
+        assert_eq!(result.execution_target, Exposure(-2.0));
         assert!(matches!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
@@ -1135,7 +1158,7 @@ mod tests {
 
         let result = reconcile_target(&track, 89.0);
 
-        assert_eq!(result.desired_exposure, Exposure(4.0));
+        assert_eq!(result.risk_approved_target, Exposure(4.0));
         assert_eq!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
@@ -1161,7 +1184,7 @@ mod tests {
 
         let result = reconcile_target(&track, 89.0);
 
-        assert_eq!(result.desired_exposure, Exposure(4.0));
+        assert_eq!(result.risk_approved_target, Exposure(4.0));
         assert_eq!(
             result.new_runtime_state,
             Some(TrackState::Running(ControlState::Automatic(
@@ -1181,7 +1204,7 @@ mod tests {
 
         let result = reconcile_target(&track, 90.0);
 
-        assert!((result.desired_exposure.0 - 8.0).abs() < 0.001);
+        assert!((result.risk_approved_target.0 - 8.0).abs() < 0.001);
         assert!(!result.target_pursuit_suppressed);
         assert!(
             result
@@ -1200,7 +1223,7 @@ mod tests {
 
         let result = reconcile_target(&track, 90.0);
 
-        assert_eq!(result.desired_exposure, Exposure(8.0));
+        assert_eq!(result.risk_approved_target, Exposure(8.0));
         assert!(!result.target_pursuit_suppressed);
         assert!(
             !result
@@ -1294,7 +1317,7 @@ mod tests {
 
         let result = reconcile_target(&track, 85.0);
 
-        assert_eq!(result.desired_exposure, Exposure(8.0));
+        assert_eq!(result.risk_approved_target, Exposure(8.0));
         assert_eq!(
             result.new_runtime_state.as_ref().cloned(),
             Some(TrackState::Running(ControlState::Automatic(
@@ -1340,7 +1363,7 @@ mod tests {
                 },
             ))),
         );
-        assert_eq!(result.desired_exposure, Exposure(4.0));
+        assert_eq!(result.risk_approved_target, Exposure(4.0));
     }
 
     #[test]
@@ -1366,7 +1389,7 @@ mod tests {
                 .map(|state| state.status()),
             Some(TrackStatus::Flattening),
         );
-        assert!(result.desired_exposure.0.abs() < 0.001);
+        assert!(result.risk_approved_target.0.abs() < 0.001);
     }
 
     #[test]
@@ -1399,7 +1422,7 @@ mod tests {
                 AutoState::FlattenPending { .. },
             )))
         ));
-        assert!(result.desired_exposure.0.abs() < 0.001);
+        assert!(result.risk_approved_target.0.abs() < 0.001);
     }
 
     #[test]
@@ -1426,7 +1449,7 @@ mod tests {
                 },
             ))),
         );
-        assert_eq!(result.desired_exposure, Exposure(8.0));
+        assert_eq!(result.risk_approved_target, Exposure(8.0));
     }
 
     #[test]
@@ -1456,7 +1479,7 @@ mod tests {
                 .map(|state| state.status()),
             Some(TrackStatus::Flattening),
         );
-        assert!(result.desired_exposure.0.abs() < 0.001);
+        assert!(result.risk_approved_target.0.abs() < 0.001);
     }
 
     #[test]
@@ -1483,7 +1506,7 @@ mod tests {
                 AutoState::FollowingBand,
             ))),
         );
-        assert_eq!(below_result.desired_exposure, strategy_target_at(109.5));
+        assert_eq!(below_result.risk_approved_target, strategy_target_at(109.5));
 
         let mut above_track = test_runtime();
         set_out_of_band_policy(
@@ -1502,7 +1525,7 @@ mod tests {
         let above_result = reconcile_target(&above_track, 109.5);
 
         assert_eq!(above_result.new_runtime_state, None);
-        assert_eq!(above_result.desired_exposure, Exposure(0.0));
+        assert_eq!(above_result.risk_approved_target, Exposure(0.0));
     }
 
     #[test]
@@ -1521,7 +1544,7 @@ mod tests {
                 .map(|state| state.status()),
             Some(TrackStatus::Terminated),
         );
-        assert!(result.desired_exposure.0.abs() < 0.001);
+        assert!(result.risk_approved_target.0.abs() < 0.001);
     }
 
     #[test]
@@ -1534,7 +1557,7 @@ mod tests {
         let result = reconcile_target(&track, 90.0);
 
         assert_eq!(result.policy_target, Exposure(8.0));
-        assert_eq!(result.desired_exposure, Exposure(4.0));
+        assert_eq!(result.risk_approved_target, Exposure(4.0));
         assert!(result.events.iter().any(|event| matches!(
             event,
             DomainEvent::RiskCapApplied { intended, capped }
@@ -1552,7 +1575,8 @@ mod tests {
         let result = reconcile_target(&track, 90.0);
 
         assert!(result.target_pursuit_suppressed);
-        assert_eq!(result.desired_exposure, Exposure(4.0));
+        assert_eq!(result.risk_approved_target, Exposure(4.0));
+        assert_eq!(result.reason, Some(DecisionReason::AtExecutionTarget));
         assert!(result.events.iter().any(|event| matches!(
             event,
             DomainEvent::RiskCapApplied { intended, capped }
@@ -1577,7 +1601,7 @@ mod tests {
 
         let result = reconcile_target(&track, 90.0);
 
-        assert_eq!(result.desired_exposure, Exposure(4.0));
+        assert_eq!(result.risk_approved_target, Exposure(4.0));
         assert!(!result.target_pursuit_suppressed);
         assert!(result.events.iter().any(|event| matches!(
             event,
@@ -1615,6 +1639,7 @@ mod tests {
             risk_approved_target: Exposure(4.0),
             acquisition_frontier: None,
             execution_target: Exposure(4.0),
+            reason: DecisionReason::SubmitPlanned,
             applied_risk_cap: Some(applied_risk_cap.clone()),
             price_execution_gate: crate::price_gate::PriceExecutionGate::Open,
             revision: 1,
@@ -1624,7 +1649,7 @@ mod tests {
 
         let result = reconcile_target(&track, 90.0);
 
-        assert_eq!(result.desired_exposure, Exposure(4.0));
+        assert_eq!(result.risk_approved_target, Exposure(4.0));
         assert!(!result.target_pursuit_suppressed);
         assert!(
             !result
@@ -1658,7 +1683,7 @@ mod tests {
 
         let result = reconcile_target(&track, 90.0);
 
-        assert_eq!(result.desired_exposure, Exposure(0.0));
+        assert_eq!(result.risk_approved_target, Exposure(0.0));
         assert_eq!(
             result.new_runtime_state,
             Some(TrackState::Terminated {
@@ -1679,7 +1704,7 @@ mod tests {
         let result = reconcile_target(&track, 90.0);
 
         assert!(result.target_pursuit_suppressed);
-        assert_eq!(result.desired_exposure, Exposure(2.0));
+        assert_eq!(result.risk_approved_target, Exposure(2.0));
         assert_eq!(
             result.execution_gate_decision,
             ExecutionGateDecision::NoSubmit {
@@ -1689,6 +1714,7 @@ mod tests {
                 }
             }
         );
+        assert_eq!(result.reason, Some(DecisionReason::RiskInputInvalid));
         assert!(result.events.iter().any(|event| matches!(
             event,
             DomainEvent::ExecutionGateApplied {
@@ -1707,8 +1733,9 @@ mod tests {
 
         let result = reconcile_target(&track, 85.0);
 
-        assert_eq!(result.desired_exposure.0, 6.0);
+        assert_eq!(result.risk_approved_target.0, 6.0);
         assert!(result.target_pursuit_suppressed);
+        assert_eq!(result.reason, Some(DecisionReason::BandPolicyBlocked));
     }
 
     #[test]
@@ -1720,7 +1747,7 @@ mod tests {
 
         let result = reconcile_target(&track, 90.0);
 
-        assert_eq!(result.desired_exposure, Exposure(4.0));
+        assert_eq!(result.risk_approved_target, Exposure(4.0));
         assert!(result.events.iter().any(|event| matches!(
             event,
             DomainEvent::RiskCapApplied { intended, capped }
@@ -1802,7 +1829,7 @@ mod tests {
         let result = reconcile_target(&track, 100.0);
 
         assert!(!result.target_pursuit_suppressed);
-        assert_eq!(result.desired_exposure, Exposure(2.0));
+        assert_eq!(result.risk_approved_target, Exposure(2.0));
         assert!(
             result
                 .events

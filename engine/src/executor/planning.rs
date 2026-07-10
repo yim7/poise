@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::execution_gate::ExecutionGateDecision;
-use crate::execution_plan::TrackEffect;
+use crate::execution_plan::{DecisionReason, TrackEffect};
 use crate::ports::{ExecutionQuote, OrderRequest};
 use crate::price_gate::{
     PriceExecutionGate, SubmitPurpose, WorkingOrderGateAction, allows_submit,
@@ -48,9 +48,9 @@ pub struct SubmitIntentInput<'a> {
     pub min_rebalance_units: f64,
     pub current_exposure: Exposure,
     // Risk-approved target retained for risk-reducing passive maker selection.
-    pub desired_exposure: Exposure,
+    pub risk_approved_target: Exposure,
     // Final target already resolved by the reconciler; active policies must not derive it again.
-    pub execution_target_exposure: Exposure,
+    pub execution_target: Exposure,
     // Execution constraints stay separate from target ownership and order maintenance.
     pub execution_gate_decision: ExecutionGateDecision,
     pub execution_quote: Option<ExecutionQuote>,
@@ -65,6 +65,7 @@ pub struct ExecutorPlan {
     #[allow(dead_code)]
     pub desired_bindings: Vec<BindingProposal>,
     pub effects: Vec<TrackEffect>,
+    pub reason: Option<DecisionReason>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,7 +109,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         .ensure_revision(submit_intent.config, submit_intent.current_exposure.clone());
 
     if state.recovery_anomaly.is_some() {
-        return noop_plan(state);
+        return recovery_required_plan(state);
     }
 
     let boundaries = discretize_boundaries(
@@ -117,7 +118,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     );
     let boundary_epsilon = boundary_exposure_epsilon(&submit_intent);
     let position_epsilon = position_exposure_epsilon(&submit_intent);
-    let execution_target = submit_intent.execution_target_exposure.clone();
+    let execution_target = submit_intent.execution_target.clone();
     let execution_view = match BoundaryLedgerView::try_from_boundaries(
         &boundaries,
         &state.ledger_state,
@@ -127,19 +128,19 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         Ok(view) => view,
         Err(_error) => {
             state.recovery_anomaly = Some(RecoveryAnomaly::BoundaryProgressOutOfRange);
-            return noop_plan(state);
+            return recovery_required_plan(state);
         }
     };
     let desired_view = match BoundaryLedgerView::try_from_boundaries(
         &boundaries,
         &state.ledger_state,
-        submit_intent.desired_exposure.clone(),
+        submit_intent.risk_approved_target.clone(),
         boundary_epsilon,
     ) {
         Ok(view) => view,
         Err(_error) => {
             state.recovery_anomaly = Some(RecoveryAnomaly::BoundaryProgressOutOfRange);
-            return noop_plan(state);
+            return recovery_required_plan(state);
         }
     };
     if state.ledger_state.has_unexplained_exposure_drift(
@@ -148,7 +149,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         position_epsilon,
     ) {
         state.recovery_anomaly = Some(RecoveryAnomaly::ExpectedExposureMismatch);
-        return noop_plan(state);
+        return recovery_required_plan(state);
     }
 
     let mut effects =
@@ -162,14 +163,24 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         &submit_intent.execution_gate_decision,
         ExecutionGateDecision::NoSubmit { .. }
     ) {
-        return finish_plan(state, Vec::new(), effects);
+        let reason = maintenance_reason(&effects, &state);
+        return finish_plan(state, Vec::new(), effects, reason);
     }
 
     if !allows_submit(
         submit_intent.price_execution_gate,
         submit_intent.submit_purpose,
     ) {
-        return finish_plan(state, Vec::new(), effects);
+        let has_target_gap = !submit_intent
+            .current_exposure
+            .delta(&submit_intent.execution_target)
+            .is_zero();
+        let reason = if has_target_gap || !effects.is_empty() {
+            Some(DecisionReason::PriceGateBlocked)
+        } else {
+            maintenance_reason(&effects, &state)
+        };
+        return finish_plan(state, Vec::new(), effects, reason);
     }
 
     if submit_intent.policy_context == PolicyContext::Normal {
@@ -187,15 +198,16 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         native_qty_per_unit: submit_intent.native_qty_per_unit,
         min_rebalance_units: submit_intent.min_rebalance_units,
         current_exposure: &submit_intent.current_exposure,
-        execution_target_exposure: &execution_target,
-        desired_exposure: &submit_intent.desired_exposure,
+        execution_target: &execution_target,
+        risk_approved_target: &submit_intent.risk_approved_target,
         execution_quote: submit_intent.execution_quote,
         submit_purpose: submit_intent.submit_purpose,
         boundary_epsilon,
         curve_maker_levels_per_side: CURVE_MAKER_LEVELS_PER_SIDE,
     };
 
-    let desired_bindings = plan_policy_bindings(submit_intent.policy_context, &policy_input);
+    let policy_plan = plan_policy_bindings(submit_intent.policy_context, &policy_input);
+    let desired_bindings = policy_plan.desired_bindings;
     effects.extend(reconcile_bindings(
         &mut state,
         &desired_bindings,
@@ -204,6 +216,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         CURVE_MAKER_GRACE_MS,
     ));
 
+    let reason = execution_reason(&effects, &state, &desired_bindings, policy_plan.reason);
     finish_plan(
         state,
         desired_bindings
@@ -211,6 +224,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
             .map(|binding| binding.proposal.clone())
             .collect(),
         effects,
+        reason,
     )
 }
 
@@ -225,7 +239,7 @@ pub fn maintain_protected_bindings(input: ExecutorInput<'_>) -> ExecutorPlan {
         .ensure_revision(submit_intent.config, submit_intent.current_exposure.clone());
 
     if state.recovery_anomaly.is_some() {
-        return noop_plan(state);
+        return recovery_required_plan(state);
     }
 
     let position_epsilon = position_exposure_epsilon(&submit_intent);
@@ -235,13 +249,26 @@ pub fn maintain_protected_bindings(input: ExecutorInput<'_>) -> ExecutorPlan {
         position_epsilon,
     ) {
         state.recovery_anomaly = Some(RecoveryAnomaly::ExpectedExposureMismatch);
-        return noop_plan(state);
+        return recovery_required_plan(state);
     }
 
     let mut effects =
         apply_price_gate_to_existing_bindings(&mut state, submit_intent.price_execution_gate);
     effects.extend(cancel_inventory_increasing_bindings(&mut state));
-    finish_plan(state, Vec::new(), effects)
+    let has_target_gap = !submit_intent
+        .current_exposure
+        .delta(&submit_intent.execution_target)
+        .is_zero();
+    let reason = if !allows_submit(
+        submit_intent.price_execution_gate,
+        submit_intent.submit_purpose,
+    ) && (has_target_gap || !effects.is_empty())
+    {
+        Some(DecisionReason::PriceGateBlocked)
+    } else {
+        maintenance_reason(&effects, &state)
+    };
+    finish_plan(state, Vec::new(), effects, reason)
 }
 
 pub fn refresh_state(
@@ -252,18 +279,21 @@ pub fn refresh_state(
     previous_state.ensure_revision(config, current_exposure.clone())
 }
 
-fn noop_plan(state: ExecutorState) -> ExecutorPlan {
-    finish_plan(state, Vec::new(), vec![TrackEffect::NoOp])
+fn recovery_required_plan(state: ExecutorState) -> ExecutorPlan {
+    finish_plan(
+        state,
+        Vec::new(),
+        Vec::new(),
+        Some(DecisionReason::RecoveryRequired),
+    )
 }
 
 fn finish_plan(
     mut state: ExecutorState,
     desired_bindings: Vec<BindingProposal>,
-    mut effects: Vec<TrackEffect>,
+    effects: Vec<TrackEffect>,
+    reason: Option<DecisionReason>,
 ) -> ExecutorPlan {
-    if effects.is_empty() {
-        effects.push(TrackEffect::NoOp);
-    }
     // Terminal bindings are an ExecutorPlan output invariant, including early returns.
     state
         .bindings
@@ -273,7 +303,55 @@ fn finish_plan(
         state,
         desired_bindings,
         effects,
+        reason,
     }
+}
+
+fn maintenance_reason(effects: &[TrackEffect], state: &ExecutorState) -> Option<DecisionReason> {
+    if effects.iter().any(|effect| {
+        matches!(
+            effect,
+            TrackEffect::CancelOrder { .. } | TrackEffect::CancelAll { .. }
+        )
+    }) || state.bindings.iter().any(|binding| {
+        matches!(
+            binding.status,
+            BindingStatus::CancelAfterSubmit | BindingStatus::CancelPending
+        )
+    }) {
+        Some(DecisionReason::WaitingCancel)
+    } else {
+        None
+    }
+}
+
+fn execution_reason(
+    effects: &[TrackEffect],
+    state: &ExecutorState,
+    desired_bindings: &[DesiredBinding],
+    policy_reason: Option<DecisionReason>,
+) -> Option<DecisionReason> {
+    if effects
+        .iter()
+        .any(|effect| matches!(effect, TrackEffect::SubmitOrder { .. }))
+    {
+        return Some(DecisionReason::SubmitPlanned);
+    }
+    if let Some(reason) = maintenance_reason(effects, state) {
+        return Some(reason);
+    }
+    if !desired_bindings.is_empty() {
+        if state.bindings.iter().any(|binding| {
+            matches!(
+                binding.status,
+                BindingStatus::SubmitPending | BindingStatus::SubmitAuthorized
+            )
+        }) {
+            return Some(DecisionReason::SubmitPlanned);
+        }
+        return Some(DecisionReason::CoveredByWorkingOrder);
+    }
+    policy_reason
 }
 
 fn refresh_curve_maker_due_grace_start(
@@ -595,9 +673,9 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,
-                execution_target_exposure: desired_exposure.clone(),
+                execution_target: desired_exposure.clone(),
                 execution_gate_decision: Default::default(),
-                desired_exposure,
+                risk_approved_target: desired_exposure,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -628,10 +706,10 @@ mod tests {
         rules: &'a ExchangeRules,
         current_exposure: Exposure,
         desired_exposure: Exposure,
-        execution_target_exposure: Exposure,
+        execution_target: Exposure,
     ) -> ExecutorInput<'a> {
         let mut input = input(config, rules, current_exposure, desired_exposure);
-        input.submit_intent.execution_target_exposure = execution_target_exposure;
+        input.submit_intent.execution_target = execution_target;
         input
     }
 
@@ -651,9 +729,9 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,
-                execution_target_exposure: desired_exposure.clone(),
+                execution_target: desired_exposure.clone(),
                 execution_gate_decision: Default::default(),
-                desired_exposure,
+                risk_approved_target: desired_exposure,
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -710,6 +788,44 @@ mod tests {
         assert_eq!(request.price, 100.1);
         assert!((request.quantity - 1.0).abs() < 1e-9);
         assert_eq!(catch_up_binding.allocations.len(), 1);
+        assert_eq!(plan.reason, Some(DecisionReason::SubmitPlanned));
+    }
+
+    #[test]
+    fn planning_explains_threshold_venue_and_existing_order_holds() {
+        let config = config();
+        let rules = rules();
+
+        let at_target = plan(input(&config, &rules, Exposure(0.0), Exposure(0.0)));
+        assert!(at_target.effects.is_empty());
+        assert_eq!(at_target.reason, None);
+
+        let below_rebalance = plan(input(&config, &rules, Exposure(0.0), Exposure(0.5)));
+        assert!(below_rebalance.effects.is_empty());
+        assert_eq!(below_rebalance.reason, Some(DecisionReason::BelowRebalance));
+
+        let mut restrictive_rules = rules.clone();
+        restrictive_rules.min_qty = 10.0;
+        let below_venue = plan(input(
+            &config,
+            &restrictive_rules,
+            Exposure(0.0),
+            Exposure(2.0),
+        ));
+        assert!(below_venue.effects.is_empty());
+        assert_eq!(below_venue.reason, Some(DecisionReason::BelowVenueMinimum));
+
+        let mut owned = plan(input(&config, &rules, Exposure(0.0), Exposure(2.0))).state;
+        for binding in &mut owned.bindings {
+            binding.status = BindingStatus::Working;
+            binding.order_id = Some("working-order".to_string());
+        }
+        let covered = plan(ExecutorInput::new(
+            input(&config, &rules, Exposure(0.0), Exposure(2.0)).submit_intent,
+            Some(&owned),
+        ));
+        assert!(covered.effects.is_empty());
+        assert_eq!(covered.reason, Some(DecisionReason::CoveredByWorkingOrder));
     }
 
     #[test]
@@ -942,7 +1058,7 @@ mod tests {
             Exposure(-0.1056),
             Exposure(0.4172),
         );
-        input.submit_intent.execution_target_exposure = Exposure(0.0);
+        input.submit_intent.execution_target = Exposure(0.0);
         input.submit_intent.execution_quote = Some(ExecutionQuote {
             best_bid: 64_362.0,
             best_ask: 64_363.0,
@@ -1096,8 +1212,8 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
-                desired_exposure: Exposure(2.0),
-                execution_target_exposure: Exposure(2.0),
+                risk_approved_target: Exposure(2.0),
+                execution_target: Exposure(2.0),
                 execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 100.0,
@@ -1122,6 +1238,7 @@ mod tests {
             binding.status == BindingStatus::SubmitPending
                 && binding.request.client_order_id == pending_client_order_id
         }));
+        assert_eq!(next.reason, Some(DecisionReason::SubmitPlanned));
     }
 
     #[test]
@@ -1150,8 +1267,8 @@ mod tests {
                     native_qty_per_unit: 1.0,
                     min_rebalance_units: config.min_rebalance_units,
                     current_exposure: Exposure(0.0),
-                    desired_exposure: Exposure(2.0),
-                    execution_target_exposure: Exposure(2.0),
+                    risk_approved_target: Exposure(2.0),
+                    execution_target: Exposure(2.0),
                     execution_gate_decision: Default::default(),
                     execution_quote: Some(ExecutionQuote {
                         best_bid: 100.0,
@@ -1172,6 +1289,14 @@ mod tests {
             assert!(next.state.bindings.iter().any(|binding| {
                 binding.request.client_order_id == client_order_id && binding.status == status
             }));
+            assert_eq!(
+                next.reason,
+                Some(match status {
+                    BindingStatus::SubmitAuthorized => DecisionReason::SubmitPlanned,
+                    BindingStatus::CancelAfterSubmit => DecisionReason::WaitingCancel,
+                    _ => unreachable!("test covers pre-receipt lifecycle states only"),
+                })
+            );
         }
     }
 
@@ -1198,8 +1323,8 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(-6.0),
-                desired_exposure: Exposure(-1.0),
-                execution_target_exposure: Exposure(-1.0),
+                risk_approved_target: Exposure(-1.0),
+                execution_target: Exposure(-1.0),
                 execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
@@ -1280,8 +1405,8 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
-                desired_exposure: Exposure(2.0),
-                execution_target_exposure: Exposure(2.0),
+                risk_approved_target: Exposure(2.0),
+                execution_target: Exposure(2.0),
                 execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
@@ -1348,8 +1473,8 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
-                desired_exposure: Exposure(2.0),
-                execution_target_exposure: Exposure(2.0),
+                risk_approved_target: Exposure(2.0),
+                execution_target: Exposure(2.0),
                 execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
@@ -1388,8 +1513,8 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
-                desired_exposure: Exposure(2.0),
-                execution_target_exposure: Exposure(2.0),
+                risk_approved_target: Exposure(2.0),
+                execution_target: Exposure(2.0),
                 execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 100.0,
@@ -1422,6 +1547,7 @@ mod tests {
             1,
             "existing downstream replacement should stay as the only submit pending"
         );
+        assert_eq!(next.reason, Some(DecisionReason::WaitingCancel));
     }
 
     #[test]
@@ -1432,28 +1558,46 @@ mod tests {
         previous.bindings[0].status = BindingStatus::Working;
         previous.bindings[0].order_id = Some("increase-order".to_string());
 
-        let plan = plan(input_with_gate(
+        let blocked = plan(input_with_gate(
             &config,
             &rules,
             Exposure(0.0),
-            Exposure(2.0),
+            Exposure(0.0),
             PriceExecutionGate::ManualRiskReductionOnly {
                 reason: crate::price_gate::PriceExecutionBlockReason::MarkBookDivergence,
             },
             &previous,
         ));
 
-        assert!(plan.effects.iter().any(|effect| matches!(
+        assert!(blocked.effects.iter().any(|effect| matches!(
             effect,
             TrackEffect::CancelOrder { order_id, .. } if order_id == "increase-order"
         )));
         assert!(
-            !plan
+            !blocked
                 .effects
                 .iter()
                 .any(|effect| matches!(effect, TrackEffect::SubmitOrder { .. }))
         );
-        assert_eq!(plan.state.bindings[0].status, BindingStatus::CancelPending);
+        assert_eq!(
+            blocked.state.bindings[0].status,
+            BindingStatus::CancelPending
+        );
+        assert_eq!(blocked.reason, Some(DecisionReason::PriceGateBlocked));
+
+        let waiting = plan(input_with_gate(
+            &config,
+            &rules,
+            Exposure(0.0),
+            Exposure(0.0),
+            PriceExecutionGate::ManualRiskReductionOnly {
+                reason: crate::price_gate::PriceExecutionBlockReason::MarkBookDivergence,
+            },
+            &blocked.state,
+        ));
+
+        assert!(waiting.effects.is_empty());
+        assert_eq!(waiting.reason, Some(DecisionReason::WaitingCancel));
     }
 
     #[test]
@@ -1599,7 +1743,8 @@ mod tests {
             plan.state.recovery_anomaly,
             Some(crate::executor::RecoveryAnomaly::BoundaryProgressOutOfRange)
         );
-        assert_eq!(plan.effects, vec![TrackEffect::NoOp]);
+        assert!(plan.effects.is_empty());
+        assert_eq!(plan.reason, Some(DecisionReason::RecoveryRequired));
         assert_eq!(plan.state.bindings[0].status, BindingStatus::Working);
     }
 
@@ -1657,8 +1802,8 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
-                desired_exposure: Exposure(0.0),
-                execution_target_exposure: Exposure(0.0),
+                risk_approved_target: Exposure(0.0),
+                execution_target: Exposure(0.0),
                 execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
@@ -1719,8 +1864,8 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
-                desired_exposure: Exposure(0.0),
-                execution_target_exposure: Exposure(0.0),
+                risk_approved_target: Exposure(0.0),
+                execution_target: Exposure(0.0),
                 execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
@@ -1784,8 +1929,8 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
-                desired_exposure: Exposure(0.0),
-                execution_target_exposure: Exposure(0.0),
+                risk_approved_target: Exposure(0.0),
+                execution_target: Exposure(0.0),
                 execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
@@ -1831,8 +1976,8 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
-                desired_exposure: Exposure(0.0),
-                execution_target_exposure: Exposure(0.0),
+                risk_approved_target: Exposure(0.0),
+                execution_target: Exposure(0.0),
                 execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
@@ -1871,8 +2016,8 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
-                desired_exposure: Exposure(0.0),
-                execution_target_exposure: Exposure(0.0),
+                risk_approved_target: Exposure(0.0),
+                execution_target: Exposure(0.0),
                 execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
@@ -1971,8 +2116,8 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
-                desired_exposure: Exposure(1.0),
-                execution_target_exposure: Exposure(1.0),
+                risk_approved_target: Exposure(1.0),
+                execution_target: Exposure(1.0),
                 execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
@@ -1990,7 +2135,8 @@ mod tests {
             plan.state.recovery_anomaly,
             Some(crate::executor::RecoveryAnomaly::ExpectedExposureMismatch)
         );
-        assert_eq!(plan.effects, vec![TrackEffect::NoOp]);
+        assert!(plan.effects.is_empty());
+        assert_eq!(plan.reason, Some(DecisionReason::RecoveryRequired));
     }
 
     #[test]
@@ -2007,8 +2153,8 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.6),
-                desired_exposure: Exposure(1.0),
-                execution_target_exposure: Exposure(1.0),
+                risk_approved_target: Exposure(1.0),
+                execution_target: Exposure(1.0),
                 execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
@@ -2051,8 +2197,8 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(1.2),
-                desired_exposure: Exposure(1.0),
-                execution_target_exposure: Exposure(1.0),
+                risk_approved_target: Exposure(1.0),
+                execution_target: Exposure(1.0),
                 execution_gate_decision: Default::default(),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
@@ -2070,6 +2216,7 @@ mod tests {
             plan.state.recovery_anomaly,
             Some(crate::executor::RecoveryAnomaly::BoundaryProgressOutOfRange)
         );
-        assert_eq!(plan.effects, vec![TrackEffect::NoOp]);
+        assert!(plan.effects.is_empty());
+        assert_eq!(plan.reason, Some(DecisionReason::RecoveryRequired));
     }
 }

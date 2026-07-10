@@ -6,9 +6,9 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::app::App;
 use crate::exposure_presentation::instance_exposure_annotation;
 use crate::protocol::{
-    ActivityLevelView, ExecutionBindingIntentView, ExecutionBindingStatusView, ExecutionStateView,
-    ExecutionStatusView, RiskAcquisitionDirectionView, RiskAcquisitionView, TrackCommandType,
-    TrackCommandView, TrackExecutionView,
+    ActivityLevelView, DecisionReasonView, ExecutionBindingIntentView, ExecutionBindingStatusView,
+    ExecutionStateView, ExecutionStatusView, InventoryDecisionView, RiskAcquisitionDirectionView,
+    RiskAcquisitionView, TrackCommandType, TrackCommandView,
 };
 use crate::signal::{exposure_signal, pnl_signal};
 use crate::theme::Theme;
@@ -76,6 +76,7 @@ fn track_lines(
         ExecutionStateView::Closed => "closed",
     };
     let mut lines = Vec::new();
+    let inventory_gap = format_optional_exposure(inventory_gap(detail));
 
     if matches!(
         detail.execution.execution_status,
@@ -85,15 +86,13 @@ fn track_lines(
         let binding_count = format_binding_count(detail.execution.active_binding_count);
         lines.push(Line::from(Span::styled(
             format!(
-                "{lifecycle} | {execution_state} | ATTENTION REQUIRED | {reason_summary} | gap {:.4} | {binding_count}",
-                detail.execution.inventory_gap,
+                "{lifecycle} | {execution_state} | ATTENTION REQUIRED | {reason_summary} | gap {inventory_gap} | {binding_count}",
             ),
             Theme::execution_attention(),
         )));
     } else {
         lines.push(Line::from(format!(
-            "{lifecycle} | {execution_state} | gap {:.4} | {}",
-            detail.execution.inventory_gap,
+            "{lifecycle} | {execution_state} | gap {inventory_gap} | {}",
             format_binding_count(detail.execution.active_binding_count)
         )));
     }
@@ -119,6 +118,7 @@ fn minimal_track_line(detail: &crate::protocol::TrackDetailView) -> Line<'static
         ExecutionStateView::Paused => "paused",
         ExecutionStateView::Closed => "closed",
     };
+    let inventory_gap = format_optional_exposure(inventory_gap(detail));
 
     if matches!(
         detail.execution.execution_status,
@@ -126,16 +126,14 @@ fn minimal_track_line(detail: &crate::protocol::TrackDetailView) -> Line<'static
     ) {
         Line::from(Span::styled(
             format!(
-                "{lifecycle} | {execution_state} | ATTENTION | gap {:.4} | {}",
-                detail.execution.inventory_gap,
+                "{lifecycle} | {execution_state} | ATTENTION | gap {inventory_gap} | {}",
                 format_binding_count(detail.execution.active_binding_count)
             ),
             Theme::execution_attention(),
         ))
     } else {
         Line::from(format!(
-            "{lifecycle} | {execution_state} | gap {:.4} | {}",
-            detail.execution.inventory_gap,
+            "{lifecycle} | {execution_state} | gap {inventory_gap} | {}",
             format_binding_count(detail.execution.active_binding_count)
         ))
     }
@@ -149,10 +147,7 @@ fn market_lines(
         return vec![format_exposure_line(
             detail.status.strategy_price,
             detail.position.current_exposure,
-            detail
-                .execution
-                .execution_target_exposure
-                .or(detail.position.desired_exposure),
+            detail.decision.execution_target,
             detail.execution.risk_acquisition.as_ref(),
         )];
     }
@@ -175,10 +170,7 @@ fn market_lines(
         format_exposure_line(
             detail.status.strategy_price,
             detail.position.current_exposure,
-            detail
-                .execution
-                .execution_target_exposure
-                .or(detail.position.desired_exposure),
+            detail.decision.execution_target,
             detail.execution.risk_acquisition.as_ref(),
         ),
     ]
@@ -364,17 +356,15 @@ fn execution_body_line_count(detail: &crate::protocol::TrackDetailView) -> usize
         execution.execution_status,
         ExecutionStatusView::AttentionRequired
     ));
-    let target_lines = 1;
+    let target_lines = 2;
     let risk_acquisition_lines = execution.risk_acquisition.as_ref().map_or(0, |_| 2);
-    let binding_lines = execution.bindings.len();
+    let binding_lines = if execution.bindings.is_empty() && execution.risk_acquisition.is_none() {
+        1
+    } else {
+        execution.bindings.len()
+    };
 
-    match (
-        target_lines + alert_lines + risk_acquisition_lines,
-        binding_lines,
-    ) {
-        (non_binding, 0) => non_binding,
-        (non_binding, bindings) => non_binding + bindings,
-    }
+    target_lines + alert_lines + risk_acquisition_lines + binding_lines
 }
 
 fn execution_lines(
@@ -389,11 +379,11 @@ fn execution_lines(
         .map(format_binding_detail)
         .collect::<Vec<_>>();
 
-    if matches!(mode, DetailLayoutMode::Minimal) {
-        return limit_execution_lines(minimal_execution_lines(detail, &binding_details), max_lines);
+    if matches!(mode, DetailLayoutMode::Compact | DetailLayoutMode::Minimal) {
+        return vec![format_compact_decision_line(&detail.decision)];
     }
 
-    let mut lines = vec![format_execution_target_line(detail)];
+    let mut lines = format_decision_lines(&detail.decision);
 
     if matches!(
         execution.execution_status,
@@ -413,12 +403,7 @@ fn execution_lines(
         lines.extend(format_risk_acquisition_lines(risk_acquisition));
     }
 
-    if matches!(mode, DetailLayoutMode::Compact) {
-        let execution_summary = format_compact_execution_summary(execution);
-        if let Some(summary) = execution_summary {
-            lines.push(Line::from(summary));
-        }
-    } else if !binding_details.is_empty() {
+    if !binding_details.is_empty() {
         lines.extend(binding_details.into_iter().map(Line::from));
     } else if !lines.is_empty() && execution.risk_acquisition.is_none() {
         lines.push(Line::from("bindings: none"));
@@ -432,7 +417,7 @@ fn limit_execution_lines(mut lines: Vec<Line<'static>>, max_lines: usize) -> Vec
         return lines;
     }
     if max_lines == 1 {
-        return vec![Line::from(format!("+{} more execution lines", lines.len()))];
+        return lines.into_iter().take(1).collect();
     }
 
     let hidden = lines.len() - max_lines + 1;
@@ -441,59 +426,75 @@ fn limit_execution_lines(mut lines: Vec<Line<'static>>, max_lines: usize) -> Vec
     lines
 }
 
-fn minimal_execution_lines(
-    detail: &crate::protocol::TrackDetailView,
-    binding_details: &[String],
-) -> Vec<Line<'static>> {
-    let execution = &detail.execution;
-    if matches!(
-        execution.execution_status,
-        ExecutionStatusView::AttentionRequired
-    ) {
-        return vec![Line::from(format!(
-            "alerts: {}",
-            attention_summary(&execution.attention_reasons)
-        ))];
+fn format_decision_lines(decision: &InventoryDecisionView) -> Vec<Line<'static>> {
+    let revision = format_decision_revision(decision.revision);
+    let reason = format_decision_reason(decision.reason);
+    let mut lines = vec![Line::from(format!("decision {revision} | reason {reason}"))];
+    if decision_targets_are_unavailable(decision) {
+        lines.push(Line::from("targets unavailable"));
+    } else {
+        lines.push(Line::from(format!(
+            "targets: policy {} | approved {} | frontier {} | execution {}",
+            format_optional_signed_exposure(decision.policy_target),
+            format_optional_signed_exposure(decision.risk_approved_target),
+            format_optional_signed_exposure(decision.acquisition_frontier),
+            format_optional_signed_exposure(decision.execution_target),
+        )));
     }
-
-    if let Some(summary) = format_compact_execution_summary(execution) {
-        return vec![Line::from(summary)];
-    }
-
-    if binding_details.is_empty() {
-        return vec![format_execution_target_line(detail)];
-    }
-
-    vec![Line::from("execution detail unavailable")]
+    lines
 }
 
-fn format_execution_target_line(detail: &crate::protocol::TrackDetailView) -> Line<'static> {
-    Line::from(format!(
-        "exposure: cur {} | curve {} | exec {} | gap {}",
-        format_signed_exposure(detail.position.current_exposure),
-        format_optional_signed_exposure(detail.position.desired_exposure),
-        format_optional_signed_exposure(detail.execution.execution_target_exposure),
-        format_signed_exposure(detail.execution.inventory_gap)
-    ))
+fn format_compact_decision_line(decision: &InventoryDecisionView) -> Line<'static> {
+    let revision = format_decision_revision(decision.revision);
+    let reason = format_decision_reason(decision.reason);
+    if decision_targets_are_unavailable(decision) {
+        Line::from(format!("{revision} {reason} | targets unavailable"))
+    } else {
+        Line::from(format!(
+            "{revision} {reason} | policy {} approved {} frontier {} exec {}",
+            format_optional_compact_target(decision.policy_target),
+            format_optional_compact_target(decision.risk_approved_target),
+            format_optional_compact_target(decision.acquisition_frontier),
+            format_optional_compact_target(decision.execution_target),
+        ))
+    }
 }
 
-fn format_compact_execution_summary(execution: &TrackExecutionView) -> Option<String> {
-    execution
-        .risk_acquisition
-        .as_ref()
-        .map(format_compact_risk_acquisition)
-        .or_else(|| compact_binding_summary(execution))
+fn decision_targets_are_unavailable(decision: &InventoryDecisionView) -> bool {
+    decision.policy_target.is_none()
+        && decision.risk_approved_target.is_none()
+        && decision.acquisition_frontier.is_none()
+        && decision.execution_target.is_none()
 }
 
-fn compact_binding_summary(execution: &TrackExecutionView) -> Option<String> {
-    match execution.bindings.as_slice() {
-        [] => None,
-        [binding] => Some(format!("binding: {}", compact_binding_label(binding))),
-        bindings => Some(format!(
-            "bindings {} | {}",
-            bindings.len(),
-            compact_binding_label(&bindings[0])
-        )),
+fn format_optional_compact_target(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:+.2}"))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_decision_revision(revision: Option<u64>) -> String {
+    revision
+        .map(|revision| format!("r{revision}"))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_decision_reason(reason: DecisionReasonView) -> &'static str {
+    match reason {
+        DecisionReasonView::WaitingMarketData => "waiting_market_data",
+        DecisionReasonView::Paused => "paused",
+        DecisionReasonView::RiskInputInvalid => "risk_input_invalid",
+        DecisionReasonView::BandPolicyBlocked => "band_policy_blocked",
+        DecisionReasonView::AtExecutionTarget => "at_execution_target",
+        DecisionReasonView::WaitingRiskRelease => "waiting_risk_release",
+        DecisionReasonView::AccountCapacityBlocked => "account_capacity_blocked",
+        DecisionReasonView::PriceGateBlocked => "price_gate_blocked",
+        DecisionReasonView::BelowRebalance => "below_rebalance",
+        DecisionReasonView::BelowVenueMinimum => "below_venue_minimum",
+        DecisionReasonView::CoveredByWorkingOrder => "covered_by_working_order",
+        DecisionReasonView::RecoveryRequired => "recovery_required",
+        DecisionReasonView::WaitingCancel => "waiting_cancel",
+        DecisionReasonView::SubmitPlanned => "submit_planned",
     }
 }
 
@@ -516,21 +517,11 @@ fn format_binding_detail(binding: &poise_protocol::ExecutionBindingView) -> Stri
     )
 }
 
-fn compact_binding_label(binding: &poise_protocol::ExecutionBindingView) -> String {
-    let order = binding
-        .order
-        .as_ref()
-        .map(|order| format!("{} {:.4} @ {:.4}", order.side, order.quantity, order.price))
-        .unwrap_or_else(|| "no order".to_string());
-    format!("{} {order}", binding.label)
-}
-
 fn format_risk_acquisition_lines(risk_acquisition: &RiskAcquisitionView) -> Vec<Line<'static>> {
     vec![
         Line::from(format!(
-            "acq: {} | frontier {} | backlog {} | release {} -> {}",
+            "acq: {} | backlog {} | release {} -> {}",
             format_risk_direction(risk_acquisition.direction),
-            format_signed_exposure(risk_acquisition.risk_release_frontier),
             format_signed_exposure(risk_acquisition.backlog_units),
             format_signed_exposure(risk_acquisition.next_release_units),
             format_signed_exposure(risk_acquisition.next_release_target),
@@ -542,17 +533,6 @@ fn format_risk_acquisition_lines(risk_acquisition: &RiskAcquisitionView) -> Vec<
             format_signed_exposure(risk_acquisition.release_anchor_target),
         )),
     ]
-}
-
-fn format_compact_risk_acquisition(risk_acquisition: &RiskAcquisitionView) -> String {
-    format!(
-        "acq: {} backlog {} | release {} -> {} | unlock {}",
-        format_risk_direction(risk_acquisition.direction),
-        format_signed_exposure(risk_acquisition.backlog_units),
-        format_signed_exposure(risk_acquisition.next_release_units),
-        format_signed_exposure(risk_acquisition.next_release_target),
-        format_release_trigger_conditions(risk_acquisition),
-    )
 }
 
 fn format_release_trigger_conditions(risk_acquisition: &RiskAcquisitionView) -> String {
@@ -616,6 +596,19 @@ fn format_optional_signed_exposure(value: Option<f64>) -> String {
     value
         .map(format_signed_exposure)
         .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_optional_exposure(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.4}"))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn inventory_gap(detail: &crate::protocol::TrackDetailView) -> Option<f64> {
+    detail
+        .decision
+        .execution_target
+        .map(|target| target - detail.position.current_exposure)
 }
 
 fn format_binding_status(value: ExecutionBindingStatusView) -> &'static str {
@@ -768,13 +761,13 @@ fn status_command_hint(commands: &[TrackCommandView]) -> String {
 mod tests {
     use crate::app::{App, View};
     use crate::protocol::{
-        ExecutionStatusView, TrackCommandType, TrackCommandView, TrackDetailView,
-        TrackDiagnosticsView,
+        DecisionReasonView, ExecutionStatusView, InventoryDecisionView, TrackCommandType,
+        TrackCommandView, TrackDetailView, TrackDiagnosticsView,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::{execution_lines, pnl_lines, render};
+    use super::{execution_body_line_count, execution_lines, pnl_lines, render};
     use crate::timestamp_display::format_local_timestamp_for_display;
     use crate::views::instance_layout::DetailLayoutMode;
 
@@ -868,6 +861,114 @@ mod tests {
             "../../tests/fixtures/track_diagnostics_view.json"
         ))
         .unwrap()
+    }
+
+    fn detail_with_distinct_decision() -> TrackDetailView {
+        let mut detail: TrackDetailView =
+            serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
+                .unwrap();
+        detail.decision = InventoryDecisionView {
+            revision: Some(77),
+            policy_target: Some(6.0),
+            risk_approved_target: Some(4.5),
+            acquisition_frontier: Some(4.0),
+            execution_target: Some(3.75),
+            reason: DecisionReasonView::WaitingRiskRelease,
+        };
+        detail
+    }
+
+    #[test]
+    fn renders_revision_reason_and_distinct_four_target_chain() {
+        let detail = detail_with_distinct_decision();
+
+        let lines = execution_lines(&detail, DetailLayoutMode::Standard, 4)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines[0], "decision r77 | reason waiting_risk_release");
+        assert_eq!(
+            lines[1],
+            "targets: policy +6.0000 | approved +4.5000 | frontier +4.0000 | execution +3.7500"
+        );
+    }
+
+    #[test]
+    fn standard_layout_counts_bindings_none_line() {
+        let mut detail = detail_with_distinct_decision();
+        detail.execution.risk_acquisition = None;
+        detail.execution.bindings.clear();
+        detail.execution.active_binding_count = 0;
+
+        let body_line_count = execution_body_line_count(&detail);
+        let lines = execution_lines(&detail, DetailLayoutMode::Standard, body_line_count)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(body_line_count, 3);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[2], "bindings: none");
+        assert!(!lines.join(" ").contains("more execution lines"));
+    }
+
+    #[test]
+    fn renders_unavailable_decision_without_target_fallback_or_zero() {
+        let mut detail = detail_with_distinct_decision();
+        detail.decision = InventoryDecisionView {
+            revision: None,
+            policy_target: None,
+            risk_approved_target: None,
+            acquisition_frontier: None,
+            execution_target: None,
+            reason: DecisionReasonView::WaitingMarketData,
+        };
+
+        let lines = execution_lines(&detail, DetailLayoutMode::Standard, 4)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines[0], "decision - | reason waiting_market_data");
+        assert_eq!(lines[1], "targets unavailable");
+        assert!(!lines.join(" ").contains("+0.0000"));
+    }
+
+    #[test]
+    fn keeps_available_targets_when_only_frontier_is_unavailable() {
+        let mut detail = detail_with_distinct_decision();
+        detail.decision.acquisition_frontier = None;
+
+        let lines = execution_lines(&detail, DetailLayoutMode::Standard, 4)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lines[1],
+            "targets: policy +6.0000 | approved +4.5000 | frontier - | execution +3.7500"
+        );
+    }
+
+    #[test]
+    fn compact_and_minimal_layouts_keep_decision_visible_with_attention() {
+        let mut detail = detail_with_distinct_decision();
+        detail.execution.execution_status = ExecutionStatusView::AttentionRequired;
+        detail.execution.attention_reasons = vec!["recovery anomaly".into()];
+
+        for mode in [DetailLayoutMode::Compact, DetailLayoutMode::Minimal] {
+            let lines = execution_lines(&detail, mode, 1)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                lines,
+                [
+                    "r77 waiting_risk_release | policy +6.00 approved +4.50 frontier +4.00 exec +3.75"
+                ]
+            );
+        }
     }
 
     #[test]
@@ -1073,8 +1174,6 @@ mod tests {
                 .unwrap();
         value["execution"]["risk_acquisition"] = serde_json::json!({
             "direction": "long",
-            "curve_target": 6.0,
-            "risk_release_frontier": 2.375,
             "backlog_units": 3.625,
             "release_anchor_price": 100.0,
             "release_anchor_target": 4.0,
@@ -1085,15 +1184,20 @@ mod tests {
             "next_release_units": 0.875,
             "next_release_target": 3.25
         });
-        value["execution"]["execution_target_exposure"] = serde_json::json!(3.75);
+        value["decision"] = serde_json::json!({
+            "revision": 43,
+            "policy_target": 6.0,
+            "risk_approved_target": 6.0,
+            "acquisition_frontier": 2.375,
+            "execution_target": 3.75,
+            "reason": "waiting_risk_release"
+        });
         let detail: TrackDetailView = serde_json::from_value(value).unwrap();
 
         let text = render_text_with_size(detail, 180, 36);
 
         assert!(text.contains("exposure: 3.5000 → 3.7500 [↑ +0.2500] [acq backlog +3.6250]"));
-        assert!(text.contains(
-            "acq: long | frontier +2.3750 | backlog +3.6250 | release +0.8750 -> +3.2500"
-        ));
+        assert!(text.contains("acq: long | backlog +3.6250 | release +0.8750 -> +3.2500"));
         assert!(
             text.contains("unlock: price <= 92.5000 or stale in 18m | anchor 100.0000/+4.0000")
         );
@@ -1106,17 +1210,17 @@ mod tests {
                 .unwrap();
         detail.execution.bindings.clear();
         detail.execution.active_binding_count = 0;
-        detail.execution.execution_target_exposure = Some(3.75);
-        detail.execution.inventory_gap = 0.25;
+        detail.decision.execution_target = Some(3.75);
 
         let lines = execution_lines(&detail, DetailLayoutMode::Standard, 4)
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
 
+        assert_eq!(lines[0], "decision r42 | reason submit_planned");
         assert_eq!(
-            lines[0],
-            "exposure: cur +3.5000 | curve +4.0000 | exec +3.7500 | gap +0.2500"
+            lines[1],
+            "targets: policy +4.0000 | approved +4.0000 | frontier +4.0000 | execution +3.7500"
         );
         assert!(lines.iter().any(|line| line == "bindings: none"));
         assert!(!lines.iter().any(|line| line == "no active bindings"));
@@ -1131,8 +1235,6 @@ mod tests {
         value["execution"]["active_binding_count"] = serde_json::json!(0);
         value["execution"]["risk_acquisition"] = serde_json::json!({
             "direction": "long",
-            "curve_target": 0.3742,
-            "risk_release_frontier": 0.0,
             "backlog_units": 0.3742,
             "release_anchor_price": 64399.5,
             "release_anchor_target": 0.0,
@@ -1144,29 +1246,36 @@ mod tests {
             "next_release_target": 0.3742
         });
         value["position"]["current_exposure"] = serde_json::json!(-0.1056);
-        value["position"]["desired_exposure"] = serde_json::json!(0.3742);
-        value["execution"]["execution_target_exposure"] = serde_json::json!(0.0);
-        value["execution"]["inventory_gap"] = serde_json::json!(0.1056);
+        value["decision"] = serde_json::json!({
+            "revision": 43,
+            "policy_target": 0.3742,
+            "risk_approved_target": 0.3742,
+            "acquisition_frontier": 0.0,
+            "execution_target": 0.0,
+            "reason": "waiting_risk_release"
+        });
         let detail: TrackDetailView = serde_json::from_value(value).unwrap();
 
-        let lines = execution_lines(&detail, DetailLayoutMode::Standard, 3)
+        let lines = execution_lines(&detail, DetailLayoutMode::Standard, 4)
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
 
-        assert_eq!(lines.len(), 3);
-        assert_eq!(
-            lines[0],
-            "exposure: cur -0.1056 | curve +0.3742 | exec +0.0000 | gap +0.1056"
-        );
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "decision r43 | reason waiting_risk_release");
         assert_eq!(
             lines[1],
-            "acq: long | frontier +0.0000 | backlog +0.3742 | release +0.3742 -> +0.3742"
+            "targets: policy +0.3742 | approved +0.3742 | frontier +0.0000 | execution +0.0000"
         );
         assert_eq!(
             lines[2],
+            "acq: long | backlog +0.3742 | release +0.3742 -> +0.3742"
+        );
+        assert_eq!(
+            lines[3],
             "unlock: price <= 64201.9945 or stale in 60m | anchor 64399.5000/+0.0000"
         );
+        assert!(!lines[2].contains("frontier"));
         assert!(!lines.iter().any(|line| line == "bindings: none"));
     }
 
@@ -1184,7 +1293,7 @@ mod tests {
             })
             .collect();
 
-        let lines = execution_lines(&detail, DetailLayoutMode::Standard, 7)
+        let lines = execution_lines(&detail, DetailLayoutMode::Standard, 8)
             .iter()
             .map(line_text)
             .collect::<Vec<_>>();
@@ -1225,7 +1334,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(lines.len(), 5);
-        assert!(lines[4].contains("+5 more execution lines"));
+        assert!(lines[4].contains("+6 more execution lines"));
     }
 
     #[test]

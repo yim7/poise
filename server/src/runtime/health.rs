@@ -616,11 +616,13 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use poise_application::{
         AccountReadModel, AccountRiskSignal, EffectJournalDiagnosticsSnapshot,
-        EffectJournalFailure, TrackListReadModel, TrackPriceExecutionBlockReason,
-        TrackReadPnlStats, TrackReadStatus, TrackRecoveryIssue, TrackStrategyPriceStatus,
+        EffectJournalFailure, TrackInventoryDecisionReadModel, TrackListReadModel,
+        TrackPriceExecutionBlockReason, TrackReadPnlStats, TrackReadStatus, TrackRecoveryIssue,
+        TrackStrategyPriceStatus,
     };
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::ExchangeRules;
+    use poise_engine::execution_plan::DecisionReason;
 
     use crate::runtime::PnlBackfillSnapshot;
 
@@ -651,8 +653,14 @@ mod tests {
             strategy_price_status: TrackStrategyPriceStatus::Live,
             current_exposure: 0.0,
             position_qty: 0.0,
-            desired_exposure: Some(0.0),
-            execution_target_exposure: Some(0.0),
+            decision: TrackInventoryDecisionReadModel {
+                revision: Some(1),
+                policy_target: Some(0.0),
+                risk_approved_target: Some(0.0),
+                acquisition_frontier: None,
+                execution_target: Some(0.0),
+                reason: DecisionReason::AtExecutionTarget,
+            },
             risk_acquisition: None,
             pnl_stats: TrackReadPnlStats::default(),
             unrealized_pnl: 0.0,

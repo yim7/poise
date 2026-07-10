@@ -1,9 +1,11 @@
 use std::time::{Duration, Instant};
 
 use crate::protocol::{
-    AccountSummaryView, ExecutionStatusView, TrackCommandType, TrackDetailView,
-    TrackDiagnosticsView, TrackListItemView, TrackLiveView,
+    AccountSummaryView, ExecutionStatusView, PriceExecutionBlockReasonView, TrackCommandType,
+    TrackDetailView, TrackDiagnosticsView, TrackListItemView, TrackLiveView,
 };
+
+const MARKET_DATA_STALE_ATTENTION_REASON: &str = "market data stale";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -159,10 +161,20 @@ impl App {
     }
 
     pub fn apply_track_live_view(&mut self, track_id: &str, live: TrackLiveView) {
+        let has_committed_decision = live.decision.revision.is_some();
+        let price_execution_block_reason = live.price_execution_block_reason;
+
         if let Some(item) = self.tracks.iter_mut().find(|track| track.id == track_id) {
             item.strategy_price = live.strategy_price;
             item.strategy_price_status = live.strategy_price_status;
-            item.exposure.target = live.execution_target_exposure.or(live.desired_exposure);
+            item.decision = live.decision.clone();
+            apply_live_execution_attention(
+                &mut item.execution.execution_status,
+                &mut item.execution.attention_reasons,
+                &mut item.execution.price_execution_block_reason,
+                price_execution_block_reason,
+                has_committed_decision,
+            );
         }
 
         if let Some(detail) = self
@@ -175,12 +187,15 @@ impl App {
             detail.market.mark_price = live.mark_price;
             detail.market.best_bid = live.best_bid;
             detail.market.best_ask = live.best_ask;
-            detail.position.desired_exposure = live.desired_exposure;
-            detail.execution.execution_target_exposure = live.execution_target_exposure;
-            detail.execution.inventory_gap = live
-                .execution_target_exposure
-                .map_or(0.0, |target| target - detail.position.current_exposure);
+            detail.decision = live.decision;
             detail.execution.risk_acquisition = live.risk_acquisition;
+            apply_live_execution_attention(
+                &mut detail.execution.execution_status,
+                &mut detail.execution.attention_reasons,
+                &mut detail.execution.price_execution_block_reason,
+                price_execution_block_reason,
+                has_committed_decision,
+            );
         }
     }
 
@@ -269,11 +284,49 @@ impl App {
     }
 }
 
+fn apply_live_execution_attention(
+    execution_status: &mut ExecutionStatusView,
+    attention_reasons: &mut Vec<String>,
+    current_price_reason: &mut Option<PriceExecutionBlockReasonView>,
+    next_price_reason: Option<PriceExecutionBlockReasonView>,
+    has_committed_decision: bool,
+) {
+    if let Some(reason) = current_price_reason {
+        let reason = reason.to_string();
+        if let Some(index) = attention_reasons
+            .iter()
+            .rposition(|candidate| candidate == &reason)
+        {
+            attention_reasons.remove(index);
+        }
+    }
+
+    if let Some(reason) = next_price_reason {
+        attention_reasons.push(reason.to_string());
+    }
+    *current_price_reason = next_price_reason;
+
+    if has_committed_decision {
+        if let Some(index) = attention_reasons
+            .iter()
+            .position(|reason| reason == MARKET_DATA_STALE_ATTENTION_REASON)
+        {
+            attention_reasons.remove(index);
+        }
+    }
+
+    *execution_status = if attention_reasons.is_empty() {
+        ExecutionStatusView::Normal
+    } else {
+        ExecutionStatusView::AttentionRequired
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use crate::protocol::{
-        AccountSummaryView, ExecutionStateView, ExecutionStatusView, RiskSignalView, StreamEvent,
-        TrackDetailView, TrackDiagnosticsView, TrackListItemView,
+        AccountSummaryView, ExecutionStateView, ExecutionStatusView, PriceExecutionBlockReasonView,
+        RiskSignalView, StreamEvent, TrackDetailView, TrackDiagnosticsView, TrackListItemView,
     };
 
     use super::{App, View};
@@ -308,6 +361,269 @@ mod tests {
             "../tests/fixtures/track_diagnostics_view.json"
         ))
         .unwrap()
+    }
+
+    fn live_view() -> crate::protocol::TrackLiveView {
+        let event: StreamEvent = serde_json::from_str(include_str!(
+            "../tests/fixtures/ws_track_live_view_changed.json"
+        ))
+        .unwrap();
+        let StreamEvent::TrackLiveViewChanged { live, .. } = event else {
+            panic!("unexpected event variant");
+        };
+        live
+    }
+
+    #[test]
+    fn apply_track_live_view_replaces_decision_atomically_in_list_and_detail() {
+        let mut app = App::new(track_list_items());
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+        app.apply_track_detail(detail_view("btc-core"));
+        let live = live_view();
+        let expected_decision = live.decision.clone();
+
+        app.apply_track_live_view("btc-core", live);
+
+        assert_eq!(app.tracks[0].decision, expected_decision);
+        assert_eq!(
+            app.current_track_detail().unwrap().decision,
+            expected_decision
+        );
+    }
+
+    #[test]
+    fn live_price_gate_adds_attention_to_list_and_detail() {
+        let mut app = App::new(track_list_items());
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+        app.apply_track_detail(detail_view("btc-core"));
+        let mut live = live_view();
+        live.price_execution_block_reason =
+            Some(PriceExecutionBlockReasonView::MissingExecutionQuote);
+
+        app.apply_track_live_view("btc-core", live);
+
+        assert_eq!(
+            app.tracks[0].execution.execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
+        assert_eq!(
+            app.tracks[0].execution.attention_reasons,
+            ["missing execution quote"]
+        );
+        assert_eq!(
+            app.tracks[0].execution.price_execution_block_reason,
+            Some(PriceExecutionBlockReasonView::MissingExecutionQuote)
+        );
+        assert_eq!(
+            app.current_track_detail()
+                .unwrap()
+                .execution
+                .execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
+        assert_eq!(
+            app.current_track_detail()
+                .unwrap()
+                .execution
+                .attention_reasons,
+            ["missing execution quote"]
+        );
+        assert_eq!(
+            app.current_track_detail()
+                .unwrap()
+                .execution
+                .price_execution_block_reason,
+            Some(PriceExecutionBlockReasonView::MissingExecutionQuote)
+        );
+    }
+
+    #[test]
+    fn live_price_gate_clear_removes_price_attention_from_list_and_detail() {
+        let mut tracks = track_list_items();
+        tracks[0].execution.execution_status = ExecutionStatusView::AttentionRequired;
+        tracks[0].execution.attention_reasons = vec!["missing execution quote".into()];
+        tracks[0].execution.price_execution_block_reason =
+            Some(PriceExecutionBlockReasonView::MissingExecutionQuote);
+        let mut detail = detail_view("btc-core");
+        detail.execution.execution_status = ExecutionStatusView::AttentionRequired;
+        detail.execution.attention_reasons = vec!["missing execution quote".into()];
+        detail.execution.price_execution_block_reason =
+            Some(PriceExecutionBlockReasonView::MissingExecutionQuote);
+        let mut app = App::new(tracks);
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+        app.apply_track_detail(detail);
+        let mut live = live_view();
+        live.decision.revision = None;
+
+        app.apply_track_live_view("btc-core", live);
+
+        assert_eq!(
+            app.tracks[0].execution.execution_status,
+            ExecutionStatusView::Normal
+        );
+        assert!(app.tracks[0].execution.attention_reasons.is_empty());
+        assert_eq!(app.tracks[0].execution.price_execution_block_reason, None);
+        assert_eq!(
+            app.current_track_detail()
+                .unwrap()
+                .execution
+                .execution_status,
+            ExecutionStatusView::Normal
+        );
+        assert!(
+            app.current_track_detail()
+                .unwrap()
+                .execution
+                .attention_reasons
+                .is_empty()
+        );
+        assert_eq!(
+            app.current_track_detail()
+                .unwrap()
+                .execution
+                .price_execution_block_reason,
+            None
+        );
+    }
+
+    #[test]
+    fn live_price_gate_clear_preserves_other_attention_reasons() {
+        let other_reasons = vec![
+            "recovery anomaly: unknown_live_order".to_string(),
+            "market data stale".to_string(),
+            "insufficient account margin".to_string(),
+        ];
+        let mut tracks = track_list_items();
+        tracks[0].execution.execution_status = ExecutionStatusView::AttentionRequired;
+        tracks[0].execution.attention_reasons = other_reasons
+            .iter()
+            .cloned()
+            .chain(["mark/book divergence".to_string()])
+            .collect();
+        tracks[0].execution.price_execution_block_reason =
+            Some(PriceExecutionBlockReasonView::MarkBookDivergence);
+        let mut detail = detail_view("btc-core");
+        detail.execution.execution_status = ExecutionStatusView::AttentionRequired;
+        detail.execution.attention_reasons = tracks[0].execution.attention_reasons.clone();
+        detail.execution.price_execution_block_reason =
+            Some(PriceExecutionBlockReasonView::MarkBookDivergence);
+        let mut app = App::new(tracks);
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+        app.apply_track_detail(detail);
+        let mut live = live_view();
+        live.decision.revision = None;
+
+        app.apply_track_live_view("btc-core", live);
+
+        assert_eq!(app.tracks[0].execution.attention_reasons, other_reasons);
+        assert_eq!(
+            app.tracks[0].execution.execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
+        assert_eq!(
+            app.current_track_detail()
+                .unwrap()
+                .execution
+                .attention_reasons,
+            other_reasons
+        );
+        assert_eq!(
+            app.current_track_detail()
+                .unwrap()
+                .execution
+                .execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
+    }
+
+    #[test]
+    fn committed_live_decision_clears_only_stale_market_attention() {
+        let initial_reasons = vec![
+            "recovery anomaly: unknown_live_order".to_string(),
+            "market data stale".to_string(),
+            "insufficient account margin".to_string(),
+        ];
+        let expected_reasons = vec![
+            "recovery anomaly: unknown_live_order".to_string(),
+            "insufficient account margin".to_string(),
+        ];
+        let mut tracks = track_list_items();
+        tracks[0].execution.execution_status = ExecutionStatusView::AttentionRequired;
+        tracks[0].execution.attention_reasons = initial_reasons.clone();
+        let mut detail = detail_view("btc-core");
+        detail.execution.execution_status = ExecutionStatusView::AttentionRequired;
+        detail.execution.attention_reasons = initial_reasons;
+        let mut app = App::new(tracks);
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+        app.apply_track_detail(detail);
+
+        app.apply_track_live_view("btc-core", live_view());
+
+        assert_eq!(app.tracks[0].execution.attention_reasons, expected_reasons);
+        assert_eq!(
+            app.tracks[0].execution.execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
+        assert_eq!(
+            app.current_track_detail()
+                .unwrap()
+                .execution
+                .attention_reasons,
+            expected_reasons
+        );
+        assert_eq!(
+            app.current_track_detail()
+                .unwrap()
+                .execution
+                .execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
+    }
+
+    #[test]
+    fn uncommitted_live_decision_preserves_stale_market_attention() {
+        let mut tracks = track_list_items();
+        tracks[0].execution.execution_status = ExecutionStatusView::AttentionRequired;
+        tracks[0].execution.attention_reasons = vec!["market data stale".into()];
+        let mut detail = detail_view("btc-core");
+        detail.execution.execution_status = ExecutionStatusView::AttentionRequired;
+        detail.execution.attention_reasons = vec!["market data stale".into()];
+        let mut app = App::new(tracks);
+        app.current_view = View::Instance;
+        app.show_instance_for_selected();
+        app.apply_track_detail(detail);
+        let mut live = live_view();
+        live.decision.revision = None;
+
+        app.apply_track_live_view("btc-core", live);
+
+        assert_eq!(
+            app.tracks[0].execution.attention_reasons,
+            ["market data stale"]
+        );
+        assert_eq!(
+            app.tracks[0].execution.execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
+        assert_eq!(
+            app.current_track_detail()
+                .unwrap()
+                .execution
+                .attention_reasons,
+            ["market data stale"]
+        );
+        assert_eq!(
+            app.current_track_detail()
+                .unwrap()
+                .execution
+                .execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
     }
 
     #[test]

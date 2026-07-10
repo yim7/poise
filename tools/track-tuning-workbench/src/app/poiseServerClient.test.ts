@@ -4,16 +4,16 @@ import {
   createPoiseServerClient,
   normalizeServerBaseUrl,
   serverWebSocketUrl,
+  type TrackListResponse,
   type StreamEvent,
 } from '@/app/poiseServerClient';
 
 describe('poiseServerClient', () => {
   it('normalizes server base urls before requesting the track list', async () => {
+    const responseFixture = trackListResponseFixture();
     const fetchJson = vi.fn(async () =>
       new Response(
-        JSON.stringify({
-          items: [],
-        }),
+        JSON.stringify(responseFixture),
         {
           status: 200,
           headers: {
@@ -24,9 +24,15 @@ describe('poiseServerClient', () => {
     );
     const client = createPoiseServerClient({ fetch: fetchJson });
 
-    await expect(client.listTracks(' http://127.0.0.1:8000/ ')).resolves.toEqual({
-      items: [],
-    });
+    const response = await client.listTracks(' http://127.0.0.1:8000/ ');
+
+    expect(response).toEqual(responseFixture);
+    expect(response.items[0].execution.attention_reasons).toEqual([
+      'missing execution quote',
+    ]);
+    expect(response.items[0].execution.price_execution_block_reason).toBe(
+      'missing_execution_quote',
+    );
 
     expect(fetchJson).toHaveBeenCalledWith('http://127.0.0.1:8000/tracks', {
       headers: {
@@ -81,7 +87,14 @@ describe('poiseServerClient', () => {
           },
           position: {
             current_exposure: 1,
-            desired_exposure: 2,
+          },
+          decision: {
+            revision: 7,
+            policy_target: 8,
+            risk_approved_target: 4,
+            acquisition_frontier: 1.5,
+            execution_target: 1.25,
+            reason: 'waiting_risk_release',
           },
           pnl: {
             pnl_asset: 'USDT',
@@ -94,9 +107,9 @@ describe('poiseServerClient', () => {
           },
           execution: {
             state: 'open',
-            execution_status: 'normal',
-            attention_reasons: [],
-            inventory_gap: 1,
+            execution_status: 'attention_required',
+            attention_reasons: ['mark/book divergence'],
+            price_execution_block_reason: 'mark_book_divergence',
             active_binding_count: 0,
             bindings: [],
           },
@@ -113,8 +126,19 @@ describe('poiseServerClient', () => {
     );
     const client = createPoiseServerClient({ fetch: fetchJson });
 
-    await client.getTrackDetail('http://127.0.0.1:8000/', 'btc/grid');
+    const detail = await client.getTrackDetail('http://127.0.0.1:8000/', 'btc/grid');
     await client.getTrackDiagnostics('http://127.0.0.1:8000/', 'btc/grid');
+
+    expect(detail.decision).toEqual({
+      revision: 7,
+      policy_target: 8,
+      risk_approved_target: 4,
+      acquisition_frontier: 1.5,
+      execution_target: 1.25,
+      reason: 'waiting_risk_release',
+    });
+    expect(detail.execution.attention_reasons).toEqual(['mark/book divergence']);
+    expect(detail.execution.price_execution_block_reason).toBe('mark_book_divergence');
 
     expect(fetchJson).toHaveBeenNthCalledWith(
       1,
@@ -153,7 +177,14 @@ describe('poiseServerClient', () => {
         mark_price: 100.2,
         best_bid: 100.1,
         best_ask: 100.3,
-        desired_exposure: 3,
+        decision: {
+          revision: 8,
+          policy_target: 9,
+          risk_approved_target: 5,
+          acquisition_frontier: 2,
+          execution_target: 1.75,
+          reason: 'submit_planned',
+        },
         price_execution_block_reason: null,
       },
     });
@@ -169,13 +200,62 @@ describe('poiseServerClient', () => {
         mark_price: 100.2,
         best_bid: 100.1,
         best_ask: 100.3,
-        desired_exposure: 3,
+        decision: {
+          revision: 8,
+          policy_target: 9,
+          risk_approved_target: 5,
+          acquisition_frontier: 2,
+          execution_target: 1.75,
+          reason: 'submit_planned',
+        },
         price_execution_block_reason: null,
       },
     } satisfies StreamEvent);
     expect(sockets[0].closed).toBe(true);
   });
 });
+
+function trackListResponseFixture(): TrackListResponse {
+  return {
+    items: [
+      {
+        id: 'btc-core',
+        instrument: {
+          venue: 'binance',
+          symbol: 'BTCUSDT',
+        },
+        lifecycle: {
+          status: 'active',
+          updated_at: '2026-05-08T00:00:00Z',
+        },
+        strategy_price: 100,
+        strategy_price_status: 'live',
+        exposure: {
+          current: 1,
+        },
+        decision: {
+          revision: 8,
+          policy_target: 9,
+          risk_approved_target: 5,
+          acquisition_frontier: 2,
+          execution_target: 1.75,
+          reason: 'price_gate_blocked',
+        },
+        execution: {
+          state: 'open',
+          execution_status: 'attention_required',
+          attention_reasons: ['missing execution quote'],
+          price_execution_block_reason: 'missing_execution_quote',
+          active_binding_count: 0,
+        },
+        pnl: {
+          pnl_asset: 'USDT',
+          total_pnl: 0,
+        },
+      },
+    ],
+  };
+}
 
 class FakeWebSocket extends EventTarget {
   readonly url: string;

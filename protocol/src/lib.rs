@@ -184,6 +184,7 @@ pub struct TrackListItemView {
     pub strategy_price: Option<f64>,
     pub strategy_price_status: StrategyPriceStatusView,
     pub exposure: ExposureSummaryView,
+    pub decision: InventoryDecisionView,
     pub execution: ExecutionBadgeView,
     pub pnl: TrackListPnlView,
 }
@@ -203,8 +204,35 @@ pub struct TrackLifecycleView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExposureSummaryView {
     pub current: f64,
-    #[serde(default)]
-    pub target: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InventoryDecisionView {
+    pub revision: Option<u64>,
+    pub policy_target: Option<f64>,
+    pub risk_approved_target: Option<f64>,
+    pub acquisition_frontier: Option<f64>,
+    pub execution_target: Option<f64>,
+    pub reason: DecisionReasonView,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionReasonView {
+    WaitingMarketData,
+    Paused,
+    RiskInputInvalid,
+    BandPolicyBlocked,
+    AtExecutionTarget,
+    WaitingRiskRelease,
+    AccountCapacityBlocked,
+    PriceGateBlocked,
+    BelowRebalance,
+    BelowVenueMinimum,
+    CoveredByWorkingOrder,
+    RecoveryRequired,
+    WaitingCancel,
+    SubmitPlanned,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -218,6 +246,10 @@ pub struct TrackListPnlView {
 pub struct ExecutionBadgeView {
     pub state: ExecutionStateView,
     pub execution_status: ExecutionStatusView,
+    #[serde(default)]
+    pub attention_reasons: Vec<String>,
+    #[serde(default)]
+    pub price_execution_block_reason: Option<PriceExecutionBlockReasonView>,
     pub active_binding_count: u32,
 }
 
@@ -231,6 +263,7 @@ pub struct TrackDetailView {
     pub loss_limits: TrackLossLimitsView,
     pub market: TrackMarketView,
     pub position: TrackPositionView,
+    pub decision: InventoryDecisionView,
     pub pnl: TrackPnlView,
     pub execution: TrackExecutionView,
     pub activity: Vec<TrackActivityItemView>,
@@ -319,6 +352,16 @@ pub enum PriceExecutionBlockReasonView {
     MarkBookDivergence,
 }
 
+impl fmt::Display for PriceExecutionBlockReasonView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let reason = match self {
+            Self::MissingExecutionQuote => "missing execution quote",
+            Self::MarkBookDivergence => "mark/book divergence",
+        };
+        f.write_str(reason)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackLiveView {
     pub strategy_price: Option<f64>,
@@ -326,9 +369,7 @@ pub struct TrackLiveView {
     pub mark_price: Option<f64>,
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
-    pub desired_exposure: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_target_exposure: Option<f64>,
+    pub decision: InventoryDecisionView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk_acquisition: Option<RiskAcquisitionView>,
     pub price_execution_block_reason: Option<PriceExecutionBlockReasonView>,
@@ -338,8 +379,6 @@ pub struct TrackLiveView {
 #[serde(deny_unknown_fields)]
 pub struct TrackPositionView {
     pub current_exposure: f64,
-    #[serde(default)]
-    pub desired_exposure: Option<f64>,
     #[serde(default)]
     pub quantity_unit: TrackPositionQuantityUnitView,
     #[serde(default)]
@@ -378,9 +417,7 @@ pub struct TrackExecutionView {
     #[serde(default)]
     pub attention_reasons: Vec<String>,
     #[serde(default)]
-    pub inventory_gap: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_target_exposure: Option<f64>,
+    pub price_execution_block_reason: Option<PriceExecutionBlockReasonView>,
     #[serde(default)]
     pub active_binding_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -392,8 +429,6 @@ pub struct TrackExecutionView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RiskAcquisitionView {
     pub direction: RiskAcquisitionDirectionView,
-    pub curve_target: f64,
-    pub risk_release_frontier: f64,
     pub backlog_units: f64,
     pub release_anchor_price: f64,
     pub release_anchor_target: f64,
@@ -837,15 +872,16 @@ mod tests {
     use super::{
         AccountAnalysisView, AccountAssetExposureView, AccountAssetQuantitySourceView,
         AccountHedgeLikeView, AccountSummaryView, AccountTrackAnalysisView, BandFlattenTrigger,
-        BandProtectionPolicy, BandRecoverPolicy, ExecutionBindingIntentView,
+        BandProtectionPolicy, BandRecoverPolicy, DecisionReasonView, ExecutionBindingIntentView,
         ExecutionBindingOrderView, ExecutionBindingPolicyView, ExecutionBindingStatusView,
         ExecutionBindingView, ExecutionStateView, ExecutionStatusView, InstrumentView,
-        PnlBackfillStatusView, ReadinessIssueView, RecentFillsAuditResponse,
-        RecentPnlAvailabilityView, RiskAcquisitionConfigView, RiskAcquisitionDirectionView,
-        RiskAcquisitionView, RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView,
-        StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
-        TrackDiagnosticsView, TrackExecutionView, TrackListResponse, TrackStatus,
-        TradingReadinessResponse,
+        InventoryDecisionView, PnlBackfillStatusView, PriceExecutionBlockReasonView,
+        ReadinessIssueView, RecentFillsAuditResponse, RecentPnlAvailabilityView,
+        RiskAcquisitionConfigView, RiskAcquisitionDirectionView, RiskAcquisitionView,
+        RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView, StreamEvent,
+        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
+        TrackDiagnosticsView, TrackExecutionView, TrackListItemView, TrackListResponse,
+        TrackLiveView, TrackStatus, TradingReadinessResponse,
     };
 
     #[test]
@@ -984,6 +1020,119 @@ mod tests {
     }
 
     #[test]
+    fn inventory_decision_wire_contract_is_shared_and_uses_public_vocabulary() {
+        let expected_decision = serde_json::json!({
+            "revision": 7,
+            "policy_target": 8.0,
+            "risk_approved_target": 4.0,
+            "acquisition_frontier": 1.5,
+            "execution_target": 1.25,
+            "reason": "price_gate_blocked"
+        });
+        let decision: InventoryDecisionView =
+            serde_json::from_value(expected_decision.clone()).unwrap();
+
+        assert_eq!(decision.revision, Some(7));
+        assert_eq!(decision.policy_target, Some(8.0));
+        assert_eq!(decision.risk_approved_target, Some(4.0));
+        assert_eq!(decision.acquisition_frontier, Some(1.5));
+        assert_eq!(decision.execution_target, Some(1.25));
+        assert_eq!(decision.reason, DecisionReasonView::PriceGateBlocked);
+        assert_eq!(serde_json::to_value(&decision).unwrap(), expected_decision);
+        assert_eq!(
+            serde_json::to_value(DecisionReasonView::RiskInputInvalid).unwrap(),
+            serde_json::json!("risk_input_invalid")
+        );
+        assert_eq!(
+            serde_json::to_value(DecisionReasonView::BandPolicyBlocked).unwrap(),
+            serde_json::json!("band_policy_blocked")
+        );
+
+        let item: TrackListItemView = serde_json::from_value(serde_json::json!({
+            "id": "btc-core",
+            "instrument": {"venue": "binance_futures", "symbol": "BTCUSDT"},
+            "lifecycle": {"status": "active", "updated_at": "2026-03-31T12:34:56Z"},
+            "strategy_price": 64123.4,
+            "strategy_price_status": "live",
+            "exposure": {"current": 0.5},
+            "decision": expected_decision.clone(),
+            "execution": {"state": "open", "execution_status": "normal", "active_binding_count": 1},
+            "pnl": {"pnl_asset": "USDT", "total_pnl": 1229.0}
+        }))
+        .unwrap();
+        let detail: TrackDetailView = serde_json::from_value(serde_json::json!({
+            "identity": {"id": "btc-core", "instrument": {"venue": "binance_futures", "symbol": "BTCUSDT"}},
+            "status": {
+                "lifecycle": {"status": "active", "updated_at": "2026-03-31T12:34:56Z"},
+                "strategy_price": 64123.4,
+                "strategy_price_status": "live"
+            },
+            "strategy": {"lower_price": 60000.0, "upper_price": 68000.0, "long_exposure_units": 8.0, "short_exposure_units": 8.0, "notional_per_unit": 375.0, "min_rebalance_units": 0.5, "shape_family": "linear", "out_of_band_policy": "freeze"},
+            "max_notional": 3000.0,
+            "loss_limits": {"daily_loss_limit": 100.0, "total_loss_limit": 300.0},
+            "market": {"mark_price": 64123.4, "best_bid": 64120.1, "best_ask": 64124.5},
+            "position": {"current_exposure": 0.5},
+            "decision": expected_decision.clone(),
+            "pnl": {"pnl_asset": "USDT", "gross_realized_pnl": 0.0, "net_realized_pnl": 0.0, "unrealized_pnl": 0.0, "total_pnl": 0.0, "trading_fee_cumulative": 0.0, "funding_fee_cumulative": 0.0},
+            "execution": {
+                "state": "open",
+                "risk_acquisition": {
+                    "direction": "long",
+                    "backlog_units": 2.5,
+                    "release_anchor_price": 64123.4,
+                    "release_anchor_target": 1.5,
+                    "next_advantage_target": 2.0,
+                    "next_advantage_price": 63000.0,
+                    "next_release_units": 0.5,
+                    "next_release_target": 1.75
+                }
+            },
+            "activity": [],
+            "available_commands": []
+        }))
+        .unwrap();
+        let live: TrackLiveView = serde_json::from_value(serde_json::json!({
+            "strategy_price": 64123.4,
+            "strategy_price_status": "live",
+            "mark_price": 64123.4,
+            "best_bid": 64120.1,
+            "best_ask": 64124.5,
+            "decision": expected_decision,
+            "risk_acquisition": null,
+            "price_execution_block_reason": null
+        }))
+        .unwrap();
+
+        assert_eq!(item.decision, decision);
+        assert_eq!(detail.decision, decision);
+        assert_eq!(live.decision, decision);
+
+        let item_json = serde_json::to_value(item).unwrap();
+        let detail_json = serde_json::to_value(detail).unwrap();
+        let live_json = serde_json::to_value(live).unwrap();
+        assert!(item_json["exposure"].get("target").is_none());
+        assert!(detail_json["position"].get("desired_exposure").is_none());
+        assert!(
+            detail_json["execution"]
+                .get("execution_target_exposure")
+                .is_none()
+        );
+        assert!(detail_json["execution"].get("inventory_gap").is_none());
+        assert!(
+            detail_json["execution"]["risk_acquisition"]
+                .get("curve_target")
+                .is_none()
+        );
+        assert!(
+            detail_json["execution"]["risk_acquisition"]
+                .get("risk_release_frontier")
+                .is_none()
+        );
+        assert!(live_json.get("desired_exposure").is_none());
+        assert!(live_json.get("execution_target_exposure").is_none());
+    }
+
+    #[test]
     fn deserializes_track_list_response() {
         let response: TrackListResponse = serde_json::from_str(
             r#"{
@@ -994,7 +1143,8 @@ mod tests {
                         "lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},
                         "strategy_price":64123.4,
                         "strategy_price_status":"live",
-                        "exposure":{"current":0.5,"target":0.75},
+                        "exposure":{"current":0.5},
+                        "decision":{"revision":1,"policy_target":0.75,"risk_approved_target":0.75,"acquisition_frontier":null,"execution_target":0.75,"reason":"submit_planned"},
                         "execution":{"state":"open","execution_status":"normal","active_binding_count":1},
                         "pnl":{"pnl_asset":"USDT","total_pnl":1229.0}
                     }
@@ -1023,7 +1173,8 @@ mod tests {
                         "lifecycle":{"status":"active","updated_at":"2026-03-31T12:34:56Z"},
                         "strategy_price":64123.4,
                         "strategy_price_status":"live",
-                        "exposure":{"current":0.5,"target":0.75},
+                        "exposure":{"current":0.5},
+                        "decision":{"revision":1,"policy_target":0.75,"risk_approved_target":0.75,"acquisition_frontier":null,"execution_target":0.75,"reason":"submit_planned"},
                         "execution":{"state":"open","execution_status":"normal","active_binding_count":1},
                         "pnl":{"pnl_asset":"USDT","total_pnl":1229.0}
                     }
@@ -1040,13 +1191,46 @@ mod tests {
     }
 
     #[test]
+    fn execution_badge_carries_price_attention_ownership() {
+        let response: TrackListResponse = serde_json::from_value(serde_json::json!({
+            "items": [{
+                "id": "btc-core",
+                "instrument": {"venue": "binance_futures", "symbol": "BTCUSDT"},
+                "lifecycle": {"status": "active", "updated_at": "2026-03-31T12:34:56Z"},
+                "strategy_price": 64123.4,
+                "strategy_price_status": "live",
+                "exposure": {"current": 0.5},
+                "decision": {"revision": 1, "policy_target": 0.75, "risk_approved_target": 0.75, "acquisition_frontier": null, "execution_target": 0.75, "reason": "price_gate_blocked"},
+                "execution": {
+                    "state": "open",
+                    "execution_status": "attention_required",
+                    "attention_reasons": ["market data stale", "missing execution quote"],
+                    "price_execution_block_reason": "missing_execution_quote",
+                    "active_binding_count": 1
+                },
+                "pnl": {"pnl_asset": "USDT", "total_pnl": 1229.0}
+            }]
+        }))
+        .unwrap();
+
+        let execution = &response.items[0].execution;
+        assert_eq!(
+            execution.attention_reasons,
+            ["market data stale", "missing execution quote"]
+        );
+        assert_eq!(
+            execution.price_execution_block_reason,
+            Some(PriceExecutionBlockReasonView::MissingExecutionQuote)
+        );
+    }
+
+    #[test]
     fn execution_binding_view_serializes_stable_identity_and_policy() {
         let execution = TrackExecutionView {
             state: ExecutionStateView::Open,
             execution_status: ExecutionStatusView::Normal,
             attention_reasons: Vec::new(),
-            inventory_gap: 0.0,
-            execution_target_exposure: None,
+            price_execution_block_reason: None,
             active_binding_count: 1,
             risk_acquisition: Default::default(),
             bindings: vec![ExecutionBindingView {
@@ -1077,13 +1261,10 @@ mod tests {
             state: ExecutionStateView::Open,
             execution_status: ExecutionStatusView::Normal,
             attention_reasons: Vec::new(),
-            inventory_gap: 0.25,
-            execution_target_exposure: Some(2.75),
+            price_execution_block_reason: None,
             active_binding_count: 0,
             risk_acquisition: Some(RiskAcquisitionView {
                 direction: RiskAcquisitionDirectionView::Long,
-                curve_target: 6.0,
-                risk_release_frontier: 2.375,
                 backlog_units: 3.625,
                 release_anchor_price: 100.0,
                 release_anchor_target: 4.0,
@@ -1107,8 +1288,6 @@ mod tests {
             payload["risk_acquisition"]["backlog_units"].as_f64(),
             Some(3.625)
         );
-        assert_eq!(payload["execution_target_exposure"].as_f64(), Some(2.75));
-        assert_eq!(payload["inventory_gap"].as_f64(), Some(0.25));
         assert_eq!(
             payload["risk_acquisition"]["next_advantage_price"].as_f64(),
             Some(92.5)
@@ -1137,9 +1316,10 @@ mod tests {
                 "max_notional":3000.0,
                 "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
-                "position":{"current_exposure":0.5,"desired_exposure":0.75,"quantity":0.0029296875,"notional":187.5,"notional_asset":"USDT"},
+                "position":{"current_exposure":0.5,"quantity":0.0029296875,"notional":187.5,"notional_asset":"USDT"},
+                "decision":{"revision":1,"policy_target":0.75,"risk_approved_target":0.75,"acquisition_frontier":null,"execution_target":0.75,"reason":"submit_planned"},
                 "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
-                "execution":{"state":"open","execution_status":"attention_required","attention_reasons":["missing execution quote"],"inventory_gap":0.0,"active_binding_count":0,"bindings":[]},
+                "execution":{"state":"open","execution_status":"attention_required","attention_reasons":["missing execution quote"],"active_binding_count":0,"bindings":[]},
                 "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
                 "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
             }"#,
@@ -1191,9 +1371,10 @@ mod tests {
                 "max_notional":3000.0,
                 "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
-                "position":{"current_exposure":0.5,"desired_exposure":0.75,"quantity":0.0029296875,"notional":187.5,"notional_asset":"USDT"},
+                "position":{"current_exposure":0.5,"quantity":0.0029296875,"notional":187.5,"notional_asset":"USDT"},
+                "decision":{"revision":1,"policy_target":0.75,"risk_approved_target":0.75,"acquisition_frontier":null,"execution_target":0.75,"reason":"submit_planned"},
                 "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
-                "execution":{"state":"open","execution_status":"normal","attention_reasons":[],"inventory_gap":0.0,"active_binding_count":0,"bindings":[]},
+                "execution":{"state":"open","execution_status":"normal","attention_reasons":[],"active_binding_count":0,"bindings":[]},
                 "activity":[],
                 "available_commands":[]
             }"#,
@@ -1239,9 +1420,10 @@ mod tests {
                     "max_notional":3000.0,
                     "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                     "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
-                    "position":{"current_exposure":0.5,"desired_exposure":0.75},
+                    "position":{"current_exposure":0.5},
+                    "decision":{"revision":1,"policy_target":0.75,"risk_approved_target":0.75,"acquisition_frontier":null,"execution_target":0.75,"reason":"submit_planned"},
                     "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
-                    "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"active_binding_count":0,"bindings":[]},
+                    "execution":{"state":"open","execution_status":"normal","active_binding_count":0,"bindings":[]},
                     "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
                     "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
                 }
@@ -1286,9 +1468,10 @@ mod tests {
                 "max_notional":3000.0,
                 "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
-                "position":{"current_exposure":0.5,"desired_exposure":0.75},
+                "position":{"current_exposure":0.5},
+                "decision":{"revision":1,"policy_target":0.75,"risk_approved_target":0.75,"acquisition_frontier":null,"execution_target":0.75,"reason":"submit_planned"},
                 "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
-                "execution":{"state":"open","execution_status":"normal","inventory_gap":0.0,"active_binding_count":0,"bindings":[]},
+                "execution":{"state":"open","execution_status":"normal","active_binding_count":0,"bindings":[]},
                 "activity":[{"ts":"2026-03-31T12:34:56Z","message":"Track activated","level":"info"}],
                 "available_commands":[{"command":"pause","enabled":true,"disabled_reason":null}]
             }"#,

@@ -447,11 +447,11 @@ mod tests {
         RecentTrackPnlRecords, UserDataEvent,
     };
     use poise_protocol::{
-        AccountSummaryView, ExecutionBindingIntentView, ExecutionBindingStatusView,
-        ExecutionStatusView, RecentFillCoverageView, RecentFillsAuditResponse,
-        RecentPnlAvailabilityView, RiskSignalView, TrackCommandAccepted, TrackCommandRequest,
-        TrackCommandType, TrackDetailView, TrackDiagnosticsView, TrackListResponse, TrackStatus,
-        TradingReadinessResponse,
+        AccountSummaryView, DecisionReasonView, ExecutionBindingIntentView,
+        ExecutionBindingStatusView, ExecutionStatusView, RecentFillCoverageView,
+        RecentFillsAuditResponse, RecentPnlAvailabilityView, RiskSignalView, TrackCommandAccepted,
+        TrackCommandRequest, TrackCommandType, TrackDetailView, TrackDiagnosticsView,
+        TrackListResponse, TrackStatus, TradingReadinessResponse,
     };
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
@@ -1647,7 +1647,9 @@ mod tests {
         let body = to_bytes(detail.into_body(), usize::MAX).await.unwrap();
         let payload: TrackDetailView = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload.status.lifecycle.status, TrackStatus::Paused);
-        assert_eq!(payload.position.desired_exposure, None);
+        assert_eq!(payload.decision.revision, None);
+        assert_eq!(payload.decision.execution_target, None);
+        assert_eq!(payload.decision.reason, DecisionReasonView::Paused);
     }
 
     #[tokio::test]

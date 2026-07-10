@@ -20,7 +20,7 @@ pub(super) async fn run_once(worker: &EffectWorker) -> Result<()> {
         };
         let effect_id = effect.effect_id.clone();
         let track_id = effect.track_id.clone();
-        let instrument = effect_instrument(&effect.effect).cloned();
+        let instrument = effect_instrument(&effect.effect).clone();
         let outcome = match worker.process_effect(effect).await {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -36,14 +36,14 @@ pub(super) async fn run_once(worker: &EffectWorker) -> Result<()> {
                     .state
                     .session_effect_queue
                     .record_outcome(&effect_id, outcome);
-                handle_session_queue_action(worker, &track_id, instrument.as_ref(), action).await?;
+                handle_session_queue_action(worker, &track_id, &instrument, action).await?;
             }
             SessionDispatchResult::Cancel(resolution) => {
                 let action = worker
                     .state
                     .session_effect_queue
                     .record_cancel_resolution(&effect_id, resolution);
-                handle_cancel_queue_action(worker, &track_id, instrument.as_ref(), action).await?;
+                handle_cancel_queue_action(worker, &track_id, &instrument, action).await?;
             }
         }
     }
@@ -54,7 +54,7 @@ pub(super) async fn run_once(worker: &EffectWorker) -> Result<()> {
 async fn handle_session_queue_action(
     worker: &EffectWorker,
     track_id: &TrackId,
-    instrument: Option<&Instrument>,
+    instrument: &Instrument,
     action: SessionQueueAction,
 ) -> Result<()> {
     match action {
@@ -85,7 +85,7 @@ async fn handle_session_queue_action(
 async fn handle_cancel_queue_action(
     worker: &EffectWorker,
     track_id: &TrackId,
-    instrument: Option<&Instrument>,
+    instrument: &Instrument,
     action: CancelQueueAction,
 ) -> Result<()> {
     match action {
@@ -109,15 +109,13 @@ async fn handle_cancel_queue_action(
             record_superseded_effects(worker, track_id, &effect_ids).await?;
         }
         CancelQueueAction::AwaitingCancelFollowUp { .. } => {
-            if let Some(instrument) = instrument {
-                worker
-                    .recover_unknown_outcome(
-                        track_id.as_str(),
-                        instrument,
-                        cancel_writeback_outcome_unknown(),
-                    )
-                    .await?;
-            }
+            worker
+                .recover_unknown_outcome(
+                    track_id.as_str(),
+                    instrument,
+                    cancel_writeback_outcome_unknown(),
+                )
+                .await?;
         }
         CancelQueueAction::UnblockedDownstream | CancelQueueAction::Deferred { .. } => {}
         CancelQueueAction::Blocked { reason } => {
@@ -145,24 +143,20 @@ async fn record_superseded_effects(
 async fn trigger_queue_reconcile(
     worker: &EffectWorker,
     track_id: &TrackId,
-    instrument: Option<&Instrument>,
+    instrument: &Instrument,
     reason: ReconcileReason,
 ) -> Result<()> {
-    if let Some(instrument) = instrument {
-        worker
-            .trigger_immediate_reconcile(track_id.as_str(), instrument, reason)
-            .await?;
-    }
-    Ok(())
+    worker
+        .trigger_immediate_reconcile(track_id.as_str(), instrument, reason)
+        .await
 }
 
-fn effect_instrument(effect: &TrackEffect) -> Option<&Instrument> {
+fn effect_instrument(effect: &TrackEffect) -> &Instrument {
     match effect {
-        TrackEffect::SubmitOrder { request, .. } => Some(&request.instrument),
+        TrackEffect::SubmitOrder { request, .. } => &request.instrument,
         TrackEffect::CancelOrder { instrument, .. } | TrackEffect::CancelAll { instrument } => {
-            Some(instrument)
+            instrument
         }
-        TrackEffect::NoOp => None,
     }
 }
 
@@ -213,16 +207,6 @@ pub(super) async fn process_effect(
                     },
                 )
                 .await
-        }
-        TrackEffect::NoOp => {
-            worker
-                .state
-                .effect_service
-                .complete_effect_succeeded(effect.track_id.as_str(), &effect.effect_id)
-                .await?;
-            Ok(SessionDispatchResult::Outcome(
-                SessionEffectOutcome::Finished,
-            ))
         }
     }
 }
@@ -362,7 +346,7 @@ mod tests {
         let result = super::handle_cancel_queue_action(
             &worker,
             &TrackId::new("btc-core"),
-            None,
+            &Instrument::new(Venue::Binance, "BTCUSDT"),
             poise_application::CancelQueueAction::Blocked {
                 reason: "queue invariant failed".into(),
             },

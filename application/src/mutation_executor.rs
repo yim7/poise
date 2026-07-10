@@ -89,7 +89,7 @@ struct OwnedTrackMutationCommit {
     domain_events: Vec<DomainEvent>,
     effects: Vec<TrackEffect>,
     effect_status_updates: Vec<EffectStatusUpdate>,
-    skip_when_noop: bool,
+    skip_when_no_work: bool,
     control_state_override: Option<TrackControlState>,
 }
 
@@ -468,6 +468,7 @@ impl MutationExecutor {
                         .mutation_frame(id)
                         .ok_or_else(|| anyhow!("track `{id}` not found"))?
                 };
+                self.notify_live_only_executor_changes(id, &previous_frame, &next_frame);
                 self.session_effect_queue
                     .wake_track_for(&TrackId::new(id), WakeSignal::FreshMarket);
 
@@ -496,6 +497,28 @@ impl MutationExecutor {
                     .wake_track_for(&TrackId::new(id), WakeSignal::FreshMarket);
                 Ok(transition)
             }
+        }
+    }
+
+    fn notify_live_only_executor_changes(
+        &self,
+        id: &str,
+        previous_frame: &TrackMutationFrame,
+        next_frame: &TrackMutationFrame,
+    ) {
+        let recovery_anomaly_changed =
+            previous_frame.recovery_anomaly_active() != next_frame.recovery_anomaly_active();
+        if recovery_anomaly_changed {
+            self.recovery_anomaly_observer
+                .observe_recovery_anomaly_change(
+                    &TrackId::new(id),
+                    next_frame.recovery_anomaly_active(),
+                );
+        }
+        if previous_frame.executor_view_changed(next_frame) {
+            self.emit_internal_notification(ApplicationNotification::TrackChanged {
+                track_id: TrackId::new(id),
+            });
         }
     }
 
@@ -546,7 +569,7 @@ impl MutationExecutor {
     }
 
     pub async fn refresh_market_data_health(&self, id: &str) -> Result<TrackTransition> {
-        self.mutate_track_skip_noop(id, |manager| {
+        self.mutate_track_skip_when_no_work(id, |manager| {
             manager.refresh_market_data_health(&TrackId::new(id))
         })
         .await
@@ -1344,7 +1367,7 @@ impl MutationExecutor {
         self.mutate_track_with_options(id, false, mutate).await
     }
 
-    async fn mutate_track_skip_noop<R, F>(
+    async fn mutate_track_skip_when_no_work<R, F>(
         &self,
         id: &str,
         mutate: F,
@@ -1359,7 +1382,7 @@ impl MutationExecutor {
     async fn mutate_track_with_options<R, F>(
         &self,
         id: &str,
-        skip_when_noop: bool,
+        skip_when_no_work: bool,
         mutate: F,
     ) -> std::result::Result<R, TrackMutationError>
     where
@@ -1394,7 +1417,7 @@ impl MutationExecutor {
                 &next_frame,
                 &result,
                 None,
-                skip_when_noop,
+                skip_when_no_work,
                 None,
             )
             .await?;
@@ -1446,7 +1469,7 @@ impl MutationExecutor {
         next_frame: &TrackMutationFrame,
         result: &R,
         effect_status_update: Option<&EffectStatusUpdate>,
-        skip_when_noop: bool,
+        skip_when_no_work: bool,
         control_state_override: Option<&TrackControlState>,
     ) -> std::result::Result<OwnedMutexGuard<()>, TrackMutationError>
     where
@@ -1463,7 +1486,7 @@ impl MutationExecutor {
             next_frame,
             result,
             effect_status_updates,
-            skip_when_noop,
+            skip_when_no_work,
             control_state_override,
         )
         .await
@@ -1478,7 +1501,7 @@ impl MutationExecutor {
         next_frame: &TrackMutationFrame,
         result: &R,
         effect_status_updates: &[EffectStatusUpdate],
-        skip_when_noop: bool,
+        skip_when_no_work: bool,
         control_state_override: Option<&TrackControlState>,
     ) -> std::result::Result<OwnedMutexGuard<()>, TrackMutationError>
     where
@@ -1491,7 +1514,7 @@ impl MutationExecutor {
             domain_events: result.domain_events().to_vec(),
             effects: result.effects().to_vec(),
             effect_status_updates: effect_status_updates.to_vec(),
-            skip_when_noop,
+            skip_when_no_work,
             control_state_override: control_state_override.cloned(),
         };
         let executor = self.clone();
@@ -1519,7 +1542,7 @@ impl MutationExecutor {
             domain_events,
             effects,
             effect_status_updates,
-            skip_when_noop,
+            skip_when_no_work,
             control_state_override,
         } = commit;
         let control_state_update = persisted_control_state_after_transition(
@@ -1527,13 +1550,22 @@ impl MutationExecutor {
             next_frame.runtime_state(),
             control_state_override.as_ref(),
         );
-        let has_session_effects = effects
-            .iter()
-            .any(|effect| !matches!(effect, TrackEffect::NoOp));
+        let has_session_effects = !effects.is_empty();
         let has_track_write = control_state_update.is_some() || !domain_events.is_empty();
         let has_effect_status_update = !effect_status_updates.is_empty();
         let has_work = has_track_write || has_effect_status_update || has_session_effects;
-        if skip_when_noop && !has_work {
+        let decision_changed = previous_frame.inventory_decision_revision()
+            != next_frame.inventory_decision_revision();
+        let market_data_stale_changed =
+            previous_frame.market_data_stale() != next_frame.market_data_stale();
+        let executor_view_changed = previous_frame.executor_view_changed(&next_frame);
+        let public_view_changed =
+            decision_changed || market_data_stale_changed || executor_view_changed;
+        let previous_recovery_anomaly_active = previous_frame.recovery_anomaly_active();
+        let next_recovery_anomaly_active = next_frame.recovery_anomaly_active();
+        let recovery_anomaly_changed =
+            previous_recovery_anomaly_active != next_recovery_anomaly_active;
+        if skip_when_no_work && !has_work && !public_view_changed && !recovery_anomaly_changed {
             return Ok(());
         }
 
@@ -1588,9 +1620,7 @@ impl MutationExecutor {
             );
         }
 
-        let previous_recovery_anomaly_active = previous_frame.recovery_anomaly_active();
-        let next_recovery_anomaly_active = next_frame.recovery_anomaly_active();
-        if previous_recovery_anomaly_active != next_recovery_anomaly_active {
+        if recovery_anomaly_changed {
             self.recovery_anomaly_observer
                 .observe_recovery_anomaly_change(
                     &TrackId::new(id.as_str()),
@@ -1598,7 +1628,7 @@ impl MutationExecutor {
                 );
         }
 
-        if has_track_write || has_effect_status_update || has_session_effects {
+        if has_work || public_view_changed || recovery_anomaly_changed {
             self.emit_internal_notification(ApplicationNotification::TrackChanged {
                 track_id: TrackId::new(id.as_str()),
             });
@@ -2107,8 +2137,12 @@ mod tests {
     use crate::session_effect_queue::{
         DeferredUntil, SessionEffectOutcome, SessionPendingEffectState, WakeSignal,
     };
-    use crate::{CancelReceiptResolution, EffectStatus, SessionEffectQueue, TrackEffectJournal};
+    use crate::{
+        ApplicationNotification, CancelReceiptResolution, EffectStatus, SessionEffectQueue,
+        TrackEffectJournal,
+    };
     use async_trait::async_trait;
+    use chrono::Utc;
     use poise_core::risk::RiskTerminationCause;
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
@@ -2125,7 +2159,7 @@ mod tests {
     use poise_engine::ports::{ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus};
     use poise_engine::runtime::{
         AutoState, ControlState, FreshSessionExternalInputs, InventoryDecisionSnapshot,
-        TerminationCause, TrackState,
+        InventoryDecisionView, TerminationCause, TrackState,
     };
     use poise_engine::transition::TrackTransition;
     use tokio::sync::broadcast::error::TryRecvError;
@@ -2265,7 +2299,7 @@ mod tests {
         MutationExecutor::new(
             seeded_manager(),
             repository.clone(),
-            repository,
+            repository.clone(),
             SessionEffectQueue::default(),
             notifications,
             Arc::new(NoopGuard),
@@ -2292,10 +2326,11 @@ mod tests {
             )
             .unwrap();
         let decision = manager
-            .track_runtime_view(&TrackId::new("btc-core"))
+            .get_track("btc-core")
             .unwrap()
-            .inventory_decision
-            .unwrap();
+            .inventory_decision()
+            .unwrap()
+            .clone();
         (manager, decision)
     }
 
@@ -2357,6 +2392,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_only_executor_change_notifies_recovery_anomaly_edge() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let (notifications, _) = broadcast::channel(16);
+        let mut receiver = notifications.subscribe();
+        let executor = MutationExecutor::new(
+            seeded_manager(),
+            repository.clone(),
+            repository,
+            SessionEffectQueue::default(),
+            notifications,
+            Arc::new(NoopGuard),
+            observer.clone(),
+        );
+        let previous_frame = frame_with_recovery_anomaly(false);
+        let next_frame = frame_with_recovery_anomaly(true);
+
+        executor.notify_live_only_executor_changes("btc-core", &previous_frame, &next_frame);
+
+        assert_eq!(observer.recorded(), vec![("btc-core".to_string(), true)]);
+        assert_eq!(
+            receiver.recv().await.unwrap(),
+            ApplicationNotification::TrackChanged {
+                track_id: TrackId::new("btc-core"),
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn commit_track_mutation_notifies_recovery_anomaly_clear_edges_only() {
         let repository = Arc::new(MemoryRepository::default());
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
@@ -2381,6 +2445,53 @@ mod tests {
             .unwrap();
 
         assert_eq!(observer.recorded(), vec![("btc-core".to_string(), false)]);
+    }
+
+    #[tokio::test]
+    async fn executor_view_change_notifies_without_durable_work() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let (notifications, _) = broadcast::channel(16);
+        let mut receiver = notifications.subscribe();
+        let executor = MutationExecutor::new(
+            seeded_manager(),
+            repository.clone(),
+            repository.clone(),
+            SessionEffectQueue::default(),
+            notifications,
+            Arc::new(NoopGuard),
+            observer.clone(),
+        );
+        let previous_frame = frame_with_recovery_anomaly(true);
+        let mut next_frame = previous_frame.clone();
+        next_frame.set_recovery_anomaly(Some(RecoveryAnomaly::DuplicateLiveOrders));
+
+        let mutation_guard = executor.lock_track_mutation("btc-core").await;
+        executor
+            .commit_track_mutation(
+                mutation_guard,
+                "btc-core",
+                &previous_frame,
+                &next_frame,
+                &(),
+                None,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(observer.recorded().is_empty());
+        assert_eq!(repository.business_write_call_count(), 0);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("executor view change should notify subscribers")
+                .unwrap(),
+            ApplicationNotification::TrackChanged {
+                track_id: TrackId::new("btc-core"),
+            }
+        );
     }
 
     #[tokio::test]
@@ -3145,8 +3256,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
-            .inventory_decision
-            .expect("live-only planning should commit a decision snapshot");
+            .decision;
         let second_transition = executor
             .observe_market(
                 "btc-core",
@@ -3165,15 +3275,13 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap()
-                .inventory_decision
-                .unwrap(),
+                .decision,
             executor
                 .track_runtime_view("btc-core")
                 .await
                 .unwrap()
                 .unwrap()
-                .inventory_decision
-                .unwrap(),
+                .decision,
         ];
         let token_after_tick = executor
             .prepare_exchange_state_sync("btc-core")
@@ -3185,7 +3293,10 @@ mod tests {
         assert!(second_transition.events.is_empty());
         assert!(second_transition.effects.is_empty());
         assert_eq!(queried_decisions[0], queried_decisions[1]);
-        assert_eq!(queried_decisions[0].revision, first_decision.revision + 1);
+        assert_eq!(
+            queried_decisions[0].revision,
+            Some(first_decision.revision.unwrap() + 1)
+        );
         assert_eq!(
             queried_decisions[0].risk_approved_target,
             first_decision.risk_approved_target
@@ -3208,6 +3319,87 @@ mod tests {
             repository.business_write_call_count(),
             0,
             "live-only tick should not persist any durable runtime projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_transition_commit_skips_all_shared_work() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let (notifications, _) = broadcast::channel(16);
+        let mut receiver = notifications.subscribe();
+        let queue = SessionEffectQueue::default();
+        let executor = MutationExecutor::new(
+            seeded_manager(),
+            repository.clone(),
+            repository.clone(),
+            queue.clone(),
+            notifications,
+            Arc::new(NoopGuard),
+            observer,
+        );
+
+        let transition = executor
+            .refresh_market_data_health("btc-core")
+            .await
+            .unwrap();
+
+        assert!(transition.events.is_empty());
+        assert!(transition.effects.is_empty());
+        assert_eq!(repository.business_write_call_count(), 0);
+        assert!(repository.pending_effects().is_empty());
+        assert!(
+            queue
+                .snapshot_for_track(&TrackId::new("btc-core"))
+                .pending_effects
+                .is_empty()
+        );
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn market_data_stale_edge_notifies_without_durable_write() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let (notifications, _) = broadcast::channel(16);
+        let mut receiver = notifications.subscribe();
+        let executor = MutationExecutor::new(
+            seeded_manager(),
+            repository.clone(),
+            repository.clone(),
+            SessionEffectQueue::default(),
+            notifications,
+            Arc::new(NoopGuard),
+            observer,
+        );
+        let previous_frame = {
+            let manager = executor.manager.read().await;
+            manager.mutation_frame("btc-core").unwrap()
+        };
+        let mut next_frame = previous_frame.clone();
+        next_frame.set_market_data_stale_since(Some(Utc::now()));
+
+        let mutation_guard = executor.lock_track_mutation("btc-core").await;
+        executor
+            .commit_track_mutation(
+                mutation_guard,
+                "btc-core",
+                &previous_frame,
+                &next_frame,
+                &(),
+                None,
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(repository.business_write_call_count(), 0);
+        assert_eq!(
+            receiver.recv().await.unwrap(),
+            ApplicationNotification::TrackChanged {
+                track_id: TrackId::new("btc-core"),
+            }
         );
     }
 
@@ -3308,8 +3500,18 @@ mod tests {
         assert!(mutation.await.unwrap().is_err());
         let queried_after_rollback = query.await.unwrap().unwrap().unwrap();
         assert_eq!(
-            queried_after_rollback.inventory_decision,
-            Some(committed_before)
+            queried_after_rollback.decision,
+            InventoryDecisionView::default()
+        );
+        assert_eq!(
+            executor
+                .manager
+                .read()
+                .await
+                .get_track("btc-core")
+                .unwrap()
+                .inventory_decision(),
+            Some(&committed_before)
         );
     }
 
@@ -3412,8 +3614,18 @@ mod tests {
             "caller cancellation must not release the mutation owner before rollback"
         );
         assert_eq!(
-            queried_after_rollback.inventory_decision,
-            Some(committed_before)
+            queried_after_rollback.decision,
+            InventoryDecisionView::default()
+        );
+        assert_eq!(
+            executor
+                .manager
+                .read()
+                .await
+                .get_track("btc-core")
+                .unwrap()
+                .inventory_decision(),
+            Some(&committed_before)
         );
     }
 
@@ -3777,7 +3989,7 @@ mod tests {
     #[tokio::test]
     async fn closed_cancel_follow_up_forces_reconcile_even_from_recover_only_sync() {
         let repository = Arc::new(MemoryRepository::default());
-        let (services, _) = track_write_services(seeded_manager(), repository.clone());
+        let (services, notifications) = track_write_services(seeded_manager(), repository.clone());
         let track_id = TrackId::new("btc-core");
         services
             .observation
@@ -3791,6 +4003,15 @@ mod tests {
                 },
             )
             .await
+            .unwrap();
+        let revision_before_sync = services
+            .observation
+            .track_runtime_view(track_id.as_str())
+            .await
+            .unwrap()
+            .unwrap()
+            .decision
+            .revision
             .unwrap();
         services.session_effect_queue.clear_track(&track_id);
 
@@ -3816,6 +4037,7 @@ mod tests {
             .prepare_exchange_state_sync(track_id.as_str())
             .await
             .unwrap();
+        let mut receiver = notifications.subscribe();
 
         let outcome = services
             .observation
@@ -3833,9 +4055,27 @@ mod tests {
             panic!("current exchange snapshot should apply");
         };
 
-        assert!(
-            !transition.effects.is_empty(),
-            "closed cancel follow-up should force reconcile even through recover-only exchange sync"
+        let decision_after_sync = services
+            .observation
+            .track_runtime_view(track_id.as_str())
+            .await
+            .unwrap()
+            .unwrap()
+            .decision;
+        assert_eq!(
+            decision_after_sync.revision,
+            Some(revision_before_sync + 1),
+            "closed cancel follow-up should force reconcile even when no effect is needed"
+        );
+        assert!(transition.effects.is_empty());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("decision-only reconcile should notify subscribers")
+                .unwrap(),
+            ApplicationNotification::TrackChanged {
+                track_id: track_id.clone(),
+            }
         );
     }
 

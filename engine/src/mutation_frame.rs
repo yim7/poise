@@ -77,6 +77,20 @@ impl TrackMutationFrame {
         self.inventory_decision.as_ref()
     }
 
+    pub fn inventory_decision_revision(&self) -> Option<u64> {
+        self.inventory_decision
+            .as_ref()
+            .map(|decision| decision.revision)
+    }
+
+    pub fn market_data_stale(&self) -> bool {
+        self.market_data_stale_since.is_some()
+    }
+
+    pub fn executor_view_changed(&self, next: &Self) -> bool {
+        self.executor_state.view() != next.executor_state.view()
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_exposure_state(
         &mut self,

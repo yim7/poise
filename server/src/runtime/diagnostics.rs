@@ -51,7 +51,8 @@ mod tests {
     use poise_core::types::{ExchangeRules, Exposure, Side};
     use poise_engine::ports::{ExchangeOpenOrderSnapshot, ExchangeOrder, OrderStatus};
     use poise_engine::runtime::{
-        BindingView, ExecutorView, StrategyPriceStatus, TrackRuntimeView, TrackStatus,
+        BindingView, ExecutorView, InventoryDecisionView, StrategyPriceStatus, TrackRuntimeView,
+        TrackStatus,
     };
 
     use super::{describe_open_orders, describe_runtime_bindings};
@@ -74,9 +75,7 @@ mod tests {
             },
             current_exposure: Exposure(0.0),
             position_qty: 0.0,
-            inventory_decision: None,
-            desired_exposure: None,
-            execution_target_exposure: None,
+            decision: InventoryDecisionView::default(),
             risk_acquisition: Default::default(),
             manual_target_override: None,
             executor: ExecutorView {

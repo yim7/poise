@@ -38,8 +38,15 @@
       "best_ask": 101.55
     },
     "position": {
-      "current_exposure": 3.7,
-      "desired_exposure": 4.0
+      "current_exposure": 3.7
+    },
+    "decision": {
+      "revision": 43,
+      "policy_target": 4.0,
+      "risk_approved_target": 4.0,
+      "acquisition_frontier": 4.0,
+      "execution_target": 4.0,
+      "reason": "at_execution_target"
     },
     "pnl": {
       "pnl_asset": "USDT",
@@ -53,7 +60,8 @@
     "execution": {
       "state": "open",
       "execution_status": "normal",
-      "inventory_gap": 0.3,
+      "attention_reasons": [],
+      "price_execution_block_reason": null,
       "active_binding_count": 0,
       "bindings": []
     },

@@ -28,18 +28,13 @@ impl SessionTrackEffect {
         effects
             .iter()
             .enumerate()
-            .filter_map(|(sequence, effect)| {
-                if matches!(effect, TrackEffect::NoOp) {
-                    return None;
-                }
-                Some(Self {
-                    effect_id: format!("{}:{batch_id}:{sequence}", track_id.as_str()),
-                    track_id: track_id.clone(),
-                    batch_id: batch_id.to_string(),
-                    sequence: sequence as u32,
-                    effect: effect.clone(),
-                    created_at,
-                })
+            .map(|(sequence, effect)| Self {
+                effect_id: format!("{}:{batch_id}:{sequence}", track_id.as_str()),
+                track_id: track_id.clone(),
+                batch_id: batch_id.to_string(),
+                sequence: sequence as u32,
+                effect: effect.clone(),
+                created_at,
             })
             .collect()
     }
@@ -113,7 +108,6 @@ pub(crate) struct SessionPendingEffectView {
 pub(crate) enum SessionPendingEffectKind {
     Submit,
     Cancel,
-    Other,
 }
 
 #[cfg(test)]
@@ -1392,7 +1386,6 @@ impl SessionTrackEffectExt for TrackEffect {
             TrackEffect::CancelOrder { .. } | TrackEffect::CancelAll { .. } => {
                 SessionPendingEffectKind::Cancel
             }
-            TrackEffect::NoOp => SessionPendingEffectKind::Other,
         }
     }
 }
@@ -1488,6 +1481,24 @@ mod tests {
             first_ids[0], second_ids[0],
             "fresh process queues must not reuse persisted journal effect ids"
         );
+    }
+
+    #[test]
+    fn empty_transition_effects_enqueue_no_session_work() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+
+        let enqueued = queue.enqueue_transition_effects(&track_id, &[], Utc::now());
+
+        assert!(enqueued.is_empty());
+        assert!(enqueued.journal_projection_entries().is_empty());
+        assert!(
+            queue
+                .snapshot_for_track(&track_id)
+                .pending_effects
+                .is_empty()
+        );
+        assert!(queue.claim_next().is_none());
     }
 
     #[test]

@@ -45,7 +45,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             item.execution.active_binding_count,
         );
         let price = format_price_summary(item.strategy_price, item.strategy_price_status);
-        let exposure = format_exposure_summary(item.exposure.current, item.exposure.target);
+        let exposure =
+            format_exposure_summary(item.exposure.current, item.decision.execution_target);
         let total_pnl = pnl_signal(item.pnl.total_pnl);
         let total_pnl_text = format!("{} {}", total_pnl.text, item.pnl.pnl_asset);
 
@@ -376,6 +377,29 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_signal_uses_execution_target_only() {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut response: crate::protocol::TrackListResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/track_list_response.json"
+        ))
+        .unwrap();
+        response.items[0].decision.policy_target = Some(8.0);
+        response.items[0].decision.risk_approved_target = Some(6.0);
+        response.items[0].decision.acquisition_frontier = Some(4.0);
+        response.items[0].decision.execution_target = Some(3.0);
+        let app = App::new(response.items);
+
+        terminal
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("3.5000 | ↓ -0.5000"));
+        assert!(!text.contains("↑ +4.5000"));
+    }
+
+    #[test]
     fn renders_stale_strategy_price_with_short_marker_and_stale_color() {
         let backend = TestBackend::new(100, 20);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -420,7 +444,15 @@ mod tests {
                         "lifecycle": {"status": "active", "updated_at": "2026-03-26T10:00:00Z"},
                         "strategy_price": null,
                         "strategy_price_status": "live",
-                        "exposure": {"current": 3.5, "target": 3.0},
+                        "exposure": {"current": 3.5},
+                        "decision": {
+                            "revision": 42,
+                            "policy_target": 3.0,
+                            "risk_approved_target": 3.0,
+                            "acquisition_frontier": 3.0,
+                            "execution_target": 3.0,
+                            "reason": "submit_planned"
+                        },
                         "execution": {"state": "open", "execution_status": "normal", "active_binding_count": 0},
                         "pnl": {"pnl_asset": "USDT", "total_pnl": 12.3}
                     }
@@ -531,7 +563,15 @@ mod tests {
                         "lifecycle": {"status": "active", "updated_at": "2026-03-26T10:00:00Z"},
                         "strategy_price": 101.25,
                         "strategy_price_status": "live",
-                        "exposure": {"current": 3.5, "target": 3.0},
+                        "exposure": {"current": 3.5},
+                        "decision": {
+                            "revision": 42,
+                            "policy_target": 3.0,
+                            "risk_approved_target": 3.0,
+                            "acquisition_frontier": 3.0,
+                            "execution_target": 3.0,
+                            "reason": "submit_planned"
+                        },
                         "execution": {"state": "open", "execution_status": "attention_required", "active_binding_count": 1},
                         "pnl": {"pnl_asset": "USDT", "total_pnl": 12345.67}
                     }
@@ -563,7 +603,15 @@ mod tests {
                         "lifecycle": {"status": "active", "updated_at": "2026-03-26T10:00:00Z"},
                         "strategy_price": 101.25,
                         "strategy_price_status": "live",
-                        "exposure": {"current": 3.5, "target": 3.0},
+                        "exposure": {"current": 3.5},
+                        "decision": {
+                            "revision": 42,
+                            "policy_target": 3.0,
+                            "risk_approved_target": 3.0,
+                            "acquisition_frontier": 3.0,
+                            "execution_target": 3.0,
+                            "reason": "submit_planned"
+                        },
                         "execution": {"state": "open", "execution_status": "normal", "active_binding_count": 0},
                         "pnl": {"pnl_asset": "USDT", "total_pnl": 12.3}
                     }
@@ -601,7 +649,15 @@ mod tests {
                         "lifecycle": {"status": "active", "updated_at": "2026-03-26T10:00:00Z"},
                         "strategy_price": 101.25,
                         "strategy_price_status": "live",
-                        "exposure": {"current": 3.5, "target": 3.0},
+                        "exposure": {"current": 3.5},
+                        "decision": {
+                            "revision": 42,
+                            "policy_target": 3.0,
+                            "risk_approved_target": 3.0,
+                            "acquisition_frontier": 3.0,
+                            "execution_target": 3.0,
+                            "reason": "submit_planned"
+                        },
                         "execution": {"state": "open", "execution_status": "normal", "active_binding_count": 0},
                         "pnl": {"pnl_asset": "USDT", "total_pnl": -245.3}
                     }

@@ -43,10 +43,17 @@
   },
   "position": {
     "current_exposure": 3.5,
-    "desired_exposure": 4.0,
     "quantity": 0.42,
     "notional": 42.546,
     "notional_asset": "USDT"
+  },
+  "decision": {
+    "revision": 42,
+    "policy_target": 4.0,
+    "risk_approved_target": 4.0,
+    "acquisition_frontier": 4.0,
+    "execution_target": 4.0,
+    "reason": "submit_planned"
   },
   "pnl": {
     "pnl_asset": "USDT",
@@ -60,7 +67,8 @@
   "execution": {
     "state": "open",
     "execution_status": "normal",
-    "inventory_gap": 0.5,
+    "attention_reasons": [],
+    "price_execution_block_reason": null,
     "active_binding_count": 1,
     "bindings": [
       {

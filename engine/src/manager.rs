@@ -8,7 +8,7 @@ use poise_core::types::Exposure;
 
 use crate::command::TrackCommand;
 use crate::execution_gate::ExecutionGateDecision;
-use crate::execution_plan::TrackEffect;
+use crate::execution_plan::{DecisionReason, TrackEffect};
 use crate::executor;
 use crate::ledger::{TrackPnlRecord, TrackPnlStats};
 use crate::mutation_frame::TrackMutationFrame;
@@ -211,6 +211,7 @@ impl TrackManager {
             desired_exposure,
             inventory_decision,
             inventory_decision_revision,
+            executor_state,
         ) = {
             let track = self
                 .tracks
@@ -227,6 +228,7 @@ impl TrackManager {
                 track.desired_exposure.clone(),
                 track.inventory_decision.clone(),
                 track.inventory_decision_revision,
+                track.executor_state.clone(),
             )
         };
 
@@ -241,6 +243,11 @@ impl TrackManager {
         track.desired_exposure = desired_exposure;
         track.inventory_decision = inventory_decision;
         track.inventory_decision_revision = inventory_decision_revision;
+        retain_live_only_executor_state(
+            track,
+            executor_state,
+            previous_frame.executor_view_changed(&next_frame),
+        );
         track.strategy_price = strategy_price;
         track.strategy_price_status = strategy_price_status;
         track.mark_price = mark_price;
@@ -930,7 +937,7 @@ impl TrackManager {
                     .get_mut(id)
                     .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
                 track.replace_executor_state(state);
-                Ok((vec![], vec![TrackEffect::NoOp]))
+                Ok((vec![], vec![]))
             }
             executor::RecoveryResolution::Rebuilt {
                 state,
@@ -1097,13 +1104,13 @@ impl TrackManager {
     fn submit_intent_input<'a>(
         &self,
         track: &'a TrackRuntime,
-        desired_exposure: poise_core::types::Exposure,
-        execution_target_exposure: poise_core::types::Exposure,
+        risk_approved_target: poise_core::types::Exposure,
+        execution_target: poise_core::types::Exposure,
         execution_gate_decision: ExecutionGateDecision,
         policy_context: executor::PolicyContext,
         observed_at: chrono::DateTime<chrono::Utc>,
     ) -> executor::SubmitIntentInput<'a> {
-        let submit_purpose = self.submit_purpose_for_track(track, &desired_exposure);
+        let submit_purpose = self.submit_purpose_for_track(track, &risk_approved_target);
         executor::SubmitIntentInput {
             instrument: track.instrument(),
             config: track.config(),
@@ -1111,8 +1118,8 @@ impl TrackManager {
             native_qty_per_unit: track.native_qty_per_exposure_unit(),
             min_rebalance_units: track.config().min_rebalance_units,
             current_exposure: track.current_exposure.clone(),
-            desired_exposure,
-            execution_target_exposure,
+            risk_approved_target,
+            execution_target,
             execution_gate_decision,
             execution_quote: Self::execution_quote_for_track(track),
             policy_context,
@@ -1160,25 +1167,21 @@ impl TrackManager {
         let track = &normalized_track;
         let observed_at = self.clock.now();
         let target = reconciler::reconcile_target_at(track, strategy_price, observed_at);
-        let inventory_decision = InventoryDecisionSnapshot {
-            observed_at,
-            policy_target: target.policy_target.clone(),
-            risk_approved_target: target.desired_exposure.clone(),
-            acquisition_frontier: target.risk_release_frontier.clone(),
-            execution_target: target.execution_target_exposure.clone(),
-            applied_risk_cap: target.applied_risk_cap.clone(),
-            price_execution_gate: track.price_execution_gate,
-            revision: track.next_inventory_decision_revision(),
-            risk_acquisition: track.risk_acquisition_runtime_view(
+        if track.executor_state.recovery_anomaly.is_some() {
+            let reason = Self::select_primary_decision_reason(
+                target.reason,
+                Some(DecisionReason::RecoveryRequired),
+            );
+            let inventory_decision = Self::inventory_decision_snapshot(
+                track,
                 &target,
                 strategy_price,
                 observed_at,
-            ),
-        };
-        if track.executor_state.recovery_anomaly.is_some() {
+                reason,
+            );
             return Ok(PlannedInventoryExecution {
                 events: target.events,
-                effects: vec![TrackEffect::NoOp],
+                effects: vec![],
                 inventory_decision,
                 new_runtime_state: target.new_runtime_state,
                 execution_gate_decision: target.execution_gate_decision,
@@ -1198,19 +1201,33 @@ impl TrackManager {
         let policy_context = Self::policy_context_for_state(effective_track_state);
         let maintain_protected_bindings =
             target.target_pursuit_suppressed && Self::holds_protected_target(effective_track_state);
+        let has_active_bindings = track
+            .executor_state
+            .bindings
+            .iter()
+            .any(|binding| binding.is_active());
         if target.target_pursuit_suppressed
             && !risk_exposure_gate_active
             && !execution_gate_blocks_submit
             && policy_context != executor::PolicyContext::ReduceOnly
+            && !has_active_bindings
         {
             let executor_state = executor::refresh_state(
                 &track.executor_state,
                 track.config(),
                 &track.current_exposure,
             );
+            let reason = Self::select_primary_decision_reason(target.reason, None);
+            let inventory_decision = Self::inventory_decision_snapshot(
+                track,
+                &target,
+                strategy_price,
+                observed_at,
+                reason,
+            );
             return Ok(PlannedInventoryExecution {
                 events: target.events,
-                effects: vec![TrackEffect::NoOp],
+                effects: vec![],
                 inventory_decision,
                 new_runtime_state: target.new_runtime_state,
                 execution_gate_decision: target.execution_gate_decision,
@@ -1220,8 +1237,8 @@ impl TrackManager {
         let executor_state = Some(&track.executor_state);
         let submit_intent = self.submit_intent_input(
             track,
-            target.desired_exposure.clone(),
-            target.execution_target_exposure.clone(),
+            target.risk_approved_target.clone(),
+            target.execution_target.clone(),
             target.execution_gate_decision.clone(),
             policy_context,
             observed_at,
@@ -1232,6 +1249,9 @@ impl TrackManager {
         } else {
             executor::plan(executor_input)
         };
+        let reason = Self::select_primary_decision_reason(target.reason, plan.reason);
+        let inventory_decision =
+            Self::inventory_decision_snapshot(track, &target, strategy_price, observed_at, reason);
 
         Ok(PlannedInventoryExecution {
             events: target.events,
@@ -1241,6 +1261,50 @@ impl TrackManager {
             execution_gate_decision: target.execution_gate_decision,
             executor_state: plan.state,
         })
+    }
+
+    fn inventory_decision_snapshot(
+        track: &TrackRuntime,
+        target: &reconciler::TargetReconcileResult,
+        strategy_price: f64,
+        observed_at: chrono::DateTime<chrono::Utc>,
+        reason: DecisionReason,
+    ) -> InventoryDecisionSnapshot {
+        InventoryDecisionSnapshot {
+            observed_at,
+            policy_target: target.policy_target.clone(),
+            risk_approved_target: target.risk_approved_target.clone(),
+            acquisition_frontier: target.acquisition_frontier.clone(),
+            execution_target: target.execution_target.clone(),
+            reason,
+            applied_risk_cap: target.applied_risk_cap.clone(),
+            price_execution_gate: track.price_execution_gate,
+            revision: track.next_inventory_decision_revision(),
+            risk_acquisition: track.risk_acquisition_runtime_view(
+                target,
+                strategy_price,
+                observed_at,
+            ),
+        }
+    }
+
+    fn select_primary_decision_reason(
+        target_reason: Option<DecisionReason>,
+        executor_reason: Option<DecisionReason>,
+    ) -> DecisionReason {
+        match (target_reason, executor_reason) {
+            (Some(target), Some(executor)) => {
+                if decision_reason_priority(executor) > decision_reason_priority(target) {
+                    executor
+                } else {
+                    target
+                }
+            }
+            (Some(reason), None) | (None, Some(reason)) => reason,
+            (None, None) => {
+                unreachable!("inventory planning must provide a primary diagnostic reason")
+            }
+        }
     }
 
     fn current_pnl_utc_day(&self) -> chrono::NaiveDate {
@@ -1253,6 +1317,24 @@ impl TrackManager {
             .pnl_stats
             .normalize_utc_day(self.current_pnl_utc_day());
         track
+    }
+}
+
+fn decision_reason_priority(reason: DecisionReason) -> u8 {
+    match reason {
+        DecisionReason::RecoveryRequired => 100,
+        DecisionReason::RiskInputInvalid => 99,
+        DecisionReason::AccountCapacityBlocked => 90,
+        DecisionReason::SubmitPlanned => 80,
+        DecisionReason::BandPolicyBlocked
+        | DecisionReason::PriceGateBlocked
+        | DecisionReason::WaitingCancel => 70,
+        DecisionReason::WaitingRiskRelease => 60,
+        DecisionReason::CoveredByWorkingOrder => 50,
+        DecisionReason::BelowVenueMinimum => 40,
+        DecisionReason::BelowRebalance => 30,
+        DecisionReason::AtExecutionTarget => 20,
+        DecisionReason::WaitingMarketData | DecisionReason::Paused => 10,
     }
 }
 
@@ -1275,7 +1357,7 @@ fn market_mutation_requires_durable_write(
     let has_non_target_events = events
         .iter()
         .any(|event| !matches!(event, DomainEvent::ExposureTargetChanged { .. }));
-    let has_execution_effects = !effects.is_empty() && !matches!(effects, [TrackEffect::NoOp]);
+    let has_execution_effects = !effects.is_empty();
     let frame_changed_without_target = {
         let mut normalized_next = next_frame.clone();
         normalized_next.desired_exposure = previous_frame.desired_exposure.clone();
@@ -1303,6 +1385,21 @@ fn market_mutation_requires_durable_write(
         || durable_target_change
 }
 
+fn retain_live_only_executor_state(
+    track: &mut TrackRuntime,
+    executor_state: ExecutorState,
+    executor_view_changed: bool,
+) {
+    if executor_view_changed {
+        track.replace_executor_state(executor_state);
+    } else {
+        // Market planning may legitimately advance private ledger/timer state. Keep that
+        // state without invalidating an exchange snapshot whose binding interpretation is
+        // unchanged.
+        track.executor_state = executor_state;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1320,6 +1417,7 @@ mod tests {
     use crate::executor::{PolicyContext, policy::PolicyKind};
     use crate::ledger::TrackPnlStats;
     use crate::ports::ExecutionQuote;
+    use crate::price_gate::{PriceExecutionBlockReason, PriceExecutionGate};
     use crate::risk_exposure_gate::RiskExposureGateState;
     use crate::runtime::{CurrentMarketData, TrackStatus};
     use poise_core::track::Venue;
@@ -1423,6 +1521,11 @@ mod tests {
             .iter()
             .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
             .expect("catch-up binding should be tracked");
+        assert_eq!(
+            track.inventory_decision().unwrap().reason,
+            crate::execution_plan::DecisionReason::SubmitPlanned
+        );
+        assert!(!transition.effects.is_empty());
 
         let request = transition
             .effects
@@ -1464,12 +1567,8 @@ mod tests {
         let (mut manager, id) = manager();
         manager.observe(&id, market(95.0)).unwrap();
 
-        let committed = manager
-            .track_runtime_view(&id)
-            .unwrap()
-            .inventory_decision
-            .expect("planning should commit an inventory decision");
-        assert_eq!(committed.revision, 1);
+        let committed = manager.track_runtime_view(&id).unwrap().decision;
+        assert_eq!(committed.revision, Some(1));
 
         let track = manager.tracks.get_mut(&id).unwrap();
         track.strategy_price = Some(105.0);
@@ -1479,15 +1578,7 @@ mod tests {
             manager.track_runtime_view(&id).unwrap(),
         ];
         for view in queried_twice {
-            assert_eq!(view.inventory_decision.as_ref(), Some(&committed));
-            assert_eq!(
-                view.desired_exposure.as_ref(),
-                Some(&committed.risk_approved_target)
-            );
-            assert_eq!(
-                view.execution_target_exposure.as_ref(),
-                Some(&committed.execution_target)
-            );
+            assert_eq!(view.decision, committed);
         }
     }
 
@@ -1571,7 +1662,6 @@ mod tests {
             first_revision + 1
         );
         assert!(!transition.events.is_empty());
-        assert!(!transition.effects.is_empty());
     }
 
     #[test]
@@ -1645,6 +1735,91 @@ mod tests {
         assert_eq!(next.revision, previous.revision + 1);
         assert_eq!(next.risk_approved_target, previous.risk_approved_target);
         assert_eq!(next.execution_target, previous.execution_target);
+    }
+
+    #[test]
+    fn live_only_market_mutation_keeps_executor_maintenance_state() {
+        let (mut manager, id) = manager();
+        manager.observe(&id, market(100.0)).unwrap();
+        {
+            let track = manager.tracks.get_mut(&id).unwrap();
+            track.executor_state.bindings.push(LiveOrderBinding {
+                binding_id: "queued-increase-binding".to_string(),
+                proposal_key: crate::executor::binding::BindingProposalKey {
+                    policy: PolicyKind::CatchUp,
+                    operations: Vec::new(),
+                },
+                allocations: Vec::new(),
+                absorbed_exposure_qty: 0.0,
+                request: crate::ports::OrderRequest {
+                    instrument: track.instrument().clone(),
+                    side: Side::Buy,
+                    price: 100.1,
+                    quantity: 1.0,
+                    client_order_id: "queued-increase-client".to_string(),
+                    reduce_only: false,
+                },
+                desired_exposure: Exposure(1.0),
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                order_id: None,
+                status: crate::executor::binding::BindingStatus::SubmitPending,
+                policy_state: crate::executor::binding::BindingPolicyState::Stateless,
+            });
+            let mut authorized = track.executor_state.bindings[0].clone();
+            authorized.binding_id = "authorized-increase-binding".to_string();
+            authorized.request.client_order_id = "authorized-increase-client".to_string();
+            authorized.status = crate::executor::binding::BindingStatus::SubmitAuthorized;
+            track.executor_state.bindings.push(authorized);
+        }
+        let previous_exchange_revision = manager
+            .get_track(id.as_str())
+            .unwrap()
+            .exchange_observation_revision();
+
+        let outcome = manager
+            .observe_market_mutation(&id, MarketObservation::MarkPrice { mark_price: 200.0 })
+            .unwrap();
+
+        assert!(matches!(outcome, MarketMutationOutcome::LiveOnly));
+        let bindings = &manager
+            .get_track(id.as_str())
+            .unwrap()
+            .executor_state
+            .bindings;
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].status,
+            crate::executor::binding::BindingStatus::CancelAfterSubmit,
+            "live-only rollback must retain queued terminalization and in-flight protection"
+        );
+        assert_ne!(
+            manager
+                .get_track(id.as_str())
+                .unwrap()
+                .exchange_observation_revision(),
+            previous_exchange_revision,
+            "binding interpretation changes must invalidate older exchange snapshots"
+        );
+    }
+
+    #[test]
+    fn live_only_private_executor_change_does_not_advance_exchange_revision() {
+        let (mut manager, id) = manager();
+        let track = manager.tracks.get_mut(&id).unwrap();
+        let previous_revision = track.exchange_observation_revision();
+        let previous_frame = track.mutation_frame();
+        let mut executor_state = track.executor_state.clone();
+        executor_state.ledger_state.ledger_anchor_exposure = Exposure(2.0);
+        let mut next_frame = previous_frame.clone();
+        next_frame.executor_state = executor_state.clone();
+        let executor_view_changed = previous_frame.executor_view_changed(&next_frame);
+
+        assert!(!executor_view_changed);
+
+        retain_live_only_executor_state(track, executor_state.clone(), executor_view_changed);
+
+        assert_eq!(track.executor_state, executor_state);
+        assert_eq!(track.exchange_observation_revision(), previous_revision);
     }
 
     #[test]
@@ -1822,6 +1997,15 @@ mod tests {
             effect,
             TrackEffect::SubmitOrder { request, .. } if !request.reduce_only
         )));
+        assert_eq!(
+            manager
+                .get_track(id.as_str())
+                .unwrap()
+                .inventory_decision()
+                .unwrap()
+                .reason,
+            DecisionReason::AccountCapacityBlocked
+        );
     }
 
     #[test]
@@ -1987,6 +2171,109 @@ mod tests {
                 PolicyContext::ReduceOnly
             );
         }
+    }
+
+    #[test]
+    fn manager_selects_one_primary_reason_without_changing_planning_control_flow() {
+        let cases = [
+            (
+                Some(DecisionReason::RiskInputInvalid),
+                Some(DecisionReason::SubmitPlanned),
+                DecisionReason::RiskInputInvalid,
+            ),
+            (
+                Some(DecisionReason::AccountCapacityBlocked),
+                Some(DecisionReason::WaitingCancel),
+                DecisionReason::AccountCapacityBlocked,
+            ),
+            (
+                Some(DecisionReason::WaitingRiskRelease),
+                Some(DecisionReason::CoveredByWorkingOrder),
+                DecisionReason::WaitingRiskRelease,
+            ),
+            (
+                None,
+                Some(DecisionReason::SubmitPlanned),
+                DecisionReason::SubmitPlanned,
+            ),
+        ];
+
+        for (target, executor, expected) in cases {
+            assert_eq!(
+                TrackManager::select_primary_decision_reason(target, executor),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn price_gate_still_cancels_increasing_binding_at_execution_target() {
+        let (mut manager, id) = manager();
+        manager.observe(&id, market(100.0)).unwrap();
+        {
+            let track = manager.tracks.get_mut(&id).unwrap();
+            track.price_execution_gate = PriceExecutionGate::NoSubmit {
+                reason: PriceExecutionBlockReason::MarkBookDivergence,
+            };
+            track.executor_state.bindings.push(LiveOrderBinding {
+                binding_id: "at-target-increase-binding".to_string(),
+                proposal_key: crate::executor::binding::BindingProposalKey {
+                    policy: PolicyKind::CatchUp,
+                    operations: Vec::new(),
+                },
+                allocations: Vec::new(),
+                absorbed_exposure_qty: 0.0,
+                request: crate::ports::OrderRequest {
+                    instrument: track.instrument().clone(),
+                    side: Side::Buy,
+                    price: 99.9,
+                    quantity: 1.0,
+                    client_order_id: "at-target-increase-client".to_string(),
+                    reduce_only: false,
+                },
+                desired_exposure: Exposure(1.0),
+                submit_purpose: SubmitPurpose::AutoReconcile,
+                order_id: Some("at-target-increase-order".to_string()),
+                status: crate::executor::binding::BindingStatus::Working,
+                policy_state: crate::executor::binding::BindingPolicyState::Stateless,
+            });
+        }
+
+        let (_, effects) = manager.reconcile_track(&id, 100.0).unwrap();
+
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            TrackEffect::CancelOrder { order_id, .. }
+                if order_id == "at-target-increase-order"
+        )));
+        assert_eq!(
+            manager
+                .get_track(id.as_str())
+                .unwrap()
+                .inventory_decision()
+                .unwrap()
+                .reason,
+            DecisionReason::PriceGateBlocked
+        );
+    }
+
+    #[test]
+    fn terminated_track_at_zero_reports_at_execution_target() {
+        let (mut manager, id) = manager();
+        manager.observe(&id, market(100.0)).unwrap();
+
+        let transition = manager.command(&id, TrackCommand::Terminate).unwrap();
+
+        assert!(transition.effects.is_empty());
+        assert_eq!(
+            manager
+                .get_track(id.as_str())
+                .unwrap()
+                .inventory_decision()
+                .unwrap()
+                .reason,
+            DecisionReason::AtExecutionTarget
+        );
     }
 
     #[test]

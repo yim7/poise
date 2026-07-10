@@ -1,26 +1,28 @@
 use poise_protocol::{
     ActivityLevelView, BandFlattenTrigger as ProtocolTrigger,
     BandProtectionPolicy as ProtocolPolicy, BandRecoverPolicy as ProtocolRecoverPolicy,
-    ExecutionBadgeView, ExecutionBindingIntentView, ExecutionBindingOrderView,
+    DecisionReasonView, ExecutionBadgeView, ExecutionBindingIntentView, ExecutionBindingOrderView,
     ExecutionBindingPolicyView, ExecutionBindingStatusView, ExecutionBindingView,
     ExecutionStateView, ExecutionStatusView, ExposureSummaryView, InstrumentView,
-    RiskAcquisitionConfigView, RiskAcquisitionDirectionView, RiskAcquisitionView,
-    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, StrategyPriceStatusView,
-    TrackActivityItemView, TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionView,
-    TrackIdentityView, TrackLifecycleView, TrackListItemView, TrackListPnlView,
-    TrackLossLimitsView, TrackMarketView, TrackPnlView, TrackPositionQuantityUnitView,
-    TrackPositionView, TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
+    InventoryDecisionView, PriceExecutionBlockReasonView, RiskAcquisitionConfigView,
+    RiskAcquisitionDirectionView, RiskAcquisitionView, ShapeFamily as ProtocolShapeFamily,
+    Side as ProtocolSide, StrategyPriceStatusView, TrackActivityItemView, TrackCommandType,
+    TrackCommandView, TrackDetailView, TrackExecutionView, TrackIdentityView, TrackLifecycleView,
+    TrackListItemView, TrackListPnlView, TrackLossLimitsView, TrackMarketView, TrackPnlView,
+    TrackPositionQuantityUnitView, TrackPositionView, TrackStatus as ProtocolTrackStatus,
+    TrackStatusPanelView, TrackStrategyView,
 };
 
 use poise_core::track::Instrument;
 use poise_core::types::{ExchangeRules, QuantityKind};
 
 use poise_application::{
-    TrackActivityLevel, TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent,
-    TrackReadBindingPolicy, TrackReadBindingStatus, TrackReadModel, TrackReadStatus,
-    TrackRecoveryIssue, TrackRiskAcquisitionDirection, TrackRiskAcquisitionReadModel,
-    TrackStrategyPriceStatus,
+    TrackActivityLevel, TrackInventoryDecisionReadModel, TrackListReadModel,
+    TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadBindingPolicy,
+    TrackReadBindingStatus, TrackReadModel, TrackReadStatus, TrackRecoveryIssue,
+    TrackRiskAcquisitionDirection, TrackRiskAcquisitionReadModel, TrackStrategyPriceStatus,
 };
+use poise_engine::execution_plan::DecisionReason;
 
 pub struct TrackProjector;
 
@@ -52,11 +54,15 @@ impl TrackProjector {
             strategy_price_status: project_strategy_price_status(source.strategy_price_status),
             exposure: ExposureSummaryView {
                 current: source.current_exposure,
-                target: source.execution_target_exposure.or(source.desired_exposure),
             },
+            decision: project_read_model_decision(&source.decision),
             execution: ExecutionBadgeView {
                 state: project_list_execution_state(source),
                 execution_status: project_list_execution_status(source),
+                attention_reasons: project_list_attention_reasons(source),
+                price_execution_block_reason: source
+                    .price_execution_block_reason
+                    .map(project_price_execution_block_reason),
                 active_binding_count: source.active_binding_count,
             },
             pnl: TrackListPnlView {
@@ -105,12 +111,12 @@ impl TrackProjector {
             },
             position: TrackPositionView {
                 current_exposure: source.current_exposure,
-                desired_exposure: source.desired_exposure,
                 quantity_unit: project_position_quantity_unit(&source.exchange_rules),
                 quantity: source.position_qty,
                 notional: project_position_notional(source),
                 notional_asset: project_position_notional_asset(&source.exchange_rules),
             },
+            decision: project_read_model_decision(&source.decision),
             pnl: TrackPnlView {
                 pnl_asset: pnl.pnl_asset,
                 gross_realized_pnl: pnl.gross_realized_pnl,
@@ -124,8 +130,9 @@ impl TrackProjector {
                 state: project_execution_state(source),
                 execution_status: project_execution_status(source),
                 attention_reasons: project_attention_reasons(source),
-                inventory_gap: source.inventory_gap,
-                execution_target_exposure: source.execution_target_exposure,
+                price_execution_block_reason: source
+                    .price_execution_block_reason
+                    .map(project_price_execution_block_reason),
                 active_binding_count: source.active_binding_count,
                 risk_acquisition: source
                     .risk_acquisition
@@ -248,14 +255,60 @@ fn project_track_status(value: &TrackReadStatus) -> ProtocolTrackStatus {
     }
 }
 
+fn project_read_model_decision(source: &TrackInventoryDecisionReadModel) -> InventoryDecisionView {
+    project_inventory_decision(
+        source.revision,
+        source.policy_target,
+        source.risk_approved_target,
+        source.acquisition_frontier,
+        source.execution_target,
+        source.reason,
+    )
+}
+
+pub(crate) fn project_inventory_decision(
+    revision: Option<u64>,
+    policy_target: Option<f64>,
+    risk_approved_target: Option<f64>,
+    acquisition_frontier: Option<f64>,
+    execution_target: Option<f64>,
+    reason: DecisionReason,
+) -> InventoryDecisionView {
+    InventoryDecisionView {
+        revision,
+        policy_target,
+        risk_approved_target,
+        acquisition_frontier,
+        execution_target,
+        reason: project_decision_reason(reason),
+    }
+}
+
+fn project_decision_reason(reason: DecisionReason) -> DecisionReasonView {
+    match reason {
+        DecisionReason::WaitingMarketData => DecisionReasonView::WaitingMarketData,
+        DecisionReason::Paused => DecisionReasonView::Paused,
+        DecisionReason::RiskInputInvalid => DecisionReasonView::RiskInputInvalid,
+        DecisionReason::BandPolicyBlocked => DecisionReasonView::BandPolicyBlocked,
+        DecisionReason::AtExecutionTarget => DecisionReasonView::AtExecutionTarget,
+        DecisionReason::WaitingRiskRelease => DecisionReasonView::WaitingRiskRelease,
+        DecisionReason::AccountCapacityBlocked => DecisionReasonView::AccountCapacityBlocked,
+        DecisionReason::PriceGateBlocked => DecisionReasonView::PriceGateBlocked,
+        DecisionReason::BelowRebalance => DecisionReasonView::BelowRebalance,
+        DecisionReason::BelowVenueMinimum => DecisionReasonView::BelowVenueMinimum,
+        DecisionReason::CoveredByWorkingOrder => DecisionReasonView::CoveredByWorkingOrder,
+        DecisionReason::RecoveryRequired => DecisionReasonView::RecoveryRequired,
+        DecisionReason::WaitingCancel => DecisionReasonView::WaitingCancel,
+        DecisionReason::SubmitPlanned => DecisionReasonView::SubmitPlanned,
+    }
+}
+
 fn project_risk_acquisition_runtime(source: &TrackRiskAcquisitionReadModel) -> RiskAcquisitionView {
     RiskAcquisitionView {
         direction: match source.direction {
             TrackRiskAcquisitionDirection::Long => RiskAcquisitionDirectionView::Long,
             TrackRiskAcquisitionDirection::Short => RiskAcquisitionDirectionView::Short,
         },
-        curve_target: source.curve_target,
-        risk_release_frontier: source.risk_release_frontier,
         backlog_units: source.backlog_units,
         release_anchor_price: source.release_anchor_price,
         release_anchor_target: source.release_anchor_target,
@@ -420,10 +473,16 @@ fn project_list_attention_reasons(source: &TrackListReadModel) -> Vec<String> {
     reasons
 }
 
-fn project_price_execution_block_reason(reason: TrackPriceExecutionBlockReason) -> &'static str {
+fn project_price_execution_block_reason(
+    reason: TrackPriceExecutionBlockReason,
+) -> PriceExecutionBlockReasonView {
     match reason {
-        TrackPriceExecutionBlockReason::MissingExecutionQuote => "missing execution quote",
-        TrackPriceExecutionBlockReason::MarkBookDivergence => "mark/book divergence",
+        TrackPriceExecutionBlockReason::MissingExecutionQuote => {
+            PriceExecutionBlockReasonView::MissingExecutionQuote
+        }
+        TrackPriceExecutionBlockReason::MarkBookDivergence => {
+            PriceExecutionBlockReasonView::MarkBookDivergence
+        }
     }
 }
 
@@ -527,18 +586,20 @@ fn project_available_commands(source: &TrackReadModel) -> Vec<TrackCommandView> 
 mod tests {
     use chrono::{TimeZone, Utc};
     use poise_application::{
-        ReadModelBinding, TrackActivityEntry, TrackActivityLevel, TrackListReadModel,
-        TrackPriceExecutionBlockReason, TrackReadBindingIntent, TrackReadBindingPolicy,
-        TrackReadBindingStatus, TrackReadModel, TrackReadPnlStats, TrackReadStatus,
-        TrackRecoveryIssue, TrackRiskAcquisitionDirection, TrackRiskAcquisitionReadModel,
-        TrackStrategyPriceStatus,
+        ReadModelBinding, TrackActivityEntry, TrackActivityLevel, TrackInventoryDecisionReadModel,
+        TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent,
+        TrackReadBindingPolicy, TrackReadBindingStatus, TrackReadModel, TrackReadPnlStats,
+        TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
+        TrackRiskAcquisitionReadModel, TrackStrategyPriceStatus,
     };
     use poise_core::strategy::{BandProtectionPolicy, BandRecoverPolicy, ShapeFamily};
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::{ExchangeRules, QuantityKind, Side};
+    use poise_engine::execution_plan::DecisionReason;
     use poise_protocol::{
-        ActivityLevelView, ExecutionBindingIntentView, ExecutionBindingPolicyView,
-        ExecutionBindingStatusView, ExecutionStateView, ExecutionStatusView, TrackCommandType,
+        ActivityLevelView, DecisionReasonView, ExecutionBindingIntentView,
+        ExecutionBindingPolicyView, ExecutionBindingStatusView, ExecutionStateView,
+        ExecutionStatusView, PriceExecutionBlockReasonView, TrackCommandType,
         TrackPositionQuantityUnitView,
     };
 
@@ -591,15 +652,93 @@ mod tests {
     }
 
     #[test]
-    fn projects_list_item_exposure_target_from_execution_target() {
-        let mut source = list_source_with_submitting_effect();
-        source.desired_exposure = Some(4.0);
-        source.execution_target_exposure = Some(3.75);
+    fn projects_list_and_detail_with_the_same_atomic_decision() {
+        let mut detail_source = source_with_submitting_effect();
+        detail_source.decision = TrackInventoryDecisionReadModel {
+            revision: Some(77),
+            policy_target: Some(6.0),
+            risk_approved_target: Some(4.5),
+            acquisition_frontier: Some(4.0),
+            execution_target: Some(3.75),
+            reason: DecisionReason::WaitingRiskRelease,
+        };
+        let list_source = TrackListReadModel::from(&detail_source);
+        let projector = TrackProjector::new();
 
-        let item = TrackProjector::new().project_list_item(&source);
+        let item = projector.project_list_item(&list_source);
+        let detail = projector.project_detail(&detail_source);
 
         assert_eq!(item.exposure.current, 3.5);
-        assert_eq!(item.exposure.target, Some(3.75));
+        assert_eq!(item.decision, detail.decision);
+        assert_eq!(item.decision.revision, Some(77));
+        assert_eq!(item.decision.policy_target, Some(6.0));
+        assert_eq!(item.decision.risk_approved_target, Some(4.5));
+        assert_eq!(item.decision.acquisition_frontier, Some(4.0));
+        assert_eq!(item.decision.execution_target, Some(3.75));
+        assert_eq!(item.decision.reason, DecisionReasonView::WaitingRiskRelease);
+    }
+
+    #[test]
+    fn projects_all_engine_decision_reasons_to_protocol_vocabulary() {
+        let cases = [
+            (
+                DecisionReason::WaitingMarketData,
+                DecisionReasonView::WaitingMarketData,
+            ),
+            (DecisionReason::Paused, DecisionReasonView::Paused),
+            (
+                DecisionReason::RiskInputInvalid,
+                DecisionReasonView::RiskInputInvalid,
+            ),
+            (
+                DecisionReason::BandPolicyBlocked,
+                DecisionReasonView::BandPolicyBlocked,
+            ),
+            (
+                DecisionReason::AtExecutionTarget,
+                DecisionReasonView::AtExecutionTarget,
+            ),
+            (
+                DecisionReason::WaitingRiskRelease,
+                DecisionReasonView::WaitingRiskRelease,
+            ),
+            (
+                DecisionReason::AccountCapacityBlocked,
+                DecisionReasonView::AccountCapacityBlocked,
+            ),
+            (
+                DecisionReason::PriceGateBlocked,
+                DecisionReasonView::PriceGateBlocked,
+            ),
+            (
+                DecisionReason::BelowRebalance,
+                DecisionReasonView::BelowRebalance,
+            ),
+            (
+                DecisionReason::BelowVenueMinimum,
+                DecisionReasonView::BelowVenueMinimum,
+            ),
+            (
+                DecisionReason::CoveredByWorkingOrder,
+                DecisionReasonView::CoveredByWorkingOrder,
+            ),
+            (
+                DecisionReason::RecoveryRequired,
+                DecisionReasonView::RecoveryRequired,
+            ),
+            (
+                DecisionReason::WaitingCancel,
+                DecisionReasonView::WaitingCancel,
+            ),
+            (
+                DecisionReason::SubmitPlanned,
+                DecisionReasonView::SubmitPlanned,
+            ),
+        ];
+
+        for (source, expected) in cases {
+            assert_eq!(super::project_decision_reason(source), expected);
+        }
     }
 
     #[test]
@@ -614,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn projector_preserves_existing_detail_and_list_shapes() {
+    fn projector_removes_legacy_target_fields_without_fallback() {
         let list_source = list_source_with_submitting_effect();
         let detail_source = source_with_submitting_effect();
         let list_json =
@@ -624,13 +763,19 @@ mod tests {
 
         assert!(list_json.get("execution").is_some());
         assert!(list_json.get("exposure").is_some());
+        assert!(list_json["exposure"].get("target").is_none());
+        assert!(list_json.get("decision").is_some());
         assert!(detail_json.get("market").is_some());
         assert!(detail_json.get("position").is_some());
         assert_eq!(detail_json["market"]["mark_price"].as_f64(), Some(101.5));
-        assert_eq!(
-            detail_json["position"]["desired_exposure"].as_f64(),
-            Some(4.0)
+        assert!(detail_json["position"].get("desired_exposure").is_none());
+        assert!(detail_json["execution"].get("inventory_gap").is_none());
+        assert!(
+            detail_json["execution"]
+                .get("execution_target_exposure")
+                .is_none()
         );
+        assert!(detail_json.get("decision").is_some());
     }
 
     #[test]
@@ -886,6 +1031,58 @@ mod tests {
     }
 
     #[test]
+    fn projector_preserves_price_attention_ownership_in_list_and_detail() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.has_stale_market_data = true;
+        source.price_execution_block_reason =
+            Some(TrackPriceExecutionBlockReason::MissingExecutionQuote);
+        let list_source = TrackListReadModel::from(&source);
+        let projector = TrackProjector::new();
+
+        let item = projector.project_list_item(&list_source);
+        let detail = projector.project_detail(&source);
+
+        assert_eq!(
+            item.execution.attention_reasons,
+            ["market data stale", "missing execution quote"]
+        );
+        assert_eq!(
+            item.execution.price_execution_block_reason,
+            Some(PriceExecutionBlockReasonView::MissingExecutionQuote)
+        );
+        assert_eq!(
+            detail.execution.attention_reasons,
+            item.execution.attention_reasons
+        );
+        assert_eq!(
+            detail.execution.price_execution_block_reason,
+            item.execution.price_execution_block_reason
+        );
+    }
+
+    #[test]
+    fn price_gate_attention_does_not_override_decision_reason() {
+        let mut source = source_with_failed_effect_and_recent_event();
+        source.decision.reason = DecisionReason::BelowRebalance;
+        source.price_execution_block_reason =
+            Some(TrackPriceExecutionBlockReason::MarkBookDivergence);
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(detail.decision.reason, DecisionReasonView::BelowRebalance);
+        assert_eq!(
+            detail.execution.execution_status,
+            ExecutionStatusView::AttentionRequired
+        );
+        assert!(
+            detail
+                .execution
+                .attention_reasons
+                .contains(&"mark/book divergence".to_string())
+        );
+    }
+
+    #[test]
     fn projector_marks_strategy_price_status_stale_when_quote_is_missing() {
         let mut source = source_with_failed_effect_and_recent_event();
         source.strategy_price = Some(101.25);
@@ -1022,8 +1219,7 @@ mod tests {
             detail.execution.execution_status,
             ExecutionStatusView::Normal
         );
-        assert!((detail.execution.inventory_gap - 0.5).abs() < f64::EPSILON);
-        assert_eq!(detail.execution.execution_target_exposure, Some(4.0));
+        assert_eq!(detail.decision.execution_target, Some(4.0));
         assert_eq!(detail.execution.active_binding_count, 1);
         assert_eq!(
             detail.execution.active_binding_count,
@@ -1055,8 +1251,6 @@ mod tests {
         let mut source = source_with_submitting_effect();
         source.risk_acquisition = Some(TrackRiskAcquisitionReadModel {
             direction: TrackRiskAcquisitionDirection::Long,
-            curve_target: 6.0,
-            risk_release_frontier: 2.375,
             backlog_units: 3.625,
             release_anchor_price: 100.0,
             release_anchor_target: 4.0,
@@ -1078,9 +1272,11 @@ mod tests {
             risk_acquisition.direction,
             poise_protocol::RiskAcquisitionDirectionView::Long
         );
-        assert!((risk_acquisition.curve_target - 6.0).abs() < f64::EPSILON);
         assert!((risk_acquisition.backlog_units - 3.625).abs() < f64::EPSILON);
         assert_eq!(risk_acquisition.next_advantage_price, Some(92.5));
+        let json = serde_json::to_value(risk_acquisition).unwrap();
+        assert!(json.get("curve_target").is_none());
+        assert!(json.get("risk_release_frontier").is_none());
     }
 
     #[test]
@@ -1236,8 +1432,14 @@ mod tests {
             best_ask: Some(101.5),
             current_exposure: 3.5,
             position_qty: 13.125,
-            desired_exposure: Some(4.0),
-            execution_target_exposure: Some(4.0),
+            decision: TrackInventoryDecisionReadModel {
+                revision: Some(42),
+                policy_target: Some(4.0),
+                risk_approved_target: Some(4.0),
+                acquisition_frontier: Some(4.0),
+                execution_target: Some(4.0),
+                reason: DecisionReason::SubmitPlanned,
+            },
             risk_acquisition: Default::default(),
             pnl_stats: TrackReadPnlStats {
                 pnl_asset: Some("USDT".to_string()),
@@ -1249,7 +1451,6 @@ mod tests {
                 funding_fee_cumulative: -4.0,
             },
             unrealized_pnl: 265.2,
-            inventory_gap: 0.5,
             recovery_issue: None,
             has_account_margin_guard: false,
             has_stale_market_data: false,

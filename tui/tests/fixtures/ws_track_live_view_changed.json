@@ -1,0 +1,20 @@
+{
+  "type": "track_live_view_changed",
+  "track_id": "btc-core",
+  "live": {
+    "strategy_price": 111.5,
+    "strategy_price_status": "live",
+    "mark_price": 112.0,
+    "best_bid": 111.0,
+    "best_ask": 112.0,
+    "decision": {
+      "revision": 44,
+      "policy_target": 6.0,
+      "risk_approved_target": 4.5,
+      "acquisition_frontier": 4.0,
+      "execution_target": 3.75,
+      "reason": "waiting_risk_release"
+    },
+    "price_execution_block_reason": null
+  }
+}

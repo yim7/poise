@@ -7,6 +7,7 @@ use poise_core::types::{ExchangeRules, Exposure, PriceRounding, Side};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::execution_plan::DecisionReason;
 use crate::execution_plan::{is_meetable_minimum, round_to_step};
 use crate::executor::binding::{
     BindingOperationAllocation, BindingPolicyState, BindingProposal, BindingStatus,
@@ -50,9 +51,9 @@ pub(super) struct PolicyPlanningInput<'a> {
     pub min_rebalance_units: f64,
     pub current_exposure: &'a Exposure,
     // Catch-up and direct target policies consume only this reconciler-owned target.
-    pub execution_target_exposure: &'a Exposure,
+    pub execution_target: &'a Exposure,
     // Passive makers may inspect the risk-approved target, but may only lower current risk.
-    pub desired_exposure: &'a Exposure,
+    pub risk_approved_target: &'a Exposure,
     pub execution_quote: Option<ExecutionQuote>,
     pub submit_purpose: SubmitPurpose,
     pub boundary_epsilon: f64,
@@ -69,6 +70,17 @@ pub(super) struct DesiredBinding {
     pub(super) policy_state: BindingPolicyState,
 }
 
+pub(super) struct PolicyPlan {
+    pub(super) desired_bindings: Vec<DesiredBinding>,
+    pub(super) reason: Option<DecisionReason>,
+}
+
+enum TargetBindingPlan {
+    Planned(DesiredBinding),
+    Blocked(DecisionReason),
+    NotNeeded,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BindingReconciliationDecision {
     CoveredByExisting { indexes: Vec<usize> },
@@ -83,22 +95,37 @@ pub(super) enum BindingReconciliationDecision {
 pub(super) fn plan_policy_bindings(
     context: PolicyContext,
     input: &PolicyPlanningInput<'_>,
-) -> Vec<DesiredBinding> {
+) -> PolicyPlan {
     match context {
         PolicyContext::Normal => plan_normal_policy_bindings(input),
-        PolicyContext::ManualOverride => plan_manual_override_binding(input).into_iter().collect(),
-        PolicyContext::ReduceOnly => plan_reduce_only_binding(input).into_iter().collect(),
+        PolicyContext::ManualOverride => {
+            policy_plan_from_target(plan_manual_override_binding(input))
+        }
+        PolicyContext::ReduceOnly => policy_plan_from_target(plan_reduce_only_binding(input)),
     }
 }
 
-fn plan_normal_policy_bindings(input: &PolicyPlanningInput<'_>) -> Vec<DesiredBinding> {
+fn policy_plan_from_target(target: TargetBindingPlan) -> PolicyPlan {
+    match target {
+        TargetBindingPlan::Planned(binding) => PolicyPlan {
+            desired_bindings: vec![binding],
+            reason: None,
+        },
+        TargetBindingPlan::Blocked(reason) => PolicyPlan {
+            desired_bindings: Vec::new(),
+            reason: Some(reason),
+        },
+        TargetBindingPlan::NotNeeded => PolicyPlan {
+            desired_bindings: Vec::new(),
+            reason: None,
+        },
+    }
+}
+
+fn plan_normal_policy_bindings(input: &PolicyPlanningInput<'_>) -> PolicyPlan {
     let mut covered_operations = BTreeSet::new();
     let mut desired_bindings = Vec::new();
-    let gap_direction = direction_for_gap(
-        &input
-            .current_exposure
-            .delta(input.execution_target_exposure),
-    );
+    let gap_direction = direction_for_gap(&input.current_exposure.delta(input.execution_target));
     let catch_up_operations = if should_select_target_path_for_catch_up(input, gap_direction) {
         select_target_operations(
             input.execution_view,
@@ -115,13 +142,16 @@ fn plan_normal_policy_bindings(input: &PolicyPlanningInput<'_>) -> Vec<DesiredBi
             gap_direction,
         )
     };
-    if let Some(binding) = plan_target_binding(
+    let mut reason = None;
+    match plan_target_binding(
         input,
         PolicyKind::CatchUp,
         catch_up_operations.clone(),
         BindingPolicyState::Stateless,
     ) {
-        desired_bindings.push(binding);
+        TargetBindingPlan::Planned(binding) => desired_bindings.push(binding),
+        TargetBindingPlan::Blocked(blocked) => reason = Some(blocked),
+        TargetBindingPlan::NotNeeded => {}
     }
     covered_operations.extend(catch_up_operations.iter().cloned());
     desired_bindings.extend(
@@ -130,15 +160,17 @@ fn plan_normal_policy_bindings(input: &PolicyPlanningInput<'_>) -> Vec<DesiredBi
             .filter_map(|operation| plan_curve_maker_binding(input, operation)),
     );
 
-    desired_bindings
+    PolicyPlan {
+        desired_bindings,
+        reason,
+    }
 }
 
-fn plan_manual_override_binding(input: &PolicyPlanningInput<'_>) -> Option<DesiredBinding> {
-    let direction = direction_for_gap(
-        &input
-            .current_exposure
-            .delta(input.execution_target_exposure),
-    )?;
+fn plan_manual_override_binding(input: &PolicyPlanningInput<'_>) -> TargetBindingPlan {
+    let Some(direction) = direction_for_gap(&input.current_exposure.delta(input.execution_target))
+    else {
+        return TargetBindingPlan::NotNeeded;
+    };
     let selected = select_target_operations(
         input.execution_view,
         &BTreeSet::new(),
@@ -159,23 +191,26 @@ fn should_select_target_path_for_catch_up(
     gap_direction: Option<BoundaryDirection>,
 ) -> bool {
     gap_direction.is_some()
-        && ((input.execution_target_exposure.is_zero()
-            && target_change_can_use_reduce_only(
-                input.current_exposure,
-                input.execution_target_exposure,
-            ))
-            || target_change_crosses_zero(input.current_exposure, input.execution_target_exposure))
+        && ((input.execution_target.is_zero()
+            && target_change_can_use_reduce_only(input.current_exposure, input.execution_target))
+            || target_change_crosses_zero(input.current_exposure, input.execution_target))
 }
 
-fn plan_reduce_only_binding(input: &PolicyPlanningInput<'_>) -> Option<DesiredBinding> {
-    if !target_change_can_use_reduce_only(input.current_exposure, input.execution_target_exposure) {
-        return None;
+fn plan_reduce_only_binding(input: &PolicyPlanningInput<'_>) -> TargetBindingPlan {
+    if input
+        .current_exposure
+        .delta(input.execution_target)
+        .is_zero()
+    {
+        return TargetBindingPlan::NotNeeded;
     }
-    let direction = direction_for_gap(
-        &input
-            .current_exposure
-            .delta(input.execution_target_exposure),
-    )?;
+    if !target_change_can_use_reduce_only(input.current_exposure, input.execution_target) {
+        return TargetBindingPlan::Blocked(DecisionReason::BelowRebalance);
+    }
+    let Some(direction) = direction_for_gap(&input.current_exposure.delta(input.execution_target))
+    else {
+        return TargetBindingPlan::Blocked(DecisionReason::BelowRebalance);
+    };
     let selected = select_target_operations(
         input.execution_view,
         &BTreeSet::new(),
@@ -287,27 +322,38 @@ fn reduce_only_catch_up_replacement_must_wait_for_owners(
         })
 }
 
-pub(super) fn plan_target_binding(
+fn plan_target_binding(
     input: &PolicyPlanningInput<'_>,
     policy: PolicyKind,
     selected: Vec<BoundaryOperation>,
     policy_state: BindingPolicyState,
-) -> Option<DesiredBinding> {
-    let inventory_gap = input
-        .current_exposure
-        .delta(input.execution_target_exposure);
+) -> TargetBindingPlan {
+    let inventory_gap = input.current_exposure.delta(input.execution_target);
     let reduce_only =
-        target_change_can_use_reduce_only(input.current_exposure, input.execution_target_exposure);
+        target_change_can_use_reduce_only(input.current_exposure, input.execution_target);
+    if inventory_gap.is_zero() {
+        return TargetBindingPlan::NotNeeded;
+    }
     if inventory_gap.0.abs() < input.min_rebalance_units
         && !allows_sub_min_rebalance_flatten(input, reduce_only)
     {
-        return None;
+        return TargetBindingPlan::Blocked(DecisionReason::BelowRebalance);
     }
 
-    let direction = direction_for_gap(&inventory_gap)?;
-    let price = execution_price(direction, input.execution_quote)?;
-    let (allocations, quantity) =
-        plan_executable_allocations(input, policy, selected, price, inventory_gap.0, reduce_only)?;
+    let Some(direction) = direction_for_gap(&inventory_gap) else {
+        return TargetBindingPlan::NotNeeded;
+    };
+    let Some(price) = execution_price(direction, input.execution_quote) else {
+        return TargetBindingPlan::Blocked(DecisionReason::PriceGateBlocked);
+    };
+    if selected.is_empty() {
+        return TargetBindingPlan::Blocked(DecisionReason::BelowRebalance);
+    }
+    let Some((allocations, quantity)) =
+        plan_executable_allocations(input, policy, selected, price, inventory_gap.0, reduce_only)
+    else {
+        return TargetBindingPlan::Blocked(DecisionReason::BelowVenueMinimum);
+    };
 
     let request = OrderRequest {
         instrument: input.instrument.clone(),
@@ -318,11 +364,11 @@ pub(super) fn plan_target_binding(
         reduce_only,
     };
     let proposal = proposal_for_allocations(policy, &allocations);
-    Some(DesiredBinding {
+    TargetBindingPlan::Planned(DesiredBinding {
         proposal,
         allocations,
         request,
-        desired_exposure: input.execution_target_exposure.clone(),
+        desired_exposure: input.execution_target.clone(),
         submit_purpose: input.submit_purpose,
         policy_state,
     })
@@ -374,10 +420,7 @@ fn target_exposure_budget(
     match policy {
         PolicyKind::CatchUp if reduce_only => inventory_gap.abs(),
         PolicyKind::CatchUp
-            if target_change_crosses_zero(
-                input.current_exposure,
-                input.execution_target_exposure,
-            ) =>
+            if target_change_crosses_zero(input.current_exposure, input.execution_target) =>
         {
             inventory_gap.abs()
         }
@@ -697,7 +740,7 @@ fn plan_curve_maker_binding(
         proposal,
         allocations,
         request,
-        desired_exposure: input.desired_exposure.clone(),
+        desired_exposure: input.risk_approved_target.clone(),
         submit_purpose: input.submit_purpose,
         policy_state: BindingPolicyState::CurveMaker {
             due_grace_started_at: None,
@@ -869,7 +912,7 @@ fn target_change_crosses_zero(current_exposure: &Exposure, desired_exposure: &Ex
 }
 
 fn allows_sub_min_rebalance_flatten(input: &PolicyPlanningInput<'_>, reduce_only: bool) -> bool {
-    reduce_only && input.execution_target_exposure.is_zero()
+    reduce_only && input.execution_target.is_zero()
 }
 
 fn catch_up_increase_exposure_budget(
@@ -1129,8 +1172,8 @@ mod tests {
             native_qty_per_unit: 1.0,
             min_rebalance_units: 1.0,
             current_exposure: &current,
-            execution_target_exposure: &desired,
-            desired_exposure: &desired,
+            execution_target: &desired,
+            risk_approved_target: &desired,
             execution_quote: Some(ExecutionQuote {
                 best_bid: 99.9,
                 best_ask: 100.1,
@@ -1175,8 +1218,8 @@ mod tests {
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: &Exposure(0.0),
-                execution_target_exposure: &Exposure(1.0),
-                desired_exposure: &Exposure(1.0),
+                execution_target: &Exposure(1.0),
+                risk_approved_target: &Exposure(1.0),
                 execution_quote: Some(ExecutionQuote {
                     best_bid: 99.9,
                     best_ask: 100.1,
@@ -1189,13 +1232,14 @@ mod tests {
 
         assert_eq!(
             desired
+                .desired_bindings
                 .iter()
                 .map(|binding| binding.proposal.policy)
                 .collect::<Vec<_>>(),
             vec![PolicyKind::CatchUp]
         );
-        assert_eq!(desired[0].allocations[0].operation, due_up);
-        assert_eq!(desired[0].allocations.len(), 1);
+        assert_eq!(desired.desired_bindings[0].allocations[0].operation, due_up);
+        assert_eq!(desired.desired_bindings[0].allocations.len(), 1);
     }
 
     #[test]

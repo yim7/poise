@@ -2,11 +2,11 @@
 pub use poise_protocol::{
     AccountAnalysisView, AccountAssetExposureView, AccountAssetQuantitySourceView,
     AccountHedgeLikeView, AccountSummaryView, AccountTrackAnalysisView, ActivityLevelView,
-    ExecutionBindingIntentView, ExecutionBindingStatusView, ExecutionStateView,
-    ExecutionStatusView, PriceExecutionBlockReasonView, RiskAcquisitionDirectionView,
-    RiskAcquisitionView, RiskSignalView, StrategyPriceStatusView, StreamEvent,
-    TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackCommandView, TrackDetailView,
-    TrackDiagnosticsView, TrackExecutionView, TrackListItemView, TrackListPnlView,
+    DecisionReasonView, ExecutionBindingIntentView, ExecutionBindingStatusView, ExecutionStateView,
+    ExecutionStatusView, InventoryDecisionView, PriceExecutionBlockReasonView,
+    RiskAcquisitionDirectionView, RiskAcquisitionView, RiskSignalView, StrategyPriceStatusView,
+    StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackCommandView,
+    TrackDetailView, TrackDiagnosticsView, TrackExecutionView, TrackListItemView, TrackListPnlView,
     TrackListResponse, TrackLiveView, TrackPnlView, TrackStatus,
 };
 

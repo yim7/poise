@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import type {
+  InventoryDecisionView,
   PoiseServerClient,
   StreamEvent,
   TrackDetailView,
@@ -47,8 +48,13 @@ describe('ServerLivePanel', () => {
     expect(within(panel).getByText('策略价 100.50')).toBeInTheDocument();
     expect(within(panel).getByText('标记价 101.25')).toBeInTheDocument();
     expect(within(panel).getByText('当前 1.5000')).toBeInTheDocument();
-    expect(within(panel).getByText('目标 2.0000')).toBeInTheDocument();
-    expect(within(panel).getByText('差额 0.5000')).toBeInTheDocument();
+    expect(within(panel).getByText('revision 7')).toBeInTheDocument();
+    expect(within(panel).getByText('waiting_risk_release')).toBeInTheDocument();
+    expect(within(panel).getByText('策略 8.0000')).toBeInTheDocument();
+    expect(within(panel).getByText('风控 4.0000')).toBeInTheDocument();
+    expect(within(panel).getByText('前沿 1.5000')).toBeInTheDocument();
+    expect(within(panel).getByText('执行 1.2500')).toBeInTheDocument();
+    expect(within(panel).getByText('差额 -0.2500')).toBeInTheDocument();
     expect(within(panel).getByText('buy 0.2500 @ 100.20')).toBeInTheDocument();
     expect(within(panel).getByText('目标仓位变化')).toBeInTheDocument();
   });
@@ -63,35 +69,114 @@ describe('ServerLivePanel', () => {
     });
 
     act(() => {
-      emit({
-        type: 'track_live_view_changed',
-        track_id: 'btc-core',
-        live: {
-          strategy_price: 102.75,
-          strategy_price_status: 'live',
-          mark_price: 103.25,
-          best_bid: 103.1,
-          best_ask: 103.3,
-          desired_exposure: 4,
-          price_execution_block_reason: null,
-        },
-      });
+      emit(liveTrackEvent());
     });
 
     const panel = screen.getByRole('region', { name: 'Server live inspector' });
     expect(within(panel).getByText('策略价 102.75')).toBeInTheDocument();
     expect(within(panel).getByText('标记价 103.25')).toBeInTheDocument();
-    expect(within(panel).getByText('目标 4.0000')).toBeInTheDocument();
+    expect(within(panel).getByText('revision 8')).toBeInTheDocument();
+    expect(within(panel).getByText('submit_planned')).toBeInTheDocument();
+    expect(within(panel).getByText('策略 9.0000')).toBeInTheDocument();
+    expect(within(panel).getByText('风控 5.0000')).toBeInTheDocument();
+    expect(within(panel).getByText('前沿 2.0000')).toBeInTheDocument();
+    expect(within(panel).getByText('执行 1.7500')).toBeInTheDocument();
+  });
+
+  it('drops a stale live overlay when full list and detail events arrive', async () => {
+    const { client, emit } = createFakeServerClient();
+
+    render(<ServerLivePanel enabled client={client} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '连接 Server' }));
+    });
+
+    act(() => {
+      emit(liveTrackEvent());
+    });
+    expect(screen.getByText('revision 8')).toBeInTheDocument();
+
+    act(() => {
+      emit({
+        type: 'track_list_item_changed',
+        track_id: 'btc-core',
+        item: pausedTrackListItem(),
+      });
+    });
+
+    expect(screen.queryByText('revision 8')).not.toBeInTheDocument();
+    expect(screen.getByText('revision 7')).toBeInTheDocument();
+    expect(screen.getByText('paused')).toBeInTheDocument();
+
+    act(() => {
+      emit(liveTrackEvent());
+    });
+    expect(screen.getByText('revision 8')).toBeInTheDocument();
+
+    act(() => {
+      emit({
+        type: 'track_detail_changed',
+        track_id: 'btc-core',
+        detail: pausedTrackDetail(),
+      });
+    });
+
+    const panel = screen.getByRole('region', { name: 'Server live inspector' });
+    expect(within(panel).queryByText('revision 8')).not.toBeInTheDocument();
+    expect(within(panel).getByText('revision --')).toBeInTheDocument();
+    expect(within(panel).getAllByText('paused')).toHaveLength(2);
+    expect(within(panel).getByText('策略 --')).toBeInTheDocument();
+    expect(within(panel).getByText('执行 --')).toBeInTheDocument();
+  });
+
+  it('clears the previous server live cache when reconnecting with the same track id', async () => {
+    const { client, emit } = createFakeServerClient();
+    vi.mocked(client.listTracks).mockImplementation(async (baseUrl) => ({
+      items: [baseUrl === 'http://127.0.0.1:9000' ? pausedTrackListItem() : trackListItem()],
+    }));
+    vi.mocked(client.getTrackDetail).mockImplementation(async (baseUrl) => (
+      baseUrl === 'http://127.0.0.1:9000' ? pausedTrackDetail() : trackDetail()
+    ));
+
+    render(<ServerLivePanel enabled client={client} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '连接 Server' }));
+    });
+    act(() => {
+      emit(liveTrackEvent());
+    });
+    expect(screen.getByText('revision 8')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Server URL'), {
+      target: { value: 'http://127.0.0.1:9000/' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '连接 Server' }));
+    });
+
+    const panel = screen.getByRole('region', { name: 'Server live inspector' });
+    expect(client.listTracks).toHaveBeenLastCalledWith('http://127.0.0.1:9000');
+    expect(within(panel).queryByText('revision 8')).not.toBeInTheDocument();
+    expect(within(panel).getByText('revision --')).toBeInTheDocument();
+    expect(within(panel).getAllByText('paused')).toHaveLength(2);
+    expect(within(panel).getByText('策略价 --')).toBeInTheDocument();
+    expect(within(panel).getByText('标记价 --')).toBeInTheDocument();
   });
 
   it('shows risk acquisition backlog separately from the release frontier', async () => {
     const detail = trackDetail();
-    detail.position.desired_exposure = 1.5;
-    detail.execution.inventory_gap = 0;
+    detail.decision = {
+      revision: 9,
+      policy_target: 4.8235,
+      risk_approved_target: 4.817,
+      acquisition_frontier: 4.8,
+      execution_target: 4.8,
+      reason: 'waiting_risk_release',
+    };
     detail.execution.risk_acquisition = {
       direction: 'long',
-      curve_target: 4.8235,
-      risk_release_frontier: 4.8,
       backlog_units: 0.0235,
       release_anchor_price: 1518.3,
       release_anchor_target: 4.817,
@@ -109,7 +194,10 @@ describe('ServerLivePanel', () => {
     });
 
     const panel = screen.getByRole('region', { name: 'Server live inspector' });
-    expect(within(panel).getByText('释放 4.8000 · 曲线 4.8235')).toBeInTheDocument();
+    expect(within(panel).getByText('策略 4.8235')).toBeInTheDocument();
+    expect(within(panel).getByText('风控 4.8170')).toBeInTheDocument();
+    expect(within(panel).getByText('前沿 4.8000')).toBeInTheDocument();
+    expect(within(panel).getByText('执行 4.8000')).toBeInTheDocument();
     expect(within(panel).getByText('backlog +0.0235')).toBeInTheDocument();
     expect(within(panel).getByText('next +0.0235 → 4.8235')).toBeInTheDocument();
   });
@@ -152,11 +240,20 @@ function trackListItem(): TrackListItemView {
     strategy_price_status: 'live',
     exposure: {
       current: 1.5,
-      target: 2,
+    },
+    decision: {
+      revision: 7,
+      policy_target: 8,
+      risk_approved_target: 4,
+      acquisition_frontier: 1.5,
+      execution_target: 1.25,
+      reason: 'waiting_risk_release',
     },
     execution: {
       state: 'open',
       execution_status: 'normal',
+      attention_reasons: [],
+      price_execution_block_reason: null,
       active_binding_count: 1,
     },
     pnl: {
@@ -205,7 +302,14 @@ function trackDetail(): TrackDetailView {
     },
     position: {
       current_exposure: 1.5,
-      desired_exposure: 2,
+    },
+    decision: {
+      revision: 7,
+      policy_target: 8,
+      risk_approved_target: 4,
+      acquisition_frontier: 1.5,
+      execution_target: 1.25,
+      reason: 'waiting_risk_release',
     },
     pnl: {
       pnl_asset: 'USDT',
@@ -220,7 +324,7 @@ function trackDetail(): TrackDetailView {
       state: 'open',
       execution_status: 'normal',
       attention_reasons: [],
-      inventory_gap: 0.5,
+      price_execution_block_reason: null,
       active_binding_count: 1,
       bindings: [
         {
@@ -257,5 +361,83 @@ function trackDiagnostics(): TrackDiagnosticsView {
         message: '目标仓位变化',
       },
     ],
+  };
+}
+
+function liveTrackEvent(): Extract<StreamEvent, { type: 'track_live_view_changed' }> {
+  return {
+    type: 'track_live_view_changed',
+    track_id: 'btc-core',
+    live: {
+      strategy_price: 102.75,
+      strategy_price_status: 'live',
+      mark_price: 103.25,
+      best_bid: 103.1,
+      best_ask: 103.3,
+      decision: {
+        revision: 8,
+        policy_target: 9,
+        risk_approved_target: 5,
+        acquisition_frontier: 2,
+        execution_target: 1.75,
+        reason: 'submit_planned',
+      },
+      price_execution_block_reason: null,
+    },
+  };
+}
+
+function pausedTrackListItem(): TrackListItemView {
+  const item = trackListItem();
+  return {
+    ...item,
+    lifecycle: {
+      ...item.lifecycle,
+      status: 'paused',
+      updated_at: '2026-05-08T00:00:02Z',
+    },
+    strategy_price: null,
+    strategy_price_status: 'stale',
+    decision: unavailableDecision(),
+  };
+}
+
+function pausedTrackDetail(): TrackDetailView {
+  const detail = trackDetail();
+  return {
+    ...detail,
+    status: {
+      ...detail.status,
+      lifecycle: {
+        ...detail.status.lifecycle,
+        status: 'paused',
+        updated_at: '2026-05-08T00:00:02Z',
+      },
+      strategy_price: null,
+      strategy_price_status: 'stale',
+    },
+    market: {
+      mark_price: null,
+      best_bid: null,
+      best_ask: null,
+    },
+    decision: unavailableDecision(),
+    execution: {
+      ...detail.execution,
+      state: 'paused',
+      active_binding_count: 0,
+      bindings: [],
+    },
+  };
+}
+
+function unavailableDecision(): InventoryDecisionView {
+  return {
+    revision: null,
+    policy_target: null,
+    risk_approved_target: null,
+    acquisition_frontier: null,
+    execution_target: null,
+    reason: 'paused',
   };
 }

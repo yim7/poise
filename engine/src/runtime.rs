@@ -9,6 +9,7 @@ use poise_core::track::{Instrument, TrackDefinition, TrackId};
 use poise_core::types::{ExchangeRules, Exposure, Side};
 
 use crate::execution_gate::{ExecutionGateDecision, ExecutionGateState};
+use crate::execution_plan::DecisionReason;
 use crate::executor::RecoveryAnomaly;
 use crate::executor::binding::{BindingStatus, LiveOrderBinding};
 use crate::executor::boundary::trigger_price_for_boundary;
@@ -197,14 +198,14 @@ pub struct FreshSessionExternalInputs {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StrategyTargetView {
-    pub desired_exposure: Option<Exposure>,
+    pub risk_approved_target: Option<Exposure>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RiskAcquisitionRuntimeView {
     pub direction: RiskAcquisitionDirection,
-    pub curve_target: Exposure,
-    pub risk_release_frontier: Exposure,
+    pub risk_approved_target: Exposure,
+    pub acquisition_frontier: Exposure,
     pub backlog_units: f64,
     pub release_anchor_price: f64,
     pub release_anchor_target: Exposure,
@@ -229,10 +230,51 @@ pub struct InventoryDecisionSnapshot {
     pub risk_approved_target: Exposure,
     pub acquisition_frontier: Option<Exposure>,
     pub execution_target: Exposure,
+    pub reason: DecisionReason,
     pub applied_risk_cap: Option<AppliedRiskCap>,
     pub price_execution_gate: PriceExecutionGate,
     pub revision: u64,
     pub risk_acquisition: Option<RiskAcquisitionRuntimeView>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InventoryDecisionView {
+    pub revision: Option<u64>,
+    pub policy_target: Option<f64>,
+    pub risk_approved_target: Option<f64>,
+    pub acquisition_frontier: Option<f64>,
+    pub execution_target: Option<f64>,
+    pub reason: DecisionReason,
+}
+
+impl InventoryDecisionView {
+    fn committed(snapshot: &InventoryDecisionSnapshot) -> Self {
+        Self {
+            revision: Some(snapshot.revision),
+            policy_target: Some(snapshot.policy_target.0),
+            risk_approved_target: Some(snapshot.risk_approved_target.0),
+            acquisition_frontier: snapshot.acquisition_frontier.as_ref().map(|value| value.0),
+            execution_target: Some(snapshot.execution_target.0),
+            reason: snapshot.reason,
+        }
+    }
+
+    fn unavailable(reason: DecisionReason) -> Self {
+        Self {
+            revision: None,
+            policy_target: None,
+            risk_approved_target: None,
+            acquisition_frontier: None,
+            execution_target: None,
+            reason,
+        }
+    }
+}
+
+impl Default for InventoryDecisionView {
+    fn default() -> Self {
+        Self::unavailable(DecisionReason::WaitingMarketData)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -248,8 +290,7 @@ pub struct TrackLiveView {
     pub mark_price: Option<f64>,
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
-    pub desired_exposure: Option<f64>,
-    pub execution_target_exposure: Option<f64>,
+    pub decision: InventoryDecisionView,
     pub risk_acquisition: Option<RiskAcquisitionRuntimeView>,
     pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
 }
@@ -278,9 +319,7 @@ pub struct TrackRuntimeView {
     pub exchange_rules: ExchangeRules,
     pub current_exposure: Exposure,
     pub position_qty: f64,
-    pub inventory_decision: Option<InventoryDecisionSnapshot>,
-    pub desired_exposure: Option<Exposure>,
-    pub execution_target_exposure: Option<Exposure>,
+    pub decision: InventoryDecisionView,
     pub risk_acquisition: Option<RiskAcquisitionRuntimeView>,
     pub manual_target_override: Option<Exposure>,
     pub executor: ExecutorView,
@@ -771,25 +810,44 @@ impl TrackRuntime {
 
     pub fn strategy_target_view(&self) -> StrategyTargetView {
         StrategyTargetView {
-            desired_exposure: self
-                .inventory_decision
-                .as_ref()
+            risk_approved_target: self
+                .publicly_committed_inventory_decision()
                 .map(|decision| decision.risk_approved_target.clone()),
         }
     }
 
+    pub fn inventory_decision_view(&self) -> InventoryDecisionView {
+        if self.track_state.is_paused() {
+            return InventoryDecisionView::unavailable(DecisionReason::Paused);
+        }
+        self.publicly_committed_inventory_decision()
+            .map(InventoryDecisionView::committed)
+            .unwrap_or_else(|| {
+                InventoryDecisionView::unavailable(DecisionReason::WaitingMarketData)
+            })
+    }
+
+    fn publicly_committed_inventory_decision(&self) -> Option<&InventoryDecisionSnapshot> {
+        if matches!(self.track_state, TrackState::WaitingMarketData)
+            || self.strategy_price_status == StrategyPriceStatus::Stale
+            || self.market_data_stale_since.is_some()
+        {
+            return None;
+        }
+        self.inventory_decision.as_ref()
+    }
+
     pub fn live_view(&self) -> TrackLiveView {
         let quote_health = self.quote_health_view();
-        let decision = self.inventory_decision.as_ref();
+        let committed = self.publicly_committed_inventory_decision();
         TrackLiveView {
             strategy_price: self.strategy_price,
             strategy_price_status: quote_health.strategy_price_status,
             mark_price: self.mark_price,
             best_bid: self.best_bid,
             best_ask: self.best_ask,
-            desired_exposure: decision.map(|decision| decision.risk_approved_target.0),
-            execution_target_exposure: decision.map(|decision| decision.execution_target.0),
-            risk_acquisition: decision.and_then(|decision| decision.risk_acquisition.clone()),
+            decision: self.inventory_decision_view(),
+            risk_acquisition: committed.and_then(|decision| decision.risk_acquisition.clone()),
             price_execution_block_reason: match quote_health.price_execution_gate {
                 PriceExecutionGate::Open => None,
                 PriceExecutionGate::ManualRiskReductionOnly { reason }
@@ -805,9 +863,7 @@ impl TrackRuntime {
             exchange_rules: self.exchange_rules.clone(),
             current_exposure: self.current_exposure.clone(),
             position_qty: self.current_position_qty,
-            inventory_decision: self.inventory_decision.clone(),
-            desired_exposure: live.desired_exposure.map(Exposure),
-            execution_target_exposure: live.execution_target_exposure.map(Exposure),
+            decision: live.decision,
             risk_acquisition: live.risk_acquisition,
             manual_target_override: self.manual_target_override(),
             executor: self.executor_state.view(),
@@ -843,15 +899,19 @@ impl TrackRuntime {
         let transient_gate = match persisted_gate {
             Some(_) => None,
             None => {
-                let risk_release_frontier = target.risk_release_frontier.as_ref()?;
-                let backlog_units = target.curve_target.delta(risk_release_frontier).0.abs();
+                let acquisition_frontier = target.acquisition_frontier.as_ref()?;
+                let backlog_units = target
+                    .risk_approved_target
+                    .delta(acquisition_frontier)
+                    .0
+                    .abs();
                 if backlog_units <= f64::EPSILON {
                     return None;
                 }
                 Some(RiskExposureGateState {
-                    risk_release_frontier: risk_release_frontier.clone(),
+                    risk_release_frontier: acquisition_frontier.clone(),
                     release_anchor_price: strategy_price,
-                    release_anchor_target: risk_release_frontier.clone(),
+                    release_anchor_target: acquisition_frontier.clone(),
                     stale_since: observed_at,
                 })
             }
@@ -862,11 +922,11 @@ impl TrackRuntime {
                 self.config().risk_acquisition,
                 self.config().min_rebalance_units,
                 gate,
-                target.curve_target.clone(),
+                target.risk_approved_target.clone(),
             )
         })?;
         Some(self.risk_acquisition_view(
-            &target.curve_target,
+            &target.risk_approved_target,
             &gate.risk_release_frontier,
             gate,
             &release,
@@ -876,8 +936,8 @@ impl TrackRuntime {
 
     fn risk_acquisition_view(
         &self,
-        curve_target: &Exposure,
-        risk_release_frontier: &Exposure,
+        risk_approved_target: &Exposure,
+        acquisition_frontier: &Exposure,
         gate: &RiskExposureGateState,
         release: &RiskAcquisitionRelease,
         observed_at: DateTime<Utc>,
@@ -891,9 +951,9 @@ impl TrackRuntime {
             / 60_000.0;
         RiskAcquisitionRuntimeView {
             direction: RiskAcquisitionDirection::from(release.direction),
-            curve_target: curve_target.clone(),
-            risk_release_frontier: risk_release_frontier.clone(),
-            backlog_units: curve_target.delta(risk_release_frontier).0.abs(),
+            risk_approved_target: risk_approved_target.clone(),
+            acquisition_frontier: acquisition_frontier.clone(),
+            backlog_units: risk_approved_target.delta(acquisition_frontier).0.abs(),
             release_anchor_price: gate.release_anchor_price,
             release_anchor_target: gate.release_anchor_target.clone(),
             stale_release_elapsed_minutes,
@@ -1035,6 +1095,8 @@ mod tests {
             test_rules(0.1),
             Utc::now(),
         );
+        runtime.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
         runtime.current_exposure = Exposure(0.0);
         runtime.strategy_price = Some(95.0);
         runtime.strategy_price_status = StrategyPriceStatus::Live;
@@ -1048,14 +1110,15 @@ mod tests {
         );
 
         let live = runtime.live_view();
-        assert!((live.execution_target_exposure.unwrap() - 2.0).abs() < 1e-9);
+        assert!((live.decision.execution_target.unwrap() - 2.0).abs() < 1e-9);
+        assert_eq!(live.decision, runtime.runtime_view().decision);
         let risk_acquisition = live
             .risk_acquisition
             .expect("risk acquisition observability should be present while backlog exists");
 
         assert_eq!(risk_acquisition.direction, RiskAcquisitionDirection::Long);
-        assert!((risk_acquisition.curve_target.0 - 4.0).abs() < 1e-9);
-        assert!((risk_acquisition.risk_release_frontier.0 - 2.0).abs() < 1e-9);
+        assert!((risk_acquisition.risk_approved_target.0 - 4.0).abs() < 1e-9);
+        assert!((risk_acquisition.acquisition_frontier.0 - 2.0).abs() < 1e-9);
         assert!((risk_acquisition.backlog_units - 2.0).abs() < 1e-9);
         assert!((risk_acquisition.release_anchor_price - 95.0).abs() < 1e-9);
         assert!((risk_acquisition.release_anchor_target.0 - 4.0).abs() < 1e-9);
@@ -1063,6 +1126,45 @@ mod tests {
         assert_eq!(risk_acquisition.next_advantage_price, Some(92.5));
         assert!((risk_acquisition.next_release_units - 1.0).abs() < 1e-9);
         assert!((risk_acquisition.next_release_target.0 - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn decision_view_masks_old_snapshot_when_market_data_is_stale() {
+        let mut runtime = test_runtime();
+        runtime.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::FollowingBand));
+        runtime.strategy_price = Some(95.0);
+        runtime.strategy_price_status = StrategyPriceStatus::Live;
+        runtime.best_bid = Some(94.9);
+        runtime.best_ask = Some(95.1);
+        commit_inventory_decision_for_test(
+            &mut runtime,
+            95.0,
+            Utc.with_ymd_and_hms(2026, 4, 23, 8, 0, 0).unwrap(),
+        );
+        assert!(runtime.live_view().decision.revision.is_some());
+
+        runtime.strategy_price_status = StrategyPriceStatus::Stale;
+        let decision = runtime.live_view().decision;
+
+        assert_eq!(decision.reason, DecisionReason::WaitingMarketData);
+        assert_eq!(decision.revision, None);
+        assert_eq!(decision.policy_target, None);
+        assert_eq!(decision.risk_approved_target, None);
+        assert_eq!(decision.acquisition_frontier, None);
+        assert_eq!(decision.execution_target, None);
+
+        runtime.strategy_price_status = StrategyPriceStatus::Live;
+        runtime.track_state = TrackState::Paused {
+            suspended: ControlState::Automatic(AutoState::FollowingBand),
+        };
+        let paused = runtime.runtime_view().decision;
+        assert_eq!(paused.reason, DecisionReason::Paused);
+        assert_eq!(paused.revision, None);
+        assert_eq!(paused.policy_target, None);
+        assert_eq!(paused.risk_approved_target, None);
+        assert_eq!(paused.acquisition_frontier, None);
+        assert_eq!(paused.execution_target, None);
     }
 
     #[test]
@@ -1088,14 +1190,14 @@ mod tests {
 
         let live = runtime.live_view();
 
-        assert_eq!(live.execution_target_exposure, Some(0.0));
+        assert_eq!(live.decision.execution_target, Some(0.0));
         let risk_acquisition = live
             .risk_acquisition
             .expect("transient cross-zero risk acquisition backlog should be visible");
 
         assert_eq!(risk_acquisition.direction, RiskAcquisitionDirection::Long);
-        assert!((risk_acquisition.curve_target.0 - 0.5).abs() < 1e-9);
-        assert_eq!(risk_acquisition.risk_release_frontier, Exposure(0.0));
+        assert!((risk_acquisition.risk_approved_target.0 - 0.5).abs() < 1e-9);
+        assert_eq!(risk_acquisition.acquisition_frontier, Exposure(0.0));
         assert!((risk_acquisition.backlog_units - 0.5).abs() < 1e-9);
         assert!((risk_acquisition.release_anchor_price - 99.375).abs() < 1e-9);
         assert_eq!(risk_acquisition.release_anchor_target, Exposure(0.0));
@@ -1251,9 +1353,10 @@ mod tests {
         let decision = InventoryDecisionSnapshot {
             observed_at,
             policy_target: target.policy_target.clone(),
-            risk_approved_target: target.desired_exposure.clone(),
-            acquisition_frontier: target.risk_release_frontier.clone(),
-            execution_target: target.execution_target_exposure.clone(),
+            risk_approved_target: target.risk_approved_target.clone(),
+            acquisition_frontier: target.acquisition_frontier.clone(),
+            execution_target: target.execution_target.clone(),
+            reason: target.reason.unwrap_or(DecisionReason::SubmitPlanned),
             applied_risk_cap: target.applied_risk_cap.clone(),
             price_execution_gate: runtime.price_execution_gate,
             revision: runtime.next_inventory_decision_revision(),

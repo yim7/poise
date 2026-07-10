@@ -839,11 +839,13 @@ mod tests {
             strategy_price_status: detail.status.strategy_price_status,
             exposure: crate::protocol::ExposureSummaryView {
                 current: detail.position.current_exposure,
-                target: detail.position.desired_exposure,
             },
+            decision: detail.decision.clone(),
             execution: crate::protocol::ExecutionBadgeView {
                 state: detail.execution.state,
                 execution_status: detail.execution.execution_status,
+                attention_reasons: detail.execution.attention_reasons.clone(),
+                price_execution_block_reason: detail.execution.price_execution_block_reason,
                 active_binding_count: detail.execution.active_binding_count,
             },
             pnl: TrackListPnlView {
@@ -1549,28 +1551,18 @@ mod tests {
         app.show_instance_for_selected();
         state.requests.lock().await.clear();
 
-        handle_ws_event(
-            &client,
-            &mut app,
-            StreamEvent::TrackLiveViewChanged {
-                track_id: BTC_GRID_ID.into(),
-                live: crate::protocol::TrackLiveView {
-                    strategy_price: Some(111.5),
-                    strategy_price_status: crate::protocol::StrategyPriceStatusView::Live,
-                    mark_price: Some(112.0),
-                    best_bid: Some(111.0),
-                    best_ask: Some(112.0),
-                    desired_exposure: Some(4.5),
-                    execution_target_exposure: Some(3.75),
-                    risk_acquisition: Default::default(),
-                    price_execution_block_reason: None,
-                },
-            },
-        )
-        .await;
+        let event: StreamEvent = serde_json::from_str(include_str!(
+            "../tests/fixtures/ws_track_live_view_changed.json"
+        ))
+        .unwrap();
+        handle_ws_event(&client, &mut app, event).await;
 
         assert_eq!(app.tracks[0].strategy_price, Some(111.5));
-        assert_eq!(app.tracks[0].exposure.target, Some(3.75));
+        assert_eq!(app.tracks[0].decision.revision, Some(44));
+        assert_eq!(app.tracks[0].decision.policy_target, Some(6.0));
+        assert_eq!(app.tracks[0].decision.risk_approved_target, Some(4.5));
+        assert_eq!(app.tracks[0].decision.acquisition_frontier, Some(4.0));
+        assert_eq!(app.tracks[0].decision.execution_target, Some(3.75));
         assert_eq!(
             app.current_track.as_ref().unwrap().status.strategy_price,
             Some(111.5)
@@ -1587,23 +1579,16 @@ mod tests {
             app.current_track.as_ref().unwrap().market.best_ask,
             Some(112.0)
         );
+        let decision = &app.current_track.as_ref().unwrap().decision;
+        assert_eq!(decision.revision, Some(44));
+        assert_eq!(decision.policy_target, Some(6.0));
+        assert_eq!(decision.risk_approved_target, Some(4.5));
+        assert_eq!(decision.acquisition_frontier, Some(4.0));
+        assert_eq!(decision.execution_target, Some(3.75));
         assert_eq!(
-            app.current_track
-                .as_ref()
-                .unwrap()
-                .position
-                .desired_exposure,
-            Some(4.5)
+            decision.reason,
+            crate::protocol::DecisionReasonView::WaitingRiskRelease
         );
-        assert_eq!(
-            app.current_track
-                .as_ref()
-                .unwrap()
-                .execution
-                .execution_target_exposure,
-            Some(3.75)
-        );
-        assert!((app.current_track.as_ref().unwrap().execution.inventory_gap - 1.75).abs() < 1e-9);
         assert!(
             state.requests.lock().await.is_empty(),
             "live patch should not trigger an extra HTTP reload"

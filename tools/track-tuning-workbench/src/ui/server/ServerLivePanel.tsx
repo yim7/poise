@@ -67,11 +67,18 @@ export function ServerLivePanel({
 
   const connect = async () => {
     const nextBaseUrl = normalizeServerBaseUrl(baseUrlInput);
+    const switchingServer = connectedBaseUrl !== '' && connectedBaseUrl !== nextBaseUrl;
     disconnectRef.current?.();
     disconnectRef.current = null;
     setConnectionState('connecting');
     setNotice(null);
     setConnectedBaseUrl(nextBaseUrl);
+    setLiveById({});
+    if (switchingServer) {
+      setTracks([]);
+      setDetailsById({});
+      setDiagnosticsById({});
+    }
 
     try {
       const trackList = await resolvedClient.listTracks(nextBaseUrl);
@@ -132,6 +139,7 @@ export function ServerLivePanel({
   const applyStreamEvent = (event: StreamEvent) => {
     if (event.type === 'track_list_item_changed') {
       setTracks((current) => upsertTrackItem(current, event.item));
+      setLiveById((current) => removeTrackEntry(current, event.track_id));
       return;
     }
 
@@ -140,6 +148,7 @@ export function ServerLivePanel({
         ...current,
         [event.track_id]: event.detail,
       }));
+      setLiveById((current) => removeTrackEntry(current, event.track_id));
       return;
     }
 
@@ -252,22 +261,36 @@ function TrackRuntimeSummary({
   const strategyPrice = live?.strategy_price ?? detail?.status.strategy_price ?? track.strategy_price;
   const markPrice = live?.mark_price ?? detail?.market.mark_price ?? null;
   const currentExposure = detail?.position.current_exposure ?? track.exposure.current;
-  const desiredExposure = live?.desired_exposure ?? detail?.position.desired_exposure ?? track.exposure.target ?? null;
+  const decision = live?.decision ?? detail?.decision ?? track.decision;
   const riskAcquisition = live
     ? live.risk_acquisition ?? null
     : detail?.execution.risk_acquisition ?? null;
-  const inventoryGap = detail?.execution.inventory_gap ?? (
-    desiredExposure === null ? null : desiredExposure - currentExposure
-  );
-  const exposureNote = riskAcquisition
-    ? `释放 ${formatExposure(riskAcquisition.risk_release_frontier)} · 曲线 ${formatExposure(riskAcquisition.curve_target)}`
-    : `目标 ${formatExposure(desiredExposure)}`;
+  const inventoryGap = decision.execution_target === null
+    ? null
+    : decision.execution_target - currentExposure;
+  const revision = decision.revision === null
+    ? 'revision --'
+    : `revision ${decision.revision}`;
   const gapValue = riskAcquisition
     ? `backlog ${formatSignedExposure(riskAcquisition.backlog_units)}`
-    : `差额 ${formatExposure(inventoryGap)}`;
+    : `差额 ${formatSignedExposure(inventoryGap)}`;
   const gapNote = riskAcquisition
     ? `next ${formatSignedExposure(riskAcquisition.next_release_units)} → ${formatExposure(riskAcquisition.next_release_target)}`
     : `${detail?.execution.active_binding_count ?? track.execution.active_binding_count} 个 active binding`;
+  const targetMetrics = (
+    <>
+      <RuntimeMetric
+        label="策略与风控"
+        value={`策略 ${formatExposure(decision.policy_target)}`}
+        note={`风控 ${formatExposure(decision.risk_approved_target)}`}
+      />
+      <RuntimeMetric
+        label="前沿与执行"
+        value={`前沿 ${formatExposure(decision.acquisition_frontier)}`}
+        note={`执行 ${formatExposure(decision.execution_target)}`}
+      />
+    </>
+  );
   const firstBinding = detail?.execution.bindings[0] ?? null;
   const latestActivity = [
     ...(detail?.activity ?? []),
@@ -279,7 +302,9 @@ function TrackRuntimeSummary({
       <div className="server-live__summary-grid">
         <RuntimeMetric label="Track" value={track.id} note={track.instrument.symbol} />
         <RuntimeMetric label="价格" value={`策略价 ${formatPrice(strategyPrice)}`} note={`标记价 ${formatPrice(markPrice)}`} />
-        <RuntimeMetric label="仓位" value={`当前 ${formatExposure(currentExposure)}`} note={exposureNote} />
+        <RuntimeMetric label="仓位" value={`当前 ${formatExposure(currentExposure)}`} note="以执行目标为基准" />
+        <RuntimeMetric label="决策" value={revision} note={decision.reason} />
+        {targetMetrics}
         <RuntimeMetric label="差额" value={gapValue} note={gapNote} />
       </div>
 
@@ -344,6 +369,16 @@ function upsertTrackItem(items: TrackListItemView[], nextItem: TrackListItemView
   }
 
   return items.map((item) => (item.id === nextItem.id ? nextItem : item));
+}
+
+function removeTrackEntry<T>(entries: Record<string, T>, trackId: string) {
+  if (!(trackId in entries)) {
+    return entries;
+  }
+
+  const nextEntries = { ...entries };
+  delete nextEntries[trackId];
+  return nextEntries;
 }
 
 function connectionBadge(state: ConnectionState) {

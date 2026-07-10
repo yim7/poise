@@ -218,6 +218,13 @@ mod tests {
         .unwrap()
     }
 
+    fn track_live_stream_event() -> StreamEvent {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/ws_track_live_view_changed.json"
+        ))
+        .unwrap()
+    }
+
     fn account_summary_view() -> AccountSummaryView {
         serde_json::from_str(include_str!("../tests/fixtures/account_summary_view.json")).unwrap()
     }
@@ -382,6 +389,23 @@ mod tests {
         let event = receiver.recv().await.unwrap();
 
         assert_eq!(event, track_stream_event());
+    }
+
+    #[test]
+    fn decodes_live_view_with_revision_four_targets_and_reason() {
+        let StreamEvent::TrackLiveViewChanged { live, .. } = track_live_stream_event() else {
+            panic!("unexpected event variant");
+        };
+
+        assert_eq!(live.decision.revision, Some(44));
+        assert_eq!(live.decision.policy_target, Some(6.0));
+        assert_eq!(live.decision.risk_approved_target, Some(4.5));
+        assert_eq!(live.decision.acquisition_frontier, Some(4.0));
+        assert_eq!(live.decision.execution_target, Some(3.75));
+        assert_eq!(
+            live.decision.reason,
+            crate::protocol::DecisionReasonView::WaitingRiskRelease
+        );
     }
 
     #[test]
