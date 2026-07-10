@@ -433,7 +433,10 @@ git diff --check
 改动范围：
 
 - engine/src/ports.rs
+- engine/src/mutation_frame.rs
+- application/src/mutation_executor.rs
 - application/src/session_effect_queue.rs
+- application/src/submit_effect_service.rs
 - server/src/order_outcome.rs
 - server/src/effect_worker/
 - exchanges/binance/
@@ -449,7 +452,8 @@ git diff --check
 - SubmitOutcomeUnknown 不 terminalize binding，不把 effect 记为 failed/superseded，也不重新 dispatch 同一仓位缺口。
 - worker 标记 exchange state stale，触发完整 position/open-orders sync，并把当前 submit effect deferred 到 ExchangeState。
 - receipt、WS order fact 或完整快照找到同一 client order id 时，复用 Task 0.7 生命周期吸收事实。
-- 只有无 anomaly 的完整快照确认订单不存在，才能结束旧 submit effect 并允许后续重新规划。
+- submit 返回 unknown 后的第一次即时同步仍按 DispatchInFlight 处理：它可以吸收已出现的订单事实，但空结果不能证明请求不会稍后落地。
+- 只有切换到 AwaitingExchangeState 后，后续独立且无 anomaly 的完整快照再次确认订单不存在，才能结束旧 submit effect 并允许重新规划。
 - 对账失败、revision 变化或 recovery anomaly 时继续 deferred，不释放 ownership。
 - fresh-session 边界不变：进程重启仍从交易所重建，不恢复旧 queue 或 binding。
 
@@ -458,6 +462,7 @@ git diff --check
 - 由 exchange adapter 拥有“请求是否可能已发送”的知识；server 不解析错误字符串猜测结果。
 - submit 不使用会跨 transport、5xx 或 429 自动重派的通用 HTTP retry；一次 dispatch 只发送一次，后续依靠稳定 client order id 和完整交易所对账。
 - submit 与 cancel 使用 operation-specific error mapping，不能让 cancel-only 错误种类泄漏到 submit。
+- InFlight 到 AwaitingExchangeState 的切换与已吸收 order fact 的补查必须在同一 track mutation 临界区完成，避免 WS 事实早于网络错误返回时遗留旧 owner。
 - 只新增 ExecutionPortErrorKind::SubmitOutcomeUnknown，不新增 submit service、DTO 或持久化状态。
 - 不自动重派；是否需要新订单由完整对账后的正常 reconcile 决定。
 
