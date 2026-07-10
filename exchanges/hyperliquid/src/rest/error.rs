@@ -1,5 +1,6 @@
 use std::fmt;
 
+use anyhow::Error;
 use reqwest::StatusCode;
 
 use poise_engine::ports::ExecutionPortErrorKind;
@@ -15,6 +16,9 @@ pub(crate) enum HyperliquidRestError {
         response: String,
     },
     OrderRejected {
+        message: String,
+    },
+    SubmitOutcomeUnknown {
         message: String,
     },
 }
@@ -40,7 +44,32 @@ impl HyperliquidRestError {
         }
     }
 
+    pub(crate) fn classify_submit_dispatch(error: Error) -> Error {
+        if let Some(rest_error) = error.downcast_ref::<Self>() {
+            match rest_error {
+                Self::SubmitOutcomeUnknown { .. } => return error,
+                Self::HttpStatus { status, .. }
+                    if *status == StatusCode::REQUEST_TIMEOUT || status.is_server_error() => {}
+                Self::HttpStatus { .. } | Self::Exchange { .. } | Self::OrderRejected { .. } => {
+                    return error;
+                }
+            }
+        }
+        if let Some(request_error) = error.downcast_ref::<reqwest::Error>()
+            && (request_error.is_builder() || request_error.is_connect())
+        {
+            return error;
+        }
+        Self::SubmitOutcomeUnknown {
+            message: error.to_string(),
+        }
+        .into()
+    }
+
     pub(crate) fn execution_error_kind(&self) -> Option<ExecutionPortErrorKind> {
+        if matches!(self, Self::SubmitOutcomeUnknown { .. }) {
+            return Some(ExecutionPortErrorKind::SubmitOutcomeUnknown);
+        }
         if self.is_insufficient_margin() {
             return Some(ExecutionPortErrorKind::InsufficientMargin);
         }
@@ -80,7 +109,7 @@ impl HyperliquidRestError {
         match self {
             Self::HttpStatus { body, .. } => body,
             Self::Exchange { response } => response,
-            Self::OrderRejected { message } => message,
+            Self::OrderRejected { message } | Self::SubmitOutcomeUnknown { message } => message,
         }
     }
 }
@@ -94,6 +123,9 @@ impl fmt::Display for HyperliquidRestError {
             Self::Exchange { response } => write!(f, "Hyperliquid exchange error: {response}"),
             Self::OrderRejected { message } => {
                 write!(f, "Hyperliquid order rejected: {message}")
+            }
+            Self::SubmitOutcomeUnknown { message } => {
+                write!(f, "Hyperliquid submit outcome unknown: {message}")
             }
         }
     }

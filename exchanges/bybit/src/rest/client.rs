@@ -17,7 +17,7 @@ use poise_engine::ports::{
 };
 
 use super::auth::sign_v5_payload;
-use super::error::BybitRestError;
+use super::error::{BybitRestError, BybitSubmitOutcomeUnknown};
 use super::models::{
     BybitEnvelope, CancelAllRequestBody, CancelAllResult, CancelOrderRequestBody,
     CreateOrderRequestBody, CreateOrderResult, InstrumentInfoResult, OpenOrderListResult,
@@ -120,19 +120,19 @@ impl BybitRestClient {
             order_link_id: req.client_order_id.clone(),
             reduce_only: req.reduce_only,
         };
+        let serialized_body =
+            serde_json::to_string(&body).context("failed to serialize create order body")?;
         let response: CreateOrderResult = self
             .send_request(
                 Method::POST,
                 "/v5/order/create",
                 Vec::new(),
-                Some(
-                    serde_json::to_string(&body)
-                        .context("failed to serialize create order body")?,
-                ),
+                Some(serialized_body),
                 AuthMode::Signed,
             )
-            .await?;
-        response.try_into()
+            .await
+            .map_err(classify_dispatched_submit_error)?;
+        response.try_into().map_err(BybitSubmitOutcomeUnknown::wrap)
     }
 
     pub async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<OrderReceipt> {
@@ -426,8 +426,32 @@ impl BybitRestClient {
     }
 }
 
+fn classify_dispatched_submit_error(error: anyhow::Error) -> anyhow::Error {
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<BybitRestError>()
+            .is_some_and(|exchange_error| {
+                exchange_error.execution_error_kind().is_some()
+                    || !exchange_error.has_ambiguous_submit_status()
+            })
+    }) {
+        return error;
+    }
+
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|request_error| request_error.is_builder() || request_error.is_connect())
+    }) {
+        return error;
+    }
+
+    BybitSubmitOutcomeUnknown::wrap(error)
+}
+
 fn build_http_client(base_url: &str) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(15));
     if should_bypass_proxy(base_url) {
@@ -593,6 +617,47 @@ mod tests {
         assert!(request.body.contains(r#""orderType":"Limit""#));
         assert!(request.body.contains(r#""timeInForce":"GTC""#));
         assert!(request.body.contains(r#""positionIdx":0"#));
+    }
+
+    #[tokio::test]
+    async fn submit_order_does_not_follow_temporary_redirect() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::redirect(307, "/redirected-submit"),
+            MockResponse::json(
+                200,
+                r#"{"retCode":0,"retMsg":"OK","result":{"orderId":"12345","orderLinkId":"client-redirect"}}"#,
+            ),
+        ])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        let result = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            OrderRequest {
+                instrument: poise_core::track::Instrument::new(
+                    poise_core::track::Venue::Bybit,
+                    "BTCUSDT",
+                ),
+                side: poise_core::types::Side::Buy,
+                price: 64000.10,
+                quantity: 0.01,
+                client_order_id: "client-redirect".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await;
+
+        assert_eq!(server.requests().len(), 1);
+        assert_eq!(
+            result.unwrap_err().kind(),
+            poise_engine::ports::ExecutionPortErrorKind::Failed
+        );
     }
 
     #[tokio::test]
@@ -898,6 +963,7 @@ mod tests {
     struct MockResponse {
         status: u16,
         body: String,
+        location: Option<String>,
     }
 
     impl MockResponse {
@@ -905,6 +971,15 @@ mod tests {
             Self {
                 status,
                 body: body.to_string(),
+                location: None,
+            }
+        }
+
+        fn redirect(status: u16, location: &str) -> Self {
+            Self {
+                status,
+                body: String::new(),
+                location: Some(location.to_string()),
             }
         }
     }
@@ -937,10 +1012,16 @@ mod tests {
 
                     let response = queued_responses.lock().unwrap().pop_front().unwrap();
                     let status_text = if response.status == 200 { "OK" } else { "ERR" };
+                    let location = response
+                        .location
+                        .as_deref()
+                        .map(|location| format!("Location: {location}\r\n"))
+                        .unwrap_or_default();
                     let raw = format!(
-                        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 {} {}\r\n{}Content-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
                         response.status,
                         status_text,
+                        location,
                         response.body.len(),
                         response.body
                     );

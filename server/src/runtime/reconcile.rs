@@ -251,12 +251,12 @@ pub(super) async fn sync_exchange_state_from_exchange(
             .load_track_recovery_summary(&TrackId::new(track_id))
             .await
             .map_err(TrackMutationError::Persistence)?;
-        let mut position = execution
-            .get_position(instrument)
-            .await
-            .map_err(execution_persistence_error)?;
         let mut open_orders = execution
             .get_open_orders(instrument)
+            .await
+            .map_err(execution_persistence_error)?;
+        let mut position = execution
+            .get_position(instrument)
             .await
             .map_err(execution_persistence_error)?;
 
@@ -281,12 +281,12 @@ pub(super) async fn sync_exchange_state_from_exchange(
                 "order-set recovery anomaly encountered; resetting instrument open orders"
             );
             reset_open_orders_for_order_set_recovery_anomaly(execution, instrument).await?;
-            position = execution
-                .get_position(instrument)
-                .await
-                .map_err(execution_persistence_error)?;
             open_orders = execution
                 .get_open_orders(instrument)
+                .await
+                .map_err(execution_persistence_error)?;
+            position = execution
+                .get_position(instrument)
                 .await
                 .map_err(execution_persistence_error)?;
         }
@@ -323,10 +323,15 @@ pub(super) async fn sync_exchange_state_from_exchange(
 
         match outcome {
             ExchangeStateSyncOutcome::Applied(_) => {
-                state
-                    .exchange_freshness
-                    .clear_if_current(freshness_token)
-                    .await;
+                if !state
+                    .session_effect_queue
+                    .has_unresolved_submit_outcome_for_track(&TrackId::new(track_id))
+                {
+                    state
+                        .exchange_freshness
+                        .clear_if_current(freshness_token)
+                        .await;
+                }
                 return Ok(());
             }
             ExchangeStateSyncOutcome::RevisionChanged

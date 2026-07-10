@@ -182,6 +182,23 @@ impl SubmitEffectService {
         ))
     }
 
+    pub async fn record_outcome_unknown(
+        &self,
+        id: &str,
+        effect_id: &str,
+        client_order_id: &str,
+        initial_snapshot_confirmed: bool,
+    ) -> Result<bool> {
+        self.executor
+            .record_submit_outcome_unknown(
+                id,
+                effect_id,
+                client_order_id,
+                initial_snapshot_confirmed,
+            )
+            .await
+    }
+
     #[cfg(any(test, feature = "server-test-support"))]
     pub fn manager(&self) -> Arc<RwLock<TrackManager>> {
         self.executor.manager()

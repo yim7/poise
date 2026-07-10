@@ -11,8 +11,8 @@ use super::dispatch::SessionDispatchResult;
 use super::{Cancellation, EffectWorker, is_insufficient_margin_failure};
 use crate::exchange_freshness::FreshnessGateDecision;
 use crate::order_outcome::{
-    OutcomeClass, cancel_writeback_outcome_unknown, classify_cancel_error,
-    classify_submit_receipt_writeback_error,
+    OutcomeClass, OutcomeUnknownRecovery, cancel_writeback_outcome_unknown, classify_cancel_error,
+    classify_submit_error, classify_submit_receipt_writeback_error,
 };
 use crate::submit_coordinator::SubmitCoordinator;
 
@@ -74,16 +74,13 @@ pub(super) async fn execute_submit(
                 if let OutcomeClass::OutcomeUnknown(recovery) =
                     classify_submit_receipt_writeback_error(&error)
                 {
-                    worker
-                        .recover_unknown_outcome(
-                            effect.track_id.as_str(),
-                            &request.instrument,
-                            recovery,
-                        )
-                        .await?;
-                    return Ok(SessionEffectOutcome::Deferred {
-                        until: poise_application::DeferredUntil::ExchangeState,
-                    });
+                    return Ok(defer_submit_until_exchange_state(
+                        worker,
+                        effect.track_id.as_str(),
+                        &request.instrument,
+                        recovery,
+                    )
+                    .await);
                 }
                 completion
                     .record_completion_failure(&error.to_string())
@@ -93,6 +90,12 @@ pub(super) async fn execute_submit(
             Ok(SessionEffectOutcome::Finished)
         }
         Err(error) => {
+            if let OutcomeClass::OutcomeUnknown(recovery) = classify_submit_error(&error) {
+                return Ok(defer_unknown_submit_dispatch_until_exchange_state(
+                    worker, effect, &request, recovery,
+                )
+                .await);
+            }
             if is_insufficient_margin_failure(&error) {
                 worker
                     .state
@@ -136,6 +139,96 @@ pub(super) async fn execute_submit(
                 reason: failure_message,
             })
         }
+    }
+}
+
+async fn defer_unknown_submit_dispatch_until_exchange_state(
+    worker: &EffectWorker,
+    effect: &SessionTrackEffect,
+    request: &OrderRequest,
+    recovery: OutcomeUnknownRecovery,
+) -> SessionEffectOutcome {
+    let recovery_error = worker
+        .recover_unknown_outcome(effect.track_id.as_str(), &request.instrument, recovery)
+        .await
+        .err();
+    let initial_snapshot_confirmed = recovery_error.is_none();
+
+    match worker
+        .state
+        .submit_effect_service
+        .record_outcome_unknown(
+            effect.track_id.as_str(),
+            &effect.effect_id,
+            &request.client_order_id,
+            initial_snapshot_confirmed,
+        )
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::error!(
+                track_id = %effect.track_id.as_str(),
+                effect_id = %effect.effect_id,
+                "submit outcome became unknown outside the expected in-flight queue state"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                track_id = %effect.track_id.as_str(),
+                effect_id = %effect.effect_id,
+                "failed to record unknown submit outcome; retaining deferred execution: {error}"
+            );
+        }
+    }
+
+    if worker
+        .state
+        .session_effect_queue
+        .active_submit_effect_ids()
+        .contains(&effect.effect_id)
+    {
+        worker
+            .state
+            .reconcile
+            .exchange_freshness
+            .mark_stale(effect.track_id.as_str(), recovery.freshness_reason)
+            .await;
+    }
+
+    if let Some(error) = recovery_error {
+        tracing::warn!(
+            track_id = %effect.track_id.as_str(),
+            symbol = %request.instrument.symbol,
+            venue = %request.instrument.venue.as_str(),
+            "failed to reconcile unknown submit outcome; retaining submit ownership: {error}"
+        );
+    }
+
+    SessionEffectOutcome::Deferred {
+        until: poise_application::DeferredUntil::ExchangeState,
+    }
+}
+
+async fn defer_submit_until_exchange_state(
+    worker: &EffectWorker,
+    track_id: &str,
+    instrument: &poise_core::track::Instrument,
+    recovery: OutcomeUnknownRecovery,
+) -> SessionEffectOutcome {
+    if let Err(error) = worker
+        .recover_unknown_outcome(track_id, instrument, recovery)
+        .await
+    {
+        tracing::warn!(
+            track_id,
+            symbol = %instrument.symbol,
+            venue = %instrument.venue.as_str(),
+            "failed to reconcile unknown submit outcome; retaining submit ownership: {error}"
+        );
+    }
+    SessionEffectOutcome::Deferred {
+        until: poise_application::DeferredUntil::ExchangeState,
     }
 }
 

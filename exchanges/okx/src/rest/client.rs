@@ -323,7 +323,8 @@ impl OkxRestClient {
         .context("failed to serialize OKX place-order body")?;
         let ack = self
             .send_ack_request(Method::POST, "/api/v5/trade/order", body)
-            .await?;
+            .await
+            .map_err(OkxRestError::classify_submit_dispatch)?;
         ack_to_receipt(ack, OrderStatus::Submitting)
     }
 
@@ -682,6 +683,7 @@ fn encode_query(params: &[(&str, String)]) -> String {
 
 fn build_http_client(_base_url: &str) -> reqwest::Client {
     reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()
         .expect("failed to build OKX reqwest client")
@@ -930,6 +932,41 @@ mod tests {
                 &request.body,
                 "secret-key",
             ))
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_order_does_not_follow_temporary_redirect() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
+            MockResponse::redirect(307, "/redirected-submit"),
+            MockResponse::json(
+                200,
+                r#"{"code":"0","msg":"","data":[{"ordId":"123","clOrdId":"client-redirect","sCode":"0","sMsg":""}]}"#,
+            ),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        let result = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            OrderRequest {
+                instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
+                side: Side::Buy,
+                price: 64000.10,
+                quantity: 0.01,
+                client_order_id: "client-redirect".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await;
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].path, "/api/v5/trade/order");
+        assert_eq!(
+            result.unwrap_err().kind(),
+            poise_engine::ports::ExecutionPortErrorKind::Failed
         );
     }
 
@@ -1398,6 +1435,252 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execution_port_maps_submit_envelope_timeout_code_to_outcome_unknown() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
+            MockResponse::json(
+                200,
+                r#"{"code":"50004","msg":"Endpoint request timeout","data":[]}"#,
+            ),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            OrderRequest {
+                instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
+                side: Side::Buy,
+                price: 64000.10,
+                quantity: 0.01,
+                client_order_id: "client-envelope-timeout".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::SubmitOutcomeUnknown
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_port_maps_submit_item_timeout_code_to_outcome_unknown() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
+            MockResponse::json(
+                200,
+                r#"{"code":"1","msg":"All operations failed","data":[{"ordId":"","clOrdId":"client-item-timeout","sCode":"50004","sMsg":"Endpoint request timeout"}]}"#,
+            ),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            OrderRequest {
+                instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
+                side: Side::Buy,
+                price: 64000.10,
+                quantity: 0.01,
+                client_order_id: "client-item-timeout".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::SubmitOutcomeUnknown
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_port_keeps_submit_rate_limit_code_final() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
+            MockResponse::json(
+                200,
+                r#"{"code":"50011","msg":"Requests too frequent","data":[]}"#,
+            ),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            OrderRequest {
+                instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
+                side: Side::Buy,
+                price: 64000.10,
+                quantity: 0.01,
+                client_order_id: "client-rate-limit".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::RateLimited
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_port_maps_submit_http_500_to_outcome_unknown_in_both_deployments() {
+        for simulated_trading in [false, true] {
+            let server = MockHttpServer::spawn(vec![
+                MockResponse::json(200, linear_instrument_response()),
+                MockResponse::json(500, r#"{"error":"gateway failure"}"#),
+            ])
+            .await;
+            let client = test_client(&server, simulated_trading);
+
+            let error = poise_engine::ports::ExecutionPort::submit_order(
+                &client,
+                OrderRequest {
+                    instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
+                    side: Side::Buy,
+                    price: 64000.10,
+                    quantity: 0.01,
+                    client_order_id: "client-1".to_string(),
+                    reduce_only: false,
+                },
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(
+                error.kind(),
+                poise_engine::ports::ExecutionPortErrorKind::SubmitOutcomeUnknown
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_port_maps_malformed_submit_success_to_outcome_unknown() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
+            MockResponse::json(200, "{"),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            OrderRequest {
+                instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
+                side: Side::Buy,
+                price: 64000.10,
+                quantity: 0.01,
+                client_order_id: "client-1".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::SubmitOutcomeUnknown
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_port_keeps_metadata_failure_definitive_before_submit_dispatch() {
+        let server =
+            MockHttpServer::spawn(vec![MockResponse::json(500, r#"{"error":"meta down"}"#)]).await;
+        let client = test_client(&server, true);
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            OrderRequest {
+                instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
+                side: Side::Buy,
+                price: 64000.10,
+                quantity: 0.01,
+                client_order_id: "client-1".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_port_keeps_submit_connect_failure_definitive() {
+        let server =
+            MockHttpServer::spawn(vec![MockResponse::json(200, linear_instrument_response())])
+                .await;
+        let client = test_client(&server, true);
+        client
+            .get_or_fetch_instrument_metadata("BTC-USDT-SWAP")
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            OrderRequest {
+                instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
+                side: Side::Buy,
+                price: 64000.10,
+                quantity: 0.01,
+                client_order_id: "client-1".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_does_not_leak_cancel_only_outcome_kind() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
+            MockResponse::json(
+                200,
+                r#"{"code":"1","msg":"All operations failed","data":[{"ordId":"","clOrdId":"client-1","sCode":"51400","sMsg":"Order cancellation failed as the order does not exist"}]}"#,
+            ),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            OrderRequest {
+                instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
+                side: Side::Buy,
+                price: 64000.10,
+                quantity: 0.01,
+                client_order_id: "client-1".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::Failed
+        );
+    }
+
+    #[tokio::test]
     async fn submit_order_surfaces_ack_failure_when_envelope_reports_all_operations_failed() {
         let server = MockHttpServer::spawn(vec![
             MockResponse::json(200, linear_instrument_response()),
@@ -1488,6 +1771,7 @@ mod tests {
     struct MockResponse {
         status: u16,
         body: String,
+        location: Option<String>,
     }
 
     impl MockResponse {
@@ -1495,6 +1779,15 @@ mod tests {
             Self {
                 status,
                 body: body.to_string(),
+                location: None,
+            }
+        }
+
+        fn redirect(status: u16, location: &str) -> Self {
+            Self {
+                status,
+                body: String::new(),
+                location: Some(location.to_string()),
             }
         }
     }
@@ -1514,6 +1807,9 @@ mod tests {
 
             tokio::spawn(async move {
                 loop {
+                    if queued_responses.lock().unwrap().is_empty() {
+                        break;
+                    }
                     let Ok((mut socket, _)) = listener.accept().await else {
                         break;
                     };
@@ -1537,10 +1833,16 @@ mod tests {
 
                     let response = queued_responses.lock().unwrap().pop_front().unwrap();
                     let status_text = if response.status == 200 { "OK" } else { "ERR" };
+                    let location = response
+                        .location
+                        .as_deref()
+                        .map(|location| format!("Location: {location}\r\n"))
+                        .unwrap_or_default();
                     let raw = format!(
-                        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 {} {}\r\n{}Content-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
                         response.status,
                         status_text,
+                        location,
                         response.body.len(),
                         response.body
                     );

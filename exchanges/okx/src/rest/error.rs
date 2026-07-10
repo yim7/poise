@@ -1,5 +1,6 @@
 use std::fmt;
 
+use anyhow::Error;
 use reqwest::{Method, StatusCode};
 
 use poise_engine::ports::ExecutionPortErrorKind;
@@ -21,6 +22,9 @@ pub(crate) enum OkxRestError {
     Acknowledgement {
         order_id: String,
         code: String,
+        message: String,
+    },
+    SubmitOutcomeUnknown {
         message: String,
     },
 }
@@ -66,7 +70,34 @@ impl OkxRestError {
         }
     }
 
+    pub(crate) fn classify_submit_dispatch(error: Error) -> Error {
+        if let Some(rest_error) = error.downcast_ref::<Self>() {
+            match rest_error {
+                Self::SubmitOutcomeUnknown { .. } => return error,
+                Self::HttpStatus { status, .. }
+                    if *status == StatusCode::REQUEST_TIMEOUT || status.is_server_error() => {}
+                Self::Code { code, .. } | Self::Acknowledgement { code, .. } if code == "50004" => {
+                }
+                Self::HttpStatus { .. } | Self::Code { .. } | Self::Acknowledgement { .. } => {
+                    return error;
+                }
+            }
+        }
+        if let Some(request_error) = error.downcast_ref::<reqwest::Error>()
+            && (request_error.is_builder() || request_error.is_connect())
+        {
+            return error;
+        }
+        Self::SubmitOutcomeUnknown {
+            message: error.to_string(),
+        }
+        .into()
+    }
+
     pub(crate) fn execution_error_kind(&self) -> Option<ExecutionPortErrorKind> {
+        if matches!(self, Self::SubmitOutcomeUnknown { .. }) {
+            return Some(ExecutionPortErrorKind::SubmitOutcomeUnknown);
+        }
         if self.is_insufficient_margin() {
             return Some(ExecutionPortErrorKind::InsufficientMargin);
         }
@@ -80,6 +111,11 @@ impl OkxRestError {
             return Some(ExecutionPortErrorKind::CancelOutcomeUnknown);
         }
         None
+    }
+
+    pub(crate) fn submit_execution_error_kind(&self) -> Option<ExecutionPortErrorKind> {
+        self.execution_error_kind()
+            .filter(|kind| *kind != ExecutionPortErrorKind::CancelOutcomeUnknown)
     }
 
     fn is_insufficient_margin(&self) -> bool {
@@ -110,21 +146,25 @@ impl OkxRestError {
     fn status(&self) -> Option<StatusCode> {
         match self {
             Self::HttpStatus { status, .. } => Some(*status),
-            Self::Code { .. } | Self::Acknowledgement { .. } => None,
+            Self::Code { .. }
+            | Self::Acknowledgement { .. }
+            | Self::SubmitOutcomeUnknown { .. } => None,
         }
     }
 
     fn error_code(&self) -> Option<&str> {
         match self {
             Self::Code { code, .. } | Self::Acknowledgement { code, .. } => Some(code.as_str()),
-            Self::HttpStatus { .. } => None,
+            Self::HttpStatus { .. } | Self::SubmitOutcomeUnknown { .. } => None,
         }
     }
 
     fn message(&self) -> &str {
         match self {
             Self::HttpStatus { body, .. } => body,
-            Self::Code { message, .. } | Self::Acknowledgement { message, .. } => message,
+            Self::Code { message, .. }
+            | Self::Acknowledgement { message, .. }
+            | Self::SubmitOutcomeUnknown { message } => message,
         }
     }
 }
@@ -158,6 +198,9 @@ impl fmt::Display for OkxRestError {
                 f,
                 "OKX acknowledgement for order `{order_id}` failed with sCode {code}: {message}"
             ),
+            Self::SubmitOutcomeUnknown { message } => {
+                write!(f, "OKX submit outcome unknown: {message}")
+            }
         }
     }
 }

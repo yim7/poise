@@ -4,4 +4,4 @@ mod error;
 pub mod models;
 
 pub use client::BinanceRestClient;
-pub(crate) use error::BinanceRestError;
+pub(crate) use error::{BinanceRestError, BinanceSubmitOutcomeUnknown};

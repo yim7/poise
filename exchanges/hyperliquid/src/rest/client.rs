@@ -93,10 +93,7 @@ impl HyperliquidRestClient {
                 config.endpoints().rest_base_url().to_string(),
                 config.credentials()?,
                 Arc::new(|| chrono::Utc::now().timestamp_millis() as u64),
-                reqwest::Client::builder()
-                    .no_proxy()
-                    .build()
-                    .context("failed to build Hyperliquid HTTP client")?,
+                build_http_client()?,
                 client_order_ids,
             ),
         )
@@ -383,8 +380,13 @@ impl HyperliquidRestClient {
             grouping: "na".to_string(),
             builder: None,
         });
-        let response = self.post_exchange(&action).await?;
+        let body = self.exchange_request_body(&action)?;
+        let response = self
+            .post_json("/exchange", &body)
+            .await
+            .map_err(HyperliquidRestError::classify_submit_dispatch)?;
         order_receipt_from_response(response, &request.client_order_id)
+            .map_err(HyperliquidRestError::classify_submit_dispatch)
     }
 
     pub(crate) async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<OrderReceipt> {
@@ -565,6 +567,11 @@ impl HyperliquidRestClient {
     }
 
     async fn post_exchange(&self, action: &ExchangeAction) -> Result<serde_json::Value> {
+        let body = self.exchange_request_body(action)?;
+        self.post_json("/exchange", &body).await
+    }
+
+    fn exchange_request_body(&self, action: &ExchangeAction) -> Result<serde_json::Value> {
         let nonce = (self.timestamp_provider)();
         let connection_id = action_hash(action, nonce, self.credentials.vault_address())?;
         let signature = sign_l1_action(self.credentials.private_key(), self.chain, connection_id)?;
@@ -576,7 +583,7 @@ impl HyperliquidRestClient {
         if let Some(vault_address) = self.credentials.vault_address() {
             body["vaultAddress"] = json!(vault_address);
         }
-        self.post_json("/exchange", &body).await
+        Ok(body)
     }
 
     async fn post_json<T: DeserializeOwned>(
@@ -604,6 +611,14 @@ impl HyperliquidRestClient {
             anyhow!("failed to deserialize Hyperliquid response for {path}: {error}; body: {body}")
         })
     }
+}
+
+fn build_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .context("failed to build Hyperliquid HTTP client")
 }
 
 fn validate_recent_history_times(
@@ -870,7 +885,7 @@ mod tests {
     };
 
     use super::{
-        HyperliquidRestClient, PerpDexRef, ensure_recent_fill_history_complete,
+        HyperliquidRestClient, PerpDexRef, build_http_client, ensure_recent_fill_history_complete,
         next_recent_history_start, parse_perp_dex,
     };
     use crate::config::Credentials;
@@ -1928,6 +1943,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_order_does_not_follow_permanent_redirect() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"ETH","szDecimals":4},{"name":"BTC","szDecimals":5}]}"#,
+            ),
+            MockResponse::redirect(308, "/redirected-submit"),
+            MockResponse::json(
+                200,
+                r#"{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":67890}}]}}}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            build_http_client().unwrap(),
+        );
+
+        let result = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            PortOrderRequest {
+                instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
+                side: Side::Buy,
+                price: 2000.0,
+                quantity: 3.5,
+                client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await;
+
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].path, "/exchange");
+        assert_eq!(
+            result.unwrap_err().kind(),
+            poise_engine::ports::ExecutionPortErrorKind::Failed
+        );
+    }
+
+    #[tokio::test]
     async fn submit_order_trims_binary_float_noise_from_wire_decimals() {
         let server = MockHttpServer::spawn(vec![
             MockResponse::json(
@@ -2178,10 +2236,229 @@ mod tests {
         assert!(error.to_string().contains("tick size"));
     }
 
+    #[tokio::test]
+    async fn execution_port_maps_submit_http_500_to_outcome_unknown() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"ETH","szDecimals":4},{"name":"BTC","szDecimals":5}]}"#,
+            ),
+            MockResponse::json(500, r#"{"error":"gateway failure"}"#),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            PortOrderRequest {
+                instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
+                side: Side::Buy,
+                price: 2000.0,
+                quantity: 3.5,
+                client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::SubmitOutcomeUnknown
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_port_maps_malformed_submit_success_to_outcome_unknown() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"ETH","szDecimals":4},{"name":"BTC","szDecimals":5}]}"#,
+            ),
+            MockResponse::json(200, "{"),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            PortOrderRequest {
+                instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
+                side: Side::Buy,
+                price: 2000.0,
+                quantity: 3.5,
+                client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::SubmitOutcomeUnknown
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_port_maps_uninterpretable_submit_receipt_to_outcome_unknown() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"ETH","szDecimals":4},{"name":"BTC","szDecimals":5}]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"status":"ok","response":{"type":"order","data":{"statuses":[]}}}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            PortOrderRequest {
+                instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
+                side: Side::Buy,
+                price: 2000.0,
+                quantity: 3.5,
+                client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::SubmitOutcomeUnknown
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_port_keeps_explicit_exchange_rejection_final() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"{"universe":[{"name":"ETH","szDecimals":4},{"name":"BTC","szDecimals":5}]}"#,
+            ),
+            MockResponse::json(200, r#"{"status":"err","response":"invalid nonce"}"#),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            PortOrderRequest {
+                instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
+                side: Side::Buy,
+                price: 2000.0,
+                quantity: 3.5,
+                client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_port_keeps_metadata_failure_definitive_before_submit_dispatch() {
+        let server =
+            MockHttpServer::spawn(vec![MockResponse::json(500, r#"{"error":"meta down"}"#)]).await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            PortOrderRequest {
+                instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
+                side: Side::Buy,
+                price: 2000.0,
+                quantity: 3.5,
+                client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_port_keeps_submit_connect_failure_definitive() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"universe":[{"name":"ETH","szDecimals":4},{"name":"BTC","szDecimals":5}]}"#,
+        )])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_583_838),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+        client.asset_descriptor("BTC").await.unwrap();
+        tokio::task::yield_now().await;
+
+        let error = poise_engine::ports::ExecutionPort::submit_order(
+            &client,
+            PortOrderRequest {
+                instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
+                side: Side::Buy,
+                price: 2000.0,
+                quantity: 3.5,
+                client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
+                reduce_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            poise_engine::ports::ExecutionPortErrorKind::Failed
+        );
+    }
+
     #[derive(Debug, Clone)]
     struct MockResponse {
         status: u16,
         body: String,
+        location: Option<String>,
     }
 
     impl MockResponse {
@@ -2189,6 +2466,15 @@ mod tests {
             Self {
                 status,
                 body: body.to_string(),
+                location: None,
+            }
+        }
+
+        fn redirect(status: u16, location: &str) -> Self {
+            Self {
+                status,
+                body: String::new(),
+                location: Some(location.to_string()),
             }
         }
     }
@@ -2234,9 +2520,15 @@ mod tests {
 
                     let request = parse_request(&String::from_utf8_lossy(&buffer));
                     stored_requests.lock().await.push(request);
+                    let location = response
+                        .location
+                        .as_deref()
+                        .map(|location| format!("location: {location}\r\n"))
+                        .unwrap_or_default();
                     let reply = format!(
-                        "HTTP/1.1 {} OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        "HTTP/1.1 {} OK\r\n{}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                         response.status,
+                        location,
                         response.body.len(),
                         response.body
                     );

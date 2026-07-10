@@ -7,14 +7,14 @@ use tokio::sync::mpsc;
 use poise_core::track::Instrument;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
-    ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
-    MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position,
-    RecentTrackPnlRecords, UserDataEvent,
+    ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError,
+    ExecutionPortErrorKind, ExecutionResult, MarketDataPort, MarketDataTick, MetadataPort,
+    OrderReceipt, OrderRequest, Position, RecentTrackPnlRecords, UserDataEvent,
 };
 
 use crate::{
     Config,
-    rest::{BybitRestClient, BybitRestError},
+    rest::{BybitRestClient, BybitRestError, BybitSubmitOutcomeUnknown},
     ws::BybitWsClient,
 };
 
@@ -65,12 +65,20 @@ fn map_execution_error(error: anyhow::Error) -> ExecutionPortError {
     ExecutionPortError::from(error)
 }
 
+fn map_submit_execution_error(error: anyhow::Error) -> ExecutionPortError {
+    if error.downcast_ref::<BybitSubmitOutcomeUnknown>().is_some() {
+        return ExecutionPortError::new(ExecutionPortErrorKind::SubmitOutcomeUnknown, error);
+    }
+
+    map_execution_error(error)
+}
+
 #[async_trait]
 impl ExecutionPort for BybitRestClient {
     async fn submit_order(&self, req: OrderRequest) -> ExecutionResult<OrderReceipt> {
         BybitRestClient::submit_order(self, req)
             .await
-            .map_err(map_execution_error)
+            .map_err(map_submit_execution_error)
     }
 
     async fn cancel_order(
@@ -172,9 +180,41 @@ mod tests {
 
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
-    use poise_engine::ports::{OrderRequest, OrderStatus};
+    use poise_engine::ports::{ExecutionPortErrorKind, OrderRequest, OrderStatus};
 
     use super::*;
+
+    fn submit_request(client_order_id: &str) -> OrderRequest {
+        OrderRequest {
+            instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
+            side: Side::Buy,
+            price: 65_000.0,
+            quantity: 0.1,
+            client_order_id: client_order_id.to_string(),
+            reduce_only: false,
+        }
+    }
+
+    fn execution_for_server(server: &MockHttpServer) -> Arc<dyn ExecutionPort> {
+        let rest = Arc::new(
+            crate::rest::BybitRestClient::with_http_client_and_timestamp_provider(
+                server.base_url(),
+                "api-key",
+                "secret-key",
+                Arc::new(|| 1_700_000_000_000),
+                reqwest::Client::builder().no_proxy().build().unwrap(),
+            ),
+        );
+        let ws = Arc::new(BybitWsClient::with_test_params(
+            "ws://127.0.0.1:1",
+            "ws://127.0.0.1:1",
+            "api-key",
+            "secret-key",
+            Duration::from_millis(10),
+            Arc::new(|| 1_700_000_000_000),
+        ));
+        ports_from_clients(rest, ws).execution()
+    }
 
     #[tokio::test]
     async fn connected_exposes_all_required_ports() {
@@ -498,6 +538,86 @@ mod tests {
             requests[4].path,
             "/v5/order/realtime?category=linear&symbol=BTCUSDT&orderFilter=Order"
         );
+    }
+
+    #[tokio::test]
+    async fn submit_order_maps_server_error_to_unknown() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":10016,"retMsg":"server error","result":{}}"#,
+        )])
+        .await;
+
+        let error = execution_for_server(&server)
+            .submit_order(submit_request("client-server-error"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::SubmitOutcomeUnknown);
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn submit_order_maps_request_timeout_to_unknown() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":10000,"retMsg":"request timeout","result":{}}"#,
+        )])
+        .await;
+
+        let error = execution_for_server(&server)
+            .submit_order(submit_request("client-request-timeout"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::SubmitOutcomeUnknown);
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn submit_order_maps_malformed_success_response_to_unknown() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(200, "not-json")]).await;
+
+        let error = execution_for_server(&server)
+            .submit_order(submit_request("client-malformed-response"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::SubmitOutcomeUnknown);
+    }
+
+    #[tokio::test]
+    async fn submit_order_keeps_structured_rejection_final() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":110007,"retMsg":"available balance is insufficient","result":{}}"#,
+        )])
+        .await;
+
+        let error = execution_for_server(&server)
+            .submit_order(submit_request("client-margin"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::InsufficientMargin);
+    }
+
+    #[tokio::test]
+    async fn submit_order_keeps_connect_failure_final() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable_address = listener.local_addr().unwrap();
+        drop(listener);
+        let server = MockHttpServer {
+            base_url: format!("http://{unavailable_address}"),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        let error = execution_for_server(&server)
+            .submit_order(submit_request("client-connect-failure"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::Failed);
     }
 
     #[derive(Debug, Clone)]

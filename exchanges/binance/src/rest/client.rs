@@ -17,7 +17,7 @@ use poise_engine::ports::{
 };
 
 use super::auth::{encode_query, sign_query};
-use super::error::BinanceRestError;
+use super::error::{BinanceRestError, BinanceSubmitOutcomeUnknown};
 use super::models::{
     BinanceAccountSummaryInformation, BinanceErrorResponse, BinanceExchangeInfoResponse,
     BinanceLeverageChangeResponse, BinanceOpenOrder, BinanceOrderResponse, BinancePositionMode,
@@ -261,11 +261,14 @@ impl BinanceRestClient {
         if req.reduce_only {
             params.push(("reduceOnly", "true".to_string()));
         }
-        let response: BinanceOrderResponse = self
-            .send_request(Method::POST, "/fapi/v1/order", params, AuthMode::Signed)
-            .await?;
+        let response = self
+            .send_new_order_request_once(params)
+            .await
+            .map_err(classify_dispatched_submit_error)?;
 
-        response.try_into()
+        response
+            .try_into()
+            .map_err(BinanceSubmitOutcomeUnknown::wrap)
     }
 
     pub async fn cancel_order(&self, symbol: &str, order_id: &str) -> Result<OrderReceipt> {
@@ -319,6 +322,50 @@ impl BinanceRestClient {
             )
             .await?;
         Ok(())
+    }
+
+    async fn send_new_order_request_once(
+        &self,
+        params: Vec<(&str, String)>,
+    ) -> Result<BinanceOrderResponse> {
+        const PATH: &str = "/fapi/v1/order";
+
+        if self.should_refresh_time_sync_before_signed_request() {
+            let _ = self.sync_server_time_offset().await;
+        }
+
+        let mut request_params = params;
+        request_params.push(("timestamp", self.signed_timestamp_ms().to_string()));
+        request_params.push(("recvWindow", DEFAULT_RECV_WINDOW_MS.to_string()));
+
+        let query = encode_query(&request_params);
+        let signed_query = format!("{query}&signature={}", self.sign_query(&query));
+        let url = format!("{}{}?{}", self.base_url, PATH, signed_query);
+        let request = self
+            .http
+            .request(Method::POST, &url)
+            .header("X-MBX-APIKEY", &self.api_key);
+
+        let response = request
+            .send()
+            .await
+            .context("request POST /fapi/v1/order failed")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("failed to read response body for /fapi/v1/order")?;
+
+        if !status.is_success() {
+            return Err(BinanceRestError::new(Method::POST, PATH, status, body).into());
+        }
+
+        serde_json::from_str(&body).with_context(|| {
+            format!(
+                "failed to deserialize response for {PATH} with status {status}: {}",
+                body_preview(&body)
+            )
+        })
     }
 
     async fn send_request<T>(
@@ -485,8 +532,32 @@ impl BinanceRestClient {
     }
 }
 
+fn classify_dispatched_submit_error(error: anyhow::Error) -> anyhow::Error {
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<BinanceRestError>()
+            .is_some_and(|exchange_error| {
+                exchange_error.execution_error_kind().is_some()
+                    || !exchange_error.has_ambiguous_submit_status()
+            })
+    }) {
+        return error;
+    }
+
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|request_error| request_error.is_builder() || request_error.is_connect())
+    }) {
+        return error;
+    }
+
+    BinanceSubmitOutcomeUnknown::wrap(error)
+}
+
 fn build_http_client(base_url: &str) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(15));
     if should_bypass_proxy(base_url) {

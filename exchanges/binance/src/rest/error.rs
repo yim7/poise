@@ -6,6 +6,29 @@ use poise_engine::ports::ExecutionPortErrorKind;
 
 use super::models::BinanceErrorResponse;
 
+#[derive(Debug)]
+pub(crate) struct BinanceSubmitOutcomeUnknown {
+    source: anyhow::Error,
+}
+
+impl BinanceSubmitOutcomeUnknown {
+    pub(crate) fn wrap(source: anyhow::Error) -> anyhow::Error {
+        anyhow::Error::new(Self { source })
+    }
+}
+
+impl fmt::Display for BinanceSubmitOutcomeUnknown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Binance submit outcome is unknown: {}", self.source)
+    }
+}
+
+impl std::error::Error for BinanceSubmitOutcomeUnknown {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct BinanceRestError {
     method: Method,
@@ -68,6 +91,10 @@ impl BinanceRestError {
             return Some(ExecutionPortErrorKind::RateLimited);
         }
         None
+    }
+
+    pub(crate) fn has_ambiguous_submit_status(&self) -> bool {
+        self.status.is_server_error() || self.status == StatusCode::REQUEST_TIMEOUT
     }
 
     fn is_insufficient_margin(&self) -> bool {

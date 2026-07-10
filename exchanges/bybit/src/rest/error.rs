@@ -4,6 +4,29 @@ use reqwest::{Method, StatusCode};
 
 use poise_engine::ports::ExecutionPortErrorKind;
 
+#[derive(Debug)]
+pub(crate) struct BybitSubmitOutcomeUnknown {
+    source: anyhow::Error,
+}
+
+impl BybitSubmitOutcomeUnknown {
+    pub(crate) fn wrap(source: anyhow::Error) -> anyhow::Error {
+        anyhow::Error::new(Self { source })
+    }
+}
+
+impl fmt::Display for BybitSubmitOutcomeUnknown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Bybit submit outcome is unknown: {}", self.source)
+    }
+}
+
+impl std::error::Error for BybitSubmitOutcomeUnknown {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct BybitRestError {
     method: Method,
@@ -58,6 +81,13 @@ impl BybitRestError {
             return Some(ExecutionPortErrorKind::RateLimited);
         }
         None
+    }
+
+    pub(crate) fn has_ambiguous_submit_status(&self) -> bool {
+        matches!(
+            self.status,
+            Some(status) if status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT
+        ) || matches!(self.ret_code, Some(10000 | 10016))
     }
 
     fn is_insufficient_margin(&self) -> bool {

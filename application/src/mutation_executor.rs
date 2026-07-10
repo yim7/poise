@@ -630,6 +630,53 @@ impl MutationExecutor {
         Ok(result)
     }
 
+    pub(crate) async fn record_submit_outcome_unknown(
+        &self,
+        id: &str,
+        effect_id: &str,
+        client_order_id: &str,
+        initial_snapshot_confirmed: bool,
+    ) -> Result<bool> {
+        let _mutation_guard = self.lock_track_mutation(id).await;
+        let frame_facts = {
+            let manager = self.manager.read().await;
+            manager
+                .mutation_frame(id)
+                .map(|frame| {
+                    (
+                        frame.recovery_anomaly_active(),
+                        frame.has_recorded_order_fact_for_client_order_id(client_order_id),
+                    )
+                })
+                .ok_or_else(|| anyhow!("track `{id}` not found"))
+        };
+        let effective_initial_snapshot_confirmed = initial_snapshot_confirmed
+            && frame_facts
+                .as_ref()
+                .is_ok_and(|(recovery_anomaly_active, _)| !recovery_anomaly_active);
+        if !self
+            .session_effect_queue
+            .record_submit_outcome_unknown(effect_id, effective_initial_snapshot_confirmed)
+        {
+            return Ok(false);
+        }
+
+        let (recovery_anomaly_active, recorded_order_fact) = frame_facts?;
+        if recovery_anomaly_active || !recorded_order_fact {
+            return Ok(true);
+        }
+
+        let resolved_effect_ids = self
+            .session_effect_queue
+            .resolve_submit_awaiting_resolution_by_client_order_id(
+                &TrackId::new(id),
+                client_order_id,
+            );
+        self.record_effects_succeeded(id, &resolved_effect_ids)
+            .await?;
+        Ok(true)
+    }
+
     pub async fn record_track_pnl(&self, id: &str, record: TrackPnlRecord) -> Result<bool> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let track_id = TrackId::new(id);
@@ -733,6 +780,7 @@ impl MutationExecutor {
             transition,
             next_frame,
             follow_up_plan,
+            submit_awaiting_initial_snapshot_effect_ids,
             submit_awaiting_resolution_effect_ids,
             exchange_state_wake_token,
         ) = {
@@ -796,6 +844,7 @@ impl MutationExecutor {
                             transition,
                             next_frame,
                             follow_up_plan,
+                            queue_context.submit_awaiting_initial_snapshot_effect_ids,
                             queue_context.submit_awaiting_resolution_effect_ids,
                             queue_context.exchange_state_wake_token,
                         ))
@@ -825,7 +874,25 @@ impl MutationExecutor {
         self.handle_follow_up_queue_actions(id, &follow_up_actions)
             .await?;
 
-        let resolved_submit_effect_ids = if next_frame.recovery_anomaly_active() {
+        let mut resolved_initial_snapshot_effect_ids = Vec::new();
+        if !next_frame.recovery_anomaly_active() {
+            resolved_initial_snapshot_effect_ids = self
+                .session_effect_queue
+                .resolve_submit_initial_snapshot_effects_with_recorded_order_fact(
+                    &token.track_id,
+                    &submit_awaiting_initial_snapshot_effect_ids,
+                    |client_order_id| {
+                        next_frame.has_recorded_order_fact_for_client_order_id(client_order_id)
+                    },
+                );
+            self.session_effect_queue
+                .promote_submit_unknown_after_initial_snapshot(
+                    &token.track_id,
+                    &submit_awaiting_initial_snapshot_effect_ids,
+                );
+        }
+
+        let mut resolved_submit_effect_ids = if next_frame.recovery_anomaly_active() {
             Vec::new()
         } else {
             self.session_effect_queue
@@ -834,6 +901,7 @@ impl MutationExecutor {
                     &submit_awaiting_resolution_effect_ids,
                 )
         };
+        resolved_submit_effect_ids.append(&mut resolved_initial_snapshot_effect_ids);
         self.record_effects_succeeded(id, &resolved_submit_effect_ids)
             .await?;
 

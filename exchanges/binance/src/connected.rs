@@ -7,14 +7,14 @@ use tokio::sync::mpsc;
 use poise_core::track::Instrument;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
-    ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
-    MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position,
-    RecentTrackPnlRecords, UserDataEvent,
+    ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError,
+    ExecutionPortErrorKind, ExecutionResult, MarketDataPort, MarketDataTick, MetadataPort,
+    OrderReceipt, OrderRequest, Position, RecentTrackPnlRecords, UserDataEvent,
 };
 
 use crate::{
     Config,
-    rest::{BinanceRestClient, BinanceRestError},
+    rest::{BinanceRestClient, BinanceRestError, BinanceSubmitOutcomeUnknown},
     ws::BinanceWsClient,
 };
 
@@ -65,6 +65,25 @@ fn map_execution_error(error: anyhow::Error) -> ExecutionPortError {
     ExecutionPortError::from(error)
 }
 
+fn map_submit_execution_error(error: anyhow::Error) -> ExecutionPortError {
+    if error
+        .downcast_ref::<BinanceSubmitOutcomeUnknown>()
+        .is_some()
+    {
+        return ExecutionPortError::new(ExecutionPortErrorKind::SubmitOutcomeUnknown, error);
+    }
+
+    if let Some(kind) = error
+        .downcast_ref::<BinanceRestError>()
+        .and_then(BinanceRestError::execution_error_kind)
+        .filter(|kind| *kind != ExecutionPortErrorKind::CancelOutcomeUnknown)
+    {
+        return ExecutionPortError::new(kind, error);
+    }
+
+    ExecutionPortError::from(error)
+}
+
 struct BinanceAccount {
     rest: Arc<BinanceRestClient>,
     ws: Arc<BinanceWsClient>,
@@ -82,7 +101,7 @@ impl ExecutionPort for BinanceRestClient {
     async fn submit_order(&self, req: OrderRequest) -> ExecutionResult<OrderReceipt> {
         BinanceRestClient::new_order(self, &req)
             .await
-            .map_err(map_execution_error)
+            .map_err(map_submit_execution_error)
     }
 
     async fn cancel_order(
@@ -298,6 +317,17 @@ mod tests {
             ws_base_url,
         ));
         ports_from_clients(rest, ws)
+    }
+
+    fn submit_request(client_order_id: &str) -> OrderRequest {
+        OrderRequest {
+            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
+            side: Side::Buy,
+            price: 65_000.0,
+            quantity: 0.1,
+            client_order_id: client_order_id.to_string(),
+            reduce_only: false,
+        }
     }
 
     #[test]
@@ -518,6 +548,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_order_maps_server_error_to_unknown_without_retrying() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            500,
+            r#"{"code":-1000,"msg":"internal error"}"#,
+        )])
+        .await;
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
+
+        let error = execution
+            .submit_order(submit_request("client-server-error"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::SubmitOutcomeUnknown);
+        assert_eq!(
+            server.requests().await.len(),
+            1,
+            "one submit dispatch must produce at most one POST"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_order_does_not_follow_temporary_redirect() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::redirect(307, "/redirected-submit"),
+            MockResponse::json(
+                200,
+                r#"{"orderId":12345,"clientOrderId":"client-redirect","executedQty":"0","status":"NEW"}"#,
+            ),
+        ])
+        .await;
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
+
+        let result = execution
+            .submit_order(submit_request("client-redirect"))
+            .await;
+
+        assert_eq!(
+            server.requests().await.len(),
+            1,
+            "one submit dispatch must not repeat POST through an HTTP redirect"
+        );
+        assert_eq!(
+            result.unwrap_err().kind(),
+            ExecutionPortErrorKind::Failed,
+            "an unfollowed redirect is a definitive HTTP response"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_order_maps_request_timeout_to_unknown_without_retrying() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            408,
+            r#"{"code":-1000,"msg":"request timeout"}"#,
+        )])
+        .await;
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
+
+        let error = execution
+            .submit_order(submit_request("client-request-timeout"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::SubmitOutcomeUnknown);
+        assert_eq!(server.requests().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn submit_order_keeps_rate_limit_final_without_retrying() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            429,
+            r#"{"code":-1003,"msg":"Too many requests"}"#,
+        )])
+        .await;
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
+
+        let error = execution
+            .submit_order(submit_request("client-rate-limited"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::RateLimited);
+        assert_eq!(server.requests().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn submit_order_maps_malformed_success_response_to_unknown() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(200, "not-json")]).await;
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
+
+        let error = execution
+            .submit_order(submit_request("client-malformed-response"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::SubmitOutcomeUnknown);
+    }
+
+    #[tokio::test]
+    async fn submit_order_does_not_leak_cancel_only_error_kind() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            400,
+            r#"{"code":-2011,"msg":"Unknown order sent."}"#,
+        )])
+        .await;
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
+
+        let error = execution
+            .submit_order(submit_request("client-cancel-code"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::Failed);
+    }
+
+    #[tokio::test]
+    async fn submit_order_keeps_connect_failure_final() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable_address = listener.local_addr().unwrap();
+        drop(listener);
+        let execution = build_test_connected_with_urls(
+            format!("http://{unavailable_address}"),
+            "ws://127.0.0.1:1",
+        )
+        .execution();
+
+        let error = execution
+            .submit_order(submit_request("client-connect-failure"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::Failed);
+    }
+
+    #[tokio::test]
     async fn get_position_calls_rest_and_converts_payload() {
         let server = MockHttpServer::spawn(vec![MockResponse::json(
             200,
@@ -636,6 +807,7 @@ mod tests {
     struct MockResponse {
         status: u16,
         body: String,
+        headers: Vec<(String, String)>,
     }
 
     impl MockResponse {
@@ -643,6 +815,15 @@ mod tests {
             Self {
                 status,
                 body: body.to_string(),
+                headers: Vec::new(),
+            }
+        }
+
+        fn redirect(status: u16, location: &str) -> Self {
+            Self {
+                status,
+                body: String::new(),
+                headers: vec![("location".to_string(), location.to_string())],
             }
         }
     }
@@ -717,10 +898,16 @@ mod tests {
                         headers,
                     });
 
+                    let response_headers = response
+                        .headers
+                        .iter()
+                        .map(|(name, value)| format!("{name}: {value}\r\n"))
+                        .collect::<String>();
                     let reply = format!(
-                        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        "HTTP/1.1 {} {}\r\n{}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                         response.status,
                         reason_phrase(response.status),
+                        response_headers,
                         response.body.len(),
                         response.body
                     );
@@ -748,6 +935,7 @@ mod tests {
     fn reason_phrase(status: u16) -> &'static str {
         match status {
             200 => "OK",
+            307 => "Temporary Redirect",
             _ => "Unknown",
         }
     }

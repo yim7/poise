@@ -103,6 +103,16 @@ impl TrackMutationFrame {
         self.executor_state.recovery_anomaly.is_some()
     }
 
+    pub fn has_recorded_order_fact_for_client_order_id(&self, client_order_id: &str) -> bool {
+        self.executor_state.bindings.iter().any(|binding| {
+            binding.request.client_order_id == client_order_id && binding.order_id.is_some()
+        }) || self
+            .executor_state
+            .recent_terminal_orders
+            .iter()
+            .any(|order| order.client_order_id == client_order_id)
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_recovery_anomaly(&mut self, recovery_anomaly: Option<RecoveryAnomaly>) {
         self.executor_state.recovery_anomaly = recovery_anomaly;

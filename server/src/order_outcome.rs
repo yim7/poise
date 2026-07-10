@@ -56,6 +56,17 @@ pub fn classify_cancel_error(error: &ExecutionPortError) -> OutcomeClass {
     OutcomeClass::FinalFailure
 }
 
+pub fn classify_submit_error(error: &ExecutionPortError) -> OutcomeClass {
+    if error.kind() == ExecutionPortErrorKind::SubmitOutcomeUnknown {
+        return OutcomeClass::OutcomeUnknown(OutcomeUnknownRecovery {
+            freshness_reason: ExchangeFreshnessReason::SubmitOutcomeUnknown,
+            reconcile_reason: ReconcileReason::SyncAfterSubmitOutcomeUnknown,
+        });
+    }
+
+    OutcomeClass::FinalFailure
+}
+
 pub fn cancel_writeback_outcome_unknown() -> OutcomeUnknownRecovery {
     OutcomeUnknownRecovery {
         freshness_reason: ExchangeFreshnessReason::CancelOutcomeUnknown,
@@ -118,6 +129,29 @@ mod tests {
         let error = ExecutionPortError::failed("unknown order sent");
 
         assert_eq!(classify_cancel_error(&error), OutcomeClass::FinalFailure);
+    }
+
+    #[test]
+    fn classify_submit_outcome_unknown_port_error_as_unknown() {
+        let error = ExecutionPortError::new(
+            ExecutionPortErrorKind::SubmitOutcomeUnknown,
+            anyhow!("submit response body timed out"),
+        );
+
+        assert_eq!(
+            classify_submit_error(&error),
+            OutcomeClass::OutcomeUnknown(OutcomeUnknownRecovery {
+                freshness_reason: ExchangeFreshnessReason::SubmitOutcomeUnknown,
+                reconcile_reason: ReconcileReason::SyncAfterSubmitOutcomeUnknown,
+            })
+        );
+    }
+
+    #[test]
+    fn classify_timeout_message_without_submit_outcome_unknown_kind_as_final_failure() {
+        let error = ExecutionPortError::failed("submit request timed out");
+
+        assert_eq!(classify_submit_error(&error), OutcomeClass::FinalFailure);
     }
 
     #[test]

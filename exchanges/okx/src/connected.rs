@@ -77,12 +77,23 @@ fn map_execution_error(error: anyhow::Error) -> ExecutionPortError {
     ExecutionPortError::from(error)
 }
 
+fn map_submit_execution_error(error: anyhow::Error) -> ExecutionPortError {
+    if let Some(kind) = error
+        .downcast_ref::<OkxRestError>()
+        .and_then(OkxRestError::submit_execution_error_kind)
+    {
+        return ExecutionPortError::new(kind, error);
+    }
+
+    ExecutionPortError::from(error)
+}
+
 #[async_trait]
 impl ExecutionPort for OkxRestClient {
     async fn submit_order(&self, req: OrderRequest) -> ExecutionResult<OrderReceipt> {
         OkxRestClient::submit_order(self, req)
             .await
-            .map_err(map_execution_error)
+            .map_err(map_submit_execution_error)
     }
 
     async fn cancel_order(

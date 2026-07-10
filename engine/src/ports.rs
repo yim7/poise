@@ -17,6 +17,7 @@ use poise_core::track::Instrument;
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionPortErrorKind {
     Failed,
+    SubmitOutcomeUnknown,
     CancelOutcomeUnknown,
     InsufficientMargin,
     InvalidPriceIncrement,
@@ -27,6 +28,7 @@ impl fmt::Display for ExecutionPortErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Failed => write!(f, "execution failed"),
+            Self::SubmitOutcomeUnknown => write!(f, "submit outcome unknown"),
             Self::CancelOutcomeUnknown => write!(f, "cancel outcome unknown"),
             Self::InsufficientMargin => write!(f, "insufficient margin"),
             Self::InvalidPriceIncrement => write!(f, "invalid price increment"),
@@ -403,6 +405,22 @@ mod tests {
 
         assert_eq!(source.to_string(), "Unknown order sent.");
         assert_eq!(error.kind(), ExecutionPortErrorKind::CancelOutcomeUnknown);
+    }
+
+    #[test]
+    fn submit_outcome_unknown_preserves_source_error() {
+        let error = ExecutionPortError::new(
+            ExecutionPortErrorKind::SubmitOutcomeUnknown,
+            anyhow::anyhow!("response body ended before the submit result was known"),
+        );
+
+        let source = std::error::Error::source(&error).expect("source error should be preserved");
+
+        assert_eq!(
+            source.to_string(),
+            "response body ended before the submit result was known"
+        );
+        assert_eq!(error.kind(), ExecutionPortErrorKind::SubmitOutcomeUnknown);
     }
 
     #[test]

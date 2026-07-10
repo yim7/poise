@@ -202,6 +202,7 @@ pub(crate) struct SessionExchangeStateRevision(u64);
 pub(crate) struct ExchangeSnapshotQueueContext {
     pub(crate) follow_up_plan: CancelFollowUpResolutionPlan,
     pub(crate) pending_submit_hints: Vec<PendingSubmitHint>,
+    pub(crate) submit_awaiting_initial_snapshot_effect_ids: Vec<String>,
     pub(crate) submit_awaiting_resolution_effect_ids: Vec<String>,
     pub(crate) exchange_state_wake_token: Option<ExchangeStateWakeToken>,
 }
@@ -294,6 +295,7 @@ struct QueuedEffect {
 enum QueuedEffectState {
     Queued,
     InFlight,
+    SubmitAwaitingInitialSnapshot,
     SubmitAwaitingResolution,
     AwaitingFollowUp,
 }
@@ -371,6 +373,18 @@ impl SessionEffectQueue {
             })
             .map(|item| item.effect.effect_id.clone())
             .collect();
+        let submit_awaiting_initial_snapshot_effect_ids = inner
+            .tracks
+            .get(track_id)
+            .into_iter()
+            .flat_map(|track| track.batches.iter())
+            .flat_map(|batch| batch.effects.iter())
+            .filter(|item| {
+                item.dispatch_state == QueuedEffectState::SubmitAwaitingInitialSnapshot
+                    && matches!(item.effect.effect, TrackEffect::SubmitOrder { .. })
+            })
+            .map(|item| item.effect.effect_id.clone())
+            .collect();
         let exchange_state_wake_token = inner.tracks.get(track_id).and_then(|track| {
             if track.paused_until != Some(DeferredUntil::ExchangeState) {
                 return None;
@@ -384,6 +398,7 @@ impl SessionEffectQueue {
         Some(apply(ExchangeSnapshotQueueContext {
             follow_up_plan,
             pending_submit_hints,
+            submit_awaiting_initial_snapshot_effect_ids,
             submit_awaiting_resolution_effect_ids,
             exchange_state_wake_token,
         }))
@@ -493,7 +508,38 @@ impl SessionEffectQueue {
             QueuedEffectState::InFlight => {
                 effect.dispatch_state = QueuedEffectState::SubmitAwaitingResolution;
             }
+            QueuedEffectState::SubmitAwaitingInitialSnapshot => {
+                effect.dispatch_state = QueuedEffectState::SubmitAwaitingResolution;
+            }
             QueuedEffectState::SubmitAwaitingResolution => return true,
+            QueuedEffectState::Queued | QueuedEffectState::AwaitingFollowUp => return false,
+        }
+        inner.mark_track_ready(&track_id);
+        inner.advance_exchange_state_revision(&track_id);
+        true
+    }
+
+    pub(crate) fn record_submit_outcome_unknown(
+        &self,
+        effect_id: &str,
+        initial_snapshot_confirmed: bool,
+    ) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let Some((track_id, effect)) = inner.effect_mut(effect_id) else {
+            return false;
+        };
+        if !matches!(effect.effect.effect, TrackEffect::SubmitOrder { .. }) {
+            return false;
+        }
+        let target_state = if initial_snapshot_confirmed {
+            QueuedEffectState::SubmitAwaitingResolution
+        } else {
+            QueuedEffectState::SubmitAwaitingInitialSnapshot
+        };
+        match effect.dispatch_state {
+            QueuedEffectState::InFlight => effect.dispatch_state = target_state,
+            QueuedEffectState::SubmitAwaitingInitialSnapshot
+            | QueuedEffectState::SubmitAwaitingResolution => return true,
             QueuedEffectState::Queued | QueuedEffectState::AwaitingFollowUp => return false,
         }
         inner.mark_track_ready(&track_id);
@@ -553,7 +599,11 @@ impl SessionEffectQueue {
                     track.set_paused_until(Some(until));
                     if let Some(effect) = track.front_effect_mut()
                         && effect.effect.effect_id == effect_id
-                        && effect.dispatch_state != QueuedEffectState::SubmitAwaitingResolution
+                        && !matches!(
+                            effect.dispatch_state,
+                            QueuedEffectState::SubmitAwaitingInitialSnapshot
+                                | QueuedEffectState::SubmitAwaitingResolution
+                        )
                     {
                         effect.dispatch_state = QueuedEffectState::Queued;
                     }
@@ -704,11 +754,32 @@ impl SessionEffectQueue {
             .filter(|item| {
                 matches!(
                     item.dispatch_state,
-                    QueuedEffectState::InFlight | QueuedEffectState::SubmitAwaitingResolution
+                    QueuedEffectState::InFlight
+                        | QueuedEffectState::SubmitAwaitingInitialSnapshot
+                        | QueuedEffectState::SubmitAwaitingResolution
                 ) && matches!(item.effect.effect, TrackEffect::SubmitOrder { .. })
             })
             .map(|item| item.effect.effect_id.clone())
             .collect()
+    }
+
+    pub fn has_unresolved_submit_outcome_for_track(&self, track_id: &TrackId) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .tracks
+            .get(track_id)
+            .into_iter()
+            .flat_map(|track| track.batches.iter())
+            .flat_map(|batch| batch.effects.iter())
+            .any(|item| {
+                matches!(
+                    item.dispatch_state,
+                    QueuedEffectState::InFlight
+                        | QueuedEffectState::SubmitAwaitingInitialSnapshot
+                        | QueuedEffectState::SubmitAwaitingResolution
+                ) && matches!(item.effect.effect, TrackEffect::SubmitOrder { .. })
+            })
     }
 
     #[cfg(test)]
@@ -747,18 +818,65 @@ impl SessionEffectQueue {
         track_id: &TrackId,
         client_order_id: &str,
     ) -> Vec<String> {
-        self.resolve_submit_awaiting_resolution_where(track_id, |effect| {
-            matches!(
-                &effect.effect,
-                TrackEffect::SubmitOrder { request, .. }
-                    if request.client_order_id == client_order_id
-            )
-        })
+        self.resolve_submit_where(
+            track_id,
+            |state| {
+                matches!(
+                    state,
+                    QueuedEffectState::SubmitAwaitingInitialSnapshot
+                        | QueuedEffectState::SubmitAwaitingResolution
+                )
+            },
+            |effect| {
+                matches!(
+                    &effect.effect,
+                    TrackEffect::SubmitOrder { request, .. }
+                        if request.client_order_id == client_order_id
+                )
+            },
+        )
+    }
+
+    pub(crate) fn resolve_submit_initial_snapshot_effects_with_recorded_order_fact(
+        &self,
+        track_id: &TrackId,
+        eligible_effect_ids: &[String],
+        mut has_recorded_order_fact: impl FnMut(&str) -> bool,
+    ) -> Vec<String> {
+        if eligible_effect_ids.is_empty() {
+            return Vec::new();
+        }
+        let eligible_effect_ids = eligible_effect_ids.iter().collect::<HashSet<_>>();
+        self.resolve_submit_where(
+            track_id,
+            |state| state == QueuedEffectState::SubmitAwaitingInitialSnapshot,
+            |effect| {
+                eligible_effect_ids.contains(&effect.effect_id)
+                    && matches!(
+                        &effect.effect,
+                        TrackEffect::SubmitOrder { request, .. }
+                            if has_recorded_order_fact(&request.client_order_id)
+                    )
+            },
+        )
     }
 
     fn resolve_submit_awaiting_resolution_where(
         &self,
         track_id: &TrackId,
+        matches_effect: impl FnMut(&SessionTrackEffect) -> bool,
+    ) -> Vec<String> {
+        self.resolve_submit_where(
+            track_id,
+            |state| state == QueuedEffectState::SubmitAwaitingResolution,
+            matches_effect,
+        )
+    }
+
+    fn resolve_submit_where(
+        &self,
+        track_id: &TrackId,
+        mut matches_state: impl FnMut(QueuedEffectState) -> bool,
         mut matches_effect: impl FnMut(&SessionTrackEffect) -> bool,
     ) -> Vec<String> {
         let mut inner = self.inner.lock().unwrap();
@@ -771,7 +889,7 @@ impl SessionEffectQueue {
             for batch in &mut track.batches {
                 let mut retained = VecDeque::new();
                 while let Some(item) = batch.effects.pop_front() {
-                    if item.dispatch_state == QueuedEffectState::SubmitAwaitingResolution
+                    if matches_state(item.dispatch_state)
                         && matches!(item.effect.effect, TrackEffect::SubmitOrder { .. })
                         && matches_effect(&item.effect)
                     {
@@ -795,6 +913,37 @@ impl SessionEffectQueue {
         inner.mark_track_ready(track_id);
         inner.advance_exchange_state_revision(track_id);
         resolved
+    }
+
+    pub(crate) fn promote_submit_unknown_after_initial_snapshot(
+        &self,
+        track_id: &TrackId,
+        eligible_effect_ids: &[String],
+    ) -> bool {
+        if eligible_effect_ids.is_empty() {
+            return false;
+        }
+        let eligible_effect_ids = eligible_effect_ids.iter().collect::<HashSet<_>>();
+        let mut inner = self.inner.lock().unwrap();
+        let mut changed = false;
+        if let Some(track) = inner.tracks.get_mut(track_id) {
+            for item in track
+                .batches
+                .iter_mut()
+                .flat_map(|batch| batch.effects.iter_mut())
+            {
+                if item.dispatch_state == QueuedEffectState::SubmitAwaitingInitialSnapshot
+                    && eligible_effect_ids.contains(&item.effect.effect_id)
+                {
+                    item.dispatch_state = QueuedEffectState::SubmitAwaitingResolution;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            inner.advance_exchange_state_revision(track_id);
+        }
+        changed
     }
 
     #[cfg(test)]
@@ -1155,7 +1304,9 @@ impl SessionEffectQueueInner {
 impl QueuedEffect {
     fn pending_submit_hint(&self) -> Option<PendingSubmitHint> {
         let phase = match self.dispatch_state {
-            QueuedEffectState::InFlight => PendingSubmitPhase::DispatchInFlight,
+            QueuedEffectState::InFlight | QueuedEffectState::SubmitAwaitingInitialSnapshot => {
+                PendingSubmitPhase::DispatchInFlight
+            }
             QueuedEffectState::SubmitAwaitingResolution => {
                 PendingSubmitPhase::AwaitingExchangeState
             }
@@ -1221,6 +1372,7 @@ impl From<QueuedEffectState> for SessionPendingEffectState {
         match value {
             QueuedEffectState::Queued => Self::Queued,
             QueuedEffectState::InFlight => Self::InFlight,
+            QueuedEffectState::SubmitAwaitingInitialSnapshot => Self::SubmitAwaitingResolution,
             QueuedEffectState::SubmitAwaitingResolution => Self::SubmitAwaitingResolution,
             QueuedEffectState::AwaitingFollowUp => Self::AwaitingFollowUp,
         }
@@ -1476,6 +1628,67 @@ mod tests {
             queue.active_submit_hints_for_track(&track_id)[0].phase,
             PendingSubmitPhase::AwaitingExchangeState,
             "the next complete exchange snapshot may now resolve the submit"
+        );
+    }
+
+    #[test]
+    fn unknown_submit_without_initial_snapshot_needs_promotion_before_absence_resolution() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = enqueue_effects(&queue, "btc-core", &[submit_effect("client-1")]);
+
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        assert!(queue.record_submit_outcome_unknown(&enqueued[0], false));
+        queue.record_outcome(
+            &enqueued[0],
+            SessionEffectOutcome::Deferred {
+                until: DeferredUntil::ExchangeState,
+            },
+        );
+        assert_eq!(
+            queue.active_submit_hints_for_track(&track_id)[0].phase,
+            PendingSubmitPhase::DispatchInFlight,
+            "failed immediate sync must keep absence resolution disabled"
+        );
+        assert!(
+            queue
+                .resolve_submit_awaiting_resolution_effects(
+                    &track_id,
+                    std::slice::from_ref(&enqueued[0]),
+                )
+                .is_empty(),
+            "absence cannot resolve an unknown submit before one successful snapshot"
+        );
+
+        assert!(queue.promote_submit_unknown_after_initial_snapshot(
+            &track_id,
+            std::slice::from_ref(&enqueued[0]),
+        ));
+        assert_eq!(
+            queue.active_submit_hints_for_track(&track_id)[0].phase,
+            PendingSubmitPhase::AwaitingExchangeState
+        );
+        assert_eq!(
+            queue.resolve_submit_awaiting_resolution_effects(
+                &track_id,
+                std::slice::from_ref(&enqueued[0]),
+            ),
+            vec![enqueued[0].clone()]
+        );
+    }
+
+    #[test]
+    fn matching_order_fact_can_resolve_submit_before_initial_snapshot() {
+        let queue = SessionEffectQueue::default();
+        let track_id = TrackId::new("btc-core");
+        let enqueued = enqueue_effects(&queue, "btc-core", &[submit_effect("client-1")]);
+
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        assert!(queue.record_submit_outcome_unknown(&enqueued[0], false));
+
+        assert_eq!(
+            queue.resolve_submit_awaiting_resolution_by_client_order_id(&track_id, "client-1"),
+            vec![enqueued[0].clone()]
         );
     }
 
