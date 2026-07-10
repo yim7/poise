@@ -1,6 +1,6 @@
 # Poise
 
-`Poise` 是一个面向 Binance / Bybit USDⓈ-M Futures、Hyperliquid Perps 和 OKX SWAP 永续合约的探索型策略运行项目。当前主线把每个 track 定义为价格带内的目标占用函数，并通过库存执行器持续把实际仓位拉回目标仓位。
+`Poise` 是一个面向 Binance / Bybit USDⓈ-M Futures、Hyperliquid Perps 和 OKX SWAP 永续合约的探索型策略运行项目。每个 track 由价格曲线产生 `policy_target`，经风险约束形成 `risk_approved_target`，新增风险再由 gate 释放 `acquisition_frontier`，最终得到 executor 追随的 `execution_target`。
 
 ## 项目状态
 
@@ -17,8 +17,8 @@ Poise 是个人策略运行实验项目。源码公开主要为了透明记录�
 
 ## 工作区结构
 
-- [core/](core/)：领域模型、策略参数、风险规则、领域事件。
-- [engine/](engine/)：track 运行时、状态机、目标计算、执行规划和恢复。
+- [core/](core/)：领域模型、策略参数、风险规则、领域事件和 curve-immediate benchmark。
+- [engine/](engine/)：track 运行时、状态机、目标计算、决策回放、执行规划和恢复。
 - [application/](application/)：用例服务、读模型、持久化 port 和定义索引。
 - [storage/](storage/)：SQLite 持久化适配。
 - [protocol/](protocol/)：`server` 与 `tui` 共享的 HTTP / WebSocket DTO。
@@ -28,6 +28,7 @@ Poise 是个人策略运行实验项目。源码公开主要为了透明记录�
 - [exchanges/okx/](exchanges/okx/)：OKX SWAP 永续合约适配。
 - [server/](server/)：配置、装配、HTTP / WebSocket、runtime task 和交易所接入。
 - [tui/](tui/)：本地值守和操作界面。
+- [tools/track-tuning-workbench/](tools/track-tuning-workbench/)：由 Rust decision evaluator 驱动的 Tauri 调参工具，TypeScript 只负责交互和展示。
 
 ## 当前约束
 
@@ -53,6 +54,8 @@ cp configs/demo.toml "$HOME/poise-instances/testnet/config.toml"
 把实例目录里的 `[exchange]` 改成当前实例要连接的交易所和凭证。一个实例只能选择一个交易所。
 
 ### 2. 选择交易所
+
+四个 venue 都有配置分支和 adapter，但这不表示它们都能进入当前交易 runtime。启动前必须具备 recent PNL 恢复能力：Hyperliquid 和 OKX 返回可审计、可回补的 recent PNL records；Binance 和 Bybit 当前明确返回 `Unsupported`，正常启动会在启动交易 runtime task 前失败。完整能力矩阵见 [系统构建说明](docs/system-overview.md#持久化与读模型)。
 
 Binance USDⓈ-M Futures：
 
@@ -212,7 +215,7 @@ stale_release_minutes = 60.0
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `initial_ratio` | `0.5` | 从零启动或重新进入同方向 backlog 时，先允许建立目标暴露的一部分；如果目标不小于 `min_rebalance_units`，至少释放一个最小调仓单位。取值范围是 `(0, 1]`。 |
+| `initial_ratio` | `0.5` | 同一运行 session 内普通 acquisition episode 的初始 allowance 比例。目标小于 `min_rebalance_units` 时 allowance 等于目标，否则取 `目标 × 比例` 与最小调仓单位的较大值；初始 frontier 还不能低于已有同向仓位。只有超出当前仓位的部分算新增 release，因此新增量可以为 `0`。取值范围是 `(0, 1]`。 |
 | `advantage_steps` | `2.0` | 等待曲线目标相对锚点多走多少个 `min_rebalance_units` 后释放 backlog。 |
 | `min_release_steps` | `1.0` | 每次释放 backlog 的最小单位倍数。 |
 | `max_release_steps` | `4.0` | 每次释放 backlog 的最大单位倍数，必须大于等于 `min_release_steps`。 |
@@ -220,6 +223,8 @@ stale_release_minutes = 60.0
 | `stale_release_minutes` | `60.0` | stale 等待达到这个分钟数后，即使价格还没走到优势阈值，也按同一套释放数量规则释放一批 backlog。设为 `0` 表示关闭时间释放。 |
 
 注意 `risk_acquisition` 必须写成 `[tracks.risk_acquisition]` 子表，不要写成 `risk_acquisition = { ... }` 行内对象。多个 `[[tracks]]` 时，每个 track 都可以有自己的 `[tracks.risk_acquisition]`，子表归属于它前面最近的那个 `[[tracks]]`。
+
+进程启动会建立 fresh-session。第一笔有效行情只允许保持或降低当前风险，不使用 `initial_ratio` 授予新增风险；stale 等待也从这笔行情开始计时，停机期间的离线时间不计入等待。`initial_ratio` 仍用于同一 session 内随后出现的新 acquisition episode。
 
 `[account_monitor]` 可选配置：
 
@@ -253,7 +258,7 @@ cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet" --dr
 cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet"
 ```
 
-启动后服务端会读取配置、初始化 SQLite、连接交易所、执行 startup-only 杠杆设置，加载可跨进程恢复的控制状态和 PNL 明细，并以交易所当前仓位、订单和新行情建立新的运行 session。旧 effect journal 只作为诊断历史，不会被恢复或重放。随后服务端启动 HTTP / WebSocket 控制面。
+启动后服务端会读取配置、初始化 SQLite、连接交易所、执行 startup-only 杠杆设置并加载可跨进程恢复的控制状态和 PNL 明细。启动交易 runtime task 前会验证 recent PNL 恢复能力，再以交易所当前仓位、订单和新行情建立 fresh-session。旧 effect journal 只作为诊断历史，不会被恢复或重放。随后服务端启动 HTTP / WebSocket 控制面。
 
 ### 5. 启动 TUI
 
@@ -281,6 +286,7 @@ curl http://127.0.0.1:8000/readiness
 curl http://127.0.0.1:8000/account
 curl http://127.0.0.1:8000/tracks
 curl http://127.0.0.1:8000/tracks/btc-core
+curl http://127.0.0.1:8000/debug/tracks/btc-core/recent-fills-audit
 ```
 
 当前公开入口：
@@ -292,6 +298,7 @@ curl http://127.0.0.1:8000/tracks/btc-core
 - `GET /tracks/:id`
 - `POST /tracks/:id/commands`
 - `GET /debug/tracks/:id/diagnostics`
+- `GET /debug/tracks/:id/recent-fills-audit`
 - `GET /ws`
 
 协议 DTO 以 [protocol/src/lib.rs](protocol/src/lib.rs) 和序列化测试为准，不再维护单独协议文档。
@@ -354,4 +361,9 @@ cargo test -p poise-application
 cargo test -p poise-hyperliquid
 cargo test -p poise-server
 cargo test -p poise-tui
+cargo test -p poise-track-tuning-workbench
+(cd tools/track-tuning-workbench && pnpm test)
+(cd tools/track-tuning-workbench && pnpm build)
 ```
+
+Workbench 把 core 的 curve-immediate benchmark 与 engine 的 delayed decision replay 并列展示。前者在曲线目标变化达到 `min_rebalance_units` 后按简化 taker 假设立即跟到目标，是理论基准，不是完整策略、决策或撮合回放。
