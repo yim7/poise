@@ -4,7 +4,7 @@
 
 本文是当前已确认的实现任务清单，不是长期架构事实源。长期架构和运行语义仍以 [system-overview.md](system-overview.md) 为准。
 
-当前状态：执行中。当前 task 是 0.1 修复跨零新增风险计算。
+当前状态：执行中。当前 task 是 0.2 收紧配置数值与默认值契约。
 
 本文的生命周期：
 
@@ -143,8 +143,8 @@ Task 清单：
 
 | Task | 状态 | 验收摘要 | Commit |
 | --- | --- | --- | --- |
-| 0.1 修复跨零新增风险计算 | in_progress | 反方向目标只把平仓后的新方向仓位计为新增风险 | — |
-| 0.2 收紧配置数值与默认值契约 | pending | Rust、server、Workbench 对非法值和默认值结论一致 | — |
+| 0.1 修复跨零新增风险计算 | completed | 反方向目标只把平仓后的新方向仓位计为新增风险 | 8c10ece |
+| 0.2 收紧配置数值与默认值契约 | in_progress | Rust、server、Workbench 对非法值和默认值结论一致 | — |
 | 0.3 建立 track identity guard | pending | track_id 不能把旧控制或 PNL 重新解释成另一 instrument | — |
 | 0.4 消除 PNL backfill 空成功并补齐当前实用 venue | pending | Available(empty)、Unsupported、transient error 明确分离 | — |
 | 0.5 修复 REST 旧快照覆盖 WS 新事实 | pending | observation revision 改变时旧 REST 快照不能应用 | — |
