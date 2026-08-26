@@ -270,6 +270,7 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
             let envelope = serde_json::from_str::<AccountUpdateEnvelope>(payload)
                 .with_context(|| format!("failed to parse {event_type} payload"))?;
             let event_time = parse_user_event_time(&event_type, envelope.event_time)?;
+            let transaction_time = parse_user_event_time(&event_type, envelope.transaction_time)?;
             let account = envelope.account;
             if account.reason.as_deref() == Some("FUNDING_FEE") {
                 let Some(symbol) = account
@@ -294,15 +295,15 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                 }
 
                 return Ok(UserStreamMessage::Events(vec![UserDataEvent {
-                    event_time,
+                    event_time: transaction_time,
                     payload: UserDataPayload::TrackPnl(TrackPnlRecord::funding(
                         Instrument::new(Venue::Binance, symbol.to_string()),
-                        event_time,
+                        transaction_time,
                         "binance:funding_fee".into(),
                         Some(format!(
                             "binance:funding_fee:{}:{}",
                             symbol.to_lowercase(),
-                            event_time.timestamp_millis()
+                            transaction_time.timestamp_millis()
                         )),
                         balance_change,
                         quote_asset,
@@ -487,6 +488,7 @@ mod tests {
         let payload = r#"{
             "e": "ACCOUNT_UPDATE",
             "E": 1700000000000,
+            "T": 1699999999000,
             "a": {
                 "m": "FUNDING_FEE",
                 "B": [{
@@ -507,17 +509,36 @@ mod tests {
         assert_eq!(
             events,
             UserStreamMessage::Events(vec![UserDataEvent {
-                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                event_time: Utc.timestamp_millis_opt(1_699_999_999_000).unwrap(),
                 payload: UserDataPayload::TrackPnl(TrackPnlRecord::funding(
                     Instrument::new(Venue::Binance, "BTCUSDT"),
-                    Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                    Utc.timestamp_millis_opt(1_699_999_999_000).unwrap(),
                     "binance:funding_fee".into(),
-                    Some("binance:funding_fee:btcusdt:1700000000000".into()),
+                    Some("binance:funding_fee:btcusdt:1699999999000".into()),
                     -1.5,
                     "USDT",
                 )),
             }])
         );
+
+        let backfilled = crate::mapper::track_pnl_record_from_funding(
+            crate::rest::models::BinanceIncomeRecord {
+                symbol: "BTCUSDT".into(),
+                income_type: "FUNDING_FEE".into(),
+                income: "-1.5".into(),
+                asset: "USDT".into(),
+                time: 1_699_999_999_000,
+            },
+        )
+        .unwrap();
+        let UserStreamMessage::Events(events) = events else {
+            panic!("funding account update must emit an event");
+        };
+        let UserDataPayload::TrackPnl(streamed) = &events[0].payload else {
+            panic!("funding account update must emit a PNL record");
+        };
+        assert_eq!(streamed.source_key, backfilled.source_key);
+        assert_eq!(streamed.occurred_at, backfilled.occurred_at);
     }
 
     #[test]
@@ -626,6 +647,7 @@ mod tests {
         let payload = r#"{
             "e": "ACCOUNT_UPDATE",
             "E": 1700000000000,
+            "T": 1700000000000,
             "a": {
                 "P": [{
                     "s": "BTCUSDT",
@@ -765,7 +787,7 @@ mod tests {
             second_ws
                 .send(
                     Message::Text(
-                        r#"{"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"P":[{"s":"BTCUSDT","pa":"0.015","ep":"64200.0","up":"12.3"}]}}"#
+                        r#"{"e":"ACCOUNT_UPDATE","E":1700000000000,"T":1700000000000,"a":{"P":[{"s":"BTCUSDT","pa":"0.015","ep":"64200.0","up":"12.3"}]}}"#
                             .to_string()
                     ),
                 )
@@ -834,7 +856,7 @@ mod tests {
             second_ws
                 .send(
                     Message::Text(
-                        r#"{"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"P":[{"s":"BTCUSDT","pa":"0.015","ep":"64200.0","up":"12.3"}]}}"#
+                        r#"{"e":"ACCOUNT_UPDATE","E":1700000000000,"T":1700000000000,"a":{"P":[{"s":"BTCUSDT","pa":"0.015","ep":"64200.0","up":"12.3"}]}}"#
                             .to_string()
                     ),
                 )
@@ -902,7 +924,7 @@ mod tests {
             websocket
                 .send(
                     Message::Text(
-                        r#"{"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"P":[{"s":"BTCUSDT","pa":"0.015","ep":"64200.0","up":"12.3"}]}}"#
+                        r#"{"e":"ACCOUNT_UPDATE","E":1700000000000,"T":1700000000000,"a":{"P":[{"s":"BTCUSDT","pa":"0.015","ep":"64200.0","up":"12.3"}]}}"#
                             .to_string(),
                     ),
                 )

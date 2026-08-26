@@ -150,9 +150,12 @@ impl AccountPort for BinanceAccount {
 
     async fn get_recent_track_pnl_records(
         &self,
-        _instrument: &Instrument,
+        instrument: &Instrument,
     ) -> Result<RecentTrackPnlRecords> {
-        Ok(RecentTrackPnlRecords::Unsupported)
+        self.rest
+            .get_recent_track_pnl_records(&instrument.symbol)
+            .await
+            .map(RecentTrackPnlRecords::Available)
     }
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
@@ -342,8 +345,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recent_track_pnl_records_are_explicitly_unsupported() {
-        let connected = build_test_connected();
+    async fn recent_track_pnl_records_include_trades_and_funding() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"[
+                    {"commission":"0.07819010","commissionAsset":"USDT","id":698759,"orderId":25851813,"price":"7819.01","qty":"0.002","marginAsset":"USDT","realizedPnl":"-0.91539999","side":"SELL","symbol":"BTCUSDT","time":1569514978020},
+                    {"commission":"0.00001000","commissionAsset":"BNB","id":698760,"orderId":25851814,"price":"7820.00","qty":"0.003","marginAsset":"USDT","realizedPnl":"1.25000000","side":"BUY","symbol":"BTCUSDT","time":1569514979020}
+                ]"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"[{"symbol":"BTCUSDT","incomeType":"FUNDING_FEE","income":"-0.37500000","asset":"USDT","time":1570608000000,"tranId":9689322392,"tradeId":""}]"#,
+            ),
+        ])
+        .await;
+        let connected = build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:19080");
 
         let outcome = connected
             .account()
@@ -351,7 +368,26 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(outcome, RecentTrackPnlRecords::Unsupported);
+        let RecentTrackPnlRecords::Available(records) = outcome else {
+            panic!("Binance recent PNL must be available");
+        };
+        assert_eq!(records.len(), 3);
+        assert_eq!(
+            records[0].source_key.as_deref(),
+            Some("binance:order_trade_update:btcusdt:698759")
+        );
+        assert_eq!(records[0].trading_fee, 0.07819010);
+        assert_eq!(
+            records[1].source_key.as_deref(),
+            Some("binance:order_trade_update:btcusdt:698760")
+        );
+        assert_eq!(records[1].realized_pnl, 1.25);
+        assert_eq!(records[1].trading_fee, 0.0);
+        assert_eq!(
+            records[2].source_key.as_deref(),
+            Some("binance:funding_fee:btcusdt:1570608000000")
+        );
+        assert_eq!(records[2].funding_fee, -0.375);
     }
 
     #[test]
@@ -548,7 +584,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_order_maps_server_error_to_unknown_without_retrying() {
+    async fn submit_order_keeps_definitive_internal_error_final_without_retrying() {
         let server = MockHttpServer::spawn(vec![MockResponse::json(
             500,
             r#"{"code":-1000,"msg":"internal error"}"#,
@@ -562,12 +598,92 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(error.kind(), ExecutionPortErrorKind::SubmitOutcomeUnknown);
+        assert_eq!(error.kind(), ExecutionPortErrorKind::Failed);
         assert_eq!(
             server.requests().await.len(),
             1,
             "one submit dispatch must produce at most one POST"
         );
+    }
+
+    #[tokio::test]
+    async fn submit_order_keeps_service_unavailable_final_without_retrying() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            503,
+            r#"{"code":-1000,"msg":"Service Unavailable."}"#,
+        )])
+        .await;
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
+
+        let error = execution
+            .submit_order(submit_request("client-service-unavailable"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::Failed);
+        assert_eq!(
+            server.requests().await.len(),
+            1,
+            "one submit dispatch must produce at most one POST"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_order_keeps_documented_internal_error_final_without_retrying() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            503,
+            r#"{"code":-1000,"msg":"Internal error; unable to process your request. Please try again."}"#,
+        )])
+        .await;
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
+
+        let error = execution
+            .submit_order(submit_request("client-documented-internal-error"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::Failed);
+        assert_eq!(server.requests().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn submit_order_maps_documented_timeout_503_to_unknown_without_retrying() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            503,
+            r#"{"code":-1000,"msg":"Unknown error, please check your request or try again later."}"#,
+        )])
+        .await;
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
+
+        let error = execution
+            .submit_order(submit_request("client-documented-timeout"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::SubmitOutcomeUnknown);
+        assert_eq!(server.requests().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn submit_order_keeps_system_overload_final_as_rate_limited() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            503,
+            r#"{"code":-1008,"msg":"Request throttled by system-level protection. Reduce-only/close-position orders are exempt. Please try again."}"#,
+        )])
+        .await;
+        let execution =
+            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").execution();
+
+        let error = execution
+            .submit_order(submit_request("client-system-overload"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ExecutionPortErrorKind::RateLimited);
+        assert_eq!(server.requests().await.len(), 1);
     }
 
     #[tokio::test]

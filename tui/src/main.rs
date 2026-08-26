@@ -542,11 +542,10 @@ async fn sync_projected_state(client: &ApiClient, app: &mut App) -> Result<()> {
 mod tests {
     use std::collections::HashMap;
     use std::fs;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::path::PathBuf;
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Child, ChildStdin, Command, Stdio};
     use std::sync::{Arc, Mutex as StdMutex, OnceLock};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
     use axum::extract::{Path, Query, State};
@@ -932,7 +931,11 @@ mod tests {
         while socket.recv().await.is_some() {}
     }
 
-    async fn exchange_ws_handler(Path(stream): Path<String>, ws: WebSocketUpgrade) -> Response {
+    async fn exchange_price_ws_handler(
+        Query(params): Query<HashMap<String, String>>,
+        ws: WebSocketUpgrade,
+    ) -> Response {
+        let stream = params.get("streams").cloned().unwrap_or_default();
         ws.on_upgrade(move |socket| handle_exchange_socket(socket, stream))
     }
 
@@ -954,9 +957,18 @@ mod tests {
         };
 
         for price in prices {
-            let payload = format!(
-                r#"{{"e":"markPriceUpdate","E":1700000000000,"s":"{symbol}","p":"{price}","i":"{price}"}}"#
-            );
+            let payload = if stream.ends_with("@bookTicker") {
+                let mid = price.parse::<f64>().unwrap();
+                format!(
+                    r#"{{"e":"bookTicker","E":1700000000000,"s":"{symbol}","b":"{:.2}","a":"{:.2}"}}"#,
+                    mid - 0.1,
+                    mid + 0.1
+                )
+            } else {
+                format!(
+                    r#"{{"e":"markPriceUpdate","E":1700000000000,"s":"{symbol}","p":"{price}","i":"{price}"}}"#
+                )
+            };
             if socket.send(AxumMessage::Text(payload)).await.is_err() {
                 break;
             }
@@ -976,6 +988,12 @@ mod tests {
     async fn server_time() -> Json<serde_json::Value> {
         Json(serde_json::json!({
             "serverTime": 1_700_000_000_000_i64
+        }))
+    }
+
+    async fn position_mode() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "dualSidePosition": false
         }))
     }
 
@@ -1042,6 +1060,19 @@ mod tests {
                 "leverage": leverage
             }
         ]))
+    }
+
+    async fn set_leverage(
+        Query(params): Query<HashMap<String, String>>,
+    ) -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "symbol": params.get("symbol").cloned().unwrap_or_default(),
+            "leverage": params
+                .get("leverage")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(1),
+            "maxNotionalValue": "1000000"
+        }))
     }
 
     async fn open_orders() -> Json<serde_json::Value> {
@@ -1872,14 +1903,20 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
-            .route("/ws/:stream", get(exchange_ws_handler))
+            .route("/public/stream", get(exchange_price_ws_handler))
+            .route("/market/stream", get(exchange_price_ws_handler))
+            .route("/private/ws", get(silent_ws_handler))
             .route("/fapi/v1/time", get(server_time))
+            .route("/fapi/v1/positionSide/dual", get(position_mode))
             .route("/fapi/v1/exchangeInfo", get(exchange_info))
             .route("/fapi/v1/symbolConfig", get(symbol_config))
+            .route("/fapi/v1/leverage", post(set_leverage))
             .route("/fapi/v2/account", get(account_information))
             .route("/fapi/v3/account", get(account_information))
             .route("/fapi/v2/positionRisk", get(position_risk))
             .route("/fapi/v1/openOrders", get(open_orders))
+            .route("/fapi/v1/userTrades", get(open_orders))
+            .route("/fapi/v1/income", get(open_orders))
             .route("/fapi/v1/order", post(create_order).delete(cancel_order))
             .route(
                 "/fapi/v1/allOpenOrders",
@@ -1996,84 +2033,135 @@ mod tests {
         ensure_real_server_test_binaries().tui
     }
 
-    struct TmuxSession {
-        name: String,
+    struct TerminalSession {
+        child: Child,
+        stdin: Option<ChildStdin>,
+        output: Arc<StdMutex<String>>,
+        reader: Option<std::thread::JoinHandle<()>>,
     }
 
-    impl TmuxSession {
-        fn start(command: &str) -> Self {
-            let name = format!(
-                "poise-tui-{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            );
-            let status = Command::new("tmux")
-                .args([
-                    "new-session",
-                    "-d",
-                    "-s",
-                    &name,
-                    "-x",
-                    "120",
-                    "-y",
-                    "40",
-                    command,
-                ])
-                .status()
+    impl TerminalSession {
+        fn start(base_url: &str, tui_binary: &std::path::Path) -> Self {
+            let mut command = Command::new("script");
+            #[cfg(target_os = "macos")]
+            command.args([
+                "-q",
+                "/dev/null",
+                "/bin/sh",
+                "-c",
+                "stty cols 120 rows 40; exec \"$POISE_TUI_BINARY\"",
+            ]);
+            #[cfg(target_os = "linux")]
+            command.args([
+                "-q",
+                "-c",
+                "stty cols 120 rows 40; exec \"$POISE_TUI_BINARY\"",
+                "/dev/null",
+            ]);
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            panic!("real TUI binary E2E supports macOS and Linux only");
+
+            let mut child = command
+                .env("POISE_BASE_URL", base_url)
+                .env("POISE_TUI_BINARY", tui_binary)
+                .env("TERM", "xterm-256color")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
                 .unwrap();
-            assert!(status.success());
-            Self { name }
+            let stdin = child.stdin.take().unwrap();
+            let mut stdout = child.stdout.take().unwrap();
+            let output = Arc::new(StdMutex::new(String::new()));
+            let reader_output = Arc::clone(&output);
+            let reader = std::thread::spawn(move || {
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let Ok(read) = stdout.read(&mut buffer) else {
+                        break;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    reader_output
+                        .lock()
+                        .unwrap()
+                        .push_str(&String::from_utf8_lossy(&buffer[..read]));
+                }
+            });
+
+            Self {
+                child,
+                stdin: Some(stdin),
+                output,
+                reader: Some(reader),
+            }
         }
 
-        fn capture_pane(&self) -> String {
-            let output = Command::new("tmux")
-                .args(["capture-pane", "-p", "-t", &self.name])
-                .output()
-                .unwrap();
-            assert!(output.status.success());
-            String::from_utf8(output.stdout).unwrap()
+        fn capture_output(&self) -> String {
+            self.output.lock().unwrap().clone()
         }
 
-        fn send_keys(&self, keys: &[&str]) {
-            let status = Command::new("tmux")
-                .arg("send-keys")
-                .arg("-t")
-                .arg(&self.name)
-                .args(keys)
-                .status()
-                .unwrap();
-            assert!(status.success());
+        fn send_keys(&mut self, keys: &[&str]) {
+            let stdin = self.stdin.as_mut().unwrap();
+            for key in keys {
+                if *key == "Enter" {
+                    stdin.write_all(b"\r").unwrap();
+                } else {
+                    stdin.write_all(key.as_bytes()).unwrap();
+                }
+            }
+            stdin.flush().unwrap();
         }
 
-        fn is_alive(&self) -> bool {
-            Command::new("tmux")
-                .args(["has-session", "-t", &self.name])
-                .output()
-                .unwrap()
-                .status
-                .success()
+        fn is_alive(&mut self) -> bool {
+            self.child.try_wait().unwrap().is_none()
         }
     }
 
-    async fn wait_for_pane_text(session: &TmuxSession, needle: &str) -> String {
+    async fn wait_for_terminal_text(session: &TerminalSession, needle: &str) -> String {
         for _ in 0..40 {
-            let pane = session.capture_pane();
-            if pane.contains(needle) {
-                return pane;
+            let output = session.capture_output();
+            if output.contains(needle) {
+                return output;
             }
             sleep(Duration::from_millis(100)).await;
         }
 
-        session.capture_pane()
+        session.capture_output()
     }
 
-    impl Drop for TmuxSession {
+    fn strip_terminal_control_sequences(input: &str) -> String {
+        let mut output = String::with_capacity(input.len());
+        let mut chars = input.chars().peekable();
+        while let Some(character) = chars.next() {
+            if character == '\u{1b}' {
+                if chars.next_if_eq(&'[').is_some() {
+                    for control in chars.by_ref() {
+                        if ('@'..='~').contains(&control) {
+                            break;
+                        }
+                    }
+                } else {
+                    let _ = chars.next();
+                }
+                continue;
+            }
+            if !character.is_control() || character == '\n' {
+                output.push(character);
+            }
+        }
+        output
+    }
+
+    impl Drop for TerminalSession {
         fn drop(&mut self) {
-            let _ = Command::new("tmux")
-                .args(["kill-session", "-t", &self.name])
-                .output();
+            self.stdin.take();
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
         }
     }
 
@@ -2128,14 +2216,19 @@ mod tests {
         panic!("detail `{id}` never received market price");
     }
 
-    fn e2e_server_config(bind_address: std::net::SocketAddr, include_eth_track: bool) -> String {
+    fn e2e_server_config(
+        bind_address: std::net::SocketAddr,
+        include_eth_track: bool,
+        rest_base_url: &str,
+        ws_base_url: &str,
+    ) -> String {
         let mut config = format!(
             r#"
 bind_address = "{bind_address}"
 
 [exchange]
 venue = "binance"
-deployment = "testnet"
+deployment = {{ custom = {{ rest_base_url = "{rest_base_url}", ws_root_base_url = "{ws_base_url}" }} }}
 api_key = "demo-key"
 api_secret = "demo-secret"
 
@@ -2147,6 +2240,8 @@ upper_price = 110.0
 long_exposure_units = 8.0
 short_exposure_units = 8.0
 notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 1200.0
 "#
         );
 
@@ -2162,6 +2257,8 @@ upper_price = 2600.0
 long_exposure_units = 5.0
 short_exposure_units = 4.0
 notional_per_unit = 2000.0
+daily_loss_limit = 300.0
+total_loss_limit = 1200.0
 shape_family = "inertial"
 out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }, recover = { reentry_confirm = { bps = 500 } } } }
 "#,
@@ -2181,13 +2278,20 @@ out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }
         let bind_address = bind_listener.local_addr().unwrap();
         drop(bind_listener);
         let config_path = temp_dir.path().join("config.toml");
-        fs::write(&config_path, e2e_server_config(bind_address, true)).unwrap();
+        fs::write(
+            &config_path,
+            e2e_server_config(
+                bind_address,
+                true,
+                &exchange.rest_base_url,
+                &exchange.ws_base_url,
+            ),
+        )
+        .unwrap();
 
         let mut server = Command::new(server_binary)
             .arg("--instance-dir")
             .arg(temp_dir.path())
-            .env("POISE_TEST_BINANCE_REST_BASE_URL", &exchange.rest_base_url)
-            .env("POISE_TEST_BINANCE_WS_BASE_URL", &exchange.ws_base_url)
             .current_dir(temp_dir.path())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2250,6 +2354,18 @@ out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }
                 .strategy_price
                 .is_some()
         );
+        let detail = app.current_track.as_ref().unwrap();
+        let list_item = app
+            .tracks
+            .iter()
+            .find(|track| track.id == detail.identity.id)
+            .unwrap();
+        assert_eq!(list_item.decision, detail.decision);
+        assert!(detail.decision.revision.is_some());
+        assert!(detail.decision.policy_target.is_some());
+        assert!(detail.decision.risk_approved_target.is_some());
+        assert!(detail.decision.acquisition_frontier.is_some());
+        assert!(detail.decision.execution_target.is_some());
 
         let _ = server.kill();
         let _ = server.wait();
@@ -2265,13 +2381,20 @@ out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }
         let bind_address = bind_listener.local_addr().unwrap();
         drop(bind_listener);
         let config_path = temp_dir.path().join("config.toml");
-        fs::write(&config_path, e2e_server_config(bind_address, false)).unwrap();
+        fs::write(
+            &config_path,
+            e2e_server_config(
+                bind_address,
+                false,
+                &exchange.rest_base_url,
+                &exchange.ws_base_url,
+            ),
+        )
+        .unwrap();
 
         let mut server = Command::new(server_binary)
             .arg("--instance-dir")
             .arg(temp_dir.path())
-            .env("POISE_TEST_BINANCE_REST_BASE_URL", &exchange.rest_base_url)
-            .env("POISE_TEST_BINANCE_WS_BASE_URL", &exchange.ws_base_url)
             .env("HTTP_PROXY", "http://127.0.0.1:9")
             .env("HTTPS_PROXY", "http://127.0.0.1:9")
             .env("ALL_PROXY", "http://127.0.0.1:9")
@@ -2301,13 +2424,20 @@ out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }
         let bind_address = bind_listener.local_addr().unwrap();
         drop(bind_listener);
         let config_path = temp_dir.path().join("config.toml");
-        fs::write(&config_path, e2e_server_config(bind_address, true)).unwrap();
+        fs::write(
+            &config_path,
+            e2e_server_config(
+                bind_address,
+                true,
+                &exchange.rest_base_url,
+                &exchange.ws_base_url,
+            ),
+        )
+        .unwrap();
 
         let mut server = Command::new(server_binary)
             .arg("--instance-dir")
             .arg(temp_dir.path())
-            .env("POISE_TEST_BINANCE_REST_BASE_URL", &exchange.rest_base_url)
-            .env("POISE_TEST_BINANCE_WS_BASE_URL", &exchange.ws_base_url)
             .current_dir(temp_dir.path())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2316,30 +2446,41 @@ out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }
 
         let base_url = format!("http://{bind_address}");
         wait_for_http_ready(&base_url, &mut server).await;
-        let session = TmuxSession::start(&format!(
-            "env POISE_BASE_URL={base_url} {}",
-            tui_binary.display()
-        ));
+        let mut session = TerminalSession::start(&base_url, &tui_binary);
 
-        let dashboard = wait_for_pane_text(&session, "BTCUSDT").await;
+        let dashboard = wait_for_terminal_text(&session, "BTCUSDT").await;
         assert!(dashboard.contains("BTCUSDT"), "dashboard:\n{dashboard}");
         assert!(dashboard.contains("ETHUSDT"), "dashboard:\n{dashboard}");
 
         session.send_keys(&["Enter"]);
-        let btc_view = wait_for_pane_text(&session, "Track").await;
+        let btc_view = wait_for_terminal_text(&session, "targets:").await;
+        let btc_text = strip_terminal_control_sequences(&btc_view);
         assert!(btc_view.contains("Track"), "btc view:\n{btc_view}");
         assert!(btc_view.contains("Market"), "btc view:\n{btc_view}");
         assert!(btc_view.contains("BTCUSDT"), "btc view:\n{btc_view}");
+        let revision = btc_text
+            .split("decisionr")
+            .nth(1)
+            .and_then(|value| value.chars().next());
+        assert!(
+            revision.is_some_and(|value| value.is_ascii_digit()),
+            "btc view:\n{btc_view}"
+        );
+        assert!(btc_text.contains("|reason"), "btc view:\n{btc_view}");
+        assert!(btc_text.contains("targets:policy"), "btc view:\n{btc_view}");
+        assert!(btc_text.contains("|approved"), "btc view:\n{btc_view}");
+        assert!(btc_text.contains("|frontier"), "btc view:\n{btc_view}");
+        assert!(btc_text.contains("|execution"), "btc view:\n{btc_view}");
 
         session.send_keys(&["]"]);
-        let eth_view = wait_for_pane_text(&session, "ETHUSDT").await;
+        let eth_view = wait_for_terminal_text(&session, "out of band flatten").await;
         assert!(eth_view.contains("ETHUSDT"), "eth view:\n{eth_view}");
         assert!(
             eth_view.contains("out of band flatten"),
             "eth view:\n{eth_view}"
         );
 
-        let event_view = wait_for_pane_text(&session, "Activity").await;
+        let event_view = wait_for_terminal_text(&session, "Activity").await;
         assert!(event_view.contains("Activity"), "event view:\n{event_view}");
 
         session.send_keys(&["q"]);
@@ -2350,7 +2491,7 @@ out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }
             sleep(Duration::from_millis(100)).await;
         }
 
-        assert!(!session.is_alive(), "tmux session still alive after q");
+        assert!(!session.is_alive(), "terminal session still alive after q");
 
         let _ = server.kill();
         let _ = server.wait();
@@ -2386,11 +2527,18 @@ out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }
 
     #[test]
     fn slow_e2e_server_config_examples_use_service_level_exchange_boundary() {
-        let source = include_str!("main.rs");
+        let config = e2e_server_config(
+            "127.0.0.1:0".parse().unwrap(),
+            true,
+            "http://127.0.0.1:18080",
+            "ws://127.0.0.1:18080",
+        );
 
-        assert!(source.contains("[exchange]\nvenue = \"binance\"\ndeployment = \"testnet\""));
-        assert!(!source.contains("track_id = \"btc-core\"\nvenue = \"binance\""));
-        assert!(!source.contains("track_id = \"eth-core\"\nvenue = \"binance\""));
-        assert!(!source.contains("environment = \"test\""));
+        assert!(config.contains(
+            "[exchange]\nvenue = \"binance\"\ndeployment = { custom = { rest_base_url ="
+        ));
+        assert!(!config.contains("track_id = \"btc-core\"\nvenue = \"binance\""));
+        assert!(!config.contains("track_id = \"eth-core\"\nvenue = \"binance\""));
+        assert!(!config.contains("environment = \"test\""));
     }
 }

@@ -56,6 +56,8 @@ pub(super) struct OrderTradeUpdateEnvelope {
 pub(super) struct AccountUpdateEnvelope {
     #[serde(rename = "E")]
     pub(super) event_time: i64,
+    #[serde(rename = "T")]
+    pub(super) transaction_time: i64,
     #[serde(rename = "a")]
     pub(super) account: AccountUpdate,
 }

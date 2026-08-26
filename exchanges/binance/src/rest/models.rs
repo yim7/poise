@@ -69,6 +69,35 @@ pub struct BinanceOpenOrder {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct BinanceAccountTrade {
+    pub commission: String,
+    #[serde(rename = "commissionAsset")]
+    pub commission_asset: String,
+    pub id: u64,
+    #[serde(rename = "orderId")]
+    pub order_id: u64,
+    pub price: String,
+    pub qty: String,
+    #[serde(rename = "marginAsset")]
+    pub margin_asset: String,
+    #[serde(rename = "realizedPnl")]
+    pub realized_pnl: String,
+    pub side: String,
+    pub symbol: String,
+    pub time: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BinanceIncomeRecord {
+    pub symbol: String,
+    #[serde(rename = "incomeType")]
+    pub income_type: String,
+    pub income: String,
+    pub asset: String,
+    pub time: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct BinanceExchangeInfoResponse {
     pub symbols: Vec<BinanceExchangeInfo>,
 }
@@ -101,6 +130,8 @@ pub struct ServerTimeResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BinanceErrorResponse {
     pub code: i64,
+    #[serde(default)]
+    pub msg: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

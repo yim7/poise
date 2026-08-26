@@ -36,6 +36,7 @@ pub(crate) struct BinanceRestError {
     status: StatusCode,
     body: String,
     code: Option<i64>,
+    message: Option<String>,
 }
 
 impl BinanceRestError {
@@ -45,9 +46,9 @@ impl BinanceRestError {
         status: StatusCode,
         body: String,
     ) -> Self {
-        let code = serde_json::from_str::<BinanceErrorResponse>(&body)
-            .ok()
-            .map(|error| error.code);
+        let response = serde_json::from_str::<BinanceErrorResponse>(&body).ok();
+        let code = response.as_ref().map(|error| error.code);
+        let message = response.and_then(|error| error.msg);
 
         Self {
             method,
@@ -55,6 +56,7 @@ impl BinanceRestError {
             status,
             body,
             code,
+            message,
         }
     }
 
@@ -94,7 +96,10 @@ impl BinanceRestError {
     }
 
     pub(crate) fn has_ambiguous_submit_status(&self) -> bool {
-        self.status.is_server_error() || self.status == StatusCode::REQUEST_TIMEOUT
+        self.status == StatusCode::REQUEST_TIMEOUT
+            || (self.status == StatusCode::SERVICE_UNAVAILABLE
+                && self.message.as_deref()
+                    == Some("Unknown error, please check your request or try again later."))
     }
 
     fn is_insufficient_margin(&self) -> bool {
@@ -108,7 +113,7 @@ impl BinanceRestError {
     fn is_rate_limited(&self) -> bool {
         self.status == StatusCode::TOO_MANY_REQUESTS
             || self.status.as_u16() == 418
-            || self.code == Some(-1003)
+            || matches!(self.code, Some(-1003 | -1008))
     }
 }
 

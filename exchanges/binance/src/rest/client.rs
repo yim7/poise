@@ -11,6 +11,7 @@ use serde::de::DeserializeOwned;
 use tokio::time::{Duration, sleep};
 use url::{Host, Url};
 
+use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderRequest, Position,
@@ -19,11 +20,14 @@ use poise_engine::ports::{
 use super::auth::{encode_query, sign_query};
 use super::error::{BinanceRestError, BinanceSubmitOutcomeUnknown};
 use super::models::{
-    BinanceAccountSummaryInformation, BinanceErrorResponse, BinanceExchangeInfoResponse,
-    BinanceLeverageChangeResponse, BinanceOpenOrder, BinanceOrderResponse, BinancePositionMode,
-    BinancePositionRisk, BinanceSymbolConfiguration, ListenKeyResponse, ServerTimeResponse,
+    BinanceAccountSummaryInformation, BinanceAccountTrade, BinanceErrorResponse,
+    BinanceExchangeInfoResponse, BinanceIncomeRecord, BinanceLeverageChangeResponse,
+    BinanceOpenOrder, BinanceOrderResponse, BinancePositionMode, BinancePositionRisk,
+    BinanceSymbolConfiguration, ListenKeyResponse, ServerTimeResponse,
 };
-use crate::mapper::build_account_capacity_snapshot;
+use crate::mapper::{
+    build_account_capacity_snapshot, track_pnl_record_from_funding, track_pnl_record_from_trade,
+};
 
 const DEFAULT_RECV_WINDOW_MS: i64 = 10_000;
 const MAX_RETRIES: usize = 3;
@@ -163,6 +167,47 @@ impl BinanceRestClient {
             .into_iter()
             .map(TryInto::try_into)
             .collect::<Result<Vec<_>>>()
+    }
+
+    pub(crate) async fn get_recent_track_pnl_records(
+        &self,
+        symbol: &str,
+    ) -> Result<Vec<TrackPnlRecord>> {
+        let trades: Vec<BinanceAccountTrade> = self
+            .send_request(
+                Method::GET,
+                "/fapi/v1/userTrades",
+                vec![
+                    ("symbol", symbol.to_string()),
+                    ("limit", "1000".to_string()),
+                ],
+                AuthMode::Signed,
+            )
+            .await?;
+        let funding: Vec<BinanceIncomeRecord> = self
+            .send_request(
+                Method::GET,
+                "/fapi/v1/income",
+                vec![
+                    ("symbol", symbol.to_string()),
+                    ("incomeType", "FUNDING_FEE".to_string()),
+                    ("limit", "1000".to_string()),
+                ],
+                AuthMode::Signed,
+            )
+            .await?;
+
+        let mut records = trades
+            .into_iter()
+            .map(track_pnl_record_from_trade)
+            .collect::<Result<Vec<_>>>()?;
+        records.extend(
+            funding
+                .into_iter()
+                .map(track_pnl_record_from_funding)
+                .collect::<Result<Vec<_>>>()?,
+        );
+        Ok(records)
     }
 
     pub async fn get_account_capacity_snapshot(

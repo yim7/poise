@@ -1,12 +1,14 @@
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 
 use crate::rest::models::{
-    BinanceAccountSummaryInformation, BinanceExchangeInfo, BinanceOpenOrder, BinanceOrderResponse,
-    BinancePositionRisk, BinanceSymbolConfiguration,
+    BinanceAccountSummaryInformation, BinanceAccountTrade, BinanceExchangeInfo,
+    BinanceIncomeRecord, BinanceOpenOrder, BinanceOrderResponse, BinancePositionRisk,
+    BinanceSymbolConfiguration,
 };
 use poise_core::track::{Instrument, Venue};
+use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderStatus, Position,
@@ -89,6 +91,64 @@ impl TryFrom<BinanceOpenOrder> for ExchangeOrder {
     }
 }
 
+pub(crate) fn track_pnl_record_from_trade(value: BinanceAccountTrade) -> Result<TrackPnlRecord> {
+    let instrument = Instrument::new(Venue::Binance, &value.symbol);
+    let settlement_asset = instrument.quote_asset();
+    ensure!(
+        value.margin_asset == settlement_asset,
+        "Binance margin asset `{}` does not match settlement asset `{settlement_asset}`",
+        value.margin_asset
+    );
+    let occurred_at = millis_to_utc("trade.time", value.time)?;
+    let trade_id = value.id.to_string();
+    let commission = parse_decimal("commission", &value.commission)?;
+    let trading_fee = if value.commission_asset == settlement_asset {
+        commission
+    } else {
+        0.0
+    };
+
+    Ok(TrackPnlRecord::trade(
+        instrument,
+        occurred_at,
+        "binance:order_trade_update".to_string(),
+        Some(format!(
+            "binance:order_trade_update:{}:{trade_id}",
+            value.symbol.to_lowercase()
+        )),
+        Some(value.order_id.to_string()),
+        Some(trade_id),
+        parse_side(&value.side)?,
+        parse_decimal("price", &value.price)?,
+        parse_decimal("qty", &value.qty)?,
+        parse_decimal("realizedPnl", &value.realized_pnl)?,
+        trading_fee,
+        settlement_asset,
+    ))
+}
+
+pub(crate) fn track_pnl_record_from_funding(value: BinanceIncomeRecord) -> Result<TrackPnlRecord> {
+    ensure!(
+        value.income_type == "FUNDING_FEE",
+        "unsupported Binance income type `{}`",
+        value.income_type
+    );
+    let occurred_at = millis_to_utc("income.time", value.time)?;
+
+    Ok(TrackPnlRecord::funding(
+        Instrument::new(Venue::Binance, &value.symbol),
+        occurred_at,
+        "binance:funding_fee".to_string(),
+        Some(format!(
+            "binance:funding_fee:{}:{}",
+            value.symbol.to_lowercase(),
+            value.time
+        )),
+        parse_decimal("income", &value.income)?,
+        value.asset,
+    ))
+}
+
 impl TryFrom<BinanceExchangeInfo> for ExchangeInfo {
     type Error = anyhow::Error;
 
@@ -166,6 +226,12 @@ fn parse_decimal(field: &str, value: &str) -> Result<f64> {
     value
         .parse::<f64>()
         .with_context(|| format!("invalid decimal for {field}: {value}"))
+}
+
+fn millis_to_utc(field: &str, value: i64) -> Result<chrono::DateTime<Utc>> {
+    Utc.timestamp_millis_opt(value)
+        .single()
+        .with_context(|| format!("invalid Binance timestamp `{field}`: {value}"))
 }
 
 #[cfg(test)]
