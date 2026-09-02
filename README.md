@@ -19,7 +19,7 @@ Poise 是个人策略运行实验项目。源码公开主要为了透明记录�
 
 - [core/](core/)：领域模型、策略参数、风险规则、领域事件和 curve-immediate benchmark。
 - [engine/](engine/)：track 运行时、状态机、目标计算、决策回放、执行规划和恢复。
-- [application/](application/)：用例服务、读模型、持久化 port 和定义索引。
+- [application/](application/)：`TradingRuntime`、提交协议、session effect queue、交易所与持久化 port、查询和读模型。
 - [storage/](storage/)：SQLite 持久化适配。
 - [protocol/](protocol/)：`server` 与 `tui` 共享的 HTTP / WebSocket DTO。
 - [exchanges/binance/](exchanges/binance/)：Binance USDⓈ-M Futures 适配。
@@ -38,7 +38,7 @@ Poise 是个人策略运行实验项目。源码公开主要为了透明记录�
 - 同一实例内 `venue + symbol` 必须唯一。
 - HTTP / WebSocket 以 `track_id` 作为一等标识。
 - SQLite 默认路径是 `<instance-dir>/.data/poise-server.sqlite`。
-- 启动遇到当前配置与持久业务状态不兼容时会失败，需要操作者显式处理实例目录或数据库。
+- SQLite 只接受当前代码定义的精确 schema；旧 schema 不迁移或推断，启动失败时需要重新初始化实例数据库。
 
 ## 快速开始
 
@@ -55,7 +55,7 @@ cp configs/demo.toml "$HOME/poise-instances/testnet/config.toml"
 
 ### 2. 选择交易所
 
-四个 venue 都有配置分支和 adapter，但这不表示它们都能进入当前交易 runtime。启动前必须具备 recent PNL 恢复能力：Hyperliquid 和 OKX 返回可审计、可回补的 recent PNL records；Binance 和 Bybit 当前明确返回 `Unsupported`，正常启动会在启动交易 runtime task 前失败。完整能力矩阵见 [系统构建说明](docs/system-overview.md#持久化与读模型)。
+四个 venue 都有配置分支和 adapter，但启动前仍必须具备 recent PNL 完整覆盖能力。Binance、Hyperliquid 和 OKX 返回带 covered window 与 completeness 的 recent PNL records；Bybit 当前明确返回 `Unsupported`，正常启动会在交易 runtime task 启动前失败。完整能力矩阵见 [系统构建说明](docs/system-overview.md#持久化与读模型)。
 
 Binance USDⓈ-M Futures：
 
