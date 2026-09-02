@@ -36,8 +36,8 @@ pub use notifications::ApplicationNotification;
 pub use query_service::TradingQueries;
 pub use read_model::{
     AccountAnalysisReadModel, AccountAssetExposureReadModel, AccountAssetQuantitySource,
-    AccountHedgeLikeReadModel, AccountTrackAnalysisReadModel, ReadModelBinding,
-    TrackAcquisitionSessionReadModel, TrackActivityEntry, TrackActivityLevel,
+    AccountHedgeLikeReadModel, AccountNotionalExposureReadModel, AccountTrackAnalysisReadModel,
+    ReadModelBinding, TrackAcquisitionSessionReadModel, TrackActivityEntry, TrackActivityLevel,
     TrackInventoryDecisionReadModel, TrackListReadModel, TrackPriceExecutionBlockReason,
     TrackReadBindingIntent, TrackReadBindingPolicy, TrackReadBindingStatus, TrackReadModel,
     TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,

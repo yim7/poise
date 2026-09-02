@@ -41,7 +41,9 @@ export interface InventoryDecisionView {
 
 export interface TrackListPnlView {
   pnl_asset: string;
-  total_pnl: number;
+  total_pnl: number | null;
+  completeness: "complete" | "incomplete";
+  unvalued_cashflows: UnvaluedPnlCashflowView[];
 }
 
 export interface ExecutionBadgeView {
@@ -115,20 +117,27 @@ export interface TrackLiveView {
 
 export interface TrackPositionView {
   current_exposure: number;
-  quantity_unit?: "base_asset" | "contracts";
-  quantity?: number;
-  notional?: number;
-  notional_asset?: string;
+  quantity_unit: "base_asset" | "contracts";
+  quantity: number;
+  notional: number | null;
+  notional_asset: string;
 }
 
 export interface TrackPnlView {
   pnl_asset: string;
   gross_realized_pnl: number;
-  net_realized_pnl: number;
+  net_realized_pnl: number | null;
   unrealized_pnl: number;
-  total_pnl: number;
+  total_pnl: number | null;
   trading_fee_cumulative: number;
   funding_fee_cumulative: number;
+  completeness: "complete" | "incomplete";
+  unvalued_cashflows: UnvaluedPnlCashflowView[];
+}
+
+export interface UnvaluedPnlCashflowView {
+  kind: "realized_pnl" | "trading_fee" | "funding";
+  amount: { value: number; asset: string } | null;
 }
 
 export interface TrackExecutionView {
@@ -245,9 +254,7 @@ export interface AccountSummaryView {
 
 export interface AccountAnalysisView {
   tracks: AccountTrackAnalysisView[];
-  total_contracts: number;
-  total_signed_usd_notional: number;
-  total_abs_usd_notional: number;
+  notional_exposures: AccountNotionalExposureView[];
   base_exposures: AccountAssetExposureView[];
   hedge_like: AccountHedgeLikeView[];
 }
@@ -258,11 +265,18 @@ export interface AccountTrackAnalysisView {
   settlement_asset: string;
   position_qty: number;
   contract_count?: number | null;
-  signed_usd_notional: number;
-  abs_usd_notional: number;
-  estimated_base_asset?: string | null;
-  estimated_base_exposure?: number | null;
+  signed_notional: number | null;
+  abs_notional: number | null;
+  notional_asset: string;
+  contract_base_asset: string | null;
+  contract_base_exposure: number | null;
   pnl_asset: string;
+}
+
+export interface AccountNotionalExposureView {
+  asset: string;
+  signed_notional: number;
+  abs_notional: number;
 }
 
 export interface AccountAssetExposureView {

@@ -251,6 +251,8 @@ function trackListResponseFixture(): TrackListResponse {
         pnl: {
           pnl_asset: 'USDT',
           total_pnl: 0,
+          completeness: 'complete',
+          unvalued_cashflows: [],
         },
       },
     ],

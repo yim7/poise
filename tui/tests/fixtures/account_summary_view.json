@@ -16,16 +16,17 @@
         "settlement_asset": "BTC",
         "position_qty": -30.0,
         "contract_count": -30.0,
-        "signed_usd_notional": -3000.0,
-        "abs_usd_notional": 3000.0,
-        "estimated_base_asset": "BTC",
-        "estimated_base_exposure": -0.03,
+        "signed_notional": -3000.0,
+        "abs_notional": 3000.0,
+        "notional_asset": "USD",
+        "contract_base_asset": "BTC",
+        "contract_base_exposure": -0.03,
         "pnl_asset": "BTC"
       }
     ],
-    "total_contracts": -30.0,
-    "total_signed_usd_notional": -3000.0,
-    "total_abs_usd_notional": 3000.0,
+    "notional_exposures": [
+      { "asset": "USD", "signed_notional": -3000.0, "abs_notional": 3000.0 }
+    ],
     "base_exposures": [{ "asset": "BTC", "quantity": -0.03 }],
     "hedge_like": [
       {

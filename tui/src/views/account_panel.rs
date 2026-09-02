@@ -56,9 +56,8 @@ fn lines(summary: Option<&AccountSummaryView>) -> Vec<Line<'static>> {
 
     if let Some(analysis) = summary.analysis.as_ref() {
         result.push(Line::from(format!(
-            "contracts {} | usd notional {} | base {}",
-            format_quantity(analysis.total_contracts),
-            format_amount(analysis.total_signed_usd_notional),
+            "notional {} | base {}",
+            format_notional_exposures(analysis),
             format_base_exposures(analysis),
         )));
         if let Some(hedge_like) = analysis.hedge_like.first() {
@@ -67,6 +66,25 @@ fn lines(summary: Option<&AccountSummaryView>) -> Vec<Line<'static>> {
     }
 
     result
+}
+
+fn format_notional_exposures(analysis: &AccountAnalysisView) -> String {
+    if analysis.notional_exposures.is_empty() {
+        return "-".to_string();
+    }
+
+    analysis
+        .notional_exposures
+        .iter()
+        .map(|exposure| {
+            format!(
+                "{} {}",
+                exposure.asset,
+                format_amount(exposure.signed_notional)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn format_optional_amount(value: Option<f64>) -> String {
@@ -213,7 +231,7 @@ mod tests {
             .unwrap();
 
         let text = buffer_text(&terminal);
-        assert!(text.contains("contracts -30.0000"));
+        assert!(text.contains("notional USD -3,000.00"));
         assert!(text.contains("base BTC -0.0300"));
         assert!(text.contains("net BTC +0.1700"));
     }

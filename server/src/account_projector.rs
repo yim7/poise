@@ -1,12 +1,13 @@
 use poise_protocol::{
     AccountAnalysisView, AccountAssetExposureView, AccountAssetQuantitySourceView,
-    AccountHedgeLikeView, AccountSummaryView, AccountTrackAnalysisView, InstrumentView,
-    RiskSignalView,
+    AccountHedgeLikeView, AccountNotionalExposureView, AccountSummaryView,
+    AccountTrackAnalysisView, InstrumentView, RiskSignalView,
 };
 
 use poise_application::{
     AccountAnalysisReadModel, AccountAssetExposureReadModel, AccountAssetQuantitySource,
-    AccountHedgeLikeReadModel, AccountReadModel, AccountRiskSignal, AccountTrackAnalysisReadModel,
+    AccountHedgeLikeReadModel, AccountNotionalExposureReadModel, AccountReadModel,
+    AccountRiskSignal, AccountTrackAnalysisReadModel,
 };
 
 pub struct AccountProjector;
@@ -49,9 +50,11 @@ fn project_risk_signal(signal: AccountRiskSignal) -> RiskSignalView {
 fn project_account_analysis(source: &AccountAnalysisReadModel) -> AccountAnalysisView {
     AccountAnalysisView {
         tracks: source.tracks.iter().map(project_account_track).collect(),
-        total_contracts: source.total_contracts,
-        total_signed_usd_notional: source.total_signed_usd_notional,
-        total_abs_usd_notional: source.total_abs_usd_notional,
+        notional_exposures: source
+            .notional_exposures
+            .iter()
+            .map(project_account_notional_exposure)
+            .collect(),
         base_exposures: source
             .base_exposures
             .iter()
@@ -75,11 +78,22 @@ fn project_account_track(source: &AccountTrackAnalysisReadModel) -> AccountTrack
         settlement_asset: source.settlement_asset.clone(),
         position_qty: source.position_qty,
         contract_count: source.contract_count,
-        signed_usd_notional: source.signed_usd_notional,
-        abs_usd_notional: source.abs_usd_notional,
-        estimated_base_asset: source.estimated_base_asset.clone(),
-        estimated_base_exposure: source.estimated_base_exposure,
+        signed_notional: source.signed_notional,
+        abs_notional: source.abs_notional,
+        notional_asset: source.notional_asset.clone(),
+        contract_base_asset: source.contract_base_asset.clone(),
+        contract_base_exposure: source.contract_base_exposure,
         pnl_asset: source.pnl_asset.clone(),
+    }
+}
+
+fn project_account_notional_exposure(
+    source: &AccountNotionalExposureReadModel,
+) -> AccountNotionalExposureView {
+    AccountNotionalExposureView {
+        asset: source.asset.clone(),
+        signed_notional: source.signed_notional,
+        abs_notional: source.abs_notional,
     }
 }
 
@@ -122,15 +136,15 @@ mod tests {
     use poise_core::track::{Instrument, Venue};
     use poise_protocol::{
         AccountAnalysisView, AccountAssetExposureView, AccountAssetQuantitySourceView,
-        AccountHedgeLikeView, AccountSummaryView, AccountTrackAnalysisView, InstrumentView,
-        RiskSignalView,
+        AccountHedgeLikeView, AccountNotionalExposureView, AccountSummaryView,
+        AccountTrackAnalysisView, InstrumentView, RiskSignalView,
     };
 
     use super::AccountProjector;
     use poise_application::{
         AccountAnalysisReadModel, AccountAssetExposureReadModel, AccountAssetQuantitySource,
-        AccountHedgeLikeReadModel, AccountReadModel, AccountRiskSignal,
-        AccountTrackAnalysisReadModel,
+        AccountHedgeLikeReadModel, AccountNotionalExposureReadModel, AccountReadModel,
+        AccountRiskSignal, AccountTrackAnalysisReadModel,
     };
     use poise_core::instrument::Asset;
 
@@ -191,15 +205,18 @@ mod tests {
                 settlement_asset: "BTC".to_string(),
                 position_qty: -30.0,
                 contract_count: Some(-30.0),
-                signed_usd_notional: -3000.0,
-                abs_usd_notional: 3000.0,
-                estimated_base_asset: Some("BTC".to_string()),
-                estimated_base_exposure: Some(-0.03),
+                signed_notional: Some(-3000.0),
+                abs_notional: Some(3000.0),
+                notional_asset: "USD".to_string(),
+                contract_base_asset: Some("BTC".to_string()),
+                contract_base_exposure: Some(-0.03),
                 pnl_asset: "BTC".to_string(),
             }],
-            total_contracts: -30.0,
-            total_signed_usd_notional: -3000.0,
-            total_abs_usd_notional: 3000.0,
+            notional_exposures: vec![AccountNotionalExposureReadModel {
+                asset: "USD".to_string(),
+                signed_notional: -3000.0,
+                abs_notional: 3000.0,
+            }],
             base_exposures: vec![AccountAssetExposureReadModel {
                 asset: "BTC".to_string(),
                 quantity: -0.03,
@@ -229,15 +246,18 @@ mod tests {
                     settlement_asset: "BTC".to_string(),
                     position_qty: -30.0,
                     contract_count: Some(-30.0),
-                    signed_usd_notional: -3000.0,
-                    abs_usd_notional: 3000.0,
-                    estimated_base_asset: Some("BTC".to_string()),
-                    estimated_base_exposure: Some(-0.03),
+                    signed_notional: Some(-3000.0),
+                    abs_notional: Some(3000.0),
+                    notional_asset: "USD".to_string(),
+                    contract_base_asset: Some("BTC".to_string()),
+                    contract_base_exposure: Some(-0.03),
                     pnl_asset: "BTC".to_string(),
                 }],
-                total_contracts: -30.0,
-                total_signed_usd_notional: -3000.0,
-                total_abs_usd_notional: 3000.0,
+                notional_exposures: vec![AccountNotionalExposureView {
+                    asset: "USD".to_string(),
+                    signed_notional: -3000.0,
+                    abs_notional: 3000.0,
+                }],
                 base_exposures: vec![AccountAssetExposureView {
                     asset: "BTC".to_string(),
                     quantity: -0.03,

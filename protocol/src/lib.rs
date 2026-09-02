@@ -434,20 +434,15 @@ pub struct TrackLiveView {
 #[serde(deny_unknown_fields)]
 pub struct TrackPositionView {
     pub current_exposure: f64,
-    #[serde(default)]
     pub quantity_unit: TrackPositionQuantityUnitView,
-    #[serde(default)]
     pub quantity: f64,
-    #[serde(default)]
-    pub notional: f64,
-    #[serde(default)]
+    pub notional: Option<f64>,
     pub notional_asset: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackPositionQuantityUnitView {
-    #[default]
     BaseAsset,
     Contracts,
 }
@@ -673,17 +668,9 @@ pub struct AccountSummaryView {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct AccountAnalysisView {
-    #[serde(default)]
     pub tracks: Vec<AccountTrackAnalysisView>,
-    #[serde(default)]
-    pub total_contracts: f64,
-    #[serde(default)]
-    pub total_signed_usd_notional: f64,
-    #[serde(default)]
-    pub total_abs_usd_notional: f64,
-    #[serde(default)]
+    pub notional_exposures: Vec<AccountNotionalExposureView>,
     pub base_exposures: Vec<AccountAssetExposureView>,
-    #[serde(default)]
     pub hedge_like: Vec<AccountHedgeLikeView>,
 }
 
@@ -695,13 +682,19 @@ pub struct AccountTrackAnalysisView {
     pub position_qty: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contract_count: Option<f64>,
-    pub signed_usd_notional: f64,
-    pub abs_usd_notional: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub estimated_base_asset: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub estimated_base_exposure: Option<f64>,
+    pub signed_notional: Option<f64>,
+    pub abs_notional: Option<f64>,
+    pub notional_asset: String,
+    pub contract_base_asset: Option<String>,
+    pub contract_base_exposure: Option<f64>,
     pub pnl_asset: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountNotionalExposureView {
+    pub asset: String,
+    pub signed_notional: f64,
+    pub abs_notional: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -948,16 +941,16 @@ impl fmt::Display for Side {
 mod tests {
     use super::{
         AccountAnalysisView, AccountAssetExposureView, AccountAssetQuantitySourceView,
-        AccountHedgeLikeView, AccountSummaryView, AccountTrackAnalysisView,
-        AcquisitionResetReasonView, AcquisitionSessionView, BandFlattenTrigger,
-        BandProtectionPolicy, BandRecoverPolicy, DecisionReasonView, ExecutionBindingIntentView,
-        ExecutionBindingOrderView, ExecutionBindingPolicyView, ExecutionBindingStatusView,
-        ExecutionBindingView, ExecutionStateView, ExecutionStatusView, InstrumentView,
-        InventoryDecisionView, PnlBackfillStatusView, PriceExecutionBlockReasonView,
-        ReadinessIssueView, RecentFillsAuditResponse, RecentPnlAvailabilityView,
-        RiskAcquisitionConfigView, RiskAcquisitionDirectionView, RiskAcquisitionView,
-        RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView, StreamEvent,
-        TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
+        AccountHedgeLikeView, AccountNotionalExposureView, AccountSummaryView,
+        AccountTrackAnalysisView, AcquisitionResetReasonView, AcquisitionSessionView,
+        BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy, DecisionReasonView,
+        ExecutionBindingIntentView, ExecutionBindingOrderView, ExecutionBindingPolicyView,
+        ExecutionBindingStatusView, ExecutionBindingView, ExecutionStateView, ExecutionStatusView,
+        InstrumentView, InventoryDecisionView, PnlBackfillStatusView,
+        PriceExecutionBlockReasonView, ReadinessIssueView, RecentFillsAuditResponse,
+        RecentPnlAvailabilityView, RiskAcquisitionConfigView, RiskAcquisitionDirectionView,
+        RiskAcquisitionView, RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView,
+        StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
         TrackDiagnosticsView, TrackExecutionView, TrackListItemView, TrackListResponse,
         TrackLiveView, TrackStatus, TradingReadinessResponse,
     };
@@ -1151,7 +1144,7 @@ mod tests {
             "max_notional": 3000.0,
             "loss_limits": {"daily_loss_limit": 100.0, "total_loss_limit": 300.0},
             "market": {"mark_price": 64123.4, "best_bid": 64120.1, "best_ask": 64124.5},
-            "position": {"current_exposure": 0.5},
+            "position": {"current_exposure": 0.5, "quantity_unit": "base_asset", "quantity": 0.0, "notional": null, "notional_asset": "USDT"},
             "decision": expected_decision.clone(),
             "pnl": {"pnl_asset": "USDT", "gross_realized_pnl": 0.0, "net_realized_pnl": 0.0, "unrealized_pnl": 0.0, "total_pnl": 0.0, "trading_fee_cumulative": 0.0, "funding_fee_cumulative": 0.0},
             "execution": {
@@ -1427,7 +1420,7 @@ mod tests {
                 "max_notional":3000.0,
                 "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
-                "position":{"current_exposure":0.5,"quantity":0.0029296875,"notional":187.5,"notional_asset":"USDT"},
+                "position":{"current_exposure":0.5,"quantity_unit":"base_asset","quantity":0.0029296875,"notional":187.5,"notional_asset":"USDT"},
                 "decision":{"revision":1,"policy_target":0.75,"risk_approved_target":0.75,"acquisition_frontier":null,"execution_target":0.75,"reason":"submit_planned"},
                 "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
                 "execution":{"state":"open","execution_status":"attention_required","attention_reasons":["missing execution quote"],"active_binding_count":0,"bindings":[]},
@@ -1482,7 +1475,7 @@ mod tests {
                 "max_notional":3000.0,
                 "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
-                "position":{"current_exposure":0.5,"quantity":0.0029296875,"notional":187.5,"notional_asset":"USDT"},
+                "position":{"current_exposure":0.5,"quantity_unit":"base_asset","quantity":0.0029296875,"notional":187.5,"notional_asset":"USDT"},
                 "decision":{"revision":1,"policy_target":0.75,"risk_approved_target":0.75,"acquisition_frontier":null,"execution_target":0.75,"reason":"submit_planned"},
                 "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
                 "execution":{"state":"open","execution_status":"normal","attention_reasons":[],"active_binding_count":0,"bindings":[]},
@@ -1531,7 +1524,7 @@ mod tests {
                     "max_notional":3000.0,
                     "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                     "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
-                    "position":{"current_exposure":0.5},
+                    "position":{"current_exposure":0.5,"quantity_unit":"base_asset","quantity":0.0,"notional":null,"notional_asset":"USDT"},
                     "decision":{"revision":1,"policy_target":0.75,"risk_approved_target":0.75,"acquisition_frontier":null,"execution_target":0.75,"reason":"submit_planned"},
                     "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
                     "execution":{"state":"open","execution_status":"normal","active_binding_count":0,"bindings":[]},
@@ -1579,7 +1572,7 @@ mod tests {
                 "max_notional":3000.0,
                 "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
-                "position":{"current_exposure":0.5},
+                "position":{"current_exposure":0.5,"quantity_unit":"base_asset","quantity":0.0,"notional":null,"notional_asset":"USDT"},
                 "decision":{"revision":1,"policy_target":0.75,"risk_approved_target":0.75,"acquisition_frontier":null,"execution_target":0.75,"reason":"submit_planned"},
                 "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
                 "execution":{"state":"open","execution_status":"normal","active_binding_count":0,"bindings":[]},
@@ -1616,15 +1609,14 @@ mod tests {
                             "settlement_asset":"BTC",
                             "position_qty":-30.0,
                             "contract_count":-30.0,
-                            "signed_usd_notional":-3000.0,
-                            "abs_usd_notional":3000.0,
-                            "estimated_base_asset":"BTC",
-                            "estimated_base_exposure":-0.03,
+                            "signed_notional":-3000.0,
+                            "abs_notional":3000.0,
+                            "notional_asset":"USD",
+                            "contract_base_asset":"BTC",
+                            "contract_base_exposure":-0.03,
                             "pnl_asset":"BTC"
                         }],
-                        "total_contracts":-30.0,
-                        "total_signed_usd_notional":-3000.0,
-                        "total_abs_usd_notional":3000.0,
+                        "notional_exposures":[{"asset":"USD","signed_notional":-3000.0,"abs_notional":3000.0}],
                         "base_exposures":[{"asset":"BTC","quantity":-0.03}],
                         "hedge_like":[{
                             "asset":"BTC",
@@ -1663,15 +1655,18 @@ mod tests {
                                 settlement_asset: "BTC".to_string(),
                                 position_qty: -30.0,
                                 contract_count: Some(-30.0),
-                                signed_usd_notional: -3000.0,
-                                abs_usd_notional: 3000.0,
-                                estimated_base_asset: Some("BTC".to_string()),
-                                estimated_base_exposure: Some(-0.03),
+                                signed_notional: Some(-3000.0),
+                                abs_notional: Some(3000.0),
+                                notional_asset: "USD".to_string(),
+                                contract_base_asset: Some("BTC".to_string()),
+                                contract_base_exposure: Some(-0.03),
                                 pnl_asset: "BTC".to_string(),
                             }],
-                            total_contracts: -30.0,
-                            total_signed_usd_notional: -3000.0,
-                            total_abs_usd_notional: 3000.0,
+                            notional_exposures: vec![AccountNotionalExposureView {
+                                asset: "USD".to_string(),
+                                signed_notional: -3000.0,
+                                abs_notional: 3000.0,
+                            }],
                             base_exposures: vec![AccountAssetExposureView {
                                 asset: "BTC".to_string(),
                                 quantity: -0.03,

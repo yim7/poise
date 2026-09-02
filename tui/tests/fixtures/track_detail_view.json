@@ -43,6 +43,7 @@
   },
   "position": {
     "current_exposure": 3.5,
+    "quantity_unit": "base_asset",
     "quantity": 0.42,
     "notional": 42.546,
     "notional_asset": "USDT"

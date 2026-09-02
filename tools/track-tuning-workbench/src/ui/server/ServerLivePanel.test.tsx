@@ -299,6 +299,8 @@ function trackListItem(): TrackListItemView {
     pnl: {
       pnl_asset: 'USDT',
       total_pnl: 12.3,
+      completeness: 'complete',
+      unvalued_cashflows: [],
     },
   };
 }
@@ -342,6 +344,10 @@ function trackDetail(): TrackDetailView {
     },
     position: {
       current_exposure: 1.5,
+      quantity_unit: 'base_asset',
+      quantity: 0.015,
+      notional: 1.51875,
+      notional_asset: 'USDT',
     },
     decision: {
       revision: 7,
@@ -359,6 +365,8 @@ function trackDetail(): TrackDetailView {
       total_pnl: 12.3,
       trading_fee_cumulative: 0.2,
       funding_fee_cumulative: 0.1,
+      completeness: 'complete',
+      unvalued_cashflows: [],
     },
     execution: {
       state: 'open',

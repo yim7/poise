@@ -165,7 +165,7 @@ fn market_lines(
         Line::from(format!(
             "position: qty {:.6} | notional {} {}",
             detail.position.quantity,
-            format_amount(detail.position.notional),
+            format_optional_amount(detail.position.notional),
             detail.position.notional_asset
         )),
         format_exposure_line(
@@ -658,6 +658,10 @@ fn format_amount(value: f64) -> String {
         .expect("fixed precision amount should contain decimal point");
 
     format!("{sign}{}.{fraction}", group_digits(integer))
+}
+
+fn format_optional_amount(value: Option<f64>) -> String {
+    value.map(format_amount).unwrap_or_else(|| "-".to_string())
 }
 
 fn group_digits(value: &str) -> String {

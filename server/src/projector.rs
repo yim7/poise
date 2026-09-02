@@ -239,12 +239,11 @@ fn project_instrument(instrument: &Instrument) -> InstrumentView {
     }
 }
 
-fn project_position_notional(source: &TrackReadModel) -> f64 {
+fn project_position_notional(source: &TrackReadModel) -> Option<f64> {
     source
         .signed_position_notional
         .as_ref()
         .map(|notional| notional.value().abs())
-        .unwrap_or(0.0)
 }
 
 fn project_position_quantity_unit(spec: &InstrumentSpec) -> TrackPositionQuantityUnitView {
@@ -1420,8 +1419,18 @@ mod tests {
             TrackPositionQuantityUnitView::BaseAsset
         );
         assert!((detail.position.quantity - 0.42).abs() < 1e-9);
-        assert!((detail.position.notional - 42.63).abs() < 1e-9);
+        assert!((detail.position.notional.unwrap() - 42.63).abs() < 1e-9);
         assert_eq!(detail.position.notional_asset, "USDT");
+    }
+
+    #[test]
+    fn projects_missing_position_valuation_as_unknown() {
+        let mut source = source_with_submitting_effect();
+        source.signed_position_notional = None;
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(detail.position.notional, None);
     }
 
     #[test]
@@ -1460,7 +1469,7 @@ mod tests {
             TrackPositionQuantityUnitView::Contracts
         );
         assert_eq!(detail.position.quantity, -30.0);
-        assert_eq!(detail.position.notional, 3_000.0);
+        assert_eq!(detail.position.notional, Some(3_000.0));
         assert_eq!(detail.position.notional_asset, "USD");
         assert_eq!(detail.pnl.pnl_asset, "BTC");
         assert_eq!(list.pnl.pnl_asset, "BTC");

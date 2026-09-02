@@ -74,9 +74,7 @@ pub struct TrackInventoryDecisionReadModel {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AccountAnalysisReadModel {
     pub tracks: Vec<AccountTrackAnalysisReadModel>,
-    pub total_contracts: f64,
-    pub total_signed_usd_notional: f64,
-    pub total_abs_usd_notional: f64,
+    pub notional_exposures: Vec<AccountNotionalExposureReadModel>,
     pub base_exposures: Vec<AccountAssetExposureReadModel>,
     pub hedge_like: Vec<AccountHedgeLikeReadModel>,
 }
@@ -88,11 +86,19 @@ pub struct AccountTrackAnalysisReadModel {
     pub settlement_asset: String,
     pub position_qty: f64,
     pub contract_count: Option<f64>,
-    pub signed_usd_notional: f64,
-    pub abs_usd_notional: f64,
-    pub estimated_base_asset: Option<String>,
-    pub estimated_base_exposure: Option<f64>,
+    pub signed_notional: Option<f64>,
+    pub abs_notional: Option<f64>,
+    pub notional_asset: String,
+    pub contract_base_asset: Option<String>,
+    pub contract_base_exposure: Option<f64>,
     pub pnl_asset: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountNotionalExposureReadModel {
+    pub asset: String,
+    pub signed_notional: f64,
+    pub abs_notional: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,21 +131,23 @@ pub fn build_account_analysis_read_model_with_account(
     account: Option<&AccountReadModel>,
     tracks: &[TrackListReadModel],
 ) -> AccountAnalysisReadModel {
+    let mut notional_exposures = BTreeMap::<String, (f64, f64)>::new();
     let mut base_exposures = BTreeMap::<String, f64>::new();
-    let mut total_contracts = 0.0;
-    let mut total_signed_usd_notional = 0.0;
-    let mut total_abs_usd_notional = 0.0;
     let mut items = Vec::with_capacity(tracks.len());
 
     for track in tracks {
         let item = project_account_track_analysis(track);
 
-        total_contracts += item.contract_count.unwrap_or(0.0);
-        total_signed_usd_notional += item.signed_usd_notional;
-        total_abs_usd_notional += item.abs_usd_notional;
+        if let Some(signed_notional) = item.signed_notional {
+            let exposure = notional_exposures
+                .entry(item.notional_asset.clone())
+                .or_default();
+            exposure.0 += signed_notional;
+            exposure.1 += signed_notional.abs();
+        }
         if let (Some(asset), Some(quantity)) = (
-            item.estimated_base_asset.as_ref(),
-            item.estimated_base_exposure,
+            item.contract_base_asset.as_ref(),
+            item.contract_base_exposure,
         ) {
             *base_exposures.entry(asset.clone()).or_default() += quantity;
         }
@@ -147,6 +155,16 @@ pub fn build_account_analysis_read_model_with_account(
         items.push(item);
     }
 
+    let notional_exposures = notional_exposures
+        .into_iter()
+        .map(
+            |(asset, (signed_notional, abs_notional))| AccountNotionalExposureReadModel {
+                asset,
+                signed_notional,
+                abs_notional,
+            },
+        )
+        .collect();
     let base_exposures: Vec<_> = base_exposures
         .into_iter()
         .filter(|(_, quantity)| quantity.abs() > f64::EPSILON)
@@ -156,9 +174,7 @@ pub fn build_account_analysis_read_model_with_account(
 
     AccountAnalysisReadModel {
         tracks: items,
-        total_contracts,
-        total_signed_usd_notional,
-        total_abs_usd_notional,
+        notional_exposures,
         base_exposures,
         hedge_like,
     }
@@ -194,16 +210,12 @@ fn project_hedge_like(
 
 fn project_account_track_analysis(source: &TrackListReadModel) -> AccountTrackAnalysisReadModel {
     let position_qty = finite_or_zero(source.position_qty);
-    let signed_usd_notional = source
-        .signed_position_notional
-        .as_ref()
-        .map(Amount::value)
-        .unwrap_or(0.0);
-    let estimated_base_asset = source
+    let signed_notional = source.signed_position_notional.as_ref().map(Amount::value);
+    let contract_base_asset = source
         .contract_base_exposure
         .as_ref()
         .map(|amount| amount.asset().as_str().to_string());
-    let estimated_base_exposure = source.contract_base_exposure.as_ref().map(Amount::value);
+    let contract_base_exposure = source.contract_base_exposure.as_ref().map(Amount::value);
 
     AccountTrackAnalysisReadModel {
         track_id: source.track_id.clone(),
@@ -218,10 +230,11 @@ fn project_account_track_analysis(source: &TrackListReadModel) -> AccountTrackAn
             PositionBasis::BaseAsset => None,
             PositionBasis::Contracts { .. } => Some(position_qty),
         },
-        signed_usd_notional,
-        abs_usd_notional: signed_usd_notional.abs(),
-        estimated_base_asset,
-        estimated_base_exposure,
+        signed_notional,
+        abs_notional: signed_notional.map(f64::abs),
+        notional_asset: source.instrument_spec.notional_asset().as_str().to_string(),
+        contract_base_asset,
+        contract_base_exposure,
         pnl_asset: source.pnl.asset.as_str().to_string(),
     }
 }
@@ -806,11 +819,12 @@ mod tests {
     };
 
     use super::{
-        AccountAssetExposureReadModel, AccountAssetQuantitySource, TrackActivityLevel,
-        TrackInventoryDecisionReadModel, TrackListReadModel, TrackPriceExecutionBlockReason,
-        TrackReadBindingIntent, TrackReadBindingStatus, TrackReadModel, TrackReadStatus,
-        TrackRecoveryIssue, TrackRiskAcquisitionDirection, TrackRiskAcquisitionReadModel,
-        TrackStrategyPriceStatus, project_binding_status,
+        AccountAssetExposureReadModel, AccountAssetQuantitySource,
+        AccountNotionalExposureReadModel, TrackActivityLevel, TrackInventoryDecisionReadModel,
+        TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent,
+        TrackReadBindingStatus, TrackReadModel, TrackReadStatus, TrackRecoveryIssue,
+        TrackRiskAcquisitionDirection, TrackRiskAcquisitionReadModel, TrackStrategyPriceStatus,
+        project_binding_status,
     };
     use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
     use crate::track_read_source::TrackReadSource;
@@ -956,9 +970,14 @@ mod tests {
 
         let analysis = super::build_account_analysis_read_model(&[track]);
 
-        assert_eq!(analysis.total_contracts, -30.0);
-        assert_eq!(analysis.total_signed_usd_notional, -3000.0);
-        assert_eq!(analysis.total_abs_usd_notional, 3000.0);
+        assert_eq!(
+            analysis.notional_exposures,
+            vec![AccountNotionalExposureReadModel {
+                asset: "USD".to_string(),
+                signed_notional: -3000.0,
+                abs_notional: 3000.0,
+            }]
+        );
         assert_eq!(
             analysis.base_exposures,
             vec![AccountAssetExposureReadModel {
@@ -972,10 +991,11 @@ mod tests {
         assert_eq!(item.settlement_asset, "BTC");
         assert_eq!(item.pnl_asset, "BTC");
         assert_eq!(item.contract_count, Some(-30.0));
-        assert_eq!(item.signed_usd_notional, -3000.0);
-        assert_eq!(item.abs_usd_notional, 3000.0);
-        assert_eq!(item.estimated_base_asset.as_deref(), Some("BTC"));
-        assert_eq!(item.estimated_base_exposure, Some(-0.03));
+        assert_eq!(item.signed_notional, Some(-3000.0));
+        assert_eq!(item.abs_notional, Some(3000.0));
+        assert_eq!(item.notional_asset, "USD");
+        assert_eq!(item.contract_base_asset.as_deref(), Some("BTC"));
+        assert_eq!(item.contract_base_exposure, Some(-0.03));
     }
 
     #[test]
@@ -987,13 +1007,43 @@ mod tests {
 
         let analysis = super::build_account_analysis_read_model(&[track]);
 
-        assert_eq!(analysis.total_contracts, 0.0);
-        assert_eq!(analysis.total_signed_usd_notional, 0.0);
+        assert_eq!(analysis.notional_exposures, Vec::new());
         assert_eq!(analysis.base_exposures, Vec::new());
         assert_eq!(analysis.tracks[0].settlement_asset, "USDT");
         assert_eq!(analysis.tracks[0].contract_count, None);
-        assert_eq!(analysis.tracks[0].estimated_base_asset, None);
-        assert_eq!(analysis.tracks[0].estimated_base_exposure, None);
+        assert_eq!(analysis.tracks[0].signed_notional, None);
+        assert_eq!(analysis.tracks[0].abs_notional, None);
+        assert_eq!(analysis.tracks[0].contract_base_asset, None);
+        assert_eq!(analysis.tracks[0].contract_base_exposure, None);
+    }
+
+    #[test]
+    fn account_analysis_keeps_notional_assets_separate() {
+        let usdt_track = test_track_list_read_model();
+        let mut usd_track = test_track_list_read_model();
+        usd_track.track_id = "btc-coin".to_string();
+        usd_track.instrument = Instrument::new(Venue::Okx, "BTC-USD-SWAP");
+        usd_track.instrument_spec = crate::test_instrument::inverse_spec();
+        usd_track.position_qty = -30.0;
+        set_inverse_position_values(&mut usd_track);
+
+        let analysis = super::build_account_analysis_read_model(&[usdt_track, usd_track]);
+
+        assert_eq!(
+            analysis.notional_exposures,
+            vec![
+                AccountNotionalExposureReadModel {
+                    asset: "USD".to_string(),
+                    signed_notional: -3000.0,
+                    abs_notional: 3000.0,
+                },
+                AccountNotionalExposureReadModel {
+                    asset: "USDT".to_string(),
+                    signed_notional: 42_000.0,
+                    abs_notional: 42_000.0,
+                },
+            ]
+        );
     }
 
     #[test]

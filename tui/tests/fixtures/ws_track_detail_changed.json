@@ -38,7 +38,11 @@
       "best_ask": 101.55
     },
     "position": {
-      "current_exposure": 3.7
+      "current_exposure": 3.7,
+      "quantity_unit": "base_asset",
+      "quantity": 0.0,
+      "notional": null,
+      "notional_asset": "USDT"
     },
     "decision": {
       "revision": 43,
