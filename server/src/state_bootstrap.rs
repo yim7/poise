@@ -606,10 +606,11 @@ mod tests {
                 symbol,
                 occurred_at,
                 kind,
-                pnl_asset,
                 source,
-                source_key
-            ) VALUES (?1, ?2, ?3, ?4, 'trade', 'USDT', 'legacy:test', ?5)",
+                source_key,
+                realized_pnl,
+                realized_pnl_asset
+            ) VALUES (?1, ?2, ?3, ?4, 'trade', 'legacy:test', ?5, 0, 'USDT')",
             params![
                 track_id,
                 venue,

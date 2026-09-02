@@ -11,10 +11,9 @@ use serde::de::DeserializeOwned;
 use tokio::time::{Duration, sleep};
 use url::{Host, Url};
 
-use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
-    OrderRequest, Position,
+    OrderRequest, PnlHistoryWindow, Position, RecentTrackPnlBatch,
 };
 
 use super::auth::{encode_query, sign_query};
@@ -172,14 +171,24 @@ impl BinanceRestClient {
     pub(crate) async fn get_recent_track_pnl_records(
         &self,
         symbol: &str,
-    ) -> Result<Vec<TrackPnlRecord>> {
+        required_window: &PnlHistoryWindow,
+    ) -> Result<RecentTrackPnlBatch> {
+        const QUERY_LIMIT: usize = 1_000;
         let trades: Vec<BinanceAccountTrade> = self
             .send_request(
                 Method::GET,
                 "/fapi/v1/userTrades",
                 vec![
                     ("symbol", symbol.to_string()),
-                    ("limit", "1000".to_string()),
+                    (
+                        "startTime",
+                        required_window.start.timestamp_millis().to_string(),
+                    ),
+                    (
+                        "endTime",
+                        required_window.end.timestamp_millis().to_string(),
+                    ),
+                    ("limit", QUERY_LIMIT.to_string()),
                 ],
                 AuthMode::Signed,
             )
@@ -191,12 +200,21 @@ impl BinanceRestClient {
                 vec![
                     ("symbol", symbol.to_string()),
                     ("incomeType", "FUNDING_FEE".to_string()),
-                    ("limit", "1000".to_string()),
+                    (
+                        "startTime",
+                        required_window.start.timestamp_millis().to_string(),
+                    ),
+                    (
+                        "endTime",
+                        required_window.end.timestamp_millis().to_string(),
+                    ),
+                    ("limit", QUERY_LIMIT.to_string()),
                 ],
                 AuthMode::Signed,
             )
             .await?;
 
+        let complete = trades.len() < QUERY_LIMIT && funding.len() < QUERY_LIMIT;
         let mut records = trades
             .into_iter()
             .map(track_pnl_record_from_trade)
@@ -207,7 +225,11 @@ impl BinanceRestClient {
                 .map(track_pnl_record_from_funding)
                 .collect::<Result<Vec<_>>>()?,
         );
-        Ok(records)
+        Ok(if complete {
+            RecentTrackPnlBatch::complete(required_window.clone(), records)
+        } else {
+            RecentTrackPnlBatch::incomplete(None, records)
+        })
     }
 
     pub async fn get_account_capacity_snapshot(

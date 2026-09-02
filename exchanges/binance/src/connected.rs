@@ -9,7 +9,7 @@ use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError,
     ExecutionPortErrorKind, ExecutionResult, MarketDataPort, MarketDataTick, MetadataPort,
-    OrderReceipt, OrderRequest, Position, RecentTrackPnlRecords, UserDataEvent,
+    OrderReceipt, OrderRequest, PnlHistoryWindow, Position, RecentTrackPnlRecords, UserDataEvent,
 };
 
 use crate::{
@@ -151,9 +151,10 @@ impl AccountPort for BinanceAccount {
     async fn get_recent_track_pnl_records(
         &self,
         instrument: &Instrument,
+        required_window: &PnlHistoryWindow,
     ) -> Result<RecentTrackPnlRecords> {
         self.rest
-            .get_recent_track_pnl_records(&instrument.symbol)
+            .get_recent_track_pnl_records(&instrument.symbol, required_window)
             .await
             .map(RecentTrackPnlRecords::Available)
     }
@@ -279,6 +280,7 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
+            _required_window: &PnlHistoryWindow,
         ) -> Result<RecentTrackPnlRecords> {
             Ok(RecentTrackPnlRecords::Unsupported)
         }
@@ -361,16 +363,26 @@ mod tests {
         ])
         .await;
         let connected = build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:19080");
+        let required_window = PnlHistoryWindow::try_new(
+            chrono::DateTime::from_timestamp_millis(1_569_514_978_000).unwrap(),
+            chrono::DateTime::from_timestamp_millis(1_570_608_000_000).unwrap(),
+        )
+        .unwrap();
 
         let outcome = connected
             .account()
-            .get_recent_track_pnl_records(&Instrument::new(Venue::Binance, "BTCUSDT"))
+            .get_recent_track_pnl_records(
+                &Instrument::new(Venue::Binance, "BTCUSDT"),
+                &required_window,
+            )
             .await
             .unwrap();
 
-        let RecentTrackPnlRecords::Available(records) = outcome else {
+        let RecentTrackPnlRecords::Available(batch) = outcome else {
             panic!("Binance recent PNL must be available");
         };
+        assert!(batch.covers(&required_window));
+        let records = batch.records;
         assert_eq!(records.len(), 3);
         assert_eq!(
             records[0].source_key.as_deref(),
@@ -390,6 +402,66 @@ mod tests {
             Some("binance:funding_fee:btcusdt:1570608000000")
         );
         assert_eq!(records[2].funding_amount().unwrap().value(), -0.375);
+
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].path.starts_with("/fapi/v1/userTrades?"));
+        assert!(requests[1].path.starts_with("/fapi/v1/income?"));
+        for request in requests {
+            assert!(request.path.contains("startTime=1569514978000"));
+            assert!(request.path.contains("endTime=1570608000000"));
+            assert!(request.path.contains("limit=1000"));
+        }
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_are_incomplete_at_the_exchange_page_limit() {
+        let trades = serde_json::to_string(
+            &(0..1_000)
+                .map(|id| {
+                    serde_json::json!({
+                        "commission": "0.01",
+                        "commissionAsset": "USDT",
+                        "id": id,
+                        "orderId": id,
+                        "price": "65000",
+                        "qty": "0.001",
+                        "marginAsset": "USDT",
+                        "realizedPnl": "0.1",
+                        "side": "SELL",
+                        "symbol": "BTCUSDT",
+                        "time": 1_700_000_000_000_i64 + id,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, &trades),
+            MockResponse::json(200, "[]"),
+        ])
+        .await;
+        let connected = build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:19080");
+        let required_window = PnlHistoryWindow::try_new(
+            chrono::DateTime::from_timestamp_millis(1_699_999_000_000).unwrap(),
+            chrono::DateTime::from_timestamp_millis(1_700_001_000_000).unwrap(),
+        )
+        .unwrap();
+
+        let outcome = connected
+            .account()
+            .get_recent_track_pnl_records(
+                &Instrument::new(Venue::Binance, "BTCUSDT"),
+                &required_window,
+            )
+            .await
+            .unwrap();
+
+        let RecentTrackPnlRecords::Available(batch) = outcome else {
+            panic!("Binance recent PNL must be available");
+        };
+        assert_eq!(batch.records.len(), 1_000);
+        assert!(!batch.covers(&required_window));
     }
 
     #[test]

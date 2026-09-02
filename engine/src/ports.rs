@@ -381,14 +381,86 @@ pub trait AccountPort: Send + Sync {
     async fn get_recent_track_pnl_records(
         &self,
         instrument: &Instrument,
+        required_window: &PnlHistoryWindow,
     ) -> Result<RecentTrackPnlRecords>;
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PnlHistoryWindow {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+}
+
+impl PnlHistoryWindow {
+    pub fn try_new(start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Self, String> {
+        if start > end {
+            return Err(format!(
+                "PNL history window start `{start}` is after end `{end}`"
+            ));
+        }
+        Ok(Self { start, end })
+    }
+
+    pub fn covers(&self, required: &Self) -> bool {
+        self.start <= required.start && self.end >= required.end
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecentPnlCompleteness {
+    Complete,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecentTrackPnlBatch {
+    pub records: Vec<TrackPnlRecord>,
+    pub covered_window: Option<PnlHistoryWindow>,
+    pub completeness: RecentPnlCompleteness,
+}
+
+impl RecentTrackPnlBatch {
+    pub fn new(
+        records: Vec<TrackPnlRecord>,
+        covered_window: Option<PnlHistoryWindow>,
+        completeness: RecentPnlCompleteness,
+    ) -> Self {
+        Self {
+            records,
+            covered_window,
+            completeness,
+        }
+    }
+
+    pub fn complete(covered_window: PnlHistoryWindow, records: Vec<TrackPnlRecord>) -> Self {
+        Self::new(
+            records,
+            Some(covered_window),
+            RecentPnlCompleteness::Complete,
+        )
+    }
+
+    pub fn incomplete(
+        covered_window: Option<PnlHistoryWindow>,
+        records: Vec<TrackPnlRecord>,
+    ) -> Self {
+        Self::new(records, covered_window, RecentPnlCompleteness::Incomplete)
+    }
+
+    pub fn covers(&self, required_window: &PnlHistoryWindow) -> bool {
+        self.completeness == RecentPnlCompleteness::Complete
+            && self
+                .covered_window
+                .as_ref()
+                .is_some_and(|covered| covered.covers(required_window))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RecentTrackPnlRecords {
-    Available(Vec<TrackPnlRecord>),
+    Available(RecentTrackPnlBatch),
     Unsupported,
 }
 
@@ -499,6 +571,38 @@ mod tests {
         assert_eq!(snapshot.available(), None);
         assert_eq!(snapshot.available_for_asset("BTC"), Some(0.1));
         assert_eq!(snapshot.available_for_asset("USDT"), Some(5_000.0));
+    }
+
+    #[test]
+    fn complete_recent_pnl_batch_must_cover_the_required_window() {
+        let required = PnlHistoryWindow::try_new(
+            Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+        let partial = PnlHistoryWindow::try_new(
+            Utc.with_ymd_and_hms(2026, 9, 1, 12, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+
+        let complete = RecentTrackPnlBatch::complete(required.clone(), Vec::new());
+        let insufficient =
+            RecentTrackPnlBatch::new(Vec::new(), Some(partial), RecentPnlCompleteness::Complete);
+
+        assert!(complete.covers(&required));
+        assert!(!insufficient.covers(&required));
+    }
+
+    #[test]
+    fn recent_pnl_window_rejects_an_inverted_range() {
+        let error = PnlHistoryWindow::try_new(
+            Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("start"));
     }
 
     #[test]

@@ -9,6 +9,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
+use crate::pnl_audit::required_recent_pnl_window;
 use crate::server_context::ReconcileState;
 
 use super::ServerRuntime;
@@ -19,6 +20,7 @@ const PNL_BACKFILL_INTERVAL: Duration = Duration::from_secs(60);
 pub(super) struct PnlBackfillSummary {
     pub available_tracks: usize,
     pub unsupported_tracks: usize,
+    pub incomplete_tracks: usize,
     pub records_seen: usize,
     pub records_inserted: usize,
     pub records_skipped: usize,
@@ -32,6 +34,7 @@ pub(crate) struct PnlBackfillSnapshot {
     pub last_success_at: Option<DateTime<Utc>>,
     pub available_tracks: usize,
     pub unsupported_tracks: usize,
+    pub incomplete_tracks: usize,
     pub records_seen: usize,
     pub records_inserted: usize,
     pub records_skipped: usize,
@@ -55,6 +58,7 @@ impl PnlBackfillStatus {
         snapshot.last_completed_at = Some(completed_at);
         snapshot.available_tracks = summary.available_tracks;
         snapshot.unsupported_tracks = summary.unsupported_tracks;
+        snapshot.incomplete_tracks = summary.incomplete_tracks;
         snapshot.records_seen = summary.records_seen;
         snapshot.records_inserted = summary.records_inserted;
         snapshot.records_skipped = summary.records_skipped;
@@ -63,6 +67,11 @@ impl PnlBackfillStatus {
             Some(format!(
                 "recent PNL recovery is unsupported for {} configured track(s)",
                 summary.unsupported_tracks
+            ))
+        } else if summary.incomplete_tracks > 0 {
+            Some(format!(
+                "recent PNL coverage is incomplete for {} configured track(s)",
+                summary.incomplete_tracks
             ))
         } else if summary.failures > 0 {
             Some(summary.last_error.clone().unwrap_or_else(|| {
@@ -156,9 +165,13 @@ pub(super) fn spawn_pnl_backfill_task(
                             failures = summary.failures,
                             "track pnl backfill inserted records"
                         );
-                    } else if summary.unsupported_tracks > 0 || summary.failures > 0 {
+                    } else if summary.unsupported_tracks > 0
+                        || summary.incomplete_tracks > 0
+                        || summary.failures > 0
+                    {
                         tracing::warn!(
                             unsupported_tracks = summary.unsupported_tracks,
+                            incomplete_tracks = summary.incomplete_tracks,
                             records_seen = summary.records_seen,
                             records_skipped = summary.records_skipped,
                             failures = summary.failures,
@@ -177,15 +190,23 @@ pub(super) async fn backfill_recent_pnl_once(
 ) -> PnlBackfillSummary {
     let tracks = state.runtime.track_instruments().await;
     let mut summary = PnlBackfillSummary::default();
+    let required_window = required_recent_pnl_window(Utc::now());
 
     for track in tracks {
         let records = match account
-            .get_recent_track_pnl_records(&track.instrument)
+            .get_recent_track_pnl_records(&track.instrument, &required_window)
             .await
         {
-            Ok(RecentTrackPnlRecords::Available(records)) => {
+            Ok(RecentTrackPnlRecords::Available(batch)) => {
                 summary.available_tracks += 1;
-                records
+                if !batch.covers(&required_window) {
+                    summary.incomplete_tracks += 1;
+                    summary.last_error = Some(format!(
+                        "recent PNL response for track `{}` does not cover {}..{}",
+                        track.id, required_window.start, required_window.end
+                    ));
+                }
+                batch.records
             }
             Ok(RecentTrackPnlRecords::Unsupported) => {
                 summary.unsupported_tracks += 1;
@@ -310,6 +331,28 @@ mod tests {
         );
         assert_eq!(status.last_success_at, None);
         assert!(status.last_error.unwrap().contains("unsupported"));
+    }
+
+    #[test]
+    fn incomplete_backfill_is_recorded_as_degraded_not_success() {
+        let status = PnlBackfillStatus::new();
+        let completed_at = Utc.with_ymd_and_hms(2026, 6, 17, 1, 2, 3).unwrap();
+        let summary = PnlBackfillSummary {
+            available_tracks: 1,
+            incomplete_tracks: 1,
+            ..PnlBackfillSummary::default()
+        };
+
+        status.record_completion(completed_at, &summary);
+
+        let snapshot = status.snapshot();
+        assert_eq!(snapshot.incomplete_tracks, 1);
+        assert_eq!(snapshot.last_success_at, None);
+        assert_eq!(
+            snapshot.health_status(),
+            crate::runtime::RuntimeHealthStatus::Degraded
+        );
+        assert!(snapshot.last_error.unwrap().contains("incomplete"));
     }
 
     #[tokio::test]
@@ -468,13 +511,22 @@ mod tests {
             &FakeAccount::unsupported(),
         )
         .await;
+        let incomplete = backfill_recent_pnl_once(
+            &runtime_context.runtime_state().reconcile,
+            &FakeAccount::incomplete(Vec::new()),
+        )
+        .await;
 
         assert_eq!(available.available_tracks, 1);
         assert_eq!(available.unsupported_tracks, 0);
+        assert_eq!(available.incomplete_tracks, 0);
         assert_eq!(available.failures, 0);
         assert_eq!(unsupported.available_tracks, 0);
         assert_eq!(unsupported.unsupported_tracks, 1);
         assert_eq!(unsupported.failures, 0);
+        assert_eq!(incomplete.available_tracks, 1);
+        assert_eq!(incomplete.incomplete_tracks, 1);
+        assert_eq!(incomplete.failures, 0);
     }
 
     fn test_manager() -> TrackManager {
@@ -533,6 +585,7 @@ mod tests {
 
     enum FakeAccountResponse {
         Records(Vec<TrackPnlRecord>),
+        Incomplete(Vec<TrackPnlRecord>),
         Unsupported,
         Error(String),
     }
@@ -548,6 +601,13 @@ mod tests {
         fn failing(message: &str) -> Self {
             Self {
                 response: FakeAccountResponse::Error(message.to_string()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn incomplete(records: Vec<TrackPnlRecord>) -> Self {
+            Self {
+                response: FakeAccountResponse::Incomplete(records),
                 calls: Mutex::new(Vec::new()),
             }
         }
@@ -574,12 +634,19 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             instrument: &Instrument,
+            required_window: &poise_engine::ports::PnlHistoryWindow,
         ) -> Result<RecentTrackPnlRecords> {
             self.calls.lock().unwrap().push(instrument.symbol.clone());
             match &self.response {
-                FakeAccountResponse::Records(records) => {
-                    Ok(RecentTrackPnlRecords::Available(records.clone()))
-                }
+                FakeAccountResponse::Records(records) => Ok(RecentTrackPnlRecords::Available(
+                    poise_engine::ports::RecentTrackPnlBatch::complete(
+                        required_window.clone(),
+                        records.clone(),
+                    ),
+                )),
+                FakeAccountResponse::Incomplete(records) => Ok(RecentTrackPnlRecords::Available(
+                    poise_engine::ports::RecentTrackPnlBatch::incomplete(None, records.clone()),
+                )),
                 FakeAccountResponse::Unsupported => Ok(RecentTrackPnlRecords::Unsupported),
                 FakeAccountResponse::Error(message) => anyhow::bail!(message.clone()),
             }

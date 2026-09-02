@@ -51,6 +51,7 @@ pub struct PnlBackfillStatusView {
     pub last_completed_at: Option<String>,
     pub available_tracks: usize,
     pub unsupported_tracks: usize,
+    pub incomplete_tracks: usize,
     pub records_seen: usize,
     pub records_inserted: usize,
     pub records_skipped: usize,
@@ -64,6 +65,20 @@ pub struct PnlBackfillStatusView {
 pub enum RecentPnlAvailabilityView {
     Available,
     Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecentPnlCompletenessView {
+    Complete,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PnlHistoryWindowView {
+    pub start: String,
+    pub end: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -115,6 +130,9 @@ pub struct RecentFillsAuditResponse {
     pub track_id: String,
     pub instrument: InstrumentView,
     pub availability: RecentPnlAvailabilityView,
+    pub required_window: PnlHistoryWindowView,
+    pub covered_window: Option<PnlHistoryWindowView>,
+    pub completeness: RecentPnlCompletenessView,
     pub records_seen: usize,
     pub records_recorded: usize,
     pub records_missing: usize,
@@ -947,11 +965,11 @@ mod tests {
     #[test]
     fn pnl_capability_views_preserve_available_empty_and_unsupported() {
         let available: RecentFillsAuditResponse = serde_json::from_str(
-            r#"{"track_id":"btc-core","instrument":{"venue":"okx","symbol":"BTC-USDT-SWAP"},"availability":"available","records_seen":0,"records_recorded":0,"records_missing":0,"records_unkeyed":0,"items":[]}"#,
+            r#"{"track_id":"btc-core","instrument":{"venue":"okx","symbol":"BTC-USDT-SWAP"},"availability":"available","required_window":{"start":"2026-09-01T00:00:00Z","end":"2026-09-02T00:00:00Z"},"covered_window":{"start":"2026-09-01T00:00:00Z","end":"2026-09-02T00:00:00Z"},"completeness":"complete","records_seen":0,"records_recorded":0,"records_missing":0,"records_unkeyed":0,"items":[]}"#,
         )
         .unwrap();
         let unsupported: RecentFillsAuditResponse = serde_json::from_str(
-            r#"{"track_id":"btc-core","instrument":{"venue":"binance","symbol":"BTCUSDT"},"availability":"unsupported","records_seen":0,"records_recorded":0,"records_missing":0,"records_unkeyed":0,"items":[]}"#,
+            r#"{"track_id":"btc-core","instrument":{"venue":"binance","symbol":"BTCUSDT"},"availability":"unsupported","required_window":{"start":"2026-09-01T00:00:00Z","end":"2026-09-02T00:00:00Z"},"covered_window":null,"completeness":"incomplete","records_seen":0,"records_recorded":0,"records_missing":0,"records_unkeyed":0,"items":[]}"#,
         )
         .unwrap();
 
@@ -967,6 +985,7 @@ mod tests {
         let status = PnlBackfillStatusView {
             available_tracks: 2,
             unsupported_tracks: 1,
+            incomplete_tracks: 1,
             ..PnlBackfillStatusView::default()
         };
 
@@ -974,6 +993,7 @@ mod tests {
 
         assert_eq!(payload["available_tracks"], 2);
         assert_eq!(payload["unsupported_tracks"], 1);
+        assert_eq!(payload["incomplete_tracks"], 1);
     }
 
     #[test]

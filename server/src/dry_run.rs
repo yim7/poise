@@ -512,6 +512,7 @@ total_loss_limit = 0.03
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
+            _required_window: &poise_engine::ports::PnlHistoryWindow,
         ) -> Result<RecentTrackPnlRecords> {
             Ok(RecentTrackPnlRecords::Unsupported)
         }

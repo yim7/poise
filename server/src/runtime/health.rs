@@ -401,6 +401,14 @@ pub(crate) fn assess_trading_readiness(
                 pnl_backfill.unsupported_tracks
             ),
         });
+    } else if pnl_backfill.incomplete_tracks > 0 {
+        blockers.push(ReadinessIssueView {
+            component: "pnl_backfill".to_string(),
+            reason: format!(
+                "required recent PNL window is incomplete for {} configured track(s)",
+                pnl_backfill.incomplete_tracks
+            ),
+        });
     } else if pnl_status == RuntimeHealthStatus::Unknown {
         blockers.push(ReadinessIssueView {
             component: "pnl_backfill".to_string(),
@@ -955,6 +963,37 @@ mod tests {
         assert!(assessment.ready_to_trade);
         assert!(assessment.blockers.is_empty());
         assert_eq!(assessment.warnings.len(), 1);
+    }
+
+    #[test]
+    fn trading_readiness_blocks_incomplete_recent_pnl_coverage() {
+        let health = RuntimeHealth::new();
+        let at = Utc.with_ymd_and_hms(2026, 6, 17, 3, 2, 0).unwrap();
+        for component in RuntimeHealthComponent::all() {
+            health.record_success(component, at);
+        }
+
+        let assessment = assess_trading_readiness(
+            &[healthy_track()],
+            Some(&healthy_account()),
+            &health.snapshot(),
+            &PnlBackfillSnapshot {
+                last_completed_at: Some(at),
+                available_tracks: 1,
+                incomplete_tracks: 1,
+                last_error_at: Some(at),
+                last_error: Some("recent PNL coverage is incomplete".to_string()),
+                ..PnlBackfillSnapshot::default()
+            },
+            &EffectJournalDiagnosticsSnapshot::default(),
+            &AccountMarginBlock::default(),
+            &[],
+        );
+
+        assert!(!assessment.ready_to_trade);
+        assert!(assessment.blockers.iter().any(|issue| {
+            issue.component == "pnl_backfill" && issue.reason.contains("incomplete")
+        }));
     }
 
     #[test]

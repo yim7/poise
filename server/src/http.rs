@@ -10,10 +10,11 @@ use poise_core::track::TrackId;
 use poise_engine::command::TrackCommand;
 use poise_protocol::{
     AccountSummaryView, ActivityLevelView, HealthResponse, HealthStatusView, HealthTaskStatusView,
-    HealthTaskView, InstrumentView, PnlBackfillStatusView, RecentFillAuditItemView,
-    RecentFillCoverageView, RecentFillsAuditResponse, RecentPnlAvailabilityView,
-    TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
-    TrackDiagnosticItemView, TrackDiagnosticsView, TrackListResponse, TradingReadinessResponse,
+    HealthTaskView, InstrumentView, PnlBackfillStatusView, PnlHistoryWindowView,
+    RecentFillAuditItemView, RecentFillCoverageView, RecentFillsAuditResponse,
+    RecentPnlAvailabilityView, RecentPnlCompletenessView, TrackCommandAccepted,
+    TrackCommandRequest, TrackCommandType, TrackDetailView, TrackDiagnosticItemView,
+    TrackDiagnosticsView, TrackListResponse, TradingReadinessResponse,
 };
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
@@ -186,6 +187,7 @@ fn project_pnl_backfill_status(
         last_completed_at: snapshot.last_completed_at.map(|value| value.to_rfc3339()),
         available_tracks: snapshot.available_tracks,
         unsupported_tracks: snapshot.unsupported_tracks,
+        incomplete_tracks: snapshot.incomplete_tracks,
         records_seen: snapshot.records_seen,
         records_inserted: snapshot.records_inserted,
         records_skipped: snapshot.records_skipped,
@@ -295,6 +297,22 @@ fn project_recent_fills_audit(
             }
             crate::pnl_audit::RecentPnlAvailability::Unsupported => {
                 RecentPnlAvailabilityView::Unsupported
+            }
+        },
+        required_window: PnlHistoryWindowView {
+            start: audit.required_window.start.to_rfc3339(),
+            end: audit.required_window.end.to_rfc3339(),
+        },
+        covered_window: audit.covered_window.map(|window| PnlHistoryWindowView {
+            start: window.start.to_rfc3339(),
+            end: window.end.to_rfc3339(),
+        }),
+        completeness: match audit.completeness {
+            poise_engine::ports::RecentPnlCompleteness::Complete => {
+                RecentPnlCompletenessView::Complete
+            }
+            poise_engine::ports::RecentPnlCompleteness::Incomplete => {
+                RecentPnlCompletenessView::Incomplete
             }
         },
         records_seen: audit.records_seen,
@@ -451,9 +469,10 @@ mod tests {
     use poise_protocol::{
         AccountSummaryView, DecisionReasonView, ExecutionBindingIntentView,
         ExecutionBindingStatusView, ExecutionStatusView, RecentFillCoverageView,
-        RecentFillsAuditResponse, RecentPnlAvailabilityView, RiskSignalView, TrackCommandAccepted,
-        TrackCommandRequest, TrackCommandType, TrackDetailView, TrackDiagnosticsView,
-        TrackListResponse, TrackStatus, TradingReadinessResponse,
+        RecentFillsAuditResponse, RecentPnlAvailabilityView, RecentPnlCompletenessView,
+        RiskSignalView, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
+        TrackDetailView, TrackDiagnosticsView, TrackListResponse, TrackStatus,
+        TradingReadinessResponse,
     };
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
@@ -1218,6 +1237,7 @@ mod tests {
                 last_success_at: None,
                 available_tracks: 2,
                 unsupported_tracks: 1,
+                incomplete_tracks: 0,
                 records_seen: 5,
                 records_inserted: 2,
                 records_skipped: 3,
@@ -1790,6 +1810,11 @@ mod tests {
         assert_eq!(payload.track_id, "btc-core");
         assert_eq!(payload.instrument.symbol, "BTCUSDT");
         assert_eq!(payload.availability, RecentPnlAvailabilityView::Available);
+        assert_eq!(payload.completeness, RecentPnlCompletenessView::Complete);
+        assert_eq!(
+            payload.covered_window,
+            Some(payload.required_window.clone())
+        );
         assert_eq!(payload.records_seen, 3);
         assert_eq!(payload.records_recorded, 1);
         assert_eq!(payload.records_missing, 1);
@@ -1828,6 +1853,8 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["availability"], "unsupported");
+        assert_eq!(payload["completeness"], "incomplete");
+        assert_eq!(payload["covered_window"], serde_json::Value::Null);
         assert_eq!(payload["records_seen"], 0);
     }
 
@@ -1942,10 +1969,16 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
+            required_window: &poise_engine::ports::PnlHistoryWindow,
         ) -> anyhow::Result<RecentTrackPnlRecords> {
             match &self.response {
                 FakeRecentFillsResponse::Available(records) => {
-                    Ok(RecentTrackPnlRecords::Available(records.clone()))
+                    Ok(RecentTrackPnlRecords::Available(
+                        poise_engine::ports::RecentTrackPnlBatch::complete(
+                            required_window.clone(),
+                            records.clone(),
+                        ),
+                    ))
                 }
                 FakeRecentFillsResponse::Unsupported => Ok(RecentTrackPnlRecords::Unsupported),
                 FakeRecentFillsResponse::Error(message) => anyhow::bail!(message.clone()),

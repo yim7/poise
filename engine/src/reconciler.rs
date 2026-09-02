@@ -4,7 +4,9 @@ use poise_core::risk::{self, ExposureIntent, RiskOutcome};
 use poise_core::strategy::{self, BandBoundary, BandProtectionPolicy, BandStatus};
 use poise_core::types::Exposure;
 
-use crate::execution_gate::{AccountCapacityGate, AccountCapacityGateInput, ExecutionGateDecision};
+use crate::execution_gate::{
+    AccountCapacityGate, AccountCapacityGateInput, ExecutionGateDecision, added_risk_units,
+};
 use crate::execution_plan::DecisionReason;
 use crate::loss_guard::build_loss_guard_snapshot_for_asset;
 use crate::risk_exposure_gate::{
@@ -83,6 +85,18 @@ pub(crate) fn reconcile_target_at_with_metadata(
             ManualState::Flattened => Exposure(0.0),
             ManualState::TargetOverride { target } => target.clone(),
         };
+        if build_loss_guard_snapshot_for_asset(
+            &track.pnl_stats,
+            &track.risk_state,
+            Some(track.instrument_spec.settlement_asset().as_str()),
+        )
+        .is_err()
+        {
+            return reconcile_with_metadata(
+                pnl_incomplete_result(track, &target_override, Some(track.track_state.clone())),
+                None,
+            );
+        }
         let delta = track.current_exposure.delta(&target_override);
         return reconcile_with_metadata(
             TargetReconcileResult {
@@ -319,6 +333,7 @@ fn pnl_incomplete_result(
     new_runtime_state: Option<TrackState>,
 ) -> TargetReconcileResult {
     let current = track.current_exposure.clone();
+    let safe_target = risk_reducing_target(&current, policy_target);
     let reason = ExecutionGateReason::PnlIncomplete {
         expected_asset: track
             .instrument_spec
@@ -332,22 +347,43 @@ fn pnl_incomplete_result(
             .map(|asset| asset.as_str().to_string()),
         unvalued_cashflow_count: track.pnl_stats.unvalued_cashflows_cumulative.len(),
     };
+    let execution_gate_decision = ExecutionGateDecision::RiskIncreaseBlocked {
+        reason: reason.clone(),
+    };
+    let delta = current.delta(&safe_target);
+    let events = (track.execution_gate_state.last_decision != execution_gate_decision)
+        .then_some(DomainEvent::ExecutionGateApplied {
+            reason: reason.clone(),
+        })
+        .into_iter()
+        .collect();
 
     TargetReconcileResult {
-        events: vec![DomainEvent::ExecutionGateApplied {
-            reason: reason.clone(),
-        }],
+        events,
         policy_target: policy_target.clone(),
-        risk_approved_target: current.clone(),
-        execution_target: current,
-        reason: Some(DecisionReason::RiskInputInvalid),
+        risk_approved_target: safe_target.clone(),
+        execution_target: safe_target,
+        reason: delta.is_zero().then_some(DecisionReason::RiskInputInvalid),
         applied_risk_cap: None,
         new_runtime_state,
-        execution_gate_decision: ExecutionGateDecision::NoSubmit { reason },
-        target_pursuit_suppressed: true,
+        execution_gate_decision,
+        target_pursuit_suppressed: delta.is_zero(),
         acquisition_frontier: None,
         risk_acquisition: None,
         fresh_acquisition_initialization: None,
+    }
+}
+
+fn risk_reducing_target(current: &Exposure, requested: &Exposure) -> Exposure {
+    if added_risk_units(current.0, requested.0) <= f64::EPSILON {
+        return requested.clone();
+    }
+    let crosses_zero = (current.0 > f64::EPSILON && requested.0 < -f64::EPSILON)
+        || (current.0 < -f64::EPSILON && requested.0 > f64::EPSILON);
+    if crosses_zero {
+        Exposure(0.0)
+    } else {
+        current.clone()
     }
 }
 
@@ -2032,7 +2068,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_holds_when_pnl_asset_mismatches_settlement_asset() {
+    fn reconcile_blocks_risk_increase_when_pnl_asset_mismatches_settlement_asset() {
         let mut track = test_runtime();
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(2.0);
@@ -2044,7 +2080,7 @@ mod tests {
         assert_eq!(result.risk_approved_target, Exposure(2.0));
         assert_eq!(
             result.execution_gate_decision,
-            ExecutionGateDecision::NoSubmit {
+            ExecutionGateDecision::RiskIncreaseBlocked {
                 reason: ExecutionGateReason::PnlIncomplete {
                     expected_asset: "USDT".to_string(),
                     actual_asset: Some("BTC".to_string()),
@@ -2059,6 +2095,64 @@ mod tests {
                 reason: ExecutionGateReason::PnlIncomplete { .. }
             }
         )));
+    }
+
+    #[test]
+    fn incomplete_pnl_allows_risk_reducing_target() {
+        let mut track = test_runtime();
+        set_runtime_status(&mut track, TrackStatus::Active);
+        track.current_exposure = Exposure(10.0);
+        track.pnl_stats.pnl_asset = Some(poise_core::instrument::Asset::try_new("BTC").unwrap());
+
+        let result = reconcile_target(&track, 90.0);
+
+        assert!(!result.target_pursuit_suppressed);
+        assert_eq!(result.risk_approved_target, Exposure(8.0));
+        assert_eq!(result.execution_target, Exposure(8.0));
+        assert!(matches!(
+            result.execution_gate_decision,
+            ExecutionGateDecision::RiskIncreaseBlocked { .. }
+        ));
+    }
+
+    #[test]
+    fn incomplete_pnl_allows_flattening_but_not_new_opposite_risk() {
+        let mut track = test_runtime();
+        set_runtime_status(&mut track, TrackStatus::Active);
+        track.current_exposure = Exposure(2.0);
+        track.pnl_stats.pnl_asset = Some(poise_core::instrument::Asset::try_new("BTC").unwrap());
+
+        let result = reconcile_target(&track, 110.0);
+
+        assert!(!result.target_pursuit_suppressed);
+        assert_eq!(result.policy_target, Exposure(-8.0));
+        assert_eq!(result.risk_approved_target, Exposure(0.0));
+        assert_eq!(result.execution_target, Exposure(0.0));
+    }
+
+    #[test]
+    fn incomplete_pnl_applies_to_manual_targets_without_blocking_manual_reduction() {
+        let mut track = test_runtime();
+        track.current_exposure = Exposure(2.0);
+        track.pnl_stats.pnl_asset = Some(poise_core::instrument::Asset::try_new("BTC").unwrap());
+        track.track_state =
+            TrackState::Running(ControlState::Manual(ManualState::TargetOverride {
+                target: Exposure(5.0),
+            }));
+
+        let blocked = reconcile_target(&track, 100.0);
+
+        assert_eq!(blocked.risk_approved_target, Exposure(2.0));
+        assert!(blocked.target_pursuit_suppressed);
+
+        track.track_state =
+            TrackState::Running(ControlState::Manual(ManualState::TargetOverride {
+                target: Exposure(1.0),
+            }));
+        let reducing = reconcile_target(&track, 100.0);
+
+        assert_eq!(reducing.risk_approved_target, Exposure(1.0));
+        assert!(!reducing.target_pursuit_suppressed);
     }
 
     #[test]

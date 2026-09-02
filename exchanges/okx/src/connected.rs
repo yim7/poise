@@ -8,8 +8,8 @@ use poise_core::track::Instrument;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
-    MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position,
-    RecentTrackPnlRecords, UserDataEvent,
+    MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, PnlHistoryWindow,
+    Position, RecentTrackPnlRecords, UserDataEvent,
 };
 
 use crate::{
@@ -182,10 +182,11 @@ impl AccountPort for OkxAccount {
     async fn get_recent_track_pnl_records(
         &self,
         instrument: &Instrument,
+        required_window: &PnlHistoryWindow,
     ) -> Result<RecentTrackPnlRecords> {
         Ok(RecentTrackPnlRecords::Available(
             self.rest
-                .get_recent_track_pnl_records(&instrument.symbol)
+                .get_recent_track_pnl_records(&instrument.symbol, required_window)
                 .await?,
         ))
     }
@@ -313,14 +314,28 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         ));
         let connected = ports_from_clients(rest, Arc::new(dummy_ws_client()));
+        let required_window = PnlHistoryWindow::try_new(
+            fixed_datetime() - chrono::Duration::hours(24),
+            fixed_datetime(),
+        )
+        .unwrap();
 
         let outcome = connected
             .account()
-            .get_recent_track_pnl_records(&Instrument::new(Venue::Okx, "BTC-USDT-SWAP"))
+            .get_recent_track_pnl_records(
+                &Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
+                &required_window,
+            )
             .await
             .unwrap();
 
-        assert_eq!(outcome, RecentTrackPnlRecords::Available(Vec::new()));
+        assert_eq!(
+            outcome,
+            RecentTrackPnlRecords::Available(poise_engine::ports::RecentTrackPnlBatch::complete(
+                required_window,
+                Vec::new()
+            ))
+        );
     }
 
     fn fixed_datetime() -> DateTime<Utc> {

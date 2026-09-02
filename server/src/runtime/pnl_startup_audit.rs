@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use poise_application::TrackInput;
 use poise_core::events::DomainEvent;
 use poise_core::track::TrackId;
+use poise_engine::ports::RecentPnlCompleteness;
 
 use crate::pnl_audit::{RecentFillCoverage, RecentFillsAuditError, RecentPnlAvailability};
 use crate::server_context::RuntimeState;
@@ -53,6 +54,16 @@ pub(super) async fn run_startup_pnl_audit(state: &RuntimeState) -> Result<Startu
         if audit.availability == RecentPnlAvailability::Unsupported {
             let error = format!(
                 "required recent PNL recovery is unsupported for track `{}` instrument `{}:{}`",
+                track.id,
+                track.instrument.venue.as_str(),
+                track.instrument.symbol
+            );
+            state.pnl_backfill_status.record_error_now(&error);
+            bail!(error);
+        }
+        if audit.completeness != RecentPnlCompleteness::Complete {
+            let error = format!(
+                "required recent PNL coverage is incomplete for track `{}` instrument `{}:{}`",
                 track.id,
                 track.instrument.venue.as_str(),
                 track.instrument.symbol
@@ -233,6 +244,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_pnl_audit_rejects_incomplete_required_history() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let mut state = test_runtime_state(repository.clone()).await;
+        state.recent_fills_auditor = Arc::new(RecentFillsAuditor::new(
+            Arc::new(FakeRecentFillsAccount::new(
+                FakeRecentFillsResponse::Incomplete,
+            )),
+            repository as Arc<dyn TrackQueryStore>,
+        ));
+
+        let error = run_startup_pnl_audit(&state).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("required recent PNL coverage is incomplete")
+        );
+        assert!(error.to_string().contains("btc-core"));
+        assert!(error.to_string().contains("binance:BTCUSDT"));
+    }
+
+    #[tokio::test]
     async fn startup_pnl_audit_keeps_transient_query_failure_degraded_but_nonfatal() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let mut state = test_runtime_state(repository.clone()).await;
@@ -405,6 +438,7 @@ mod tests {
 
     enum FakeRecentFillsResponse {
         Available(Vec<TrackPnlRecord>),
+        Incomplete,
         Unsupported,
         Error(String),
     }
@@ -456,11 +490,20 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
+            required_window: &poise_engine::ports::PnlHistoryWindow,
         ) -> Result<RecentTrackPnlRecords> {
             match &self.response {
                 FakeRecentFillsResponse::Available(records) => {
-                    Ok(RecentTrackPnlRecords::Available(records.clone()))
+                    Ok(RecentTrackPnlRecords::Available(
+                        poise_engine::ports::RecentTrackPnlBatch::complete(
+                            required_window.clone(),
+                            records.clone(),
+                        ),
+                    ))
                 }
+                FakeRecentFillsResponse::Incomplete => Ok(RecentTrackPnlRecords::Available(
+                    poise_engine::ports::RecentTrackPnlBatch::incomplete(None, Vec::new()),
+                )),
                 FakeRecentFillsResponse::Unsupported => Ok(RecentTrackPnlRecords::Unsupported),
                 FakeRecentFillsResponse::Error(message) => anyhow::bail!(message.clone()),
             }

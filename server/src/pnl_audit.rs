@@ -2,10 +2,20 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
+use chrono::{Duration, Utc};
 use poise_application::TrackQueryStore;
 use poise_core::track::{Instrument, TrackId};
 use poise_engine::ledger::{TrackPnlRecord, TrackPnlRecordKind};
-use poise_engine::ports::{AccountPort, RecentTrackPnlRecords};
+use poise_engine::ports::{
+    AccountPort, PnlHistoryWindow, RecentPnlCompleteness, RecentTrackPnlRecords,
+};
+
+const RECENT_PNL_LOOKBACK: Duration = Duration::hours(24);
+
+pub(crate) fn required_recent_pnl_window(now: chrono::DateTime<Utc>) -> PnlHistoryWindow {
+    PnlHistoryWindow::try_new(now - RECENT_PNL_LOOKBACK, now)
+        .expect("fixed recent PNL lookback must form a valid window")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecentPnlAvailability {
@@ -44,6 +54,9 @@ pub(crate) struct RecentFillAuditItem {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RecentFillsAudit {
     pub availability: RecentPnlAvailability,
+    pub required_window: PnlHistoryWindow,
+    pub covered_window: Option<PnlHistoryWindow>,
+    pub completeness: RecentPnlCompleteness,
     pub records_seen: usize,
     pub records_recorded: usize,
     pub records_missing: usize,
@@ -72,9 +85,10 @@ impl RecentFillsAuditor {
         track_id: &TrackId,
         instrument: &Instrument,
     ) -> std::result::Result<RecentFillsAudit, RecentFillsAuditError> {
-        let records = match self
+        let required_window = required_recent_pnl_window(Utc::now());
+        let batch = match self
             .account
-            .get_recent_track_pnl_records(instrument)
+            .get_recent_track_pnl_records(instrument, &required_window)
             .await
             .map_err(RecentFillsAuditError::Exchange)?
         {
@@ -82,6 +96,9 @@ impl RecentFillsAuditor {
             RecentTrackPnlRecords::Unsupported => {
                 return Ok(RecentFillsAudit {
                     availability: RecentPnlAvailability::Unsupported,
+                    required_window,
+                    covered_window: None,
+                    completeness: RecentPnlCompleteness::Incomplete,
                     records_seen: 0,
                     records_recorded: 0,
                     records_missing: 0,
@@ -89,10 +106,18 @@ impl RecentFillsAuditor {
                     items: Vec::new(),
                 });
             }
-        }
-        .into_iter()
-        .filter(|record| record.kind() == TrackPnlRecordKind::Trade)
-        .collect::<Vec<_>>();
+        };
+        let completeness = if batch.covers(&required_window) {
+            RecentPnlCompleteness::Complete
+        } else {
+            RecentPnlCompleteness::Incomplete
+        };
+        let covered_window = batch.covered_window;
+        let records = batch
+            .records
+            .into_iter()
+            .filter(|record| record.kind() == TrackPnlRecordKind::Trade)
+            .collect::<Vec<_>>();
         let source_keys = records
             .iter()
             .filter_map(normalized_source_key)
@@ -110,6 +135,9 @@ impl RecentFillsAuditor {
 
         let mut audit = RecentFillsAudit {
             availability: RecentPnlAvailability::Available,
+            required_window,
+            covered_window,
+            completeness,
             records_seen: records.len(),
             records_recorded: 0,
             records_missing: 0,
@@ -264,7 +292,16 @@ mod tests {
             Arc::new(FakeRecentFillsAccount {
                 response: FakeRecentFillsResponse::Unsupported,
             }),
-            repository as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+        )
+        .audit_recent_fills(&track_id, &instrument)
+        .await
+        .unwrap();
+        let incomplete = RecentFillsAuditor::new(
+            Arc::new(FakeRecentFillsAccount {
+                response: FakeRecentFillsResponse::Incomplete(Vec::new()),
+            }),
+            repository.clone() as Arc<dyn TrackQueryStore>,
         )
         .audit_recent_fills(&track_id, &instrument)
         .await
@@ -272,8 +309,18 @@ mod tests {
 
         assert_eq!(available.availability, RecentPnlAvailability::Available);
         assert_eq!(available.records_seen, 0);
+        assert_eq!(
+            available.completeness,
+            poise_engine::ports::RecentPnlCompleteness::Complete
+        );
+        assert!(available.covered_window.is_some());
         assert_eq!(unsupported.availability, RecentPnlAvailability::Unsupported);
         assert_eq!(unsupported.records_seen, 0);
+        assert_eq!(
+            incomplete.completeness,
+            poise_engine::ports::RecentPnlCompleteness::Incomplete
+        );
+        assert_eq!(incomplete.covered_window, None);
     }
 
     #[tokio::test]
@@ -348,6 +395,7 @@ mod tests {
 
     enum FakeRecentFillsResponse {
         Available(Vec<TrackPnlRecord>),
+        Incomplete(Vec<TrackPnlRecord>),
         Unsupported,
         Error(String),
     }
@@ -417,10 +465,21 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
+            required_window: &poise_engine::ports::PnlHistoryWindow,
         ) -> Result<RecentTrackPnlRecords> {
             match &self.response {
                 FakeRecentFillsResponse::Available(records) => {
-                    Ok(RecentTrackPnlRecords::Available(records.clone()))
+                    Ok(RecentTrackPnlRecords::Available(
+                        poise_engine::ports::RecentTrackPnlBatch::complete(
+                            required_window.clone(),
+                            records.clone(),
+                        ),
+                    ))
+                }
+                FakeRecentFillsResponse::Incomplete(records) => {
+                    Ok(RecentTrackPnlRecords::Available(
+                        poise_engine::ports::RecentTrackPnlBatch::incomplete(None, records.clone()),
+                    ))
                 }
                 FakeRecentFillsResponse::Unsupported => Ok(RecentTrackPnlRecords::Unsupported),
                 FakeRecentFillsResponse::Error(message) => anyhow::bail!(message.clone()),

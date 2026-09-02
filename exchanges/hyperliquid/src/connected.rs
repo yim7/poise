@@ -9,8 +9,8 @@ use poise_core::track::Instrument;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
-    MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position,
-    RecentTrackPnlRecords, UserDataEvent,
+    MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, PnlHistoryWindow,
+    Position, RecentTrackPnlRecords, UserDataEvent,
 };
 
 use crate::{
@@ -148,9 +148,10 @@ impl AccountPort for HyperliquidAccount {
     async fn get_recent_track_pnl_records(
         &self,
         instrument: &Instrument,
+        required_window: &PnlHistoryWindow,
     ) -> Result<RecentTrackPnlRecords> {
         self.rest
-            .get_recent_track_pnl_records(&instrument.symbol)
+            .get_recent_track_pnl_records(&instrument.symbol, required_window)
             .await
             .map(RecentTrackPnlRecords::Available)
     }

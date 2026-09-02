@@ -11,7 +11,7 @@ use poise_core::types::PriceRounding;
 use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
-    OrderRequest as PortOrderRequest, OrderStatus, Position,
+    OrderRequest as PortOrderRequest, OrderStatus, PnlHistoryWindow, Position, RecentTrackPnlBatch,
 };
 
 use crate::client_order_id::ClientOrderIdMapper;
@@ -33,7 +33,6 @@ use crate::rules::normalize_perp_price;
 use crate::signing::{HyperliquidChain, action_hash, sign_l1_action};
 
 const MAX_DECIMAL_SCALE: u32 = 16;
-const RECENT_PNL_WINDOW_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 const USER_FILLS_PAGE_SIZE: usize = 2_000;
 const USER_FILLS_RETENTION_LIMIT: usize = 10_000;
 const USER_FUNDING_PAGE_SIZE: usize = 500;
@@ -227,10 +226,10 @@ impl HyperliquidRestClient {
     pub(crate) async fn get_recent_track_pnl_records(
         &self,
         symbol: &str,
-    ) -> Result<Vec<TrackPnlRecord>> {
-        let end_time = i64::try_from((self.timestamp_provider)())
-            .context("Hyperliquid timestamp does not fit signed milliseconds")?;
-        let start_time = end_time.saturating_sub(RECENT_PNL_WINDOW_MILLIS);
+        required_window: &PnlHistoryWindow,
+    ) -> Result<RecentTrackPnlBatch> {
+        let start_time = required_window.start.timestamp_millis();
+        let end_time = required_window.end.timestamp_millis();
         let mut records = self
             .get_recent_fill_pnl_records(symbol, start_time, end_time)
             .await?;
@@ -243,7 +242,10 @@ impl HyperliquidRestClient {
                 .cmp(&right.occurred_at)
                 .then_with(|| left.source_key.cmp(&right.source_key))
         });
-        Ok(records)
+        Ok(RecentTrackPnlBatch::complete(
+            required_window.clone(),
+            records,
+        ))
     }
 
     async fn get_recent_fill_pnl_records(
@@ -891,7 +893,7 @@ mod tests {
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
     use poise_engine::ledger::TrackPnlRecordKind;
-    use poise_engine::ports::{OrderRequest as PortOrderRequest, OrderStatus};
+    use poise_engine::ports::{OrderRequest as PortOrderRequest, OrderStatus, PnlHistoryWindow};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -928,6 +930,20 @@ mod tests {
         }
         .credentials()
         .unwrap()
+    }
+
+    async fn recent_pnl_records(
+        client: &HyperliquidRestClient,
+        symbol: &str,
+    ) -> anyhow::Result<Vec<poise_engine::ledger::TrackPnlRecord>> {
+        let end_millis = i64::try_from((client.timestamp_provider)())?;
+        let end = chrono::DateTime::from_timestamp_millis(end_millis).unwrap();
+        let required_window = PnlHistoryWindow::try_new(end - chrono::Duration::hours(24), end)
+            .map_err(anyhow::Error::msg)?;
+        Ok(client
+            .get_recent_track_pnl_records(symbol, &required_window)
+            .await?
+            .records)
     }
 
     fn fill_value(
@@ -1027,7 +1043,17 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+        let required_window = PnlHistoryWindow::try_new(
+            chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
+            chrono::DateTime::from_timestamp_millis(1_700_086_400_000).unwrap(),
+        )
+        .unwrap();
+        let batch = client
+            .get_recent_track_pnl_records("BTC", &required_window)
+            .await
+            .unwrap();
+        assert!(batch.covers(&required_window));
+        let records = batch.records;
 
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].kind(), TrackPnlRecordKind::Funding);
@@ -1080,7 +1106,7 @@ mod tests {
 
         client.get_position("BTC").await.unwrap();
         client.get_open_orders("BTC").await.unwrap();
-        client.get_recent_track_pnl_records("BTC").await.unwrap();
+        recent_pnl_records(&client, "BTC").await.unwrap();
 
         let requests = server.requests().await;
         assert_eq!(requests.len(), 4);
@@ -1106,7 +1132,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+        let records = recent_pnl_records(&client, "BTC").await.unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].trading_fee().unwrap().value(), 0.12);
@@ -1138,7 +1164,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+        let records = recent_pnl_records(&client, "BTC").await.unwrap();
 
         assert_eq!(
             records
@@ -1173,10 +1199,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let error = client
-            .get_recent_track_pnl_records("BTC")
-            .await
-            .unwrap_err();
+        let error = recent_pnl_records(&client, "BTC").await.unwrap_err();
 
         assert!(error.to_string().contains("full userFillsByTime page"));
         assert!(error.to_string().contains("no new fill identity"));
@@ -1203,10 +1226,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let error = client
-            .get_recent_track_pnl_records("BTC")
-            .await
-            .unwrap_err();
+        let error = recent_pnl_records(&client, "BTC").await.unwrap_err();
 
         assert!(
             error
@@ -1245,7 +1265,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+        let records = recent_pnl_records(&client, "BTC").await.unwrap();
 
         assert!(records.is_empty());
         assert_eq!(server.requests().await.len(), 7);
@@ -1272,7 +1292,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+        let records = recent_pnl_records(&client, "BTC").await.unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(
@@ -1303,10 +1323,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let error = client
-            .get_recent_track_pnl_records("BTC")
-            .await
-            .unwrap_err();
+        let error = recent_pnl_records(&client, "BTC").await.unwrap_err();
 
         assert!(
             error
@@ -1340,7 +1357,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+        let records = recent_pnl_records(&client, "BTC").await.unwrap();
 
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].funding_amount().unwrap().value(), -0.15);
@@ -1380,7 +1397,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+        let records = recent_pnl_records(&client, "BTC").await.unwrap();
 
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].funding_amount().unwrap().value(), -0.15);
@@ -1405,7 +1422,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
+        let records = recent_pnl_records(&client, "BTC").await.unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].trading_fee().unwrap().value(), 0.12);
@@ -1429,10 +1446,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let error = client
-            .get_recent_track_pnl_records("BTC")
-            .await
-            .unwrap_err();
+        let error = recent_pnl_records(&client, "BTC").await.unwrap_err();
 
         assert!(error.to_string().contains("failed to deserialize"));
         assert!(error.to_string().contains("hash"));
@@ -1452,10 +1466,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let error = client
-            .get_recent_track_pnl_records("BTC")
-            .await
-            .unwrap_err();
+        let error = recent_pnl_records(&client, "BTC").await.unwrap_err();
 
         assert!(error.to_string().contains("status 503"));
     }

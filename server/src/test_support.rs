@@ -500,8 +500,11 @@ impl AccountPort for NoopAccountPort {
     async fn get_recent_track_pnl_records(
         &self,
         _instrument: &poise_core::track::Instrument,
+        required_window: &poise_engine::ports::PnlHistoryWindow,
     ) -> Result<RecentTrackPnlRecords> {
-        Ok(RecentTrackPnlRecords::Available(Vec::new()))
+        Ok(RecentTrackPnlRecords::Available(
+            poise_engine::ports::RecentTrackPnlBatch::complete(required_window.clone(), Vec::new()),
+        ))
     }
 
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {

@@ -1619,6 +1619,33 @@ mod tests {
     }
 
     #[test]
+    fn pnl_gate_allows_reduce_only_submit() {
+        let config = config();
+        let rules = rules();
+        let previous = ExecutorState::empty(Utc::now());
+
+        let plan = plan(input_with_execution_gate(
+            &config,
+            &rules,
+            Exposure(2.0),
+            Exposure(1.0),
+            ExecutionGateDecision::RiskIncreaseBlocked {
+                reason: poise_core::events::ExecutionGateReason::PnlIncomplete {
+                    expected_asset: "USDT".to_string(),
+                    actual_asset: Some("USDT".to_string()),
+                    unvalued_cashflow_count: 1,
+                },
+            },
+            &previous,
+        ));
+
+        assert!(plan.effects.iter().any(|effect| matches!(
+            effect,
+            TrackEffect::SubmitOrder { request, .. } if request.reduce_only
+        )));
+    }
+
+    #[test]
     fn execution_gate_defers_cancel_until_authorized_submit_gets_order_identity() {
         let config = config();
         let rules = rules();

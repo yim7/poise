@@ -9,7 +9,7 @@ use poise_engine::ports::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError,
     ExecutionPortErrorKind, ExecutionResult, MarketDataPort, MarketDataTick, MetadataPort,
-    OrderReceipt, OrderRequest, Position, RecentTrackPnlRecords, UserDataEvent,
+    OrderReceipt, OrderRequest, PnlHistoryWindow, Position, RecentTrackPnlRecords, UserDataEvent,
 };
 
 use crate::{
@@ -145,6 +145,7 @@ impl AccountPort for BybitAccount {
     async fn get_recent_track_pnl_records(
         &self,
         _instrument: &Instrument,
+        _required_window: &PnlHistoryWindow,
     ) -> Result<RecentTrackPnlRecords> {
         Ok(RecentTrackPnlRecords::Unsupported)
     }
@@ -241,10 +242,18 @@ mod tests {
             api_secret: Some("demo-secret".to_string()),
         };
         let connected = connect(&config).await.unwrap();
+        let required_window = PnlHistoryWindow::try_new(
+            chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            chrono::DateTime::from_timestamp(1_700_086_400, 0).unwrap(),
+        )
+        .unwrap();
 
         let outcome = connected
             .account()
-            .get_recent_track_pnl_records(&Instrument::new(Venue::Bybit, "BTCUSDT"))
+            .get_recent_track_pnl_records(
+                &Instrument::new(Venue::Bybit, "BTCUSDT"),
+                &required_window,
+            )
             .await
             .unwrap();
 

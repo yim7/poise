@@ -21,6 +21,9 @@ pub struct AccountCapacityGateInput {
 pub enum ExecutionGateDecision {
     #[default]
     Open,
+    RiskIncreaseBlocked {
+        reason: ExecutionGateReason,
+    },
     NoSubmit {
         reason: ExecutionGateReason,
     },

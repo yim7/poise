@@ -11,7 +11,7 @@ use poise_core::track::{Instrument, Venue};
 use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
-    OrderRequest, OrderStatus, Position,
+    OrderRequest, OrderStatus, PnlHistoryWindow, Position, RecentTrackPnlBatch,
 };
 
 use crate::instrument::{OkxInstrumentMetadata, OkxInstrumentRegistry};
@@ -237,23 +237,31 @@ impl OkxRestClient {
     pub(crate) async fn get_recent_track_pnl_records(
         &self,
         symbol: &str,
-    ) -> Result<Vec<TrackPnlRecord>> {
+        required_window: &PnlHistoryWindow,
+    ) -> Result<RecentTrackPnlBatch> {
         let metadata = self.get_or_fetch_instrument_metadata(symbol).await?;
-        let mut records = self
+        let (mut records, trades_complete) = self
             .get_recent_trade_pnl_records_with_metadata(symbol, &metadata)
             .await?;
-        records.extend(
-            self.get_recent_funding_pnl_records_with_metadata(symbol, &metadata)
-                .await?,
-        );
-        Ok(records)
+        let (funding, funding_complete) = self
+            .get_recent_funding_pnl_records_with_metadata(symbol, &metadata)
+            .await?;
+        records.extend(funding);
+        records.retain(|record| {
+            record.occurred_at >= required_window.start && record.occurred_at <= required_window.end
+        });
+        Ok(if trades_complete && funding_complete {
+            RecentTrackPnlBatch::complete(required_window.clone(), records)
+        } else {
+            RecentTrackPnlBatch::incomplete(None, records)
+        })
     }
 
     async fn get_recent_trade_pnl_records_with_metadata(
         &self,
         symbol: &str,
         metadata: &OkxInstrumentMetadata,
-    ) -> Result<Vec<TrackPnlRecord>> {
+    ) -> Result<(Vec<TrackPnlRecord>, bool)> {
         let response: Vec<TradeFillSnapshot> = self
             .send_request(
                 Method::GET,
@@ -267,18 +275,21 @@ impl OkxRestClient {
                 AuthMode::Signed,
             )
             .await?;
-        response
+        let complete = response.len() < RECENT_TRADE_FILL_LIMIT;
+        let records = response
             .into_iter()
             .map(|fill| track_pnl_record_from_trade_fill_with_metadata(fill, metadata))
-            .collect::<Result<Vec<_>>>()
+            .collect::<Result<Vec<_>>>()?;
+        Ok((records, complete))
     }
 
     async fn get_recent_funding_pnl_records_with_metadata(
         &self,
         symbol: &str,
         metadata: &OkxInstrumentMetadata,
-    ) -> Result<Vec<TrackPnlRecord>> {
+    ) -> Result<(Vec<TrackPnlRecord>, bool)> {
         let mut records = Vec::new();
+        let mut complete = true;
         for sub_type in OKX_FUNDING_BILL_SUBTYPES {
             let response: Vec<FundingBillSnapshot> = self
                 .send_request(
@@ -294,13 +305,14 @@ impl OkxRestClient {
                     AuthMode::Signed,
                 )
                 .await?;
+            complete &= response.len() < RECENT_FUNDING_BILL_LIMIT;
             for bill in response {
                 records.push(track_pnl_record_from_funding_bill_with_metadata(
                     bill, metadata,
                 )?);
             }
         }
-        Ok(records)
+        Ok((records, complete))
     }
 
     pub(crate) async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
@@ -763,6 +775,14 @@ mod tests {
     use super::*;
     use crate::Config;
     use crate::rest::auth::sign_okx_payload;
+
+    fn recent_pnl_window() -> PnlHistoryWindow {
+        PnlHistoryWindow::try_new(
+            DateTime::from_timestamp_millis(1_781_100_000_000).unwrap(),
+            DateTime::from_timestamp_millis(1_781_200_000_000).unwrap(),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn new_builds_client_from_config_without_network() {
@@ -1237,10 +1257,11 @@ mod tests {
         .await;
         let client = test_client(&server, true);
 
-        let records = client
-            .get_recent_track_pnl_records("BTC-USD-SWAP")
+        let batch = client
+            .get_recent_track_pnl_records("BTC-USD-SWAP", &recent_pnl_window())
             .await
             .unwrap();
+        let records = batch.records;
 
         assert_eq!(records.len(), 1);
         let record = &records[0];
@@ -1307,10 +1328,11 @@ mod tests {
         .await;
         let client = test_client(&server, true);
 
-        let records = client
-            .get_recent_track_pnl_records("BTC-USD-SWAP")
+        let batch = client
+            .get_recent_track_pnl_records("BTC-USD-SWAP", &recent_pnl_window())
             .await
             .unwrap();
+        let records = batch.records;
 
         assert_eq!(records.len(), 2);
         assert_eq!(
@@ -1324,6 +1346,46 @@ mod tests {
             Some("okx:bills:btc-usd-swap:bill-income")
         );
         assert_eq!(records[1].funding_amount().unwrap().value(), 0.00025);
+    }
+
+    #[tokio::test]
+    async fn recent_track_pnl_records_are_incomplete_at_the_exchange_page_limit() {
+        let fills = serde_json::json!({
+            "code": "0",
+            "msg": "",
+            "data": (0..RECENT_TRADE_FILL_LIMIT)
+                .map(|index| serde_json::json!({
+                    "instId": "BTC-USD-SWAP",
+                    "ordId": format!("order-{index}"),
+                    "tradeId": format!("trade-{index}"),
+                    "side": "sell",
+                    "fillPx": "62096.9",
+                    "fillSz": "0.2",
+                    "fillPnl": "0",
+                    "fee": "-0.0000001610386348",
+                    "feeCcy": "BTC",
+                    "ts": (1_781_144_161_232_i64 + index as i64).to_string()
+                }))
+                .collect::<Vec<_>>()
+        })
+        .to_string();
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, inverse_instrument_response()),
+            MockResponse::json(200, &fills),
+            MockResponse::json(200, r#"{"code":"0","msg":"","data":[]}"#),
+            MockResponse::json(200, r#"{"code":"0","msg":"","data":[]}"#),
+        ])
+        .await;
+        let client = test_client(&server, true);
+        let required_window = recent_pnl_window();
+
+        let batch = client
+            .get_recent_track_pnl_records("BTC-USD-SWAP", &required_window)
+            .await
+            .unwrap();
+
+        assert_eq!(batch.records.len(), RECENT_TRADE_FILL_LIMIT);
+        assert!(!batch.covers(&required_window));
     }
 
     #[tokio::test]

@@ -2031,9 +2031,13 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &poise_core::track::Instrument,
+            required_window: &poise_engine::ports::PnlHistoryWindow,
         ) -> Result<poise_engine::ports::RecentTrackPnlRecords> {
             Ok(poise_engine::ports::RecentTrackPnlRecords::Available(
-                Vec::new(),
+                poise_engine::ports::RecentTrackPnlBatch::complete(
+                    required_window.clone(),
+                    Vec::new(),
+                ),
             ))
         }
 
