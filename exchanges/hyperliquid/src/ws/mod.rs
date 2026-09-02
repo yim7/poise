@@ -524,9 +524,10 @@ mod tests {
     use std::time::Duration;
 
     use futures_util::{SinkExt, StreamExt};
+    use poise_core::instrument::{Amount, Asset};
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
-    use poise_engine::ledger::{TrackPnlRecord, TrackPnlRecordKind};
+    use poise_engine::ledger::TrackPnlRecord;
     use poise_engine::ports::{
         ExchangeOrder, ExecutionQuote, MarketDataTick, OrderStatus, UserDataPayload,
     };
@@ -538,6 +539,10 @@ mod tests {
         HyperliquidWsClient, backoff_delay, parse_market_data_message, parse_user_data_message,
         parse_user_data_message_with_client_order_ids,
     };
+
+    fn amount(value: f64, asset: &str) -> Amount {
+        Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+    }
 
     #[test]
     fn parses_bbo_and_active_asset_ctx_into_market_ticks() {
@@ -677,41 +682,29 @@ mod tests {
 
         assert_eq!(
             fill_events[0].payload,
-            UserDataPayload::TrackPnl(TrackPnlRecord {
-                instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
-                occurred_at: chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
-                kind: TrackPnlRecordKind::Trade,
-                pnl_asset: "USDC".to_string(),
-                source: "hyperliquid:fill".to_string(),
-                source_key: Some("hyperliquid:fill:BTC:999".to_string()),
-                order_id: Some("12345".to_string()),
-                trade_id: Some("999".to_string()),
-                side: Some(Side::Buy),
-                price: Some(65000.5),
-                qty: Some(0.02),
-                realized_pnl: 3.25,
-                trading_fee: 0.12,
-                funding_fee: 0.0,
-            })
+            UserDataPayload::TrackPnl(TrackPnlRecord::trade(
+                Instrument::new(Venue::Hyperliquid, "BTC"),
+                chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
+                "hyperliquid:fill".to_string(),
+                Some("hyperliquid:fill:BTC:999".to_string()),
+                Some("12345".to_string()),
+                Some("999".to_string()),
+                Side::Buy,
+                65000.5,
+                0.02,
+                amount(3.25, "USDC"),
+                Some(amount(0.12, "USDC")),
+            ))
         );
         assert_eq!(
             funding_events[0].payload,
-            UserDataPayload::TrackPnl(TrackPnlRecord {
-                instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
-                occurred_at: chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
-                kind: TrackPnlRecordKind::Funding,
-                pnl_asset: "USDC".to_string(),
-                source: "hyperliquid:funding".to_string(),
-                source_key: Some("hyperliquid:funding:BTC:1700000000000".to_string()),
-                order_id: None,
-                trade_id: None,
-                side: None,
-                price: None,
-                qty: None,
-                realized_pnl: 0.0,
-                trading_fee: 0.0,
-                funding_fee: -0.15,
-            })
+            UserDataPayload::TrackPnl(TrackPnlRecord::funding(
+                Instrument::new(Venue::Hyperliquid, "BTC"),
+                chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
+                "hyperliquid:funding".to_string(),
+                Some("hyperliquid:funding:BTC:1700000000000".to_string()),
+                amount(-0.15, "USDC"),
+            ))
         );
     }
 
@@ -725,34 +718,33 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0].payload,
-            UserDataPayload::TrackPnl(TrackPnlRecord {
-                instrument: Instrument::new(Venue::Hyperliquid, "ETH"),
-                occurred_at: chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
-                kind: TrackPnlRecordKind::Trade,
-                pnl_asset: "USDC".to_string(),
-                source: "hyperliquid:fill".to_string(),
-                source_key: Some("hyperliquid:fill:ETH:321706137923647".to_string()),
-                order_id: Some("411114920977".to_string()),
-                trade_id: Some("321706137923647".to_string()),
-                side: Some(Side::Buy),
-                price: Some(2376.0),
-                qty: Some(0.0064),
-                realized_pnl: -0.100416,
-                trading_fee: 0.002189,
-                funding_fee: 0.0,
-            })
+            UserDataPayload::TrackPnl(TrackPnlRecord::trade(
+                Instrument::new(Venue::Hyperliquid, "ETH"),
+                chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
+                "hyperliquid:fill".to_string(),
+                Some("hyperliquid:fill:ETH:321706137923647".to_string()),
+                Some("411114920977".to_string()),
+                Some("321706137923647".to_string()),
+                Side::Buy,
+                2376.0,
+                0.0064,
+                amount(-0.100416, "USDC"),
+                Some(amount(0.002189, "USDC")),
+            ))
         );
     }
 
     #[test]
-    fn rejects_user_fill_fee_paid_in_non_usdc_asset() {
-        let error = parse_user_data_message(
+    fn preserves_user_fill_fee_paid_in_non_usdc_asset() {
+        let events = parse_user_data_message(
             r#"{"channel":"userFills","data":{"isSnapshot":false,"user":"0x2222222222222222222222222222222222222222","fills":[{"coin":"BTC","px":"65000.5","sz":"0.02","side":"B","time":1700000000000,"closedPnl":"3.25","hash":"0xabc","oid":12345,"tid":999,"fee":"0.12","feeToken":"HYPE"}]}}"#,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.to_string().contains("feeToken"));
-        assert!(error.to_string().contains("HYPE"));
+        let UserDataPayload::TrackPnl(record) = &events[0].payload else {
+            panic!("expected PNL record");
+        };
+        assert_eq!(record.trading_fee().unwrap(), &amount(0.12, "HYPE"));
     }
 
     #[test]
@@ -775,22 +767,13 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0].payload,
-            UserDataPayload::TrackPnl(TrackPnlRecord {
-                instrument: Instrument::new(Venue::Hyperliquid, "ETH"),
-                occurred_at: chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
-                kind: TrackPnlRecordKind::Funding,
-                pnl_asset: "USDC".to_string(),
-                source: "hyperliquid:funding".to_string(),
-                source_key: Some("hyperliquid:funding:ETH:1700000000000".to_string()),
-                order_id: None,
-                trade_id: None,
-                side: None,
-                price: None,
-                qty: None,
-                realized_pnl: 0.0,
-                trading_fee: 0.0,
-                funding_fee: -0.15,
-            })
+            UserDataPayload::TrackPnl(TrackPnlRecord::funding(
+                Instrument::new(Venue::Hyperliquid, "ETH"),
+                chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
+                "hyperliquid:funding".to_string(),
+                Some("hyperliquid:funding:ETH:1700000000000".to_string()),
+                amount(-0.15, "USDC"),
+            ))
         );
     }
 

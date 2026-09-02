@@ -285,6 +285,10 @@ mod tests {
 
     use super::{PnlBackfillStatus, PnlBackfillSummary, backfill_recent_pnl_once};
 
+    fn amount(value: f64, asset: &str) -> Amount {
+        Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+    }
+
     #[test]
     fn unsupported_backfill_is_recorded_as_degraded_not_success() {
         let status = PnlBackfillStatus::new();
@@ -347,9 +351,8 @@ mod tests {
             Side::Sell,
             62_096.9,
             0.2,
-            0.0,
-            0.0000001610386348,
-            "BTC",
+            amount(0.0, "BTC"),
+            Some(amount(0.0000001610386348, "BTC")),
         )]);
 
         let first =
@@ -378,10 +381,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(stats.pnl_asset.as_deref(), Some("BTC"));
+        assert_eq!(stats.pnl_asset.as_ref().map(Asset::as_str), Some("BTC"));
         assert_eq!(stats.gross_realized_pnl_cumulative, 0.0);
         assert_eq!(stats.trading_fee_cumulative, 0.0000001610386348);
-        assert_eq!(stats.net_realized_pnl_cumulative(), -0.0000001610386348);
+        assert_eq!(
+            stats.net_realized_pnl_cumulative().complete_value(),
+            Some(-0.0000001610386348)
+        );
         assert_eq!(
             *account.calls.lock().unwrap(),
             vec!["BTC-USD-SWAP".to_string(), "BTC-USD-SWAP".to_string()]

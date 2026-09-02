@@ -4,29 +4,31 @@ use poise_core::risk::LossGuardSnapshot;
 use crate::ledger::TrackPnlStats;
 use crate::runtime::RiskState;
 
-pub fn build_loss_guard_snapshot(
-    pnl_stats: &TrackPnlStats,
-    risk_state: &RiskState,
-) -> LossGuardSnapshot {
-    build_loss_guard_snapshot_for_asset(pnl_stats, risk_state, None)
-        .expect("loss guard snapshot without asset check should be infallible")
-}
-
 pub fn build_loss_guard_snapshot_for_asset(
     pnl_stats: &TrackPnlStats,
     risk_state: &RiskState,
     settlement_asset: Option<&str>,
 ) -> Result<LossGuardSnapshot> {
-    if let (Some(expected), Some(actual)) = (settlement_asset, pnl_stats.pnl_asset.as_deref()) {
+    if let (Some(expected), Some(actual)) = (settlement_asset, pnl_stats.pnl_asset.as_ref()) {
         ensure!(
-            actual == expected,
-            "pnl asset `{actual}` does not match settlement asset `{expected}`"
+            actual.as_str() == expected,
+            "pnl asset `{}` does not match settlement asset `{expected}`",
+            actual.as_str()
         );
     }
 
+    let today = pnl_stats.net_realized_pnl_today();
+    let cumulative = pnl_stats.net_realized_pnl_cumulative();
+    let today = today
+        .complete_value()
+        .ok_or_else(|| anyhow::anyhow!("today pnl aggregate is incomplete"))?;
+    let cumulative = cumulative
+        .complete_value()
+        .ok_or_else(|| anyhow::anyhow!("cumulative pnl aggregate is incomplete"))?;
+
     Ok(LossGuardSnapshot {
-        net_realized_pnl_today: pnl_stats.net_realized_pnl_today(),
-        net_realized_pnl_cumulative: pnl_stats.net_realized_pnl_cumulative(),
+        net_realized_pnl_today: today,
+        net_realized_pnl_cumulative: cumulative,
         unrealized_pnl: risk_state.unrealized_pnl,
     })
 }
@@ -34,14 +36,16 @@ pub fn build_loss_guard_snapshot_for_asset(
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
+    use poise_core::instrument::{Amount, Asset};
 
     use super::*;
+    use crate::ledger::{TrackPnlCashflowKind, UnvaluedCashflow};
 
     #[test]
     fn loss_guard_snapshot_accepts_matching_pnl_asset() {
         let pnl_stats = TrackPnlStats {
             pnl_utc_day: NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
-            pnl_asset: Some("BTC".to_string()),
+            pnl_asset: Some(poise_core::instrument::Asset::try_new("BTC").unwrap()),
             gross_realized_pnl_today: -0.01,
             gross_realized_pnl_cumulative: -0.02,
             ..TrackPnlStats::default()
@@ -64,7 +68,7 @@ mod tests {
     fn loss_guard_snapshot_rejects_mismatched_pnl_asset() {
         let pnl_stats = TrackPnlStats {
             pnl_utc_day: NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
-            pnl_asset: Some("USDT".to_string()),
+            pnl_asset: Some(poise_core::instrument::Asset::try_new("USDT").unwrap()),
             ..TrackPnlStats::default()
         };
 
@@ -78,5 +82,35 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("settlement asset"));
+    }
+
+    #[test]
+    fn loss_guard_snapshot_rejects_incomplete_cashflow_aggregation() {
+        let pnl_stats = TrackPnlStats {
+            pnl_utc_day: NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
+            pnl_asset: Some(Asset::try_new("USDT").unwrap()),
+            gross_realized_pnl_today: 10.0,
+            gross_realized_pnl_cumulative: 10.0,
+            unvalued_cashflows_today: vec![UnvaluedCashflow {
+                kind: TrackPnlCashflowKind::TradingFee,
+                amount: Some(Amount::new(0.001, Asset::try_new("BNB").unwrap()).unwrap()),
+            }],
+            unvalued_cashflows_cumulative: vec![UnvaluedCashflow {
+                kind: TrackPnlCashflowKind::TradingFee,
+                amount: Some(Amount::new(0.001, Asset::try_new("BNB").unwrap()).unwrap()),
+            }],
+            ..TrackPnlStats::default()
+        };
+
+        let error = build_loss_guard_snapshot_for_asset(
+            &pnl_stats,
+            &RiskState {
+                unrealized_pnl: 0.0,
+            },
+            Some("USDT"),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("incomplete"));
     }
 }

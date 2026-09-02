@@ -122,7 +122,7 @@ pub(crate) fn reconcile_target_at_with_metadata(
         Ok(snapshot) => snapshot,
         Err(_error) => {
             return reconcile_with_metadata(
-                pnl_asset_mismatch_result(track, &target, new_runtime_state),
+                pnl_incomplete_result(track, &target, new_runtime_state),
                 None,
             );
         }
@@ -240,9 +240,7 @@ pub(crate) fn reconcile_target_at_with_metadata(
                     ExecutionGateReason::AccountCapacityInsufficient { .. } => {
                         DecisionReason::AccountCapacityBlocked
                     }
-                    ExecutionGateReason::PnlAssetMismatch { .. } => {
-                        DecisionReason::RiskInputInvalid
-                    }
+                    ExecutionGateReason::PnlIncomplete { .. } => DecisionReason::RiskInputInvalid,
                 }),
                 applied_risk_cap,
                 new_runtime_state,
@@ -315,19 +313,24 @@ fn reconcile_with_metadata(
     }
 }
 
-fn pnl_asset_mismatch_result(
+fn pnl_incomplete_result(
     track: &TrackRuntime,
     policy_target: &Exposure,
     new_runtime_state: Option<TrackState>,
 ) -> TargetReconcileResult {
     let current = track.current_exposure.clone();
-    let reason = ExecutionGateReason::PnlAssetMismatch {
+    let reason = ExecutionGateReason::PnlIncomplete {
         expected_asset: track
             .instrument_spec
             .settlement_asset()
             .as_str()
             .to_string(),
-        actual_asset: track.pnl_stats.pnl_asset.clone().unwrap_or_default(),
+        actual_asset: track
+            .pnl_stats
+            .pnl_asset
+            .as_ref()
+            .map(|asset| asset.as_str().to_string()),
+        unvalued_cashflow_count: track.pnl_stats.unvalued_cashflows_cumulative.len(),
     };
 
     TargetReconcileResult {
@@ -1120,7 +1123,7 @@ mod tests {
     #[test]
     fn risk_input_invalid_does_not_initialize_fresh_session() {
         let mut track = fresh_session_runtime(2.0);
-        track.pnl_stats.pnl_asset = Some("BTC".to_string());
+        track.pnl_stats.pnl_asset = Some(poise_core::instrument::Asset::try_new("BTC").unwrap());
 
         let result = reconcile_target_at(
             &track,
@@ -2033,7 +2036,7 @@ mod tests {
         let mut track = test_runtime();
         set_runtime_status(&mut track, TrackStatus::Active);
         track.current_exposure = Exposure(2.0);
-        track.pnl_stats.pnl_asset = Some("BTC".to_string());
+        track.pnl_stats.pnl_asset = Some(poise_core::instrument::Asset::try_new("BTC").unwrap());
 
         let result = reconcile_target(&track, 90.0);
 
@@ -2042,9 +2045,10 @@ mod tests {
         assert_eq!(
             result.execution_gate_decision,
             ExecutionGateDecision::NoSubmit {
-                reason: ExecutionGateReason::PnlAssetMismatch {
+                reason: ExecutionGateReason::PnlIncomplete {
                     expected_asset: "USDT".to_string(),
-                    actual_asset: "BTC".to_string(),
+                    actual_asset: Some("BTC".to_string()),
+                    unvalued_cashflow_count: 0,
                 }
             }
         );
@@ -2052,7 +2056,7 @@ mod tests {
         assert!(result.events.iter().any(|event| matches!(
             event,
             DomainEvent::ExecutionGateApplied {
-                reason: ExecutionGateReason::PnlAssetMismatch { .. }
+                reason: ExecutionGateReason::PnlIncomplete { .. }
             }
         )));
     }

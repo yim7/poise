@@ -1248,10 +1248,10 @@ mod tests {
             record.source_key.as_deref(),
             Some("okx:orders:btc-usd-swap:460607985")
         );
-        assert_eq!(record.pnl_asset, "BTC");
+        assert_eq!(record.realized_pnl().unwrap().asset().as_str(), "BTC");
         assert_eq!(record.qty, Some(0.2));
-        assert_eq!(record.realized_pnl, 0.0);
-        assert_eq!(record.trading_fee, 0.0000001610386348);
+        assert_eq!(record.realized_pnl().unwrap().value(), 0.0);
+        assert_eq!(record.trading_fee().unwrap().value(), 0.0000001610386348);
 
         let requests = server.requests();
         assert_eq!(
@@ -1317,13 +1317,13 @@ mod tests {
             records[0].source_key.as_deref(),
             Some("okx:bills:btc-usd-swap:bill-expense")
         );
-        assert_eq!(records[0].pnl_asset, "BTC");
-        assert_eq!(records[0].funding_fee, -0.0001);
+        assert_eq!(records[0].funding_amount().unwrap().asset().as_str(), "BTC");
+        assert_eq!(records[0].funding_amount().unwrap().value(), -0.0001);
         assert_eq!(
             records[1].source_key.as_deref(),
             Some("okx:bills:btc-usd-swap:bill-income")
         );
-        assert_eq!(records[1].funding_fee, 0.00025);
+        assert_eq!(records[1].funding_amount().unwrap().value(), 0.00025);
     }
 
     #[tokio::test]

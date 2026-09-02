@@ -10,9 +10,10 @@ pub enum ExecutionGateReason {
         required_notional: f64,
         available_notional: f64,
     },
-    PnlAssetMismatch {
+    PnlIncomplete {
         expected_asset: String,
-        actual_asset: String,
+        actual_asset: Option<String>,
+        unvalued_cashflow_count: usize,
     },
 }
 

@@ -302,14 +302,14 @@ impl TrackManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         ensure!(
-            record.pnl_asset == track.instrument_spec.settlement_asset().as_str(),
+            record.primary_asset() == track.instrument_spec.settlement_asset(),
             "pnl asset `{}` does not match settlement asset `{}` for track `{}`",
-            record.pnl_asset,
+            record.primary_asset().as_str(),
             track.instrument_spec.settlement_asset().as_str(),
             id.as_str()
         );
         track.pnl_stats.normalize_utc_day(pnl_utc_day);
-        track.pnl_stats.apply_record(record)?;
+        track.pnl_stats.apply_record(record);
         Ok(())
     }
 
@@ -1457,7 +1457,7 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use poise_core::events::ExecutionGateReason;
-    use poise_core::instrument::InstrumentSpec;
+    use poise_core::instrument::{Amount, Asset, InstrumentSpec};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{
         BandProtectionPolicy, RiskAcquisitionConfig, ShapeFamily, TrackConfig,
@@ -1474,6 +1474,10 @@ mod tests {
     use crate::risk_exposure_gate::RiskExposureGateState;
     use crate::runtime::{CurrentMarketData, TrackStatus};
     use poise_core::track::Venue;
+
+    fn amount(value: f64, asset: &str) -> Amount {
+        Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+    }
 
     #[derive(Debug)]
     struct FixedClock(chrono::DateTime<Utc>);
@@ -2454,9 +2458,8 @@ mod tests {
                     "test".into(),
                     None,
                     None,
-                    5.0,
-                    0.5,
-                    "USDT",
+                    amount(5.0, "USDT"),
+                    Some(amount(0.5, "USDT")),
                 ),
             )
             .unwrap();
@@ -2485,9 +2488,8 @@ mod tests {
                     "test".into(),
                     None,
                     None,
-                    0.001,
-                    0.0,
-                    "BTC",
+                    amount(0.001, "BTC"),
+                    Some(amount(0.0, "BTC")),
                 ),
             )
             .unwrap_err();

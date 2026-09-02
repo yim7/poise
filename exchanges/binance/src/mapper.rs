@@ -130,16 +130,10 @@ impl TryFrom<BinanceOpenOrder> for ExchangeOrder {
 
 pub(crate) fn track_pnl_record_from_trade(value: BinanceAccountTrade) -> Result<TrackPnlRecord> {
     let instrument = Instrument::new(Venue::Binance, &value.symbol);
-    let settlement_asset = value.margin_asset.trim().to_string();
-    ensure!(!settlement_asset.is_empty(), "missing Binance margin asset");
+    let settlement_asset = Asset::try_new(value.margin_asset).map_err(anyhow::Error::msg)?;
     let occurred_at = millis_to_utc("trade.time", value.time)?;
     let trade_id = value.id.to_string();
-    let commission = parse_decimal("commission", &value.commission)?;
-    let trading_fee = if value.commission_asset == settlement_asset {
-        commission
-    } else {
-        0.0
-    };
+    let commission_asset = Asset::try_new(value.commission_asset).map_err(anyhow::Error::msg)?;
 
     Ok(TrackPnlRecord::trade(
         instrument,
@@ -154,9 +148,14 @@ pub(crate) fn track_pnl_record_from_trade(value: BinanceAccountTrade) -> Result<
         parse_side(&value.side)?,
         parse_decimal("price", &value.price)?,
         parse_decimal("qty", &value.qty)?,
-        parse_decimal("realizedPnl", &value.realized_pnl)?,
-        trading_fee,
-        settlement_asset,
+        cash_amount(
+            parse_decimal("realizedPnl", &value.realized_pnl)?,
+            settlement_asset,
+        )?,
+        Some(cash_amount(
+            parse_decimal("commission", &value.commission)?,
+            commission_asset,
+        )?),
     ))
 }
 
@@ -177,9 +176,15 @@ pub(crate) fn track_pnl_record_from_funding(value: BinanceIncomeRecord) -> Resul
             value.symbol.to_lowercase(),
             value.time
         )),
-        parse_decimal("income", &value.income)?,
-        value.asset,
+        cash_amount(
+            parse_decimal("income", &value.income)?,
+            Asset::try_new(value.asset).map_err(anyhow::Error::msg)?,
+        )?,
     ))
+}
+
+fn cash_amount(value: f64, asset: Asset) -> Result<Amount> {
+    Amount::new(value, asset).map_err(anyhow::Error::msg)
 }
 
 impl TryFrom<BinanceExchangeInfo> for ExchangeInfo {

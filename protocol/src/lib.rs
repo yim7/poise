@@ -240,7 +240,41 @@ pub enum DecisionReasonView {
 #[serde(deny_unknown_fields)]
 pub struct TrackListPnlView {
     pub pnl_asset: String,
-    pub total_pnl: f64,
+    pub total_pnl: Option<f64>,
+    #[serde(default)]
+    pub completeness: PnlCompletenessView,
+    #[serde(default)]
+    pub unvalued_cashflows: Vec<UnvaluedPnlCashflowView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PnlCompletenessView {
+    #[default]
+    Complete,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PnlCashflowKindView {
+    RealizedPnl,
+    TradingFee,
+    Funding,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PnlAmountView {
+    pub value: f64,
+    pub asset: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnvaluedPnlCashflowView {
+    pub kind: PnlCashflowKindView,
+    pub amount: Option<PnlAmountView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,11 +439,15 @@ pub enum TrackPositionQuantityUnitView {
 pub struct TrackPnlView {
     pub pnl_asset: String,
     pub gross_realized_pnl: f64,
-    pub net_realized_pnl: f64,
+    pub net_realized_pnl: Option<f64>,
     pub unrealized_pnl: f64,
-    pub total_pnl: f64,
+    pub total_pnl: Option<f64>,
     pub trading_fee_cumulative: f64,
     pub funding_fee_cumulative: f64,
+    #[serde(default)]
+    pub completeness: PnlCompletenessView,
+    #[serde(default)]
+    pub unvalued_cashflows: Vec<UnvaluedPnlCashflowView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

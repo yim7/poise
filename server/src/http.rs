@@ -434,6 +434,7 @@ mod tests {
         StoredTrackEvent, TrackEffectJournal, TrackIdentityStore, TrackMutationStore,
         TrackQueryStore,
     };
+    use poise_core::instrument::{Amount, Asset};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
@@ -472,6 +473,10 @@ mod tests {
         AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
         StoredAccountMonitorState, TrackDebugQueryService, TrackQueryService,
     };
+
+    fn amount(value: f64, asset: &str) -> Amount {
+        Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+    }
 
     #[derive(Clone)]
     struct HttpTestState {
@@ -1908,9 +1913,8 @@ mod tests {
             Side::Sell,
             62_000.0,
             0.2,
-            0.0001,
-            0.00001,
-            "USDT",
+            amount(0.0001, "USDT"),
+            Some(amount(0.00001, "USDT")),
         )
     }
 

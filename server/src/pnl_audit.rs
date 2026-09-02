@@ -91,7 +91,7 @@ impl RecentFillsAuditor {
             }
         }
         .into_iter()
-        .filter(|record| record.kind == TrackPnlRecordKind::Trade)
+        .filter(|record| record.kind() == TrackPnlRecordKind::Trade)
         .collect::<Vec<_>>();
         let source_keys = records
             .iter()
@@ -154,6 +154,7 @@ mod tests {
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
     use poise_application::{TrackIdentityStore, TrackMutationStore, TrackQueryStore};
+    use poise_core::instrument::{Amount, Asset};
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::Side;
     use poise_engine::ledger::TrackPnlRecord;
@@ -166,6 +167,10 @@ mod tests {
     use super::{
         RecentFillCoverage, RecentFillsAuditError, RecentFillsAuditor, RecentPnlAvailability,
     };
+
+    fn amount(value: f64, asset: &str) -> Amount {
+        Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+    }
 
     #[tokio::test]
     async fn recent_fills_audit_marks_recorded_missing_and_unkeyed_records() {
@@ -225,8 +230,7 @@ mod tests {
                 Utc.with_ymd_and_hms(2026, 6, 17, 8, 0, 0).unwrap(),
                 "okx:bills".to_string(),
                 Some("okx:bills:btc-usd-swap:bill-1".to_string()),
-                -0.0001,
-                "BTC",
+                amount(-0.0001, "BTC"),
             )]),
         });
         let auditor =
@@ -333,9 +337,8 @@ mod tests {
             Side::Sell,
             62_000.0,
             0.2,
-            0.0001,
-            0.00001,
-            "BTC",
+            amount(0.0001, "BTC"),
+            Some(amount(0.00001, "BTC")),
         )
     }
 

@@ -120,6 +120,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::{NaiveDate, TimeZone, Utc};
+    use poise_core::instrument::{Amount, Asset};
     use poise_core::track::TrackId;
     use poise_core::types::Exposure;
     use poise_engine::executor::RecoveryAnomaly;
@@ -134,6 +135,10 @@ mod tests {
         EffectStatus, PersistedControlMode, TrackControlState, TrackMutationStore,
         TrackRecoveryIssue,
     };
+
+    fn amount(value: f64, asset: &str) -> Amount {
+        Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+    }
 
     #[tokio::test]
     async fn load_track_recovery_summary_projects_application_owned_issue() {
@@ -177,9 +182,8 @@ mod tests {
                 "test".into(),
                 None,
                 None,
-                100.0,
-                8.0,
-                "USDT",
+                amount(100.0, "USDT"),
+                Some(amount(8.0, "USDT")),
             ),
         )
         .await
@@ -192,8 +196,7 @@ mod tests {
                 Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
                 "test".into(),
                 None,
-                -4.0,
-                "USDT",
+                amount(-4.0, "USDT"),
             ),
         )
         .await
@@ -253,9 +256,8 @@ mod tests {
                 "test".into(),
                 None,
                 None,
-                42.0,
-                0.0,
-                "USDT",
+                amount(42.0, "USDT"),
+                Some(amount(0.0, "USDT")),
             ),
         )
         .await

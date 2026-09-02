@@ -267,11 +267,11 @@ mod tests {
         }
         match &events[1].payload {
             UserDataPayload::TrackPnl(record) => {
-                assert_eq!(record.kind, TrackPnlRecordKind::Trade);
+                assert_eq!(record.kind(), TrackPnlRecordKind::Trade);
                 assert_eq!(record.trade_id.as_deref(), Some("trade-1"));
                 assert_eq!(record.qty, Some(0.05));
-                assert_eq!(record.realized_pnl, 12.34);
-                assert_eq!(record.trading_fee, 1.25);
+                assert_eq!(record.realized_pnl().unwrap().value(), 12.34);
+                assert_eq!(record.trading_fee().unwrap().value(), 1.25);
             }
             other => panic!("expected trade pnl, got {other:?}"),
         }
@@ -299,25 +299,29 @@ mod tests {
         }
         match &events[1].payload {
             UserDataPayload::TrackPnl(record) => {
-                assert_eq!(record.pnl_asset, "BTC");
+                assert_eq!(record.realized_pnl().unwrap().asset().as_str(), "BTC");
                 assert_eq!(record.qty, Some(10.0));
-                assert_eq!(record.realized_pnl, 0.0012);
-                assert_eq!(record.trading_fee, 0.00001);
+                assert_eq!(record.realized_pnl().unwrap().value(), 0.0012);
+                assert_eq!(record.trading_fee().unwrap().value(), 0.00001);
             }
             other => panic!("expected trade pnl, got {other:?}"),
         }
     }
 
     #[test]
-    fn orders_message_rejects_fee_asset_mismatch_when_metadata_is_known() {
+    fn orders_message_preserves_non_settlement_fee_asset() {
         let registry = registry_with_metadata(inverse_metadata());
-        let error = account::parse_user_data_message_with_registry(
+        let events = account::parse_user_data_message_with_registry(
             r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"BTC-USD-SWAP","ordId":"123","clOrdId":"client-1","side":"sell","px":"64000.1","sz":"30","accFillSz":"10","state":"partially_filled","fillPx":"64000.0","fillSz":"10","fillPnl":"0.0012","fee":"-0.00001","feeCcy":"USD","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
             &registry,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.to_string().contains("fee asset"));
+        let UserDataPayload::TrackPnl(record) = &events[1].payload else {
+            panic!("expected trade pnl");
+        };
+        assert_eq!(record.realized_pnl().unwrap().asset().as_str(), "BTC");
+        assert_eq!(record.trading_fee().unwrap().asset().as_str(), "USD");
     }
 
     #[test]
@@ -332,8 +336,8 @@ mod tests {
 
         match &events[1].payload {
             UserDataPayload::TrackPnl(record) => {
-                assert_eq!(record.realized_pnl, -2.34);
-                assert_eq!(record.trading_fee, 0.12);
+                assert_eq!(record.realized_pnl().unwrap().value(), -2.34);
+                assert_eq!(record.trading_fee().unwrap().value(), 0.12);
                 assert_eq!(
                     record.source_key.as_deref(),
                     Some("okx:orders:anthropic-usdt-swap:trade-1")
@@ -366,8 +370,11 @@ mod tests {
             UserDataPayload::TrackPnl(record) => {
                 assert_eq!(record.trade_id.as_deref(), Some("445492"));
                 assert_eq!(record.price, Some(1666.6));
-                assert_eq!(record.realized_pnl, 5.4390778138112309);
-                assert_eq!(record.trading_fee, 0.049998);
+                assert_eq!(
+                    record.realized_pnl().unwrap().value(),
+                    5.439_077_813_811_231
+                );
+                assert_eq!(record.trading_fee().unwrap().value(), 0.049998);
             }
             other => panic!("expected trade pnl, got {other:?}"),
         }
@@ -385,8 +392,8 @@ mod tests {
 
         match &events[1].payload {
             UserDataPayload::TrackPnl(record) => {
-                assert_eq!(record.realized_pnl, -2.34);
-                assert_eq!(record.trading_fee, 0.12);
+                assert_eq!(record.realized_pnl().unwrap().value(), -2.34);
+                assert_eq!(record.trading_fee().unwrap().value(), 0.12);
             }
             other => panic!("expected trade pnl, got {other:?}"),
         }

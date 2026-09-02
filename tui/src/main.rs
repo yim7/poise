@@ -850,6 +850,8 @@ mod tests {
             pnl: TrackListPnlView {
                 pnl_asset: detail.pnl.pnl_asset.clone(),
                 total_pnl: detail.pnl.total_pnl,
+                completeness: detail.pnl.completeness,
+                unvalued_cashflows: detail.pnl.unvalued_cashflows.clone(),
             },
         }
     }
@@ -1639,7 +1641,7 @@ mod tests {
             app.current_track.as_ref().unwrap().status.strategy_price,
             Some(101.5)
         );
-        assert!((app.current_track.as_ref().unwrap().pnl.total_pnl - 1229.0).abs() < 1e-9);
+        assert!((app.current_track.as_ref().unwrap().pnl.total_pnl.unwrap() - 1229.0).abs() < 1e-9);
     }
 
     #[tokio::test]
@@ -1652,7 +1654,7 @@ mod tests {
         let list_total = app.tracks[app.selected_index].pnl.total_pnl;
         let detail_total = app.current_track_detail().unwrap().pnl.total_pnl;
 
-        assert!((list_total - detail_total).abs() < 1e-9);
+        assert_eq!(list_total, detail_total);
     }
 
     #[tokio::test]

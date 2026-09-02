@@ -8,7 +8,7 @@ use crate::exposure_presentation::dashboard_exposure_summary;
 use crate::protocol::{
     ExecutionStateView, ExecutionStatusView, StrategyPriceStatusView, TrackStatus,
 };
-use crate::signal::{SignalDisplay, exposure_signal, pnl_signal};
+use crate::signal::{SignalDisplay, exposure_signal};
 use crate::theme::Theme;
 use crate::views::account_panel;
 
@@ -47,7 +47,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let price = format_price_summary(item.strategy_price, item.strategy_price_status);
         let exposure =
             format_exposure_summary(item.exposure.current, item.decision.execution_target);
-        let total_pnl = pnl_signal(item.pnl.total_pnl);
+        let total_pnl = crate::signal::pnl_aggregate_signal(item.pnl.total_pnl);
         let total_pnl_text = format!("{} {}", total_pnl.text, item.pnl.pnl_asset);
 
         Row::new(vec![

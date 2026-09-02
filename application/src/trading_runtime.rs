@@ -2128,7 +2128,7 @@ pub(crate) mod test_support {
                 .cloned()
                 .unwrap_or_default()
             {
-                stats.apply_record(&record)?;
+                stats.apply_record(&record);
             }
             Ok(stats)
         }
@@ -2349,6 +2349,7 @@ mod tests {
     };
     use async_trait::async_trait;
     use chrono::Utc;
+    use poise_core::instrument::{Amount, Asset};
     use poise_core::risk::RiskTerminationCause;
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
@@ -2377,6 +2378,10 @@ mod tests {
         effect_journal_entries_from_enqueued,
     };
     use crate::{CommittedTrackWrite, TrackControlState, TrackMutationStore, TrackQueryStore};
+
+    fn amount(value: f64, asset: &str) -> Amount {
+        Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+    }
 
     #[derive(Default)]
     struct RecordingRecoveryAnomalyObserver {
@@ -3368,8 +3373,7 @@ mod tests {
                     chrono::Utc::now(),
                     "test:funding".to_string(),
                     Some("test:funding:1".to_string()),
-                    -0.25,
-                    "USDT",
+                    amount(-0.25, "USDT"),
                 ),
             )
             .await

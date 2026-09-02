@@ -520,6 +520,10 @@ mod tests {
 
     use super::complete_startup;
 
+    fn amount(value: f64, asset: &str) -> Amount {
+        Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+    }
+
     #[tokio::test]
     async fn startup_capacity_uses_account_summary_available_with_track_leverage() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
@@ -938,9 +942,8 @@ mod tests {
                     "test".into(),
                     None,
                     None,
-                    42.0,
-                    0.0,
-                    "USDT",
+                    amount(42.0, "USDT"),
+                    Some(amount(0.0, "USDT")),
                 ),
             )
             .await

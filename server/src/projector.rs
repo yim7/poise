@@ -4,13 +4,14 @@ use poise_protocol::{
     BandRecoverPolicy as ProtocolRecoverPolicy, DecisionReasonView, ExecutionBadgeView,
     ExecutionBindingIntentView, ExecutionBindingOrderView, ExecutionBindingPolicyView,
     ExecutionBindingStatusView, ExecutionBindingView, ExecutionStateView, ExecutionStatusView,
-    ExposureSummaryView, InstrumentView, InventoryDecisionView, PriceExecutionBlockReasonView,
-    RiskAcquisitionConfigView, RiskAcquisitionDirectionView, RiskAcquisitionView,
-    ShapeFamily as ProtocolShapeFamily, Side as ProtocolSide, StrategyPriceStatusView,
-    TrackActivityItemView, TrackCommandType, TrackCommandView, TrackDetailView, TrackExecutionView,
-    TrackIdentityView, TrackLifecycleView, TrackListItemView, TrackListPnlView,
-    TrackLossLimitsView, TrackMarketView, TrackPnlView, TrackPositionQuantityUnitView,
-    TrackPositionView, TrackStatus as ProtocolTrackStatus, TrackStatusPanelView, TrackStrategyView,
+    ExposureSummaryView, InstrumentView, InventoryDecisionView, PnlAmountView, PnlCashflowKindView,
+    PnlCompletenessView, PriceExecutionBlockReasonView, RiskAcquisitionConfigView,
+    RiskAcquisitionDirectionView, RiskAcquisitionView, ShapeFamily as ProtocolShapeFamily,
+    Side as ProtocolSide, StrategyPriceStatusView, TrackActivityItemView, TrackCommandType,
+    TrackCommandView, TrackDetailView, TrackExecutionView, TrackIdentityView, TrackLifecycleView,
+    TrackListItemView, TrackListPnlView, TrackLossLimitsView, TrackMarketView, TrackPnlView,
+    TrackPositionQuantityUnitView, TrackPositionView, TrackStatus as ProtocolTrackStatus,
+    TrackStatusPanelView, TrackStrategyView, UnvaluedPnlCashflowView,
 };
 
 use poise_core::instrument::{InstrumentSpec, PositionBasis, PositionQty};
@@ -31,10 +32,12 @@ pub struct TrackProjector;
 struct PnlSummary {
     pnl_asset: String,
     gross_realized_pnl: f64,
-    net_realized_pnl: f64,
-    total_pnl: f64,
+    net_realized_pnl: Option<f64>,
+    total_pnl: Option<f64>,
     trading_fee_cumulative: f64,
     funding_fee_cumulative: f64,
+    completeness: PnlCompletenessView,
+    unvalued_cashflows: Vec<UnvaluedPnlCashflowView>,
 }
 
 impl TrackProjector {
@@ -70,6 +73,8 @@ impl TrackProjector {
             pnl: TrackListPnlView {
                 pnl_asset: pnl.pnl_asset,
                 total_pnl: pnl.total_pnl,
+                completeness: pnl.completeness,
+                unvalued_cashflows: pnl.unvalued_cashflows,
             },
         }
     }
@@ -127,6 +132,8 @@ impl TrackProjector {
                 total_pnl: pnl.total_pnl,
                 trading_fee_cumulative: pnl.trading_fee_cumulative,
                 funding_fee_cumulative: pnl.funding_fee_cumulative,
+                completeness: pnl.completeness,
+                unvalued_cashflows: pnl.unvalued_cashflows,
             },
             execution: TrackExecutionView {
                 state: project_execution_state(source),
@@ -167,29 +174,74 @@ impl TrackProjector {
 fn project_list_pnl_summary(source: &TrackListReadModel) -> PnlSummary {
     let gross_realized_pnl = source.pnl_stats.gross_realized_pnl_cumulative;
     let net_realized_pnl = source.pnl_stats.net_realized_pnl();
+    let (completeness, unvalued_cashflows) =
+        project_pnl_completeness(source.pnl_stats.pnl_completeness());
 
     PnlSummary {
         pnl_asset: project_pnl_asset(&source.pnl_stats, &source.instrument_spec),
         gross_realized_pnl,
         net_realized_pnl,
-        total_pnl: net_realized_pnl + source.unrealized_pnl,
+        total_pnl: net_realized_pnl.map(|pnl| pnl + source.unrealized_pnl),
         trading_fee_cumulative: source.pnl_stats.trading_fee_cumulative,
         funding_fee_cumulative: source.pnl_stats.funding_fee_cumulative,
+        completeness,
+        unvalued_cashflows,
     }
 }
 
 fn project_detail_pnl_summary(source: &TrackReadModel) -> PnlSummary {
     let gross_realized_pnl = source.pnl_stats.gross_realized_pnl_cumulative;
     let net_realized_pnl = source.pnl_stats.net_realized_pnl();
+    let (completeness, unvalued_cashflows) =
+        project_pnl_completeness(source.pnl_stats.pnl_completeness());
 
     PnlSummary {
         pnl_asset: project_pnl_asset(&source.pnl_stats, &source.instrument_spec),
         gross_realized_pnl,
         net_realized_pnl,
-        total_pnl: net_realized_pnl + source.unrealized_pnl,
+        total_pnl: net_realized_pnl.map(|pnl| pnl + source.unrealized_pnl),
         trading_fee_cumulative: source.pnl_stats.trading_fee_cumulative,
         funding_fee_cumulative: source.pnl_stats.funding_fee_cumulative,
+        completeness,
+        unvalued_cashflows,
     }
+}
+
+fn project_pnl_completeness(
+    completeness: &poise_engine::ledger::PnlAggregateCompleteness,
+) -> (PnlCompletenessView, Vec<UnvaluedPnlCashflowView>) {
+    match completeness {
+        poise_engine::ledger::PnlAggregateCompleteness::Complete => {
+            (PnlCompletenessView::Complete, Vec::new())
+        }
+        poise_engine::ledger::PnlAggregateCompleteness::Incomplete { unvalued_cashflows } => (
+            PnlCompletenessView::Incomplete,
+            project_unvalued_cashflows(unvalued_cashflows),
+        ),
+    }
+}
+
+fn project_unvalued_cashflows(
+    cashflows: &[poise_engine::ledger::UnvaluedCashflow],
+) -> Vec<UnvaluedPnlCashflowView> {
+    cashflows
+        .iter()
+        .map(|cashflow| UnvaluedPnlCashflowView {
+            kind: match cashflow.kind {
+                poise_engine::ledger::TrackPnlCashflowKind::RealizedPnl => {
+                    PnlCashflowKindView::RealizedPnl
+                }
+                poise_engine::ledger::TrackPnlCashflowKind::TradingFee => {
+                    PnlCashflowKindView::TradingFee
+                }
+                poise_engine::ledger::TrackPnlCashflowKind::Funding => PnlCashflowKindView::Funding,
+            },
+            amount: cashflow.amount.as_ref().map(|amount| PnlAmountView {
+                value: amount.value(),
+                asset: amount.asset().as_str().to_string(),
+            }),
+        })
+        .collect()
 }
 
 fn project_activity_level(level: TrackActivityLevel) -> ActivityLevelView {
@@ -629,6 +681,9 @@ mod tests {
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
     use poise_engine::execution_plan::DecisionReason;
+    use poise_engine::ledger::{
+        PnlAggregate, PnlAggregateCompleteness, TrackPnlCashflowKind, UnvaluedCashflow,
+    };
     use poise_engine::runtime::AcquisitionResetReason;
     use poise_protocol::{
         AcquisitionResetReasonView, ActivityLevelView, DecisionReasonView,
@@ -1348,9 +1403,41 @@ mod tests {
         let detail = TrackProjector::new().project_detail(&source_with_submitting_effect());
 
         assert!((detail.pnl.gross_realized_pnl - 980.1).abs() < f64::EPSILON);
-        assert!((detail.pnl.net_realized_pnl - 963.8).abs() < 1e-9);
-        assert!((detail.pnl.total_pnl - 1229.0).abs() < 1e-9);
+        assert!((detail.pnl.net_realized_pnl.unwrap() - 963.8).abs() < 1e-9);
+        assert!((detail.pnl.total_pnl.unwrap() - 1229.0).abs() < 1e-9);
         assert!((detail.pnl.unrealized_pnl - 265.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn projects_incomplete_pnl_without_fabricating_totals() {
+        let mut source = source_with_submitting_effect();
+        source.pnl_stats.net_realized_pnl_cumulative = PnlAggregate {
+            asset: Some(Asset::try_new("USDT").unwrap()),
+            valued_amount: 963.8,
+            completeness: PnlAggregateCompleteness::Incomplete {
+                unvalued_cashflows: vec![UnvaluedCashflow {
+                    kind: TrackPnlCashflowKind::TradingFee,
+                    amount: Some(Amount::new(0.001, Asset::try_new("BNB").unwrap()).unwrap()),
+                }],
+            },
+        };
+
+        let detail = TrackProjector::new().project_detail(&source);
+
+        assert_eq!(detail.pnl.net_realized_pnl, None);
+        assert_eq!(detail.pnl.total_pnl, None);
+        assert_eq!(
+            detail.pnl.completeness,
+            poise_protocol::PnlCompletenessView::Incomplete
+        );
+        assert_eq!(
+            detail.pnl.unvalued_cashflows[0]
+                .amount
+                .as_ref()
+                .unwrap()
+                .asset,
+            "BNB"
+        );
     }
 
     #[test]
@@ -1520,6 +1607,11 @@ mod tests {
                 trading_fee_cumulative: 12.3,
                 funding_fee_today: 0.0,
                 funding_fee_cumulative: -4.0,
+                net_realized_pnl_cumulative: PnlAggregate {
+                    asset: Some(Asset::try_new("USDT").unwrap()),
+                    valued_amount: 963.8,
+                    completeness: PnlAggregateCompleteness::Complete,
+                },
             },
             unrealized_pnl: 265.2,
             recovery_issue: None,

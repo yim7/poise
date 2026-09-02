@@ -1030,7 +1030,7 @@ mod tests {
         let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
 
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].kind, TrackPnlRecordKind::Funding);
+        assert_eq!(records[0].kind(), TrackPnlRecordKind::Funding);
         assert_eq!(
             records[0].instrument,
             Instrument::new(Venue::Hyperliquid, "BTC")
@@ -1039,14 +1039,14 @@ mod tests {
             records[0].source_key.as_deref(),
             Some("hyperliquid:funding:BTC:1700070001000")
         );
-        assert_eq!(records[0].funding_fee, -0.15);
-        assert_eq!(records[1].kind, TrackPnlRecordKind::Trade);
+        assert_eq!(records[0].funding_amount().unwrap().value(), -0.15);
+        assert_eq!(records[1].kind(), TrackPnlRecordKind::Trade);
         assert_eq!(
             records[1].source_key.as_deref(),
             Some("hyperliquid:fill:BTC:999")
         );
-        assert_eq!(records[1].realized_pnl, 3.25);
-        assert_eq!(records[1].trading_fee, 0.12);
+        assert_eq!(records[1].realized_pnl().unwrap().value(), 3.25);
+        assert_eq!(records[1].trading_fee().unwrap().value(), 0.12);
 
         let requests = server.requests().await;
         assert_eq!(requests.len(), 2);
@@ -1090,11 +1090,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recent_track_pnl_records_reject_non_usdc_fee_token() {
-        let server = MockHttpServer::spawn(vec![MockResponse::json(
-            200,
-            r#"[{"coin":"BTC","px":"65000.5","sz":"0.02","side":"B","time":1700080001000,"closedPnl":"3.25","hash":"0xbtc","oid":12345,"tid":999,"fee":"0.12","feeToken":"HYPE"}]"#,
-        )])
+    async fn recent_track_pnl_records_preserve_non_usdc_fee_token() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                r#"[{"coin":"BTC","px":"65000.5","sz":"0.02","side":"B","time":1700080001000,"closedPnl":"3.25","hash":"0xbtc","oid":12345,"tid":999,"fee":"0.12","feeToken":"HYPE"}]"#,
+            ),
+            MockResponse::json(200, "[]"),
+        ])
         .await;
         let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
             server.base_url(),
@@ -1103,13 +1106,11 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let error = client
-            .get_recent_track_pnl_records("BTC")
-            .await
-            .unwrap_err();
+        let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
 
-        assert!(error.to_string().contains("feeToken"));
-        assert!(error.to_string().contains("HYPE"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].trading_fee().unwrap().value(), 0.12);
+        assert_eq!(records[0].trading_fee().unwrap().asset().as_str(), "HYPE");
     }
 
     #[tokio::test]
@@ -1342,8 +1343,8 @@ mod tests {
         let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
 
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].funding_fee, -0.15);
-        assert_eq!(records[1].funding_fee, 0.05);
+        assert_eq!(records[0].funding_amount().unwrap().value(), -0.15);
+        assert_eq!(records[1].funding_amount().unwrap().value(), 0.05);
         let requests = server.requests().await;
         assert_eq!(requests[2].json_body()["startTime"], boundary_time);
     }
@@ -1382,8 +1383,8 @@ mod tests {
         let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
 
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].funding_fee, -0.15);
-        assert_eq!(records[1].funding_fee, -0.16);
+        assert_eq!(records[0].funding_amount().unwrap().value(), -0.15);
+        assert_eq!(records[1].funding_amount().unwrap().value(), -0.16);
     }
 
     #[tokio::test]
@@ -1407,7 +1408,8 @@ mod tests {
         let records = client.get_recent_track_pnl_records("BTC").await.unwrap();
 
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].trading_fee, 0.12);
+        assert_eq!(records[0].trading_fee().unwrap().value(), 0.12);
+        assert_eq!(records[0].trading_fee().unwrap().asset().as_str(), "USDC");
     }
 
     #[tokio::test]

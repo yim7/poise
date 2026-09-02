@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
@@ -9,6 +9,7 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
+use poise_core::instrument::{Amount, Asset};
 use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{UserDataEvent, UserDataPayload};
 
@@ -174,10 +175,7 @@ fn parse_orders(
             let realized_pnl = optional_decimal(&value, "fillPnl")?
                 .or(optional_decimal(&value, "pnl")?)
                 .unwrap_or(0.0);
-            let raw_fee = optional_decimal(&value, "fillFee")?
-                .or(optional_decimal(&value, "fee")?)
-                .unwrap_or(0.0);
-            let trading_fee = -raw_fee;
+            let raw_fee = optional_decimal(&value, "fillFee")?.or(optional_decimal(&value, "fee")?);
             let trade_id = trade_id.map(ToString::to_string);
             let source_key = trade_id.as_ref().map(|trade_id| {
                 format!(
@@ -186,15 +184,16 @@ fn parse_orders(
                     trade_id
                 )
             });
-            let pnl_asset = metadata.settlement_asset().to_string();
-            if let Some(fee_asset) =
-                optional_str(&value, "fillFeeCcy").or(optional_str(&value, "feeCcy"))
-            {
-                ensure!(
-                    fee_asset == pnl_asset,
-                    "OKX fee asset `{fee_asset}` does not match settlement asset `{pnl_asset}`"
-                );
-            }
+            let settlement_asset =
+                Asset::try_new(metadata.settlement_asset()).map_err(anyhow::Error::msg)?;
+            let fee_asset = optional_str(&value, "fillFeeCcy")
+                .or(optional_str(&value, "feeCcy"))
+                .map(Asset::try_new)
+                .transpose()
+                .map_err(anyhow::Error::msg)?;
+            let trading_fee = raw_fee
+                .map(|fee| cash_amount(-fee, fee_asset.unwrap_or_else(|| settlement_asset.clone())))
+                .transpose()?;
             events.push(UserDataEvent {
                 event_time,
                 payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade(
@@ -207,14 +206,17 @@ fn parse_orders(
                     order.side,
                     fill_price,
                     fill_size,
-                    realized_pnl,
+                    cash_amount(realized_pnl, settlement_asset)?,
                     trading_fee,
-                    pnl_asset,
                 )),
             });
         }
     }
     Ok(events)
+}
+
+fn cash_amount(value: f64, asset: Asset) -> Result<Amount> {
+    Amount::new(value, asset).map_err(anyhow::Error::msg)
 }
 
 fn parse_positions(

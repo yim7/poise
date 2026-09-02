@@ -1262,7 +1262,7 @@ mod tests {
         assert_eq!(detail.execution.state, ExecutionStateView::Paused);
         assert_eq!(
             detail_json["pnl"]["total_pnl"].as_f64(),
-            Some(detail.pnl.total_pnl)
+            detail.pnl.total_pnl
         );
         assert_eq!(
             detail_json["pnl"]["unrealized_pnl"].as_f64(),
@@ -1317,10 +1317,7 @@ mod tests {
         assert_eq!(item.id, "btc-core");
         assert_eq!(item.execution.execution_status, ExecutionStatusView::Normal);
         assert!(item.execution.active_binding_count > 0);
-        assert_eq!(
-            item_json["pnl"]["total_pnl"].as_f64(),
-            Some(item.pnl.total_pnl)
-        );
+        assert_eq!(item_json["pnl"]["total_pnl"].as_f64(), item.pnl.total_pnl);
         assert!(
             events
                 .iter()

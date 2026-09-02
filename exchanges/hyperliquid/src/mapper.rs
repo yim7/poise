@@ -127,11 +127,6 @@ pub(crate) fn open_order_from_response(value: OpenOrderResponse) -> Result<Excha
 }
 
 pub(crate) fn track_pnl_record_from_fill(value: &UserFillResponse) -> Result<TrackPnlRecord> {
-    ensure!(
-        value.fee_token.trim() == "USDC",
-        "unsupported Hyperliquid fill feeToken `{}`; expected `USDC`",
-        value.fee_token
-    );
     ensure_non_empty("fill.hash", &value.hash)?;
     let occurred_at = millis_to_utc(value.time)?;
     let trade_id = value.tid.to_string();
@@ -145,9 +140,14 @@ pub(crate) fn track_pnl_record_from_fill(value: &UserFillResponse) -> Result<Tra
         parse_side(&value.side)?,
         parse_finite_decimal("fill.px", &value.px)?,
         parse_finite_decimal("fill.sz", &value.sz)?,
-        parse_finite_decimal("fill.closedPnl", &value.closed_pnl)?,
-        parse_finite_decimal("fill.fee", &value.fee)?,
-        "USDC",
+        cash_amount(
+            parse_finite_decimal("fill.closedPnl", &value.closed_pnl)?,
+            "USDC",
+        )?,
+        Some(cash_amount(
+            parse_finite_decimal("fill.fee", &value.fee)?,
+            &value.fee_token,
+        )?),
     ))
 }
 
@@ -173,9 +173,13 @@ fn funding_record(coin: &str, time: i64, usdc: &str) -> Result<TrackPnlRecord> {
         millis_to_utc(time)?,
         "hyperliquid:funding".to_string(),
         Some(format!("hyperliquid:funding:{coin}:{time}")),
-        parse_finite_decimal("funding.usdc", usdc)?,
-        "USDC",
+        cash_amount(parse_finite_decimal("funding.usdc", usdc)?, "USDC")?,
     ))
+}
+
+fn cash_amount(value: f64, asset: &str) -> Result<Amount> {
+    let asset = Asset::try_new(asset).map_err(anyhow::Error::msg)?;
+    Amount::new(value, asset).map_err(anyhow::Error::msg)
 }
 
 fn decimal_step(decimals: i32) -> f64 {
@@ -443,6 +447,6 @@ mod tests {
             rest_record.source_key.as_deref(),
             Some("hyperliquid:funding:BTC:1700000000000")
         );
-        assert_eq!(rest_record.funding_fee, ws_record.funding_fee);
+        assert_eq!(rest_record.funding_amount(), ws_record.funding_amount());
     }
 }

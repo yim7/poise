@@ -703,15 +703,15 @@ fn format_exposure_line(
 
 fn format_pnl_summary_line(
     pnl_asset: &str,
-    total_pnl: f64,
+    total_pnl: Option<f64>,
     unrealized_pnl: f64,
     gross_realized_pnl: f64,
-    net_realized_pnl: f64,
+    net_realized_pnl: Option<f64>,
 ) -> Line<'static> {
-    let total = pnl_signal(total_pnl);
+    let total = crate::signal::pnl_aggregate_signal(total_pnl);
     let unrealized = pnl_signal(unrealized_pnl);
     let gross_realized = pnl_signal(gross_realized_pnl);
-    let net_realized = pnl_signal(net_realized_pnl);
+    let net_realized = crate::signal::pnl_aggregate_signal(net_realized_pnl);
 
     Line::from(vec![
         Span::raw("total "),
@@ -1456,9 +1456,9 @@ mod tests {
         let mut detail: TrackDetailView =
             serde_json::from_str(include_str!("../../tests/fixtures/track_detail_view.json"))
                 .unwrap();
-        detail.pnl.total_pnl = -123456789.12;
+        detail.pnl.total_pnl = Some(-123456789.12);
         detail.pnl.gross_realized_pnl = 987654321.99;
-        detail.pnl.net_realized_pnl = 876543210.88;
+        detail.pnl.net_realized_pnl = Some(876543210.88);
         detail.pnl.unrealized_pnl = -111111111.11;
         detail.pnl.trading_fee_cumulative = 12.34;
         detail.pnl.funding_fee_cumulative = -5.67;

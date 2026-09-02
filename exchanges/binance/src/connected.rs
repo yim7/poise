@@ -376,18 +376,20 @@ mod tests {
             records[0].source_key.as_deref(),
             Some("binance:order_trade_update:btcusdt:698759")
         );
-        assert_eq!(records[0].trading_fee, 0.07819010);
+        assert_eq!(records[0].trading_fee().unwrap().value(), 0.07819010);
+        assert_eq!(records[0].trading_fee().unwrap().asset().as_str(), "USDT");
         assert_eq!(
             records[1].source_key.as_deref(),
             Some("binance:order_trade_update:btcusdt:698760")
         );
-        assert_eq!(records[1].realized_pnl, 1.25);
-        assert_eq!(records[1].trading_fee, 0.0);
+        assert_eq!(records[1].realized_pnl().unwrap().value(), 1.25);
+        assert_eq!(records[1].trading_fee().unwrap().value(), 0.00001000);
+        assert_eq!(records[1].trading_fee().unwrap().asset().as_str(), "BNB");
         assert_eq!(
             records[2].source_key.as_deref(),
             Some("binance:funding_fee:btcusdt:1570608000000")
         );
-        assert_eq!(records[2].funding_fee, -0.375);
+        assert_eq!(records[2].funding_amount().unwrap().value(), -0.375);
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use poise_application::{
     self as app, CommittedTrackWrite, EffectJournalEntry, EffectStatus, EffectStatusUpdate,
     PersistedTrackEffect, StoredTrackEvent, TrackControlState, TrackEffectJournal,
@@ -17,7 +17,7 @@ use poise_core::instrument::{Amount, Asset};
 use poise_core::track::{Instrument, TrackId};
 use poise_core::types::Side;
 use poise_engine::execution_plan::TrackEffect;
-use poise_engine::ledger::{TrackPnlRecord, TrackPnlRecordKind, TrackPnlStats};
+use poise_engine::ledger::{TrackPnlCashflow, TrackPnlRecord, TrackPnlRecordKind, TrackPnlStats};
 
 pub struct SqliteStorage {
     conn: Arc<Mutex<Connection>>,
@@ -784,10 +784,36 @@ impl SqliteStorage {
         track_id: TrackId,
         record: TrackPnlRecord,
     ) -> Result<bool> {
-        ensure!(
-            !record.pnl_asset.trim().is_empty(),
-            "pnl_asset must not be empty"
-        );
+        let (
+            realized_pnl,
+            realized_pnl_asset,
+            trading_fee,
+            trading_fee_asset,
+            funding_fee,
+            funding_fee_asset,
+        ) = match &record.cashflow {
+            TrackPnlCashflow::Trade {
+                realized_pnl,
+                trading_fee,
+            } => (
+                Some(realized_pnl.value()),
+                Some(realized_pnl.asset().as_str().to_string()),
+                trading_fee.as_ref().map(Amount::value),
+                trading_fee
+                    .as_ref()
+                    .map(|amount| amount.asset().as_str().to_string()),
+                None,
+                None,
+            ),
+            TrackPnlCashflow::Funding { funding } => (
+                None,
+                None,
+                None,
+                None,
+                Some(funding.value()),
+                Some(funding.asset().as_str().to_string()),
+            ),
+        };
         let mut conn = Self::lock_connection(&conn)?;
         let tx = conn
             .transaction()
@@ -802,7 +828,6 @@ impl SqliteStorage {
                     symbol,
                     occurred_at,
                     kind,
-                    pnl_asset,
                     source,
                     source_key,
                     order_id,
@@ -811,16 +836,18 @@ impl SqliteStorage {
                     price,
                     qty,
                     realized_pnl,
+                    realized_pnl_asset,
                     trading_fee,
-                    funding_fee
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                    trading_fee_asset,
+                    funding_fee,
+                    funding_fee_asset
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     track_id.as_str(),
                     record.instrument.venue.as_str(),
                     record.instrument.symbol,
                     record.occurred_at.to_rfc3339(),
-                    track_pnl_record_kind_as_str(record.kind),
-                    record.pnl_asset,
+                    track_pnl_record_kind_as_str(record.kind()),
                     record.source,
                     record.source_key,
                     record.order_id,
@@ -828,9 +855,12 @@ impl SqliteStorage {
                     record.side.map(side_as_str),
                     record.price,
                     record.qty,
-                    record.realized_pnl,
-                    record.trading_fee,
-                    record.funding_fee,
+                    realized_pnl,
+                    realized_pnl_asset,
+                    trading_fee,
+                    trading_fee_asset,
+                    funding_fee,
+                    funding_fee_asset,
                 ],
             )
             .context("failed to insert track pnl record")?
@@ -858,33 +888,30 @@ impl SqliteStorage {
         pnl_utc_day: NaiveDate,
     ) -> Result<TrackPnlStats> {
         let conn = Self::lock_connection(&conn)?;
-        let cumulative = sum_pnl_records(&conn, track_id.as_str(), None, None)?;
-        let day_start =
-            DateTime::<Utc>::from_naive_utc_and_offset(pnl_utc_day.and_time(NaiveTime::MIN), Utc);
-        let next_day = pnl_utc_day
-            .succ_opt()
-            .ok_or_else(|| anyhow!("invalid pnl utc day `{pnl_utc_day}`"))?;
-        let day_end =
-            DateTime::<Utc>::from_naive_utc_and_offset(next_day.and_time(NaiveTime::MIN), Utc);
-        let today = sum_pnl_records(
-            &conn,
-            track_id.as_str(),
-            Some(day_start.to_rfc3339()),
-            Some(day_end.to_rfc3339()),
+        let mut statement = conn.prepare(
+            "SELECT occurred_at, kind,
+                    realized_pnl, realized_pnl_asset,
+                    trading_fee, trading_fee_asset,
+                    funding_fee, funding_fee_asset
+             FROM track_pnl_records
+             WHERE track_id = ?1
+             ORDER BY id ASC",
         )?;
-        let pnl_asset = merge_pnl_assets(cumulative.pnl_asset.clone(), today.pnl_asset.clone())?;
-
-        Ok(TrackPnlStats {
+        let rows = statement
+            .query_map(params![track_id.as_str()], stored_pnl_cashflow_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut stats = TrackPnlStats {
             pnl_utc_day,
-            pnl_asset,
-            gross_realized_pnl_today: today.realized_pnl,
-            gross_realized_pnl_cumulative: cumulative.realized_pnl,
-            trading_fee_today: today.trading_fee,
-            trading_fee_cumulative: cumulative.trading_fee,
-            funding_fee_today: today.funding_fee,
-            funding_fee_cumulative: cumulative.funding_fee,
             ..TrackPnlStats::default()
-        })
+        };
+        for row in rows {
+            let occurred_at = DateTime::parse_from_rfc3339(&row.occurred_at)
+                .with_context(|| format!("invalid persisted PNL timestamp `{}`", row.occurred_at))?
+                .with_timezone(&Utc);
+            let cashflow = row.try_into_cashflow()?;
+            stats.apply_cashflow_fact(occurred_at, &cashflow);
+        }
+        Ok(stats)
     }
 
     fn list_track_pnl_source_keys_blocking(
@@ -936,125 +963,81 @@ fn side_as_str(side: Side) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct PnlRecordSums {
-    pnl_asset: Option<String>,
-    realized_pnl: f64,
-    trading_fee: f64,
-    funding_fee: f64,
+#[derive(Debug, Clone)]
+struct StoredPnlCashflowRow {
+    occurred_at: String,
+    kind: String,
+    realized_pnl: Option<f64>,
+    realized_pnl_asset: Option<String>,
+    trading_fee: Option<f64>,
+    trading_fee_asset: Option<String>,
+    funding_fee: Option<f64>,
+    funding_fee_asset: Option<String>,
 }
 
-impl PnlRecordSums {
-    fn apply(
-        &mut self,
-        pnl_asset: String,
-        realized_pnl: f64,
-        trading_fee: f64,
-        funding_fee: f64,
-    ) -> Result<()> {
-        match self.pnl_asset.as_deref() {
-            Some(existing) => ensure!(
-                existing == pnl_asset,
-                "track pnl records contain multiple pnl assets: `{existing}` and `{pnl_asset}`"
-            ),
-            None => self.pnl_asset = Some(pnl_asset),
+impl StoredPnlCashflowRow {
+    fn try_into_cashflow(self) -> Result<TrackPnlCashflow> {
+        match self.kind.as_str() {
+            "trade" => Ok(TrackPnlCashflow::Trade {
+                realized_pnl: required_stored_amount(
+                    self.realized_pnl,
+                    self.realized_pnl_asset,
+                    "realized_pnl",
+                )?,
+                trading_fee: optional_stored_amount(
+                    self.trading_fee,
+                    self.trading_fee_asset,
+                    "trading_fee",
+                )?,
+            }),
+            "funding" => Ok(TrackPnlCashflow::Funding {
+                funding: required_stored_amount(
+                    self.funding_fee,
+                    self.funding_fee_asset,
+                    "funding_fee",
+                )?,
+            }),
+            other => Err(anyhow!("unknown persisted PNL record kind `{other}`")),
         }
-
-        self.realized_pnl += realized_pnl;
-        self.trading_fee += trading_fee;
-        self.funding_fee += funding_fee;
-        Ok(())
     }
 }
 
-fn sum_pnl_records(
-    conn: &Connection,
-    track_id: &str,
-    occurred_at_start: Option<String>,
-    occurred_at_end: Option<String>,
-) -> Result<PnlRecordSums> {
-    let mut statement = match (&occurred_at_start, &occurred_at_end) {
-        (Some(_), Some(_)) => conn.prepare(
-            "SELECT
-                pnl_asset,
-                realized_pnl,
-                trading_fee,
-                funding_fee
-             FROM track_pnl_records
-             WHERE track_id = ?1
-               AND occurred_at >= ?2
-               AND occurred_at < ?3",
-        )?,
-        _ => conn.prepare(
-            "SELECT
-                pnl_asset,
-                realized_pnl,
-                trading_fee,
-                funding_fee
-             FROM track_pnl_records
-             WHERE track_id = ?1",
-        )?,
-    };
-
-    let mut sums = PnlRecordSums::default();
-    match (occurred_at_start, occurred_at_end) {
-        (Some(start), Some(end)) => {
-            let rows = statement.query_map(params![track_id, start, end], pnl_record_sum_row)?;
-            for row in rows {
-                let row = row?;
-                sums.apply(
-                    row.pnl_asset,
-                    row.realized_pnl,
-                    row.trading_fee,
-                    row.funding_fee,
-                )?;
-            }
-        }
-        _ => {
-            let rows = statement.query_map(params![track_id], pnl_record_sum_row)?;
-            for row in rows {
-                let row = row?;
-                sums.apply(
-                    row.pnl_asset,
-                    row.realized_pnl,
-                    row.trading_fee,
-                    row.funding_fee,
-                )?;
-            }
-        }
-    };
-
-    Ok(sums)
-}
-
-#[derive(Debug, Clone)]
-struct PnlRecordSumRow {
-    pnl_asset: String,
-    realized_pnl: f64,
-    trading_fee: f64,
-    funding_fee: f64,
-}
-
-fn pnl_record_sum_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PnlRecordSumRow> {
-    Ok(PnlRecordSumRow {
-        pnl_asset: row.get(0)?,
-        realized_pnl: row.get(1)?,
-        trading_fee: row.get(2)?,
-        funding_fee: row.get(3)?,
+fn stored_pnl_cashflow_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredPnlCashflowRow> {
+    Ok(StoredPnlCashflowRow {
+        occurred_at: row.get(0)?,
+        kind: row.get(1)?,
+        realized_pnl: row.get(2)?,
+        realized_pnl_asset: row.get(3)?,
+        trading_fee: row.get(4)?,
+        trading_fee_asset: row.get(5)?,
+        funding_fee: row.get(6)?,
+        funding_fee_asset: row.get(7)?,
     })
 }
 
-fn merge_pnl_assets(left: Option<String>, right: Option<String>) -> Result<Option<String>> {
-    match (left, right) {
-        (Some(left), Some(right)) => {
-            ensure!(
-                left == right,
-                "track pnl records contain multiple pnl assets: `{left}` and `{right}`"
-            );
-            Ok(Some(left))
-        }
-        (Some(asset), None) | (None, Some(asset)) => Ok(Some(asset)),
+fn required_stored_amount(
+    value: Option<f64>,
+    asset: Option<String>,
+    field: &str,
+) -> Result<Amount> {
+    optional_stored_amount(value, asset, field)?
+        .ok_or_else(|| anyhow!("persisted PNL record is missing `{field}` amount"))
+}
+
+fn optional_stored_amount(
+    value: Option<f64>,
+    asset: Option<String>,
+    field: &str,
+) -> Result<Option<Amount>> {
+    match (value, asset) {
+        (Some(value), Some(asset)) => Ok(Some(
+            Amount::new(value, Asset::try_new(asset).map_err(anyhow::Error::msg)?)
+                .map_err(anyhow::Error::msg)?,
+        )),
         (None, None) => Ok(None),
+        _ => Err(anyhow!(
+            "persisted PNL record `{field}` value and asset must both be present or absent"
+        )),
     }
 }
 
@@ -1298,12 +1281,18 @@ mod tests {
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
-    use poise_engine::ledger::TrackPnlRecord;
+    use poise_engine::ledger::{
+        PnlAggregateCompleteness, TrackPnlCashflowKind, TrackPnlRecord, UnvaluedCashflow,
+    };
     use poise_engine::ports::OrderRequest;
     use rusqlite::Connection;
 
     fn test_instrument(symbol: &str) -> Instrument {
         Instrument::new(Venue::Binance, symbol)
+    }
+
+    fn amount(value: f64, asset: &str) -> Amount {
+        Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
     }
 
     async fn guard_test_track_identity(
@@ -1349,10 +1338,13 @@ mod tests {
                 symbol,
                 occurred_at,
                 kind,
-                pnl_asset,
                 source,
-                source_key
-            ) VALUES (?1, ?2, ?3, ?4, 'trade', 'USDT', 'legacy:test', ?5)",
+                source_key,
+                realized_pnl,
+                realized_pnl_asset,
+                trading_fee,
+                trading_fee_asset
+            ) VALUES (?1, ?2, ?3, ?4, 'trade', 'legacy:test', ?5, 0, 'USDT', 0, 'USDT')",
             params![
                 track_id.as_str(),
                 instrument.venue.as_str(),
@@ -1843,9 +1835,8 @@ mod tests {
             "test".into(),
             Some("missing-identity".into()),
             None,
-            1.0,
-            0.0,
-            "USDT",
+            amount(1.0, "USDT"),
+            Some(amount(0.0, "USDT")),
         );
 
         let error = TrackMutationStore::insert_track_pnl_record(&storage, &track_id, &record)
@@ -1867,9 +1858,8 @@ mod tests {
             "test".into(),
             Some("same-source-key".into()),
             None,
-            1.0,
-            0.0,
-            "USDT",
+            amount(1.0, "USDT"),
+            Some(amount(0.0, "USDT")),
         );
         TrackMutationStore::insert_track_pnl_record(&storage, &track_id, &matching)
             .await
@@ -1880,9 +1870,8 @@ mod tests {
             "test".into(),
             Some("same-source-key".into()),
             None,
-            1.0,
-            0.0,
-            "USDT",
+            amount(1.0, "USDT"),
+            Some(amount(0.0, "USDT")),
         );
 
         let error = TrackMutationStore::insert_track_pnl_record(&storage, &track_id, &mismatched)
@@ -1988,9 +1977,8 @@ mod tests {
                 Side::Sell,
                 1900.0,
                 0.4,
-                120.0,
-                3.0,
-                "USDT",
+                amount(120.0, "USDT"),
+                Some(amount(3.0, "USDT")),
             ),
         )
         .await
@@ -2003,8 +1991,7 @@ mod tests {
                 Utc.with_ymd_and_hms(2026, 4, 7, 8, 0, 0).unwrap(),
                 "binance:funding_fee".into(),
                 Some("binance:btcusdt:funding:2026-04-07T08:00:00Z".into()),
-                -1.5,
-                "USDT",
+                amount(-1.5, "USDT"),
             ),
         )
         .await
@@ -2028,8 +2015,116 @@ mod tests {
         assert_eq!(stats.trading_fee_cumulative, 3.0);
         assert_eq!(stats.funding_fee_today, 0.0);
         assert_eq!(stats.funding_fee_cumulative, -1.5);
-        assert_eq!(stats.net_realized_pnl_cumulative(), 115.5);
-        assert_eq!(stats.pnl_asset.as_deref(), Some("USDT"));
+        assert_eq!(
+            stats.net_realized_pnl_cumulative().complete_value(),
+            Some(115.5)
+        );
+        assert_eq!(stats.pnl_asset.as_ref().map(Asset::as_str), Some("USDT"));
+    }
+
+    #[tokio::test]
+    async fn track_pnl_records_preserve_fee_asset_and_incomplete_aggregation() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let track_id = TrackId::new("btc-core");
+        guard_test_track_identity(&storage, &track_id, &test_instrument("BTCUSDT")).await;
+
+        TrackMutationStore::insert_track_pnl_record(
+            &storage,
+            &track_id,
+            &TrackPnlRecord::trade_summary(
+                test_instrument("BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 8, 9, 0, 0).unwrap(),
+                "binance:fills".into(),
+                Some("trade-with-bnb-fee".into()),
+                Some("trade-1".into()),
+                amount(10.0, "USDT"),
+                Some(amount(0.001, "BNB")),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let stats = TrackQueryStore::load_track_pnl_stats(
+            &storage,
+            &track_id,
+            NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
+        )
+        .await
+        .unwrap();
+        let stored_fee: (f64, String) = storage
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT trading_fee, trading_fee_asset
+                 FROM track_pnl_records WHERE source_key = 'trade-with-bnb-fee'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(stored_fee, (0.001, "BNB".into()));
+        assert_eq!(stats.net_realized_pnl_cumulative().valued_amount, 10.0);
+        assert_eq!(
+            stats.net_realized_pnl_cumulative().completeness,
+            PnlAggregateCompleteness::Incomplete {
+                unvalued_cashflows: vec![UnvaluedCashflow {
+                    kind: TrackPnlCashflowKind::TradingFee,
+                    amount: Some(amount(0.001, "BNB")),
+                }],
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn track_pnl_records_keep_missing_fee_distinct_from_known_zero() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let track_id = TrackId::new("btc-core");
+        guard_test_track_identity(&storage, &track_id, &test_instrument("BTCUSDT")).await;
+
+        TrackMutationStore::insert_track_pnl_record(
+            &storage,
+            &track_id,
+            &TrackPnlRecord::trade_summary(
+                test_instrument("BTCUSDT"),
+                Utc.with_ymd_and_hms(2026, 4, 8, 9, 0, 0).unwrap(),
+                "binance:ws".into(),
+                Some("missing-fee".into()),
+                Some("trade-1".into()),
+                amount(10.0, "USDT"),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+
+        let stats = TrackQueryStore::load_track_pnl_stats(
+            &storage,
+            &track_id,
+            NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
+        )
+        .await
+        .unwrap();
+        let stored_fee: (Option<f64>, Option<String>) = storage
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT trading_fee, trading_fee_asset
+                 FROM track_pnl_records WHERE source_key = 'missing-fee'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(stored_fee, (None, None));
+        assert_eq!(
+            stats.unvalued_cashflows_cumulative,
+            vec![UnvaluedCashflow {
+                kind: TrackPnlCashflowKind::TradingFee,
+                amount: None,
+            }]
+        );
     }
 
     #[tokio::test]
@@ -2049,9 +2144,8 @@ mod tests {
                 "okx:fills".into(),
                 Some("okx:fills:recorded".into()),
                 Some("recorded".into()),
-                1.0,
-                0.1,
-                "USDT",
+                amount(1.0, "USDT"),
+                Some(amount(0.1, "USDT")),
             ),
         )
         .await
@@ -2065,9 +2159,8 @@ mod tests {
                 "okx:fills".into(),
                 Some("okx:fills:other-track".into()),
                 Some("other-track".into()),
-                1.0,
-                0.1,
-                "USDT",
+                amount(1.0, "USDT"),
+                Some(amount(0.1, "USDT")),
             ),
         )
         .await
@@ -2089,7 +2182,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn track_pnl_records_reject_mixed_pnl_assets_on_aggregate() {
+    async fn track_pnl_records_preserve_mixed_assets_as_incomplete_aggregate() {
         let storage = SqliteStorage::in_memory().unwrap();
         let track_id = TrackId::new("btc-core");
         guard_test_track_identity(&storage, &track_id, &test_instrument("BTCUSDT")).await;
@@ -2103,9 +2196,8 @@ mod tests {
                 "test".into(),
                 Some("test:usdt".into()),
                 None,
-                1.0,
-                0.0,
-                "USDT",
+                amount(1.0, "USDT"),
+                Some(amount(0.0, "USDT")),
             ),
         )
         .await
@@ -2119,23 +2211,24 @@ mod tests {
                 "test".into(),
                 Some("test:btc".into()),
                 None,
-                0.001,
-                0.0,
-                "BTC",
+                amount(0.001, "BTC"),
+                Some(amount(0.0, "BTC")),
             ),
         )
         .await
         .unwrap();
 
-        let error = TrackQueryStore::load_track_pnl_stats(
+        let stats = TrackQueryStore::load_track_pnl_stats(
             &storage,
             &track_id,
             NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.to_string().contains("multiple pnl assets"));
+        assert_eq!(stats.net_realized_pnl_cumulative().complete_value(), None);
+        assert_eq!(stats.gross_realized_pnl_cumulative, 1.0);
+        assert_eq!(stats.unvalued_cashflows_cumulative.len(), 2);
     }
 
     #[tokio::test]
@@ -2160,9 +2253,8 @@ mod tests {
                 "test".into(),
                 None,
                 None,
-                1.0,
-                0.0,
-                "USDT",
+                amount(1.0, "USDT"),
+                Some(amount(0.0, "USDT")),
             ),
         )
         .await

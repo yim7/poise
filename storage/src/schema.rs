@@ -33,7 +33,6 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             symbol TEXT NOT NULL,
             occurred_at TEXT NOT NULL,
             kind TEXT NOT NULL,
-            pnl_asset TEXT NOT NULL,
             source TEXT NOT NULL,
             source_key TEXT,
             order_id TEXT,
@@ -41,9 +40,23 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             side TEXT,
             price REAL,
             qty REAL,
-            realized_pnl REAL NOT NULL DEFAULT 0,
-            trading_fee REAL NOT NULL DEFAULT 0,
-            funding_fee REAL NOT NULL DEFAULT 0
+            realized_pnl REAL,
+            realized_pnl_asset TEXT,
+            trading_fee REAL,
+            trading_fee_asset TEXT,
+            funding_fee REAL,
+            funding_fee_asset TEXT,
+            CHECK ((realized_pnl IS NULL) = (realized_pnl_asset IS NULL)),
+            CHECK ((trading_fee IS NULL) = (trading_fee_asset IS NULL)),
+            CHECK ((funding_fee IS NULL) = (funding_fee_asset IS NULL)),
+            CHECK (realized_pnl_asset IS NULL OR TRIM(realized_pnl_asset) <> ''),
+            CHECK (trading_fee_asset IS NULL OR TRIM(trading_fee_asset) <> ''),
+            CHECK (funding_fee_asset IS NULL OR TRIM(funding_fee_asset) <> ''),
+            CHECK (
+                (kind = 'trade' AND realized_pnl IS NOT NULL AND funding_fee IS NULL)
+                OR
+                (kind = 'funding' AND realized_pnl IS NULL AND trading_fee IS NULL AND funding_fee IS NOT NULL)
+            )
         );
 
         CREATE TABLE IF NOT EXISTS track_events (
@@ -75,6 +88,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         );",
     )?;
 
+    migrate_shared_asset_track_pnl_records(conn)?;
     migrate_untyped_account_monitor_state(conn)?;
 
     ensure_table_schema(
@@ -111,7 +125,6 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "symbol",
             "occurred_at",
             "kind",
-            "pnl_asset",
             "source",
             "source_key",
             "order_id",
@@ -120,8 +133,11 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "price",
             "qty",
             "realized_pnl",
+            "realized_pnl_asset",
             "trading_fee",
+            "trading_fee_asset",
             "funding_fee",
+            "funding_fee_asset",
         ],
         &[
             "track_id",
@@ -129,11 +145,7 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "symbol",
             "occurred_at",
             "kind",
-            "pnl_asset",
             "source",
-            "realized_pnl",
-            "trading_fee",
-            "funding_fee",
         ],
     )?;
     ensure_table_schema(
@@ -193,6 +205,138 @@ pub fn initialize(conn: &Connection) -> Result<()> {
          ON track_pnl_records(source_key)
          WHERE source_key IS NOT NULL;",
     )?;
+    Ok(())
+}
+
+fn migrate_shared_asset_track_pnl_records(conn: &Connection) -> Result<()> {
+    let columns = table_columns(conn, "track_pnl_records")?;
+    let legacy_columns = [
+        "id",
+        "track_id",
+        "venue",
+        "symbol",
+        "occurred_at",
+        "kind",
+        "pnl_asset",
+        "source",
+        "source_key",
+        "order_id",
+        "trade_id",
+        "side",
+        "price",
+        "qty",
+        "realized_pnl",
+        "trading_fee",
+        "funding_fee",
+    ];
+    if columns != legacy_columns {
+        return Ok(());
+    }
+
+    let invalid_kind_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM track_pnl_records WHERE kind NOT IN ('trade', 'funding')",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        invalid_kind_count == 0,
+        "legacy track_pnl_records contains unsupported record kinds"
+    );
+    let invalid_asset_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM track_pnl_records WHERE TRIM(pnl_asset) = ''",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        invalid_asset_count == 0,
+        "legacy track_pnl_records contains empty pnl assets"
+    );
+
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "DROP INDEX IF EXISTS idx_track_pnl_records_track_day;
+         DROP INDEX IF EXISTS idx_track_pnl_records_source_key;
+
+         ALTER TABLE track_pnl_records
+             RENAME TO track_pnl_records_legacy_shared_asset;
+
+         CREATE TABLE track_pnl_records (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             track_id TEXT NOT NULL,
+             venue TEXT NOT NULL,
+             symbol TEXT NOT NULL,
+             occurred_at TEXT NOT NULL,
+             kind TEXT NOT NULL,
+             source TEXT NOT NULL,
+             source_key TEXT,
+             order_id TEXT,
+             trade_id TEXT,
+             side TEXT,
+             price REAL,
+             qty REAL,
+             realized_pnl REAL,
+             realized_pnl_asset TEXT,
+             trading_fee REAL,
+             trading_fee_asset TEXT,
+             funding_fee REAL,
+             funding_fee_asset TEXT,
+             CHECK ((realized_pnl IS NULL) = (realized_pnl_asset IS NULL)),
+             CHECK ((trading_fee IS NULL) = (trading_fee_asset IS NULL)),
+             CHECK ((funding_fee IS NULL) = (funding_fee_asset IS NULL)),
+             CHECK (realized_pnl_asset IS NULL OR TRIM(realized_pnl_asset) <> ''),
+             CHECK (trading_fee_asset IS NULL OR TRIM(trading_fee_asset) <> ''),
+             CHECK (funding_fee_asset IS NULL OR TRIM(funding_fee_asset) <> ''),
+             CHECK (
+                 (kind = 'trade' AND realized_pnl IS NOT NULL AND funding_fee IS NULL)
+                 OR
+                 (kind = 'funding' AND realized_pnl IS NULL AND trading_fee IS NULL AND funding_fee IS NOT NULL)
+             )
+         );
+
+         INSERT INTO track_pnl_records (
+             id,
+             track_id,
+             venue,
+             symbol,
+             occurred_at,
+             kind,
+             source,
+             source_key,
+             order_id,
+             trade_id,
+             side,
+             price,
+             qty,
+             realized_pnl,
+             realized_pnl_asset,
+             trading_fee,
+             trading_fee_asset,
+             funding_fee,
+             funding_fee_asset
+         )
+         SELECT
+             id,
+             track_id,
+             venue,
+             symbol,
+             occurred_at,
+             kind,
+             source,
+             source_key,
+             order_id,
+             trade_id,
+             side,
+             price,
+             qty,
+             CASE WHEN kind = 'trade' THEN realized_pnl END,
+             CASE WHEN kind = 'trade' THEN pnl_asset END,
+             CASE WHEN kind = 'trade' AND trading_fee <> 0 THEN trading_fee END,
+             CASE WHEN kind = 'trade' AND trading_fee <> 0 THEN pnl_asset END,
+             CASE WHEN kind = 'funding' THEN funding_fee END,
+             CASE WHEN kind = 'funding' THEN pnl_asset END
+         FROM track_pnl_records_legacy_shared_asset;",
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -294,6 +438,14 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
 
+    type StoredTradeCashflow = (
+        Option<f64>,
+        Option<String>,
+        Option<f64>,
+        Option<String>,
+        Option<f64>,
+    );
+
     #[test]
     fn initialize_creates_tables() {
         let conn = Connection::open_in_memory().unwrap();
@@ -355,7 +507,7 @@ mod tests {
         assert!(
             table_columns(&conn, "track_pnl_records")
                 .unwrap()
-                .contains(&"pnl_asset".to_string())
+                .contains(&"trading_fee_asset".to_string())
         );
 
         let index_count: i64 = conn
@@ -413,7 +565,6 @@ mod tests {
                 "symbol".to_string(),
                 "occurred_at".to_string(),
                 "kind".to_string(),
-                "pnl_asset".to_string(),
                 "source".to_string(),
                 "source_key".to_string(),
                 "order_id".to_string(),
@@ -422,8 +573,11 @@ mod tests {
                 "price".to_string(),
                 "qty".to_string(),
                 "realized_pnl".to_string(),
+                "realized_pnl_asset".to_string(),
                 "trading_fee".to_string(),
+                "trading_fee_asset".to_string(),
                 "funding_fee".to_string(),
+                "funding_fee_asset".to_string(),
             ]
         );
         let account_monitor_state_columns = table_columns(&conn, "account_monitor_state").unwrap();
@@ -485,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_rejects_nullable_track_pnl_asset_column() {
+    fn initialize_rejects_nullable_track_pnl_source_column() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE track_pnl_records (
@@ -495,7 +649,43 @@ mod tests {
                 symbol TEXT NOT NULL,
                 occurred_at TEXT NOT NULL,
                 kind TEXT NOT NULL,
-                pnl_asset TEXT,
+                source TEXT,
+                source_key TEXT,
+                order_id TEXT,
+                trade_id TEXT,
+                side TEXT,
+                price REAL,
+                qty REAL,
+                realized_pnl REAL,
+                realized_pnl_asset TEXT,
+                trading_fee REAL,
+                trading_fee_asset TEXT,
+                funding_fee REAL,
+                funding_fee_asset TEXT
+            );",
+        )
+        .unwrap();
+
+        let error = initialize(&conn).expect_err("nullable source column should fail");
+
+        assert!(
+            format!("{error:#}").contains("column `source` allows NULL"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn initialize_migrates_shared_asset_pnl_records_without_reinterpreting_values() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE track_pnl_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id TEXT NOT NULL,
+                venue TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                pnl_asset TEXT NOT NULL,
                 source TEXT NOT NULL,
                 source_key TEXT,
                 order_id TEXT,
@@ -506,16 +696,69 @@ mod tests {
                 realized_pnl REAL NOT NULL DEFAULT 0,
                 trading_fee REAL NOT NULL DEFAULT 0,
                 funding_fee REAL NOT NULL DEFAULT 0
-            );",
+            );
+            INSERT INTO track_pnl_records (
+                track_id, venue, symbol, occurred_at, kind, pnl_asset, source,
+                source_key, realized_pnl, trading_fee, funding_fee
+            ) VALUES
+                ('btc', 'binance', 'BTCUSDT', '2026-09-02T00:00:00Z',
+                 'trade', 'USDT', 'legacy:trade', 'trade-1', 12.5, 0.25, 0),
+                ('btc', 'binance', 'BTCUSDT', '2026-09-02T00:01:00Z',
+                 'trade', 'USDT', 'legacy:zero-fee', 'trade-zero-fee', 1.0, 0, 0),
+                ('btc', 'binance', 'BTCUSDT', '2026-09-02T08:00:00Z',
+                 'funding', 'USDT', 'legacy:funding', 'funding-1', 0, 0, -0.5);",
         )
         .unwrap();
 
-        let error = initialize(&conn).expect_err("nullable pnl_asset column should fail");
+        initialize(&conn).unwrap();
+        initialize(&conn).unwrap();
 
-        assert!(
-            format!("{error:#}").contains("column `pnl_asset` allows NULL"),
-            "unexpected error: {error:#}"
+        let trade: StoredTradeCashflow = conn
+            .query_row(
+                "SELECT realized_pnl, realized_pnl_asset, trading_fee,
+                        trading_fee_asset, funding_fee
+                 FROM track_pnl_records WHERE source_key = 'trade-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let funding: (Option<f64>, Option<f64>, Option<String>) = conn
+            .query_row(
+                "SELECT realized_pnl, funding_fee, funding_fee_asset
+                 FROM track_pnl_records WHERE source_key = 'funding-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let zero_fee: (Option<f64>, Option<String>) = conn
+            .query_row(
+                "SELECT trading_fee, trading_fee_asset
+                 FROM track_pnl_records WHERE source_key = 'trade-zero-fee'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            trade,
+            (
+                Some(12.5),
+                Some("USDT".into()),
+                Some(0.25),
+                Some("USDT".into()),
+                None
+            )
         );
+        assert_eq!(funding, (None, Some(-0.5), Some("USDT".into())));
+        assert_eq!(zero_fee, (None, None));
     }
 
     #[test]

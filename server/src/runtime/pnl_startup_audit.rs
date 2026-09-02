@@ -124,6 +124,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
     use poise_core::events::DomainEvent;
+    use poise_core::instrument::{Amount, Asset};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
@@ -144,6 +145,10 @@ mod tests {
     };
 
     use super::run_startup_pnl_audit;
+
+    fn amount(value: f64, asset: &str) -> Amount {
+        Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+    }
 
     #[tokio::test]
     async fn startup_pnl_audit_records_missing_recent_fill_diagnostic_event() {
@@ -178,9 +183,8 @@ mod tests {
                     Side::Sell,
                     62_000.0,
                     0.2,
-                    0.0001,
-                    0.00001,
-                    "USDT",
+                    amount(0.0001, "USDT"),
+                    Some(amount(0.00001, "USDT")),
                 )]),
             )),
             repository.clone() as Arc<dyn TrackQueryStore>,

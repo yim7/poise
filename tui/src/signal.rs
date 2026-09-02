@@ -55,6 +55,13 @@ pub fn pnl_signal(value: f64) -> SignalDisplay {
     format_signal(value, 2, SignalKind::Pnl)
 }
 
+pub fn pnl_aggregate_signal(value: Option<f64>) -> SignalDisplay {
+    value.map(pnl_signal).unwrap_or_else(|| SignalDisplay {
+        text: "incomplete".to_string(),
+        style: Theme::status_attention(),
+    })
+}
+
 fn format_signal(value: f64, precision: usize, kind: SignalKind) -> SignalDisplay {
     let threshold = 0.5 * 10f64.powi(-(precision as i32));
 
@@ -143,7 +150,7 @@ fn exposure_side(value: f64, threshold: f64) -> ExposureSide {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExposureAction, ExposureSide, SignalTone, exposure_signal};
+    use super::{ExposureAction, ExposureSide, SignalTone, exposure_signal, pnl_aggregate_signal};
 
     #[test]
     fn treats_short_size_growth_as_add() {
@@ -185,5 +192,10 @@ mod tests {
         assert_eq!(signal.current_side, ExposureSide::Long);
         assert_eq!(signal.action, ExposureAction::Unavailable);
         assert_eq!(signal.tone, SignalTone::Neutral);
+    }
+
+    #[test]
+    fn renders_incomplete_pnl_without_a_numeric_signal() {
+        assert_eq!(pnl_aggregate_signal(None).text, "incomplete");
     }
 }

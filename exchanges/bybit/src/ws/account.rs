@@ -9,6 +9,7 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
+use poise_core::instrument::{Amount, Asset};
 use poise_core::track::{Instrument, Venue};
 use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{ExchangeOrder, Position, UserDataEvent, UserDataPayload};
@@ -243,11 +244,7 @@ fn parse_execution_update(
     let instrument = Instrument::new(Venue::Bybit, symbol.clone());
     let quote_asset = bybit_settlement_asset_for_symbol(&symbol)
         .context("cannot determine Bybit settlement asset from execution symbol")?;
-    let trading_fee = match normalized_fee_currency(update.fee_currency.as_deref()) {
-        Some(asset) if asset == quote_asset => update.exec_fee,
-        Some(_) => 0.0,
-        None => update.exec_fee,
-    };
+    let fee_asset = normalized_fee_currency(update.fee_currency.as_deref()).unwrap_or(quote_asset);
 
     Ok(UserDataEvent {
         event_time,
@@ -261,11 +258,15 @@ fn parse_execution_update(
                 exec_id
             )),
             Some(exec_id),
-            update.exec_pnl,
-            trading_fee,
-            quote_asset,
+            cash_amount(update.exec_pnl, quote_asset)?,
+            Some(cash_amount(update.exec_fee, fee_asset)?),
         )),
     })
+}
+
+fn cash_amount(value: f64, asset: &str) -> Result<Amount> {
+    let asset = Asset::try_new(asset).map_err(anyhow::Error::msg)?;
+    Amount::new(value, asset).map_err(anyhow::Error::msg)
 }
 
 fn normalized_fee_currency(value: Option<&str>) -> Option<&str> {
@@ -404,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_execution_update_into_track_pnl_record() {
+    fn parses_execution_update_without_discarding_non_settlement_fee_asset() {
         let payload = r#"{
             "topic": "execution.linear",
             "creationTime": 1700000000000,
@@ -413,7 +414,7 @@ mod tests {
                 "execId": "exec-1",
                 "execPnl": "12.34",
                 "execFee": "3.21",
-                "feeCurrency": "USDT"
+                "feeCurrency": "MNT"
             }]
         }"#;
 
@@ -429,9 +430,8 @@ mod tests {
                     "bybit:execution".into(),
                     Some("bybit:execution:btcusdt:exec-1".into()),
                     Some("exec-1".into()),
-                    12.34,
-                    3.21,
-                    "USDT",
+                    cash_amount(12.34, "USDT").unwrap(),
+                    Some(cash_amount(3.21, "MNT").unwrap()),
                 )),
             }]
         );
@@ -463,9 +463,8 @@ mod tests {
                     "bybit:execution".into(),
                     Some("bybit:execution:btcusdt:exec-2".into()),
                     Some("exec-2".into()),
-                    0.50,
-                    1.25,
-                    "USDT",
+                    cash_amount(0.50, "USDT").unwrap(),
+                    Some(cash_amount(1.25, "USDT").unwrap()),
                 )),
             }]
         );
@@ -538,9 +537,8 @@ mod tests {
                     "bybit:execution".into(),
                     Some("bybit:execution:btcusdt:exec-bridge-1".into()),
                     Some("exec-bridge-1".into()),
-                    12.34,
-                    3.21,
-                    "USDT",
+                    cash_amount(12.34, "USDT").unwrap(),
+                    Some(cash_amount(3.21, "USDT").unwrap()),
                 )),
             }
         );

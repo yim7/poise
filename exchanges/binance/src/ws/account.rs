@@ -9,6 +9,7 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
+use poise_core::instrument::{Amount, Asset};
 use poise_core::track::{Instrument, Venue};
 use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{ExchangeOrder, Position, UserDataEvent, UserDataPayload};
@@ -220,16 +221,22 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                     .as_deref()
                     .filter(|value| !value.is_empty())
                 {
-                    parse_decimal("o.n", commission_amount)?
+                    Some(parse_decimal("o.n", commission_amount)?)
                 } else {
-                    0.0
+                    None
                 };
                 let quote_asset = quote_asset_for_symbol(&order.symbol)
                     .context("cannot determine Binance settlement asset from order symbol")?;
-                let trading_fee = match order.commission_asset.as_deref() {
-                    Some(asset) if asset == quote_asset => commission_amount,
-                    None if commission_amount.abs() <= f64::EPSILON => 0.0,
-                    _ => 0.0,
+                let trading_fee = match (
+                    commission_amount,
+                    order
+                        .commission_asset
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|asset| !asset.is_empty()),
+                ) {
+                    (Some(value), Some(asset)) => Some(cash_amount(value, asset)?),
+                    _ => None,
                 };
                 let trade_id = order.trade_id.map(|value| value.to_string());
                 let source_key = Some(match trade_id.as_deref() {
@@ -258,9 +265,8 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                         side,
                         price,
                         trade_qty,
-                        realized_pnl,
+                        cash_amount(realized_pnl, quote_asset)?,
                         trading_fee,
-                        quote_asset,
                     )),
                 });
             }
@@ -306,8 +312,7 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                             symbol.to_lowercase(),
                             transaction_time.timestamp_millis()
                         )),
-                        balance_change,
-                        quote_asset,
+                        cash_amount(balance_change, quote_asset)?,
                     )),
                 }]));
             }
@@ -334,6 +339,11 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
         EVENT_LISTEN_KEY_EXPIRED => Ok(UserStreamMessage::ListenKeyExpired),
         _ => Ok(UserStreamMessage::UnsupportedEvent { event_type }),
     }
+}
+
+fn cash_amount(value: f64, asset: &str) -> Result<Amount> {
+    let asset = Asset::try_new(asset).map_err(anyhow::Error::msg)?;
+    Amount::new(value, asset).map_err(anyhow::Error::msg)
 }
 
 fn parse_user_event_time(event_type: &str, event_time: i64) -> Result<chrono::DateTime<Utc>> {
@@ -413,9 +423,8 @@ mod tests {
                         Side::Sell,
                         65000.5,
                         0.02,
-                        12.34,
-                        0.0,
-                        "USDT",
+                        cash_amount(12.34, "USDT").unwrap(),
+                        None,
                     )),
                 },
             ])
@@ -475,9 +484,8 @@ mod tests {
                         Side::Sell,
                         65000.5,
                         0.02,
-                        12.34,
-                        3.2,
-                        "USDT",
+                        cash_amount(12.34, "USDT").unwrap(),
+                        Some(cash_amount(3.2, "USDT").unwrap()),
                     )),
                 },
             ])
@@ -516,8 +524,7 @@ mod tests {
                     Utc.timestamp_millis_opt(1_699_999_999_000).unwrap(),
                     "binance:funding_fee".into(),
                     Some("binance:funding_fee:btcusdt:1699999999000".into()),
-                    -1.5,
-                    "USDT",
+                    cash_amount(-1.5, "USDT").unwrap(),
                 )),
             }])
         );
@@ -583,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_non_quote_commission_amount_in_pnl_stats_record() {
+    fn preserves_non_settlement_commission_asset_in_pnl_record() {
         let payload = r#"{
             "e": "ORDER_TRADE_UPDATE",
             "E": 1700000000000,
@@ -634,9 +641,8 @@ mod tests {
                         Side::Sell,
                         65000.5,
                         0.02,
-                        12.34,
-                        0.0,
-                        "USDT",
+                        cash_amount(12.34, "USDT").unwrap(),
+                        Some(cash_amount(0.01, "BNB").unwrap()),
                     )),
                 },
             ])

@@ -472,25 +472,31 @@ pub struct TrackReadPnlStats {
     pub trading_fee_cumulative: f64,
     pub funding_fee_today: f64,
     pub funding_fee_cumulative: f64,
+    pub net_realized_pnl_cumulative: poise_engine::ledger::PnlAggregate,
 }
 
 impl TrackReadPnlStats {
-    pub fn net_realized_pnl(&self) -> f64 {
-        self.gross_realized_pnl_cumulative - self.trading_fee_cumulative
-            + self.funding_fee_cumulative
+    pub fn net_realized_pnl(&self) -> Option<f64> {
+        self.net_realized_pnl_cumulative.complete_value()
+    }
+
+    pub fn pnl_completeness(&self) -> &poise_engine::ledger::PnlAggregateCompleteness {
+        &self.net_realized_pnl_cumulative.completeness
     }
 }
 
 impl From<TrackPnlStats> for TrackReadPnlStats {
     fn from(value: TrackPnlStats) -> Self {
+        let net_realized_pnl_cumulative = value.net_realized_pnl_cumulative();
         Self {
-            pnl_asset: value.pnl_asset,
+            pnl_asset: value.pnl_asset.map(|asset| asset.as_str().to_string()),
             gross_realized_pnl_today: value.gross_realized_pnl_today,
             gross_realized_pnl_cumulative: value.gross_realized_pnl_cumulative,
             trading_fee_today: value.trading_fee_today,
             trading_fee_cumulative: value.trading_fee_cumulative,
             funding_fee_today: value.funding_fee_today,
             funding_fee_cumulative: value.funding_fee_cumulative,
+            net_realized_pnl_cumulative,
         }
     }
 }
@@ -723,12 +729,15 @@ fn project_domain_event_message(event: &DomainEvent) -> String {
                 "execution gate: account capacity insufficient {:.4} > {:.4}",
                 required_notional, available_notional
             ),
-            ExecutionGateReason::PnlAssetMismatch {
+            ExecutionGateReason::PnlIncomplete {
                 expected_asset,
                 actual_asset,
+                unvalued_cashflow_count,
             } => format!(
-                "execution gate: pnl asset mismatch expected {} got {}",
-                expected_asset, actual_asset
+                "execution gate: pnl incomplete expected {} got {} with {} unvalued cashflows",
+                expected_asset,
+                actual_asset.as_deref().unwrap_or("unknown"),
+                unvalued_cashflow_count
             ),
         },
         DomainEvent::PnlAuditMissingRecords {
