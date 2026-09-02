@@ -92,7 +92,7 @@ impl OkxRestClient {
     pub(crate) async fn get_exchange_info(&self, symbol: &str) -> Result<ExchangeInfo> {
         let instrument = self.fetch_instrument_info(symbol).await?;
         let metadata = OkxInstrumentMetadata::from_instrument_info(&instrument)?;
-        let exchange_info = metadata.exchange_info_from_instrument(&instrument)?;
+        let exchange_info = metadata.exchange_info();
         self.instrument_registry.upsert(metadata);
         Ok(exchange_info)
     }

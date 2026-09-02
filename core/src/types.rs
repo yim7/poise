@@ -174,7 +174,7 @@ impl PricePrecision {
         round_to_price_step(price, step, rounding)
     }
 
-    fn match_tolerance(self, left: f64, right: f64) -> f64 {
+    pub(crate) fn match_tolerance(self, left: f64, right: f64) -> f64 {
         match self {
             Self::FixedTick => f64::EPSILON,
             Self::SignificantFigures {

@@ -280,8 +280,9 @@ fn non_empty_string(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use poise_core::instrument::{Amount, Asset, PositionBasis, PositionQty};
     use poise_core::track::{Instrument, Venue};
-    use poise_core::types::{ExchangeRules, Side};
+    use poise_core::types::Side;
     use poise_engine::ports::{AccountSummarySnapshot, ExchangeOrder, OrderStatus, Position};
 
     use super::*;
@@ -305,24 +306,18 @@ mod tests {
         })
         .unwrap();
 
+        let spec = info.instrument_spec;
         assert_eq!(
-            info.instrument,
-            Instrument::new(Venue::Okx, "BTC-USDT-SWAP")
+            spec.instrument(),
+            &Instrument::new(Venue::Okx, "BTC-USDT-SWAP")
         );
+        assert_eq!(spec.position_basis(), &PositionBasis::BaseAsset);
+        assert_eq!(spec.price_tick(), 0.1);
+        assert_eq!(spec.position_qty_step(), PositionQty::new(0.0001).unwrap());
+        assert_eq!(spec.min_position_qty(), PositionQty::new(0.0001).unwrap());
         assert_eq!(
-            info.rules,
-            ExchangeRules {
-                price_tick: 0.1,
-                price_precision: Default::default(),
-                quantity_kind: Default::default(),
-                contract_notional: None,
-                settlement_asset: "USDT".to_string(),
-                quantity_step: 0.0001,
-                min_qty: 0.0001,
-                min_notional: 0.0,
-                maker_fee_rate: 0.0002,
-                taker_fee_rate: 0.0005,
-            }
+            spec.min_notional(),
+            &Amount::new(0.0, Asset::try_new("USDT").unwrap()).unwrap()
         );
     }
 
@@ -340,15 +335,20 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(info.instrument, Instrument::new(Venue::Okx, "BTC-USD-SWAP"));
+        let spec = info.instrument_spec;
         assert_eq!(
-            info.rules.quantity_kind,
-            poise_core::types::QuantityKind::InverseContract
+            spec.instrument(),
+            &Instrument::new(Venue::Okx, "BTC-USD-SWAP")
         );
-        assert_eq!(info.rules.contract_notional, Some(100.0));
-        assert_eq!(info.rules.settlement_asset, "BTC");
-        assert_eq!(info.rules.quantity_step, 1.0);
-        assert_eq!(info.rules.min_qty, 1.0);
+        assert_eq!(
+            spec.position_basis(),
+            &PositionBasis::Contracts {
+                contract_value: Amount::new(100.0, Asset::try_new("USD").unwrap()).unwrap(),
+            }
+        );
+        assert_eq!(spec.settlement_asset().as_str(), "BTC");
+        assert_eq!(spec.position_qty_step(), PositionQty::new(1.0).unwrap());
+        assert_eq!(spec.min_position_qty(), PositionQty::new(1.0).unwrap());
     }
 
     #[test]

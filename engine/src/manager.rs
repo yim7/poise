@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail, ensure};
 use poise_core::events::DomainEvent;
-use poise_core::types::ExchangeRules;
+use poise_core::instrument::InstrumentSpec;
 use poise_core::types::Exposure;
 
 use crate::command::TrackCommand;
@@ -84,11 +84,11 @@ impl TrackManager {
     pub fn add_track(
         &mut self,
         definition: TrackDefinition,
-        exchange_rules: ExchangeRules,
+        instrument_spec: InstrumentSpec,
     ) -> Result<()> {
         self.add_track_with_tick_timeout_secs(
             definition.clone(),
-            exchange_rules,
+            instrument_spec,
             definition.tick_timeout_secs(),
         )
     }
@@ -96,7 +96,7 @@ impl TrackManager {
     pub fn add_track_with_tick_timeout_secs(
         &mut self,
         definition: TrackDefinition,
-        exchange_rules: ExchangeRules,
+        instrument_spec: InstrumentSpec,
         tick_timeout_secs: u64,
     ) -> Result<()> {
         let id = definition.track_id().clone();
@@ -114,7 +114,7 @@ impl TrackManager {
 
         let track = TrackRuntime::with_tick_timeout_secs(
             definition,
-            exchange_rules,
+            instrument_spec,
             self.clock.now(),
             tick_timeout_secs,
         );
@@ -302,10 +302,10 @@ impl TrackManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         ensure!(
-            record.pnl_asset == track.exchange_rules.settlement_asset,
+            record.pnl_asset == track.instrument_spec.settlement_asset().as_str(),
             "pnl asset `{}` does not match settlement asset `{}` for track `{}`",
             record.pnl_asset,
-            track.exchange_rules.settlement_asset,
+            track.instrument_spec.settlement_asset().as_str(),
             id.as_str()
         );
         track.pnl_stats.normalize_utc_day(pnl_utc_day);
@@ -734,7 +734,7 @@ impl TrackManager {
                 .get(id)
                 .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
             executor::recover_submit_effect(executor::SubmitRecoveryInput {
-                exchange_rules: &track.exchange_rules,
+                instrument_spec: &track.instrument_spec,
                 previous_state: &track.executor_state,
                 recovery_token,
                 current_exposure: &track.current_exposure,
@@ -940,7 +940,7 @@ impl TrackManager {
             config: track.config(),
             current_exposure: &track.current_exposure,
             desired_exposure: track.desired_exposure.as_ref(),
-            exchange_rules: &track.exchange_rules,
+            instrument_spec: &track.instrument_spec,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
             pending_submit_hints: &pending_submit_hints,
@@ -1140,7 +1140,7 @@ impl TrackManager {
         executor::SubmitIntentInput {
             instrument: track.instrument(),
             config: track.config(),
-            exchange_rules: &track.exchange_rules,
+            instrument_spec: &track.instrument_spec,
             native_qty_per_unit: track.native_qty_per_exposure_unit(),
             min_rebalance_units: track.config().min_rebalance_units,
             current_exposure: track.current_exposure.clone(),
@@ -1457,12 +1457,13 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use poise_core::events::ExecutionGateReason;
+    use poise_core::instrument::InstrumentSpec;
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{
         BandProtectionPolicy, RiskAcquisitionConfig, ShapeFamily, TrackConfig,
     };
     use poise_core::track::TrackDefinition;
-    use poise_core::types::{ExchangeRules, Side};
+    use poise_core::types::Side;
 
     use crate::execution_plan::TrackEffect;
     use crate::executor::binding::LiveOrderBinding;
@@ -1522,34 +1523,12 @@ mod tests {
         }
     }
 
-    fn rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
+    fn rules() -> InstrumentSpec {
+        crate::test_instrument::linear_spec(0.1, 0.01, 0.0, 0.0)
     }
 
-    fn inverse_rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: poise_core::types::QuantityKind::InverseContract,
-            contract_notional: Some(100.0),
-            settlement_asset: "BTC".to_string(),
-            quantity_step: 1.0,
-            min_qty: 1.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
+    fn inverse_rules() -> InstrumentSpec {
+        crate::test_instrument::inverse_spec(0.1, 1.0, 1.0, 0.0, 100.0)
     }
 
     fn market(price: f64) -> TrackObservation {
@@ -1801,7 +1780,7 @@ mod tests {
                     current_exposure: Exposure(2.0),
                     position_qty: 2.0,
                     market_data: None,
-                    exchange_rules: rules(),
+                    instrument_spec: rules(),
                 },
             )
             .unwrap();
@@ -2436,7 +2415,7 @@ mod tests {
                 track.max_notional(),
                 track.loss_limits().clone(),
             );
-            track.exchange_rules = inverse_rules();
+            track.instrument_spec = inverse_rules();
         }
 
         manager
@@ -2602,10 +2581,7 @@ mod tests {
                         },
                         observed_at: Utc.with_ymd_and_hms(2026, 4, 22, 9, 1, 0).unwrap(),
                     }),
-                    exchange_rules: ExchangeRules {
-                        price_tick: 0.5,
-                        ..rules()
-                    },
+                    instrument_spec: crate::test_instrument::linear_spec(0.5, 0.01, 0.0, 0.0),
                 },
             )
             .unwrap();
@@ -2636,7 +2612,7 @@ mod tests {
                     current_exposure: Exposure(2.0),
                     position_qty: 2.0,
                     market_data: None,
-                    exchange_rules: rules(),
+                    instrument_spec: rules(),
                 },
             )
             .unwrap();
@@ -2685,7 +2661,7 @@ mod tests {
                     current_exposure: Exposure(2.0),
                     position_qty: 2.0,
                     market_data: None,
-                    exchange_rules: rules(),
+                    instrument_spec: rules(),
                 },
             )
             .unwrap();
@@ -2728,7 +2704,7 @@ mod tests {
                     current_exposure: Exposure(2.0),
                     position_qty: 2.0,
                     market_data: None,
-                    exchange_rules: rules(),
+                    instrument_spec: rules(),
                 },
             )
             .unwrap();

@@ -1891,7 +1891,7 @@ pub(crate) mod test_support {
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-    use poise_core::types::{ExchangeRules, Exposure, Side};
+    use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::ledger::{TrackPnlRecord, TrackPnlStats};
@@ -2324,18 +2324,7 @@ pub(crate) mod test_support {
                     None,
                 )
                 .unwrap(),
-                ExchangeRules {
-                    price_tick: 0.1,
-                    price_precision: Default::default(),
-                    quantity_kind: Default::default(),
-                    contract_notional: None,
-                    settlement_asset: "USDT".to_string(),
-                    quantity_step: 0.001,
-                    min_qty: 0.001,
-                    min_notional: 5.0,
-                    maker_fee_rate: 0.0,
-                    taker_fee_rate: 0.0,
-                },
+                crate::test_instrument::linear_spec(0.1, 0.001, 0.001, 5.0),
             )
             .unwrap();
         manager
@@ -3321,13 +3310,13 @@ mod tests {
             .prepare_exchange_state_sync("btc-core")
             .await
             .unwrap();
-        let exchange_rules = executor
+        let instrument_spec = executor
             .manager()
             .read()
             .await
             .get_track("btc-core")
             .unwrap()
-            .exchange_rules()
+            .instrument_spec()
             .clone();
 
         assert!(
@@ -3340,7 +3329,7 @@ mod tests {
                         current_exposure: Exposure(0.0),
                         position_qty: 0.0,
                         market_data: None,
-                        exchange_rules,
+                        instrument_spec,
                     },
                 )
                 .await

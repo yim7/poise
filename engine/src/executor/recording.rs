@@ -384,7 +384,7 @@ fn is_recent_terminal_receipt(
 mod tests {
     use chrono::Utc;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
-    use poise_core::types::{ExchangeRules, Exposure};
+    use poise_core::types::Exposure;
 
     use super::*;
     use crate::execution_plan::TrackEffect;
@@ -414,24 +414,13 @@ mod tests {
             out_of_band_policy: BandProtectionPolicy::Freeze,
             risk_acquisition: Default::default(),
         };
-        let rules = ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        };
+        let rules = crate::test_instrument::linear_spec(0.1, 0.01, 0.0, 0.0);
         let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
         plan(ExecutorInput::new(
             SubmitIntentInput {
                 instrument: &instrument,
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
@@ -648,24 +637,13 @@ mod tests {
             out_of_band_policy: BandProtectionPolicy::Freeze,
             risk_acquisition: Default::default(),
         };
-        let rules = ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        };
+        let rules = crate::test_instrument::linear_spec(0.1, 0.01, 0.0, 0.0);
         let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
         let planned = plan(ExecutorInput::new(
             SubmitIntentInput {
                 instrument: &instrument,
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
@@ -714,24 +692,13 @@ mod tests {
             out_of_band_policy: BandProtectionPolicy::Freeze,
             risk_acquisition: Default::default(),
         };
-        let rules = ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        };
+        let rules = crate::test_instrument::linear_spec(0.1, 0.01, 0.0, 0.0);
         let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
         let planned = plan(ExecutorInput::new(
             SubmitIntentInput {
                 instrument: &instrument,
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
@@ -787,24 +754,13 @@ mod tests {
             out_of_band_policy: BandProtectionPolicy::Freeze,
             risk_acquisition: Default::default(),
         };
-        let rules = ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        };
+        let rules = crate::test_instrument::linear_spec(0.1, 0.01, 0.0, 0.0);
         let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
         let planned = plan(ExecutorInput::new(
             SubmitIntentInput {
                 instrument: &instrument,
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
@@ -854,24 +810,13 @@ mod tests {
             out_of_band_policy: BandProtectionPolicy::Freeze,
             risk_acquisition: Default::default(),
         };
-        let rules = ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        };
+        let rules = crate::test_instrument::linear_spec(0.1, 0.01, 0.0, 0.0);
         let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
         let planned = plan(ExecutorInput::new(
             SubmitIntentInput {
                 instrument: &instrument,
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
@@ -905,7 +850,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: &instrument,
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.4),
@@ -944,24 +889,13 @@ mod tests {
             out_of_band_policy: BandProtectionPolicy::Freeze,
             risk_acquisition: Default::default(),
         };
-        let rules = ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        };
+        let rules = crate::test_instrument::linear_spec(0.1, 0.01, 0.0, 0.0);
         let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
         let planned = plan(ExecutorInput::new(
             SubmitIntentInput {
                 instrument: &instrument,
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
@@ -1009,24 +943,13 @@ mod tests {
             out_of_band_policy: BandProtectionPolicy::Freeze,
             risk_acquisition: Default::default(),
         };
-        let rules = ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        };
+        let rules = crate::test_instrument::linear_spec(0.1, 0.01, 0.0, 0.0);
         let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
         let planned = plan(ExecutorInput::new(
             SubmitIntentInput {
                 instrument: &instrument,
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),

@@ -7,10 +7,11 @@ use poise_application::{
     TrackDefinitionRegistry, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
     TrackRuntimeLifecycleService, TradingRuntime,
 };
+use poise_core::instrument::{Amount, Asset, InstrumentSpec};
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
 use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-use poise_core::types::{ExchangeRules, Exposure, Side};
+use poise_core::types::{Exposure, Side};
 use poise_engine::execution_plan::TrackEffect;
 use poise_engine::executor::SubmitRecoveryToken;
 use poise_engine::manager::TrackManager;
@@ -263,21 +264,49 @@ pub(crate) fn test_manager(track_id: &str) -> TrackManager {
                 None,
             )
             .unwrap(),
-            ExchangeRules {
-                price_tick: 0.1,
-                price_precision: Default::default(),
-                quantity_kind: Default::default(),
-                contract_notional: None,
-                settlement_asset: "USDT".to_string(),
-                quantity_step: 0.1,
-                min_qty: 0.0,
-                min_notional: 0.0,
-                maker_fee_rate: 0.0,
-                taker_fee_rate: 0.0,
-            },
+            test_instrument_spec_for(Instrument::new(
+                Venue::Binance,
+                default_symbol_for(track_id),
+            )),
         )
         .unwrap();
     manager
+}
+
+pub(crate) fn test_instrument_spec() -> InstrumentSpec {
+    test_instrument_spec_for(Instrument::new(Venue::Binance, "BTCUSDT"))
+}
+
+pub(crate) fn test_instrument_spec_for(instrument: Instrument) -> InstrumentSpec {
+    test_instrument_spec_with(instrument, 0.1, 0.1, 0.0, 0.0)
+}
+
+pub(crate) fn test_instrument_spec_with(
+    instrument: Instrument,
+    price_tick: f64,
+    quantity_step: f64,
+    min_quantity: f64,
+    min_notional: f64,
+) -> InstrumentSpec {
+    let quote_asset = Asset::try_new("USDT").unwrap();
+    let base_asset = instrument
+        .symbol
+        .strip_suffix("USDT")
+        .filter(|value| !value.is_empty())
+        .unwrap_or("BTC")
+        .to_string();
+    InstrumentSpec::try_linear(
+        instrument,
+        Asset::try_new(base_asset).unwrap(),
+        quote_asset.clone(),
+        quote_asset.clone(),
+        Default::default(),
+        price_tick,
+        quantity_step,
+        min_quantity,
+        Amount::new(min_notional, quote_asset).unwrap(),
+    )
+    .unwrap()
 }
 
 pub(crate) fn test_submit_effect(track_id: &str) -> TrackEffect {

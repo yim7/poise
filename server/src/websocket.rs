@@ -778,7 +778,7 @@ mod tests {
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-    use poise_core::types::{ExchangeRules, Exposure};
+    use poise_core::types::Exposure;
     use poise_engine::command::TrackCommand;
     use poise_engine::execution_plan::{DecisionReason, TrackEffect};
     use poise_engine::manager::TrackManager;
@@ -798,7 +798,7 @@ mod tests {
     use crate::server_context::WebSocketState;
     use crate::test_support::{
         build_effect_worker_test_context, build_test_application_services, build_websocket_state,
-        test_track_definition_registry, unavailable_account_monitor,
+        test_instrument_spec, test_track_definition_registry, unavailable_account_monitor,
     };
     use poise_application::{
         AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
@@ -1668,18 +1668,7 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-                ExchangeRules {
-                    price_tick: 0.0,
-                    price_precision: Default::default(),
-                    quantity_kind: Default::default(),
-                    contract_notional: None,
-                    settlement_asset: "USDT".to_string(),
-                    quantity_step: 0.0,
-                    min_qty: 0.0,
-                    min_notional: 0.0,
-                    maker_fee_rate: 0.0,
-                    taker_fee_rate: 0.0,
-                },
+                test_instrument_spec(),
             )
             .unwrap();
         manager

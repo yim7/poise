@@ -27,8 +27,9 @@ pub(crate) use recovery::{
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
+    use poise_core::instrument::InstrumentSpec;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
-    use poise_core::types::{ExchangeRules, Exposure, Side};
+    use poise_core::types::{Exposure, Side};
 
     use super::*;
     use crate::execution_plan::TrackEffect;
@@ -58,19 +59,8 @@ mod tests {
         }
     }
 
-    fn rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
+    fn rules() -> InstrumentSpec {
+        crate::test_instrument::linear_spec(0.1, 0.01, 0.0, 0.0)
     }
 
     fn instrument() -> Instrument {
@@ -84,15 +74,14 @@ mod tests {
     #[test]
     fn normal_policy_does_not_plan_increase_maker() {
         let config = config();
-        let mut rules = rules();
-        rules.quantity_step = 0.001;
+        let rules = crate::test_instrument::linear_spec(0.1, 0.001, 0.0, 0.0);
         let instrument = instrument();
         let state = ExecutorState::empty(observed_at()).ensure_revision(&config, Exposure(1.5));
         let plan = plan(ExecutorInput::new(
             SubmitIntentInput {
                 instrument: &instrument,
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.5),
@@ -121,15 +110,14 @@ mod tests {
     #[test]
     fn normal_policy_keeps_reduce_risk_curve_maker_without_increase_maker() {
         let config = config();
-        let mut rules = rules();
-        rules.quantity_step = 0.001;
+        let rules = crate::test_instrument::linear_spec(0.1, 0.001, 0.0, 0.0);
         let instrument = instrument();
         let state = ExecutorState::empty(observed_at()).ensure_revision(&config, Exposure(1.0));
         let plan = plan(ExecutorInput::new(
             SubmitIntentInput {
                 instrument: &instrument,
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
@@ -170,15 +158,14 @@ mod tests {
     #[test]
     fn normal_policy_suppresses_increase_maker_without_release_context() {
         let config = config();
-        let mut rules = rules();
-        rules.quantity_step = 0.001;
+        let rules = crate::test_instrument::linear_spec(0.1, 0.001, 0.0, 0.0);
         let instrument = instrument();
         let state = ExecutorState::empty(observed_at()).ensure_revision(&config, Exposure(1.0));
         let plan = plan(ExecutorInput::new(
             SubmitIntentInput {
                 instrument: &instrument,
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
@@ -211,7 +198,7 @@ mod tests {
 
     fn input<'a>(
         config: &'a TrackConfig,
-        rules: &'a ExchangeRules,
+        rules: &'a InstrumentSpec,
         instrument: &'a Instrument,
         current_exposure: Exposure,
         desired_exposure: Exposure,
@@ -230,7 +217,7 @@ mod tests {
 
     fn input_with_context<'a>(
         config: &'a TrackConfig,
-        rules: &'a ExchangeRules,
+        rules: &'a InstrumentSpec,
         instrument: &'a Instrument,
         current_exposure: Exposure,
         desired_exposure: Exposure,
@@ -241,7 +228,7 @@ mod tests {
             SubmitIntentInput {
                 instrument,
                 config,
-                exchange_rules: rules,
+                instrument_spec: rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,

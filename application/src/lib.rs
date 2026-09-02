@@ -21,6 +21,9 @@ mod track_read_source;
 mod track_read_source_loader;
 mod trading_runtime;
 
+#[cfg(test)]
+pub(crate) mod test_instrument;
+
 pub use account_monitor::{AccountMonitor, AccountMonitorConfig};
 pub use account_monitor_store::{AccountMonitorStore, StoredAccountMonitorState};
 pub use account_read_model::{AccountReadModel, AccountRiskSignal};

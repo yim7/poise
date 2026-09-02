@@ -317,7 +317,7 @@ mod tests {
 
         assert_eq!(summary.available, 100.25);
         assert_eq!(capacity.max_increase_notional, 1002.5);
-        assert_eq!(info.instrument, instrument);
+        assert_eq!(info.instrument_spec.instrument(), &instrument);
         assert_eq!(server_time.timestamp(), 1_700_000_000);
         assert_eq!(requests.len(), 5);
         assert!(

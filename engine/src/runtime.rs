@@ -2,10 +2,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use poise_core::events::ExecutionGateReason;
+use poise_core::instrument::{Amount, InstrumentSpec, PositionQty};
 use poise_core::risk::{LossLimits, RiskTerminationCause};
 use poise_core::strategy::{BandBoundary, TrackConfig};
 use poise_core::track::{Instrument, TrackDefinition, TrackId};
-use poise_core::types::{ExchangeRules, Exposure, Side};
+use poise_core::types::{Exposure, Side};
 
 use crate::execution_gate::{ExecutionGateDecision, ExecutionGateState};
 use crate::execution_plan::DecisionReason;
@@ -192,7 +193,7 @@ pub struct FreshSessionExternalInputs {
     pub current_exposure: Exposure,
     pub position_qty: f64,
     pub market_data: Option<CurrentMarketData>,
-    pub exchange_rules: ExchangeRules,
+    pub instrument_spec: InstrumentSpec,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,7 +342,7 @@ pub struct BindingView {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackRuntimeView {
     pub status: TrackStatus,
-    pub exchange_rules: ExchangeRules,
+    pub instrument_spec: InstrumentSpec,
     pub current_exposure: Exposure,
     pub position_qty: f64,
     pub decision: InventoryDecisionView,
@@ -454,7 +455,7 @@ pub struct TrackRuntime {
     // Process-local invalidation clock for composite REST snapshots. Candidate business state may
     // fail to commit, but this clock is retained separately by application and never moves back.
     exchange_observation_revision: ExchangeObservationRevision,
-    pub(crate) exchange_rules: ExchangeRules,
+    pub(crate) instrument_spec: InstrumentSpec,
     pub(crate) track_state: TrackState,
     pub(crate) current_exposure: Exposure,
     pub(crate) current_position_qty: f64,
@@ -480,16 +481,24 @@ pub struct TrackRuntime {
     pub(crate) tick_timeout_secs: u64,
 }
 
-pub fn native_qty_per_exposure_unit(config: &TrackConfig, exchange_rules: &ExchangeRules) -> f64 {
-    exchange_rules.native_qty_per_exposure_unit(config.notional_per_unit, config.band_center())
+pub fn native_qty_per_exposure_unit(config: &TrackConfig, instrument_spec: &InstrumentSpec) -> f64 {
+    let notional = Amount::new(
+        config.notional_per_unit,
+        instrument_spec.notional_asset().clone(),
+    )
+    .expect("validated track notional must be finite");
+    instrument_spec
+        .position_qty_for_notional(notional, config.band_center())
+        .expect("validated track and instrument must define a position quantity")
+        .value()
 }
 
 pub fn exposure_from_position_qty(
     config: &TrackConfig,
-    exchange_rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
     position_qty: f64,
 ) -> Exposure {
-    let unit_qty = native_qty_per_exposure_unit(config, exchange_rules);
+    let unit_qty = native_qty_per_exposure_unit(config, instrument_spec);
     if !unit_qty.is_finite() || unit_qty <= f64::EPSILON {
         Exposure(0.0)
     } else {
@@ -499,30 +508,36 @@ pub fn exposure_from_position_qty(
 
 pub fn position_notional(
     config: &TrackConfig,
-    exchange_rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
     position_qty: f64,
 ) -> f64 {
-    exchange_rules.notional_from_native_qty(position_qty, config.band_center())
+    instrument_spec
+        .notional_from_position_qty(
+            PositionQty::new(position_qty).expect("observed position quantity must be finite"),
+            config.band_center(),
+        )
+        .expect("validated track and instrument must define position notional")
+        .value()
 }
 
 pub fn required_additional_notional(
     config: &TrackConfig,
-    exchange_rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
     max_notional: f64,
     position_qty: f64,
 ) -> f64 {
-    (max_notional - position_notional(config, exchange_rules, position_qty)).max(0.0)
+    (max_notional - position_notional(config, instrument_spec, position_qty)).max(0.0)
 }
 
 impl TrackRuntime {
     pub fn new(
         definition: TrackDefinition,
-        exchange_rules: ExchangeRules,
+        instrument_spec: InstrumentSpec,
         started_at: DateTime<Utc>,
     ) -> Self {
         Self::with_tick_timeout_secs(
             definition.clone(),
-            exchange_rules,
+            instrument_spec,
             started_at,
             definition.tick_timeout_secs(),
         )
@@ -530,14 +545,14 @@ impl TrackRuntime {
 
     pub fn with_tick_timeout_secs(
         definition: TrackDefinition,
-        exchange_rules: ExchangeRules,
+        instrument_spec: InstrumentSpec,
         started_at: DateTime<Utc>,
         tick_timeout_secs: u64,
     ) -> Self {
         Self {
             definition,
             exchange_observation_revision: ExchangeObservationRevision::default(),
-            exchange_rules,
+            instrument_spec,
             track_state: TrackState::WaitingMarketData,
             current_exposure: Exposure(0.0),
             current_position_qty: 0.0,
@@ -615,8 +630,8 @@ impl TrackRuntime {
         .expect("test definition replacement must be valid");
     }
 
-    pub fn exchange_rules(&self) -> &ExchangeRules {
-        &self.exchange_rules
+    pub fn instrument_spec(&self) -> &InstrumentSpec {
+        &self.instrument_spec
     }
 
     pub fn exchange_observation_revision(&self) -> ExchangeObservationRevision {
@@ -642,21 +657,21 @@ impl TrackRuntime {
     }
 
     pub fn native_qty_per_exposure_unit(&self) -> f64 {
-        native_qty_per_exposure_unit(self.config(), &self.exchange_rules)
+        native_qty_per_exposure_unit(self.config(), &self.instrument_spec)
     }
 
     pub fn exposure_from_position_qty(&self, position_qty: f64) -> Exposure {
-        exposure_from_position_qty(self.config(), &self.exchange_rules, position_qty)
+        exposure_from_position_qty(self.config(), &self.instrument_spec, position_qty)
     }
 
     pub fn position_notional(&self, position_qty: f64) -> f64 {
-        position_notional(self.config(), &self.exchange_rules, position_qty)
+        position_notional(self.config(), &self.instrument_spec, position_qty)
     }
 
     pub fn required_additional_notional(&self, position_qty: f64) -> f64 {
         required_additional_notional(
             self.config(),
-            &self.exchange_rules,
+            &self.instrument_spec,
             self.max_notional(),
             position_qty,
         )
@@ -685,11 +700,11 @@ impl TrackRuntime {
             current_exposure,
             position_qty,
             market_data,
-            exchange_rules,
+            instrument_spec,
         } = external_inputs;
         let mut fresh = Self::with_tick_timeout_secs(
             self.static_definition(),
-            exchange_rules,
+            instrument_spec,
             started_at,
             self.tick_timeout_secs,
         );
@@ -1084,7 +1099,7 @@ impl TrackRuntime {
         let live = self.live_view();
         TrackRuntimeView {
             status: self.status(),
-            exchange_rules: self.exchange_rules.clone(),
+            instrument_spec: self.instrument_spec.clone(),
             current_exposure: self.current_exposure.clone(),
             position_qty: self.current_position_qty,
             decision: live.decision,
@@ -1452,13 +1467,13 @@ mod tests {
                     },
                     observed_at: Utc.with_ymd_and_hms(2026, 4, 23, 8, 1, 0).unwrap(),
                 }),
-                exchange_rules: test_rules(0.5),
+                instrument_spec: test_rules(0.5),
             },
             Utc.with_ymd_and_hms(2026, 4, 23, 8, 2, 0).unwrap(),
         );
 
         assert_eq!(fresh.current_exposure, Exposure(2.5));
-        assert_eq!(fresh.exchange_rules.price_tick, 0.5);
+        assert_eq!(fresh.instrument_spec.price_tick(), 0.5);
         assert_eq!(
             fresh.executor_state.bindings,
             Vec::<LiveOrderBinding>::new()
@@ -1509,7 +1524,7 @@ mod tests {
                 current_exposure: Exposure(2.0),
                 position_qty: 2.0,
                 market_data: None,
-                exchange_rules: test_rules(0.1),
+                instrument_spec: test_rules(0.1),
             },
             started_at,
         );
@@ -1559,7 +1574,7 @@ mod tests {
                 current_exposure: Exposure(1.0),
                 position_qty: 1.0,
                 market_data: None,
-                exchange_rules: test_rules(1.0),
+                instrument_spec: test_rules(1.0),
             },
             Utc.with_ymd_and_hms(2026, 4, 23, 8, 3, 0).unwrap(),
         );
@@ -1571,7 +1586,7 @@ mod tests {
         assert_eq!(fresh.best_bid, None);
         assert_eq!(fresh.best_ask, None);
         assert_eq!(fresh.strategy_price_status, StrategyPriceStatus::Stale);
-        assert_eq!(fresh.exchange_rules.price_tick, 1.0);
+        assert_eq!(fresh.instrument_spec.price_tick(), 1.0);
     }
 
     #[test]
@@ -1641,34 +1656,12 @@ mod tests {
         }
     }
 
-    fn test_rules(price_tick: f64) -> ExchangeRules {
-        ExchangeRules {
-            price_tick,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
+    fn test_rules(price_tick: f64) -> InstrumentSpec {
+        crate::test_instrument::linear_spec(price_tick, 0.01, 0.0, 0.0)
     }
 
-    fn inverse_rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: poise_core::types::QuantityKind::InverseContract,
-            contract_notional: Some(100.0),
-            settlement_asset: "BTC".to_string(),
-            quantity_step: 1.0,
-            min_qty: 1.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
+    fn inverse_rules() -> InstrumentSpec {
+        crate::test_instrument::inverse_spec(0.1, 1.0, 1.0, 0.0, 100.0)
     }
 
     fn test_definition() -> TrackDefinition {

@@ -1,12 +1,12 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
+use poise_core::instrument::{Amount, InstrumentSpec, PositionBasis};
 use poise_core::track::TrackDefinition;
-use poise_core::types::{ExchangeRules, QuantityKind};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TrackConfigExplanation {
     pub track_id: String,
     pub symbol: String,
-    pub quantity_kind: QuantityKind,
+    pub position_basis: PositionBasis,
     pub native_quantity_per_unit: f64,
     pub unit_notional: f64,
     pub unit_notional_asset: String,
@@ -21,53 +21,29 @@ pub(crate) struct TrackConfigExplanation {
 
 pub(crate) fn explain_track_config(
     track: &TrackDefinition,
-    exchange_rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
 ) -> Result<TrackConfigExplanation> {
+    let native_quantity_per_unit = native_quantity_per_unit(track, instrument_spec)?;
     ensure!(
-        !exchange_rules.settlement_asset.trim().is_empty(),
-        "missing settlement asset for `{}`",
-        track.instrument().symbol
-    );
-    ensure!(
-        exchange_rules.quantity_step.is_finite() && exchange_rules.quantity_step > 0.0,
-        "invalid quantity step for `{}`: quantity_step must be positive, got {}",
-        track.instrument().symbol,
-        exchange_rules.quantity_step
-    );
-    ensure!(
-        exchange_rules.min_qty.is_finite() && exchange_rules.min_qty >= 0.0,
-        "invalid minimum quantity for `{}`: min_qty must be non-negative, got {}",
-        track.instrument().symbol,
-        exchange_rules.min_qty
-    );
-    ensure!(
-        exchange_rules.min_notional.is_finite() && exchange_rules.min_notional >= 0.0,
-        "invalid minimum notional for `{}`: min_notional must be non-negative, got {}",
-        track.instrument().symbol,
-        exchange_rules.min_notional
-    );
-
-    let native_quantity_per_unit = native_quantity_per_unit(track, exchange_rules)?;
-    ensure!(
-        native_quantity_per_unit + f64::EPSILON >= exchange_rules.min_qty,
+        native_quantity_per_unit + f64::EPSILON >= instrument_spec.min_position_qty().value(),
         "track `{}` symbol `{}` native_quantity_per_unit {} is below min_qty {}",
         track.track_id().as_str(),
         track.instrument().symbol,
         native_quantity_per_unit,
-        exchange_rules.min_qty
+        instrument_spec.min_position_qty().value()
     );
     Ok(TrackConfigExplanation {
         track_id: track.track_id().as_str().to_string(),
         symbol: track.instrument().symbol.clone(),
-        quantity_kind: exchange_rules.quantity_kind,
+        position_basis: instrument_spec.position_basis().clone(),
         native_quantity_per_unit,
         unit_notional: track.track_config().notional_per_unit,
-        unit_notional_asset: unit_notional_asset(track, exchange_rules),
-        quantity_step: exchange_rules.quantity_step,
-        min_quantity: exchange_rules.min_qty,
-        min_notional: exchange_rules.min_notional,
+        unit_notional_asset: instrument_spec.notional_asset().as_str().to_string(),
+        quantity_step: instrument_spec.position_qty_step().value(),
+        min_quantity: instrument_spec.min_position_qty().value(),
+        min_notional: instrument_spec.min_notional().value(),
         effective_max_notional: track.effective_max_notional(),
-        loss_limit_asset: exchange_rules.settlement_asset.clone(),
+        loss_limit_asset: instrument_spec.settlement_asset().as_str().to_string(),
         daily_loss_limit: track.loss_limits().daily_loss_limit,
         total_loss_limit: track.loss_limits().total_loss_limit,
     })
@@ -75,51 +51,34 @@ pub(crate) fn explain_track_config(
 
 fn native_quantity_per_unit(
     track: &TrackDefinition,
-    exchange_rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
 ) -> Result<f64> {
-    match exchange_rules.quantity_kind {
-        QuantityKind::BaseAsset => {
-            let band_center = track.track_config().band_center();
-            ensure!(
-                band_center.is_finite() && band_center > 0.0,
-                "invalid band center for `{}`: got {}",
-                track.instrument().symbol,
-                band_center
-            );
-            Ok(exchange_rules
-                .native_qty_per_exposure_unit(track.track_config().notional_per_unit, band_center))
-        }
-        QuantityKind::InverseContract => {
-            let contract_notional = exchange_rules.contract_notional.with_context(|| {
-                format!(
-                    "missing ctVal/contract_notional for inverse config explanation on `{}`",
-                    track.instrument().symbol
-                )
-            })?;
-            ensure!(
-                contract_notional.is_finite() && contract_notional > 0.0,
-                "invalid contract_notional for `{}`: got {}",
-                track.instrument().symbol,
-                contract_notional
-            );
-            Ok(track.track_config().notional_per_unit / contract_notional)
-        }
-    }
-}
-
-fn unit_notional_asset(track: &TrackDefinition, exchange_rules: &ExchangeRules) -> String {
-    match exchange_rules.quantity_kind {
-        QuantityKind::BaseAsset => track.instrument().quote_asset(),
-        QuantityKind::InverseContract => "USD".to_string(),
-    }
+    let band_center = track.track_config().band_center();
+    ensure!(
+        band_center.is_finite() && band_center > 0.0,
+        "invalid band center for `{}`: got {}",
+        track.instrument().symbol,
+        band_center
+    );
+    instrument_spec
+        .position_qty_for_notional(
+            Amount::new(
+                track.track_config().notional_per_unit,
+                instrument_spec.notional_asset().clone(),
+            )
+            .map_err(anyhow::Error::msg)?,
+            band_center,
+        )
+        .map(|quantity| quantity.value())
+        .map_err(anyhow::Error::msg)
 }
 
 #[cfg(test)]
 mod tests {
+    use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionBasis};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-    use poise_core::types::{ExchangeRules, QuantityKind};
 
     use super::explain_track_config;
 
@@ -147,24 +106,29 @@ mod tests {
             None,
         )
         .unwrap();
-        let rules = ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: QuantityKind::InverseContract,
-            contract_notional: Some(100.0),
-            settlement_asset: "BTC".to_string(),
-            quantity_step: 1.0,
-            min_qty: 1.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0002,
-            taker_fee_rate: 0.0005,
-        };
+        let usd = Asset::try_new("USD").unwrap();
+        let rules = InstrumentSpec::try_inverse(
+            track.instrument().clone(),
+            Asset::try_new("BTC").unwrap(),
+            usd.clone(),
+            Asset::try_new("BTC").unwrap(),
+            Amount::new(100.0, usd.clone()).unwrap(),
+            Default::default(),
+            0.1,
+            1.0,
+            1.0,
+            Amount::new(0.0, usd).unwrap(),
+        )
+        .unwrap();
 
         let explanation = explain_track_config(&track, &rules).unwrap();
 
         assert_eq!(explanation.track_id, "btc-core");
         assert_eq!(explanation.symbol, "BTC-USD-SWAP");
-        assert_eq!(explanation.quantity_kind, QuantityKind::InverseContract);
+        assert!(matches!(
+            explanation.position_basis,
+            PositionBasis::Contracts { .. }
+        ));
         assert_eq!(explanation.native_quantity_per_unit, 3.0);
         assert_eq!(explanation.unit_notional, 300.0);
         assert_eq!(explanation.unit_notional_asset, "USD");
@@ -201,18 +165,19 @@ mod tests {
             None,
         )
         .unwrap();
-        let rules = ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: QuantityKind::BaseAsset,
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.001,
-            min_qty: 0.01,
-            min_notional: 5.0,
-            maker_fee_rate: 0.0002,
-            taker_fee_rate: 0.0005,
-        };
+        let usdt = Asset::try_new("USDT").unwrap();
+        let rules = InstrumentSpec::try_linear(
+            track.instrument().clone(),
+            Asset::try_new("ETH").unwrap(),
+            usdt.clone(),
+            usdt.clone(),
+            Default::default(),
+            0.1,
+            0.001,
+            0.01,
+            Amount::new(5.0, usdt).unwrap(),
+        )
+        .unwrap();
 
         let explanation = explain_track_config(&track, &rules).unwrap();
 

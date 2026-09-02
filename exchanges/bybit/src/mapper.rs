@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::{TimeZone, Utc};
 
+use poise_core::instrument::{Amount, Asset, InstrumentSpec};
 use poise_core::track::{Instrument, Venue};
 use poise_engine::ports::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
@@ -45,33 +46,43 @@ impl TryFrom<InstrumentInfoResult> for ExchangeInfo {
             .into_iter()
             .next()
             .context("missing linear instrument info")?;
+        let (base_asset, quote_asset) = bybit_linear_assets(&info.symbol)?;
+        let base_asset = Asset::try_new(base_asset).map_err(anyhow::Error::msg)?;
+        let quote_asset = Asset::try_new(quote_asset).map_err(anyhow::Error::msg)?;
         let instrument = Instrument::new(Venue::Bybit, info.symbol);
-        let settlement_asset = instrument.quote_asset();
+        let min_notional = required_value(
+            "lotSizeFilter.minNotionalValue",
+            info.lot_size_filter.min_notional_value,
+        )?;
         Ok(Self {
-            instrument,
-            rules: poise_core::types::ExchangeRules {
-                price_tick: required_value("priceFilter.tickSize", info.price_filter.tick_size)?,
-                price_precision: Default::default(),
-                quantity_kind: poise_core::types::QuantityKind::BaseAsset,
-                contract_notional: None,
-                settlement_asset,
-                quantity_step: required_value(
-                    "lotSizeFilter.qtyStep",
-                    info.lot_size_filter.qty_step,
-                )?,
-                min_qty: required_value(
+            instrument_spec: InstrumentSpec::try_linear(
+                instrument,
+                base_asset,
+                quote_asset.clone(),
+                quote_asset.clone(),
+                Default::default(),
+                required_value("priceFilter.tickSize", info.price_filter.tick_size)?,
+                required_value("lotSizeFilter.qtyStep", info.lot_size_filter.qty_step)?,
+                required_value(
                     "lotSizeFilter.minOrderQty",
                     info.lot_size_filter.min_order_qty,
                 )?,
-                min_notional: required_value(
-                    "lotSizeFilter.minNotionalValue",
-                    info.lot_size_filter.min_notional_value,
-                )?,
-                maker_fee_rate: 0.0002,
-                taker_fee_rate: 0.00055,
-            },
+                Amount::new(min_notional, quote_asset).map_err(anyhow::Error::msg)?,
+            )
+            .map_err(anyhow::Error::msg)?,
         })
     }
+}
+
+fn bybit_linear_assets(symbol: &str) -> Result<(&str, &str)> {
+    for quote_asset in ["USDT", "USDC"] {
+        if let Some(base_asset) = symbol.strip_suffix(quote_asset)
+            && !base_asset.is_empty()
+        {
+            return Ok((base_asset, quote_asset));
+        }
+    }
+    Err(anyhow!("cannot determine Bybit assets for `{symbol}`"))
 }
 
 impl WalletBalanceResult {
@@ -268,7 +279,7 @@ mod tests {
         OpenOrderSnapshot, PositionSnapshot, PriceFilter, ServerTimeResult, UnifiedWalletBalance,
         WalletBalanceResult,
     };
-    use poise_core::types::{ExchangeRules, Side};
+    use poise_core::types::Side;
     use poise_engine::ports::{OrderReceipt, OrderStatus, Position};
 
     #[test]
@@ -289,24 +300,19 @@ mod tests {
             ExchangeInfo::try_from(InstrumentInfoResult { list: vec![info] }).unwrap();
 
         assert_eq!(
-            exchange_info.instrument,
-            Instrument::new(Venue::Bybit, "BTCUSDT")
+            exchange_info.instrument_spec.instrument(),
+            &Instrument::new(Venue::Bybit, "BTCUSDT")
+        );
+        assert_eq!(exchange_info.instrument_spec.price_tick(), 0.1);
+        assert_eq!(
+            exchange_info.instrument_spec.position_qty_step().value(),
+            0.001
         );
         assert_eq!(
-            exchange_info.rules,
-            ExchangeRules {
-                price_tick: 0.1,
-                price_precision: Default::default(),
-                quantity_kind: Default::default(),
-                contract_notional: None,
-                settlement_asset: "USDT".to_string(),
-                quantity_step: 0.001,
-                min_qty: 0.001,
-                min_notional: 5.0,
-                maker_fee_rate: 0.0002,
-                taker_fee_rate: 0.00055,
-            }
+            exchange_info.instrument_spec.min_position_qty().value(),
+            0.001
         );
+        assert_eq!(exchange_info.instrument_spec.min_notional().value(), 5.0);
     }
 
     #[test]

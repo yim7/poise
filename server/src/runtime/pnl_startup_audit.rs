@@ -127,7 +127,7 @@ mod tests {
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-    use poise_core::types::{ExchangeRules, Side};
+    use poise_core::types::Side;
     use poise_engine::ledger::TrackPnlRecord;
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
@@ -341,7 +341,7 @@ mod tests {
     fn test_manager() -> TrackManager {
         let mut manager = TrackManager::new(Arc::new(SystemClock));
         manager
-            .add_track(test_track(), test_exchange_rules())
+            .add_track(test_track(), test_instrument_spec())
             .unwrap();
         manager
     }
@@ -371,19 +371,14 @@ mod tests {
         .unwrap()
     }
 
-    fn test_exchange_rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.001,
-            min_qty: 0.001,
-            min_notional: 5.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
+    fn test_instrument_spec() -> poise_core::instrument::InstrumentSpec {
+        crate::test_support::test_instrument_spec_with(
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            0.1,
+            0.001,
+            0.001,
+            5.0,
+        )
     }
 
     struct FakeRecentFillsAccount {

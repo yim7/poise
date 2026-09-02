@@ -621,10 +621,10 @@ mod tests {
         TrackStrategyPriceStatus,
     };
     use poise_core::track::{Instrument, TrackId, Venue};
-    use poise_core::types::ExchangeRules;
     use poise_engine::execution_plan::DecisionReason;
 
     use crate::runtime::PnlBackfillSnapshot;
+    use crate::test_support::test_instrument_spec;
 
     use super::{
         AccountMarginBlock, RuntimeHealth, RuntimeHealthComponent, RuntimeHealthStatus,
@@ -635,18 +635,7 @@ mod tests {
         TrackListReadModel {
             track_id: "btc-core".to_string(),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            exchange_rules: ExchangeRules {
-                price_tick: 0.1,
-                price_precision: Default::default(),
-                quantity_kind: Default::default(),
-                contract_notional: None,
-                settlement_asset: "USDT".to_string(),
-                quantity_step: 0.001,
-                min_qty: 0.001,
-                min_notional: 5.0,
-                maker_fee_rate: 0.0,
-                taker_fee_rate: 0.0,
-            },
+            instrument_spec: test_instrument_spec(),
             status: TrackReadStatus::Active,
             updated_at: Utc.with_ymd_and_hms(2026, 6, 17, 3, 0, 0).unwrap(),
             strategy_price: Some(100.0),

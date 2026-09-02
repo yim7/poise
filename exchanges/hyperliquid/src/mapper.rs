@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{DateTime, Utc};
+use poise_core::instrument::{Amount, Asset, InstrumentSpec};
 use poise_core::track::{Instrument, Venue};
-use poise_core::types::{ExchangeRules, Side};
+use poise_core::types::Side;
 use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{
     AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderStatus, Position,
@@ -13,8 +14,6 @@ use crate::rest::models::{
 };
 use crate::rules::{perp_price_precision, representative_perp_price_tick};
 const MIN_NOTIONAL_USD: f64 = 10.0;
-const VIP0_MAKER_FEE_RATE: f64 = 0.00015;
-const VIP0_TAKER_FEE_RATE: f64 = 0.00045;
 
 pub(crate) fn build_exchange_info(meta: &MetaResponse, symbol: &str) -> Result<ExchangeInfo> {
     let asset = meta
@@ -24,20 +23,21 @@ pub(crate) fn build_exchange_info(meta: &MetaResponse, symbol: &str) -> Result<E
         .ok_or_else(|| anyhow!("missing Hyperliquid asset `{symbol}`"))?;
     let quantity_step = decimal_step(asset.sz_decimals as i32);
 
+    let base_asset = Asset::try_new(symbol).map_err(anyhow::Error::msg)?;
+    let quote_asset = Asset::try_new("USDC").map_err(anyhow::Error::msg)?;
     Ok(ExchangeInfo {
-        instrument: Instrument::new(Venue::Hyperliquid, symbol),
-        rules: ExchangeRules {
-            price_tick: representative_perp_price_tick(asset.sz_decimals),
-            price_precision: perp_price_precision(asset.sz_decimals),
-            quantity_kind: poise_core::types::QuantityKind::BaseAsset,
-            contract_notional: None,
-            settlement_asset: "USDC".to_string(),
+        instrument_spec: InstrumentSpec::try_linear(
+            Instrument::new(Venue::Hyperliquid, symbol),
+            base_asset,
+            quote_asset.clone(),
+            quote_asset.clone(),
+            perp_price_precision(asset.sz_decimals),
+            representative_perp_price_tick(asset.sz_decimals),
             quantity_step,
-            min_qty: quantity_step,
-            min_notional: MIN_NOTIONAL_USD,
-            maker_fee_rate: VIP0_MAKER_FEE_RATE,
-            taker_fee_rate: VIP0_TAKER_FEE_RATE,
-        },
+            quantity_step,
+            Amount::new(MIN_NOTIONAL_USD, quote_asset).map_err(anyhow::Error::msg)?,
+        )
+        .map_err(anyhow::Error::msg)?,
     })
 }
 
@@ -200,7 +200,7 @@ fn ensure_non_empty<'a>(field: &str, value: &'a str) -> Result<&'a str> {
 #[cfg(test)]
 mod tests {
     use poise_core::track::{Instrument, Venue};
-    use poise_core::types::{ExchangeRules, PricePrecision, Side};
+    use poise_core::types::{PricePrecision, Side};
     use poise_engine::ports::{ExchangeOrder, OrderStatus, Position};
 
     use crate::rest::models::{
@@ -228,22 +228,19 @@ mod tests {
 
         let info = build_exchange_info(&meta, "BTC").unwrap();
 
-        assert_eq!(info.instrument, Instrument::new(Venue::Hyperliquid, "BTC"));
+        let spec = info.instrument_spec;
         assert_eq!(
-            info.rules,
-            ExchangeRules {
-                price_tick: 1.0,
-                price_precision: PricePrecision::significant_figures(1, 5),
-                quantity_kind: Default::default(),
-                contract_notional: None,
-                settlement_asset: "USDC".to_string(),
-                quantity_step: 0.00001,
-                min_qty: 0.00001,
-                min_notional: 10.0,
-                maker_fee_rate: 0.00015,
-                taker_fee_rate: 0.00045,
-            }
+            spec.instrument(),
+            &Instrument::new(Venue::Hyperliquid, "BTC")
         );
+        assert_eq!(spec.price_tick(), 1.0);
+        assert_eq!(
+            spec.price_precision(),
+            PricePrecision::significant_figures(1, 5)
+        );
+        assert_eq!(spec.position_qty_step().value(), 0.00001);
+        assert_eq!(spec.min_position_qty().value(), 0.00001);
+        assert_eq!(spec.min_notional().value(), 10.0);
     }
 
     #[test]
@@ -260,7 +257,7 @@ mod tests {
 
         let info = build_exchange_info(&meta, "ETH").unwrap();
 
-        assert_eq!(info.rules.price_tick, 0.1);
+        assert_eq!(info.instrument_spec.price_tick(), 0.1);
     }
 
     #[test]

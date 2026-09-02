@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow, ensure};
 use poise_application::TrackDefinitionRegistry;
+use poise_core::instrument::{InstrumentSpec, PositionBasis};
 use poise_core::track::{Instrument, TrackDefinition};
-use poise_core::types::{ExchangeRules, QuantityKind};
 use poise_engine::ports::{AccountSummarySnapshot, ExchangePorts, MarketDataPort};
 use poise_protocol::{
     ConfigDryRunAccountView, ConfigDryRunCapacityView, ConfigDryRunResponse, ConfigDryRunTrackView,
@@ -38,7 +38,7 @@ pub(crate) async fn run_config_dry_run_with_ports(
                     track.instrument().symbol
                 )
             })?;
-        let explanation = explain_track_config(track, &info.rules)?;
+        let explanation = explain_track_config(track, &info.instrument_spec)?;
         let leverage = track_leverage_index
             .get(track.track_id())
             .copied()
@@ -48,8 +48,14 @@ pub(crate) async fn run_config_dry_run_with_ports(
                     explanation.track_id
                 )
             })?;
-        let capacity =
-            estimate_capacity(track, &info.rules, &account, leverage, market_data.as_ref()).await?;
+        let capacity = estimate_capacity(
+            track,
+            &info.instrument_spec,
+            &account,
+            leverage,
+            market_data.as_ref(),
+        )
+        .await?;
         tracks.push(project_track_explanation(
             explanation,
             track.instrument(),
@@ -97,7 +103,7 @@ fn project_track_explanation(
             symbol: explanation.symbol,
         },
         leverage,
-        native_quantity_unit: quantity_unit(explanation.quantity_kind),
+        native_quantity_unit: quantity_unit(&explanation.position_basis),
         native_quantity_per_unit: explanation.native_quantity_per_unit,
         unit_notional: explanation.unit_notional,
         unit_notional_asset: explanation.unit_notional_asset,
@@ -112,16 +118,16 @@ fn project_track_explanation(
     }
 }
 
-fn quantity_unit(quantity_kind: QuantityKind) -> TrackPositionQuantityUnitView {
-    match quantity_kind {
-        QuantityKind::BaseAsset => TrackPositionQuantityUnitView::BaseAsset,
-        QuantityKind::InverseContract => TrackPositionQuantityUnitView::Contracts,
+fn quantity_unit(position_basis: &PositionBasis) -> TrackPositionQuantityUnitView {
+    match position_basis {
+        PositionBasis::BaseAsset => TrackPositionQuantityUnitView::BaseAsset,
+        PositionBasis::Contracts { .. } => TrackPositionQuantityUnitView::Contracts,
     }
 }
 
 async fn estimate_capacity(
     track: &TrackDefinition,
-    exchange_rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
     account: &AccountSummarySnapshot,
     leverage: u32,
     market_data: &dyn MarketDataPort,
@@ -137,7 +143,10 @@ async fn estimate_capacity(
             )
         })?;
     let Some(mark_price) = mark_price else {
-        if matches!(exchange_rules.quantity_kind, QuantityKind::InverseContract) {
+        if matches!(
+            instrument_spec.position_basis(),
+            PositionBasis::Contracts { .. }
+        ) {
             return Err(anyhow!(
                 "missing mark price for inverse dry-run capacity on `{}`",
                 track.instrument().symbol
@@ -152,9 +161,9 @@ async fn estimate_capacity(
         mark_price
     );
 
-    let available_asset = exchange_rules.settlement_asset.clone();
-    let available = match exchange_rules.quantity_kind {
-        QuantityKind::InverseContract => account
+    let available_asset = instrument_spec.settlement_asset().as_str().to_string();
+    let available = match instrument_spec.position_basis() {
+        PositionBasis::Contracts { .. } => account
             .available_for_asset(&available_asset)
             .with_context(|| {
                 format!(
@@ -162,7 +171,7 @@ async fn estimate_capacity(
                     available_asset
                 )
             })?,
-        QuantityKind::BaseAsset => account
+        PositionBasis::BaseAsset => account
             .available_for_asset(&available_asset)
             .unwrap_or(account.available),
     };
@@ -175,34 +184,23 @@ async fn estimate_capacity(
     let available = available.max(0.0);
 
     let (estimated_max_native_quantity, estimated_max_notional, estimated_max_notional_asset) =
-        match exchange_rules.quantity_kind {
-            QuantityKind::BaseAsset => {
+        match instrument_spec.position_basis() {
+            PositionBasis::BaseAsset => {
                 let estimated_max_notional = available * leverage as f64;
                 (
                     estimated_max_notional / mark_price,
                     estimated_max_notional,
-                    track.instrument().quote_asset(),
+                    instrument_spec.notional_asset().as_str().to_string(),
                 )
             }
-            QuantityKind::InverseContract => {
-                let contract_notional = exchange_rules.contract_notional.with_context(|| {
-                    format!(
-                        "missing ctVal/contract_notional for inverse dry-run capacity on `{}`",
-                        track.instrument().symbol
-                    )
-                })?;
-                ensure!(
-                    contract_notional.is_finite() && contract_notional > 0.0,
-                    "invalid contract_notional for `{}`: got {}",
-                    track.instrument().symbol,
-                    contract_notional
-                );
+            PositionBasis::Contracts { contract_value } => {
+                let contract_notional = contract_value.value();
                 let estimated_contracts =
                     available * mark_price * leverage as f64 / contract_notional;
                 (
                     estimated_contracts,
                     estimated_contracts * contract_notional,
-                    "USD".to_string(),
+                    instrument_spec.notional_asset().as_str().to_string(),
                 )
             }
         };
@@ -223,10 +221,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
-    use anyhow::Result;
+    use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
-    use poise_core::track::Instrument;
-    use poise_core::types::{ExchangeRules, QuantityKind};
+    use poise_core::instrument::{Amount, Asset, InstrumentSpec};
+    use poise_core::track::{Instrument, Venue};
     use poise_engine::ports::{
         AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot,
         ExchangeInfo, ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, MarketDataPort,
@@ -311,10 +309,9 @@ total_loss_limit = 0.03
     #[tokio::test]
     async fn dry_run_reports_missing_inverse_ct_val_metadata() {
         let config = inverse_config_with_notional_per_unit(300.0);
-        let exchange = Arc::new(RecordingDryRunExchange::with_rules(ExchangeRules {
-            contract_notional: None,
-            ..inverse_rules()
-        }));
+        let exchange = Arc::new(RecordingDryRunExchange::with_metadata_error(
+            "missing ctVal/contract_notional",
+        ));
 
         let error = run_config_dry_run_with_ports(
             &config,
@@ -327,8 +324,8 @@ total_loss_limit = 0.03
             ),
         )
         .await
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
+        let error = format!("{error:#}");
 
         assert!(error.contains("BTC-USD-SWAP"));
         assert!(error.contains("ctVal"));
@@ -388,7 +385,8 @@ total_loss_limit = 0.03
 
     struct RecordingDryRunExchange {
         calls: Mutex<Vec<String>>,
-        rules: Mutex<ExchangeRules>,
+        instrument_spec: Mutex<InstrumentSpec>,
+        metadata_error: Option<String>,
         mark_price: Mutex<Option<f64>>,
     }
 
@@ -396,16 +394,17 @@ total_loss_limit = 0.03
         fn default() -> Self {
             Self {
                 calls: Mutex::new(Vec::new()),
-                rules: Mutex::new(inverse_rules()),
+                instrument_spec: Mutex::new(inverse_spec()),
+                metadata_error: None,
                 mark_price: Mutex::new(Some(60_000.0)),
             }
         }
     }
 
     impl RecordingDryRunExchange {
-        fn with_rules(rules: ExchangeRules) -> Self {
+        fn with_metadata_error(error: impl Into<String>) -> Self {
             Self {
-                rules: Mutex::new(rules),
+                metadata_error: Some(error.into()),
                 ..Self::default()
             }
         }
@@ -437,9 +436,11 @@ total_loss_limit = 0.03
     impl MetadataPort for RecordingDryRunExchange {
         async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
             self.record(format!("metadata:{}", instrument.symbol));
+            if let Some(error) = &self.metadata_error {
+                return Err(anyhow!(error.clone()));
+            }
             Ok(ExchangeInfo {
-                instrument: instrument.clone(),
-                rules: self.rules.lock().unwrap().clone(),
+                instrument_spec: self.instrument_spec.lock().unwrap().clone(),
             })
         }
 
@@ -525,18 +526,21 @@ total_loss_limit = 0.03
         }
     }
 
-    fn inverse_rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: QuantityKind::InverseContract,
-            contract_notional: Some(100.0),
-            settlement_asset: "BTC".to_string(),
-            quantity_step: 1.0,
-            min_qty: 1.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0002,
-            taker_fee_rate: 0.0005,
-        }
+    fn inverse_spec() -> InstrumentSpec {
+        let instrument = Instrument::new(Venue::Okx, "BTC-USD-SWAP");
+        let usd = Asset::try_new("USD").unwrap();
+        InstrumentSpec::try_inverse(
+            instrument,
+            Asset::try_new("BTC").unwrap(),
+            usd.clone(),
+            Asset::try_new("BTC").unwrap(),
+            Amount::new(100.0, usd.clone()).unwrap(),
+            Default::default(),
+            0.1,
+            1.0,
+            1.0,
+            Amount::new(0.0, usd).unwrap(),
+        )
+        .unwrap()
     }
 }

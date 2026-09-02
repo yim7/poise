@@ -439,7 +439,7 @@ mod tests {
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_core::{
         events::DomainEvent,
-        types::{ExchangeRules, Exposure, Side},
+        types::{Exposure, Side},
     };
     use poise_engine::ledger::TrackPnlRecord;
     use poise_engine::manager::TrackManager;
@@ -481,21 +481,6 @@ mod tests {
 
     fn router(state: HttpTestState) -> axum::Router {
         super::router(state.http_state, state.websocket_state)
-    }
-
-    fn test_exchange_rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.0,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.0,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
     }
 
     struct FakeClock;
@@ -837,7 +822,7 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-                test_exchange_rules(),
+                crate::test_support::test_instrument_spec(),
             )
             .unwrap();
         observe_seed_market(&mut manager);

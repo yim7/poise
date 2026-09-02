@@ -213,8 +213,7 @@ pub enum MarketDataTick {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExchangeInfo {
-    pub instrument: Instrument,
-    pub rules: poise_core::types::ExchangeRules,
+    pub instrument_spec: poise_core::instrument::InstrumentSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

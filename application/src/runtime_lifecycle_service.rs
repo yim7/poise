@@ -289,18 +289,9 @@ mod tests {
                             },
                             observed_at: Utc.with_ymd_and_hms(2026, 4, 23, 9, 1, 0).unwrap(),
                         }),
-                        exchange_rules: poise_core::types::ExchangeRules {
-                            price_tick: 0.5,
-                            price_precision: Default::default(),
-                            quantity_kind: Default::default(),
-                            contract_notional: None,
-                            settlement_asset: "USDT".to_string(),
-                            quantity_step: 0.001,
-                            min_qty: 0.001,
-                            min_notional: 5.0,
-                            maker_fee_rate: 0.0,
-                            taker_fee_rate: 0.0,
-                        },
+                        instrument_spec: crate::test_instrument::linear_spec(
+                            0.5, 0.001, 0.001, 5.0,
+                        ),
                     },
                 )
                 .await
@@ -324,7 +315,7 @@ mod tests {
         assert_eq!(live_view.best_bid, Some(95.8));
         assert_eq!(live_view.best_ask, Some(96.2));
         let track = manager.get_track("btc-core").unwrap();
-        assert_eq!(track.exchange_rules().price_tick, 0.5);
+        assert_eq!(track.instrument_spec().price_tick(), 0.5);
     }
 
     #[tokio::test]

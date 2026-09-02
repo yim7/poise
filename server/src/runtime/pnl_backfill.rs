@@ -264,10 +264,11 @@ mod tests {
     use poise_application::{
         TrackEffectJournal, TrackIdentityStore, TrackMutationStore, TrackQueryStore,
     };
+    use poise_core::instrument::{Amount, Asset, InstrumentSpec};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-    use poise_core::types::{ExchangeRules, Side};
+    use poise_core::types::Side;
     use poise_engine::ledger::TrackPnlRecord;
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
@@ -496,21 +497,27 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-                ExchangeRules {
-                    price_tick: 0.1,
-                    price_precision: Default::default(),
-                    quantity_kind: poise_core::types::QuantityKind::InverseContract,
-                    contract_notional: Some(100.0),
-                    settlement_asset: "BTC".to_string(),
-                    quantity_step: 1.0,
-                    min_qty: 1.0,
-                    min_notional: 0.0,
-                    maker_fee_rate: 0.0,
-                    taker_fee_rate: 0.0,
-                },
+                inverse_instrument_spec(),
             )
             .unwrap();
         manager
+    }
+
+    fn inverse_instrument_spec() -> InstrumentSpec {
+        let usd = Asset::try_new("USD").unwrap();
+        InstrumentSpec::try_inverse(
+            Instrument::new(Venue::Okx, "BTC-USD-SWAP"),
+            Asset::try_new("BTC").unwrap(),
+            usd.clone(),
+            Asset::try_new("BTC").unwrap(),
+            Amount::new(100.0, usd.clone()).unwrap(),
+            Default::default(),
+            0.1,
+            1.0,
+            1.0,
+            Amount::new(0.0, usd).unwrap(),
+        )
+        .unwrap()
     }
 
     struct FakeAccount {

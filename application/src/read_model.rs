@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use poise_core::events::{DomainEvent, ExecutionGateReason};
+use poise_core::instrument::{InstrumentSpec, PositionBasis, PositionQty};
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, RiskAcquisitionConfig, ShapeFamily};
 use poise_core::track::{Instrument, TrackDefinition};
-use poise_core::types::{ExchangeRules, QuantityKind, Side};
+use poise_core::types::Side;
 use poise_engine::execution_plan::{DecisionReason, TrackEffect};
 use poise_engine::executor::{BindingStatus, PolicyKind, RecoveryAnomaly};
 use poise_engine::ledger::TrackPnlStats;
@@ -40,7 +41,7 @@ pub enum TrackActivityLevel {
 pub struct TrackListReadModel {
     pub track_id: String,
     pub instrument: Instrument,
-    pub exchange_rules: ExchangeRules,
+    pub instrument_spec: InstrumentSpec,
     pub status: TrackReadStatus,
     pub updated_at: DateTime<Utc>,
     pub strategy_price: Option<f64>,
@@ -194,43 +195,56 @@ fn project_account_track_analysis(source: &TrackListReadModel) -> AccountTrackAn
     let native_quantity = finite_or_zero(source.position_qty);
     let reference_price = positive_finite(source.strategy_price);
     let signed_usd_notional =
-        signed_position_usd_notional(native_quantity, &source.exchange_rules, reference_price);
+        signed_position_usd_notional(native_quantity, &source.instrument_spec, reference_price);
     let (estimated_base_asset, estimated_base_exposure) =
         estimated_base_exposure(source, signed_usd_notional, reference_price);
 
     AccountTrackAnalysisReadModel {
         track_id: source.track_id.clone(),
         instrument: source.instrument.clone(),
-        settlement_asset: source.exchange_rules.settlement_asset.clone(),
+        settlement_asset: source
+            .instrument_spec
+            .settlement_asset()
+            .as_str()
+            .to_string(),
         native_quantity,
-        contract_count: match source.exchange_rules.quantity_kind {
-            QuantityKind::BaseAsset => None,
-            QuantityKind::InverseContract => Some(native_quantity),
+        contract_count: match source.instrument_spec.position_basis() {
+            PositionBasis::BaseAsset => None,
+            PositionBasis::Contracts { .. } => Some(native_quantity),
         },
         signed_usd_notional,
         abs_usd_notional: signed_usd_notional.abs(),
         estimated_base_asset,
         estimated_base_exposure,
-        pnl_asset: source
-            .pnl_stats
-            .pnl_asset
-            .clone()
-            .unwrap_or_else(|| source.exchange_rules.settlement_asset.clone()),
+        pnl_asset: source.pnl_stats.pnl_asset.clone().unwrap_or_else(|| {
+            source
+                .instrument_spec
+                .settlement_asset()
+                .as_str()
+                .to_string()
+        }),
     }
 }
 
 fn signed_position_usd_notional(
     native_quantity: f64,
-    rules: &ExchangeRules,
+    rules: &InstrumentSpec,
     reference_price: Option<f64>,
 ) -> f64 {
-    match rules.quantity_kind {
-        QuantityKind::BaseAsset => reference_price.map_or(0.0, |price| native_quantity * price),
-        QuantityKind::InverseContract => rules
-            .contract_notional
-            .and_then(|contract_notional| positive_finite(Some(contract_notional)))
-            .map_or(0.0, |contract_notional| native_quantity * contract_notional),
-    }
+    let price = match rules.position_basis() {
+        PositionBasis::BaseAsset => match reference_price {
+            Some(price) => price,
+            None => return 0.0,
+        },
+        PositionBasis::Contracts { .. } => reference_price.unwrap_or(1.0),
+    };
+    let Ok(quantity) = PositionQty::new(native_quantity) else {
+        return 0.0;
+    };
+    rules
+        .signed_notional_from_position_qty(quantity, price)
+        .map(|notional| notional.value())
+        .unwrap_or(0.0)
 }
 
 fn estimated_base_exposure(
@@ -238,12 +252,20 @@ fn estimated_base_exposure(
     signed_usd_notional: f64,
     reference_price: Option<f64>,
 ) -> (Option<String>, Option<f64>) {
-    match source.exchange_rules.quantity_kind {
-        QuantityKind::BaseAsset => (None, None),
-        QuantityKind::InverseContract => reference_price.map_or((None, None), |price| {
+    match source.instrument_spec.position_basis() {
+        PositionBasis::BaseAsset => (None, None),
+        PositionBasis::Contracts { .. } => reference_price.map_or((None, None), |price| {
+            let base_exposure = PositionQty::new(source.position_qty)
+                .and_then(|quantity| {
+                    source
+                        .instrument_spec
+                        .base_exposure_from_position_qty(quantity, price)
+                })
+                .map(|amount| amount.value())
+                .unwrap_or_else(|_| signed_usd_notional / price);
             (
-                Some(source.exchange_rules.settlement_asset.clone()),
-                Some(signed_usd_notional / price),
+                Some(source.instrument_spec.base_asset().as_str().to_string()),
+                Some(base_exposure),
             )
         }),
     }
@@ -261,7 +283,7 @@ fn finite_or_zero(value: f64) -> f64 {
 pub struct TrackReadModel {
     pub track_id: String,
     pub instrument: Instrument,
-    pub exchange_rules: ExchangeRules,
+    pub instrument_spec: InstrumentSpec,
     pub status: TrackReadStatus,
     pub updated_at: DateTime<Utc>,
     pub lower_price: f64,
@@ -491,7 +513,7 @@ impl TrackReadModel {
         Self {
             track_id: list_view.track_id.clone(),
             instrument: list_view.instrument.clone(),
-            exchange_rules: list_view.exchange_rules.clone(),
+            instrument_spec: list_view.instrument_spec.clone(),
             status: list_view.status,
             updated_at: list_view.updated_at,
             lower_price: track_config.lower_price,
@@ -541,7 +563,7 @@ impl TrackListReadModel {
         Self {
             track_id: definition.track_id().as_str().to_string(),
             instrument: definition.instrument().clone(),
-            exchange_rules: runtime.exchange_rules.clone(),
+            instrument_spec: runtime.instrument_spec.clone(),
             status: TrackReadStatus::from(runtime.status.clone()),
             updated_at,
             strategy_price: runtime.strategy_price,
@@ -579,7 +601,7 @@ impl From<&TrackReadModel> for TrackListReadModel {
         Self {
             track_id: value.track_id.clone(),
             instrument: value.instrument.clone(),
-            exchange_rules: value.exchange_rules.clone(),
+            instrument_spec: value.instrument_spec.clone(),
             status: value.status,
             updated_at: value.updated_at,
             strategy_price: value.strategy_price,
@@ -842,10 +864,11 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
+    use poise_core::instrument::InstrumentSpec;
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-    use poise_core::types::{ExchangeRules, Exposure, QuantityKind, Side};
+    use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::{DecisionReason, TrackEffect};
     use poise_engine::executor::{BindingStatus, PolicyKind, SubmitRecoveryToken};
     use poise_engine::ports::OrderRequest;
@@ -907,25 +930,14 @@ mod tests {
         .unwrap()
     }
 
-    fn test_exchange_rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.001,
-            min_qty: 0.001,
-            min_notional: 5.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
+    fn test_instrument_spec() -> InstrumentSpec {
+        crate::test_instrument::linear_spec(0.1, 0.001, 0.001, 5.0)
     }
 
     fn test_runtime_view(decision: InventoryDecisionView) -> TrackRuntimeView {
         TrackRuntimeView {
             status: TrackStatus::Active,
-            exchange_rules: test_exchange_rules(),
+            instrument_spec: test_instrument_spec(),
             current_exposure: Exposure(1.0),
             position_qty: 1.0,
             decision,
@@ -951,7 +963,7 @@ mod tests {
         TrackListReadModel {
             track_id: "btc-core".to_string(),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            exchange_rules: test_exchange_rules(),
+            instrument_spec: test_instrument_spec(),
             status: TrackReadStatus::Active,
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             strategy_price: Some(100_000.0),
@@ -988,15 +1000,12 @@ mod tests {
 
     #[test]
     fn account_analysis_summarizes_inverse_contract_exposure() {
-        let mut rules = test_exchange_rules();
-        rules.quantity_kind = QuantityKind::InverseContract;
-        rules.contract_notional = Some(100.0);
-        rules.settlement_asset = "BTC".to_string();
+        let rules = crate::test_instrument::inverse_spec();
 
         let mut track = test_track_list_read_model();
         track.track_id = "btc-coin".to_string();
         track.instrument = Instrument::new(Venue::Okx, "BTC-USD-SWAP");
-        track.exchange_rules = rules;
+        track.instrument_spec = rules;
         track.position_qty = -30.0;
         track.pnl_stats.pnl_asset = Some("BTC".to_string());
 
@@ -1043,13 +1052,10 @@ mod tests {
 
     #[test]
     fn account_analysis_estimates_hedge_like_net_exposure_from_account_asset_balance() {
-        let mut rules = test_exchange_rules();
-        rules.quantity_kind = QuantityKind::InverseContract;
-        rules.contract_notional = Some(100.0);
-        rules.settlement_asset = "BTC".to_string();
+        let rules = crate::test_instrument::inverse_spec();
 
         let mut track = test_track_list_read_model();
-        track.exchange_rules = rules;
+        track.instrument_spec = rules;
         track.position_qty = -30.0;
 
         let account = test_account_read_model();
@@ -1070,13 +1076,10 @@ mod tests {
 
     #[test]
     fn account_analysis_marks_hedge_like_net_exposure_unknown_without_account_asset_balance() {
-        let mut rules = test_exchange_rules();
-        rules.quantity_kind = QuantityKind::InverseContract;
-        rules.contract_notional = Some(100.0);
-        rules.settlement_asset = "BTC".to_string();
+        let rules = crate::test_instrument::inverse_spec();
 
         let mut track = test_track_list_read_model();
-        track.exchange_rules = rules;
+        track.instrument_spec = rules;
         track.position_qty = -30.0;
 
         let analysis = super::build_account_analysis_read_model_with_account(None, &[track]);

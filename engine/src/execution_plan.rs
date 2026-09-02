@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::executor::binding::SubmitRecoveryToken;
-use poise_core::types::{ExchangeRules, Exposure};
+use poise_core::instrument::{InstrumentSpec, PositionQty};
+use poise_core::types::Exposure;
 
 use crate::ports::OrderRequest;
 use crate::price_gate::SubmitPurpose;
@@ -51,35 +52,21 @@ pub fn round_to_step(value: f64, step: f64) -> f64 {
     steps * step
 }
 
-pub fn is_meetable_minimum(price: f64, quantity: f64, rules: &ExchangeRules) -> bool {
-    if quantity + f64::EPSILON < rules.min_qty {
-        return false;
-    }
-    if rules.notional_from_native_qty(quantity, price) + f64::EPSILON < rules.min_notional {
-        return false;
-    }
-    true
+pub fn is_meetable_minimum(price: f64, quantity: f64, rules: &InstrumentSpec) -> bool {
+    PositionQty::new(quantity)
+        .and_then(|quantity| rules.meets_minimum(quantity, price))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
 mod tests {
-    use poise_core::types::{ExchangeRules, QuantityKind};
+    use poise_core::instrument::InstrumentSpec;
 
     use super::{DecisionReason, is_meetable_minimum};
+    use crate::test_instrument::inverse_spec;
 
-    fn inverse_rules(min_notional: f64) -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: QuantityKind::InverseContract,
-            contract_notional: Some(100.0),
-            settlement_asset: "BTC".to_string(),
-            quantity_step: 1.0,
-            min_qty: 1.0,
-            min_notional,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
+    fn inverse_rules(min_notional: f64) -> InstrumentSpec {
+        inverse_spec(0.1, 1.0, 1.0, min_notional, 100.0)
     }
 
     #[test]

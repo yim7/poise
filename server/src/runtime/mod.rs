@@ -8,8 +8,9 @@ use crate::server_context::{EffectWorkerState, ReconcileState, RuntimeState};
 use crate::test_support::RuntimeTestContext;
 use anyhow::{Result, anyhow};
 use poise_application::TrackMutationError;
+use poise_core::instrument::InstrumentSpec;
 use poise_core::track::{Instrument, TrackDefinition, TrackId};
-use poise_core::types::{ExchangeRules, Exposure};
+use poise_core::types::Exposure;
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::ports::{
     AccountPort, AccountSummaryPort, ClockPort, ExecutionPort, MarketDataPort, MetadataPort,
@@ -64,11 +65,11 @@ impl RuntimeStartupDefinition {
     pub(crate) fn required_additional_notional(
         &self,
         position_qty: f64,
-        exchange_rules: &ExchangeRules,
+        instrument_spec: &InstrumentSpec,
     ) -> f64 {
         poise_engine::runtime::required_additional_notional(
             self.track.track_config(),
-            exchange_rules,
+            instrument_spec,
             self.track.max_notional(),
             position_qty,
         )
@@ -77,11 +78,11 @@ impl RuntimeStartupDefinition {
     pub(crate) fn exposure_from_position_qty(
         &self,
         position_qty: f64,
-        exchange_rules: &ExchangeRules,
+        instrument_spec: &InstrumentSpec,
     ) -> Exposure {
         poise_engine::runtime::exposure_from_position_qty(
             self.track.track_config(),
-            exchange_rules,
+            instrument_spec,
             position_qty,
         )
     }

@@ -10,10 +10,11 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
+use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
 use poise_core::replay::{estimate_settlement_fee, validate_replay_exchange_rules};
 use poise_core::strategy::TrackConfig;
-use poise_core::track::TrackDefinition;
-use poise_core::types::{ExchangeRules, Exposure, Side};
+use poise_core::track::{TrackDefinition, Venue};
+use poise_core::types::{ExchangeRules, Exposure, QuantityKind, Side};
 
 use crate::execution_gate::added_risk_units;
 use crate::execution_plan::TrackEffect;
@@ -193,6 +194,7 @@ struct DecisionReplayRunner {
     clock: Arc<ReplayClock>,
     track_id: poise_core::track::TrackId,
     track_config: TrackConfig,
+    instrument_spec: InstrumentSpec,
     exchange_rules: ExchangeRules,
     fill_model: DecisionReplayFillModel,
     last_observed_at: DateTime<Utc>,
@@ -227,10 +229,18 @@ impl DecisionReplayRunner {
     fn new(input: &DecisionReplayInput) -> Result<Self> {
         validate_position(&input.initial_position).context("invalid initial position")?;
         validate_replay_exchange_rules(&input.exchange_rules).map_err(anyhow::Error::msg)?;
-        let unit_qty = input.exchange_rules.native_qty_per_exposure_unit(
-            input.definition.track_config().notional_per_unit,
-            input.definition.track_config().band_center(),
-        );
+        let instrument_spec = replay_instrument_spec(&input.definition, &input.exchange_rules)?;
+        let unit_qty = instrument_spec
+            .position_qty_for_notional(
+                Amount::new(
+                    input.definition.track_config().notional_per_unit,
+                    instrument_spec.notional_asset().clone(),
+                )
+                .map_err(anyhow::Error::msg)?,
+                input.definition.track_config().band_center(),
+            )
+            .map_err(anyhow::Error::msg)?
+            .value();
         ensure!(
             unit_qty.is_finite() && unit_qty > f64::EPSILON,
             "native quantity per exposure unit must be finite and positive"
@@ -240,13 +250,10 @@ impl DecisionReplayRunner {
         let track_id = input.definition.track_id().clone();
         let track_config = input.definition.track_config().clone();
         manager
-            .add_track(input.definition.clone(), input.exchange_rules.clone())
+            .add_track(input.definition.clone(), instrument_spec.clone())
             .context("add decision replay track")?;
-        let initial_exposure = exposure_from_position_qty(
-            &track_config,
-            &input.exchange_rules,
-            input.initial_position.qty,
-        );
+        let initial_exposure =
+            exposure_from_position_qty(&track_config, &instrument_spec, input.initial_position.qty);
         manager
             .fresh_start_track(
                 &track_id,
@@ -256,7 +263,7 @@ impl DecisionReplayRunner {
                     current_exposure: initial_exposure,
                     position_qty: input.initial_position.qty,
                     market_data: None,
-                    exchange_rules: input.exchange_rules.clone(),
+                    instrument_spec: instrument_spec.clone(),
                 },
             )
             .context("fresh-start decision replay track")?;
@@ -276,6 +283,7 @@ impl DecisionReplayRunner {
             clock,
             track_id,
             track_config,
+            instrument_spec,
             exchange_rules: input.exchange_rules.clone(),
             fill_model: input.fill_model,
             last_observed_at: input.started_at,
@@ -759,8 +767,13 @@ impl DecisionReplayRunner {
         self.simulated_position_qty = position_after_qty;
         accumulator.signed_filled_native_qty += signed_quantity;
         let trade_notional = self
-            .exchange_rules
-            .notional_from_native_qty(quantity, price);
+            .instrument_spec
+            .notional_from_position_qty(
+                PositionQty::new(quantity).map_err(anyhow::Error::msg)?,
+                price,
+            )
+            .map_err(anyhow::Error::msg)?
+            .value();
         let fee = estimate_settlement_fee(
             &self.exchange_rules,
             trade_notional,
@@ -799,7 +812,7 @@ impl DecisionReplayRunner {
                 current_exposure: self.simulated_exposure(),
                 position_qty: self.simulated_position_qty,
                 market_data: None,
-                exchange_rules: self.exchange_rules.clone(),
+                instrument_spec: self.instrument_spec.clone(),
             },
         )?;
         let transition = self.manager.observe(
@@ -819,7 +832,7 @@ impl DecisionReplayRunner {
     fn simulated_exposure(&self) -> Exposure {
         exposure_from_position_qty(
             &self.track_config,
-            &self.exchange_rules,
+            &self.instrument_spec,
             self.simulated_position_qty,
         )
     }
@@ -833,6 +846,75 @@ impl DecisionReplayRunner {
             Side::Sell => request.price <= quote.best_bid + f64::EPSILON,
         }
     }
+}
+
+fn replay_instrument_spec(
+    definition: &TrackDefinition,
+    rules: &ExchangeRules,
+) -> Result<InstrumentSpec> {
+    let instrument = definition.instrument().clone();
+    let settlement_asset =
+        Asset::try_new(rules.settlement_asset.clone()).map_err(anyhow::Error::msg)?;
+    let (base_asset, quote_asset) = match rules.quantity_kind {
+        QuantityKind::BaseAsset => {
+            let quote_asset = settlement_asset.clone();
+            let base_asset = match instrument.venue {
+                Venue::Okx => instrument
+                    .symbol
+                    .split('-')
+                    .next()
+                    .unwrap_or(&instrument.symbol),
+                Venue::Hyperliquid => instrument.symbol.as_str(),
+                _ => instrument
+                    .symbol
+                    .strip_suffix(quote_asset.as_str())
+                    .unwrap_or(&instrument.symbol),
+            };
+            (
+                Asset::try_new(base_asset).map_err(anyhow::Error::msg)?,
+                quote_asset,
+            )
+        }
+        QuantityKind::InverseContract => (
+            settlement_asset.clone(),
+            Asset::try_new("USD").map_err(anyhow::Error::msg)?,
+        ),
+    };
+    let min_notional =
+        Amount::new(rules.min_notional, quote_asset.clone()).map_err(anyhow::Error::msg)?;
+
+    match rules.quantity_kind {
+        QuantityKind::BaseAsset => InstrumentSpec::try_linear(
+            instrument,
+            base_asset,
+            quote_asset.clone(),
+            settlement_asset,
+            rules.price_precision,
+            rules.price_tick,
+            rules.quantity_step,
+            rules.min_qty,
+            min_notional,
+        ),
+        QuantityKind::InverseContract => InstrumentSpec::try_inverse(
+            instrument,
+            base_asset,
+            quote_asset.clone(),
+            settlement_asset,
+            Amount::new(
+                rules
+                    .contract_notional
+                    .context("inverse replay rules missing contract_notional")?,
+                quote_asset,
+            )
+            .map_err(anyhow::Error::msg)?,
+            rules.price_precision,
+            rules.price_tick,
+            rules.quantity_step,
+            rules.min_qty,
+            min_notional,
+        ),
+    }
+    .map_err(anyhow::Error::msg)
 }
 
 fn validate_position(position: &PositionObservation) -> Result<()> {

@@ -4,10 +4,10 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
 use poise_application::TrackDefinitionRegistry;
+use poise_core::instrument::{Amount, Asset, InstrumentSpec};
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
 use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-use poise_core::types::ExchangeRules;
 use poise_engine::ports::{ExchangeInfo, MetadataPort};
 
 #[path = "../src/startup_preparation.rs"]
@@ -218,7 +218,7 @@ async fn load_exchange_info_with_retry_retries_transient_failures() {
     .unwrap();
 
     assert_eq!(metadata.calls(), 3);
-    assert_eq!(info.rules, test_exchange_rules());
+    assert_eq!(info.instrument_spec, test_instrument_spec());
 }
 
 fn track_definition_registry(track_id: &str, symbol: &str) -> TrackDefinitionRegistry {
@@ -249,19 +249,21 @@ fn track_definition_registry(track_id: &str, symbol: &str) -> TrackDefinitionReg
     .unwrap()
 }
 
-fn test_exchange_rules() -> ExchangeRules {
-    ExchangeRules {
-        price_tick: 0.1,
-        price_precision: Default::default(),
-        quantity_kind: Default::default(),
-        contract_notional: None,
-        settlement_asset: "USDT".to_string(),
-        quantity_step: 0.1,
-        min_qty: 0.0,
-        min_notional: 0.0,
-        maker_fee_rate: 0.0,
-        taker_fee_rate: 0.0,
-    }
+fn test_instrument_spec() -> InstrumentSpec {
+    let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+    let usdt = Asset::try_new("USDT").unwrap();
+    InstrumentSpec::try_linear(
+        instrument,
+        Asset::try_new("BTC").unwrap(),
+        usdt.clone(),
+        usdt.clone(),
+        Default::default(),
+        0.1,
+        0.1,
+        0.0,
+        Amount::new(0.0, usdt).unwrap(),
+    )
+    .unwrap()
 }
 
 struct RecordingExchangeStartupControl {
@@ -376,8 +378,7 @@ impl MetadataPort for FlakyExchangeInfoPort {
             return Err(anyhow!("temporary metadata failure"));
         }
         Ok(ExchangeInfo {
-            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            rules: test_exchange_rules(),
+            instrument_spec: test_instrument_spec(),
         })
     }
 

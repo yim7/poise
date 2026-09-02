@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
+use poise_core::instrument::InstrumentSpec;
 use poise_core::strategy::TrackConfig;
-use poise_core::types::{ExchangeRules, Exposure};
+use poise_core::types::Exposure;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use uuid::Uuid;
@@ -43,7 +44,7 @@ pub struct ExecutorInput<'a> {
 pub struct SubmitIntentInput<'a> {
     pub instrument: &'a Instrument,
     pub config: &'a TrackConfig,
-    pub exchange_rules: &'a ExchangeRules,
+    pub instrument_spec: &'a InstrumentSpec,
     pub native_qty_per_unit: f64,
     pub min_rebalance_units: f64,
     pub current_exposure: Exposure,
@@ -194,7 +195,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         boundaries: &boundaries,
         instrument: submit_intent.instrument,
         config: submit_intent.config,
-        exchange_rules: submit_intent.exchange_rules,
+        instrument_spec: submit_intent.instrument_spec,
         native_qty_per_unit: submit_intent.native_qty_per_unit,
         min_rebalance_units: submit_intent.min_rebalance_units,
         current_exposure: &submit_intent.current_exposure,
@@ -211,7 +212,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
     effects.extend(reconcile_bindings(
         &mut state,
         &desired_bindings,
-        submit_intent.exchange_rules,
+        submit_intent.instrument_spec,
         submit_intent.observed_at,
         CURVE_MAKER_GRACE_MS,
     ));
@@ -447,7 +448,7 @@ fn order_role_for_binding(binding: &LiveOrderBinding) -> OrderRole {
 fn reconcile_bindings(
     state: &mut ExecutorState,
     desired_bindings: &[DesiredBinding],
-    exchange_rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
     observed_at: DateTime<Utc>,
     curve_maker_grace_ms: i64,
 ) -> Vec<TrackEffect> {
@@ -460,7 +461,7 @@ fn reconcile_bindings(
             &state.bindings[..existing_count],
             &state.bindings,
             desired,
-            exchange_rules,
+            instrument_spec,
             observed_at,
             curve_maker_grace_ms,
         ) {
@@ -595,7 +596,7 @@ fn position_exposure_epsilon(input: &SubmitIntentInput<'_>) -> f64 {
     let quantity_step_as_exposure = if input.native_qty_per_unit <= f64::EPSILON {
         0.0
     } else {
-        input.exchange_rules.quantity_step / input.native_qty_per_unit
+        input.instrument_spec.position_qty_step().value() / input.native_qty_per_unit
     };
     boundary_exposure_epsilon(input).max(quantity_step_as_exposure)
 }
@@ -612,8 +613,9 @@ fn next_binding_id(policy: PolicyKind) -> String {
 
 #[cfg(test)]
 mod tests {
+    use poise_core::instrument::InstrumentSpec;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
-    use poise_core::types::{ExchangeRules, Side};
+    use poise_core::types::Side;
     use std::collections::BTreeSet;
     use std::sync::LazyLock;
 
@@ -638,19 +640,8 @@ mod tests {
         }
     }
 
-    fn rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
+    fn rules() -> InstrumentSpec {
+        crate::test_instrument::linear_spec(0.1, 0.01, 0.0, 0.0)
     }
 
     fn instrument() -> &'static Instrument {
@@ -661,7 +652,7 @@ mod tests {
 
     fn input<'a>(
         config: &'a TrackConfig,
-        rules: &'a ExchangeRules,
+        rules: &'a InstrumentSpec,
         current_exposure: Exposure,
         desired_exposure: Exposure,
     ) -> ExecutorInput<'a> {
@@ -669,7 +660,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config,
-                exchange_rules: rules,
+                instrument_spec: rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,
@@ -691,7 +682,7 @@ mod tests {
 
     fn input_with_native_qty_per_unit<'a>(
         config: &'a TrackConfig,
-        rules: &'a ExchangeRules,
+        rules: &'a InstrumentSpec,
         native_qty_per_unit: f64,
         current_exposure: Exposure,
         desired_exposure: Exposure,
@@ -703,7 +694,7 @@ mod tests {
 
     fn input_with_execution_target<'a>(
         config: &'a TrackConfig,
-        rules: &'a ExchangeRules,
+        rules: &'a InstrumentSpec,
         current_exposure: Exposure,
         desired_exposure: Exposure,
         execution_target: Exposure,
@@ -715,7 +706,7 @@ mod tests {
 
     fn input_with_gate<'a>(
         config: &'a TrackConfig,
-        rules: &'a ExchangeRules,
+        rules: &'a InstrumentSpec,
         current_exposure: Exposure,
         desired_exposure: Exposure,
         price_execution_gate: PriceExecutionGate,
@@ -725,7 +716,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config,
-                exchange_rules: rules,
+                instrument_spec: rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,
@@ -747,7 +738,7 @@ mod tests {
 
     fn input_with_execution_gate<'a>(
         config: &'a TrackConfig,
-        rules: &'a ExchangeRules,
+        rules: &'a InstrumentSpec,
         current_exposure: Exposure,
         desired_exposure: Exposure,
         execution_gate_decision: ExecutionGateDecision,
@@ -804,8 +795,7 @@ mod tests {
         assert!(below_rebalance.effects.is_empty());
         assert_eq!(below_rebalance.reason, Some(DecisionReason::BelowRebalance));
 
-        let mut restrictive_rules = rules.clone();
-        restrictive_rules.min_qty = 10.0;
+        let restrictive_rules = crate::test_instrument::linear_spec(0.1, 0.01, 10.0, 0.0);
         let below_venue = plan(input(
             &config,
             &restrictive_rules,
@@ -1045,11 +1035,7 @@ mod tests {
             out_of_band_policy: BandProtectionPolicy::Freeze,
             risk_acquisition: Default::default(),
         };
-        let mut rules = rules();
-        rules.price_tick = 0.5;
-        rules.quantity_step = 0.00001;
-        rules.min_qty = 0.00001;
-        rules.min_notional = 5.0;
+        let rules = crate::test_instrument::linear_spec(0.5, 0.00001, 0.00001, 5.0);
 
         let mut input = input_with_native_qty_per_unit(
             &config,
@@ -1076,7 +1062,7 @@ mod tests {
         assert_eq!(catch_up_binding.request.side, Side::Buy);
         assert!(catch_up_binding.request.reduce_only);
         assert_eq!(catch_up_binding.desired_exposure, Exposure(0.0));
-        assert!((catch_up_binding.request.quantity - 0.00031).abs() < 1e-9);
+        assert!((catch_up_binding.request.quantity - 0.00032).abs() < 1e-9);
     }
 
     #[test]
@@ -1111,9 +1097,7 @@ mod tests {
             out_of_band_policy: BandProtectionPolicy::Freeze,
             risk_acquisition: Default::default(),
         };
-        let mut rules = rules();
-        rules.quantity_step = 0.01;
-        rules.min_qty = 0.01;
+        let rules = crate::test_instrument::linear_spec(0.1, 0.01, 0.01, 0.0);
 
         let plan = plan(input_with_native_qty_per_unit(
             &config,
@@ -1158,9 +1142,7 @@ mod tests {
             out_of_band_policy: BandProtectionPolicy::Freeze,
             risk_acquisition: Default::default(),
         };
-        let mut rules = rules();
-        rules.quantity_step = 0.01;
-        rules.min_qty = 0.01;
+        let rules = crate::test_instrument::linear_spec(0.1, 0.01, 0.01, 0.0);
 
         let plan = plan(input_with_native_qty_per_unit(
             &config,
@@ -1208,7 +1190,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
@@ -1263,7 +1245,7 @@ mod tests {
                 SubmitIntentInput {
                     instrument: instrument(),
                     config: &config,
-                    exchange_rules: &rules,
+                    instrument_spec: &rules,
                     native_qty_per_unit: 1.0,
                     min_rebalance_units: config.min_rebalance_units,
                     current_exposure: Exposure(0.0),
@@ -1319,7 +1301,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(-6.0),
@@ -1401,7 +1383,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
@@ -1469,7 +1451,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
@@ -1509,7 +1491,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
@@ -1798,7 +1780,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
@@ -1860,7 +1842,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
@@ -1925,7 +1907,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
@@ -1972,7 +1954,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
@@ -2012,7 +1994,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
@@ -2112,7 +2094,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
@@ -2149,7 +2131,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.6),
@@ -2193,7 +2175,7 @@ mod tests {
             SubmitIntentInput {
                 instrument: instrument(),
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(1.2),

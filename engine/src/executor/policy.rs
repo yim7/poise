@@ -2,13 +2,14 @@ use std::collections::BTreeSet;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use poise_core::instrument::{Amount, InstrumentSpec, PositionQty};
 use poise_core::strategy::TrackConfig;
-use poise_core::types::{ExchangeRules, Exposure, PriceRounding, Side};
+use poise_core::types::{Exposure, PriceRounding, Side};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::execution_plan::DecisionReason;
-use crate::execution_plan::{is_meetable_minimum, round_to_step};
+use crate::execution_plan::is_meetable_minimum;
 use crate::executor::binding::{
     BindingOperationAllocation, BindingPolicyState, BindingProposal, BindingStatus,
     LiveOrderBinding, binding_is_active,
@@ -46,7 +47,7 @@ pub(super) struct PolicyPlanningInput<'a> {
     pub boundaries: &'a [BoundaryBlueprint],
     pub instrument: &'a Instrument,
     pub config: &'a TrackConfig,
-    pub exchange_rules: &'a ExchangeRules,
+    pub instrument_spec: &'a InstrumentSpec,
     pub native_qty_per_unit: f64,
     pub min_rebalance_units: f64,
     pub current_exposure: &'a Exposure,
@@ -230,7 +231,7 @@ pub(super) fn classify_binding_reconciliation(
     bindings: &[LiveOrderBinding],
     active_bindings: &[LiveOrderBinding],
     desired: &DesiredBinding,
-    exchange_rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
     observed_at: chrono::DateTime<chrono::Utc>,
     curve_maker_grace_ms: i64,
 ) -> BindingReconciliationDecision {
@@ -247,7 +248,7 @@ pub(super) fn classify_binding_reconciliation(
         let indexes = existing_passive_covering_indexes(
             bindings,
             desired,
-            exchange_rules,
+            instrument_spec,
             observed_at,
             curve_maker_grace_ms,
         );
@@ -270,7 +271,7 @@ pub(super) fn classify_binding_reconciliation(
         if reduce_only_catch_up_replacement_must_wait(&bindings[index], desired) {
             return BindingReconciliationDecision::ReuseExisting { index };
         }
-        return if binding_request_matches_desired(&bindings[index], desired, exchange_rules) {
+        return if binding_request_matches_desired(&bindings[index], desired, instrument_spec) {
             BindingReconciliationDecision::ReuseExisting { index }
         } else {
             BindingReconciliationDecision::ReplaceReusable { index }
@@ -392,11 +393,14 @@ fn plan_executable_allocations(
         .iter()
         .map(|allocation| allocation.exposure_qty)
         .sum::<f64>();
-    let quantity = round_to_step(
-        exposure_qty * input.native_qty_per_unit,
-        input.exchange_rules.quantity_step,
-    );
-    if quantity <= f64::EPSILON || !is_meetable_minimum(price, quantity, input.exchange_rules) {
+    let quantity = input
+        .instrument_spec
+        .normalize_position_qty(
+            PositionQty::new(exposure_qty * input.native_qty_per_unit)
+                .expect("planned position quantity must be finite"),
+        )
+        .value();
+    if quantity <= f64::EPSILON || !is_meetable_minimum(price, quantity, input.instrument_spec) {
         return None;
     }
 
@@ -557,7 +561,7 @@ fn non_cancel_pending_owner_indexes_for_allocations(
 fn existing_passive_covering_indexes(
     bindings: &[LiveOrderBinding],
     desired: &DesiredBinding,
-    exchange_rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
     observed_at: chrono::DateTime<chrono::Utc>,
     curve_maker_grace_ms: i64,
 ) -> Vec<usize> {
@@ -568,7 +572,7 @@ fn existing_passive_covering_indexes(
                 binding,
                 desired,
                 desired_allocation,
-                exchange_rules,
+                instrument_spec,
                 observed_at,
                 curve_maker_grace_ms,
             )
@@ -584,7 +588,7 @@ fn binding_is_passive_covering_owner(
     binding: &LiveOrderBinding,
     desired: &DesiredBinding,
     desired_allocation: &BindingOperationAllocation,
-    exchange_rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
     observed_at: chrono::DateTime<chrono::Utc>,
     curve_maker_grace_ms: i64,
 ) -> bool {
@@ -594,7 +598,7 @@ fn binding_is_passive_covering_owner(
         || curve_maker_grace_expired(binding, observed_at, curve_maker_grace_ms)
         || binding.request.side != desired.request.side
         || binding.request.reduce_only != desired.request.reduce_only
-        || !exchange_rules.prices_match(binding.request.price, desired.request.price)
+        || !instrument_spec.prices_match(binding.request.price, desired.request.price)
     {
         return false;
     }
@@ -682,15 +686,15 @@ fn binding_is_cancel_pending(binding: &LiveOrderBinding) -> bool {
 fn binding_request_matches_desired(
     binding: &LiveOrderBinding,
     desired: &DesiredBinding,
-    exchange_rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
 ) -> bool {
     binding.request.instrument == desired.request.instrument
         && binding.request.side == desired.request.side
-        && exchange_rules.prices_match(binding.request.price, desired.request.price)
+        && instrument_spec.prices_match(binding.request.price, desired.request.price)
         && values_match(
             binding.request.quantity,
             desired.request.quantity,
-            exchange_rules.quantity_step,
+            instrument_spec.position_qty_step().value(),
         )
         && binding.request.reduce_only == desired.request.reduce_only
 }
@@ -715,11 +719,14 @@ fn plan_curve_maker_binding(
         .operations
         .iter()
         .find(|candidate| candidate.operation == operation)?;
-    let quantity = round_to_step(
-        operation_view.remaining * input.native_qty_per_unit,
-        input.exchange_rules.quantity_step,
-    );
-    if quantity <= f64::EPSILON || !is_meetable_minimum(price, quantity, input.exchange_rules) {
+    let quantity = input
+        .instrument_spec
+        .normalize_position_qty(
+            PositionQty::new(operation_view.remaining * input.native_qty_per_unit)
+                .expect("planned position quantity must be finite"),
+        )
+        .value();
+    if quantity <= f64::EPSILON || !is_meetable_minimum(price, quantity, input.instrument_spec) {
         return None;
     }
 
@@ -821,13 +828,13 @@ fn maker_price_for_operation(
     };
     raw_price
         .is_finite()
-        .then(|| round_passive_price(raw_price, input.exchange_rules, operation.direction))
+        .then(|| round_passive_price(raw_price, input.instrument_spec, operation.direction))
 }
 
-fn round_passive_price(price: f64, rules: &ExchangeRules, direction: BoundaryDirection) -> f64 {
+fn round_passive_price(price: f64, rules: &InstrumentSpec, direction: BoundaryDirection) -> f64 {
     match direction {
-        BoundaryDirection::Up => rules.round_price(price, PriceRounding::Down),
-        BoundaryDirection::Down => rules.round_price(price, PriceRounding::Up),
+        BoundaryDirection::Up => rules.normalize_price(price, PriceRounding::Down),
+        BoundaryDirection::Down => rules.normalize_price(price, PriceRounding::Up),
     }
 }
 
@@ -937,17 +944,25 @@ fn minimum_executable_exposure_qty(input: &PolicyPlanningInput<'_>, price: f64) 
     if input.native_qty_per_unit <= f64::EPSILON {
         return 0.0;
     }
-    minimum_executable_order_qty(price, input.exchange_rules) / input.native_qty_per_unit
+    minimum_executable_order_qty(price, input.instrument_spec) / input.native_qty_per_unit
 }
 
-fn minimum_executable_order_qty(price: f64, rules: &ExchangeRules) -> f64 {
-    let min_notional_qty = rules.native_qty_per_exposure_unit(rules.min_notional, price);
+fn minimum_executable_order_qty(price: f64, rules: &InstrumentSpec) -> f64 {
+    let min_notional_qty = rules
+        .position_qty_for_notional(
+            Amount::new(rules.min_notional().value(), rules.notional_asset().clone())
+                .expect("validated minimum notional must be finite"),
+            price,
+        )
+        .expect("validated instrument and price must define minimum quantity")
+        .value();
     let quantity = rules
-        .quantity_step
-        .max(rules.min_qty)
+        .position_qty_step()
+        .value()
+        .max(rules.min_position_qty().value())
         .max(min_notional_qty)
         .max(0.0);
-    round_up_to_step(quantity, rules.quantity_step)
+    round_up_to_step(quantity, rules.position_qty_step().value())
 }
 
 fn round_up_to_step(value: f64, step: f64) -> f64 {
@@ -994,8 +1009,9 @@ fn client_order_policy_prefix(policy: PolicyKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use poise_core::instrument::InstrumentSpec;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
-    use poise_core::types::{ExchangeRules, Exposure, PricePrecision};
+    use poise_core::types::{Exposure, PricePrecision};
 
     use crate::executor::boundary::{
         BoundaryDirection, BoundaryId, BoundaryOperation, ProfileRevision, discretize_boundaries,
@@ -1032,35 +1048,19 @@ mod tests {
         }
     }
 
-    fn rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
+    fn rules() -> InstrumentSpec {
+        crate::test_instrument::linear_spec(0.1, 0.01, 0.0, 0.0)
     }
 
     #[test]
     fn passive_price_rounding_uses_dynamic_exchange_precision() {
-        let rules = ExchangeRules {
-            price_tick: 0.0001,
-            price_precision: PricePrecision::significant_figures(2, 5),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        };
+        let rules = crate::test_instrument::linear_spec_with_precision(
+            0.0001,
+            PricePrecision::significant_figures(2, 5),
+            0.01,
+            0.0,
+            0.0,
+        );
 
         assert!(
             (round_passive_price(1234.56, &rules, BoundaryDirection::Up) - 1234.5).abs() < 1e-9
@@ -1168,7 +1168,7 @@ mod tests {
             boundaries: &boundaries,
             instrument: &instrument,
             config: &config,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             native_qty_per_unit: 1.0,
             min_rebalance_units: 1.0,
             current_exposure: &current,
@@ -1214,7 +1214,7 @@ mod tests {
                 boundaries: &boundaries,
                 instrument: &instrument,
                 config: &config,
-                exchange_rules: &rules,
+                instrument_spec: &rules,
                 native_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: &Exposure(0.0),

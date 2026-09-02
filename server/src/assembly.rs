@@ -185,7 +185,7 @@ async fn assemble_with_state_store(
             track.clone(),
             startup_leverage,
         ));
-        manager.add_track(track.clone(), info.rules)?;
+        manager.add_track(track.clone(), info.instrument_spec)?;
     }
 
     let (notifications, _) = broadcast::channel(256);
@@ -530,19 +530,8 @@ mod tests {
 
     use super::{ServerPlatform, SystemClock, assemble, build_exchange, validate_registry_venue};
 
-    fn test_exchange_rules() -> poise_core::types::ExchangeRules {
-        poise_core::types::ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.1,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
+    fn test_instrument_spec() -> poise_core::instrument::InstrumentSpec {
+        crate::test_support::test_instrument_spec()
     }
 
     fn test_track_definition_registry(config: &Config) -> Arc<TrackDefinitionRegistry> {
@@ -1091,7 +1080,7 @@ total_loss_limit = 600.0
                     None,
                 )
                 .unwrap(),
-                test_exchange_rules(),
+                test_instrument_spec(),
             )
             .unwrap();
         TrackMutationStore::save_track_control_state(
@@ -1346,7 +1335,7 @@ total_loss_limit = 600.0
                     None,
                 )
                 .unwrap(),
-                test_exchange_rules(),
+                test_instrument_spec(),
             )
             .unwrap();
         let (events, _) = broadcast::channel(16);
@@ -1557,8 +1546,7 @@ total_loss_limit = 600.0
     impl MetadataPort for FakeExchange {
         async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
             Ok(ExchangeInfo {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                rules: test_exchange_rules(),
+                instrument_spec: test_instrument_spec(),
             })
         }
 
@@ -1840,8 +1828,7 @@ total_loss_limit = 600.0
     impl MetadataPort for FakeMetadataPort {
         async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
             Ok(ExchangeInfo {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                rules: test_exchange_rules(),
+                instrument_spec: test_instrument_spec(),
             })
         }
 

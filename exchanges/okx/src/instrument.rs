@@ -5,7 +5,6 @@ use anyhow::{Context, Result, anyhow, ensure};
 
 use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
 use poise_core::track::{Instrument, Venue};
-use poise_core::types::{ExchangeRules, QuantityKind};
 use poise_engine::ports::ExchangeInfo;
 
 use crate::rest::models::InstrumentInfo;
@@ -156,40 +155,10 @@ impl OkxInstrumentMetadata {
         }
     }
 
-    pub(crate) fn exchange_info_from_instrument(
-        &self,
-        value: &InstrumentInfo,
-    ) -> Result<ExchangeInfo> {
-        let (quantity_kind, contract_notional, quantity_step, min_qty) = match self.contract_kind {
-            OkxContractKind::Inverse => (
-                QuantityKind::InverseContract,
-                Some(self.ct_val),
-                self.instrument_spec.position_qty_step().value(),
-                self.instrument_spec.min_position_qty().value(),
-            ),
-            OkxContractKind::Linear => (
-                QuantityKind::BaseAsset,
-                None,
-                self.instrument_spec.position_qty_step().value(),
-                self.instrument_spec.min_position_qty().value(),
-            ),
-        };
-
-        Ok(ExchangeInfo {
-            instrument: Instrument::new(Venue::Okx, value.inst_id.clone()),
-            rules: ExchangeRules {
-                price_tick: self.instrument_spec.price_tick(),
-                price_precision: self.instrument_spec.price_precision(),
-                quantity_kind,
-                contract_notional,
-                settlement_asset: self.settlement_asset().to_string(),
-                quantity_step,
-                min_qty,
-                min_notional: self.instrument_spec.min_notional().value(),
-                maker_fee_rate: 0.0002,
-                taker_fee_rate: 0.0005,
-            },
-        })
+    pub(crate) fn exchange_info(&self) -> ExchangeInfo {
+        ExchangeInfo {
+            instrument_spec: self.instrument_spec().clone(),
+        }
     }
 
     pub(crate) fn wire_contracts_from_position_qty(
@@ -272,7 +241,7 @@ impl OkxInstrumentRegistry {
 
 #[cfg(test)]
 pub(crate) fn exchange_info_from_instrument(value: InstrumentInfo) -> Result<ExchangeInfo> {
-    OkxInstrumentMetadata::from_instrument_info(&value)?.exchange_info_from_instrument(&value)
+    Ok(OkxInstrumentMetadata::from_instrument_info(&value)?.exchange_info())
 }
 
 fn okx_symbol_assets(symbol: &str) -> Result<(&str, &str)> {

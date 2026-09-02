@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
+use poise_core::instrument::InstrumentSpec;
 use poise_core::strategy::TrackConfig;
-use poise_core::types::{ExchangeRules, Exposure};
+use poise_core::types::Exposure;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -31,7 +32,7 @@ pub struct RecoveryInput<'a> {
     pub current_exposure: &'a Exposure,
     #[allow(dead_code)]
     pub desired_exposure: Option<&'a Exposure>,
-    pub exchange_rules: &'a ExchangeRules,
+    pub instrument_spec: &'a InstrumentSpec,
     pub previous_state: Option<&'a ExecutorState>,
     pub open_orders: &'a CompleteOpenOrderSnapshot,
     pub pending_submit_hints: &'a [PendingSubmitHint],
@@ -52,7 +53,7 @@ pub enum RecoveryResolution {
 
 pub struct SubmitRecoveryInput<'a> {
     #[allow(dead_code)]
-    pub exchange_rules: &'a ExchangeRules,
+    pub instrument_spec: &'a InstrumentSpec,
     pub previous_state: &'a ExecutorState,
     pub recovery_token: &'a SubmitRecoveryToken,
     #[allow(dead_code)]
@@ -222,7 +223,7 @@ pub fn recover_working_orders(input: RecoveryInput<'_>) -> RecoveryResolution {
         let mut matched_live_orders = Vec::new();
         for live_order in input.open_orders.orders() {
             let matches =
-                binding_candidates_for_live_order(&state, live_order, input.exchange_rules);
+                binding_candidates_for_live_order(&state, live_order, input.instrument_spec);
             let candidate = match matches.as_slice() {
                 [] => return recovery_anomaly(state, RecoveryAnomaly::UnknownLiveOrder),
                 [candidate] => candidate.clone(),
@@ -313,7 +314,7 @@ fn reanchor_executor_ledger(
 fn binding_candidates_for_live_order(
     state: &ExecutorState,
     live_order: &OrderObservation,
-    rules: &ExchangeRules,
+    rules: &InstrumentSpec,
 ) -> Vec<RecoveryBindingCandidate> {
     let existing_candidates = state
         .bindings
@@ -358,7 +359,7 @@ fn structural_matches_for_live_order(
     candidates: Vec<RecoveryBindingCandidate>,
     state: &ExecutorState,
     live_order: &OrderObservation,
-    rules: &ExchangeRules,
+    rules: &InstrumentSpec,
 ) -> Vec<RecoveryBindingCandidate> {
     candidates
         .into_iter()
@@ -386,7 +387,7 @@ fn structural_matches_for_live_order(
             values_match(
                 binding.request.quantity,
                 live_order.quantity,
-                rules.quantity_step,
+                rules.position_qty_step().value(),
             )
         })
         .collect()
@@ -405,8 +406,9 @@ fn recovery_anomaly(mut state: ExecutorState, anomaly: RecoveryAnomaly) -> Recov
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use poise_core::instrument::InstrumentSpec;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
-    use poise_core::types::{ExchangeRules, Side};
+    use poise_core::types::Side;
     use std::sync::LazyLock;
 
     use super::*;
@@ -423,19 +425,8 @@ mod tests {
     use crate::price_gate::SubmitPurpose;
     use poise_core::track::{Instrument, Venue};
 
-    fn rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.01,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
+    fn rules() -> InstrumentSpec {
+        crate::test_instrument::linear_spec(0.1, 0.01, 0.0, 0.0)
     }
 
     fn config() -> &'static TrackConfig {
@@ -524,7 +515,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(0.0),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(previous_state),
             open_orders: &open_orders,
             pending_submit_hints: &[],
@@ -603,7 +594,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(0.0),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&ExecutorState::empty(Utc::now())),
             open_orders: &open_orders,
             pending_submit_hints: &[],
@@ -628,7 +619,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(0.0),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
             pending_submit_hints: &[],
@@ -658,7 +649,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(0.0),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
             pending_submit_hints: &[],
@@ -692,7 +683,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(0.0),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
             pending_submit_hints: &[],
@@ -723,7 +714,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(0.4),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
             pending_submit_hints: &[],
@@ -761,7 +752,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(-1.1),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
             pending_submit_hints: &[],
@@ -793,7 +784,7 @@ mod tests {
             config: config(),
             current_exposure: &current_exposure,
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
             pending_submit_hints: &[],
@@ -832,7 +823,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(1.2),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
             pending_submit_hints: &[],
@@ -858,7 +849,7 @@ mod tests {
         previous_state.bindings.push(binding);
 
         let recovery = recover_submit_effect(SubmitRecoveryInput {
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: &previous_state,
             recovery_token: &target_recovery_token,
             current_exposure: &Exposure(0.0),
@@ -886,7 +877,7 @@ mod tests {
         );
 
         let duplicate = recover_submit_effect(SubmitRecoveryInput {
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: &state,
             recovery_token: &target_recovery_token,
             current_exposure: &Exposure(0.0),
@@ -906,7 +897,7 @@ mod tests {
         let previous_state = ExecutorState::empty(Utc::now());
 
         let recovery = recover_submit_effect(SubmitRecoveryInput {
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: &previous_state,
             recovery_token: &recovery_token,
             current_exposure: &Exposure(0.0),
@@ -930,7 +921,7 @@ mod tests {
         previous_state.bindings.push(protected);
 
         let recovery = recover_submit_effect(SubmitRecoveryInput {
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: &previous_state,
             recovery_token: &recovery_token,
             current_exposure: &Exposure(0.0),
@@ -955,7 +946,7 @@ mod tests {
         );
 
         let duplicate = recover_submit_effect(SubmitRecoveryInput {
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: &state,
             recovery_token: &recovery_token,
             current_exposure: &Exposure(0.0),
@@ -995,7 +986,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(0.0),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&previous_state),
             open_orders: &empty_orders,
             pending_submit_hints: std::slice::from_ref(&hint),
@@ -1021,7 +1012,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(0.0),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&previous_state),
             open_orders: &empty_orders,
             pending_submit_hints: std::slice::from_ref(&awaiting_exchange_state_hint),
@@ -1043,7 +1034,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(0.0),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&previous_state),
             open_orders: &empty_orders,
             pending_submit_hints: &[],
@@ -1078,7 +1069,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(0.0),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&previous_state),
             open_orders: &live_orders,
             pending_submit_hints: &[],
@@ -1103,7 +1094,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(0.0),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&state),
             open_orders: &live_orders,
             pending_submit_hints: &[],
@@ -1148,7 +1139,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(0.0),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&previous_state),
             open_orders: &live_orders,
             pending_submit_hints: &[],
@@ -1184,7 +1175,7 @@ mod tests {
             config: config(),
             current_exposure: &Exposure(0.0),
             desired_exposure: None,
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: Some(&previous_state),
             open_orders: &live_orders,
             pending_submit_hints: &[],
@@ -1206,7 +1197,7 @@ mod tests {
         let live_order = live_order("stale-client", Side::Buy, 100.0, 1.0);
 
         let recovery = recover_submit_effect(SubmitRecoveryInput {
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: &previous_state,
             recovery_token: &SubmitRecoveryToken::empty(),
             current_exposure: &Exposure(0.0),
@@ -1229,7 +1220,7 @@ mod tests {
         previous_state.bindings.push(existing_binding);
 
         let recovery = recover_submit_effect(SubmitRecoveryInput {
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: &previous_state,
             recovery_token: &recovery_token,
             current_exposure: &Exposure(0.0),
@@ -1252,7 +1243,7 @@ mod tests {
         previous_state.bindings.push(existing_binding);
 
         let recovery = recover_submit_effect(SubmitRecoveryInput {
-            exchange_rules: &rules,
+            instrument_spec: &rules,
             previous_state: &previous_state,
             recovery_token: &recovery_token,
             current_exposure: &Exposure(0.0),

@@ -7,6 +7,7 @@ use crate::rest::models::{
     BinanceIncomeRecord, BinanceOpenOrder, BinanceOrderResponse, BinancePositionRisk,
     BinanceSymbolConfiguration,
 };
+use poise_core::instrument::{Amount, Asset, InstrumentSpec};
 use poise_core::track::{Instrument, Venue};
 use poise_engine::ledger::TrackPnlRecord;
 use poise_engine::ports::{
@@ -153,8 +154,10 @@ impl TryFrom<BinanceExchangeInfo> for ExchangeInfo {
     type Error = anyhow::Error;
 
     fn try_from(value: BinanceExchangeInfo) -> Result<Self, Self::Error> {
+        let (base_asset, quote_asset) = binance_linear_assets(&value.symbol)?;
+        let base_asset = Asset::try_new(base_asset).map_err(anyhow::Error::msg)?;
+        let quote_asset = Asset::try_new(quote_asset).map_err(anyhow::Error::msg)?;
         let instrument = Instrument::new(Venue::Binance, value.symbol);
-        let settlement_asset = instrument.quote_asset();
         let price_filter = value
             .filters
             .iter()
@@ -171,30 +174,34 @@ impl TryFrom<BinanceExchangeInfo> for ExchangeInfo {
             .find(|filter| filter.filter_type == "MIN_NOTIONAL")
             .context("missing MIN_NOTIONAL filter")?;
 
+        let min_notional =
+            parse_optional_decimal("notional", min_notional_filter.notional.as_deref())?;
         Ok(Self {
-            instrument,
-            rules: poise_core::types::ExchangeRules {
-                price_tick: parse_optional_decimal("tickSize", price_filter.tick_size.as_deref())?,
-                price_precision: Default::default(),
-                quantity_kind: poise_core::types::QuantityKind::BaseAsset,
-                contract_notional: None,
-                settlement_asset,
-                quantity_step: parse_optional_decimal(
-                    "stepSize",
-                    lot_size_filter.step_size.as_deref(),
-                )?,
-                min_qty: parse_optional_decimal("minQty", lot_size_filter.min_qty.as_deref())?,
-                min_notional: parse_optional_decimal(
-                    "notional",
-                    min_notional_filter.notional.as_deref(),
-                )?,
-                // exchangeInfo does not include fee rates; default to VIP0 until
-                // commissionRate is wired in.
-                maker_fee_rate: 0.0002,
-                taker_fee_rate: 0.0004,
-            },
+            instrument_spec: InstrumentSpec::try_linear(
+                instrument,
+                base_asset,
+                quote_asset.clone(),
+                quote_asset.clone(),
+                Default::default(),
+                parse_optional_decimal("tickSize", price_filter.tick_size.as_deref())?,
+                parse_optional_decimal("stepSize", lot_size_filter.step_size.as_deref())?,
+                parse_optional_decimal("minQty", lot_size_filter.min_qty.as_deref())?,
+                Amount::new(min_notional, quote_asset).map_err(anyhow::Error::msg)?,
+            )
+            .map_err(anyhow::Error::msg)?,
         })
     }
+}
+
+fn binance_linear_assets(symbol: &str) -> Result<(&str, &str)> {
+    for quote_asset in ["USDT", "USDC", "FDUSD", "BUSD", "BTC", "ETH"] {
+        if let Some(base_asset) = symbol.strip_suffix(quote_asset)
+            && !base_asset.is_empty()
+        {
+            return Ok((base_asset, quote_asset));
+        }
+    }
+    Err(anyhow!("cannot determine Binance assets for `{symbol}`"))
 }
 
 fn parse_side(value: &str) -> Result<poise_core::types::Side> {
@@ -236,7 +243,7 @@ fn millis_to_utc(field: &str, value: i64) -> Result<chrono::DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
-    use poise_core::types::{ExchangeRules, Side};
+    use poise_core::types::Side;
     use poise_engine::ports::AccountSummarySnapshot;
 
     use super::*;
@@ -406,23 +413,14 @@ mod tests {
         let converted =
             ExchangeInfo::try_from(response.symbols.into_iter().next().unwrap()).unwrap();
 
+        let spec = converted.instrument_spec;
         assert_eq!(
-            converted,
-            ExchangeInfo {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                rules: ExchangeRules {
-                    price_tick: 0.1,
-                    price_precision: Default::default(),
-                    quantity_kind: Default::default(),
-                    contract_notional: None,
-                    settlement_asset: "USDT".to_string(),
-                    quantity_step: 0.001,
-                    min_qty: 0.001,
-                    min_notional: 100.0,
-                    maker_fee_rate: 0.0002,
-                    taker_fee_rate: 0.0004,
-                },
-            }
+            spec.instrument(),
+            &Instrument::new(Venue::Binance, "BTCUSDT")
         );
+        assert_eq!(spec.price_tick(), 0.1);
+        assert_eq!(spec.position_qty_step().value(), 0.001);
+        assert_eq!(spec.min_position_qty().value(), 0.001);
+        assert_eq!(spec.min_notional().value(), 100.0);
     }
 }

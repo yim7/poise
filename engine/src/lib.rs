@@ -14,3 +14,6 @@ pub mod reconciler;
 pub(crate) mod risk_exposure_gate;
 pub mod runtime;
 pub mod transition;
+
+#[cfg(test)]
+pub(crate) mod test_instrument;

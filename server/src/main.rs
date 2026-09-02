@@ -151,7 +151,6 @@ mod tests {
     use chrono::Utc;
     use poise_application::TrackDefinitionRegistry;
     use poise_core::track::{Instrument, Venue};
-    use poise_core::types::ExchangeRules;
     use poise_engine::ports::{
         AccountPort, ClockPort, ExchangeInfo, ExchangeOpenOrderSnapshot, ExchangePorts,
         ExecutionPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, OrderStatus,
@@ -937,19 +936,7 @@ total_loss_limit = 600.0
     impl MetadataPort for FakeExchange {
         async fn get_exchange_info(&self, _instrument: &Instrument) -> Result<ExchangeInfo> {
             Ok(ExchangeInfo {
-                instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                rules: ExchangeRules {
-                    price_tick: 0.1,
-                    price_precision: Default::default(),
-                    quantity_kind: Default::default(),
-                    contract_notional: None,
-                    settlement_asset: "USDT".to_string(),
-                    quantity_step: 0.1,
-                    min_qty: 0.0,
-                    min_notional: 0.0,
-                    maker_fee_rate: 0.0,
-                    taker_fee_rate: 0.0,
-                },
+                instrument_spec: crate::test_support::test_instrument_spec(),
             })
         }
 

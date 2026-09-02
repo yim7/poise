@@ -1509,7 +1509,10 @@ mod tests {
         let capacity = client.get_account_capacity_snapshot(10).await.unwrap();
         let open_orders = client.get_open_orders("BTC").await.unwrap();
 
-        assert_eq!(info.instrument, Instrument::new(Venue::Hyperliquid, "BTC"));
+        assert_eq!(
+            info.instrument_spec.instrument(),
+            &Instrument::new(Venue::Hyperliquid, "BTC")
+        );
         assert_eq!(summary.equity, 125.5);
         assert_eq!(position.qty, 0.02);
         assert_eq!(capacity.max_increase_notional, 1002.5);
@@ -1687,12 +1690,12 @@ mod tests {
         client.get_exchange_info("xyz:CBRS").await.unwrap();
 
         assert_eq!(
-            default_info.instrument,
-            Instrument::new(Venue::Hyperliquid, "BTC")
+            default_info.instrument_spec.instrument(),
+            &Instrument::new(Venue::Hyperliquid, "BTC")
         );
         assert_eq!(
-            hip3_info.instrument,
-            Instrument::new(Venue::Hyperliquid, "xyz:CBRS")
+            hip3_info.instrument_spec.instrument(),
+            &Instrument::new(Venue::Hyperliquid, "xyz:CBRS")
         );
         let requests = server.requests().await;
         assert_eq!(requests.len(), 2);

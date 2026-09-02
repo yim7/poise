@@ -117,7 +117,7 @@ pub(crate) fn reconcile_target_at_with_metadata(
     let loss_guard = match build_loss_guard_snapshot_for_asset(
         &track.pnl_stats,
         &track.risk_state,
-        Some(&track.exchange_rules.settlement_asset),
+        Some(track.instrument_spec.settlement_asset().as_str()),
     ) {
         Ok(snapshot) => snapshot,
         Err(_error) => {
@@ -322,7 +322,11 @@ fn pnl_asset_mismatch_result(
 ) -> TargetReconcileResult {
     let current = track.current_exposure.clone();
     let reason = ExecutionGateReason::PnlAssetMismatch {
-        expected_asset: track.exchange_rules.settlement_asset.clone(),
+        expected_asset: track
+            .instrument_spec
+            .settlement_asset()
+            .as_str()
+            .to_string(),
         actual_asset: track.pnl_stats.pnl_asset.clone().unwrap_or_default(),
     };
 
@@ -709,18 +713,7 @@ mod tests {
 
         TrackRuntime::new(
             definition,
-            poise_core::types::ExchangeRules {
-                price_tick: 0.1,
-                price_precision: Default::default(),
-                quantity_kind: Default::default(),
-                contract_notional: None,
-                settlement_asset: "USDT".to_string(),
-                quantity_step: 0.1,
-                min_qty: 0.0,
-                min_notional: 0.0,
-                maker_fee_rate: 0.0,
-                taker_fee_rate: 0.0,
-            },
+            crate::test_instrument::linear_spec(0.1, 0.1, 0.0, 0.0),
             Utc.with_ymd_and_hms(2026, 3, 29, 9, 0, 0).unwrap(),
         )
     }
@@ -845,7 +838,7 @@ mod tests {
         config.short_exposure_units = 10.0;
         config.risk_acquisition = RiskAcquisitionConfig::default();
         let track = test_runtime_with(config, test_max_notional(), test_loss_limits());
-        let exchange_rules = track.exchange_rules.clone();
+        let instrument_spec = track.instrument_spec.clone();
         track.fresh_start(
             TrackState::Running(ControlState::Automatic(AutoState::FollowingBand)),
             crate::ledger::TrackPnlStats::default(),
@@ -853,7 +846,7 @@ mod tests {
                 current_exposure: Exposure(current_exposure),
                 position_qty: current_exposure,
                 market_data: None,
-                exchange_rules,
+                instrument_spec,
             },
             Utc.with_ymd_and_hms(2026, 6, 1, 9, 0, 0).unwrap(),
         )

@@ -238,14 +238,30 @@ impl InstrumentSpec {
         &self.min_notional
     }
 
+    pub fn contract_value(&self) -> Option<&Amount> {
+        match &self.position_basis {
+            PositionBasis::BaseAsset => None,
+            PositionBasis::Contracts { contract_value } => Some(contract_value),
+        }
+    }
+
     pub fn normalize_price(&self, price: f64, rounding: PriceRounding) -> f64 {
         self.price_precision.round(price, rounding, self.price_tick)
     }
 
     pub fn prices_match(&self, left: f64, right: f64) -> bool {
-        let left = self.normalize_price(left, PriceRounding::Nearest);
-        let right = self.normalize_price(right, PriceRounding::Nearest);
-        values_match(left, right, self.price_tick)
+        match self.price_precision {
+            PricePrecision::FixedTick => values_match(left, right, self.price_tick),
+            _ => {
+                let left = self.normalize_price(left, PriceRounding::Nearest);
+                let right = self.normalize_price(right, PriceRounding::Nearest);
+                values_match(
+                    left,
+                    right,
+                    self.price_precision.match_tolerance(left, right),
+                )
+            }
+        }
     }
 
     pub fn normalize_position_qty(&self, quantity: PositionQty) -> PositionQty {
@@ -391,6 +407,25 @@ mod tests {
                 .abs()
                 < 1e-12
         );
+    }
+
+    #[test]
+    fn significant_figure_prices_do_not_match_across_adjacent_effective_steps() {
+        let usdc = Asset::try_new("USDC").unwrap();
+        let spec = InstrumentSpec::try_linear(
+            Instrument::new(Venue::Hyperliquid, "ETH"),
+            Asset::try_new("ETH").unwrap(),
+            usdc.clone(),
+            usdc.clone(),
+            PricePrecision::significant_figures(1, 5),
+            0.1,
+            0.0001,
+            0.0001,
+            Amount::new(10.0, usdc).unwrap(),
+        )
+        .unwrap();
+
+        assert!(!spec.prices_match(1_234.6, 1_234.7));
     }
 
     #[test]

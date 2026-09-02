@@ -134,7 +134,7 @@ mod tests {
     use crate::runtime::exchange_state::apply_user_data_event;
     use crate::test_support::{
         build_runtime_and_effect_worker_test_contexts, build_test_application_services,
-        unavailable_account_monitor,
+        test_instrument_spec, unavailable_account_monitor,
     };
 
     #[tokio::test]
@@ -223,18 +223,7 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-                poise_core::types::ExchangeRules {
-                    price_tick: 0.1,
-                    price_precision: Default::default(),
-                    quantity_kind: Default::default(),
-                    contract_notional: None,
-                    settlement_asset: "USDT".to_string(),
-                    quantity_step: 0.001,
-                    min_qty: 0.001,
-                    min_notional: 5.0,
-                    maker_fee_rate: 0.0,
-                    taker_fee_rate: 0.0,
-                },
+                test_instrument_spec(),
             )
             .unwrap();
         manager

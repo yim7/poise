@@ -5,8 +5,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{DateTime, Utc};
 use poise_application::TrackInput;
+use poise_core::instrument::{InstrumentSpec, PositionBasis};
 use poise_core::track::{Instrument, TrackId};
-use poise_core::types::{ExchangeRules, QuantityKind};
 use poise_engine::ports::{AccountCapacitySnapshot, Position, UserDataEvent};
 use poise_engine::runtime::FreshSessionExternalInputs;
 use tokio::sync::mpsc;
@@ -34,19 +34,19 @@ impl TrackStartupSeed {
     fn required_additional_notional(
         &self,
         position_qty: f64,
-        exchange_rules: &poise_core::types::ExchangeRules,
+        instrument_spec: &InstrumentSpec,
     ) -> f64 {
         self.definition
-            .required_additional_notional(position_qty, exchange_rules)
+            .required_additional_notional(position_qty, instrument_spec)
     }
 
     fn exposure_from_position_qty(
         &self,
         position_qty: f64,
-        exchange_rules: &poise_core::types::ExchangeRules,
+        instrument_spec: &InstrumentSpec,
     ) -> poise_core::types::Exposure {
         self.definition
-            .exposure_from_position_qty(position_qty, exchange_rules)
+            .exposure_from_position_qty(position_qty, instrument_spec)
     }
 
     fn startup_leverage(&self) -> u32 {
@@ -122,7 +122,7 @@ struct StartupReplayEvent {
 
 struct TrackStartupPreflight {
     position: Position,
-    exchange_rules: ExchangeRules,
+    instrument_spec: InstrumentSpec,
     account_capacity_snapshot: AccountCapacitySnapshot,
 }
 
@@ -184,7 +184,7 @@ async fn rebuild_fresh_sessions(
         let instrument = seed.instrument().clone();
         let preflight = preflight_track_startup(runtime, seed).await?;
         let current_exposure =
-            seed.exposure_from_position_qty(preflight.position.qty, &preflight.exchange_rules);
+            seed.exposure_from_position_qty(preflight.position.qty, &preflight.instrument_spec);
         let applied = runtime
             .state
             .reconcile
@@ -196,7 +196,7 @@ async fn rebuild_fresh_sessions(
                     current_exposure,
                     position_qty: preflight.position.qty,
                     market_data: None,
-                    exchange_rules: preflight.exchange_rules.clone(),
+                    instrument_spec: preflight.instrument_spec.clone(),
                 },
             )
             .await?;
@@ -254,11 +254,12 @@ async fn preflight_track_startup_inner(
         runtime.metadata.get_exchange_info(&instrument)
     })
     .await?;
-    validate_startup_exchange_rules(seed, &exchange_info.rules)?;
+    validate_startup_instrument_spec(seed, &exchange_info.instrument_spec)?;
     let account_capacity_snapshot =
-        probe_startup_account_capacity(runtime, seed, &position, &exchange_info.rules).await?;
+        probe_startup_account_capacity(runtime, seed, &position, &exchange_info.instrument_spec)
+            .await?;
     let required_additional_notional =
-        seed.required_additional_notional(position.qty, &exchange_info.rules);
+        seed.required_additional_notional(position.qty, &exchange_info.instrument_spec);
     if required_additional_notional > account_capacity_snapshot.max_increase_notional {
         return Err(anyhow!(
             "insufficient account margin for configured max_notional on track `{}`: required {}, available {}",
@@ -270,53 +271,23 @@ async fn preflight_track_startup_inner(
 
     Ok(TrackStartupPreflight {
         position,
-        exchange_rules: exchange_info.rules,
+        instrument_spec: exchange_info.instrument_spec,
         account_capacity_snapshot,
     })
 }
 
-fn validate_startup_exchange_rules(
+fn validate_startup_instrument_spec(
     seed: &TrackStartupSeed,
-    exchange_rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
 ) -> Result<()> {
     ensure!(
-        exchange_rules.price_tick.is_finite() && exchange_rules.price_tick > f64::EPSILON,
-        "invalid symbol metadata for `{}`: price_tick must be positive, got {}",
+        instrument_spec.instrument() == seed.instrument(),
+        "symbol metadata instrument mismatch: requested `{}:{}`, got `{}:{}`",
+        seed.instrument().venue.as_str(),
         seed.instrument().symbol,
-        exchange_rules.price_tick
+        instrument_spec.instrument().venue.as_str(),
+        instrument_spec.instrument().symbol,
     );
-    ensure!(
-        !exchange_rules.settlement_asset.trim().is_empty(),
-        "invalid symbol metadata for `{}`: settlement asset must not be empty",
-        seed.instrument().symbol
-    );
-    ensure!(
-        exchange_rules.quantity_step.is_finite() && exchange_rules.quantity_step > f64::EPSILON,
-        "invalid minimum trade unit for `{}`: quantity_step must be positive, got {}",
-        seed.instrument().symbol,
-        exchange_rules.quantity_step
-    );
-    ensure!(
-        exchange_rules.min_qty.is_finite() && exchange_rules.min_qty >= 0.0,
-        "invalid minimum trade unit for `{}`: min_qty must be non-negative, got {}",
-        seed.instrument().symbol,
-        exchange_rules.min_qty
-    );
-    ensure!(
-        exchange_rules.min_notional.is_finite() && exchange_rules.min_notional >= 0.0,
-        "invalid minimum trade unit for `{}`: min_notional must be non-negative, got {}",
-        seed.instrument().symbol,
-        exchange_rules.min_notional
-    );
-    if matches!(exchange_rules.quantity_kind, QuantityKind::InverseContract) {
-        ensure!(
-            exchange_rules
-                .contract_notional
-                .is_some_and(|value| value.is_finite() && value > f64::EPSILON),
-            "invalid symbol metadata for `{}`: inverse contract_notional must be positive",
-            seed.instrument().symbol
-        );
-    }
     Ok(())
 }
 
@@ -355,7 +326,7 @@ async fn probe_startup_account_capacity(
     runtime: &ServerRuntime,
     track: &TrackStartupSeed,
     position: &Position,
-    exchange_rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
 ) -> Result<AccountCapacitySnapshot> {
     let instrument = track.instrument().clone();
     let startup_leverage = track.startup_leverage();
@@ -366,16 +337,19 @@ async fn probe_startup_account_capacity(
         let market_data = Arc::clone(&market_data);
         let instrument = instrument.clone();
         let position = position.clone();
-        let exchange_rules = exchange_rules.clone();
+        let instrument_spec = instrument_spec.clone();
         async move {
-            if matches!(exchange_rules.quantity_kind, QuantityKind::InverseContract) {
+            if matches!(
+                instrument_spec.position_basis(),
+                PositionBasis::Contracts { .. }
+            ) {
                 let summary = account_summary.get_account_summary().await?;
                 let available = summary
-                    .available_for_asset(&exchange_rules.settlement_asset)
+                    .available_for_asset(instrument_spec.settlement_asset().as_str())
                     .with_context(|| {
                         format!(
                             "missing available balance for settlement asset `{}`",
-                            exchange_rules.settlement_asset
+                            instrument_spec.settlement_asset().as_str()
                         )
                     })?;
                 let mark_price = match position.mark_price {
@@ -390,12 +364,15 @@ async fn probe_startup_account_capacity(
                             )
                         })?,
                 };
-                let contract_notional = exchange_rules.contract_notional.with_context(|| {
-                    format!(
-                        "missing contract notional for inverse account capacity on `{}`",
-                        instrument.symbol
-                    )
-                })?;
+                let contract_notional = instrument_spec
+                    .contract_value()
+                    .with_context(|| {
+                        format!(
+                            "missing contract notional for inverse account capacity on `{}`",
+                            instrument.symbol
+                        )
+                    })?
+                    .value();
                 let estimated_contracts =
                     available * mark_price * startup_leverage as f64 / contract_notional;
                 return Ok::<AccountCapacitySnapshot, anyhow::Error>(AccountCapacitySnapshot {
@@ -518,10 +495,11 @@ mod tests {
     use poise_application::{
         EffectStatus, TrackEffectJournal, TrackIdentityStore, TrackMutationStore, TrackQueryStore,
     };
+    use poise_core::instrument::{Amount, Asset, InstrumentSpec};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-    use poise_core::types::{ExchangeRules, Exposure, QuantityKind, Side};
+    use poise_core::types::{Exposure, Side};
     use poise_engine::manager::TrackManager;
     use poise_engine::ports::{
         AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort,
@@ -536,8 +514,8 @@ mod tests {
     use crate::runtime::{RuntimePorts, RuntimeStartupDefinition};
     use crate::test_support::{
         build_runtime_and_effect_worker_test_contexts, build_test_application_services,
-        seed_persisted_pending_submit_effect, test_track_definition_registry,
-        unavailable_account_monitor,
+        seed_persisted_pending_submit_effect, test_instrument_spec_for,
+        test_track_definition_registry, unavailable_account_monitor,
     };
 
     use super::complete_startup;
@@ -627,18 +605,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let inverse_rules = ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: QuantityKind::InverseContract,
-            contract_notional: Some(100.0),
-            settlement_asset: "BTC".to_string(),
-            quantity_step: 1.0,
-            min_qty: 1.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        };
+        let inverse_rules = inverse_rules();
         let mut manager = TrackManager::new(Arc::new(SystemClock));
         manager
             .add_track(track.clone(), inverse_rules.clone())
@@ -665,7 +632,7 @@ mod tests {
             Venue::Okx,
             "BTC-USD-SWAP",
         )));
-        exchange.set_exchange_rules(inverse_rules);
+        exchange.set_instrument_spec(inverse_rules);
         exchange.set_available_asset("BTC", 0.5);
         exchange.set_position_mark_price(100_000.0);
         let runtime = super::ServerRuntime::new(
@@ -723,18 +690,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let inverse_rules = ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: QuantityKind::InverseContract,
-            contract_notional: Some(100.0),
-            settlement_asset: "BTC".to_string(),
-            quantity_step: 1.0,
-            min_qty: 1.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        };
+        let inverse_rules = inverse_rules();
         let mut manager = TrackManager::new(Arc::new(SystemClock));
         manager
             .add_track(track.clone(), inverse_rules.clone())
@@ -761,7 +717,7 @@ mod tests {
             Venue::Okx,
             "BTC-USD-SWAP",
         )));
-        exchange.set_exchange_rules(inverse_rules);
+        exchange.set_instrument_spec(inverse_rules);
         exchange.set_available_asset("BTC", 0.5);
         exchange.set_market_mark_price(100_000.0);
         let runtime = super::ServerRuntime::new(
@@ -831,10 +787,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_preflight_rejects_invalid_minimum_trade_unit() {
-        let mut rules = linear_rules("BTCUSDT");
-        rules.quantity_step = 0.0;
-        let (runtime, _exchange) = runtime_for_track(seeded_track(), rules);
+    async fn startup_preflight_rejects_mismatched_instrument_metadata() {
+        let (runtime, exchange) = runtime_for_track(seeded_track(), linear_rules("BTCUSDT"));
+        exchange.set_instrument_spec(linear_rules("ETHUSDT"));
         let (_sender, mut receiver) = mpsc::channel(8);
         let startup_replay_floor = Utc.with_ymd_and_hms(2026, 4, 23, 12, 0, 0).unwrap();
 
@@ -844,8 +799,8 @@ mod tests {
         let message = error.to_string();
 
         assert!(message.contains("startup preflight failed"));
-        assert!(message.contains("quantity_step"));
-        assert!(message.contains("minimum trade unit"));
+        assert!(message.contains("BTCUSDT"));
+        assert!(message.contains("ETHUSDT"));
     }
 
     #[tokio::test]
@@ -1378,44 +1333,36 @@ mod tests {
         .unwrap()
     }
 
-    fn linear_rules(symbol: &str) -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: Default::default(),
-            contract_notional: None,
-            settlement_asset: Instrument::new(Venue::Binance, symbol).quote_asset(),
-            quantity_step: 0.001,
-            min_qty: 0.001,
-            min_notional: 5.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
+    fn linear_rules(symbol: &str) -> InstrumentSpec {
+        test_instrument_spec_for(Instrument::new(Venue::Binance, symbol))
     }
 
-    fn inverse_rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: QuantityKind::InverseContract,
-            contract_notional: Some(100.0),
-            settlement_asset: "BTC".to_string(),
-            quantity_step: 1.0,
-            min_qty: 1.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0,
-            taker_fee_rate: 0.0,
-        }
+    fn inverse_rules() -> InstrumentSpec {
+        let instrument = Instrument::new(Venue::Okx, "BTC-USD-SWAP");
+        let usd = Asset::try_new("USD").unwrap();
+        InstrumentSpec::try_inverse(
+            instrument,
+            Asset::try_new("BTC").unwrap(),
+            usd.clone(),
+            Asset::try_new("BTC").unwrap(),
+            Amount::new(100.0, usd.clone()).unwrap(),
+            Default::default(),
+            0.1,
+            1.0,
+            1.0,
+            Amount::new(0.0, usd).unwrap(),
+        )
+        .unwrap()
     }
 
     fn runtime_for_track(
         track: TrackDefinition,
-        exchange_rules: ExchangeRules,
+        instrument_spec: InstrumentSpec,
     ) -> (super::ServerRuntime, Arc<StartupExchange>) {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let mut manager = TrackManager::new(Arc::new(SystemClock));
         manager
-            .add_track(track.clone(), exchange_rules.clone())
+            .add_track(track.clone(), instrument_spec.clone())
             .unwrap();
         let (notifications, _) = tokio::sync::broadcast::channel(16);
         let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
@@ -1436,7 +1383,7 @@ mod tests {
                 account_monitor,
             );
         let exchange = Arc::new(StartupExchange::with_instrument(track.instrument().clone()));
-        exchange.set_exchange_rules(exchange_rules);
+        exchange.set_instrument_spec(instrument_spec);
         let runtime = super::ServerRuntime::new(
             runtime_context.runtime_state(),
             effect_worker_context.effect_worker_state,
@@ -1484,7 +1431,7 @@ mod tests {
         available_by_asset: std::sync::Mutex<BTreeMap<String, f64>>,
         position_mark_price: std::sync::Mutex<Option<f64>>,
         market_mark_price: std::sync::Mutex<Option<f64>>,
-        exchange_rules: std::sync::Mutex<ExchangeRules>,
+        instrument_spec: std::sync::Mutex<InstrumentSpec>,
         exchange_info_error: std::sync::Mutex<Option<String>>,
         instrument: Instrument,
     }
@@ -1495,7 +1442,7 @@ mod tests {
         }
 
         fn with_instrument(instrument: Instrument) -> Self {
-            let settlement_asset = instrument.quote_asset();
+            let instrument_spec = test_instrument_spec_for(instrument.clone());
             Self {
                 inherited_order_present: AtomicBool::new(true),
                 cancel_all_calls: AtomicUsize::new(0),
@@ -1508,18 +1455,7 @@ mod tests {
                 available_by_asset: std::sync::Mutex::new(BTreeMap::new()),
                 position_mark_price: std::sync::Mutex::new(None),
                 market_mark_price: std::sync::Mutex::new(None),
-                exchange_rules: std::sync::Mutex::new(ExchangeRules {
-                    price_tick: 0.1,
-                    price_precision: Default::default(),
-                    quantity_kind: Default::default(),
-                    contract_notional: None,
-                    settlement_asset,
-                    quantity_step: 0.001,
-                    min_qty: 0.001,
-                    min_notional: 5.0,
-                    maker_fee_rate: 0.0,
-                    taker_fee_rate: 0.0,
-                }),
+                instrument_spec: std::sync::Mutex::new(instrument_spec),
                 exchange_info_error: std::sync::Mutex::new(None),
                 instrument,
             }
@@ -1544,8 +1480,8 @@ mod tests {
             *self.market_mark_price.lock().unwrap() = Some(mark_price);
         }
 
-        fn set_exchange_rules(&self, rules: ExchangeRules) {
-            *self.exchange_rules.lock().unwrap() = rules;
+        fn set_instrument_spec(&self, rules: InstrumentSpec) {
+            *self.instrument_spec.lock().unwrap() = rules;
         }
 
         fn fail_exchange_info(&self, message: &str) {
@@ -1688,8 +1624,7 @@ mod tests {
                 anyhow::bail!(message);
             }
             Ok(ExchangeInfo {
-                instrument: instrument.clone(),
-                rules: self.exchange_rules.lock().unwrap().clone(),
+                instrument_spec: self.instrument_spec.lock().unwrap().clone(),
             })
         }
 
