@@ -3,6 +3,7 @@ use std::sync::RwLock;
 
 use anyhow::{Context, Result, anyhow, ensure};
 
+use poise_core::instrument::{Amount, Asset, InstrumentSpec};
 use poise_core::track::{Instrument, Venue};
 use poise_core::types::{ExchangeRules, QuantityKind};
 use poise_engine::ports::ExchangeInfo;
@@ -11,86 +12,137 @@ use crate::rest::models::InstrumentInfo;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OkxInstrumentMetadata {
-    symbol: String,
     contract_kind: OkxContractKind,
-    ct_val: Option<f64>,
-    ct_val_ccy: Option<String>,
-    settle_ccy: String,
+    ct_val: f64,
+    instrument_spec: InstrumentSpec,
 }
 
 impl OkxInstrumentMetadata {
     pub(crate) fn from_instrument_info(value: &InstrumentInfo) -> Result<Self> {
         let instrument = Instrument::new(Venue::Okx, value.inst_id.clone());
-        let explicit_settle_ccy = value
+        let settle_ccy = value
             .settle_ccy
             .as_deref()
             .filter(|asset| !asset.trim().is_empty())
-            .map(ToString::to_string);
+            .context("missing settleCcy")?;
         let ct_val = value
             .ct_val
             .as_deref()
-            .map(|raw| parse_decimal("ctVal", raw))
-            .transpose()?;
+            .filter(|raw| !raw.trim().is_empty())
+            .context("missing ctVal")
+            .and_then(|raw| parse_decimal("ctVal", raw))?;
         let ct_val_ccy = value
             .ct_val_ccy
             .as_deref()
             .filter(|asset| !asset.trim().is_empty())
-            .map(ToString::to_string);
+            .context("missing ctValCcy")?;
+        let tick_size = parse_decimal("tickSz", &value.tick_sz)?;
+        let lot_size = parse_decimal("lotSz", &value.lot_sz)?;
+        let min_size = parse_decimal("minSz", &value.min_sz)?;
+        ensure!(
+            tick_size.is_finite() && tick_size > f64::EPSILON,
+            "OKX instrument `{}` tickSz must be positive",
+            value.inst_id
+        );
+        ensure!(
+            lot_size.is_finite() && lot_size > f64::EPSILON,
+            "OKX instrument `{}` lotSz must be positive",
+            value.inst_id
+        );
+        ensure!(
+            min_size.is_finite() && min_size >= 0.0,
+            "OKX instrument `{}` minSz must be non-negative",
+            value.inst_id
+        );
+        let (base_asset, quote_asset) = okx_symbol_assets(&value.inst_id)?;
+        let base_asset = Asset::try_new(base_asset).map_err(anyhow::Error::msg)?;
+        let quote_asset = Asset::try_new(quote_asset).map_err(anyhow::Error::msg)?;
+        let settlement_asset = Asset::try_new(settle_ccy).map_err(anyhow::Error::msg)?;
         let contract_kind = match value.ct_type.as_deref() {
             Some("inverse") => {
                 ensure!(
-                    ct_val.unwrap_or_default() > 0.0,
+                    ct_val > 0.0,
                     "OKX inverse instrument `{}` missing positive ctVal",
                     value.inst_id
                 );
                 ensure!(
-                    ct_val_ccy.as_deref() == Some("USD"),
+                    ct_val_ccy == "USD",
                     "OKX inverse instrument `{}` ctValCcy must be USD",
-                    value.inst_id
-                );
-                ensure!(
-                    explicit_settle_ccy.is_some(),
-                    "OKX inverse instrument `{}` missing settleCcy",
                     value.inst_id
                 );
                 OkxContractKind::Inverse
             }
             Some("linear") => {
-                if let Some(ct_val) = ct_val {
-                    ensure!(
-                        ct_val > 0.0,
-                        "OKX linear instrument `{}` has non-positive ctVal",
-                        value.inst_id
-                    );
-                    let base_asset = okx_base_asset(&value.inst_id);
-                    ensure!(
-                        ct_val_ccy.as_deref() == Some(base_asset),
-                        "OKX linear instrument `{}` ctValCcy must be base asset `{base_asset}`",
-                        value.inst_id
-                    );
-                }
+                ensure!(
+                    ct_val > 0.0,
+                    "OKX linear instrument `{}` has non-positive ctVal",
+                    value.inst_id
+                );
+                ensure!(
+                    ct_val_ccy == base_asset.as_str(),
+                    "OKX linear instrument `{}` ctValCcy must be base asset `{}`",
+                    value.inst_id,
+                    base_asset.as_str()
+                );
                 OkxContractKind::Linear
             }
             Some(other) => return Err(anyhow!("unsupported OKX ctType `{other}`")),
-            None => OkxContractKind::Linear,
+            None => return Err(anyhow!("OKX instrument `{}` missing ctType", value.inst_id)),
         };
-        let settle_ccy = explicit_settle_ccy.unwrap_or_else(|| instrument.quote_asset());
+        let min_notional = Amount::new(0.0, quote_asset.clone()).map_err(anyhow::Error::msg)?;
+        let instrument_spec = match contract_kind {
+            OkxContractKind::Linear => InstrumentSpec::try_linear(
+                instrument,
+                base_asset,
+                quote_asset,
+                settlement_asset,
+                Default::default(),
+                tick_size,
+                lot_size * ct_val,
+                min_size * ct_val,
+                min_notional,
+            ),
+            OkxContractKind::Inverse => InstrumentSpec::try_inverse(
+                instrument,
+                base_asset,
+                quote_asset,
+                settlement_asset,
+                Amount::new(
+                    ct_val,
+                    Asset::try_new(ct_val_ccy).map_err(anyhow::Error::msg)?,
+                )
+                .map_err(anyhow::Error::msg)?,
+                Default::default(),
+                tick_size,
+                lot_size,
+                min_size,
+                min_notional,
+            ),
+        }
+        .map_err(|error| {
+            anyhow!(
+                "invalid OKX instrument metadata for `{}`: {error}",
+                value.inst_id
+            )
+        })?;
 
         Ok(Self {
-            symbol: value.inst_id.clone(),
             contract_kind,
             ct_val,
-            ct_val_ccy,
-            settle_ccy,
+            instrument_spec,
         })
     }
 
     pub(crate) fn symbol(&self) -> &str {
-        &self.symbol
+        &self.instrument_spec.instrument().symbol
     }
 
     pub(crate) fn settlement_asset(&self) -> &str {
-        &self.settle_ccy
+        self.instrument_spec.settlement_asset().as_str()
+    }
+
+    pub(crate) fn instrument_spec(&self) -> &InstrumentSpec {
+        &self.instrument_spec
     }
 
     pub(crate) fn is_inverse(&self) -> bool {
@@ -99,7 +151,7 @@ impl OkxInstrumentMetadata {
 
     pub(crate) fn contract_notional(&self) -> Option<f64> {
         match self.contract_kind {
-            OkxContractKind::Inverse => self.ct_val,
+            OkxContractKind::Inverse => Some(self.ct_val),
             OkxContractKind::Linear => None,
         }
     }
@@ -108,33 +160,32 @@ impl OkxInstrumentMetadata {
         &self,
         value: &InstrumentInfo,
     ) -> Result<ExchangeInfo> {
-        let contract_size = self.linear_contract_size();
         let (quantity_kind, contract_notional, quantity_step, min_qty) = match self.contract_kind {
             OkxContractKind::Inverse => (
                 QuantityKind::InverseContract,
-                self.ct_val,
-                parse_decimal("lotSz", &value.lot_sz)?,
-                parse_decimal("minSz", &value.min_sz)?,
+                Some(self.ct_val),
+                self.instrument_spec.position_qty_step().value(),
+                self.instrument_spec.min_position_qty().value(),
             ),
             OkxContractKind::Linear => (
                 QuantityKind::BaseAsset,
                 None,
-                parse_decimal("lotSz", &value.lot_sz)? * contract_size,
-                parse_decimal("minSz", &value.min_sz)? * contract_size,
+                self.instrument_spec.position_qty_step().value(),
+                self.instrument_spec.min_position_qty().value(),
             ),
         };
 
         Ok(ExchangeInfo {
             instrument: Instrument::new(Venue::Okx, value.inst_id.clone()),
             rules: ExchangeRules {
-                price_tick: parse_decimal("tickSz", &value.tick_sz)?,
-                price_precision: Default::default(),
+                price_tick: self.instrument_spec.price_tick(),
+                price_precision: self.instrument_spec.price_precision(),
                 quantity_kind,
                 contract_notional,
-                settlement_asset: self.settle_ccy.clone(),
+                settlement_asset: self.settlement_asset().to_string(),
                 quantity_step,
                 min_qty,
-                min_notional: 0.0,
+                min_notional: self.instrument_spec.min_notional().value(),
                 maker_fee_rate: 0.0002,
                 taker_fee_rate: 0.0005,
             },
@@ -156,7 +207,7 @@ impl OkxInstrumentMetadata {
     }
 
     fn linear_contract_size(&self) -> f64 {
-        self.ct_val.unwrap_or(1.0)
+        self.ct_val
     }
 }
 
@@ -193,12 +244,104 @@ pub(crate) fn exchange_info_from_instrument(value: InstrumentInfo) -> Result<Exc
     OkxInstrumentMetadata::from_instrument_info(&value)?.exchange_info_from_instrument(&value)
 }
 
-fn okx_base_asset(symbol: &str) -> &str {
-    symbol.split('-').next().unwrap_or(symbol)
+fn okx_symbol_assets(symbol: &str) -> Result<(&str, &str)> {
+    let mut parts = symbol.split('-');
+    let base_asset = parts.next().filter(|part| !part.is_empty());
+    let quote_asset = parts.next().filter(|part| !part.is_empty());
+    match (base_asset, quote_asset) {
+        (Some(base_asset), Some(quote_asset)) => Ok((base_asset, quote_asset)),
+        _ => Err(anyhow!("invalid OKX instrument symbol `{symbol}`")),
+    }
 }
 
 fn parse_decimal(field: &str, value: &str) -> Result<f64> {
     value
         .parse::<f64>()
         .with_context(|| format!("invalid decimal for {field}: {value}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use poise_core::instrument::{Asset, PositionBasis, PositionQty};
+
+    use super::*;
+
+    fn linear_instrument() -> InstrumentInfo {
+        InstrumentInfo {
+            inst_id: "BTC-USDT-SWAP".to_string(),
+            ct_type: Some("linear".to_string()),
+            tick_sz: "0.1".to_string(),
+            lot_sz: "1".to_string(),
+            min_sz: "1".to_string(),
+            ct_val: Some("0.01".to_string()),
+            ct_val_ccy: Some("BTC".to_string()),
+            settle_ccy: Some("USDT".to_string()),
+        }
+    }
+
+    #[test]
+    fn linear_metadata_builds_complete_canonical_instrument_spec() {
+        let metadata = OkxInstrumentMetadata::from_instrument_info(&linear_instrument()).unwrap();
+        let spec = metadata.instrument_spec();
+
+        assert_eq!(spec.instrument().symbol, "BTC-USDT-SWAP");
+        assert_eq!(spec.base_asset(), &Asset::try_new("BTC").unwrap());
+        assert_eq!(spec.quote_asset(), &Asset::try_new("USDT").unwrap());
+        assert_eq!(spec.notional_asset(), &Asset::try_new("USDT").unwrap());
+        assert_eq!(spec.settlement_asset(), &Asset::try_new("USDT").unwrap());
+        assert_eq!(spec.position_basis(), &PositionBasis::BaseAsset);
+        assert_eq!(spec.price_tick(), 0.1);
+        assert_eq!(spec.position_qty_step(), PositionQty::new(0.01).unwrap());
+        assert_eq!(spec.min_position_qty(), PositionQty::new(0.01).unwrap());
+        assert_eq!(spec.min_notional().value(), 0.0);
+    }
+
+    #[test]
+    fn linear_metadata_requires_contract_value_and_units() {
+        let mut instrument = linear_instrument();
+        instrument.ct_val = None;
+        assert!(
+            OkxInstrumentMetadata::from_instrument_info(&instrument)
+                .unwrap_err()
+                .to_string()
+                .contains("ctVal")
+        );
+
+        let mut instrument = linear_instrument();
+        instrument.ct_val_ccy = Some("USDT".to_string());
+        assert!(
+            OkxInstrumentMetadata::from_instrument_info(&instrument)
+                .unwrap_err()
+                .to_string()
+                .contains("base asset")
+        );
+
+        let mut instrument = linear_instrument();
+        instrument.settle_ccy = None;
+        assert!(
+            OkxInstrumentMetadata::from_instrument_info(&instrument)
+                .unwrap_err()
+                .to_string()
+                .contains("settleCcy")
+        );
+    }
+
+    #[test]
+    fn linear_metadata_rejects_invalid_tick_lot_and_minimum_quantity() {
+        for (field, value) in [("tickSz", "0"), ("lotSz", "0"), ("minSz", "-1")] {
+            let mut instrument = linear_instrument();
+            match field {
+                "tickSz" => instrument.tick_sz = value.to_string(),
+                "lotSz" => instrument.lot_sz = value.to_string(),
+                "minSz" => instrument.min_sz = value.to_string(),
+                _ => unreachable!(),
+            }
+
+            let error = OkxInstrumentMetadata::from_instrument_info(&instrument).unwrap_err();
+            assert!(
+                error.to_string().contains(field),
+                "expected {field} in error, got {error}"
+            );
+        }
+    }
 }
