@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use poise_application::{
-    AccountMonitorStore, TrackEffectJournal, TrackIdentityGuardOutcome, TrackIdentityStore,
-    TrackMutationStore, TrackQueryStore,
+    AccountMonitorStore, TrackEffectJournal, TrackIdentityStore, TrackMutationStore,
+    TrackQueryStore,
 };
 use poise_core::track::TrackDefinition;
 use poise_storage::sqlite::SqliteStorage;
@@ -59,12 +59,10 @@ impl PreparedStateStore {
                 )
             })
             .collect::<Vec<_>>();
-        let outcomes = self
-            .identity_store
+        self.identity_store
             .guard_track_identities(&identities)
             .await
             .context("failed to guard configured track identities")?;
-        log_track_identity_guard_outcomes(&self.track_definitions, &outcomes);
 
         startup(self.repositories.clone(), self.track_definitions).await
     }
@@ -117,45 +115,6 @@ impl StateRepositories {
 
 fn unexpected(error: anyhow::Error) -> StateBootstrapError {
     StateBootstrapError::Unexpected(error)
-}
-
-fn log_track_identity_guard_outcomes(
-    definitions: &[TrackDefinition],
-    outcomes: &[TrackIdentityGuardOutcome],
-) {
-    for outcome in outcomes {
-        match outcome {
-            TrackIdentityGuardOutcome::AdoptedLegacyPnl(track_id) => {
-                let definition = definitions
-                    .iter()
-                    .find(|definition| definition.track_id() == track_id)
-                    .expect("identity guard outcome must reference a configured track");
-                let instrument = definition.instrument();
-                tracing::info!(
-                    track_id = %track_id.as_str(),
-                    venue = instrument.venue.as_str(),
-                    symbol = %instrument.symbol,
-                    adoption_source = "legacy_pnl",
-                    "adopted configured track identity from legacy PNL evidence"
-                );
-            }
-            TrackIdentityGuardOutcome::AdoptedLegacyWithoutInstrumentEvidence(track_id) => {
-                let definition = definitions
-                    .iter()
-                    .find(|definition| definition.track_id() == track_id)
-                    .expect("identity guard outcome must reference a configured track");
-                let instrument = definition.instrument();
-                tracing::warn!(
-                    track_id = %track_id.as_str(),
-                    venue = instrument.venue.as_str(),
-                    symbol = %instrument.symbol,
-                    adoption_source = "control_or_events_without_instrument",
-                    "adopted configured track identity for legacy state without instrument evidence"
-                );
-            }
-            TrackIdentityGuardOutcome::Matched(_) | TrackIdentityGuardOutcome::BoundNew(_) => {}
-        }
-    }
 }
 
 pub async fn prepare_state_repository(
@@ -288,37 +247,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn matching_legacy_pnl_identity_is_adopted_before_startup() {
+    async fn unbound_pnl_state_does_not_invoke_startup() {
         let instance_dir = tempfile::tempdir().unwrap();
         let db_path = test_db_path(instance_dir.path());
         super::ensure_parent_dir(&db_path).unwrap();
         drop(SqliteStorage::new(&db_path).unwrap());
-        insert_legacy_pnl_identity(&db_path, "btc-core", "binance", "BTCUSDT");
+        insert_unbound_pnl_record(&db_path, "btc-core", "binance", "BTCUSDT");
         let config = test_config(90.0);
-
-        prepare_state_repository(&config, &db_path)
-            .await
-            .unwrap()
-            .run_startup(|_repositories, _definitions| async { Ok(()) })
-            .await
-            .unwrap();
-
-        let identity = load_track_identity(&db_path, "btc-core").unwrap();
-        assert_eq!(
-            (identity.0.as_str(), identity.1.as_str()),
-            ("binance", "BTCUSDT")
-        );
-    }
-
-    #[tokio::test]
-    async fn conflicting_legacy_pnl_identity_does_not_invoke_startup() {
-        let instance_dir = tempfile::tempdir().unwrap();
-        let db_path = test_db_path(instance_dir.path());
-        super::ensure_parent_dir(&db_path).unwrap();
-        drop(SqliteStorage::new(&db_path).unwrap());
-        insert_legacy_pnl_identity(&db_path, "btc-core", "binance", "BTCUSDT");
-        let mut config = test_config(90.0);
-        config.tracks[0].symbol = "ETHUSDT".into();
         let closure_invoked = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&closure_invoked);
 
@@ -332,13 +267,13 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(format!("{error:#}").contains("legacy PNL identity"));
+        assert!(format!("{error:#}").contains("unbound persisted state"));
         assert!(!closure_invoked.load(Ordering::SeqCst));
         assert!(load_track_identity(&db_path, "btc-core").is_none());
     }
 
     #[tokio::test]
-    async fn control_only_legacy_state_adopts_current_track_identity() {
+    async fn unbound_control_state_does_not_invoke_startup() {
         let instance_dir = tempfile::tempdir().unwrap();
         let db_path = test_db_path(instance_dir.path());
         persist_business_state(
@@ -349,27 +284,22 @@ mod tests {
         )
         .await;
         let config = test_config(90.0);
+        let closure_invoked = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&closure_invoked);
 
-        let state = prepare_state_repository(&config, &db_path)
+        let error = prepare_state_repository(&config, &db_path)
             .await
             .unwrap()
-            .run_startup(|repositories, _definitions| async move {
-                TrackQueryStore::load_track_control_state(
-                    repositories.query_store().as_ref(),
-                    &TrackId::new("btc-core"),
-                )
-                .await
+            .run_startup(move |_repositories, _definitions| async move {
+                observed.store(true, Ordering::SeqCst);
+                Ok(())
             })
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(
-            state,
-            Some(TrackControlState::Paused {
-                resume_mode: PersistedControlMode::Automatic,
-            })
-        );
-        assert!(load_track_identity(&db_path, "btc-core").is_some());
+        assert!(format!("{error:#}").contains("unbound persisted state"));
+        assert!(!closure_invoked.load(Ordering::SeqCst));
+        assert!(load_track_identity(&db_path, "btc-core").is_none());
     }
 
     #[tokio::test]
@@ -592,7 +522,7 @@ mod tests {
         .unwrap()
     }
 
-    fn insert_legacy_pnl_identity(db_path: &Path, track_id: &str, venue: &str, symbol: &str) {
+    fn insert_unbound_pnl_record(db_path: &Path, track_id: &str, venue: &str, symbol: &str) {
         let conn = rusqlite::Connection::open(db_path).unwrap();
         conn.execute(
             "INSERT INTO track_pnl_records (
@@ -605,13 +535,13 @@ mod tests {
                 source_key,
                 realized_pnl,
                 realized_pnl_asset
-            ) VALUES (?1, ?2, ?3, ?4, 'trade', 'legacy:test', ?5, 0, 'USDT')",
+            ) VALUES (?1, ?2, ?3, ?4, 'trade', 'test:unbound', ?5, 0, 'USDT')",
             params![
                 track_id,
                 venue,
                 symbol,
                 chrono::Utc::now().to_rfc3339(),
-                format!("legacy:{track_id}:{venue}:{symbol}"),
+                format!("unbound:{track_id}:{venue}:{symbol}"),
             ],
         )
         .unwrap();

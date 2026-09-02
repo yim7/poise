@@ -246,7 +246,7 @@ mod tests {
     fn orders_message_maps_wire_contracts_to_canonical_order_and_fill_quantities() {
         let registry = registry_with_metadata(linear_metadata());
         let events = account::parse_user_data_message_with_registry(
-            r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"BTC-USDT-SWAP","ordId":"123","clOrdId":"client-1","side":"buy","px":"64000.1","sz":"20","accFillSz":"5","state":"partially_filled","fillPx":"64000.0","fillSz":"5","fillPnl":"12.34","fee":"-1.25","feeCcy":"USDT","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
+            r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"BTC-USDT-SWAP","ordId":"123","clOrdId":"client-1","side":"buy","px":"64000.1","sz":"20","accFillSz":"5","state":"partially_filled","fillPx":"64000.0","fillSz":"5","fillPnl":"12.34","fillFee":"-1.25","fillFeeCcy":"USDT","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
             &registry,
         )
         .unwrap();
@@ -281,7 +281,7 @@ mod tests {
     fn inverse_orders_message_uses_contract_qty_and_settlement_pnl_asset() {
         let registry = registry_with_metadata(inverse_metadata());
         let events = account::parse_user_data_message_with_registry(
-            r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"BTC-USD-SWAP","ordId":"123","clOrdId":"client-1","side":"sell","px":"64000.1","sz":"30","accFillSz":"10","state":"partially_filled","fillPx":"64000.0","fillSz":"10","fillPnl":"0.0012","fee":"-0.00001","feeCcy":"BTC","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
+            r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"BTC-USD-SWAP","ordId":"123","clOrdId":"client-1","side":"sell","px":"64000.1","sz":"30","accFillSz":"10","state":"partially_filled","fillPx":"64000.0","fillSz":"10","fillPnl":"0.0012","fillFee":"-0.00001","fillFeeCcy":"BTC","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
             &registry,
         )
         .unwrap();
@@ -312,7 +312,7 @@ mod tests {
     fn orders_message_preserves_non_settlement_fee_asset() {
         let registry = registry_with_metadata(inverse_metadata());
         let events = account::parse_user_data_message_with_registry(
-            r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"BTC-USD-SWAP","ordId":"123","clOrdId":"client-1","side":"sell","px":"64000.1","sz":"30","accFillSz":"10","state":"partially_filled","fillPx":"64000.0","fillSz":"10","fillPnl":"0.0012","fee":"-0.00001","feeCcy":"USD","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
+            r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"BTC-USD-SWAP","ordId":"123","clOrdId":"client-1","side":"sell","px":"64000.1","sz":"30","accFillSz":"10","state":"partially_filled","fillPx":"64000.0","fillSz":"10","fillPnl":"0.0012","fillFee":"-0.00001","fillFeeCcy":"USD","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
             &registry,
         )
         .unwrap();
@@ -381,22 +381,17 @@ mod tests {
     }
 
     #[test]
-    fn orders_message_accepts_legacy_order_pnl_and_fee_fields() {
+    fn orders_message_rejects_fill_without_current_fill_pnl_field() {
         let registry =
             registry_with_metadata(linear_metadata_for("ANTHROPIC-USDT-SWAP", "ANTHROPIC"));
-        let events = account::parse_user_data_message_with_registry(
-            r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"ANTHROPIC-USDT-SWAP","ordId":"123","clOrdId":"client-1","side":"sell","px":"1500.1","sz":"0.16","accFillSz":"0.16","state":"filled","fillPx":"1498.0","fillSz":"0.16","pnl":"-2.34","fee":"-0.12","feeCcy":"USDT","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
+
+        let error = account::parse_user_data_message_with_registry(
+            r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"ANTHROPIC-USDT-SWAP","ordId":"123","clOrdId":"client-1","side":"sell","px":"1500.1","sz":"0.16","accFillSz":"0.16","state":"filled","fillPx":"1498.0","fillSz":"0.16","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
             &registry,
         )
-        .unwrap();
+        .unwrap_err();
 
-        match &events[1].payload {
-            UserDataPayload::TrackPnl(record) => {
-                assert_eq!(record.realized_pnl().unwrap().value(), -2.34);
-                assert_eq!(record.trading_fee().unwrap().value(), 0.12);
-            }
-            other => panic!("expected trade pnl, got {other:?}"),
-        }
+        assert!(error.to_string().contains("fillPnl"));
     }
 
     #[test]

@@ -436,11 +436,11 @@ describe('workbench store', () => {
   it('rejects a saved draft that lacks Rust-provided risk acquisition config', async () => {
     const sourceSnapshot = makeSnapshot({ selectedDraftId: 'draft-b' });
     sourceSnapshot.drafts[1]!.riskAcquisition.initialRatio = '0.61';
-    const legacySnapshot = makeSnapshot({ selectedDraftId: 'draft-a' });
-    delete (legacySnapshot.drafts[0] as Partial<TrackDraft>).riskAcquisition;
+    const invalidSnapshot = makeSnapshot({ selectedDraftId: 'draft-a' });
+    delete (invalidSnapshot.drafts[0] as Partial<TrackDraft>).riskAcquisition;
     const store = createWorkbenchStore({
       initialSnapshot: sourceSnapshot,
-      sessionSync: createSessionSync(makePersistence(legacySnapshot), { debounceMs: 0 }),
+      sessionSync: createSessionSync(makePersistence(invalidSnapshot), { debounceMs: 0 }),
     });
 
     await store.load('/tmp/config.toml', sourceSnapshot);

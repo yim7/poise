@@ -105,16 +105,10 @@ pub(crate) struct TradeFillSnapshot {
     pub fill_price: String,
     #[serde(rename = "fillSz")]
     pub fill_size: String,
-    #[serde(rename = "fillPnl", default)]
-    pub fill_pnl: Option<String>,
-    #[serde(default)]
-    pub pnl: Option<String>,
-    #[serde(rename = "fillFee", default)]
-    pub fill_fee: Option<String>,
+    #[serde(rename = "fillPnl")]
+    pub fill_pnl: String,
     #[serde(default)]
     pub fee: Option<String>,
-    #[serde(rename = "fillFeeCcy", default)]
-    pub fill_fee_currency: Option<String>,
     #[serde(rename = "feeCcy", default)]
     pub fee_currency: Option<String>,
     pub ts: String,

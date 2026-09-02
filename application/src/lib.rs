@@ -50,7 +50,7 @@ pub use session_effect_queue::{
 };
 pub use track_control_state::{PersistedControlMode, TrackControlCommand, TrackControlState};
 pub use track_effect_store::TrackEffectJournal;
-pub use track_identity_store::{TrackIdentityGuardOutcome, TrackIdentityStore};
+pub use track_identity_store::TrackIdentityStore;
 pub use track_mutation_store::TrackMutationStore;
 pub use track_persistence::{
     CommittedTrackWrite, EffectJournalEntry, EffectStatus, EffectStatusUpdate,

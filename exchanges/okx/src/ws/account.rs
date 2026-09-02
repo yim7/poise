@@ -172,10 +172,10 @@ fn parse_orders(
         if fill_size > f64::EPSILON || trade_id.is_some() {
             let fill_size = position_qty_from_okx_contracts(fill_size, &metadata)?;
             let fill_price = optional_decimal(&value, "fillPx")?.unwrap_or(order.price);
-            let realized_pnl = optional_decimal(&value, "fillPnl")?
-                .or(optional_decimal(&value, "pnl")?)
-                .unwrap_or(0.0);
-            let raw_fee = optional_decimal(&value, "fillFee")?.or(optional_decimal(&value, "fee")?);
+            let realized_pnl = optional_decimal(&value, "fillPnl")?.ok_or_else(|| {
+                anyhow::anyhow!("OKX orders fill is missing current `fillPnl` field")
+            })?;
+            let raw_fee = optional_decimal(&value, "fillFee")?;
             let trade_id = trade_id.map(ToString::to_string);
             let source_key = trade_id.as_ref().map(|trade_id| {
                 format!(
@@ -187,7 +187,6 @@ fn parse_orders(
             let settlement_asset =
                 Asset::try_new(metadata.settlement_asset()).map_err(anyhow::Error::msg)?;
             let fee_asset = optional_str(&value, "fillFeeCcy")
-                .or(optional_str(&value, "feeCcy"))
                 .map(Asset::try_new)
                 .transpose()
                 .map_err(anyhow::Error::msg)?;

@@ -133,17 +133,13 @@ pub(crate) fn track_pnl_record_from_trade_fill_with_metadata(
     let fill_price = parse_decimal("fillPx", &value.fill_price)?;
     let fill_size =
         position_qty_from_okx_contracts(parse_decimal("fillSz", &value.fill_size)?, metadata)?;
-    let realized_pnl = parse_optional_decimal("fillPnl", value.fill_pnl.as_deref())?
-        .or(parse_optional_decimal("pnl", value.pnl.as_deref())?)
-        .unwrap_or(0.0);
-    let raw_fee = parse_optional_decimal("fillFee", value.fill_fee.as_deref())?
-        .or(parse_optional_decimal("fee", value.fee.as_deref())?);
+    let realized_pnl = parse_decimal("fillPnl", &value.fill_pnl)?;
+    let raw_fee = parse_optional_decimal("fee", value.fee.as_deref())?;
     let settlement_asset =
         Asset::try_new(metadata.settlement_asset()).map_err(anyhow::Error::msg)?;
     let fee_asset = value
-        .fill_fee_currency
+        .fee_currency
         .as_deref()
-        .or(value.fee_currency.as_deref())
         .map(str::trim)
         .filter(|asset| !asset.is_empty())
         .map(Asset::try_new)
@@ -370,11 +366,8 @@ mod tests {
                 side: "sell".to_string(),
                 fill_price: "62147.4".to_string(),
                 fill_size: "10".to_string(),
-                fill_pnl: Some("0.000000154839457".to_string()),
-                pnl: None,
-                fill_fee: None,
+                fill_pnl: "0.000000154839457".to_string(),
                 fee: Some("-0.000000032".to_string()),
-                fill_fee_currency: None,
                 fee_currency: Some("BTC".to_string()),
                 ts: "1781099765546".to_string(),
             },
@@ -424,11 +417,8 @@ mod tests {
                 side: "buy".to_string(),
                 fill_price: "64000".to_string(),
                 fill_size: "3".to_string(),
-                fill_pnl: Some("12.34".to_string()),
-                pnl: None,
-                fill_fee: None,
+                fill_pnl: "12.34".to_string(),
                 fee: Some("-0.5".to_string()),
-                fill_fee_currency: None,
                 fee_currency: Some("USDT".to_string()),
                 ts: "1781099765546".to_string(),
             },
@@ -464,11 +454,8 @@ mod tests {
                 side: "sell".to_string(),
                 fill_price: "62147.4".to_string(),
                 fill_size: "10".to_string(),
-                fill_pnl: Some("0".to_string()),
-                pnl: None,
-                fill_fee: None,
+                fill_pnl: "0".to_string(),
                 fee: Some("-0.000000032".to_string()),
-                fill_fee_currency: None,
                 fee_currency: Some("USD".to_string()),
                 ts: "1781099765546".to_string(),
             },

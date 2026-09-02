@@ -842,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn projector_removes_legacy_target_fields_without_fallback() {
+    fn projector_omits_removed_target_fields_without_fallback() {
         let list_source = list_source_with_submitting_effect();
         let detail_source = source_with_submitting_effect();
         let list_json =

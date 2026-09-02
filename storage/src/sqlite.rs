@@ -7,7 +7,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use poise_application::{
     self as app, CommittedTrackWrite, EffectJournalEntry, EffectStatus, EffectStatusUpdate,
     PersistedTrackEffect, StoredTrackEvent, TrackControlState, TrackEffectJournal,
-    TrackIdentityGuardOutcome, TrackIdentityStore, TrackMutationStore, TrackQueryStore,
+    TrackIdentityStore, TrackMutationStore, TrackQueryStore,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -246,14 +246,12 @@ impl SqliteStorage {
     fn guard_track_identities_blocking(
         conn: Arc<Mutex<Connection>>,
         identities: Vec<(TrackId, Instrument)>,
-    ) -> Result<Vec<TrackIdentityGuardOutcome>> {
+    ) -> Result<()> {
         let mut conn = Self::lock_connection(&conn)?;
         let tx = conn
             .transaction()
             .context("failed to start sqlite track identity transaction")?;
         let bound_at = Utc::now().to_rfc3339();
-        let mut outcomes = Vec::with_capacity(identities.len());
-
         for (track_id, instrument) in identities {
             let existing = tx
                 .query_row(
@@ -267,62 +265,6 @@ impl SqliteStorage {
                 .with_context(|| {
                     format!("failed to load track identity for `{}`", track_id.as_str())
                 })?;
-            let legacy_pnl_instruments = {
-                let mut statement = tx
-                    .prepare(
-                        "SELECT DISTINCT venue, symbol
-                         FROM track_pnl_records
-                         WHERE track_id = ?1
-                         ORDER BY venue ASC, symbol ASC",
-                    )
-                    .with_context(|| {
-                        format!(
-                            "failed to prepare legacy PNL identity query for `{}`",
-                            track_id.as_str()
-                        )
-                    })?;
-                statement
-                    .query_map(params![track_id.as_str()], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .with_context(|| {
-                        format!(
-                            "failed to query legacy PNL identities for `{}`",
-                            track_id.as_str()
-                        )
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .with_context(|| {
-                        format!(
-                            "failed to deserialize legacy PNL identities for `{}`",
-                            track_id.as_str()
-                        )
-                    })?
-            };
-
-            ensure!(
-                legacy_pnl_instruments.len() <= 1,
-                "track `{}` legacy PNL contains multiple instruments: {}",
-                track_id.as_str(),
-                legacy_pnl_instruments
-                    .iter()
-                    .map(|(venue, symbol)| format!("{venue}:{symbol}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            if let Some((legacy_venue, legacy_symbol)) = legacy_pnl_instruments.first() {
-                ensure!(
-                    legacy_venue == instrument.venue.as_str()
-                        && legacy_symbol == &instrument.symbol,
-                    "track `{}` legacy PNL identity `{}:{}` conflicts with configured identity `{}:{}`",
-                    track_id.as_str(),
-                    legacy_venue,
-                    legacy_symbol,
-                    instrument.venue.as_str(),
-                    instrument.symbol
-                );
-            }
-
             if let Some((bound_venue, bound_symbol)) = existing {
                 ensure!(
                     bound_venue == instrument.venue.as_str() && bound_symbol == instrument.symbol,
@@ -333,17 +275,14 @@ impl SqliteStorage {
                     instrument.venue.as_str(),
                     instrument.symbol
                 );
-                outcomes.push(TrackIdentityGuardOutcome::Matched(track_id));
                 continue;
             }
 
-            let outcome = if !legacy_pnl_instruments.is_empty() {
-                TrackIdentityGuardOutcome::AdoptedLegacyPnl(track_id.clone())
-            } else if Self::has_legacy_track_state(&tx, &track_id)? {
-                TrackIdentityGuardOutcome::AdoptedLegacyWithoutInstrumentEvidence(track_id.clone())
-            } else {
-                TrackIdentityGuardOutcome::BoundNew(track_id.clone())
-            };
+            ensure!(
+                !Self::has_unbound_business_state(&tx, &track_id)?,
+                "track `{}` has unbound persisted state; reinitialize the instance database",
+                track_id.as_str()
+            );
             tx.execute(
                 "INSERT INTO track_identity (track_id, venue, symbol, bound_at)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -357,26 +296,29 @@ impl SqliteStorage {
             .with_context(|| {
                 format!("failed to bind track identity for `{}`", track_id.as_str())
             })?;
-            outcomes.push(outcome);
         }
 
         tx.commit()
             .context("failed to commit sqlite track identity transaction")?;
-        Ok(outcomes)
+        Ok(())
     }
 
-    fn has_legacy_track_state(tx: &rusqlite::Transaction<'_>, track_id: &TrackId) -> Result<bool> {
+    fn has_unbound_business_state(
+        tx: &rusqlite::Transaction<'_>,
+        track_id: &TrackId,
+    ) -> Result<bool> {
         let exists = tx
             .query_row(
                 "SELECT
                     EXISTS(SELECT 1 FROM track_control_state WHERE track_id = ?1)
-                    OR EXISTS(SELECT 1 FROM track_events WHERE track_id = ?1)",
+                    OR EXISTS(SELECT 1 FROM track_events WHERE track_id = ?1)
+                    OR EXISTS(SELECT 1 FROM track_pnl_records WHERE track_id = ?1)",
                 params![track_id.as_str()],
                 |row| row.get::<_, i64>(0),
             )
             .with_context(|| {
                 format!(
-                    "failed to inspect legacy state for track `{}`",
+                    "failed to inspect unbound business state for track `{}`",
                     track_id.as_str()
                 )
             })?;
@@ -1043,10 +985,7 @@ fn optional_stored_amount(
 
 #[async_trait]
 impl TrackIdentityStore for SqliteStorage {
-    async fn guard_track_identities(
-        &self,
-        identities: &[(TrackId, Instrument)],
-    ) -> Result<Vec<TrackIdentityGuardOutcome>> {
+    async fn guard_track_identities(&self, identities: &[(TrackId, Instrument)]) -> Result<()> {
         let conn = Arc::clone(&self.conn);
         let identities = identities.to_vec();
 
@@ -1272,8 +1211,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use poise_application::{
-        EffectStatus, TrackEffectJournal, TrackIdentityGuardOutcome, TrackIdentityStore,
-        TrackMutationStore, TrackQueryStore,
+        EffectStatus, TrackEffectJournal, TrackIdentityStore, TrackMutationStore, TrackQueryStore,
     };
     use poise_core::events::DomainEvent;
     use poise_core::strategy::BandBoundary;
@@ -1299,7 +1237,7 @@ mod tests {
         storage: &SqliteStorage,
         track_id: &TrackId,
         instrument: &Instrument,
-    ) -> Vec<TrackIdentityGuardOutcome> {
+    ) {
         TrackIdentityStore::guard_track_identities(
             storage,
             &[(track_id.clone(), instrument.clone())],
@@ -1324,7 +1262,7 @@ mod tests {
         .unwrap()
     }
 
-    fn insert_legacy_pnl_record(
+    fn insert_unbound_pnl_record(
         storage: &SqliteStorage,
         track_id: &TrackId,
         instrument: &Instrument,
@@ -1344,7 +1282,7 @@ mod tests {
                 realized_pnl_asset,
                 trading_fee,
                 trading_fee_asset
-            ) VALUES (?1, ?2, ?3, ?4, 'trade', 'legacy:test', ?5, 0, 'USDT', 0, 'USDT')",
+            ) VALUES (?1, ?2, ?3, ?4, 'trade', 'test:unbound', ?5, 0, 'USDT', 0, 'USDT')",
             params![
                 track_id.as_str(),
                 instrument.venue.as_str(),
@@ -1631,16 +1569,11 @@ mod tests {
         let track_id = TrackId::new("btc-core");
         let instrument = test_instrument("BTCUSDT");
 
-        let first = guard_test_track_identity(&storage, &track_id, &instrument).await;
+        guard_test_track_identity(&storage, &track_id, &instrument).await;
         let first_row = stored_track_identity(&storage, &track_id).unwrap();
-        let second = guard_test_track_identity(&storage, &track_id, &instrument).await;
+        guard_test_track_identity(&storage, &track_id, &instrument).await;
         let second_row = stored_track_identity(&storage, &track_id).unwrap();
 
-        assert_eq!(
-            first,
-            vec![TrackIdentityGuardOutcome::BoundNew(track_id.clone())]
-        );
-        assert_eq!(second, vec![TrackIdentityGuardOutcome::Matched(track_id)]);
         assert_eq!(first_row.0, "binance");
         assert_eq!(first_row.1, "BTCUSDT");
         assert!(DateTime::parse_from_rfc3339(&first_row.2).is_ok());
@@ -1677,72 +1610,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn track_identity_guard_adopts_matching_unique_legacy_pnl() {
+    async fn track_identity_guard_rejects_unbound_pnl_state_without_inference() {
         let storage = SqliteStorage::in_memory().unwrap();
         let track_id = TrackId::new("btc-core");
         let instrument = test_instrument("BTCUSDT");
-        insert_legacy_pnl_record(&storage, &track_id, &instrument, "legacy:btc");
+        insert_unbound_pnl_record(&storage, &track_id, &instrument, "unbound:btc");
 
-        let outcomes = guard_test_track_identity(&storage, &track_id, &instrument).await;
+        let error =
+            TrackIdentityStore::guard_track_identities(&storage, &[(track_id.clone(), instrument)])
+                .await
+                .unwrap_err();
 
-        assert_eq!(
-            outcomes,
-            vec![TrackIdentityGuardOutcome::AdoptedLegacyPnl(track_id)]
-        );
-    }
-
-    #[tokio::test]
-    async fn track_identity_guard_rejects_conflicting_legacy_pnl() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let track_id = TrackId::new("btc-core");
-        insert_legacy_pnl_record(
-            &storage,
-            &track_id,
-            &test_instrument("BTCUSDT"),
-            "legacy:btc",
-        );
-
-        let error = TrackIdentityStore::guard_track_identities(
-            &storage,
-            &[(track_id.clone(), test_instrument("ETHUSDT"))],
-        )
-        .await
-        .unwrap_err();
-
-        assert!(format!("{error:#}").contains("legacy PNL"));
+        assert!(format!("{error:#}").contains("unbound persisted state"));
         assert!(stored_track_identity(&storage, &track_id).is_none());
     }
 
     #[tokio::test]
-    async fn track_identity_guard_rejects_multiple_legacy_pnl_instruments() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let track_id = TrackId::new("btc-core");
-        insert_legacy_pnl_record(
-            &storage,
-            &track_id,
-            &test_instrument("BTCUSDT"),
-            "legacy:binance",
-        );
-        insert_legacy_pnl_record(
-            &storage,
-            &track_id,
-            &Instrument::new(Venue::Bybit, "BTCUSDT"),
-            "legacy:bybit",
-        );
-
-        let error = TrackIdentityStore::guard_track_identities(
-            &storage,
-            &[(track_id.clone(), test_instrument("BTCUSDT"))],
-        )
-        .await
-        .unwrap_err();
-
-        assert!(format!("{error:#}").contains("multiple instruments"));
-        assert!(stored_track_identity(&storage, &track_id).is_none());
-    }
-
-    #[tokio::test]
-    async fn track_identity_guard_reports_legacy_state_without_instrument_evidence() {
+    async fn track_identity_guard_rejects_unbound_control_state() {
         let storage = SqliteStorage::in_memory().unwrap();
         let track_id = TrackId::new("btc-core");
         TrackMutationStore::save_track_control_state(
@@ -1753,37 +1637,48 @@ mod tests {
         .await
         .unwrap();
 
-        let outcomes =
-            guard_test_track_identity(&storage, &track_id, &test_instrument("BTCUSDT")).await;
+        let error = TrackIdentityStore::guard_track_identities(
+            &storage,
+            &[(track_id.clone(), test_instrument("BTCUSDT"))],
+        )
+        .await
+        .unwrap_err();
 
-        assert_eq!(
-            outcomes,
-            vec![TrackIdentityGuardOutcome::AdoptedLegacyWithoutInstrumentEvidence(track_id)]
-        );
+        assert!(format!("{error:#}").contains("unbound persisted state"));
+        assert!(stored_track_identity(&storage, &track_id).is_none());
+    }
 
-        let event_storage = SqliteStorage::in_memory().unwrap();
-        let event_track_id = TrackId::new("eth-core");
+    #[tokio::test]
+    async fn track_identity_guard_rejects_unbound_events() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let track_id = TrackId::new("eth-core");
         {
-            let conn = event_storage.conn.lock().unwrap();
+            let conn = storage.conn.lock().unwrap();
             conn.execute(
                 "INSERT INTO track_events (track_id, event_json, created_at)
                  VALUES (?1, '{}', ?2)",
-                params![event_track_id.as_str(), Utc::now().to_rfc3339()],
+                params![track_id.as_str(), Utc::now().to_rfc3339()],
             )
             .unwrap();
         }
-        let event_outcomes =
-            guard_test_track_identity(&event_storage, &event_track_id, &test_instrument("ETHUSDT"))
-                .await;
-        assert_eq!(
-            event_outcomes,
-            vec![TrackIdentityGuardOutcome::AdoptedLegacyWithoutInstrumentEvidence(event_track_id)]
-        );
 
-        let presence_storage = SqliteStorage::in_memory().unwrap();
+        let error = TrackIdentityStore::guard_track_identities(
+            &storage,
+            &[(track_id.clone(), test_instrument("ETHUSDT"))],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("unbound persisted state"));
+        assert!(stored_track_identity(&storage, &track_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn track_identity_guard_ignores_read_model_presence_when_binding_new_track() {
+        let storage = SqliteStorage::in_memory().unwrap();
         let presence_track_id = TrackId::new("sol-core");
         {
-            let conn = presence_storage.conn.lock().unwrap();
+            let conn = storage.conn.lock().unwrap();
             let now = Utc::now().to_rfc3339();
             conn.execute(
                 "INSERT INTO persisted_track_presence (track_id, created_at, updated_at)
@@ -1792,16 +1687,8 @@ mod tests {
             )
             .unwrap();
         }
-        let presence_outcomes = guard_test_track_identity(
-            &presence_storage,
-            &presence_track_id,
-            &test_instrument("SOLUSDT"),
-        )
-        .await;
-        assert_eq!(
-            presence_outcomes,
-            vec![TrackIdentityGuardOutcome::BoundNew(presence_track_id)]
-        );
+        guard_test_track_identity(&storage, &presence_track_id, &test_instrument("SOLUSDT")).await;
+        assert!(stored_track_identity(&storage, &presence_track_id).is_some());
     }
 
     #[tokio::test]

@@ -915,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn projects_unavailable_live_decision_without_legacy_target_fallback() {
+    fn projects_unavailable_live_decision_without_target_fallback() {
         let live = super::project_live_view(TrackLiveView::default());
         let json = serde_json::to_value(&live).unwrap();
 
