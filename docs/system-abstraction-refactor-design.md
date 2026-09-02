@@ -1,6 +1,6 @@
 # 系统抽象重构设计
 
-> 状态：实施中，S1–S3 已完成。
+> 状态：实施中，S1–S3 已完成，S4.1 已完成。
 >
 > 文档角色：本文定义本次系统抽象重构要做的改动和验收标准；[system-overview.md](system-overview.md) 在重构完成前继续描述当前系统，是当前实现的唯一长期依据。[exchange-abstraction-research.md](exchange-abstraction-research.md) 只保留调研证据，不定义最终架构。
 >
@@ -398,7 +398,7 @@ base_exposure_from_position_qty
 | S1 | 不可变 transition 与唯一更新入口 | 已完成 | `0f3a936`、`75b58b7`、`2d0992f`、`6427e46` |
 | S2 | effect / submit ownership | 已完成 | `7f714ba` |
 | S3 | OKX linear `InstrumentSpec` | 已完成 | `f913d39`、`7f019c7`、`de37b11`、`10ca055` |
-| S4 | OKX inverse 与其他 venue | 待开始 | - |
+| S4 | OKX inverse 与其他 venue | 实施中（4.1 完成） | `1833c7c` |
 | S5 | 账户估值与 PNL cashflow | 待开始 | - |
 | S6 | queries、装配和最终删除 | 待开始 | - |
 
