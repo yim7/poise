@@ -625,11 +625,12 @@ mod tests {
     use poise_application::{
         AccountReadModel, AccountRiskSignal, EffectJournalDiagnosticsSnapshot,
         EffectJournalFailure, TrackInventoryDecisionReadModel, TrackListReadModel,
-        TrackPriceExecutionBlockReason, TrackReadPnlStats, TrackReadStatus, TrackRecoveryIssue,
+        TrackPriceExecutionBlockReason, TrackReadStatus, TrackRecoveryIssue,
         TrackStrategyPriceStatus,
     };
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_engine::execution_plan::DecisionReason;
+    use poise_engine::ledger::TrackPnlStats;
 
     use crate::runtime::PnlBackfillSnapshot;
     use crate::test_support::test_instrument_spec;
@@ -640,16 +641,22 @@ mod tests {
     };
 
     fn healthy_track() -> TrackListReadModel {
+        let instrument_spec = test_instrument_spec();
         TrackListReadModel {
             track_id: "btc-core".to_string(),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            instrument_spec: test_instrument_spec(),
+            instrument_spec: instrument_spec.clone(),
             status: TrackReadStatus::Active,
             updated_at: Utc.with_ymd_and_hms(2026, 6, 17, 3, 0, 0).unwrap(),
             strategy_price: Some(100.0),
             strategy_price_status: TrackStrategyPriceStatus::Live,
             current_exposure: 0.0,
             position_qty: 0.0,
+            signed_position_notional: Some(
+                poise_core::instrument::Amount::new(0.0, instrument_spec.notional_asset().clone())
+                    .unwrap(),
+            ),
+            contract_base_exposure: None,
             decision: TrackInventoryDecisionReadModel {
                 revision: Some(1),
                 policy_target: Some(0.0),
@@ -660,8 +667,7 @@ mod tests {
             },
             acquisition_session: None,
             risk_acquisition: None,
-            pnl_stats: TrackReadPnlStats::default(),
-            unrealized_pnl: 0.0,
+            pnl: TrackPnlStats::default().view(instrument_spec.settlement_asset(), 0.0),
             recovery_issue: None,
             has_account_margin_guard: false,
             has_stale_market_data: false,

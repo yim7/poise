@@ -50,6 +50,7 @@ mod tests {
     use poise_application::exchange::{ExchangeOpenOrderSnapshot, ExchangeOrder, OrderStatus};
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::{Exposure, Side};
+    use poise_engine::ledger::TrackPnlStats;
     use poise_engine::runtime::{
         BindingView, ExecutorView, InventoryDecisionView, StrategyPriceStatus, TrackRuntimeView,
         TrackStatus,
@@ -60,11 +61,17 @@ mod tests {
 
     #[test]
     fn describe_runtime_bindings_includes_binding_identity_and_order_shape() {
+        let instrument_spec = test_instrument_spec();
         let runtime = TrackRuntimeView {
             status: TrackStatus::Active,
-            instrument_spec: test_instrument_spec(),
+            instrument_spec: instrument_spec.clone(),
             current_exposure: Exposure(0.0),
             position_qty: 0.0,
+            signed_position_notional: Some(
+                poise_core::instrument::Amount::new(0.0, instrument_spec.notional_asset().clone())
+                    .unwrap(),
+            ),
+            contract_base_exposure: None,
             decision: InventoryDecisionView::default(),
             acquisition_session: None,
             risk_acquisition: Default::default(),
@@ -83,7 +90,7 @@ mod tests {
                 recovery_anomaly: None,
             },
             pnl_stats: Default::default(),
-            unrealized_pnl: 0.0,
+            pnl: TrackPnlStats::default().view(instrument_spec.settlement_asset(), 0.0),
             has_account_margin_guard: false,
             price_execution_block_reason: None,
             strategy_price: Some(4680.0),

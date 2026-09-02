@@ -40,7 +40,7 @@ pub use read_model::{
     TrackAcquisitionSessionReadModel, TrackActivityEntry, TrackActivityLevel,
     TrackInventoryDecisionReadModel, TrackListReadModel, TrackPriceExecutionBlockReason,
     TrackReadBindingIntent, TrackReadBindingPolicy, TrackReadBindingStatus, TrackReadModel,
-    TrackReadPnlStats, TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
+    TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
     TrackRiskAcquisitionReadModel, TrackStrategyPriceStatus, build_account_analysis_read_model,
     build_account_analysis_read_model_with_account,
 };

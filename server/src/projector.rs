@@ -14,7 +14,7 @@ use poise_protocol::{
     TrackStatusPanelView, TrackStrategyView, UnvaluedPnlCashflowView,
 };
 
-use poise_core::instrument::{InstrumentSpec, PositionBasis, PositionQty};
+use poise_core::instrument::{InstrumentSpec, PositionBasis};
 use poise_core::track::Instrument;
 
 use poise_application::{
@@ -46,7 +46,7 @@ impl TrackProjector {
     }
 
     pub fn project_list_item(&self, source: &TrackListReadModel) -> TrackListItemView {
-        let pnl = project_list_pnl_summary(source);
+        let pnl = project_pnl_summary(&source.pnl);
 
         TrackListItemView {
             id: source.track_id.clone(),
@@ -80,7 +80,7 @@ impl TrackProjector {
     }
 
     pub fn project_detail(&self, source: &TrackReadModel) -> TrackDetailView {
-        let pnl = project_detail_pnl_summary(source);
+        let pnl = project_pnl_summary(&source.pnl);
 
         TrackDetailView {
             identity: TrackIdentityView {
@@ -128,7 +128,7 @@ impl TrackProjector {
                 pnl_asset: pnl.pnl_asset,
                 gross_realized_pnl: pnl.gross_realized_pnl,
                 net_realized_pnl: pnl.net_realized_pnl,
-                unrealized_pnl: source.unrealized_pnl,
+                unrealized_pnl: source.pnl.unrealized_pnl,
                 total_pnl: pnl.total_pnl,
                 trading_fee_cumulative: pnl.trading_fee_cumulative,
                 funding_fee_cumulative: pnl.funding_fee_cumulative,
@@ -171,37 +171,17 @@ impl TrackProjector {
     }
 }
 
-fn project_list_pnl_summary(source: &TrackListReadModel) -> PnlSummary {
-    let gross_realized_pnl = source.pnl_stats.gross_realized_pnl_cumulative;
-    let net_realized_pnl = source.pnl_stats.net_realized_pnl();
+fn project_pnl_summary(source: &poise_engine::ledger::TrackPnlView) -> PnlSummary {
     let (completeness, unvalued_cashflows) =
-        project_pnl_completeness(source.pnl_stats.pnl_completeness());
+        project_pnl_completeness(&source.total_pnl.completeness);
 
     PnlSummary {
-        pnl_asset: project_pnl_asset(&source.pnl_stats, &source.instrument_spec),
-        gross_realized_pnl,
-        net_realized_pnl,
-        total_pnl: net_realized_pnl.map(|pnl| pnl + source.unrealized_pnl),
-        trading_fee_cumulative: source.pnl_stats.trading_fee_cumulative,
-        funding_fee_cumulative: source.pnl_stats.funding_fee_cumulative,
-        completeness,
-        unvalued_cashflows,
-    }
-}
-
-fn project_detail_pnl_summary(source: &TrackReadModel) -> PnlSummary {
-    let gross_realized_pnl = source.pnl_stats.gross_realized_pnl_cumulative;
-    let net_realized_pnl = source.pnl_stats.net_realized_pnl();
-    let (completeness, unvalued_cashflows) =
-        project_pnl_completeness(source.pnl_stats.pnl_completeness());
-
-    PnlSummary {
-        pnl_asset: project_pnl_asset(&source.pnl_stats, &source.instrument_spec),
-        gross_realized_pnl,
-        net_realized_pnl,
-        total_pnl: net_realized_pnl.map(|pnl| pnl + source.unrealized_pnl),
-        trading_fee_cumulative: source.pnl_stats.trading_fee_cumulative,
-        funding_fee_cumulative: source.pnl_stats.funding_fee_cumulative,
+        pnl_asset: source.asset.as_str().to_string(),
+        gross_realized_pnl: source.gross_realized_pnl_cumulative,
+        net_realized_pnl: source.net_realized_pnl_cumulative.complete_value(),
+        total_pnl: source.total_pnl.complete_value(),
+        trading_fee_cumulative: source.trading_fee_cumulative,
+        funding_fee_cumulative: source.funding_fee_cumulative,
         completeness,
         unvalued_cashflows,
     }
@@ -260,20 +240,10 @@ fn project_instrument(instrument: &Instrument) -> InstrumentView {
 }
 
 fn project_position_notional(source: &TrackReadModel) -> f64 {
-    let price = match source.instrument_spec.position_basis() {
-        PositionBasis::BaseAsset => match source.mark_price.or(source.strategy_price) {
-            Some(price) => price,
-            None => return 0.0,
-        },
-        PositionBasis::Contracts { .. } => 1.0,
-    };
-    PositionQty::new(source.position_qty)
-        .and_then(|quantity| {
-            source
-                .instrument_spec
-                .notional_from_position_qty(quantity, price)
-        })
-        .map(|notional| notional.value())
+    source
+        .signed_position_notional
+        .as_ref()
+        .map(|notional| notional.value().abs())
         .unwrap_or(0.0)
 }
 
@@ -286,16 +256,6 @@ fn project_position_quantity_unit(spec: &InstrumentSpec) -> TrackPositionQuantit
 
 fn project_position_notional_asset(spec: &InstrumentSpec) -> String {
     spec.notional_asset().as_str().to_string()
-}
-
-fn project_pnl_asset(
-    pnl_stats: &poise_application::TrackReadPnlStats,
-    spec: &InstrumentSpec,
-) -> String {
-    pnl_stats
-        .pnl_asset
-        .clone()
-        .unwrap_or_else(|| spec.settlement_asset().as_str().to_string())
 }
 
 fn project_track_status(value: &TrackReadStatus) -> ProtocolTrackStatus {
@@ -673,7 +633,7 @@ mod tests {
         ReadModelBinding, TrackAcquisitionSessionReadModel, TrackActivityEntry, TrackActivityLevel,
         TrackInventoryDecisionReadModel, TrackListReadModel, TrackPriceExecutionBlockReason,
         TrackReadBindingIntent, TrackReadBindingPolicy, TrackReadBindingStatus, TrackReadModel,
-        TrackReadPnlStats, TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
+        TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
         TrackRiskAcquisitionReadModel, TrackStrategyPriceStatus,
     };
     use poise_core::instrument::{Amount, Asset, InstrumentSpec};
@@ -682,7 +642,8 @@ mod tests {
     use poise_core::types::Side;
     use poise_engine::execution_plan::DecisionReason;
     use poise_engine::ledger::{
-        PnlAggregate, PnlAggregateCompleteness, TrackPnlCashflowKind, UnvaluedCashflow,
+        PnlAggregate, PnlAggregateCompleteness, TrackPnlCashflowKind, TrackPnlView,
+        UnvaluedCashflow,
     };
     use poise_engine::runtime::AcquisitionResetReason;
     use poise_protocol::{
@@ -1411,7 +1372,7 @@ mod tests {
     #[test]
     fn projects_incomplete_pnl_without_fabricating_totals() {
         let mut source = source_with_submitting_effect();
-        source.pnl_stats.net_realized_pnl_cumulative = PnlAggregate {
+        source.pnl.net_realized_pnl_cumulative = PnlAggregate {
             asset: Some(Asset::try_new("USDT").unwrap()),
             valued_amount: 963.8,
             completeness: PnlAggregateCompleteness::Incomplete {
@@ -1420,6 +1381,11 @@ mod tests {
                     amount: Some(Amount::new(0.001, Asset::try_new("BNB").unwrap()).unwrap()),
                 }],
             },
+        };
+        source.pnl.total_pnl = PnlAggregate {
+            asset: Some(Asset::try_new("USDT").unwrap()),
+            valued_amount: 1229.0,
+            completeness: source.pnl.net_realized_pnl_cumulative.completeness.clone(),
         };
 
         let detail = TrackProjector::new().project_detail(&source);
@@ -1445,6 +1411,8 @@ mod tests {
         let mut source = source_with_submitting_effect();
         source.position_qty = 0.42;
         source.strategy_price = Some(101.25);
+        source.signed_position_notional =
+            Some(Amount::new(42.63, Asset::try_new("USDT").unwrap()).unwrap());
         let detail = TrackProjector::new().project_detail(&source);
 
         assert_eq!(
@@ -1462,7 +1430,7 @@ mod tests {
         source.instrument = Instrument::new(Venue::Hyperliquid, "ETH");
         source.instrument_spec =
             linear_instrument_spec(source.instrument.clone(), "ETH", "USDC", "USDC");
-        source.pnl_stats.pnl_asset = None;
+        source.pnl.asset = Asset::try_new("USDC").unwrap();
         let detail = TrackProjector::new().project_detail(&source);
         let list = TrackProjector::new().project_list_item(&TrackListReadModel::from(&source));
 
@@ -1477,9 +1445,12 @@ mod tests {
         source.instrument_spec = inverse_instrument_spec();
         source.current_exposure = -3.0;
         source.position_qty = -30.0;
+        source.signed_position_notional =
+            Some(Amount::new(-3_000.0, Asset::try_new("USD").unwrap()).unwrap());
+        source.contract_base_exposure = None;
         source.mark_price = None;
         source.strategy_price = None;
-        source.pnl_stats.pnl_asset = Some("BTC".to_string());
+        source.pnl.asset = Asset::try_new("BTC").unwrap();
 
         let detail = TrackProjector::new().project_detail(&source);
         let list = TrackProjector::new().project_list_item(&TrackListReadModel::from(&source));
@@ -1557,15 +1528,13 @@ mod tests {
     }
 
     fn source_with_submitting_effect() -> TrackReadModel {
+        let instrument = Instrument::new(Venue::Binance, "BTCUSDT");
+        let instrument_spec = linear_instrument_spec(instrument.clone(), "BTC", "USDT", "USDT");
+        let pnl_asset = Asset::try_new("USDT").unwrap();
         TrackReadModel {
             track_id: "btc-core".into(),
-            instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            instrument_spec: linear_instrument_spec(
-                Instrument::new(Venue::Binance, "BTCUSDT"),
-                "BTC",
-                "USDT",
-                "USDT",
-            ),
+            instrument,
+            instrument_spec,
             status: TrackReadStatus::Active,
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             lower_price: 90.0,
@@ -1589,6 +1558,8 @@ mod tests {
             best_ask: Some(101.5),
             current_exposure: 3.5,
             position_qty: 13.125,
+            signed_position_notional: Some(Amount::new(1332.1875, pnl_asset.clone()).unwrap()),
+            contract_base_exposure: None,
             decision: TrackInventoryDecisionReadModel {
                 revision: Some(42),
                 policy_target: Some(4.0),
@@ -1599,8 +1570,8 @@ mod tests {
             },
             acquisition_session: None,
             risk_acquisition: Default::default(),
-            pnl_stats: TrackReadPnlStats {
-                pnl_asset: Some("USDT".to_string()),
+            pnl: TrackPnlView {
+                asset: pnl_asset.clone(),
                 gross_realized_pnl_today: 980.1,
                 gross_realized_pnl_cumulative: 980.1,
                 trading_fee_today: 0.0,
@@ -1608,12 +1579,17 @@ mod tests {
                 funding_fee_today: 0.0,
                 funding_fee_cumulative: -4.0,
                 net_realized_pnl_cumulative: PnlAggregate {
-                    asset: Some(Asset::try_new("USDT").unwrap()),
+                    asset: Some(pnl_asset.clone()),
                     valued_amount: 963.8,
                     completeness: PnlAggregateCompleteness::Complete,
                 },
+                unrealized_pnl: 265.2,
+                total_pnl: PnlAggregate {
+                    asset: Some(pnl_asset),
+                    valued_amount: 1229.0,
+                    completeness: PnlAggregateCompleteness::Complete,
+                },
             },
-            unrealized_pnl: 265.2,
             recovery_issue: None,
             has_account_margin_guard: false,
             has_stale_market_data: false,

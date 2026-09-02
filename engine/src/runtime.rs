@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use poise_core::events::ExecutionGateReason;
-use poise_core::instrument::{Amount, InstrumentSpec, PositionQty};
+use poise_core::instrument::{Amount, InstrumentSpec, PositionBasis, PositionQty};
 use poise_core::risk::{LossLimits, RiskTerminationCause};
 use poise_core::strategy::{BandBoundary, TrackConfig};
 use poise_core::track::{Instrument, TrackDefinition, TrackId};
@@ -17,7 +17,7 @@ use crate::executor::boundary::trigger_price_for_boundary;
 use crate::executor::boundary::{ProfileRevision, profile_revision_for_config};
 use crate::executor::ledger::BoundaryLedgerState;
 use crate::executor::policy::PolicyKind;
-use crate::ledger::TrackPnlStats;
+use crate::ledger::{TrackPnlStats, TrackPnlView};
 use crate::price_gate::{
     PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
 };
@@ -345,13 +345,15 @@ pub struct TrackRuntimeView {
     pub instrument_spec: InstrumentSpec,
     pub current_exposure: Exposure,
     pub position_qty: f64,
+    pub signed_position_notional: Option<Amount>,
+    pub contract_base_exposure: Option<Amount>,
     pub decision: InventoryDecisionView,
     pub acquisition_session: Option<AcquisitionSessionRuntimeView>,
     pub risk_acquisition: Option<RiskAcquisitionRuntimeView>,
     pub manual_target_override: Option<Exposure>,
     pub executor: ExecutorView,
     pub pnl_stats: TrackPnlStats,
-    pub unrealized_pnl: f64,
+    pub pnl: TrackPnlView,
     pub has_account_margin_guard: bool,
     pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
     pub strategy_price: Option<f64>,
@@ -530,6 +532,39 @@ pub fn required_additional_notional(
     position_qty: f64,
 ) -> f64 {
     (max_notional - position_notional(config, instrument_spec, position_qty)).max(0.0)
+}
+
+fn current_position_values(
+    instrument_spec: &InstrumentSpec,
+    position_qty: f64,
+    mark_price: Option<f64>,
+    strategy_price: Option<f64>,
+) -> (Option<Amount>, Option<Amount>) {
+    let Ok(quantity) = PositionQty::new(position_qty) else {
+        return (None, None);
+    };
+    let reference_price = mark_price
+        .filter(|price| price.is_finite() && *price > f64::EPSILON)
+        .or_else(|| strategy_price.filter(|price| price.is_finite() && *price > f64::EPSILON));
+    let notional_price = match instrument_spec.position_basis() {
+        PositionBasis::BaseAsset => reference_price,
+        PositionBasis::Contracts { .. } => Some(reference_price.unwrap_or(1.0)),
+    };
+    let signed_notional = notional_price.and_then(|price| {
+        instrument_spec
+            .signed_notional_from_position_qty(quantity, price)
+            .ok()
+    });
+    let contract_base_exposure = match instrument_spec.position_basis() {
+        PositionBasis::BaseAsset => None,
+        PositionBasis::Contracts { .. } => reference_price.and_then(|price| {
+            instrument_spec
+                .base_exposure_from_position_qty(quantity, price)
+                .ok()
+        }),
+    };
+
+    (signed_notional, contract_base_exposure)
 }
 
 impl TrackRuntime {
@@ -1104,18 +1139,30 @@ impl TrackRuntime {
 
     pub fn runtime_view(&self) -> TrackRuntimeView {
         let live = self.live_view();
+        let (signed_position_notional, contract_base_exposure) = current_position_values(
+            &self.instrument_spec,
+            self.current_position_qty,
+            live.mark_price,
+            live.strategy_price,
+        );
+        let pnl = self.pnl_stats.view(
+            self.instrument_spec.settlement_asset(),
+            self.risk_state.unrealized_pnl,
+        );
         TrackRuntimeView {
             status: self.status(),
             instrument_spec: self.instrument_spec.clone(),
             current_exposure: self.current_exposure.clone(),
             position_qty: self.current_position_qty,
+            signed_position_notional,
+            contract_base_exposure,
             decision: live.decision,
             acquisition_session: live.acquisition_session,
             risk_acquisition: live.risk_acquisition,
             manual_target_override: self.manual_target_override(),
             executor: self.executor_state.view(),
             pnl_stats: self.pnl_stats.clone(),
-            unrealized_pnl: self.risk_state.unrealized_pnl,
+            pnl,
             has_account_margin_guard: matches!(
                 self.execution_gate_state.last_decision,
                 ExecutionGateDecision::NoSubmit {
@@ -1268,6 +1315,40 @@ mod tests {
             exposure_from_position_qty(&config, &rules, -30.0),
             Exposure(-3.0)
         );
+    }
+
+    #[test]
+    fn runtime_view_values_linear_position_at_mark_price() {
+        let mut runtime = test_runtime();
+        runtime.current_position_qty = 2.0;
+        runtime.strategy_price = Some(100.0);
+        runtime.mark_price = Some(110.0);
+
+        let view = runtime.runtime_view();
+
+        let notional = view
+            .signed_position_notional
+            .expect("linear position should be valued from the mark price");
+        assert_eq!(notional.value(), 220.0);
+        assert_eq!(notional.asset(), runtime.instrument_spec.notional_asset());
+        assert_eq!(view.contract_base_exposure, None);
+    }
+
+    #[test]
+    fn runtime_view_values_inverse_contract_notional_and_base_exposure_once() {
+        let mut runtime = TrackRuntime::new(test_definition(), inverse_rules(), Utc::now());
+        runtime.current_position_qty = -30.0;
+        runtime.strategy_price = Some(90_000.0);
+        runtime.mark_price = Some(100_000.0);
+
+        let view = runtime.runtime_view();
+
+        let notional = view.signed_position_notional.unwrap();
+        assert_eq!(notional.value(), -3_000.0);
+        assert_eq!(notional.asset().as_str(), "USD");
+        let base_exposure = view.contract_base_exposure.unwrap();
+        assert_eq!(base_exposure.value(), -0.03);
+        assert_eq!(base_exposure.asset().as_str(), "BTC");
     }
 
     #[test]

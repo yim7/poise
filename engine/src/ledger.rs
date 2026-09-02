@@ -192,6 +192,20 @@ impl PnlAggregate {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackPnlView {
+    pub asset: Asset,
+    pub gross_realized_pnl_today: f64,
+    pub gross_realized_pnl_cumulative: f64,
+    pub trading_fee_today: f64,
+    pub trading_fee_cumulative: f64,
+    pub funding_fee_today: f64,
+    pub funding_fee_cumulative: f64,
+    pub net_realized_pnl_cumulative: PnlAggregate,
+    pub unrealized_pnl: f64,
+    pub total_pnl: PnlAggregate,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackPnlStats {
     pub pnl_utc_day: NaiveDate,
     pub pnl_asset: Option<Asset>,
@@ -254,6 +268,35 @@ impl TrackPnlStats {
 
     pub fn net_realized_pnl(&self) -> PnlAggregate {
         self.net_realized_pnl_cumulative()
+    }
+
+    pub fn view(&self, default_asset: &Asset, unrealized_pnl: f64) -> TrackPnlView {
+        let asset = self
+            .pnl_asset
+            .clone()
+            .unwrap_or_else(|| default_asset.clone());
+        let mut net_realized_pnl_cumulative = self.net_realized_pnl_cumulative();
+        if net_realized_pnl_cumulative.asset.is_none() {
+            net_realized_pnl_cumulative.asset = Some(asset.clone());
+        }
+        let total_pnl = PnlAggregate {
+            asset: Some(asset.clone()),
+            valued_amount: net_realized_pnl_cumulative.valued_amount + unrealized_pnl,
+            completeness: net_realized_pnl_cumulative.completeness.clone(),
+        };
+
+        TrackPnlView {
+            asset,
+            gross_realized_pnl_today: self.gross_realized_pnl_today,
+            gross_realized_pnl_cumulative: self.gross_realized_pnl_cumulative,
+            trading_fee_today: self.trading_fee_today,
+            trading_fee_cumulative: self.trading_fee_cumulative,
+            funding_fee_today: self.funding_fee_today,
+            funding_fee_cumulative: self.funding_fee_cumulative,
+            net_realized_pnl_cumulative,
+            unrealized_pnl,
+            total_pnl,
+        }
     }
 
     pub fn apply_record(&mut self, record: &TrackPnlRecord) {
@@ -549,6 +592,23 @@ mod tests {
                 }],
             }
         );
+    }
+
+    #[test]
+    fn pnl_view_owns_total_and_default_asset_semantics() {
+        let stats = TrackPnlStats {
+            gross_realized_pnl_cumulative: 120.0,
+            trading_fee_cumulative: 5.0,
+            ..TrackPnlStats::default()
+        };
+        let view = stats.view(&Asset::try_new("USDT").unwrap(), -15.0);
+
+        assert_eq!(view.asset.as_str(), "USDT");
+        assert_eq!(
+            view.net_realized_pnl_cumulative.complete_value(),
+            Some(115.0)
+        );
+        assert_eq!(view.total_pnl.complete_value(), Some(100.0));
     }
 
     #[test]

@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use poise_core::events::{DomainEvent, ExecutionGateReason};
-use poise_core::instrument::{InstrumentSpec, PositionBasis, PositionQty};
+use poise_core::instrument::{Amount, InstrumentSpec, PositionBasis};
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, RiskAcquisitionConfig, ShapeFamily};
 use poise_core::track::{Instrument, TrackDefinition};
 use poise_core::types::Side;
 use poise_engine::execution_plan::{DecisionReason, TrackEffect};
 use poise_engine::executor::{BindingStatus, PolicyKind, RecoveryAnomaly};
-use poise_engine::ledger::TrackPnlStats;
+use poise_engine::ledger::TrackPnlView;
 use poise_engine::price_gate::PriceExecutionBlockReason;
 use poise_engine::runtime::{
     AcquisitionResetReason, AcquisitionSessionRuntimeView, InventoryDecisionView,
@@ -48,11 +48,12 @@ pub struct TrackListReadModel {
     pub strategy_price_status: TrackStrategyPriceStatus,
     pub current_exposure: f64,
     pub position_qty: f64,
+    pub signed_position_notional: Option<Amount>,
+    pub contract_base_exposure: Option<Amount>,
     pub decision: TrackInventoryDecisionReadModel,
     pub acquisition_session: Option<TrackAcquisitionSessionReadModel>,
     pub risk_acquisition: Option<TrackRiskAcquisitionReadModel>,
-    pub pnl_stats: TrackReadPnlStats,
-    pub unrealized_pnl: f64,
+    pub pnl: TrackPnlView,
     pub recovery_issue: Option<TrackRecoveryIssue>,
     pub has_account_margin_guard: bool,
     pub has_stale_market_data: bool,
@@ -193,11 +194,16 @@ fn project_hedge_like(
 
 fn project_account_track_analysis(source: &TrackListReadModel) -> AccountTrackAnalysisReadModel {
     let position_qty = finite_or_zero(source.position_qty);
-    let reference_price = positive_finite(source.strategy_price);
-    let signed_usd_notional =
-        signed_position_usd_notional(position_qty, &source.instrument_spec, reference_price);
-    let (estimated_base_asset, estimated_base_exposure) =
-        estimated_base_exposure(source, signed_usd_notional, reference_price);
+    let signed_usd_notional = source
+        .signed_position_notional
+        .as_ref()
+        .map(Amount::value)
+        .unwrap_or(0.0);
+    let estimated_base_asset = source
+        .contract_base_exposure
+        .as_ref()
+        .map(|amount| amount.asset().as_str().to_string());
+    let estimated_base_exposure = source.contract_base_exposure.as_ref().map(Amount::value);
 
     AccountTrackAnalysisReadModel {
         track_id: source.track_id.clone(),
@@ -216,63 +222,8 @@ fn project_account_track_analysis(source: &TrackListReadModel) -> AccountTrackAn
         abs_usd_notional: signed_usd_notional.abs(),
         estimated_base_asset,
         estimated_base_exposure,
-        pnl_asset: source.pnl_stats.pnl_asset.clone().unwrap_or_else(|| {
-            source
-                .instrument_spec
-                .settlement_asset()
-                .as_str()
-                .to_string()
-        }),
+        pnl_asset: source.pnl.asset.as_str().to_string(),
     }
-}
-
-fn signed_position_usd_notional(
-    position_qty: f64,
-    rules: &InstrumentSpec,
-    reference_price: Option<f64>,
-) -> f64 {
-    let price = match rules.position_basis() {
-        PositionBasis::BaseAsset => match reference_price {
-            Some(price) => price,
-            None => return 0.0,
-        },
-        PositionBasis::Contracts { .. } => reference_price.unwrap_or(1.0),
-    };
-    let Ok(quantity) = PositionQty::new(position_qty) else {
-        return 0.0;
-    };
-    rules
-        .signed_notional_from_position_qty(quantity, price)
-        .map(|notional| notional.value())
-        .unwrap_or(0.0)
-}
-
-fn estimated_base_exposure(
-    source: &TrackListReadModel,
-    signed_usd_notional: f64,
-    reference_price: Option<f64>,
-) -> (Option<String>, Option<f64>) {
-    match source.instrument_spec.position_basis() {
-        PositionBasis::BaseAsset => (None, None),
-        PositionBasis::Contracts { .. } => reference_price.map_or((None, None), |price| {
-            let base_exposure = PositionQty::new(source.position_qty)
-                .and_then(|quantity| {
-                    source
-                        .instrument_spec
-                        .base_exposure_from_position_qty(quantity, price)
-                })
-                .map(|amount| amount.value())
-                .unwrap_or_else(|_| signed_usd_notional / price);
-            (
-                Some(source.instrument_spec.base_asset().as_str().to_string()),
-                Some(base_exposure),
-            )
-        }),
-    }
-}
-
-fn positive_finite(value: Option<f64>) -> Option<f64> {
-    value.filter(|value| value.is_finite() && *value > f64::EPSILON)
 }
 
 fn finite_or_zero(value: f64) -> f64 {
@@ -304,11 +255,12 @@ pub struct TrackReadModel {
     pub best_ask: Option<f64>,
     pub current_exposure: f64,
     pub position_qty: f64,
+    pub signed_position_notional: Option<Amount>,
+    pub contract_base_exposure: Option<Amount>,
     pub decision: TrackInventoryDecisionReadModel,
     pub acquisition_session: Option<TrackAcquisitionSessionReadModel>,
     pub risk_acquisition: Option<TrackRiskAcquisitionReadModel>,
-    pub pnl_stats: TrackReadPnlStats,
-    pub unrealized_pnl: f64,
+    pub pnl: TrackPnlView,
     pub recovery_issue: Option<TrackRecoveryIssue>,
     pub has_account_margin_guard: bool,
     pub has_stale_market_data: bool,
@@ -463,44 +415,6 @@ impl From<PriceExecutionBlockReason> for TrackPriceExecutionBlockReason {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct TrackReadPnlStats {
-    pub pnl_asset: Option<String>,
-    pub gross_realized_pnl_today: f64,
-    pub gross_realized_pnl_cumulative: f64,
-    pub trading_fee_today: f64,
-    pub trading_fee_cumulative: f64,
-    pub funding_fee_today: f64,
-    pub funding_fee_cumulative: f64,
-    pub net_realized_pnl_cumulative: poise_engine::ledger::PnlAggregate,
-}
-
-impl TrackReadPnlStats {
-    pub fn net_realized_pnl(&self) -> Option<f64> {
-        self.net_realized_pnl_cumulative.complete_value()
-    }
-
-    pub fn pnl_completeness(&self) -> &poise_engine::ledger::PnlAggregateCompleteness {
-        &self.net_realized_pnl_cumulative.completeness
-    }
-}
-
-impl From<TrackPnlStats> for TrackReadPnlStats {
-    fn from(value: TrackPnlStats) -> Self {
-        let net_realized_pnl_cumulative = value.net_realized_pnl_cumulative();
-        Self {
-            pnl_asset: value.pnl_asset.map(|asset| asset.as_str().to_string()),
-            gross_realized_pnl_today: value.gross_realized_pnl_today,
-            gross_realized_pnl_cumulative: value.gross_realized_pnl_cumulative,
-            trading_fee_today: value.trading_fee_today,
-            trading_fee_cumulative: value.trading_fee_cumulative,
-            funding_fee_today: value.funding_fee_today,
-            funding_fee_cumulative: value.funding_fee_cumulative,
-            net_realized_pnl_cumulative,
-        }
-    }
-}
-
 impl TrackReadModel {
     pub(crate) fn from_source(source: TrackReadSource) -> Self {
         let TrackReadSource {
@@ -540,14 +454,15 @@ impl TrackReadModel {
             best_ask: runtime.best_ask,
             current_exposure: list_view.current_exposure,
             position_qty: list_view.position_qty,
+            signed_position_notional: list_view.signed_position_notional.clone(),
+            contract_base_exposure: list_view.contract_base_exposure.clone(),
             decision: list_view.decision.clone(),
             acquisition_session: runtime
                 .acquisition_session
                 .clone()
                 .map(TrackAcquisitionSessionReadModel::from),
             risk_acquisition: list_view.risk_acquisition.clone(),
-            pnl_stats: list_view.pnl_stats.clone(),
-            unrealized_pnl: list_view.unrealized_pnl,
+            pnl: list_view.pnl.clone(),
             recovery_issue: list_view.recovery_issue,
             has_account_margin_guard: list_view.has_account_margin_guard,
             has_stale_market_data: list_view.has_stale_market_data,
@@ -576,6 +491,8 @@ impl TrackListReadModel {
             strategy_price_status: TrackStrategyPriceStatus::from(runtime.strategy_price_status),
             current_exposure: runtime.current_exposure.0,
             position_qty: runtime.position_qty,
+            signed_position_notional: runtime.signed_position_notional.clone(),
+            contract_base_exposure: runtime.contract_base_exposure.clone(),
             decision: TrackInventoryDecisionReadModel::from(&runtime.decision),
             acquisition_session: runtime
                 .acquisition_session
@@ -585,8 +502,7 @@ impl TrackListReadModel {
                 .risk_acquisition
                 .clone()
                 .map(TrackRiskAcquisitionReadModel::from),
-            pnl_stats: TrackReadPnlStats::from(runtime.pnl_stats.clone()),
-            unrealized_pnl: runtime.unrealized_pnl,
+            pnl: runtime.pnl.clone(),
             recovery_issue: runtime
                 .executor
                 .recovery_anomaly
@@ -614,11 +530,12 @@ impl From<&TrackReadModel> for TrackListReadModel {
             strategy_price_status: value.strategy_price_status,
             current_exposure: value.current_exposure,
             position_qty: value.position_qty,
+            signed_position_notional: value.signed_position_notional.clone(),
+            contract_base_exposure: value.contract_base_exposure.clone(),
             decision: value.decision.clone(),
             acquisition_session: value.acquisition_session.clone(),
             risk_acquisition: value.risk_acquisition.clone(),
-            pnl_stats: value.pnl_stats.clone(),
-            unrealized_pnl: value.unrealized_pnl,
+            pnl: value.pnl.clone(),
             recovery_issue: value.recovery_issue,
             has_account_margin_guard: value.has_account_margin_guard,
             has_stale_market_data: value.has_stale_market_data,
@@ -874,13 +791,14 @@ mod tests {
     use crate::exchange::OrderRequest;
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
-    use poise_core::instrument::{Asset, InstrumentSpec};
+    use poise_core::instrument::{Amount, Asset, InstrumentSpec};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::{DecisionReason, TrackEffect};
     use poise_engine::executor::{BindingStatus, PolicyKind, SubmitRecoveryToken};
+    use poise_engine::ledger::TrackPnlStats;
     use poise_engine::runtime::{
         AcquisitionResetReason, AcquisitionSessionRuntimeView, BindingView, ExecutorView,
         InventoryDecisionView, RiskAcquisitionDirection, RiskAcquisitionRuntimeView,
@@ -890,9 +808,9 @@ mod tests {
     use super::{
         AccountAssetExposureReadModel, AccountAssetQuantitySource, TrackActivityLevel,
         TrackInventoryDecisionReadModel, TrackListReadModel, TrackPriceExecutionBlockReason,
-        TrackReadBindingIntent, TrackReadBindingStatus, TrackReadModel, TrackReadPnlStats,
-        TrackReadStatus, TrackRecoveryIssue, TrackRiskAcquisitionDirection,
-        TrackRiskAcquisitionReadModel, TrackStrategyPriceStatus, project_binding_status,
+        TrackReadBindingIntent, TrackReadBindingStatus, TrackReadModel, TrackReadStatus,
+        TrackRecoveryIssue, TrackRiskAcquisitionDirection, TrackRiskAcquisitionReadModel,
+        TrackStrategyPriceStatus, project_binding_status,
     };
     use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
     use crate::track_read_source::TrackReadSource;
@@ -944,18 +862,23 @@ mod tests {
     }
 
     fn test_runtime_view(decision: InventoryDecisionView) -> TrackRuntimeView {
+        let instrument_spec = test_instrument_spec();
         TrackRuntimeView {
             status: TrackStatus::Active,
-            instrument_spec: test_instrument_spec(),
+            instrument_spec: instrument_spec.clone(),
             current_exposure: Exposure(1.0),
             position_qty: 1.0,
+            signed_position_notional: Some(
+                Amount::new(101.5, instrument_spec.notional_asset().clone()).unwrap(),
+            ),
+            contract_base_exposure: None,
             decision,
             acquisition_session: None,
             risk_acquisition: None,
             manual_target_override: None,
             executor: ExecutorView::default(),
             pnl_stats: Default::default(),
-            unrealized_pnl: 0.0,
+            pnl: TrackPnlStats::default().view(instrument_spec.settlement_asset(), 0.0),
             has_account_margin_guard: false,
             price_execution_block_reason: None,
             strategy_price: Some(101.25),
@@ -969,27 +892,39 @@ mod tests {
     }
 
     fn test_track_list_read_model() -> TrackListReadModel {
+        let instrument_spec = test_instrument_spec();
         TrackListReadModel {
             track_id: "btc-core".to_string(),
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-            instrument_spec: test_instrument_spec(),
+            instrument_spec: instrument_spec.clone(),
             status: TrackReadStatus::Active,
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             strategy_price: Some(100_000.0),
             strategy_price_status: TrackStrategyPriceStatus::Live,
             current_exposure: 0.0,
             position_qty: 0.42,
+            signed_position_notional: Some(
+                Amount::new(42_000.0, instrument_spec.notional_asset().clone()).unwrap(),
+            ),
+            contract_base_exposure: None,
             decision: TrackInventoryDecisionReadModel::from(&InventoryDecisionView::default()),
             acquisition_session: None,
             risk_acquisition: None,
-            pnl_stats: TrackReadPnlStats::default(),
-            unrealized_pnl: 0.0,
+            pnl: TrackPnlStats::default().view(instrument_spec.settlement_asset(), 0.0),
             recovery_issue: None,
             has_account_margin_guard: false,
             has_stale_market_data: false,
             price_execution_block_reason: None,
             active_binding_count: 0,
         }
+    }
+
+    fn set_inverse_position_values(track: &mut TrackListReadModel) {
+        track.signed_position_notional =
+            Some(Amount::new(-3_000.0, track.instrument_spec.notional_asset().clone()).unwrap());
+        track.contract_base_exposure =
+            Some(Amount::new(-0.03, track.instrument_spec.base_asset().clone()).unwrap());
+        track.pnl = TrackPnlStats::default().view(track.instrument_spec.settlement_asset(), 0.0);
     }
 
     fn test_account_read_model() -> AccountReadModel {
@@ -1017,7 +952,7 @@ mod tests {
         track.instrument = Instrument::new(Venue::Okx, "BTC-USD-SWAP");
         track.instrument_spec = rules;
         track.position_qty = -30.0;
-        track.pnl_stats.pnl_asset = Some("BTC".to_string());
+        set_inverse_position_values(&mut track);
 
         let analysis = super::build_account_analysis_read_model(&[track]);
 
@@ -1047,6 +982,7 @@ mod tests {
     fn account_analysis_keeps_unknown_base_exposure_explicit() {
         let mut track = test_track_list_read_model();
         track.strategy_price = None;
+        track.signed_position_notional = None;
         track.recovery_issue = Some(TrackRecoveryIssue::ExpectedExposureMismatch);
 
         let analysis = super::build_account_analysis_read_model(&[track]);
@@ -1067,6 +1003,7 @@ mod tests {
         let mut track = test_track_list_read_model();
         track.instrument_spec = rules;
         track.position_qty = -30.0;
+        set_inverse_position_values(&mut track);
 
         let account = test_account_read_model();
         let analysis =
@@ -1091,6 +1028,7 @@ mod tests {
         let mut track = test_track_list_read_model();
         track.instrument_spec = rules;
         track.position_qty = -30.0;
+        set_inverse_position_values(&mut track);
 
         let analysis = super::build_account_analysis_read_model_with_account(None, &[track]);
 
