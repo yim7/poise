@@ -66,6 +66,7 @@ impl ExchangeSyncMode {
     }
 }
 
+#[derive(Clone)]
 pub struct TrackManager {
     tracks: HashMap<TrackId, TrackRuntime>,
     instruments: HashMap<Instrument, TrackId>,
@@ -194,11 +195,14 @@ impl TrackManager {
             .mutation_frame();
 
         if market_mutation_requires_durable_write(&previous_frame, &next_frame, &events, &effects) {
-            return Ok(MarketMutationOutcome::Durable(Box::new(TrackTransition {
-                frame: next_frame,
-                events,
-                effects,
-            })));
+            let next_runtime = self
+                .tracks
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
+                .clone();
+            return Ok(MarketMutationOutcome::Durable(Box::new(
+                TrackTransition::new(next_runtime, events, effects),
+            )));
         }
 
         let (
@@ -768,6 +772,20 @@ impl TrackManager {
         self.tracks.get(&TrackId::from(id))
     }
 
+    pub fn install_planned_runtime(&mut self, runtime: TrackRuntime) {
+        let id = runtime.id().clone();
+        let current = self
+            .tracks
+            .get(&id)
+            .expect("planned runtime must belong to a loaded track");
+        assert_eq!(
+            current.instrument(),
+            runtime.instrument(),
+            "planned runtime cannot change track identity"
+        );
+        self.tracks.insert(id, runtime);
+    }
+
     pub fn clock(&self) -> &dyn ClockPort {
         self.clock.as_ref()
     }
@@ -778,16 +796,12 @@ impl TrackManager {
         events: Vec<DomainEvent>,
         effects: Vec<TrackEffect>,
     ) -> Result<TrackTransition> {
-        let frame = self
+        let next_runtime = self
             .tracks
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
-            .mutation_frame();
-        Ok(TrackTransition {
-            frame,
-            events,
-            effects,
-        })
+            .clone();
+        Ok(TrackTransition::new(next_runtime, events, effects))
     }
 
     fn live_strategy_price(&self, id: &TrackId) -> Result<Option<f64>> {
