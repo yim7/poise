@@ -139,7 +139,7 @@ pub(super) fn spawn_pnl_backfill_task(
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     let state = runtime.state.reconcile.clone();
-    let account = Arc::clone(&runtime.account);
+    let account = runtime.exchange.account();
     let pnl_backfill_status = Arc::clone(&runtime.state.pnl_backfill_status);
 
     tokio::spawn(async move {

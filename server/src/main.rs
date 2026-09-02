@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
     let instance_dir = InstanceDir::new(&options.instance_dir);
     let config = config::load_config(instance_dir.config_path())?;
     if options.dry_run {
-        let (_venue, exchange_ports) = assembly::build_exchange(&config.exchange).await?;
+        let exchange_ports = assembly::build_exchange_ports(&config.exchange).await?;
         let response = dry_run::run_config_dry_run_with_ports(&config, exchange_ports).await?;
         serde_json::to_writer_pretty(std::io::stdout(), &response)?;
         println!();

@@ -14,7 +14,7 @@ pub(super) fn spawn_market_task(
     shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     let state = runtime.state.clone();
-    let market_data = Arc::clone(&runtime.market_data);
+    let market_data = runtime.exchange.market_data();
     let market_data_health_state = Arc::clone(&runtime.market_data_health_state);
     let runtime_health = Arc::clone(&runtime.state.runtime_health);
 

@@ -94,7 +94,7 @@ pub(super) fn spawn_recovery_task(
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     let state = runtime.state.clone();
-    let execution = Arc::clone(&runtime.execution);
+    let execution = runtime.exchange.execution();
     let retry_interval = runtime.recovery_retry_interval;
     let audit_interval = runtime.audit_interval;
 

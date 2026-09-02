@@ -1,10 +1,9 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use poise_core::track::Instrument;
 
-use crate::config::{ExchangeConfig, TrackSpec};
+use crate::config::TrackSpec;
 use crate::startup_preparation::{ExchangeStartupControl, TrackLeverageIndex};
 
 pub(crate) const DEFAULT_TRACK_LEVERAGE: u32 = 10;
@@ -50,25 +49,6 @@ impl ExchangeStartupControl for poise_okx::SymbolLeverageControl {
     }
 }
 
-pub(crate) fn build_exchange_startup_control(
-    config: &ExchangeConfig,
-) -> Result<Arc<dyn ExchangeStartupControl>> {
-    match config {
-        ExchangeConfig::Binance(binance_config) => Ok(Arc::new(
-            poise_binance::SymbolLeverageControl::new(binance_config)?,
-        )),
-        ExchangeConfig::Bybit(bybit_config) => Ok(Arc::new(
-            poise_bybit::SymbolLeverageControl::new(bybit_config)?,
-        )),
-        ExchangeConfig::Hyperliquid(hyperliquid_config) => Ok(Arc::new(
-            poise_hyperliquid::SymbolLeverageControl::new(hyperliquid_config)?,
-        )),
-        ExchangeConfig::Okx(okx_config) => {
-            Ok(Arc::new(poise_okx::SymbolLeverageControl::new(okx_config)?))
-        }
-    }
-}
-
 pub(crate) fn build_track_leverage_index(tracks: &[TrackSpec]) -> Result<TrackLeverageIndex> {
     let mut index = HashMap::with_capacity(tracks.len());
     for track in tracks {
@@ -92,8 +72,8 @@ mod tests {
     use anyhow::anyhow;
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
 
-    use super::{build_exchange_startup_control, build_track_leverage_index};
-    use crate::config::{ExchangeConfig, TrackSpec};
+    use super::build_track_leverage_index;
+    use crate::config::TrackSpec;
     use crate::startup_preparation::{ExchangeStartupControl, apply_exchange_startup_controls};
 
     #[test]
@@ -118,50 +98,6 @@ mod tests {
         let expected = HashMap::from([(TrackId::new("btc-core"), 12)]);
 
         assert_eq!(index, expected);
-    }
-
-    #[test]
-    fn build_exchange_startup_control_accepts_binance_credentials() {
-        build_exchange_startup_control(&ExchangeConfig::Binance(poise_binance::Config {
-            deployment: poise_binance::Deployment::Testnet,
-            api_key: Some("demo-key".into()),
-            api_secret: Some("demo-secret".into()),
-        }))
-        .unwrap();
-    }
-
-    #[test]
-    fn build_exchange_startup_control_accepts_bybit_credentials() {
-        build_exchange_startup_control(&ExchangeConfig::Bybit(poise_bybit::Config {
-            deployment: poise_bybit::Deployment::Testnet,
-            api_key: Some("demo-key".into()),
-            api_secret: Some("demo-secret".into()),
-        }))
-        .unwrap();
-    }
-
-    #[test]
-    fn build_exchange_startup_control_accepts_hyperliquid_credentials() {
-        build_exchange_startup_control(&ExchangeConfig::Hyperliquid(poise_hyperliquid::Config {
-            deployment: poise_hyperliquid::Deployment::Testnet,
-            private_key: Some(
-                "0xe908f86dbb4d55ac876378565aafeabc187f6690f046459397b17d9b9a19688e".into(),
-            ),
-            wallet_address: Some("0x2222222222222222222222222222222222222222".into()),
-            vault_address: None,
-        }))
-        .unwrap();
-    }
-
-    #[test]
-    fn build_exchange_startup_control_accepts_okx_credentials() {
-        build_exchange_startup_control(&ExchangeConfig::Okx(poise_okx::Config {
-            deployment: poise_okx::Deployment::Demo,
-            api_key: Some("demo-key".into()),
-            api_secret: Some("demo-secret".into()),
-            passphrase: Some("demo-passphrase".into()),
-        }))
-        .unwrap();
     }
 
     #[tokio::test]

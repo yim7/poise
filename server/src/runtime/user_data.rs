@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use poise_application::exchange::UserDataEvent;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -12,7 +10,7 @@ pub(super) fn spawn_user_task(
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     let state = runtime.state.clone();
-    let execution = Arc::clone(&runtime.execution);
+    let execution = runtime.exchange.execution();
 
     tokio::spawn(async move {
         state

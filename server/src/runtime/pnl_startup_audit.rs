@@ -134,7 +134,7 @@ mod tests {
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
     use poise_application::exchange::{
-        AccountCapacitySnapshot, AccountPort, RecentTrackPnlRecords, UserDataEvent,
+        AccountCapacitySnapshot, AccountPort, ExchangePorts, RecentTrackPnlRecords, UserDataEvent,
     };
     use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
     use poise_core::events::DomainEvent;
@@ -327,14 +327,14 @@ mod tests {
         let runtime = crate::runtime::ServerRuntime::new(
             state,
             effect_worker_context.effect_worker_state,
-            crate::runtime::RuntimePorts::new(
+            ExchangePorts::new(
                 execution.clone(),
                 unexpected.clone(),
                 unexpected.clone(),
                 account.clone(),
                 unexpected,
-                Arc::new(SystemClock),
             ),
+            Arc::new(SystemClock),
             vec![crate::runtime::RuntimeStartupDefinition::new(
                 test_track(),
                 1,

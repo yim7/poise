@@ -248,12 +248,12 @@ async fn preflight_track_startup_inner(
     seed: &TrackStartupSeed,
 ) -> Result<TrackStartupPreflight> {
     let instrument = seed.instrument().clone();
-    let position = retry_startup_step("get_position", || {
-        runtime.execution.get_position(&instrument)
-    })
-    .await?;
+    let execution = runtime.exchange.execution();
+    let position =
+        retry_startup_step("get_position", || execution.get_position(&instrument)).await?;
+    let metadata = runtime.exchange.metadata();
     let exchange_info = retry_startup_step("get_exchange_info", || {
-        runtime.metadata.get_exchange_info(&instrument)
+        metadata.get_exchange_info(&instrument)
     })
     .await?;
     validate_startup_instrument_spec(seed, &exchange_info.instrument_spec)?;
@@ -297,18 +297,17 @@ async fn clear_inherited_open_orders(
     runtime: &ServerRuntime,
     instrument: &Instrument,
 ) -> Result<CleanupReplayFilter> {
-    let open_orders = retry_startup_step("get_open_orders", || {
-        runtime.execution.get_open_orders(instrument)
-    })
-    .await?;
+    let execution = runtime.exchange.execution();
+    let open_orders =
+        retry_startup_step("get_open_orders", || execution.get_open_orders(instrument)).await?;
     if open_orders.is_empty() {
         return Ok(CleanupReplayFilter::default());
     }
     let cleanup_filter = CleanupReplayFilter::from_orders(open_orders.orders());
 
-    retry_startup_step("cancel_all", || runtime.execution.cancel_all(instrument)).await?;
+    retry_startup_step("cancel_all", || execution.cancel_all(instrument)).await?;
     retry_startup_step("await_open_orders_cleared", || async {
-        let remaining = runtime.execution.get_open_orders(instrument).await?;
+        let remaining = execution.get_open_orders(instrument).await?;
         if remaining.is_empty() {
             Ok(())
         } else {
@@ -332,8 +331,8 @@ async fn probe_startup_account_capacity(
 ) -> Result<AccountCapacitySnapshot> {
     let instrument = track.instrument().clone();
     let startup_leverage = track.startup_leverage();
-    let account_summary = Arc::clone(&runtime.account_summary);
-    let market_data = Arc::clone(&runtime.market_data);
+    let account_summary = runtime.exchange.account_summary();
+    let market_data = runtime.exchange.market_data();
     retry_startup_step("probe_startup_capacity", || {
         let account_summary = Arc::clone(&account_summary);
         let market_data = Arc::clone(&market_data);
@@ -440,7 +439,7 @@ async fn apply_startup_replay_events(
     for replay_event in replay_events {
         exchange_state::apply_user_data_event(
             &runtime.state.reconcile,
-            runtime.execution.as_ref(),
+            runtime.exchange.execution().as_ref(),
             &replay_event.track_id,
             replay_event.event,
         )
@@ -495,7 +494,7 @@ mod tests {
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
     use poise_application::exchange::{
-        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort,
+        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExchangePorts, ExecutionPort,
         MarketDataTick, MetadataPort, OrderReceipt, OrderStatus, Position, RecentTrackPnlRecords,
         UserDataEvent, UserDataPayload,
     };
@@ -513,7 +512,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::assembly::SystemClock;
-    use crate::runtime::{RuntimePorts, RuntimeStartupDefinition};
+    use crate::runtime::RuntimeStartupDefinition;
     use crate::test_support::{
         build_runtime_and_effect_worker_test_contexts, build_test_application_services,
         seed_persisted_pending_submit_effect, test_instrument_spec_for, test_track_definition,
@@ -524,6 +523,16 @@ mod tests {
 
     fn amount(value: f64, asset: &str) -> Amount {
         Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+    }
+
+    fn exchange_ports(exchange: Arc<StartupExchange>) -> ExchangePorts {
+        ExchangePorts::new(
+            exchange.clone(),
+            exchange.clone(),
+            exchange.clone(),
+            exchange.clone(),
+            exchange,
+        )
     }
 
     #[tokio::test]
@@ -553,14 +562,8 @@ mod tests {
         let runtime = super::ServerRuntime::new(
             runtime_context.runtime_state(),
             effect_worker_context.effect_worker_state,
-            RuntimePorts::new(
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                Arc::new(SystemClock),
-            ),
+            exchange_ports(exchange.clone()),
+            Arc::new(SystemClock),
             vec![RuntimeStartupDefinition::new(
                 test_track_definition("btc-core"),
                 25,
@@ -641,14 +644,8 @@ mod tests {
         let runtime = super::ServerRuntime::new(
             runtime_context.runtime_state(),
             effect_worker_context.effect_worker_state,
-            RuntimePorts::new(
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                Arc::new(SystemClock),
-            ),
+            exchange_ports(exchange.clone()),
+            Arc::new(SystemClock),
             vec![RuntimeStartupDefinition::new(track, 2)],
         );
         let (_sender, mut receiver) = mpsc::channel(8);
@@ -726,14 +723,8 @@ mod tests {
         let runtime = super::ServerRuntime::new(
             runtime_context.runtime_state(),
             effect_worker_context.effect_worker_state,
-            RuntimePorts::new(
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                Arc::new(SystemClock),
-            ),
+            exchange_ports(exchange.clone()),
+            Arc::new(SystemClock),
             vec![RuntimeStartupDefinition::new(track, 2)],
         );
         let (_sender, mut receiver) = mpsc::channel(8);
@@ -845,14 +836,8 @@ mod tests {
         let runtime = super::ServerRuntime::new(
             runtime_context.runtime_state(),
             effect_worker_context.effect_worker_state,
-            RuntimePorts::new(
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                Arc::new(SystemClock),
-            ),
+            exchange_ports(exchange.clone()),
+            Arc::new(SystemClock),
             vec![RuntimeStartupDefinition::new(
                 test_track_definition("btc-core"),
                 10,
@@ -981,14 +966,8 @@ mod tests {
         let runtime = super::ServerRuntime::new(
             runtime_context.runtime_state(),
             effect_worker_context.effect_worker_state,
-            RuntimePorts::new(
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                Arc::new(SystemClock),
-            ),
+            exchange_ports(exchange.clone()),
+            Arc::new(SystemClock),
             vec![RuntimeStartupDefinition::new(
                 test_track_definition("btc-core"),
                 10,
@@ -1047,14 +1026,8 @@ mod tests {
         let runtime = super::ServerRuntime::new(
             runtime_context.runtime_state(),
             effect_worker_context.effect_worker_state,
-            RuntimePorts::new(
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                Arc::new(SystemClock),
-            ),
+            exchange_ports(exchange.clone()),
+            Arc::new(SystemClock),
             vec![RuntimeStartupDefinition::new(
                 test_track_definition("btc-core"),
                 10,
@@ -1132,14 +1105,8 @@ mod tests {
         let runtime = super::ServerRuntime::new(
             runtime_context.runtime_state(),
             effect_worker_context.effect_worker_state,
-            RuntimePorts::new(
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                Arc::new(SystemClock),
-            ),
+            exchange_ports(exchange.clone()),
+            Arc::new(SystemClock),
             vec![RuntimeStartupDefinition::new(
                 test_track_definition("btc-core"),
                 10,
@@ -1189,14 +1156,8 @@ mod tests {
         let runtime = super::ServerRuntime::new(
             runtime_context.runtime_state(),
             effect_worker_context.effect_worker_state,
-            RuntimePorts::new(
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                Arc::new(SystemClock),
-            ),
+            exchange_ports(exchange.clone()),
+            Arc::new(SystemClock),
             vec![RuntimeStartupDefinition::new(
                 test_track_definition("btc-core"),
                 10,
@@ -1374,14 +1335,8 @@ mod tests {
         let runtime = super::ServerRuntime::new(
             runtime_context.runtime_state(),
             effect_worker_context.effect_worker_state,
-            RuntimePorts::new(
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                exchange.clone(),
-                Arc::new(SystemClock),
-            ),
+            exchange_ports(exchange.clone()),
+            Arc::new(SystemClock),
             vec![RuntimeStartupDefinition::new(track, 2)],
         );
         (runtime, exchange)

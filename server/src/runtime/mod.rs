@@ -8,9 +8,7 @@ use crate::server_context::{EffectWorkerState, ReconcileState, RuntimeState};
 use crate::test_support::RuntimeTestContext;
 use anyhow::{Result, anyhow};
 use poise_application::TrackMutationError;
-use poise_application::exchange::{
-    AccountPort, AccountSummaryPort, ExecutionPort, MarketDataPort, MetadataPort, UserDataEvent,
-};
+use poise_application::exchange::{ExchangePorts, ExecutionPort, UserDataEvent};
 use poise_core::instrument::InstrumentSpec;
 use poise_core::track::{Instrument, TrackDefinition, TrackId};
 use poise_core::types::Exposure;
@@ -96,11 +94,7 @@ impl RuntimeStartupDefinition {
 pub struct ServerRuntime {
     state: RuntimeState,
     effect_worker_state: EffectWorkerState,
-    execution: Arc<dyn ExecutionPort>,
-    market_data: Arc<dyn MarketDataPort>,
-    account_summary: Arc<dyn AccountSummaryPort>,
-    account: Arc<dyn AccountPort>,
-    metadata: Arc<dyn MetadataPort>,
+    exchange: ExchangePorts,
     clock: Arc<dyn ClockPort>,
     startup_definitions: Vec<RuntimeStartupDefinition>,
     recovery_retry_interval: Duration,
@@ -109,36 +103,6 @@ pub struct ServerRuntime {
     market_data_health_state: Arc<market_data_health::MarketDataHealthState>,
     market_data_health_max_sleep_interval: Duration,
     shutdown_tx: watch::Sender<bool>,
-}
-
-#[derive(Clone)]
-pub(crate) struct RuntimePorts {
-    execution: Arc<dyn ExecutionPort>,
-    market_data: Arc<dyn MarketDataPort>,
-    account_summary: Arc<dyn AccountSummaryPort>,
-    account: Arc<dyn AccountPort>,
-    metadata: Arc<dyn MetadataPort>,
-    clock: Arc<dyn ClockPort>,
-}
-
-impl RuntimePorts {
-    pub(crate) fn new(
-        execution: Arc<dyn ExecutionPort>,
-        market_data: Arc<dyn MarketDataPort>,
-        account_summary: Arc<dyn AccountSummaryPort>,
-        account: Arc<dyn AccountPort>,
-        metadata: Arc<dyn MetadataPort>,
-        clock: Arc<dyn ClockPort>,
-    ) -> Self {
-        Self {
-            execution,
-            market_data,
-            account_summary,
-            account,
-            metadata,
-            clock,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -194,13 +158,15 @@ impl ServerRuntime {
     pub fn new(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        ports: RuntimePorts,
+        exchange: ExchangePorts,
+        clock: Arc<dyn ClockPort>,
         startup_definitions: Vec<RuntimeStartupDefinition>,
     ) -> Self {
         Self::with_runtime_options(
             state,
             effect_worker_state,
-            ports,
+            exchange,
+            clock,
             startup_definitions,
             RuntimeIntervals::new(
                 Duration::from_secs(1),
@@ -214,14 +180,16 @@ impl ServerRuntime {
     pub(crate) fn with_startup_definitions(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        ports: RuntimePorts,
+        exchange: ExchangePorts,
+        clock: Arc<dyn ClockPort>,
         startup_definitions: Vec<RuntimeStartupDefinition>,
         recovery_retry_interval: Duration,
     ) -> Self {
         Self::with_runtime_options(
             state,
             effect_worker_state,
-            ports,
+            exchange,
+            clock,
             startup_definitions,
             RuntimeIntervals::new(
                 recovery_retry_interval,
@@ -235,7 +203,8 @@ impl ServerRuntime {
     fn with_runtime_options(
         state: RuntimeState,
         effect_worker_state: EffectWorkerState,
-        ports: RuntimePorts,
+        exchange: ExchangePorts,
+        clock: Arc<dyn ClockPort>,
         startup_definitions: Vec<RuntimeStartupDefinition>,
         intervals: RuntimeIntervals,
     ) -> Self {
@@ -243,12 +212,8 @@ impl ServerRuntime {
         Self {
             state,
             effect_worker_state,
-            execution: ports.execution,
-            market_data: ports.market_data,
-            account_summary: ports.account_summary,
-            account: ports.account,
-            metadata: ports.metadata,
-            clock: ports.clock,
+            exchange,
+            clock,
             startup_definitions,
             recovery_retry_interval: intervals.recovery_retry_interval,
             audit_interval: intervals.audit_interval,
@@ -261,11 +226,11 @@ impl ServerRuntime {
 
     pub async fn start(&self) -> Result<RuntimeHandles> {
         pnl_startup_audit::run_startup_pnl_audit(&self.state).await?;
-        let mut user_receiver = self.account.subscribe_user_data().await?;
-        let startup_cutoff = startup_bootstrap::retry_startup_step("get_server_time", || {
-            self.metadata.get_server_time()
-        })
-        .await?;
+        let mut user_receiver = self.exchange.account().subscribe_user_data().await?;
+        let metadata = self.exchange.metadata();
+        let startup_cutoff =
+            startup_bootstrap::retry_startup_step("get_server_time", || metadata.get_server_time())
+                .await?;
         startup_bootstrap::complete_startup(self, &mut user_receiver, startup_cutoff).await?;
         account_refresh::refresh_once(&self.state).await?;
         let account_task = self.spawn_account_task(self.shutdown_tx.subscribe());
@@ -304,7 +269,8 @@ impl ServerRuntime {
 
         let tracks = self.state.reconcile.runtime.track_instruments().await;
         for track in &tracks {
-            if let Err(error) = self.execution.cancel_all(&track.instrument).await {
+            let execution = self.exchange.execution();
+            if let Err(error) = execution.cancel_all(&track.instrument).await {
                 tracing::warn!(
                     "failed to cancel all orders for {} during shutdown: {error}",
                     track.instrument.symbol
@@ -314,7 +280,7 @@ impl ServerRuntime {
 
             if let Err(error) = sync_exchange_state_from_exchange(
                 &self.state.reconcile,
-                self.execution.as_ref(),
+                execution.as_ref(),
                 &track.id,
                 &track.instrument,
                 ExchangeSyncMode::RecoverOnly,
@@ -356,8 +322,8 @@ impl ServerRuntime {
     fn spawn_effect_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         EffectWorker::with_shutdown_rx(
             self.effect_worker_state.clone(),
-            Arc::clone(&self.execution),
-            Arc::clone(&self.account),
+            self.exchange.execution(),
+            self.exchange.account(),
             Duration::from_millis(10),
             shutdown_rx,
         )
