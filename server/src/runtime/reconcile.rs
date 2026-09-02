@@ -315,8 +315,8 @@ pub(super) async fn sync_exchange_state_from_exchange(
         match outcome {
             ExchangeStateSyncOutcome::Applied => {
                 if !state
-                    .session_effect_queue
-                    .has_unresolved_submit_outcome_for_track(&TrackId::new(track_id))
+                    .runtime
+                    .has_unresolved_submit_outcome(&TrackId::new(track_id))
                 {
                     state
                         .exchange_freshness

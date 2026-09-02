@@ -15,7 +15,6 @@ use crate::runtime::{
     AccountMarginGuardStore, PnlBackfillStatus, RecoveryDirtyState, RuntimeHealth,
     TrackReconcileGuards,
 };
-use crate::submit_preflight::SubmitPreflight;
 
 #[derive(Clone)]
 pub struct HttpState {
@@ -51,17 +50,14 @@ pub struct WebSocketState {
 pub struct ReconcileState {
     pub runtime: Arc<TradingRuntime>,
     pub runtime_lifecycle_service: Arc<TrackRuntimeLifecycleService>,
-    pub session_effect_queue: SessionEffectQueue,
     pub exchange_freshness: Arc<ExchangeFreshness>,
     pub reconcile_guards: Arc<TrackReconcileGuards>,
-    pub submit_preflight: Arc<SubmitPreflight>,
     pub recovery_dirty_state: Arc<RecoveryDirtyState>,
 }
 
 #[derive(Clone)]
 pub struct RuntimeState {
     pub reconcile: ReconcileState,
-    pub notifications: broadcast::Sender<ApplicationNotification>,
     pub live_view_notifications: broadcast::Sender<String>,
     pub account_monitor: Arc<AccountMonitor>,
     pub account_margin_guard: Arc<AccountMarginGuardStore>,

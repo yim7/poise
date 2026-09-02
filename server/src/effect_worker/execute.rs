@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+use poise_application::submit_effect_service::SubmitReceiptOutcome;
 use poise_application::{
     CancelReceiptResolution, SessionEffectOutcome, SessionTrackEffect, TrackInput,
     TrackUpdateReceipt, is_loaded_track_invariant_violation,
@@ -14,7 +15,6 @@ use crate::order_outcome::{
     OutcomeClass, OutcomeUnknownRecovery, cancel_writeback_outcome_unknown, classify_cancel_error,
     classify_submit_error, classify_submit_receipt_writeback_error,
 };
-use crate::submit_coordinator::SubmitCoordinator;
 
 pub(super) async fn execute_submit(
     worker: &EffectWorker,
@@ -23,12 +23,6 @@ pub(super) async fn execute_submit(
     recovery_token: SubmitRecoveryToken,
     _desired_exposure: poise_core::types::Exposure,
 ) -> Result<SessionEffectOutcome> {
-    let submit = SubmitCoordinator::new(
-        worker.execution.clone(),
-        worker.state.submit_effect_service.clone(),
-        worker.state.reconcile.submit_preflight.clone(),
-    );
-
     if matches!(
         worker
             .state
@@ -50,42 +44,46 @@ pub(super) async fn execute_submit(
         });
     }
 
-    let Some(flight) = submit.prepare(effect, request, recovery_token).await? else {
+    let Some(completion) = worker
+        .state
+        .submit_effect_service
+        .prepare(worker.execution.as_ref(), effect, request, recovery_token)
+        .await?
+    else {
         return Ok(SessionEffectOutcome::Finished);
     };
-    let (request, completion) = flight.into_parts();
+    let request = completion.request().clone();
 
     match worker.execution.submit_order(request.clone()).await {
         Ok(receipt) => {
-            if !worker
-                .state
-                .session_effect_queue
-                .record_submit_awaiting_resolution(&effect.effect_id)
-            {
-                return Ok(SessionEffectOutcome::Blocked {
-                    reason: format!(
-                        "submit effect `{}` was not in an in-flight queue state",
-                        effect.effect_id
-                    ),
-                });
-            }
-            if let Err(writeback_failure) = completion.record_receipt(&receipt).await {
-                let (error, completion) = writeback_failure.into_parts();
-                if let OutcomeClass::OutcomeUnknown(recovery) =
-                    classify_submit_receipt_writeback_error(&error)
-                {
-                    return Ok(defer_submit_until_exchange_state(
-                        worker,
-                        effect.track_id.as_str(),
-                        &request.instrument,
-                        recovery,
-                    )
-                    .await);
+            match completion.record_receipt(&receipt).await {
+                Ok(SubmitReceiptOutcome::Recorded) => {}
+                Ok(SubmitReceiptOutcome::QueueOwnershipLost) => {
+                    return Ok(SessionEffectOutcome::Blocked {
+                        reason: format!(
+                            "submit effect `{}` was not in an in-flight queue state",
+                            effect.effect_id
+                        ),
+                    });
                 }
-                completion
-                    .record_completion_failure(&error.to_string())
-                    .await?;
-                return Err(error);
+                Err(writeback_failure) => {
+                    let (error, completion) = writeback_failure.into_parts();
+                    if let OutcomeClass::OutcomeUnknown(recovery) =
+                        classify_submit_receipt_writeback_error(&error)
+                    {
+                        return Ok(defer_submit_until_exchange_state(
+                            worker,
+                            effect.track_id.as_str(),
+                            &request.instrument,
+                            recovery,
+                        )
+                        .await);
+                    }
+                    completion
+                        .record_completion_failure(&error.to_string())
+                        .await?;
+                    return Err(error);
+                }
             }
             Ok(SessionEffectOutcome::Finished)
         }
@@ -184,9 +182,8 @@ async fn defer_unknown_submit_dispatch_until_exchange_state(
 
     if worker
         .state
-        .session_effect_queue
-        .active_submit_effect_ids()
-        .contains(&effect.effect_id)
+        .submit_effect_service
+        .is_submit_active(&effect.effect_id)
     {
         worker
             .state

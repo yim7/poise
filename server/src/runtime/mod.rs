@@ -29,7 +29,6 @@ mod pnl_backfill;
 mod pnl_startup_audit;
 mod reconcile;
 mod startup_bootstrap;
-mod submit_preflight;
 mod user_data;
 
 pub use guards::{AccountMarginGuardStore, TrackReconcileGuards};
@@ -178,8 +177,6 @@ pub struct RuntimeHandles {
     #[cfg_attr(not(test), allow(dead_code))]
     pub recovery_task: JoinHandle<()>,
     #[cfg_attr(not(test), allow(dead_code))]
-    pub submit_preflight_task: JoinHandle<()>,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub account_task: JoinHandle<()>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub pnl_backfill_task: JoinHandle<()>,
@@ -275,7 +272,6 @@ impl ServerRuntime {
         let pnl_backfill_task = self.spawn_pnl_backfill_task(self.shutdown_tx.subscribe());
         let market_data_health_task =
             self.spawn_market_data_health_task(self.shutdown_tx.subscribe());
-        let submit_preflight_task = self.spawn_submit_preflight_task(self.shutdown_tx.subscribe());
         let effect_task = self.spawn_effect_task(self.shutdown_tx.subscribe());
         let user_task = self.spawn_user_task(user_receiver, self.shutdown_tx.subscribe());
         let market_task = self.spawn_market_task(self.shutdown_tx.subscribe());
@@ -286,7 +282,6 @@ impl ServerRuntime {
             user_task,
             effect_task,
             recovery_task,
-            submit_preflight_task,
             account_task,
             pnl_backfill_task,
         })
@@ -337,14 +332,12 @@ impl ServerRuntime {
         handles.market_data_health_task.abort();
         handles.user_task.abort();
         handles.recovery_task.abort();
-        handles.submit_preflight_task.abort();
         handles.account_task.abort();
         handles.pnl_backfill_task.abort();
         let _ = handles.market_task.await;
         let _ = handles.market_data_health_task.await;
         let _ = handles.user_task.await;
         let _ = handles.recovery_task.await;
-        let _ = handles.submit_preflight_task.await;
         let _ = handles.account_task.await;
         let _ = handles.pnl_backfill_task.await;
 
@@ -372,10 +365,6 @@ impl ServerRuntime {
 
     fn spawn_recovery_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         reconcile::spawn_recovery_task(self, shutdown_rx)
-    }
-
-    fn spawn_submit_preflight_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
-        submit_preflight::spawn_submit_preflight_task(self, shutdown_rx)
     }
 
     fn spawn_account_task(&self, shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {

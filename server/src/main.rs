@@ -16,8 +16,6 @@ mod runtime;
 mod server_context;
 mod startup_preparation;
 mod state_bootstrap;
-mod submit_coordinator;
-mod submit_preflight;
 #[cfg(test)]
 mod test_support;
 mod websocket;
@@ -694,13 +692,11 @@ total_loss_limit = 600.0
         runtime_handles.user_task.abort();
         runtime_handles.effect_task.abort();
         runtime_handles.recovery_task.abort();
-        runtime_handles.submit_preflight_task.abort();
         runtime_handles.pnl_backfill_task.abort();
         let _ = runtime_handles.market_task.await;
         let _ = runtime_handles.user_task.await;
         let _ = runtime_handles.effect_task.await;
         let _ = runtime_handles.recovery_task.await;
-        let _ = runtime_handles.submit_preflight_task.await;
         let _ = runtime_handles.pnl_backfill_task.await;
     }
 

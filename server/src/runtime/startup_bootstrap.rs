@@ -917,9 +917,10 @@ mod tests {
         assert_eq!(exchange.cancel_all_calls.load(Ordering::SeqCst), 1);
         assert!(
             !runtime_context
-                .submit_preflight
-                .has_tracked_submit_effects()
-                .await
+                .runtime_state()
+                .reconcile
+                .runtime
+                .has_unresolved_submit_outcome(&TrackId::new("btc-core"))
         );
         let effects = repository
             .list_recent_track_effects(&TrackId::new("btc-core"), 8)

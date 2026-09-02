@@ -31,7 +31,6 @@ use crate::runtime::{
     RuntimeHealth, TrackReconcileGuards,
 };
 use crate::server_context::{EffectWorkerState, RuntimeState};
-use crate::submit_preflight::SubmitPreflight;
 
 #[derive(Clone)]
 pub(crate) struct TestApplicationServices {
@@ -50,7 +49,6 @@ pub(crate) struct RuntimeTestContext {
     runtime_state: RuntimeState,
     pub(crate) notifications: broadcast::Sender<ApplicationNotification>,
     pub(crate) exchange_freshness: Arc<ExchangeFreshness>,
-    pub(crate) submit_preflight: Arc<SubmitPreflight>,
     runtime: Arc<TradingRuntime>,
 }
 
@@ -111,7 +109,6 @@ impl RuntimeTestContext {
 pub(crate) struct EffectWorkerTestContext {
     pub(crate) effect_worker_state: EffectWorkerState,
     pub(crate) exchange_freshness: Arc<ExchangeFreshness>,
-    pub(crate) submit_preflight: Arc<SubmitPreflight>,
 }
 
 impl From<EffectWorkerTestContext> for EffectWorkerState {
@@ -510,7 +507,6 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     account_monitor: Arc<AccountMonitor>,
 ) -> (RuntimeTestContext, EffectWorkerTestContext) {
     let exchange_freshness = Arc::new(ExchangeFreshness::default());
-    let submit_preflight = Arc::new(SubmitPreflight::new());
     let reconcile_guards = Arc::new(TrackReconcileGuards::default());
     let runtime_health = Arc::new(RuntimeHealth::new());
     let pnl_backfill_status = Arc::new(PnlBackfillStatus::new());
@@ -521,15 +517,12 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     let reconcile = crate::assembly::build_reconcile_state(
         Arc::clone(&services.runtime),
         Arc::clone(&services.runtime_lifecycle_service),
-        services.session_effect_queue.clone(),
         exchange_freshness.clone(),
         reconcile_guards,
-        submit_preflight.clone(),
         Arc::clone(&services.recovery_dirty_state),
     );
     let runtime_state = crate::assembly::build_runtime_state(
         reconcile.clone(),
-        services.notifications.clone(),
         broadcast::channel(1024).0,
         Arc::clone(&account_monitor),
         Arc::clone(&services.account_margin_guard),
@@ -563,29 +556,22 @@ pub(crate) fn build_test_contexts_from_runtime_states(
         &effect_worker_state.reconcile.exchange_freshness,
     ));
     debug_assert!(Arc::ptr_eq(
-        &runtime_state.reconcile.submit_preflight,
-        &effect_worker_state.reconcile.submit_preflight,
-    ));
-    debug_assert!(Arc::ptr_eq(
         &runtime_state.runtime_health,
         &effect_worker_state.runtime_health,
     ));
 
     let exchange_freshness = Arc::clone(&runtime_state.reconcile.exchange_freshness);
-    let submit_preflight = Arc::clone(&runtime_state.reconcile.submit_preflight);
 
     (
         RuntimeTestContext {
             runtime_state,
             notifications,
             exchange_freshness: Arc::clone(&exchange_freshness),
-            submit_preflight: Arc::clone(&submit_preflight),
             runtime: Arc::clone(&runtime),
         },
         EffectWorkerTestContext {
             effect_worker_state,
             exchange_freshness,
-            submit_preflight,
         },
     )
 }
@@ -596,15 +582,12 @@ pub(crate) fn build_effect_worker_test_context(
     _effect_store: Arc<dyn TrackEffectJournal>,
 ) -> EffectWorkerTestContext {
     let exchange_freshness = Arc::new(ExchangeFreshness::default());
-    let submit_preflight = Arc::new(SubmitPreflight::new());
     let runtime_health = Arc::new(RuntimeHealth::new());
     let reconcile = crate::assembly::build_reconcile_state(
         Arc::clone(&services.runtime),
         Arc::clone(&services.runtime_lifecycle_service),
-        services.session_effect_queue.clone(),
         exchange_freshness.clone(),
         Arc::new(TrackReconcileGuards::default()),
-        submit_preflight.clone(),
         Arc::clone(&services.recovery_dirty_state),
     );
     EffectWorkerTestContext {
@@ -616,6 +599,5 @@ pub(crate) fn build_effect_worker_test_context(
             runtime_health,
         ),
         exchange_freshness,
-        submit_preflight,
     }
 }

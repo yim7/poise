@@ -128,6 +128,12 @@ pub enum SessionEffectOutcome {
     Blocked { reason: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SubmitDispatchPreparation {
+    Direct,
+    NeedsLiveOrderLookup { client_order_id: String },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeferredUntil {
     FreshMarket,
@@ -283,6 +289,7 @@ struct SessionEffectBatch {
 struct QueuedEffect {
     effect: SessionTrackEffect,
     dispatch_state: QueuedEffectState,
+    submit_started: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,6 +457,7 @@ impl SessionEffectQueue {
                     QueuedEffect {
                         effect,
                         dispatch_state: QueuedEffectState::Queued,
+                        submit_started: false,
                     }
                 })
                 .collect();
@@ -490,7 +498,7 @@ impl SessionEffectQueue {
         None
     }
 
-    pub fn record_submit_awaiting_resolution(&self, effect_id: &str) -> bool {
+    pub(crate) fn record_submit_awaiting_resolution(&self, effect_id: &str) -> bool {
         let mut inner = self.inner.lock().unwrap();
         let Some((track_id, effect)) = inner.effect_mut(effect_id) else {
             return false;
@@ -511,6 +519,28 @@ impl SessionEffectQueue {
         inner.mark_track_ready(&track_id);
         inner.advance_exchange_state_revision(&track_id);
         true
+    }
+
+    pub(crate) fn prepare_submit_dispatch(
+        &self,
+        effect_id: &str,
+    ) -> Option<SubmitDispatchPreparation> {
+        let mut inner = self.inner.lock().unwrap();
+        let (_, effect) = inner.effect_mut(effect_id)?;
+        if effect.dispatch_state != QueuedEffectState::InFlight {
+            return None;
+        }
+        let TrackEffect::SubmitOrder { request, .. } = &effect.effect.effect else {
+            return None;
+        };
+        if effect.submit_started {
+            Some(SubmitDispatchPreparation::NeedsLiveOrderLookup {
+                client_order_id: request.client_order_id.clone(),
+            })
+        } else {
+            effect.submit_started = true;
+            Some(SubmitDispatchPreparation::Direct)
+        }
     }
 
     pub(crate) fn record_submit_outcome_unknown(
@@ -755,6 +785,10 @@ impl SessionEffectQueue {
             })
             .map(|item| item.effect.effect_id.clone())
             .collect()
+    }
+
+    pub(crate) fn is_active_submit_effect(&self, effect_id: &str) -> bool {
+        self.active_submit_effect_ids().contains(effect_id)
     }
 
     pub fn has_unresolved_submit_outcome_for_track(&self, track_id: &TrackId) -> bool {
@@ -1405,7 +1439,7 @@ mod tests {
         CancelQueueAction, CancelReceiptResolution, DeferredUntil, FollowUpQueueAction,
         InternalFollowUpKey, PlannedCancelFollowUpResolution, PlannedCancelFollowUpResult,
         SessionEffectOutcome, SessionEffectQueue, SessionPendingEffectState, SessionQueueAction,
-        WakeSignal,
+        SubmitDispatchPreparation, WakeSignal,
     };
 
     fn enqueue_effects(
@@ -1639,6 +1673,24 @@ mod tests {
             queue.active_submit_hints_for_track(&track_id)[0].phase,
             PendingSubmitPhase::AwaitingExchangeState,
             "the next complete exchange snapshot may now resolve the submit"
+        );
+    }
+
+    #[test]
+    fn submit_queue_remembers_when_exchange_dispatch_may_have_started() {
+        let queue = SessionEffectQueue::default();
+        let enqueued = enqueue_effects(&queue, "btc-core", &[submit_effect("client-1")]);
+
+        assert_eq!(queue.claim_next().unwrap().effect_id, enqueued[0]);
+        assert_eq!(
+            queue.prepare_submit_dispatch(&enqueued[0]),
+            Some(SubmitDispatchPreparation::Direct)
+        );
+        assert_eq!(
+            queue.prepare_submit_dispatch(&enqueued[0]),
+            Some(SubmitDispatchPreparation::NeedsLiveOrderLookup {
+                client_order_id: "client-1".into(),
+            })
         );
     }
 

@@ -3,43 +3,21 @@ use std::sync::Arc;
 use anyhow::{Error, Result};
 use poise_core::track::TrackId;
 use poise_engine::executor::SubmitRecoveryToken;
-pub use poise_engine::manager::SubmitRecoveryOrderLookup;
+use poise_engine::manager::SubmitRecoveryOrderLookup;
 #[cfg(any(test, feature = "server-test-support"))]
 use poise_engine::manager::TrackManager;
-use poise_engine::ports::{OrderReceipt, OrderRequest};
+use poise_engine::ports::{ExecutionPort, OrderReceipt, OrderRequest};
 #[cfg(any(test, feature = "server-test-support"))]
 use tokio::sync::RwLock;
 
 use crate::trading_runtime::{
     SubmitRecoveryReceipt, TrackInput, TrackUpdateReceipt, TradingRuntime,
 };
+use crate::{SessionTrackEffect, session_effect_queue::SubmitDispatchPreparation};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SubmitAttemptResult {
-    invalidates_pending_submit: bool,
-}
-
-impl SubmitAttemptResult {
-    pub fn invalidates_pending_submit(&self) -> bool {
-        self.invalidates_pending_submit
-    }
-
-    pub(crate) fn changed() -> Self {
-        Self {
-            invalidates_pending_submit: true,
-        }
-    }
-
-    pub(crate) fn unchanged() -> Self {
-        Self {
-            invalidates_pending_submit: false,
-        }
-    }
-}
-
-pub enum SubmitAttempt {
+pub(crate) enum SubmitAttempt {
     Dispatch(SubmitDispatch),
-    Finished(SubmitAttemptResult),
+    Finished,
 }
 
 /// 同一条 submit 生命周期只能结束一次；重复结束必须在类型层面不合法。
@@ -58,6 +36,12 @@ pub struct SubmitDispatch {
     effect_id: String,
     request: OrderRequest,
     desired_exposure: poise_core::types::Exposure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitReceiptOutcome {
+    Recorded,
+    QueueOwnershipLost,
 }
 
 impl SubmitDispatch {
@@ -84,7 +68,7 @@ impl SubmitDispatch {
     pub async fn record_receipt(
         self,
         receipt: &OrderReceipt,
-    ) -> std::result::Result<SubmitAttemptResult, SubmitReceiptWritebackFailure> {
+    ) -> std::result::Result<SubmitReceiptOutcome, SubmitReceiptWritebackFailure> {
         let SubmitDispatch {
             runtime,
             track_id,
@@ -92,6 +76,12 @@ impl SubmitDispatch {
             request,
             desired_exposure,
         } = self;
+        if !runtime
+            .session_effect_queue()
+            .record_submit_awaiting_resolution(&effect_id)
+        {
+            return Ok(SubmitReceiptOutcome::QueueOwnershipLost);
+        }
         match runtime
             .handle(
                 &track_id,
@@ -104,7 +94,7 @@ impl SubmitDispatch {
             )
             .await
         {
-            Ok(TrackUpdateReceipt::SubmitAttemptFinished(result)) => Ok(result),
+            Ok(TrackUpdateReceipt::SubmitAttemptFinished) => Ok(SubmitReceiptOutcome::Recorded),
             Ok(_) => unreachable!("submit completion must return a submit attempt receipt"),
             Err(error) => Err(SubmitReceiptWritebackFailure {
                 error,
@@ -119,7 +109,7 @@ impl SubmitDispatch {
         }
     }
 
-    pub async fn record_failure(self, error: &str) -> Result<SubmitAttemptResult> {
+    pub async fn record_failure(self, error: &str) -> Result<()> {
         match self
             .runtime
             .handle(
@@ -132,12 +122,12 @@ impl SubmitDispatch {
             )
             .await?
         {
-            TrackUpdateReceipt::SubmitAttemptFinished(result) => Ok(result),
+            TrackUpdateReceipt::SubmitAttemptFinished => Ok(()),
             _ => unreachable!("submit failure must return a submit attempt receipt"),
         }
     }
 
-    pub async fn record_completion_failure(self, error: &str) -> Result<SubmitAttemptResult> {
+    pub async fn record_completion_failure(self, error: &str) -> Result<()> {
         match self
             .runtime
             .handle(
@@ -149,7 +139,7 @@ impl SubmitDispatch {
             )
             .await?
         {
-            TrackUpdateReceipt::SubmitAttemptFinished(result) => Ok(result),
+            TrackUpdateReceipt::SubmitAttemptFinished => Ok(()),
             _ => unreachable!("submit effect failure must return a submit attempt receipt"),
         }
     }
@@ -176,7 +166,54 @@ impl SubmitEffectService {
         Self { runtime }
     }
 
-    pub async fn recover_or_dispatch(
+    pub async fn prepare(
+        &self,
+        execution: &dyn ExecutionPort,
+        effect: &SessionTrackEffect,
+        request: OrderRequest,
+        recovery_token: SubmitRecoveryToken,
+    ) -> Result<Option<SubmitDispatch>> {
+        let preparation = self
+            .runtime
+            .session_effect_queue()
+            .prepare_submit_dispatch(&effect.effect_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "submit effect `{}` is not the claimed queue effect",
+                    effect.effect_id
+                )
+            })?;
+        let order_lookup = match preparation {
+            SubmitDispatchPreparation::Direct => SubmitRecoveryOrderLookup::NotQueried,
+            SubmitDispatchPreparation::NeedsLiveOrderLookup { client_order_id } => {
+                SubmitRecoveryOrderLookup::Complete(
+                    execution
+                        .get_open_orders(&request.instrument)
+                        .await?
+                        .into_orders()
+                        .into_iter()
+                        .find(|order| order.client_order_id == client_order_id),
+                )
+            }
+        };
+
+        Ok(
+            match self
+                .recover_or_dispatch(
+                    effect.track_id.as_str(),
+                    &effect.effect_id,
+                    recovery_token,
+                    order_lookup,
+                )
+                .await?
+            {
+                SubmitAttempt::Dispatch(dispatch) => Some(dispatch),
+                SubmitAttempt::Finished => None,
+            },
+        )
+    }
+
+    pub(crate) async fn recover_or_dispatch(
         &self,
         id: &str,
         effect_id: &str,
@@ -230,6 +267,12 @@ impl SubmitEffectService {
         }
     }
 
+    pub fn is_submit_active(&self, effect_id: &str) -> bool {
+        self.runtime
+            .session_effect_queue()
+            .is_active_submit_effect(effect_id)
+    }
+
     #[cfg(any(test, feature = "server-test-support"))]
     pub fn manager(&self) -> Arc<RwLock<TrackManager>> {
         self.runtime.manager()
@@ -253,7 +296,7 @@ fn submit_attempt_from_recovery(
             request,
             desired_exposure,
         )),
-        SubmitRecoveryReceipt::Finished(result) => SubmitAttempt::Finished(result),
+        SubmitRecoveryReceipt::Finished => SubmitAttempt::Finished,
     }
 }
 
@@ -301,7 +344,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_dispatch_handle_records_failure_and_exposes_invalidation() {
+    async fn submit_dispatch_handle_records_failure() {
         let repository = Arc::new(MemoryRepository::default());
         let service = test_service(repository.clone());
         let dispatch = SubmitDispatch::new(
@@ -319,15 +362,13 @@ mod tests {
             Exposure(4.0),
         );
 
-        let outcome = timeout(
+        timeout(
             Duration::from_secs(1),
             dispatch.record_failure("submit order rejected"),
         )
         .await
         .expect("submit failure writeback should complete promptly")
         .unwrap();
-
-        assert!(outcome.invalidates_pending_submit());
         assert_eq!(repository.pending_effects()[0].status, EffectStatus::Failed);
     }
 
@@ -335,18 +376,36 @@ mod tests {
     async fn submit_dispatch_receipt_failure_returns_dispatch_for_follow_up_cleanup() {
         let repository = Arc::new(MemoryRepository::default());
         let service = test_service(repository);
+        let request = OrderRequest {
+            instrument: poise_core::track::Instrument::new(Venue::Binance, "BTCUSDT"),
+            side: poise_core::types::Side::Buy,
+            price: 100.0,
+            quantity: 0.1,
+            client_order_id: "client-1".into(),
+            reduce_only: false,
+        };
+        let queue = service.0.runtime.session_effect_queue();
+        let effect_id = queue
+            .enqueue_transition_effects(
+                &TrackId::new("missing-track"),
+                &[TrackEffect::SubmitOrder {
+                    request: request.clone(),
+                    desired_exposure: Exposure(4.0),
+                    submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
+                    recovery_token: SubmitRecoveryToken::empty(),
+                }],
+                chrono::Utc::now(),
+            )
+            .effect_ids()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(queue.claim_next().unwrap().effect_id, effect_id);
         let dispatch = SubmitDispatch::new(
             service.0.runtime.clone(),
             TrackId::new("missing-track"),
-            "btc-core:batch-1:0".into(),
-            OrderRequest {
-                instrument: poise_core::track::Instrument::new(Venue::Binance, "BTCUSDT"),
-                side: poise_core::types::Side::Buy,
-                price: 100.0,
-                quantity: 0.1,
-                client_order_id: "client-1".into(),
-                reduce_only: false,
-            },
+            effect_id,
+            request,
             Exposure(4.0),
         );
 
@@ -461,10 +520,9 @@ mod tests {
             .await
             .unwrap();
 
-        let super::SubmitAttempt::Finished(result) = attempt else {
+        let super::SubmitAttempt::Finished = attempt else {
             panic!("expected finished recovery");
         };
-        assert!(result.invalidates_pending_submit());
 
         let manager = services.submit_effect.manager();
         let snapshot = manager
@@ -632,10 +690,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let super::SubmitAttempt::Finished(result) = attempt else {
+        let super::SubmitAttempt::Finished = attempt else {
             panic!("withdrawn submit must not receive dispatch capability");
         };
-        assert!(result.invalidates_pending_submit());
         let persisted = repository
             .pending_effects()
             .into_iter()

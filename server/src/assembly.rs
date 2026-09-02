@@ -41,7 +41,6 @@ use crate::startup_preparation::{
     TrackLeverageIndex, load_exchange_info_with_retry, prepare_exchange_startup_with,
 };
 use crate::state_bootstrap::StateRepositories;
-use crate::submit_preflight::SubmitPreflight;
 #[cfg(test)]
 use crate::test_support::build_test_contexts_from_runtime_states;
 #[cfg(test)]
@@ -244,7 +243,6 @@ async fn assemble_with_state_store(
     };
     let exchange_freshness = Arc::new(ExchangeFreshness::default());
     let reconcile_guards = Arc::new(TrackReconcileGuards::default());
-    let submit_preflight = Arc::new(SubmitPreflight::new());
     let runtime_health = Arc::new(RuntimeHealth::new());
     let pnl_backfill_status = Arc::new(PnlBackfillStatus::new());
     let recent_fills_auditor = Arc::new(RecentFillsAuditor::new(
@@ -254,10 +252,8 @@ async fn assemble_with_state_store(
     let reconcile_state = build_reconcile_state(
         trading_runtime.clone(),
         runtime_lifecycle_service.clone(),
-        session_effect_queue.clone(),
         exchange_freshness.clone(),
         reconcile_guards.clone(),
-        submit_preflight.clone(),
         recovery_dirty_state.clone(),
     );
     let http_state = build_http_state(
@@ -285,7 +281,6 @@ async fn assemble_with_state_store(
     );
     let runtime_state = build_runtime_state(
         reconcile_state.clone(),
-        notifications.clone(),
         live_view_notifications.clone(),
         account_monitor.clone(),
         account_margin_guard.clone(),
@@ -442,26 +437,21 @@ pub(crate) fn build_websocket_state(
 pub(crate) fn build_reconcile_state(
     runtime: Arc<TradingRuntime>,
     runtime_lifecycle_service: Arc<TrackRuntimeLifecycleService>,
-    session_effect_queue: poise_application::SessionEffectQueue,
     exchange_freshness: Arc<ExchangeFreshness>,
     reconcile_guards: Arc<TrackReconcileGuards>,
-    submit_preflight: Arc<SubmitPreflight>,
     recovery_dirty_state: Arc<RecoveryDirtyState>,
 ) -> ReconcileState {
     ReconcileState {
         runtime,
         runtime_lifecycle_service,
-        session_effect_queue,
         exchange_freshness,
         reconcile_guards,
-        submit_preflight,
         recovery_dirty_state,
     }
 }
 
 pub(crate) fn build_runtime_state(
     reconcile: ReconcileState,
-    notifications: broadcast::Sender<ApplicationNotification>,
     live_view_notifications: broadcast::Sender<String>,
     account_monitor: Arc<AccountMonitor>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
@@ -471,7 +461,6 @@ pub(crate) fn build_runtime_state(
 ) -> RuntimeState {
     RuntimeState {
         reconcile,
-        notifications,
         live_view_notifications,
         account_monitor,
         account_margin_guard,
@@ -971,13 +960,11 @@ total_loss_limit = 600.0
         handles.user_task.abort();
         handles.effect_task.abort();
         handles.recovery_task.abort();
-        handles.submit_preflight_task.abort();
         handles.pnl_backfill_task.abort();
         let _ = handles.market_task.await;
         let _ = handles.user_task.await;
         let _ = handles.effect_task.await;
         let _ = handles.recovery_task.await;
-        let _ = handles.submit_preflight_task.await;
         let _ = handles.pnl_backfill_task.await;
     }
 
@@ -1044,7 +1031,6 @@ total_loss_limit = 600.0
         handles.user_task.abort();
         handles.effect_task.abort();
         handles.recovery_task.abort();
-        handles.submit_preflight_task.abort();
         handles.account_task.abort();
         handles.pnl_backfill_task.abort();
     }
@@ -1135,13 +1121,12 @@ total_loss_limit = 600.0
         handles.user_task.abort();
         handles.effect_task.abort();
         handles.recovery_task.abort();
-        handles.submit_preflight_task.abort();
         handles.account_task.abort();
         handles.pnl_backfill_task.abort();
     }
 
     #[tokio::test]
-    async fn runtime_state_exposes_observation_and_account_paths_only() {
+    async fn runtime_state_exposes_trading_runtime_and_account_paths_only() {
         let (platform, _) = test_platform().await;
         let state = platform.runtime_test_context();
 
@@ -1290,10 +1275,6 @@ total_loss_limit = 600.0
         assert!(Arc::ptr_eq(
             &runtime_context.exchange_freshness,
             &effect_worker_context.exchange_freshness,
-        ));
-        assert!(Arc::ptr_eq(
-            &runtime_context.submit_preflight,
-            &effect_worker_context.submit_preflight,
         ));
     }
 

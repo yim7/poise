@@ -32,8 +32,6 @@ use poise_engine::runtime::{
 use poise_engine::transition::TrackTransition;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
-use crate::submit_effect_service::SubmitAttemptResult;
-
 pub trait AccountCapacityGuard: Send + Sync {
     fn available_notional_for(&self, instrument: &Instrument) -> Option<f64>;
 }
@@ -188,7 +186,7 @@ pub enum SubmitRecoveryReceipt {
         request: OrderRequest,
         desired_exposure: poise_core::types::Exposure,
     },
-    Finished(SubmitAttemptResult),
+    Finished,
 }
 
 #[derive(Debug, Clone)]
@@ -209,7 +207,7 @@ pub enum TrackUpdateReceipt {
     SubmitOutcomeUnknownRecorded {
         changed: bool,
     },
-    SubmitAttemptFinished(SubmitAttemptResult),
+    SubmitAttemptFinished,
     SubmitRecovery(SubmitRecoveryReceipt),
     CancelOrderResolved(CancelReceiptResolution),
 }
@@ -529,7 +527,7 @@ impl TradingRuntime {
                 request,
                 desired_exposure,
                 receipt,
-            } => Ok(TrackUpdateReceipt::SubmitAttemptFinished(
+            } => {
                 self.complete_submit_execution(
                     id,
                     &effect_id,
@@ -537,21 +535,22 @@ impl TradingRuntime {
                     desired_exposure,
                     &receipt,
                 )
-                .await?,
-            )),
+                .await?;
+                Ok(TrackUpdateReceipt::SubmitAttemptFinished)
+            }
             TrackInput::SubmitFailed {
                 effect_id,
                 client_order_id,
                 error,
-            } => Ok(TrackUpdateReceipt::SubmitAttemptFinished(
+            } => {
                 self.record_submit_failure(id, &effect_id, &client_order_id, &error)
-                    .await?,
-            )),
+                    .await?;
+                Ok(TrackUpdateReceipt::SubmitAttemptFinished)
+            }
             TrackInput::SubmitEffectFailed { effect_id, error } => {
-                Ok(TrackUpdateReceipt::SubmitAttemptFinished(
-                    self.complete_submit_effect_failed(id, &effect_id, &error)
-                        .await?,
-                ))
+                self.complete_submit_effect_failed(id, &effect_id, &error)
+                    .await?;
+                Ok(TrackUpdateReceipt::SubmitAttemptFinished)
             }
             TrackInput::RecoverSubmit {
                 effect_id,
@@ -659,6 +658,11 @@ impl TradingRuntime {
     pub async fn has_track(&self, id: &str) -> bool {
         let manager = self.manager.read().await;
         manager.get_track(id).is_some()
+    }
+
+    pub fn has_unresolved_submit_outcome(&self, track_id: &TrackId) -> bool {
+        self.session_effect_queue
+            .has_unresolved_submit_outcome_for_track(track_id)
     }
 
     pub async fn track_instruments(&self) -> Vec<TrackInstrument> {
@@ -1286,7 +1290,7 @@ impl TradingRuntime {
         request: &OrderRequest,
         desired_exposure: poise_core::types::Exposure,
         receipt: &OrderReceipt,
-    ) -> Result<SubmitAttemptResult> {
+    ) -> Result<()> {
         self.mutate_track_with_effect_status(
             id,
             EffectStatusUpdate::succeeded(effect_id.to_string()),
@@ -1300,7 +1304,7 @@ impl TradingRuntime {
             },
         )
         .await
-        .map(|_| SubmitAttemptResult::changed())
+        .map(|_| ())
         .map_err(anyhow::Error::new)
     }
 
@@ -1310,7 +1314,7 @@ impl TradingRuntime {
         effect_id: &str,
         client_order_id: &str,
         error: &str,
-    ) -> Result<SubmitAttemptResult> {
+    ) -> Result<()> {
         self.mutate_track_with_effect_status(
             id,
             effect_status_failed(effect_id, error),
@@ -1320,7 +1324,7 @@ impl TradingRuntime {
             },
         )
         .await
-        .map(|_| SubmitAttemptResult::changed())
+        .map(|_| ())
         .map_err(anyhow::Error::new)
     }
 
@@ -1329,9 +1333,9 @@ impl TradingRuntime {
         id: &str,
         effect_id: &str,
         error: &str,
-    ) -> Result<SubmitAttemptResult> {
+    ) -> Result<()> {
         self.complete_effect_failed(id, effect_id, error).await?;
-        Ok(SubmitAttemptResult::changed())
+        Ok(())
     }
 
     async fn record_cancel_order_success(
@@ -1429,15 +1433,9 @@ impl TradingRuntime {
                     request,
                     desired_exposure,
                 },
-                SubmitRecoveryResolution::Recovered { .. } => {
-                    SubmitRecoveryReceipt::Finished(SubmitAttemptResult::changed())
-                }
-                SubmitRecoveryResolution::Superseded { .. } => {
-                    SubmitRecoveryReceipt::Finished(SubmitAttemptResult::changed())
-                }
-                SubmitRecoveryResolution::AwaitExchangeState => {
-                    SubmitRecoveryReceipt::Finished(SubmitAttemptResult::unchanged())
-                }
+                SubmitRecoveryResolution::Recovered { .. }
+                | SubmitRecoveryResolution::Superseded { .. }
+                | SubmitRecoveryResolution::AwaitExchangeState => SubmitRecoveryReceipt::Finished,
             },
         )
     }
