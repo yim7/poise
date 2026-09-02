@@ -1,6 +1,6 @@
 # 系统抽象重构设计
 
-> 状态：实施中，S1–S5 已完成。
+> 状态：实施中，S1–S5 已完成，S6 正在实施。
 >
 > 文档角色：本文定义本次系统抽象重构要做的改动和验收标准；[system-overview.md](system-overview.md) 在重构完成前继续描述当前系统，是当前实现的唯一长期依据。[exchange-abstraction-research.md](exchange-abstraction-research.md) 只保留调研证据，不定义最终架构。
 >
@@ -39,6 +39,7 @@
 7. 账户估值和 PNL cashflow 都携带资产；不同资产不能用裸数值相加。
 8. 查询只组装 committed runtime snapshot 和持久历史，不重新运行业务计算。
 9. 删除已被替代的 frame、registry、浅 service、重复 port bundle 和 server submit owner。
+10. 不兼容重构前的数据库 schema、旧字段或旧接口；删除迁移、双读/双写和 legacy 推断路径，旧实例需要显式重新初始化。
 
 这不是一次性横向替换所有 crate。实现按后文的纵向切片推进，每个切片都必须保持系统可运行、可测试，并在引入新入口的同一切片删除对应旧入口。
 
@@ -366,7 +367,7 @@ base_exposure_from_position_qty
 
 - 保持只实现 application persistence port；
 - 为 quantity unit、contract value、cashflow asset 和 account valuation asset 增加必要 schema；
-- 现有数据不得被静默重新解释。能无损迁移的记录迁移；语义不足的旧记录保留为 audit 数据并标记 aggregate incomplete，或在启动前要求操作者显式处理。
+- 只接受当前 schema；不在启动时迁移、重命名或猜测旧表和旧字段，schema 不匹配时明确失败并要求重新初始化实例。
 
 ### `exchanges/*`
 
@@ -400,7 +401,7 @@ base_exposure_from_position_qty
 | S3 | OKX linear `InstrumentSpec` | 已完成 | `f913d39`、`7f019c7`、`de37b11`、`10ca055` |
 | S4 | OKX inverse 与其他 venue | 已完成 | `1833c7c`、`ddb2e9a`、`a9613e1` |
 | S5 | 账户估值与 PNL cashflow | 已完成 | `63cbf90`、`da3a3e1`、`2d94796` |
-| S6 | queries、装配和最终删除 | 待开始 | - |
+| S6 | queries、装配和最终删除 | 实施中（definition/query ownership 已完成） | `2ab98ac` |
 
 ### 切片 1：不可变 transition 与唯一更新入口
 
@@ -436,12 +437,13 @@ base_exposure_from_position_qty
 - realized PNL、fee、funding 分别带 asset 持久化；
 - 实现 complete / incomplete aggregation 与 loss-guard 行为；
 - recent PNL 加入 requested/covered window 和 completeness；
-- schema 迁移和历史记录处理通过测试。
+- 当前 schema 的持久化与恢复通过测试。
 
 ### 切片 6：queries、装配和最终删除
 
 - queries 只组装 committed snapshot 和 persisted history；
 - 删除 definition registry、RuntimePorts 和重复 projector 计算；
+- 删除旧 schema 迁移、legacy identity 接纳和其他仅为过渡存在的代码；
 - assembly 只保留一个 venue 分支和私有连接记录；
 - 完成跨 crate 验收后再更新 `system-overview.md`，删除本文与调研文档。
 
@@ -492,7 +494,7 @@ base_exposure_from_position_qty
 - identity、durable control、events、PNL cashflow 和 account baseline 可以从 SQLite 恢复。
 - session state 与 effect queue 不从 `track_effects` journal 恢复。
 - 历史 quantity 的 unit 和 contract value 含义不会被当前 metadata 改写。
-- schema 升级对可迁移数据无损；无法安全解释的数据不会被静默赋予单位。
+- SQLite 只接受当前 schema；旧 schema 不迁移、不推断，启动明确失败并要求重新初始化。
 - PNL backfill 的 source key 幂等，coverage incomplete 会进入 readiness blocker。
 
 ### 12.6 验证范围
@@ -501,7 +503,7 @@ base_exposure_from_position_qty
 - 改动跨 crate 后运行受影响 crate 测试；
 - 最终运行 workspace tests、格式化和 lint；
 - 使用代表性 fixture 对四个 venue 做 config、metadata、order normalize、REST/WS mapping、recovery 和 PNL coverage 验收；
-- 最终 `rg` 检查上述应删除的旧类型和旁路公式，结果只能出现在迁移记录或测试迁移说明中，不能出现在运行 source。
+- 最终 `rg` 检查上述应删除的旧类型、迁移入口和旁路公式，项目中不再保留对应实现或迁移测试。
 
 ## 13. 更新唯一依据的门槛
 
