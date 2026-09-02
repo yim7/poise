@@ -133,21 +133,9 @@ pub(crate) fn build_login_payload(
     .to_string()
 }
 
-#[cfg(test)]
-pub(crate) fn parse_user_data_message(payload: &str) -> Result<Vec<UserDataEvent>> {
-    parse_user_data_message_with_optional_registry(payload, None)
-}
-
 pub(crate) fn parse_user_data_message_with_registry(
     payload: &str,
     instrument_registry: &OkxInstrumentRegistry,
-) -> Result<Vec<UserDataEvent>> {
-    parse_user_data_message_with_optional_registry(payload, Some(instrument_registry))
-}
-
-fn parse_user_data_message_with_optional_registry(
-    payload: &str,
-    instrument_registry: Option<&OkxInstrumentRegistry>,
 ) -> Result<Vec<UserDataEvent>> {
     let value: serde_json::Value = serde_json::from_str(payload)?;
     if value.get("event").is_some() {
@@ -165,14 +153,14 @@ fn parse_user_data_message_with_optional_registry(
 
 fn parse_orders(
     data: Vec<serde_json::Value>,
-    instrument_registry: Option<&OkxInstrumentRegistry>,
+    instrument_registry: &OkxInstrumentRegistry,
 ) -> Result<Vec<UserDataEvent>> {
     let mut events = Vec::new();
     for value in data {
         let event_time = millis_to_utc(required_str(&value, "uTime")?)?;
         let order_snapshot: PendingOrderSnapshot = serde_json::from_value(value.clone())?;
         let metadata = metadata_for_symbol(&order_snapshot.inst_id, instrument_registry)?;
-        let order = open_order_from_snapshot_with_metadata(order_snapshot, metadata.as_ref())?;
+        let order = open_order_from_snapshot_with_metadata(order_snapshot, &metadata)?;
         events.push(UserDataEvent {
             event_time,
             payload: UserDataPayload::OrderUpdate(order.clone()),
@@ -181,7 +169,7 @@ fn parse_orders(
         let fill_size = optional_decimal(&value, "fillSz")?.unwrap_or(0.0);
         let trade_id = optional_str(&value, "tradeId");
         if fill_size > f64::EPSILON || trade_id.is_some() {
-            let fill_size = position_qty_from_okx_contracts(fill_size, metadata.as_ref())?;
+            let fill_size = position_qty_from_okx_contracts(fill_size, &metadata)?;
             let fill_price = optional_decimal(&value, "fillPx")?.unwrap_or(order.price);
             let realized_pnl = optional_decimal(&value, "fillPnl")?
                 .or(optional_decimal(&value, "pnl")?)
@@ -198,10 +186,7 @@ fn parse_orders(
                     trade_id
                 )
             });
-            let pnl_asset = metadata
-                .as_ref()
-                .map(|metadata| metadata.settlement_asset().to_string())
-                .unwrap_or_else(|| order.instrument.quote_asset());
+            let pnl_asset = metadata.settlement_asset().to_string();
             if let Some(fee_asset) =
                 optional_str(&value, "fillFeeCcy").or(optional_str(&value, "feeCcy"))
             {
@@ -234,7 +219,7 @@ fn parse_orders(
 
 fn parse_positions(
     data: Vec<serde_json::Value>,
-    instrument_registry: Option<&OkxInstrumentRegistry>,
+    instrument_registry: &OkxInstrumentRegistry,
 ) -> Result<Vec<UserDataEvent>> {
     let mut events = Vec::new();
     for value in data {
@@ -244,8 +229,7 @@ fn parse_positions(
         events.push(UserDataEvent {
             event_time,
             payload: UserDataPayload::PositionUpdate(position_from_snapshot_with_metadata(
-                position,
-                metadata.as_ref(),
+                position, &metadata,
             )?),
         });
     }
@@ -254,15 +238,11 @@ fn parse_positions(
 
 fn metadata_for_symbol(
     symbol: &str,
-    instrument_registry: Option<&OkxInstrumentRegistry>,
-) -> Result<Option<OkxInstrumentMetadata>> {
+    instrument_registry: &OkxInstrumentRegistry,
+) -> Result<OkxInstrumentMetadata> {
     instrument_registry
-        .map(|registry| {
-            registry
-                .get(symbol)
-                .with_context(|| format!("missing OKX instrument metadata for `{symbol}`"))
-        })
-        .transpose()
+        .get(symbol)
+        .with_context(|| format!("missing OKX instrument metadata for `{symbol}`"))
 }
 
 fn millis_to_utc(value: &str) -> Result<chrono::DateTime<Utc>> {

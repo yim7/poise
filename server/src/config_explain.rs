@@ -7,7 +7,7 @@ pub(crate) struct TrackConfigExplanation {
     pub track_id: String,
     pub symbol: String,
     pub position_basis: PositionBasis,
-    pub native_quantity_per_unit: f64,
+    pub position_qty_per_unit: f64,
     pub unit_notional: f64,
     pub unit_notional_asset: String,
     pub quantity_step: f64,
@@ -23,20 +23,20 @@ pub(crate) fn explain_track_config(
     track: &TrackDefinition,
     instrument_spec: &InstrumentSpec,
 ) -> Result<TrackConfigExplanation> {
-    let native_quantity_per_unit = native_quantity_per_unit(track, instrument_spec)?;
+    let position_qty_per_unit = position_qty_per_unit(track, instrument_spec)?;
     ensure!(
-        native_quantity_per_unit + f64::EPSILON >= instrument_spec.min_position_qty().value(),
-        "track `{}` symbol `{}` native_quantity_per_unit {} is below min_qty {}",
+        position_qty_per_unit + f64::EPSILON >= instrument_spec.min_position_qty().value(),
+        "track `{}` symbol `{}` position_qty_per_unit {} is below min_qty {}",
         track.track_id().as_str(),
         track.instrument().symbol,
-        native_quantity_per_unit,
+        position_qty_per_unit,
         instrument_spec.min_position_qty().value()
     );
     Ok(TrackConfigExplanation {
         track_id: track.track_id().as_str().to_string(),
         symbol: track.instrument().symbol.clone(),
         position_basis: instrument_spec.position_basis().clone(),
-        native_quantity_per_unit,
+        position_qty_per_unit,
         unit_notional: track.track_config().notional_per_unit,
         unit_notional_asset: instrument_spec.notional_asset().as_str().to_string(),
         quantity_step: instrument_spec.position_qty_step().value(),
@@ -49,10 +49,7 @@ pub(crate) fn explain_track_config(
     })
 }
 
-fn native_quantity_per_unit(
-    track: &TrackDefinition,
-    instrument_spec: &InstrumentSpec,
-) -> Result<f64> {
+fn position_qty_per_unit(track: &TrackDefinition, instrument_spec: &InstrumentSpec) -> Result<f64> {
     let band_center = track.track_config().band_center();
     ensure!(
         band_center.is_finite() && band_center > 0.0,
@@ -129,7 +126,7 @@ mod tests {
             explanation.position_basis,
             PositionBasis::Contracts { .. }
         ));
-        assert_eq!(explanation.native_quantity_per_unit, 3.0);
+        assert_eq!(explanation.position_qty_per_unit, 3.0);
         assert_eq!(explanation.unit_notional, 300.0);
         assert_eq!(explanation.unit_notional_asset, "USD");
         assert_eq!(explanation.quantity_step, 1.0);
@@ -181,7 +178,7 @@ mod tests {
 
         let explanation = explain_track_config(&track, &rules).unwrap();
 
-        assert_eq!(explanation.native_quantity_per_unit, 0.05);
+        assert_eq!(explanation.position_qty_per_unit, 0.05);
         assert_eq!(explanation.unit_notional, 200.0);
         assert_eq!(explanation.unit_notional_asset, "USDT");
         assert_eq!(explanation.effective_max_notional, 1_000.0);

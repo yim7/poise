@@ -30,7 +30,7 @@ use crate::{
 };
 
 const CURVE_POINT_COUNT: usize = 41;
-const RULES_NOTICE: &str = "确定性评估假设，不是交易所实时规则";
+const INSTRUMENT_FIXTURE_NOTICE: &str = "确定性评估假设，不是交易所实时规则";
 const FILL_MODEL_NOTICE: &str =
     "ImmediateFullAtOrderPrice 只是确定性成交假设，不是成交概率、滑点或 PnL 预测";
 
@@ -42,7 +42,7 @@ struct EvaluationInstrumentFixture {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EvaluationRulesFixtureId {
+pub enum EvaluationInstrumentFixtureId {
     BaseAssetV1,
     InverseContractV1,
 }
@@ -52,13 +52,13 @@ pub enum EvaluationRulesFixtureId {
 pub struct WorkbenchEvaluationRequest {
     pub draft: TrackDraftPayload,
     pub exchange_venue: String,
-    pub rules_fixture: EvaluationRulesFixtureId,
+    pub instrument_fixture: EvaluationInstrumentFixtureId,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchEvaluationReportDto {
-    pub rules: EvaluationRulesDto,
+    pub instrument_fixture: EvaluationInstrumentFixtureDto,
     pub assumptions: EvaluationAssumptionsDto,
     pub curve_points: Vec<CurvePointDto>,
     pub scenarios: Vec<ScenarioReportDto>,
@@ -66,19 +66,22 @@ pub struct WorkbenchEvaluationReportDto {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EvaluationRulesDto {
-    pub fixture_id: EvaluationRulesFixtureId,
+pub struct EvaluationInstrumentFixtureDto {
+    pub fixture_id: EvaluationInstrumentFixtureId,
+    pub base_asset: String,
+    pub quote_asset: String,
+    pub notional_asset: String,
     pub price_tick: f64,
     pub price_precision: EvaluationPricePrecisionDto,
-    pub quantity_kind: EvaluationQuantityKindDto,
-    pub contract_notional: Option<f64>,
+    pub position_basis: EvaluationPositionBasisDto,
+    pub contract_value: Option<f64>,
     pub settlement_asset: String,
-    pub quantity_step: f64,
-    pub min_qty: f64,
+    pub position_qty_step: f64,
+    pub min_position_qty: f64,
     pub min_notional: f64,
     pub maker_fee_rate: f64,
     pub taker_fee_rate: f64,
-    pub native_qty_per_exposure_unit: f64,
+    pub position_qty_per_exposure_unit: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -95,17 +98,17 @@ pub enum EvaluationPricePrecisionDto {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EvaluationQuantityKindDto {
+pub enum EvaluationPositionBasisDto {
     BaseAsset,
-    InverseContract,
+    Contracts,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvaluationAssumptionsDto {
-    pub rules_notice: String,
+    pub instrument_fixture_notice: String,
     pub fill_model_notice: String,
-    pub initial_native_quantity: f64,
+    pub initial_position_qty: f64,
     pub initial_exposure: f64,
 }
 
@@ -156,7 +159,7 @@ pub struct EvaluationHorizonDto {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScenarioAssumptionsDto {
-    pub initial_native_quantity: f64,
+    pub initial_position_qty: f64,
     pub initial_exposure: f64,
     pub deterministic_fill_notice: String,
 }
@@ -191,7 +194,7 @@ pub struct ExecutionMetricsDto {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RiskIncreaseFillMetricsDto {
-    pub native_qty: f64,
+    pub position_qty: f64,
     pub weighted_fill_price: Option<f64>,
 }
 
@@ -228,9 +231,9 @@ pub struct EvaluationComparisonDto {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchedPriceComparisonDto {
-    pub curve_immediate_total_native_qty: f64,
-    pub delayed_total_native_qty: f64,
-    pub matched_native_qty: f64,
+    pub curve_immediate_total_position_qty: f64,
+    pub delayed_total_position_qty: f64,
+    pub matched_position_qty: f64,
     pub curve_immediate_matched_weighted_price: Option<f64>,
     pub delayed_matched_weighted_price: Option<f64>,
     pub favorable_price_improvement: Option<f64>,
@@ -242,11 +245,11 @@ pub struct ReplayRowDto {
     pub observed_at: String,
     pub action: String,
     pub strategy_price: Option<f64>,
-    pub simulated_position_native_quantity: f64,
+    pub simulated_position_qty: f64,
     pub simulated_position_exposure: f64,
-    pub observed_position_native_quantity: f64,
+    pub observed_position_qty: f64,
     pub observed_position_exposure: f64,
-    pub signed_filled_native_quantity: f64,
+    pub signed_filled_position_qty: f64,
     pub policy_target: Option<f64>,
     pub risk_approved_target: Option<f64>,
     pub acquisition_frontier: Option<f64>,
@@ -277,19 +280,19 @@ pub struct AppliedReleaseDto {
 pub fn evaluate_workbench_draft(
     request: WorkbenchEvaluationRequest,
 ) -> Result<WorkbenchEvaluationReportDto, CommandError> {
-    let fixture_id = request.rules_fixture;
+    let fixture_id = request.instrument_fixture;
     let leverage = request.draft.fields.leverage;
     let draft = TrackDraft::try_from(request.draft)
         .map_err(|error| evaluation_error(format!("draft 配置无效: {error}")))?;
     let definition = build_definition(draft, &request.exchange_venue)?;
-    let rules = rules_fixture(fixture_id, definition.instrument().clone());
+    let fixture = instrument_fixture(fixture_id, definition.instrument().clone());
     let track_config = definition.track_config();
-    let unit_qty = rules
+    let unit_qty = fixture
         .instrument_spec
         .position_qty_for_notional(
             Amount::new(
                 track_config.notional_per_unit,
-                rules.instrument_spec.notional_asset().clone(),
+                fixture.instrument_spec.notional_asset().clone(),
             )
             .map_err(evaluation_error)?,
             track_config.band_center(),
@@ -298,7 +301,7 @@ pub fn evaluate_workbench_draft(
         .value();
     if !unit_qty.is_finite() || unit_qty <= f64::EPSILON {
         return Err(evaluation_error(
-            "rules fixture 无法为当前配置生成有效的每单位原生数量",
+            "instrument fixture 无法为当前配置生成有效的每单位仓位数量",
         ));
     }
 
@@ -306,14 +309,14 @@ pub fn evaluate_workbench_draft(
     if track_config.long_exposure_units > 0.0 {
         scenarios.push(run_scenario(
             &definition,
-            &rules,
+            &fixture,
             leverage,
             ScenarioKind::PriceAdvantageSweep,
             EvaluationDirectionDto::Long,
         )?);
         scenarios.push(run_scenario(
             &definition,
-            &rules,
+            &fixture,
             leverage,
             ScenarioKind::StaleHold,
             EvaluationDirectionDto::Long,
@@ -322,14 +325,14 @@ pub fn evaluate_workbench_draft(
     if track_config.short_exposure_units > 0.0 {
         scenarios.push(run_scenario(
             &definition,
-            &rules,
+            &fixture,
             leverage,
             ScenarioKind::PriceAdvantageSweep,
             EvaluationDirectionDto::Short,
         )?);
         scenarios.push(run_scenario(
             &definition,
-            &rules,
+            &fixture,
             leverage,
             ScenarioKind::StaleHold,
             EvaluationDirectionDto::Short,
@@ -337,11 +340,11 @@ pub fn evaluate_workbench_draft(
     }
 
     Ok(WorkbenchEvaluationReportDto {
-        rules: project_rules(fixture_id, &rules, unit_qty),
+        instrument_fixture: project_instrument_fixture(fixture_id, &fixture, unit_qty),
         assumptions: EvaluationAssumptionsDto {
-            rules_notice: RULES_NOTICE.to_string(),
+            instrument_fixture_notice: INSTRUMENT_FIXTURE_NOTICE.to_string(),
             fill_model_notice: FILL_MODEL_NOTICE.to_string(),
-            initial_native_quantity: 0.0,
+            initial_position_qty: 0.0,
             initial_exposure: 0.0,
         },
         curve_points: curve_points(track_config),
@@ -402,8 +405,8 @@ fn parse_venue(value: &str) -> Result<Venue, CommandError> {
     }
 }
 
-fn rules_fixture(
-    fixture_id: EvaluationRulesFixtureId,
+fn instrument_fixture(
+    fixture_id: EvaluationInstrumentFixtureId,
     instrument: Instrument,
 ) -> EvaluationInstrumentFixture {
     let fee_rates = ReplayFeeRates {
@@ -411,7 +414,7 @@ fn rules_fixture(
         taker_fee_rate: 0.001,
     };
     match fixture_id {
-        EvaluationRulesFixtureId::BaseAssetV1 => {
+        EvaluationInstrumentFixtureId::BaseAssetV1 => {
             let usdt = Asset::try_new("USDT").expect("fixed fixture asset must be valid");
             EvaluationInstrumentFixture {
                 instrument_spec: InstrumentSpec::try_linear(
@@ -429,7 +432,7 @@ fn rules_fixture(
                 fee_rates,
             }
         }
-        EvaluationRulesFixtureId::InverseContractV1 => {
+        EvaluationInstrumentFixtureId::InverseContractV1 => {
             let usd = Asset::try_new("USD").expect("fixed fixture asset must be valid");
             EvaluationInstrumentFixture {
                 instrument_spec: InstrumentSpec::try_inverse(
@@ -467,12 +470,12 @@ fn curve_points(config: &TrackConfig) -> Vec<CurvePointDto> {
 
 fn run_scenario(
     definition: &TrackDefinition,
-    rules: &EvaluationInstrumentFixture,
+    fixture: &EvaluationInstrumentFixture,
     leverage: u32,
     kind: ScenarioKind,
     direction: EvaluationDirectionDto,
 ) -> Result<ScenarioReportDto, CommandError> {
-    let input = build_scenario_input(definition, rules, leverage, kind, direction)?;
+    let input = build_scenario_input(definition, fixture, leverage, kind, direction)?;
     let report = run_decision_evaluation(&input).map_err(|error| {
         evaluation_error(format!(
             "Rust decision evaluator 执行失败（{}）: {error:#}",
@@ -484,7 +487,7 @@ fn run_scenario(
 
 fn build_scenario_input(
     definition: &TrackDefinition,
-    rules: &EvaluationInstrumentFixture,
+    fixture: &EvaluationInstrumentFixture,
     leverage: u32,
     kind: ScenarioKind,
     direction: EvaluationDirectionDto,
@@ -539,8 +542,8 @@ fn build_scenario_input(
     Ok(DecisionEvaluationInput {
         replay: DecisionReplayInput {
             definition: definition.clone(),
-            instrument_spec: rules.instrument_spec.clone(),
-            fee_rates: rules.fee_rates,
+            instrument_spec: fixture.instrument_spec.clone(),
+            fee_rates: fixture.fee_rates,
             started_at,
             initial_position: PositionObservation {
                 qty: 0.0,
@@ -631,7 +634,7 @@ fn project_scenario(
             live_duration_seconds: report.horizon.live_duration_seconds,
         },
         assumptions: ScenarioAssumptionsDto {
-            initial_native_quantity: 0.0,
+            initial_position_qty: 0.0,
             initial_exposure: 0.0,
             deterministic_fill_notice: FILL_MODEL_NOTICE.to_string(),
         },
@@ -713,14 +716,17 @@ fn scenario_title(kind: ScenarioKind, direction: EvaluationDirectionDto) -> Stri
     format!("{kind}（{direction}）")
 }
 
-fn project_rules(
-    fixture_id: EvaluationRulesFixtureId,
-    rules: &EvaluationInstrumentFixture,
-    native_qty_per_exposure_unit: f64,
-) -> EvaluationRulesDto {
-    let spec = &rules.instrument_spec;
-    EvaluationRulesDto {
+fn project_instrument_fixture(
+    fixture_id: EvaluationInstrumentFixtureId,
+    fixture: &EvaluationInstrumentFixture,
+    position_qty_per_exposure_unit: f64,
+) -> EvaluationInstrumentFixtureDto {
+    let spec = &fixture.instrument_spec;
+    EvaluationInstrumentFixtureDto {
         fixture_id,
+        base_asset: spec.base_asset().as_str().to_string(),
+        quote_asset: spec.quote_asset().as_str().to_string(),
+        notional_asset: spec.notional_asset().as_str().to_string(),
         price_tick: spec.price_tick(),
         price_precision: match spec.price_precision() {
             PricePrecision::FixedTick => EvaluationPricePrecisionDto::FixedTick,
@@ -732,29 +738,29 @@ fn project_rules(
                 significant_figures,
             },
         },
-        quantity_kind: match spec.position_basis() {
-            PositionBasis::BaseAsset => EvaluationQuantityKindDto::BaseAsset,
-            PositionBasis::Contracts { .. } => EvaluationQuantityKindDto::InverseContract,
+        position_basis: match spec.position_basis() {
+            PositionBasis::BaseAsset => EvaluationPositionBasisDto::BaseAsset,
+            PositionBasis::Contracts { .. } => EvaluationPositionBasisDto::Contracts,
         },
-        contract_notional: spec.contract_value().map(|amount| amount.value()),
+        contract_value: spec.contract_value().map(|amount| amount.value()),
         settlement_asset: spec.settlement_asset().as_str().to_string(),
-        quantity_step: spec.position_qty_step().value(),
-        min_qty: spec.min_position_qty().value(),
+        position_qty_step: spec.position_qty_step().value(),
+        min_position_qty: spec.min_position_qty().value(),
         min_notional: spec.min_notional().value(),
-        maker_fee_rate: rules.fee_rates.maker_fee_rate,
-        taker_fee_rate: rules.fee_rates.taker_fee_rate,
-        native_qty_per_exposure_unit,
+        maker_fee_rate: fixture.fee_rates.maker_fee_rate,
+        taker_fee_rate: fixture.fee_rates.taker_fee_rate,
+        position_qty_per_exposure_unit,
     }
 }
 
 fn project_execution(metrics: &ExecutionCostMetrics) -> ExecutionMetricsDto {
     ExecutionMetricsDto {
         long_risk_increase: RiskIncreaseFillMetricsDto {
-            native_qty: metrics.long_risk_increase.native_qty,
+            position_qty: metrics.long_risk_increase.position_qty,
             weighted_fill_price: metrics.long_risk_increase.weighted_fill_price,
         },
         short_risk_increase: RiskIncreaseFillMetricsDto {
-            native_qty: metrics.short_risk_increase.native_qty,
+            position_qty: metrics.short_risk_increase.position_qty,
             weighted_fill_price: metrics.short_risk_increase.weighted_fill_price,
         },
         turnover_notional: metrics.turnover_notional,
@@ -769,9 +775,9 @@ fn project_matched_price(
     metrics: &MatchedRiskIncreasePriceComparison,
 ) -> MatchedPriceComparisonDto {
     MatchedPriceComparisonDto {
-        curve_immediate_total_native_qty: metrics.curve_immediate_total_native_qty,
-        delayed_total_native_qty: metrics.delayed_total_native_qty,
-        matched_native_qty: metrics.matched_native_qty,
+        curve_immediate_total_position_qty: metrics.curve_immediate_total_position_qty,
+        delayed_total_position_qty: metrics.delayed_total_position_qty,
+        matched_position_qty: metrics.matched_position_qty,
         curve_immediate_matched_weighted_price: metrics.curve_immediate_matched_weighted_price,
         delayed_matched_weighted_price: metrics.delayed_matched_weighted_price,
         favorable_price_improvement: metrics.favorable_price_improvement,
@@ -786,11 +792,11 @@ fn project_replay_row(
         observed_at: step.observed_at.to_rfc3339(),
         action: project_action(&step.action).to_string(),
         strategy_price: step.strategy_price,
-        simulated_position_native_quantity: step.simulated_position_qty,
+        simulated_position_qty: step.simulated_position_qty,
         simulated_position_exposure: step.simulated_position_exposure.0,
-        observed_position_native_quantity: step.observed_position_qty,
+        observed_position_qty: step.observed_position_qty,
         observed_position_exposure: step.observed_position_exposure.0,
-        signed_filled_native_quantity: step.signed_filled_native_qty,
+        signed_filled_position_qty: step.signed_filled_position_qty,
         policy_target: decision.map(|decision| decision.policy_target.0),
         risk_approved_target: decision.map(|decision| decision.risk_approved_target.0),
         acquisition_frontier: decision.and_then(|decision| {
@@ -881,34 +887,34 @@ mod tests {
     };
 
     use super::{
-        EvaluationDirectionDto, EvaluationQuantityKindDto, EvaluationReleaseTriggerDto,
-        EvaluationRulesFixtureId, ScenarioReportDto, WorkbenchEvaluationRequest,
+        EvaluationDirectionDto, EvaluationInstrumentFixtureId, EvaluationPositionBasisDto,
+        EvaluationReleaseTriggerDto, ScenarioReportDto, WorkbenchEvaluationRequest,
         evaluate_workbench_draft,
     };
 
     #[test]
-    fn request_requires_a_known_rules_fixture() {
+    fn request_requires_a_known_instrument_fixture() {
         let mut value =
-            serde_json::to_value(request(EvaluationRulesFixtureId::BaseAssetV1)).unwrap();
-        value.as_object_mut().unwrap().remove("rules_fixture");
+            serde_json::to_value(request(EvaluationInstrumentFixtureId::BaseAssetV1)).unwrap();
+        value.as_object_mut().unwrap().remove("instrument_fixture");
         assert!(serde_json::from_value::<WorkbenchEvaluationRequest>(value).is_err());
 
         let mut value =
-            serde_json::to_value(request(EvaluationRulesFixtureId::BaseAssetV1)).unwrap();
-        value["rules_fixture"] = json!("guessed_from_venue");
+            serde_json::to_value(request(EvaluationInstrumentFixtureId::BaseAssetV1)).unwrap();
+        value["instrument_fixture"] = json!("guessed_from_venue");
         assert!(serde_json::from_value::<WorkbenchEvaluationRequest>(value).is_err());
     }
 
     #[test]
     fn report_serializes_one_camel_case_read_model_for_typescript() {
         let report =
-            evaluate_workbench_draft(request(EvaluationRulesFixtureId::BaseAssetV1)).unwrap();
+            evaluate_workbench_draft(request(EvaluationInstrumentFixtureId::BaseAssetV1)).unwrap();
         let value = serde_json::to_value(report).unwrap();
 
         assert!(value.get("curvePoints").is_some());
         assert!(value.get("curve_points").is_none());
-        assert!(value["rules"].get("fixtureId").is_some());
-        assert!(value["rules"].get("fixture_id").is_none());
+        assert!(value["instrumentFixture"].get("fixtureId").is_some());
+        assert!(value["instrumentFixture"].get("fixture_id").is_none());
         assert!(
             value["scenarios"][0]
                 .get("curveImmediateBenchmark")
@@ -925,18 +931,20 @@ mod tests {
     #[test]
     fn adapter_builds_complete_rules_curve_and_directional_scenarios() {
         let report =
-            evaluate_workbench_draft(request(EvaluationRulesFixtureId::BaseAssetV1)).unwrap();
+            evaluate_workbench_draft(request(EvaluationInstrumentFixtureId::BaseAssetV1)).unwrap();
 
         assert_eq!(
-            report.rules.fixture_id,
-            EvaluationRulesFixtureId::BaseAssetV1
+            report.instrument_fixture.fixture_id,
+            EvaluationInstrumentFixtureId::BaseAssetV1
         );
         assert_eq!(
-            report.rules.quantity_kind,
-            EvaluationQuantityKindDto::BaseAsset
+            report.instrument_fixture.position_basis,
+            EvaluationPositionBasisDto::BaseAsset
         );
-        assert_eq!(report.rules.settlement_asset, "USDT");
-        assert!(report.rules.native_qty_per_exposure_unit > 0.0);
+        assert_eq!(report.instrument_fixture.base_asset, "BTC");
+        assert_eq!(report.instrument_fixture.notional_asset, "USDT");
+        assert_eq!(report.instrument_fixture.settlement_asset, "USDT");
+        assert!(report.instrument_fixture.position_qty_per_exposure_unit > 0.0);
         assert_eq!(report.curve_points.first().unwrap().target_exposure, 8.0);
         assert_eq!(report.curve_points.last().unwrap().target_exposure, -8.0);
         assert_eq!(report.scenarios.len(), 4);
@@ -1075,7 +1083,7 @@ mod tests {
 
     #[test]
     fn short_only_draft_generates_only_non_empty_short_scenarios() {
-        let mut request = request(EvaluationRulesFixtureId::BaseAssetV1);
+        let mut request = request(EvaluationInstrumentFixtureId::BaseAssetV1);
         request.draft.fields.long_exposure_units = 0.0;
         let report = evaluate_workbench_draft(request).unwrap();
 
@@ -1112,7 +1120,7 @@ mod tests {
 
     #[test]
     fn asymmetric_directional_scenarios_start_at_the_true_zero_target() {
-        let mut request = request(EvaluationRulesFixtureId::BaseAssetV1);
+        let mut request = request(EvaluationInstrumentFixtureId::BaseAssetV1);
         request.draft.fields.long_exposure_units = 2.0;
         request.draft.fields.short_exposure_units = 8.0;
         let report = evaluate_workbench_draft(request).unwrap();
@@ -1131,7 +1139,7 @@ mod tests {
 
     #[test]
     fn short_only_stale_release_occurs_at_backlog_threshold_not_before() {
-        let mut request = request(EvaluationRulesFixtureId::BaseAssetV1);
+        let mut request = request(EvaluationInstrumentFixtureId::BaseAssetV1);
         request.draft.fields.long_exposure_units = 0.0;
         request.draft.fields.risk_acquisition.stale_release_minutes = 30.0;
         let report = evaluate_workbench_draft(request).unwrap();
@@ -1157,7 +1165,7 @@ mod tests {
 
     #[test]
     fn any_positive_capacity_generates_its_directional_scenarios() {
-        let mut request = request(EvaluationRulesFixtureId::BaseAssetV1);
+        let mut request = request(EvaluationInstrumentFixtureId::BaseAssetV1);
         request.draft.fields.long_exposure_units = f64::EPSILON / 2.0;
         request.draft.fields.short_exposure_units = 0.0;
 
@@ -1174,7 +1182,7 @@ mod tests {
 
     #[test]
     fn inverse_fixture_uses_engine_quantity_notional_margin_and_fee_asset() {
-        let mut request = request(EvaluationRulesFixtureId::InverseContractV1);
+        let mut request = request(EvaluationInstrumentFixtureId::InverseContractV1);
         request.draft.fields.symbol = "BTCUSD_PERP".to_string();
         request.draft.fields.lower_price = 60_000.0;
         request.draft.fields.upper_price = 70_000.0;
@@ -1186,12 +1194,16 @@ mod tests {
         let execution = &scenario.curve_immediate_benchmark.execution;
 
         assert_eq!(
-            report.rules.quantity_kind,
-            EvaluationQuantityKindDto::InverseContract
+            report.instrument_fixture.position_basis,
+            EvaluationPositionBasisDto::Contracts
         );
-        assert_eq!(report.rules.contract_notional, Some(100.0));
-        assert_eq!(report.rules.settlement_asset, "BTC");
-        assert_close(report.rules.native_qty_per_exposure_unit, 3.0);
+        assert_eq!(report.instrument_fixture.contract_value, Some(100.0));
+        assert_eq!(report.instrument_fixture.notional_asset, "USD");
+        assert_eq!(report.instrument_fixture.settlement_asset, "BTC");
+        assert_close(
+            report.instrument_fixture.position_qty_per_exposure_unit,
+            3.0,
+        );
         assert_close(
             execution.max_margin_requirement,
             execution.max_abs_notional / 3.0,
@@ -1201,7 +1213,7 @@ mod tests {
 
     #[test]
     fn inverse_projection_matches_direct_engine_evaluator() {
-        let mut request = request(EvaluationRulesFixtureId::InverseContractV1);
+        let mut request = request(EvaluationInstrumentFixtureId::InverseContractV1);
         request.draft.fields.symbol = "BTCUSD_PERP".to_string();
         request.draft.fields.lower_price = 60_000.0;
         request.draft.fields.upper_price = 70_000.0;
@@ -1215,10 +1227,11 @@ mod tests {
             &request.exchange_venue,
         )
         .unwrap();
-        let rules = super::rules_fixture(request.rules_fixture, definition.instrument().clone());
+        let fixture =
+            super::instrument_fixture(request.instrument_fixture, definition.instrument().clone());
         let raw_input = super::build_scenario_input(
             &definition,
-            &rules,
+            &fixture,
             3,
             super::ScenarioKind::PriceAdvantageSweep,
             EvaluationDirectionDto::Long,
@@ -1239,19 +1252,19 @@ mod tests {
 
     #[test]
     fn evaluation_errors_are_explicit_for_invalid_venue_and_config() {
-        let mut invalid_venue = request(EvaluationRulesFixtureId::BaseAssetV1);
+        let mut invalid_venue = request(EvaluationInstrumentFixtureId::BaseAssetV1);
         invalid_venue.exchange_venue = "guessed".to_string();
         let error = evaluate_workbench_draft(invalid_venue).unwrap_err();
         assert_eq!(error.kind, CommandErrorKind::Evaluation);
         assert!(error.message.contains("exchange_venue"));
 
-        let mut invalid_config = request(EvaluationRulesFixtureId::BaseAssetV1);
+        let mut invalid_config = request(EvaluationInstrumentFixtureId::BaseAssetV1);
         invalid_config.draft.fields.upper_price = invalid_config.draft.fields.lower_price;
         let error = evaluate_workbench_draft(invalid_config).unwrap_err();
         assert_eq!(error.kind, CommandErrorKind::Evaluation);
         assert!(error.message.contains("lower_price"));
 
-        let mut invalid_horizon = request(EvaluationRulesFixtureId::BaseAssetV1);
+        let mut invalid_horizon = request(EvaluationInstrumentFixtureId::BaseAssetV1);
         invalid_horizon
             .draft
             .fields
@@ -1262,7 +1275,7 @@ mod tests {
         assert!(error.message.contains("stale_release_minutes"));
     }
 
-    fn request(rules_fixture: EvaluationRulesFixtureId) -> WorkbenchEvaluationRequest {
+    fn request(instrument_fixture: EvaluationInstrumentFixtureId) -> WorkbenchEvaluationRequest {
         WorkbenchEvaluationRequest {
             draft: TrackDraftPayload {
                 draft_id: "fixture-draft".to_string(),
@@ -1286,14 +1299,14 @@ mod tests {
                 load_issues: Vec::new(),
             },
             exchange_venue: "binance".to_string(),
-            rules_fixture,
+            instrument_fixture,
         }
     }
 
     fn report_with_risk(
         update: impl FnOnce(&mut RiskAcquisitionConfig),
     ) -> super::WorkbenchEvaluationReportDto {
-        let mut request = request(EvaluationRulesFixtureId::BaseAssetV1);
+        let mut request = request(EvaluationInstrumentFixtureId::BaseAssetV1);
         update(&mut request.draft.fields.risk_acquisition);
         evaluate_workbench_draft(request).unwrap()
     }
@@ -1385,16 +1398,16 @@ mod tests {
         raw: &poise_engine::decision_evaluation::ExecutionCostMetrics,
     ) {
         assert_close(
-            projected.long_risk_increase.native_qty,
-            raw.long_risk_increase.native_qty,
+            projected.long_risk_increase.position_qty,
+            raw.long_risk_increase.position_qty,
         );
         assert_eq!(
             projected.long_risk_increase.weighted_fill_price,
             raw.long_risk_increase.weighted_fill_price,
         );
         assert_close(
-            projected.short_risk_increase.native_qty,
-            raw.short_risk_increase.native_qty,
+            projected.short_risk_increase.position_qty,
+            raw.short_risk_increase.position_qty,
         );
         assert_eq!(
             projected.short_risk_increase.weighted_fill_price,

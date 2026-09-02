@@ -322,8 +322,11 @@ mod tests {
 
     #[test]
     fn orders_message_maps_okx_current_fill_pnl_and_fee_cost() {
-        let events = account::parse_user_data_message(
+        let registry =
+            registry_with_metadata(linear_metadata_for("ANTHROPIC-USDT-SWAP", "ANTHROPIC"));
+        let events = account::parse_user_data_message_with_registry(
             r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"ANTHROPIC-USDT-SWAP","ordId":"123","clOrdId":"client-1","side":"sell","px":"1500.1","sz":"0.16","accFillSz":"0.16","state":"filled","fillPx":"1498.0","fillSz":"0.16","fillPnl":"-2.34","fillFee":"-0.12","fillFeeCcy":"USDT","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
+            &registry,
         )
         .unwrap();
 
@@ -342,8 +345,11 @@ mod tests {
 
     #[test]
     fn orders_message_accepts_market_fill_with_empty_order_price() {
-        let events = account::parse_user_data_message(
+        let registry =
+            registry_with_metadata(linear_metadata_for("ANTHROPIC-USDT-SWAP", "ANTHROPIC"));
+        let events = account::parse_user_data_message_with_registry(
             r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"ANTHROPIC-USDT-SWAP","ordId":"123","clOrdId":"","side":"sell","px":"","sz":"0.06","accFillSz":"0.06","state":"filled","fillPx":"1666.6","fillSz":"0.06","fillPnl":"5.4390778138112309","fillFee":"-0.049998","fillFeeCcy":"USDT","tradeId":"445492","uTime":"1778456817451"}]}"#,
+            &registry,
         )
         .unwrap();
 
@@ -369,8 +375,11 @@ mod tests {
 
     #[test]
     fn orders_message_accepts_legacy_order_pnl_and_fee_fields() {
-        let events = account::parse_user_data_message(
+        let registry =
+            registry_with_metadata(linear_metadata_for("ANTHROPIC-USDT-SWAP", "ANTHROPIC"));
+        let events = account::parse_user_data_message_with_registry(
             r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"ANTHROPIC-USDT-SWAP","ordId":"123","clOrdId":"client-1","side":"sell","px":"1500.1","sz":"0.16","accFillSz":"0.16","state":"filled","fillPx":"1498.0","fillSz":"0.16","pnl":"-2.34","fee":"-0.12","feeCcy":"USDT","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
+            &registry,
         )
         .unwrap();
 
@@ -541,14 +550,18 @@ mod tests {
     }
 
     fn linear_metadata() -> OkxInstrumentMetadata {
+        linear_metadata_for("BTC-USDT-SWAP", "BTC")
+    }
+
+    fn linear_metadata_for(inst_id: &str, base_asset: &str) -> OkxInstrumentMetadata {
         OkxInstrumentMetadata::from_instrument_info(&InstrumentInfo {
-            inst_id: "BTC-USDT-SWAP".to_string(),
+            inst_id: inst_id.to_string(),
             ct_type: Some("linear".to_string()),
             tick_sz: "0.1".to_string(),
             lot_sz: "0.01".to_string(),
             min_sz: "0.01".to_string(),
             ct_val: Some("0.01".to_string()),
-            ct_val_ccy: Some("BTC".to_string()),
+            ct_val_ccy: Some(base_asset.to_string()),
             settle_ccy: Some("USDT".to_string()),
         })
         .unwrap()

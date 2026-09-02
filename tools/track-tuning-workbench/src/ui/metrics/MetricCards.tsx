@@ -2,7 +2,7 @@ import type {
   WorkbenchEvaluationLane,
   WorkbenchEvaluationReport,
   WorkbenchReplayRow,
-  WorkbenchRulesFixtureId,
+  WorkbenchInstrumentFixtureId,
   WorkbenchScenarioReport,
 } from '@/app/workbenchBridge';
 import type { TrackEvaluationState } from '@/ui/app/useTrackEvaluation';
@@ -17,8 +17,8 @@ export interface MetricCardsPriceStatus {
 
 export interface MetricCardsProps {
   evaluation: TrackEvaluationState;
-  rulesFixture: WorkbenchRulesFixtureId | null;
-  onRulesFixtureChange(fixture: WorkbenchRulesFixtureId | null): void;
+  instrumentFixture: WorkbenchInstrumentFixtureId | null;
+  onInstrumentFixtureChange(fixture: WorkbenchInstrumentFixtureId | null): void;
   selectedScenarioId: string;
   onSelectedScenarioChange(scenarioId: string): void;
   priceStatus: MetricCardsPriceStatus;
@@ -26,8 +26,8 @@ export interface MetricCardsProps {
 
 export function MetricCards({
   evaluation,
-  rulesFixture,
-  onRulesFixtureChange,
+  instrumentFixture,
+  onInstrumentFixtureChange,
   selectedScenarioId,
   onSelectedScenarioChange,
   priceStatus,
@@ -52,16 +52,16 @@ export function MetricCards({
 
       <div className="field-grid field-grid--two evaluation-controls">
         <label className="field">
-          <span className="field__label">评估规则 fixture</span>
+          <span className="field__label">评估标的 fixture</span>
           <select
             className="field__input"
-            aria-label="评估规则 fixture"
-            value={rulesFixture ?? ''}
+            aria-label="评估标的 fixture"
+            value={instrumentFixture ?? ''}
             onChange={(event) => {
-              onRulesFixtureChange(
+              onInstrumentFixtureChange(
                 event.target.value === ''
                   ? null
-                  : event.target.value as WorkbenchRulesFixtureId,
+                  : event.target.value as WorkbenchInstrumentFixtureId,
               );
             }}
           >
@@ -88,7 +88,7 @@ export function MetricCards({
       </div>
 
       <EvaluationStateNotice evaluation={evaluation} />
-      {report ? <RulesSummary report={report} /> : null}
+      {report ? <InstrumentFixtureSummary report={report} /> : null}
       {report && scenario ? <ScenarioComparison scenario={scenario} /> : null}
     </section>
   );
@@ -109,42 +109,42 @@ function EvaluationStateNotice({ evaluation }: { evaluation: TrackEvaluationStat
   }
 }
 
-function RulesSummary({ report }: { report: WorkbenchEvaluationReport }) {
-  const { rules, assumptions } = report;
+function InstrumentFixtureSummary({ report }: { report: WorkbenchEvaluationReport }) {
+  const { instrumentFixture: fixture, assumptions } = report;
   return (
     <div className="evaluation-summary">
       <div className="metric-cards metric-cards--compact">
-        <Metric title="规则 fixture" value={rules.fixtureId} note={rules.quantityKind} />
+        <Metric title="标的 fixture" value={fixture.fixtureId} note={fixture.positionBasis} />
         <Metric
           title="数量换算"
-          value={formatNumber(rules.nativeQtyPerExposureUnit)}
-          note={`native qty / exposure unit · quantity step ${formatNumber(rules.quantityStep)}`}
+          value={formatNumber(fixture.positionQtyPerExposureUnit)}
+          note={`position qty / exposure unit · position qty step ${formatNumber(fixture.positionQtyStep)}`}
         />
         <Metric
           title="价格规则"
-          value={`tick ${formatNumber(rules.priceTick)}`}
-          note={formatPricePrecision(rules.pricePrecision)}
+          value={`tick ${formatNumber(fixture.priceTick)}`}
+          note={formatPricePrecision(fixture.pricePrecision)}
         />
         <Metric
           title="最小交易"
-          value={`qty ${formatNumber(rules.minQty)}`}
-          note={`notional ${formatNumber(rules.minNotional)}`}
+          value={`qty ${formatNumber(fixture.minPositionQty)}`}
+          note={`notional ${formatNumber(fixture.minNotional)} ${fixture.notionalAsset}`}
         />
         <Metric
           title="合约与结算"
-          value={rules.contractNotional === null
-            ? 'contract notional --'
-            : `contract notional ${formatNumber(rules.contractNotional)}`}
-          note={`settlement ${rules.settlementAsset}`}
+          value={fixture.contractValue === null
+            ? 'base asset quantity'
+            : `contract value ${formatNumber(fixture.contractValue)} ${fixture.notionalAsset}`}
+          note={`base ${fixture.baseAsset} · quote ${fixture.quoteAsset} · settlement ${fixture.settlementAsset}`}
         />
         <Metric
           title="费用假设"
-          value={`taker ${formatNumber(rules.takerFeeRate)}`}
-          note={`maker ${formatNumber(rules.makerFeeRate)}`}
+          value={`taker ${formatNumber(fixture.takerFeeRate)}`}
+          note={`maker ${formatNumber(fixture.makerFeeRate)}`}
         />
       </div>
       <InlineNotice title="评估假设">
-        <p>{assumptions.rulesNotice}</p>
+        <p>{assumptions.instrumentFixtureNotice}</p>
         <p>{assumptions.fillModelNotice}</p>
       </InlineNotice>
     </div>
@@ -227,7 +227,7 @@ function LaneMetrics({
       />
       <Metric
         title={`${direction} 新增风险成交`}
-        value={`native qty ${formatNumber(riskIncrease.nativeQty)}`}
+        value={`position qty ${formatNumber(riskIncrease.positionQty)}`}
         note={`weighted price ${formatNullable(riskIncrease.weightedFillPrice)}`}
       />
       <Metric
@@ -246,7 +246,7 @@ function MatchedPriceSummary({ scenario }: { scenario: WorkbenchScenarioReport }
   return (
     <div className="evaluation-matched-price">
       <p>
-        matched native qty {formatNumber(matched.matchedNativeQty)} · immediate matched weighted price
+        matched position qty {formatNumber(matched.matchedPositionQty)} · immediate matched weighted price
         {' '}{formatNullable(matched.curveImmediateMatchedWeightedPrice)} · delayed matched weighted price
         {' '}{formatNullable(matched.delayedMatchedWeightedPrice)} · favorable improvement
         {' '}{formatNullable(matched.favorablePriceImprovement)}
@@ -313,7 +313,7 @@ function formatNumber(value: number) {
 }
 
 function formatPricePrecision(
-  precision: WorkbenchEvaluationReport['rules']['pricePrecision'],
+  precision: WorkbenchEvaluationReport['instrumentFixture']['pricePrecision'],
 ) {
   if (precision.kind === 'fixed_tick') {
     return 'fixed tick';

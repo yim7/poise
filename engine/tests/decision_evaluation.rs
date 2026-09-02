@@ -165,8 +165,8 @@ fn advantage_evaluation_separates_matched_price_improvement_from_tracking_loss()
     assert!(report.delayed_metrics.max_backlog_units > 0.0);
     assert!(report.comparison.additional_delayed_tracking_error_units > 0.0);
     let long = &report.comparison.long_risk_increase_price;
-    assert!(long.curve_immediate_total_native_qty > long.delayed_total_native_qty);
-    assert!(long.matched_native_qty > 0.0);
+    assert!(long.curve_immediate_total_position_qty > long.delayed_total_position_qty);
+    assert!(long.matched_position_qty > 0.0);
     assert!(long.favorable_price_improvement.unwrap() > 0.0);
 }
 
@@ -291,18 +291,18 @@ fn cross_zero_flattens_before_releasing_new_short_risk() {
     assert_close(delayed.steps[0].simulated_position_qty, 0.0);
     assert!(delayed.steps[0].effects.iter().all(|effect| match effect {
         DecisionReplayEffect::FillOrder {
-            risk_increase_native_qty,
+            risk_increase_position_qty,
             ..
-        } => risk_increase_native_qty.abs() < f64::EPSILON,
+        } => risk_increase_position_qty.abs() < f64::EPSILON,
         _ => true,
     }));
     assert!(delayed.steps[1].effects.iter().any(|effect| matches!(
         effect,
         DecisionReplayEffect::FillOrder {
             side: poise_core::types::Side::Sell,
-            risk_increase_native_qty,
+            risk_increase_position_qty,
             ..
-        } if *risk_increase_native_qty > 0.0
+        } if *risk_increase_position_qty > 0.0
     )));
     assert!(has_release_trigger(
         &delayed.steps[1].effects,
@@ -315,9 +315,9 @@ fn cross_zero_flattens_before_releasing_new_short_risk() {
         .filter_map(|effect| match effect {
             DecisionReplayEffect::FillOrder {
                 side: poise_core::types::Side::Sell,
-                risk_increase_native_qty,
+                risk_increase_position_qty,
                 ..
-            } => Some(*risk_increase_native_qty),
+            } => Some(*risk_increase_position_qty),
             _ => None,
         })
         .sum::<f64>();
@@ -327,7 +327,7 @@ fn cross_zero_flattens_before_releasing_new_short_risk() {
             .delayed_metrics
             .execution
             .short_risk_increase
-            .native_qty,
+            .position_qty,
         short_risk_increase,
     );
     let release_units = delayed.steps[1]
@@ -345,12 +345,12 @@ fn cross_zero_flattens_before_releasing_new_short_risk() {
             .delayed_metrics
             .execution
             .long_risk_increase
-            .native_qty,
+            .position_qty,
         0.0,
     );
     let short = &report.comparison.short_risk_increase_price;
-    assert!(short.curve_immediate_total_native_qty > short.delayed_total_native_qty);
-    assert_close(short.matched_native_qty, short.delayed_total_native_qty);
+    assert!(short.curve_immediate_total_position_qty > short.delayed_total_position_qty);
+    assert_close(short.matched_position_qty, short.delayed_total_position_qty);
     assert!(short.favorable_price_improvement.unwrap() > 0.0);
 }
 
@@ -390,7 +390,7 @@ fn late_fill_crossing_zero_counts_only_post_zero_risk_but_full_turnover() {
                 quantity,
                 price,
                 trade_notional,
-                risk_increase_native_qty,
+                risk_increase_position_qty,
                 position_before_qty,
                 position_after_qty,
                 ..
@@ -398,7 +398,7 @@ fn late_fill_crossing_zero_counts_only_post_zero_risk_but_full_turnover() {
                 *quantity,
                 *price,
                 *trade_notional,
-                *risk_increase_native_qty,
+                *risk_increase_position_qty,
                 *position_before_qty,
                 *position_after_qty,
             )),
@@ -793,14 +793,14 @@ fn inverse_contract_uses_contract_notional_for_quantity_fee_and_margin() {
     )
     .unwrap();
 
-    assert_close(execution.long_risk_increase.native_qty, 3.0);
+    assert_close(execution.long_risk_increase.position_qty, 3.0);
     assert_close(execution.turnover_notional, 300.0);
     assert_close(execution.max_abs_notional, 300.0);
     assert_close(execution.max_margin_requirement, 100.0);
     assert_eq!(execution.fee_asset, "BTC");
     assert_close(execution.estimated_taker_fee, expected_fee);
     let curve_execution = &report.curve_immediate_metrics;
-    assert_close(curve_execution.long_risk_increase.native_qty, 12.0);
+    assert_close(curve_execution.long_risk_increase.position_qty, 12.0);
     assert_close(curve_execution.turnover_notional, 1_200.0);
     assert_close(curve_execution.max_abs_notional, 1_200.0);
     assert_close(curve_execution.max_margin_requirement, 400.0);

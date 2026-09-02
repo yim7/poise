@@ -117,7 +117,7 @@ pub struct DecisionReplayStepReport {
     pub committed_decision: Option<InventoryDecisionSnapshot>,
     pub effects: Vec<DecisionReplayEffect>,
     /// Signed native fill delta for this step: buys are positive and sells are negative.
-    pub signed_filled_native_qty: f64,
+    pub signed_filled_position_qty: f64,
     pub simulated_position_qty: f64,
     pub simulated_position_exposure: Exposure,
     pub observed_position_qty: f64,
@@ -144,7 +144,7 @@ pub enum DecisionReplayEffect {
         price: f64,
         quantity: f64,
         trade_notional: f64,
-        risk_increase_native_qty: f64,
+        risk_increase_position_qty: f64,
         position_before_qty: f64,
         position_after_qty: f64,
         estimated_taker_fee: f64,
@@ -222,7 +222,7 @@ struct SimulatedOrder {
 #[derive(Default)]
 struct StepAccumulator {
     effects: Vec<DecisionReplayEffect>,
-    signed_filled_native_qty: f64,
+    signed_filled_position_qty: f64,
     estimated_taker_fee: f64,
 }
 
@@ -256,7 +256,7 @@ impl DecisionReplayRunner {
             .value();
         ensure!(
             unit_qty.is_finite() && unit_qty > f64::EPSILON,
-            "native quantity per exposure unit must be finite and positive"
+            "position quantity per exposure unit must be finite and positive"
         );
         let clock = Arc::new(ReplayClock::new(input.started_at));
         let mut manager = TrackManager::new(clock.clone());
@@ -398,7 +398,7 @@ impl DecisionReplayRunner {
             strategy_price: observed.strategy_price,
             committed_decision,
             effects: accumulator.effects,
-            signed_filled_native_qty: accumulator.signed_filled_native_qty,
+            signed_filled_position_qty: accumulator.signed_filled_position_qty,
             simulated_position_qty: self.simulated_position_qty,
             simulated_position_exposure: self.simulated_exposure(),
             observed_position_qty: observed.position_qty,
@@ -776,9 +776,9 @@ impl DecisionReplayRunner {
         };
         let position_before_qty = self.simulated_position_qty;
         let position_after_qty = position_before_qty + signed_quantity;
-        let risk_increase_native_qty = added_risk_units(position_before_qty, position_after_qty);
+        let risk_increase_position_qty = added_risk_units(position_before_qty, position_after_qty);
         self.simulated_position_qty = position_after_qty;
-        accumulator.signed_filled_native_qty += signed_quantity;
+        accumulator.signed_filled_position_qty += signed_quantity;
         let trade_notional = self
             .instrument_spec
             .notional_from_position_qty(
@@ -802,7 +802,7 @@ impl DecisionReplayRunner {
             price,
             quantity,
             trade_notional,
-            risk_increase_native_qty,
+            risk_increase_position_qty,
             position_before_qty,
             position_after_qty,
             estimated_taker_fee: fee,
@@ -1180,14 +1180,14 @@ mod tests {
 
         let report = run_decision_replay(&input).unwrap();
 
-        assert_eq!(report.steps[2].signed_filled_native_qty, 0.5);
+        assert_eq!(report.steps[2].signed_filled_position_qty, 0.5);
         assert_eq!(report.steps[2].simulated_position_qty, 0.5);
         assert_eq!(report.steps[2].observed_position_qty, 0.0);
         assert!(report.steps[2].estimated_taker_fee > 0.0);
-        assert_close(report.steps[3].signed_filled_native_qty, 0.3);
+        assert_close(report.steps[3].signed_filled_position_qty, 0.3);
         assert_eq!(report.steps[3].simulated_position_qty, 0.8);
         assert_eq!(report.steps[3].observed_position_qty, 0.0);
-        assert_eq!(report.steps[4].signed_filled_native_qty, 0.0);
+        assert_eq!(report.steps[4].signed_filled_position_qty, 0.0);
         assert_eq!(report.steps[4].estimated_taker_fee, 0.0);
         assert_eq!(report.steps[4].simulated_position_qty, 0.8);
         assert_eq!(report.steps[5].simulated_position_qty, 0.8);
@@ -1223,7 +1223,7 @@ mod tests {
             .unwrap();
 
         assert_close(
-            report.steps[2].signed_filled_native_qty.abs(),
+            report.steps[2].signed_filled_position_qty.abs(),
             submitted_quantity,
         );
         assert!(report.steps[2].estimated_taker_fee > 0.0);
@@ -1308,7 +1308,7 @@ mod tests {
 
         let report = run_decision_replay(&input).unwrap();
 
-        assert_close(report.steps[4].signed_filled_native_qty.abs(), 0.5);
+        assert_close(report.steps[4].signed_filled_position_qty.abs(), 0.5);
         assert!(report.steps[4].estimated_taker_fee > 0.0);
         assert_eq!(report.steps[4].simulated_position_qty, 1.0);
         assert_eq!(report.steps[4].observed_position_qty, 0.0);
@@ -1348,31 +1348,31 @@ mod tests {
 
         let report = run_decision_replay(&input).unwrap();
 
-        assert!(report.steps[1].signed_filled_native_qty > 0.0);
+        assert!(report.steps[1].signed_filled_position_qty > 0.0);
         assert!(report.steps[1].simulated_position_qty > 0.0);
         assert!(report.steps[1].effects.iter().any(|effect| matches!(
             effect,
             DecisionReplayEffect::FillOrder {
                 side: Side::Buy,
                 trade_notional,
-                risk_increase_native_qty,
+                risk_increase_position_qty,
                 position_before_qty,
                 position_after_qty,
                 ..
             } if (*trade_notional - 92.6).abs() < 1e-12
-                && (*risk_increase_native_qty - 1.0).abs() < 1e-12
+                && (*risk_increase_position_qty - 1.0).abs() < 1e-12
                 && position_before_qty.abs() < f64::EPSILON
                 && (*position_after_qty - 1.0).abs() < f64::EPSILON
         )));
-        assert!(report.steps[2].signed_filled_native_qty < 0.0);
+        assert!(report.steps[2].signed_filled_position_qty < 0.0);
         assert!(report.steps[2].effects.iter().any(|effect| matches!(
             effect,
             DecisionReplayEffect::FillOrder {
                 order_ref,
                 side: Side::Sell,
-                risk_increase_native_qty,
+                risk_increase_position_qty,
                 ..
-            } if order_ref == "order-2" && risk_increase_native_qty.abs() < f64::EPSILON
+            } if order_ref == "order-2" && risk_increase_position_qty.abs() < f64::EPSILON
         )));
         assert!(report.final_simulated_position_qty.abs() < f64::EPSILON);
     }

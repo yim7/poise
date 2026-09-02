@@ -1141,7 +1141,7 @@ impl TrackManager {
             instrument: track.instrument(),
             config: track.config(),
             instrument_spec: &track.instrument_spec,
-            native_qty_per_unit: track.native_qty_per_exposure_unit(),
+            position_qty_per_unit: track.position_qty_per_exposure_unit(),
             min_rebalance_units: track.config().min_rebalance_units,
             current_exposure: track.current_exposure.clone(),
             risk_approved_target,

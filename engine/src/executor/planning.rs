@@ -45,7 +45,7 @@ pub struct SubmitIntentInput<'a> {
     pub instrument: &'a Instrument,
     pub config: &'a TrackConfig,
     pub instrument_spec: &'a InstrumentSpec,
-    pub native_qty_per_unit: f64,
+    pub position_qty_per_unit: f64,
     pub min_rebalance_units: f64,
     pub current_exposure: Exposure,
     // Risk-approved target retained for risk-reducing passive maker selection.
@@ -196,7 +196,7 @@ pub fn plan(input: ExecutorInput<'_>) -> ExecutorPlan {
         instrument: submit_intent.instrument,
         config: submit_intent.config,
         instrument_spec: submit_intent.instrument_spec,
-        native_qty_per_unit: submit_intent.native_qty_per_unit,
+        position_qty_per_unit: submit_intent.position_qty_per_unit,
         min_rebalance_units: submit_intent.min_rebalance_units,
         current_exposure: &submit_intent.current_exposure,
         execution_target: &execution_target,
@@ -593,10 +593,10 @@ fn boundary_exposure_epsilon(input: &SubmitIntentInput<'_>) -> f64 {
 }
 
 fn position_exposure_epsilon(input: &SubmitIntentInput<'_>) -> f64 {
-    let quantity_step_as_exposure = if input.native_qty_per_unit <= f64::EPSILON {
+    let quantity_step_as_exposure = if input.position_qty_per_unit <= f64::EPSILON {
         0.0
     } else {
-        input.instrument_spec.position_qty_step().value() / input.native_qty_per_unit
+        input.instrument_spec.position_qty_step().value() / input.position_qty_per_unit
     };
     boundary_exposure_epsilon(input).max(quantity_step_as_exposure)
 }
@@ -661,7 +661,7 @@ mod tests {
                 instrument: instrument(),
                 config,
                 instrument_spec: rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,
                 execution_target: desired_exposure.clone(),
@@ -680,15 +680,15 @@ mod tests {
         )
     }
 
-    fn input_with_native_qty_per_unit<'a>(
+    fn input_with_position_qty_per_unit<'a>(
         config: &'a TrackConfig,
         rules: &'a InstrumentSpec,
-        native_qty_per_unit: f64,
+        position_qty_per_unit: f64,
         current_exposure: Exposure,
         desired_exposure: Exposure,
     ) -> ExecutorInput<'a> {
         let mut input = input(config, rules, current_exposure, desired_exposure);
-        input.submit_intent.native_qty_per_unit = native_qty_per_unit;
+        input.submit_intent.position_qty_per_unit = position_qty_per_unit;
         input
     }
 
@@ -717,7 +717,7 @@ mod tests {
                 instrument: instrument(),
                 config,
                 instrument_spec: rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure,
                 execution_target: desired_exposure.clone(),
@@ -819,11 +819,11 @@ mod tests {
     }
 
     #[test]
-    fn catch_up_policy_uses_native_quantity_per_exposure_unit() {
+    fn catch_up_policy_uses_position_qty_per_exposure_unit() {
         let config = config();
         let rules = rules();
 
-        let plan = plan(input_with_native_qty_per_unit(
+        let plan = plan(input_with_position_qty_per_unit(
             &config,
             &rules,
             10.0,
@@ -1037,10 +1037,10 @@ mod tests {
         };
         let rules = crate::test_instrument::linear_spec(0.5, 0.00001, 0.00001, 5.0);
 
-        let mut input = input_with_native_qty_per_unit(
+        let mut input = input_with_position_qty_per_unit(
             &config,
             &rules,
-            crate::runtime::native_qty_per_exposure_unit(&config, &rules),
+            crate::runtime::position_qty_per_exposure_unit(&config, &rules),
             Exposure(-0.1056),
             Exposure(0.4172),
         );
@@ -1099,10 +1099,10 @@ mod tests {
         };
         let rules = crate::test_instrument::linear_spec(0.1, 0.01, 0.01, 0.0);
 
-        let plan = plan(input_with_native_qty_per_unit(
+        let plan = plan(input_with_position_qty_per_unit(
             &config,
             &rules,
-            crate::runtime::native_qty_per_exposure_unit(&config, &rules),
+            crate::runtime::position_qty_per_exposure_unit(&config, &rules),
             Exposure(9.75),
             Exposure(3.75),
         ));
@@ -1122,7 +1122,7 @@ mod tests {
             .iter()
             .map(|allocation| allocation.exposure_qty)
             .sum::<f64>();
-        let position_qty_per_unit = crate::runtime::native_qty_per_exposure_unit(&config, &rules);
+        let position_qty_per_unit = crate::runtime::position_qty_per_exposure_unit(&config, &rules);
         assert!(
             (allocated_exposure - catch_up_binding.request.quantity / position_qty_per_unit).abs()
                 < 1e-9
@@ -1144,10 +1144,10 @@ mod tests {
         };
         let rules = crate::test_instrument::linear_spec(0.1, 0.01, 0.01, 0.0);
 
-        let plan = plan(input_with_native_qty_per_unit(
+        let plan = plan(input_with_position_qty_per_unit(
             &config,
             &rules,
-            crate::runtime::native_qty_per_exposure_unit(&config, &rules),
+            crate::runtime::position_qty_per_exposure_unit(&config, &rules),
             Exposure(0.75),
             Exposure(1.8705),
         ));
@@ -1191,7 +1191,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 instrument_spec: &rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 risk_approved_target: Exposure(2.0),
@@ -1246,7 +1246,7 @@ mod tests {
                     instrument: instrument(),
                     config: &config,
                     instrument_spec: &rules,
-                    native_qty_per_unit: 1.0,
+                    position_qty_per_unit: 1.0,
                     min_rebalance_units: config.min_rebalance_units,
                     current_exposure: Exposure(0.0),
                     risk_approved_target: Exposure(2.0),
@@ -1302,7 +1302,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 instrument_spec: &rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(-6.0),
                 risk_approved_target: Exposure(-1.0),
@@ -1384,7 +1384,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 instrument_spec: &rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 risk_approved_target: Exposure(2.0),
@@ -1452,7 +1452,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 instrument_spec: &rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 risk_approved_target: Exposure(2.0),
@@ -1492,7 +1492,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 instrument_spec: &rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 risk_approved_target: Exposure(2.0),
@@ -1781,7 +1781,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 instrument_spec: &rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
                 risk_approved_target: Exposure(0.0),
@@ -1843,7 +1843,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 instrument_spec: &rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
                 risk_approved_target: Exposure(0.0),
@@ -1908,7 +1908,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 instrument_spec: &rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(1.0),
                 risk_approved_target: Exposure(0.0),
@@ -1955,7 +1955,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 instrument_spec: &rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 risk_approved_target: Exposure(0.0),
@@ -1995,7 +1995,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 instrument_spec: &rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: config.min_rebalance_units,
                 current_exposure: Exposure(0.0),
                 risk_approved_target: Exposure(0.0),
@@ -2095,7 +2095,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 instrument_spec: &rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.0),
                 risk_approved_target: Exposure(1.0),
@@ -2132,7 +2132,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 instrument_spec: &rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(0.6),
                 risk_approved_target: Exposure(1.0),
@@ -2176,7 +2176,7 @@ mod tests {
                 instrument: instrument(),
                 config: &config,
                 instrument_spec: &rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: Exposure(1.2),
                 risk_approved_target: Exposure(1.0),

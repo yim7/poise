@@ -48,7 +48,7 @@ pub(super) struct PolicyPlanningInput<'a> {
     pub instrument: &'a Instrument,
     pub config: &'a TrackConfig,
     pub instrument_spec: &'a InstrumentSpec,
-    pub native_qty_per_unit: f64,
+    pub position_qty_per_unit: f64,
     pub min_rebalance_units: f64,
     pub current_exposure: &'a Exposure,
     // Catch-up and direct target policies consume only this reconciler-owned target.
@@ -396,7 +396,7 @@ fn plan_executable_allocations(
     let quantity = input
         .instrument_spec
         .normalize_position_qty(
-            PositionQty::new(exposure_qty * input.native_qty_per_unit)
+            PositionQty::new(exposure_qty * input.position_qty_per_unit)
                 .expect("planned position quantity must be finite"),
         )
         .value();
@@ -406,7 +406,7 @@ fn plan_executable_allocations(
 
     let allocations = trim_allocations_to_exposure_qty(
         allocations,
-        quantity / input.native_qty_per_unit.max(f64::EPSILON),
+        quantity / input.position_qty_per_unit.max(f64::EPSILON),
     );
     if allocations.is_empty() {
         return None;
@@ -722,7 +722,7 @@ fn plan_curve_maker_binding(
     let quantity = input
         .instrument_spec
         .normalize_position_qty(
-            PositionQty::new(operation_view.remaining * input.native_qty_per_unit)
+            PositionQty::new(operation_view.remaining * input.position_qty_per_unit)
                 .expect("planned position quantity must be finite"),
         )
         .value();
@@ -941,10 +941,10 @@ fn catch_up_increase_exposure_budget(
 }
 
 fn minimum_executable_exposure_qty(input: &PolicyPlanningInput<'_>, price: f64) -> f64 {
-    if input.native_qty_per_unit <= f64::EPSILON {
+    if input.position_qty_per_unit <= f64::EPSILON {
         return 0.0;
     }
-    minimum_executable_order_qty(price, input.instrument_spec) / input.native_qty_per_unit
+    minimum_executable_order_qty(price, input.instrument_spec) / input.position_qty_per_unit
 }
 
 fn minimum_executable_order_qty(price: f64, rules: &InstrumentSpec) -> f64 {
@@ -1169,7 +1169,7 @@ mod tests {
             instrument: &instrument,
             config: &config,
             instrument_spec: &rules,
-            native_qty_per_unit: 1.0,
+            position_qty_per_unit: 1.0,
             min_rebalance_units: 1.0,
             current_exposure: &current,
             execution_target: &desired,
@@ -1215,7 +1215,7 @@ mod tests {
                 instrument: &instrument,
                 config: &config,
                 instrument_spec: &rules,
-                native_qty_per_unit: 1.0,
+                position_qty_per_unit: 1.0,
                 min_rebalance_units: 1.0,
                 current_exposure: &Exposure(0.0),
                 execution_target: &Exposure(1.0),

@@ -103,8 +103,8 @@ fn project_track_explanation(
             symbol: explanation.symbol,
         },
         leverage,
-        native_quantity_unit: quantity_unit(&explanation.position_basis),
-        native_quantity_per_unit: explanation.native_quantity_per_unit,
+        position_qty_unit: quantity_unit(&explanation.position_basis),
+        position_qty_per_unit: explanation.position_qty_per_unit,
         unit_notional: explanation.unit_notional,
         unit_notional_asset: explanation.unit_notional_asset,
         quantity_step: explanation.quantity_step,
@@ -183,7 +183,7 @@ async fn estimate_capacity(
     );
     let available = available.max(0.0);
 
-    let (estimated_max_native_quantity, estimated_max_notional, estimated_max_notional_asset) =
+    let (estimated_max_position_qty, estimated_max_notional, estimated_max_notional_asset) =
         match instrument_spec.position_basis() {
             PositionBasis::BaseAsset => {
                 let estimated_max_notional = available * leverage as f64;
@@ -210,7 +210,7 @@ async fn estimate_capacity(
         available_asset,
         mark_price,
         leverage,
-        estimated_max_native_quantity,
+        estimated_max_position_qty,
         estimated_max_notional,
         estimated_max_notional_asset,
     }))
@@ -289,10 +289,10 @@ total_loss_limit = 0.03
         assert_eq!(track.instrument.symbol, "BTC-USD-SWAP");
         assert_eq!(track.leverage, 3);
         assert_eq!(
-            track.native_quantity_unit,
+            track.position_qty_unit,
             TrackPositionQuantityUnitView::Contracts
         );
-        assert_eq!(track.native_quantity_per_unit, 3.0);
+        assert_eq!(track.position_qty_per_unit, 3.0);
         assert_eq!(track.unit_notional_asset, "USD");
         assert_eq!(track.loss_limit_asset, "BTC");
         let capacity = track.capacity.as_ref().unwrap();
@@ -300,7 +300,7 @@ total_loss_limit = 0.03
         assert_eq!(capacity.available_asset, "BTC");
         assert_eq!(capacity.mark_price, 60_000.0);
         assert_eq!(capacity.leverage, 3);
-        assert_eq!(capacity.estimated_max_native_quantity, 450.0);
+        assert_eq!(capacity.estimated_max_position_qty, 450.0);
         assert_eq!(capacity.estimated_max_notional, 45_000.0);
         assert_eq!(capacity.estimated_max_notional_asset, "USD");
         assert!(response.warnings.is_empty());
@@ -333,7 +333,7 @@ total_loss_limit = 0.03
     }
 
     #[tokio::test]
-    async fn dry_run_reports_native_quantity_below_minimum_unit() {
+    async fn dry_run_reports_position_qty_below_minimum_unit() {
         let config = inverse_config_with_notional_per_unit(50.0);
         let exchange = Arc::new(RecordingDryRunExchange::default());
 
@@ -352,7 +352,7 @@ total_loss_limit = 0.03
         .to_string();
 
         assert!(error.contains("BTC-USD-SWAP"));
-        assert!(error.contains("native_quantity_per_unit"));
+        assert!(error.contains("position_qty_per_unit"));
         assert!(error.contains("0.5"));
         assert!(error.contains("min_qty"));
         assert!(error.contains("1"));

@@ -57,14 +57,9 @@ pub(crate) fn available_balance_from_balance(
     parse_decimal(&format!("details[{quote_asset}].availEq"), &detail.avail_eq)
 }
 
-#[cfg(test)]
-pub(crate) fn position_from_snapshot(value: PositionSnapshot) -> Result<Position> {
-    position_from_snapshot_with_metadata(value, None)
-}
-
 pub(crate) fn position_from_snapshot_with_metadata(
     value: PositionSnapshot,
-    metadata: Option<&OkxInstrumentMetadata>,
+    metadata: &OkxInstrumentMetadata,
 ) -> Result<Position> {
     if value.pos_side != "net" {
         return Err(anyhow!(
@@ -93,14 +88,9 @@ pub(crate) fn position_from_snapshot_with_metadata(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn open_order_from_snapshot(value: PendingOrderSnapshot) -> Result<ExchangeOrder> {
-    open_order_from_snapshot_with_metadata(value, None)
-}
-
 pub(crate) fn open_order_from_snapshot_with_metadata(
     value: PendingOrderSnapshot,
-    metadata: Option<&OkxInstrumentMetadata>,
+    metadata: &OkxInstrumentMetadata,
 ) -> Result<ExchangeOrder> {
     let price = value
         .fill_price
@@ -125,7 +115,7 @@ pub(crate) fn open_order_from_snapshot_with_metadata(
 
 pub(crate) fn track_pnl_record_from_trade_fill_with_metadata(
     value: TradeFillSnapshot,
-    metadata: Option<&OkxInstrumentMetadata>,
+    metadata: &OkxInstrumentMetadata,
 ) -> Result<TrackPnlRecord> {
     let instrument = Instrument::new(Venue::Okx, value.inst_id);
     let occurred_at = millis_to_utc(&value.ts)?;
@@ -140,9 +130,7 @@ pub(crate) fn track_pnl_record_from_trade_fill_with_metadata(
         .or(parse_optional_decimal("fee", value.fee.as_deref())?)
         .unwrap_or(0.0);
     let trading_fee = -raw_fee;
-    let pnl_asset = metadata
-        .map(|metadata| metadata.settlement_asset().to_string())
-        .unwrap_or_else(|| instrument.quote_asset());
+    let pnl_asset = metadata.settlement_asset().to_string();
     if let Some(fee_asset) = value
         .fill_fee_currency
         .as_deref()
@@ -180,7 +168,7 @@ pub(crate) fn track_pnl_record_from_trade_fill_with_metadata(
 
 pub(crate) fn track_pnl_record_from_funding_bill_with_metadata(
     value: FundingBillSnapshot,
-    metadata: Option<&OkxInstrumentMetadata>,
+    metadata: &OkxInstrumentMetadata,
 ) -> Result<TrackPnlRecord> {
     ensure!(
         matches!(
@@ -191,9 +179,7 @@ pub(crate) fn track_pnl_record_from_funding_bill_with_metadata(
         value.sub_type
     );
     let instrument = Instrument::new(Venue::Okx, value.inst_id);
-    let pnl_asset = metadata
-        .map(|metadata| metadata.settlement_asset().to_string())
-        .unwrap_or_else(|| instrument.quote_asset());
+    let pnl_asset = metadata.settlement_asset().to_string();
     ensure!(
         value.currency == pnl_asset,
         "OKX funding asset `{}` does not match settlement asset `{pnl_asset}`",
@@ -239,16 +225,11 @@ pub(crate) fn side_to_okx(side: Side) -> &'static str {
 
 pub(crate) fn position_qty_from_okx_contracts(
     okx_contract_qty: f64,
-    metadata: Option<&OkxInstrumentMetadata>,
+    metadata: &OkxInstrumentMetadata,
 ) -> Result<f64> {
-    match metadata {
-        Some(metadata) => Ok(metadata
-            .position_qty_from_wire_contracts(okx_contract_qty)?
-            .value()),
-        None => poise_core::instrument::PositionQty::new(okx_contract_qty)
-            .map(poise_core::instrument::PositionQty::value)
-            .map_err(anyhow::Error::msg),
-    }
+    Ok(metadata
+        .position_qty_from_wire_contracts(okx_contract_qty)?
+        .value())
 }
 
 fn parse_decimal(field: &str, value: &str) -> Result<f64> {
@@ -381,7 +362,7 @@ mod tests {
                 fee_currency: Some("BTC".to_string()),
                 ts: "1781099765546".to_string(),
             },
-            Some(&metadata),
+            &metadata,
         )
         .unwrap();
 
@@ -435,7 +416,7 @@ mod tests {
                 fee_currency: Some("USDT".to_string()),
                 ts: "1781099765546".to_string(),
             },
-            Some(&metadata),
+            &metadata,
         )
         .unwrap();
 
@@ -475,7 +456,7 @@ mod tests {
                 fee_currency: Some("USD".to_string()),
                 ts: "1781099765546".to_string(),
             },
-            Some(&metadata),
+            &metadata,
         )
         .unwrap_err();
 
@@ -509,7 +490,7 @@ mod tests {
                 currency: "BTC".to_string(),
                 ts: "1781145600000".to_string(),
             },
-            Some(&metadata),
+            &metadata,
         )
         .unwrap();
 
@@ -551,7 +532,7 @@ mod tests {
                 currency: "USDT".to_string(),
                 ts: "1781145600000".to_string(),
             },
-            Some(&metadata),
+            &metadata,
         )
         .unwrap_err();
 
@@ -641,15 +622,19 @@ mod tests {
 
     #[test]
     fn maps_net_position_snapshot_to_signed_position() {
-        let position = position_from_snapshot(PositionSnapshot {
-            inst_id: "BTC-USDT-SWAP".to_string(),
-            pos: "-0.25".to_string(),
-            avg_px: "65000.5".to_string(),
-            mark_px: Some("65100.5".to_string()),
-            upl: "123.45".to_string(),
-            pos_side: "net".to_string(),
-            lever: "20".to_string(),
-        })
+        let metadata = linear_metadata();
+        let position = position_from_snapshot_with_metadata(
+            PositionSnapshot {
+                inst_id: "BTC-USDT-SWAP".to_string(),
+                pos: "-25".to_string(),
+                avg_px: "65000.5".to_string(),
+                mark_px: Some("65100.5".to_string()),
+                upl: "123.45".to_string(),
+                pos_side: "net".to_string(),
+                lever: "20".to_string(),
+            },
+            &metadata,
+        )
         .unwrap();
 
         assert_eq!(
@@ -677,7 +662,7 @@ mod tests {
                 pos_side: "net".to_string(),
                 lever: "20".to_string(),
             },
-            Some(&metadata),
+            &metadata,
         )
         .unwrap();
 
@@ -697,7 +682,7 @@ mod tests {
                 pos_side: "net".to_string(),
                 lever: "20".to_string(),
             },
-            Some(&metadata),
+            &metadata,
         )
         .unwrap();
 
@@ -706,15 +691,19 @@ mod tests {
 
     #[test]
     fn maps_okx_flat_position_snapshot_with_empty_derived_fields() {
-        let position = position_from_snapshot(PositionSnapshot {
-            inst_id: "MU-USDT-SWAP".to_string(),
-            pos: "0".to_string(),
-            avg_px: "".to_string(),
-            mark_px: None,
-            upl: "".to_string(),
-            pos_side: "net".to_string(),
-            lever: "".to_string(),
-        })
+        let metadata = linear_metadata_for("MU-USDT-SWAP", "MU");
+        let position = position_from_snapshot_with_metadata(
+            PositionSnapshot {
+                inst_id: "MU-USDT-SWAP".to_string(),
+                pos: "0".to_string(),
+                avg_px: "".to_string(),
+                mark_px: None,
+                upl: "".to_string(),
+                pos_side: "net".to_string(),
+                lever: "".to_string(),
+            },
+            &metadata,
+        )
         .unwrap();
 
         assert_eq!(
@@ -731,15 +720,19 @@ mod tests {
 
     #[test]
     fn rejects_tiny_non_zero_position_with_empty_derived_fields() {
-        let error = position_from_snapshot(PositionSnapshot {
-            inst_id: "MU-USDT-SWAP".to_string(),
-            pos: "0.0000000000000001".to_string(),
-            avg_px: "".to_string(),
-            mark_px: None,
-            upl: "".to_string(),
-            pos_side: "net".to_string(),
-            lever: "".to_string(),
-        })
+        let metadata = linear_metadata_for("MU-USDT-SWAP", "MU");
+        let error = position_from_snapshot_with_metadata(
+            PositionSnapshot {
+                inst_id: "MU-USDT-SWAP".to_string(),
+                pos: "0.0000000000000001".to_string(),
+                avg_px: "".to_string(),
+                mark_px: None,
+                upl: "".to_string(),
+                pos_side: "net".to_string(),
+                lever: "".to_string(),
+            },
+            &metadata,
+        )
         .unwrap_err();
 
         assert!(error.to_string().contains("avgPx"));
@@ -747,15 +740,19 @@ mod tests {
 
     #[test]
     fn rejects_non_flat_position_with_empty_avg_price() {
-        let error = position_from_snapshot(PositionSnapshot {
-            inst_id: "MU-USDT-SWAP".to_string(),
-            pos: "0.25".to_string(),
-            avg_px: "".to_string(),
-            mark_px: None,
-            upl: "12.3".to_string(),
-            pos_side: "net".to_string(),
-            lever: "".to_string(),
-        })
+        let metadata = linear_metadata_for("MU-USDT-SWAP", "MU");
+        let error = position_from_snapshot_with_metadata(
+            PositionSnapshot {
+                inst_id: "MU-USDT-SWAP".to_string(),
+                pos: "25".to_string(),
+                avg_px: "".to_string(),
+                mark_px: None,
+                upl: "12.3".to_string(),
+                pos_side: "net".to_string(),
+                lever: "".to_string(),
+            },
+            &metadata,
+        )
         .unwrap_err();
 
         assert!(error.to_string().contains("avgPx"));
@@ -763,15 +760,19 @@ mod tests {
 
     #[test]
     fn rejects_non_flat_position_with_empty_unrealized_pnl() {
-        let error = position_from_snapshot(PositionSnapshot {
-            inst_id: "MU-USDT-SWAP".to_string(),
-            pos: "0.25".to_string(),
-            avg_px: "650.5".to_string(),
-            mark_px: None,
-            upl: "".to_string(),
-            pos_side: "net".to_string(),
-            lever: "".to_string(),
-        })
+        let metadata = linear_metadata_for("MU-USDT-SWAP", "MU");
+        let error = position_from_snapshot_with_metadata(
+            PositionSnapshot {
+                inst_id: "MU-USDT-SWAP".to_string(),
+                pos: "25".to_string(),
+                avg_px: "650.5".to_string(),
+                mark_px: None,
+                upl: "".to_string(),
+                pos_side: "net".to_string(),
+                lever: "".to_string(),
+            },
+            &metadata,
+        )
         .unwrap_err();
 
         assert!(error.to_string().contains("upl"));
@@ -779,15 +780,19 @@ mod tests {
 
     #[test]
     fn rejects_long_short_position_mode() {
-        let error = position_from_snapshot(PositionSnapshot {
-            inst_id: "BTC-USDT-SWAP".to_string(),
-            pos: "0.25".to_string(),
-            avg_px: "65000.5".to_string(),
-            mark_px: None,
-            upl: "123.45".to_string(),
-            pos_side: "long".to_string(),
-            lever: "20".to_string(),
-        })
+        let metadata = linear_metadata();
+        let error = position_from_snapshot_with_metadata(
+            PositionSnapshot {
+                inst_id: "BTC-USDT-SWAP".to_string(),
+                pos: "25".to_string(),
+                avg_px: "65000.5".to_string(),
+                mark_px: None,
+                upl: "123.45".to_string(),
+                pos_side: "long".to_string(),
+                lever: "20".to_string(),
+            },
+            &metadata,
+        )
         .unwrap_err();
 
         assert!(error.to_string().contains("posSide=net"));
@@ -795,17 +800,21 @@ mod tests {
 
     #[test]
     fn maps_pending_order_snapshot_to_exchange_order() {
-        let order = open_order_from_snapshot(PendingOrderSnapshot {
-            inst_id: "BTC-USDT-SWAP".to_string(),
-            order_id: "123".to_string(),
-            client_order_id: "client-123".to_string(),
-            side: "buy".to_string(),
-            price: "65000.1".to_string(),
-            fill_price: None,
-            size: "0.2".to_string(),
-            acc_fill_sz: "0.05".to_string(),
-            state: "partially_filled".to_string(),
-        })
+        let metadata = linear_metadata();
+        let order = open_order_from_snapshot_with_metadata(
+            PendingOrderSnapshot {
+                inst_id: "BTC-USDT-SWAP".to_string(),
+                order_id: "123".to_string(),
+                client_order_id: "client-123".to_string(),
+                side: "buy".to_string(),
+                price: "65000.1".to_string(),
+                fill_price: None,
+                size: "20".to_string(),
+                acc_fill_sz: "5".to_string(),
+                state: "partially_filled".to_string(),
+            },
+            &metadata,
+        )
         .unwrap();
 
         assert_eq!(
@@ -838,7 +847,7 @@ mod tests {
                 acc_fill_sz: "10".to_string(),
                 state: "partially_filled".to_string(),
             },
-            Some(&metadata),
+            &metadata,
         )
         .unwrap();
 
@@ -861,7 +870,7 @@ mod tests {
                 acc_fill_sz: "10".to_string(),
                 state: "partially_filled".to_string(),
             },
-            Some(&metadata),
+            &metadata,
         )
         .unwrap();
 
@@ -896,14 +905,18 @@ mod tests {
     }
 
     fn linear_metadata() -> OkxInstrumentMetadata {
+        linear_metadata_for("BTC-USDT-SWAP", "BTC")
+    }
+
+    fn linear_metadata_for(inst_id: &str, base_asset: &str) -> OkxInstrumentMetadata {
         OkxInstrumentMetadata::from_instrument_info(&InstrumentInfo {
-            inst_id: "BTC-USDT-SWAP".to_string(),
+            inst_id: inst_id.to_string(),
             ct_type: Some("linear".to_string()),
             tick_sz: "0.1".to_string(),
             lot_sz: "0.01".to_string(),
             min_sz: "0.01".to_string(),
             ct_val: Some("0.01".to_string()),
-            ct_val_ccy: Some("BTC".to_string()),
+            ct_val_ccy: Some(base_asset.to_string()),
             settle_ccy: Some("USDT".to_string()),
         })
         .unwrap()

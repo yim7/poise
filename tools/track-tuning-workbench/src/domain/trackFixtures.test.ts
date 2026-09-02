@@ -74,10 +74,9 @@ function makeDraft(
 }
 
 describe('track draft validation fixtures', () => {
-  it('keeps caller-provided risk config but does not inject partial exchange rules', () => {
+  it('keeps caller-provided risk acquisition config', () => {
     const draft = makeDraft();
 
-    expect(draft.attachments).not.toHaveProperty('exchangeRules');
     expect(draft.riskAcquisition).toEqual({
       initialRatio: '0.37',
       advantageSteps: '1.25',

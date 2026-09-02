@@ -256,7 +256,7 @@ export interface AccountTrackAnalysisView {
   track_id: string;
   instrument: InstrumentView;
   settlement_asset: string;
-  native_quantity: number;
+  position_qty: number;
   contract_count?: number | null;
   signed_usd_notional: number;
   abs_usd_notional: number;

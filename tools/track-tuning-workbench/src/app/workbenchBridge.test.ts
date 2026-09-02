@@ -62,7 +62,7 @@ describe('createWorkbenchBridge', () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it('hydrates the exchange venue without injecting partial exchange rules', async () => {
+  it('hydrates the exchange venue attachment', async () => {
     invokeMock.mockResolvedValueOnce({
       config_path: '/tmp/strategies/grid.toml',
       exchange_venue: 'okx',
@@ -106,7 +106,6 @@ describe('createWorkbenchBridge', () => {
       bandProtectionKindFromPolicy(loaded.projectedTracks[0].enums.bandProtectionPolicy),
     ).toBe('freeze');
     expect('bandProtectionKind' in loaded.projectedTracks[0].enums).toBe(false);
-    expect(loaded.projectedTracks[0].attachments).not.toHaveProperty('exchangeRules');
     expect(loaded.projectedTracks[0].attachments.exchangeVenue).toBe('okx');
   });
 
@@ -267,24 +266,27 @@ describe('createWorkbenchBridge', () => {
 
   it('sends one snake-case request and consumes the camel-case Rust report unchanged', async () => {
     invokeMock.mockResolvedValueOnce({
-      rules: {
+      instrumentFixture: {
         fixtureId: 'inverse_contract_v1',
+        baseAsset: 'BTC',
+        quoteAsset: 'USD',
+        notionalAsset: 'USD',
         priceTick: 0.5,
         pricePrecision: { kind: 'fixed_tick' },
-        quantityKind: 'inverse_contract',
-        contractNotional: 100,
+        positionBasis: 'contracts',
+        contractValue: 100,
         settlementAsset: 'BTC',
-        quantityStep: 1,
-        minQty: 1,
+        positionQtyStep: 1,
+        minPositionQty: 1,
         minNotional: 100,
         makerFeeRate: 0.0002,
         takerFeeRate: 0.0005,
-        nativeQtyPerExposureUnit: 3,
+        positionQtyPerExposureUnit: 3,
       },
       assumptions: {
-        rulesNotice: 'RULES_SENTINEL',
+        instrumentFixtureNotice: 'RULES_SENTINEL',
         fillModelNotice: 'FILL_SENTINEL',
-        initialNativeQuantity: 0,
+        initialPositionQty: 0,
         initialExposure: 0,
       },
       curvePoints: [
@@ -303,14 +305,14 @@ describe('createWorkbenchBridge', () => {
             liveDurationSeconds: 180,
           },
           assumptions: {
-            initialNativeQuantity: 0,
+            initialPositionQty: 0,
             initialExposure: 0,
             deterministicFillNotice: 'SCENARIO_ASSUMPTION',
           },
           curveImmediateBenchmark: {
             execution: {
-              longRiskIncrease: { nativeQty: 11, weightedFillPrice: 91.25 },
-              shortRiskIncrease: { nativeQty: 0, weightedFillPrice: null },
+              longRiskIncrease: { positionQty: 11, weightedFillPrice: 91.25 },
+              shortRiskIncrease: { positionQty: 0, weightedFillPrice: null },
               turnoverNotional: 1100,
               estimatedTakerFee: 0.55,
               feeAsset: 'BTC',
@@ -324,8 +326,8 @@ describe('createWorkbenchBridge', () => {
           },
           delayedDecisionReplay: {
             execution: {
-              longRiskIncrease: { nativeQty: 5, weightedFillPrice: 88.75 },
-              shortRiskIncrease: { nativeQty: 0, weightedFillPrice: null },
+              longRiskIncrease: { positionQty: 5, weightedFillPrice: 88.75 },
+              shortRiskIncrease: { positionQty: 0, weightedFillPrice: null },
               turnoverNotional: 500,
               estimatedTakerFee: 0.25,
               feeAsset: 'BTC',
@@ -352,17 +354,17 @@ describe('createWorkbenchBridge', () => {
             curveImmediateMaxTrackingErrorUnits: 0.25,
             delayedMaxTrackingErrorUnits: 5.5,
             longRiskIncreasePrice: {
-              curveImmediateTotalNativeQty: 11,
-              delayedTotalNativeQty: 5,
-              matchedNativeQty: 5,
+              curveImmediateTotalPositionQty: 11,
+              delayedTotalPositionQty: 5,
+              matchedPositionQty: 5,
               curveImmediateMatchedWeightedPrice: 91.25,
               delayedMatchedWeightedPrice: 88.75,
               favorablePriceImprovement: 2.5,
             },
             shortRiskIncreasePrice: {
-              curveImmediateTotalNativeQty: 0,
-              delayedTotalNativeQty: 0,
-              matchedNativeQty: 0,
+              curveImmediateTotalPositionQty: 0,
+              delayedTotalPositionQty: 0,
+              matchedPositionQty: 0,
               curveImmediateMatchedWeightedPrice: null,
               delayedMatchedWeightedPrice: null,
               favorablePriceImprovement: null,
@@ -373,11 +375,11 @@ describe('createWorkbenchBridge', () => {
               observedAt: '2026-01-01T00:01:00Z',
               action: 'execution_quote',
               strategyPrice: 95,
-              simulatedPositionNativeQuantity: 5,
+              simulatedPositionQty: 5,
               simulatedPositionExposure: 1.75,
-              observedPositionNativeQuantity: 4,
+              observedPositionQty: 4,
               observedPositionExposure: 1.5,
-              signedFilledNativeQuantity: 5,
+              signedFilledPositionQty: 5,
               policyTarget: 7.125,
               riskApprovedTarget: 3.5,
               acquisitionFrontier: 3.25,
@@ -424,7 +426,7 @@ describe('createWorkbenchBridge', () => {
     const report = await bridge.evaluateTrack({
       draft,
       exchangeVenue: 'binance',
-      rulesFixture: 'inverse_contract_v1',
+      instrumentFixture: 'inverse_contract_v1',
     });
 
     expect(invokeMock).toHaveBeenCalledWith('evaluate_track', {
@@ -438,13 +440,13 @@ describe('createWorkbenchBridge', () => {
           }),
         }),
         exchange_venue: 'binance',
-        rules_fixture: 'inverse_contract_v1',
+        instrument_fixture: 'inverse_contract_v1',
       },
     });
-    expect(report.rules).toMatchObject({
+    expect(report.instrumentFixture).toMatchObject({
       fixtureId: 'inverse_contract_v1',
-      quantityKind: 'inverse_contract',
-      nativeQtyPerExposureUnit: 3,
+      positionBasis: 'contracts',
+      positionQtyPerExposureUnit: 3,
     });
     expect(report.curvePoints).toEqual([{ price: 90, targetExposure: 7.125 }]);
     expect(report.scenarios[0]).toMatchObject({
@@ -499,7 +501,7 @@ describe('createWorkbenchBridge', () => {
     await expect(bridge.evaluateTrack({
       draft,
       exchangeVenue: 'binance',
-      rulesFixture: 'base_asset_v1',
+      instrumentFixture: 'base_asset_v1',
     })).rejects.toThrow('EVALUATION_FIXTURE_SENTINEL');
     expect(invokeMock).toHaveBeenCalledTimes(1);
   });
@@ -565,7 +567,7 @@ describe('createWorkbenchBridge', () => {
     await expect(bridge.evaluateTrack({
       draft,
       exchangeVenue: 'binance',
-      rulesFixture: 'base_asset_v1',
+      instrumentFixture: 'base_asset_v1',
     })).rejects.toThrow('Rust evaluator 不可用');
     expect(invokeMock).not.toHaveBeenCalled();
   });
@@ -581,24 +583,27 @@ describe('createWorkbenchBridge', () => {
 
   it('returns the camel-case Rust evaluation read model without a second field mapper', async () => {
     const payload = {
-      rules: {
+      instrumentFixture: {
         fixtureId: 'base_asset_v1' as const,
+        baseAsset: 'BTC',
+        quoteAsset: 'USDT',
+        notionalAsset: 'USDT',
         priceTick: 0.1,
         pricePrecision: { kind: 'fixed_tick' as const },
-        quantityKind: 'base_asset' as const,
-        contractNotional: null,
+        positionBasis: 'base_asset' as const,
+        contractValue: null,
         settlementAsset: 'USDT',
-        quantityStep: 0.001,
-        minQty: 0,
+        positionQtyStep: 0.001,
+        minPositionQty: 0,
         minNotional: 0,
         makerFeeRate: 0.0002,
         takerFeeRate: 0.001,
-        nativeQtyPerExposureUnit: 1,
+        positionQtyPerExposureUnit: 1,
       },
       assumptions: {
-        rulesNotice: 'RULES',
+        instrumentFixtureNotice: 'RULES',
         fillModelNotice: 'FILL',
-        initialNativeQuantity: 0,
+        initialPositionQty: 0,
         initialExposure: 0,
       },
       curvePoints: [],
@@ -629,7 +634,7 @@ describe('createWorkbenchBridge', () => {
     const report = await createWorkbenchBridge().evaluateTrack({
       draft,
       exchangeVenue: 'binance',
-      rulesFixture: 'base_asset_v1',
+      instrumentFixture: 'base_asset_v1',
     });
 
     expect(report).toBe(payload);

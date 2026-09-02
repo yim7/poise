@@ -85,7 +85,7 @@ pub struct AccountTrackAnalysisReadModel {
     pub track_id: String,
     pub instrument: Instrument,
     pub settlement_asset: String,
-    pub native_quantity: f64,
+    pub position_qty: f64,
     pub contract_count: Option<f64>,
     pub signed_usd_notional: f64,
     pub abs_usd_notional: f64,
@@ -192,10 +192,10 @@ fn project_hedge_like(
 }
 
 fn project_account_track_analysis(source: &TrackListReadModel) -> AccountTrackAnalysisReadModel {
-    let native_quantity = finite_or_zero(source.position_qty);
+    let position_qty = finite_or_zero(source.position_qty);
     let reference_price = positive_finite(source.strategy_price);
     let signed_usd_notional =
-        signed_position_usd_notional(native_quantity, &source.instrument_spec, reference_price);
+        signed_position_usd_notional(position_qty, &source.instrument_spec, reference_price);
     let (estimated_base_asset, estimated_base_exposure) =
         estimated_base_exposure(source, signed_usd_notional, reference_price);
 
@@ -207,10 +207,10 @@ fn project_account_track_analysis(source: &TrackListReadModel) -> AccountTrackAn
             .settlement_asset()
             .as_str()
             .to_string(),
-        native_quantity,
+        position_qty,
         contract_count: match source.instrument_spec.position_basis() {
             PositionBasis::BaseAsset => None,
-            PositionBasis::Contracts { .. } => Some(native_quantity),
+            PositionBasis::Contracts { .. } => Some(position_qty),
         },
         signed_usd_notional,
         abs_usd_notional: signed_usd_notional.abs(),
@@ -227,7 +227,7 @@ fn project_account_track_analysis(source: &TrackListReadModel) -> AccountTrackAn
 }
 
 fn signed_position_usd_notional(
-    native_quantity: f64,
+    position_qty: f64,
     rules: &InstrumentSpec,
     reference_price: Option<f64>,
 ) -> f64 {
@@ -238,7 +238,7 @@ fn signed_position_usd_notional(
         },
         PositionBasis::Contracts { .. } => reference_price.unwrap_or(1.0),
     };
-    let Ok(quantity) = PositionQty::new(native_quantity) else {
+    let Ok(quantity) = PositionQty::new(position_qty) else {
         return 0.0;
     };
     rules

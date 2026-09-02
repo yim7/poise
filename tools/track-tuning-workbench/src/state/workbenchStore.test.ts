@@ -433,24 +433,6 @@ describe('workbench store', () => {
     expect(reopenedStore.getState().temporaryPriceOverrides['draft-a']).toBe(104);
   });
 
-  it('removes legacy partial exchange rules when restoring a session', async () => {
-    const legacyDraft = makeDraft('draft-a');
-    (legacyDraft.attachments as Record<string, unknown>).exchangeRules = {
-      makerFeeRate: 0.0002,
-      takerFeeRate: 0.0005,
-    };
-    const persistence = makePersistence(makeSnapshot({ drafts: [legacyDraft] }));
-    const reopenedStore = createWorkbenchStore({
-      sessionSync: createSessionSync(persistence, { debounceMs: 0 }),
-    });
-
-    await reopenedStore.load('config/track.json');
-
-    expect(reopenedStore.getState().drafts[0]?.attachments).not.toHaveProperty(
-      'exchangeRules',
-    );
-  });
-
   it('rejects a saved draft that lacks Rust-provided risk acquisition config', async () => {
     const sourceSnapshot = makeSnapshot({ selectedDraftId: 'draft-b' });
     sourceSnapshot.drafts[1]!.riskAcquisition.initialRatio = '0.61';

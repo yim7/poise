@@ -34,7 +34,7 @@ pub struct DecisionEvaluationHorizon {
 /// Quantity and weighted price for fills that add risk in one direction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RiskIncreaseFillMetrics {
-    pub native_qty: f64,
+    pub position_qty: f64,
     pub weighted_fill_price: Option<f64>,
 }
 
@@ -65,9 +65,9 @@ pub struct DelayedDecisionMetrics {
 /// Matched-volume price comparison for one risk-increase direction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchedRiskIncreasePriceComparison {
-    pub curve_immediate_total_native_qty: f64,
-    pub delayed_total_native_qty: f64,
-    pub matched_native_qty: f64,
+    pub curve_immediate_total_position_qty: f64,
+    pub delayed_total_position_qty: f64,
+    pub matched_position_qty: f64,
     pub curve_immediate_matched_weighted_price: Option<f64>,
     pub delayed_matched_weighted_price: Option<f64>,
     /// Positive means the delayed lane received a more favorable price.
@@ -239,7 +239,7 @@ fn run_curve_immediate_benchmark(
         .collect::<Result<Vec<_>>>()?;
     run_replay(&ReplayInput {
         prices,
-        initial_native_quantity: input.replay.initial_position.qty,
+        initial_position_qty: input.replay.initial_position.qty,
         leverage: input.leverage,
         track_config: input.replay.definition.track_config().clone(),
         instrument_spec: input.replay.instrument_spec.clone(),
@@ -272,7 +272,7 @@ fn align_steps(
         input.replay.steps.len() == delayed.steps.len(),
         "delayed report step count does not match input"
     );
-    let unit_qty = native_qty_per_exposure_unit(input)?;
+    let unit_qty = position_qty_per_exposure_unit(input)?;
     let mut curve_samples = curve.samples.iter();
     let mut curve_target = None;
     let mut curve_position_qty = input.replay.initial_position.qty;
@@ -286,7 +286,7 @@ fn align_steps(
                 .next()
                 .context("curve benchmark has fewer samples than ExecutionQuote steps")?;
             curve_target = Some(sample.target_exposure);
-            curve_position_qty = sample.position_native_quantity;
+            curve_position_qty = sample.position_qty;
         }
         let delayed_position_before_qty = delayed_position_qty;
         delayed_position_qty = report.simulated_position_qty;
@@ -426,7 +426,7 @@ fn tracking_metrics(aligned: &[AlignedStep], window: &LiveWindow) -> TrackingMet
 #[derive(Debug, Clone, Copy)]
 struct FillSlice {
     price: f64,
-    native_qty: f64,
+    position_qty: f64,
 }
 
 #[derive(Default)]
@@ -440,17 +440,17 @@ fn curve_fill_stream(input: &DecisionEvaluationInput, report: &ReplayReport) -> 
     let mut stream = FillStream::default();
     let mut position_qty = input.replay.initial_position.qty;
     for sample in &report.samples {
-        if sample.trade_native_quantity.abs() <= f64::EPSILON {
+        if sample.trade_position_qty.abs() <= f64::EPSILON {
             continue;
         }
-        let next_position = position_qty + sample.trade_native_quantity;
+        let next_position = position_qty + sample.trade_position_qty;
         let risk_increase = added_risk_units(position_qty, next_position);
         if risk_increase > f64::EPSILON {
             let fill = FillSlice {
                 price: sample.price,
-                native_qty: risk_increase,
+                position_qty: risk_increase,
             };
-            if sample.trade_native_quantity > 0.0 {
+            if sample.trade_position_qty > 0.0 {
                 stream.long.push(fill);
             } else {
                 stream.short.push(fill);
@@ -469,19 +469,19 @@ fn delayed_fill_stream(report: &DecisionReplayReport) -> FillStream {
             side,
             price,
             trade_notional,
-            risk_increase_native_qty,
+            risk_increase_position_qty,
             ..
         } = effect
         else {
             continue;
         };
         stream.turnover_notional += trade_notional;
-        if *risk_increase_native_qty <= f64::EPSILON {
+        if *risk_increase_position_qty <= f64::EPSILON {
             continue;
         }
         let fill = FillSlice {
             price: *price,
-            native_qty: *risk_increase_native_qty,
+            position_qty: *risk_increase_position_qty,
         };
         match side {
             Side::Buy => stream.long.push(fill),
@@ -510,16 +510,16 @@ fn execution_metrics(
 }
 
 fn risk_fill_metrics(fills: &[FillSlice]) -> RiskIncreaseFillMetrics {
-    let native_qty = fills.iter().map(|fill| fill.native_qty).sum::<f64>();
-    let weighted_fill_price = (native_qty > f64::EPSILON).then(|| {
+    let position_qty = fills.iter().map(|fill| fill.position_qty).sum::<f64>();
+    let weighted_fill_price = (position_qty > f64::EPSILON).then(|| {
         fills
             .iter()
-            .map(|fill| fill.price * fill.native_qty)
+            .map(|fill| fill.price * fill.position_qty)
             .sum::<f64>()
-            / native_qty
+            / position_qty
     });
     RiskIncreaseFillMetrics {
-        native_qty,
+        position_qty,
         weighted_fill_price,
     }
 }
@@ -581,8 +581,8 @@ fn matched_price_comparison(
     delayed: &[FillSlice],
     direction: Side,
 ) -> MatchedRiskIncreasePriceComparison {
-    let curve_total = curve.iter().map(|fill| fill.native_qty).sum::<f64>();
-    let delayed_total = delayed.iter().map(|fill| fill.native_qty).sum::<f64>();
+    let curve_total = curve.iter().map(|fill| fill.position_qty).sum::<f64>();
+    let delayed_total = delayed.iter().map(|fill| fill.position_qty).sum::<f64>();
     let matched = curve_total.min(delayed_total);
     let curve_price = prefix_weighted_price(curve, matched);
     let delayed_price = prefix_weighted_price(delayed, matched);
@@ -592,9 +592,9 @@ fn matched_price_comparison(
         _ => None,
     };
     MatchedRiskIncreasePriceComparison {
-        curve_immediate_total_native_qty: curve_total,
-        delayed_total_native_qty: delayed_total,
-        matched_native_qty: matched,
+        curve_immediate_total_position_qty: curve_total,
+        delayed_total_position_qty: delayed_total,
+        matched_position_qty: matched,
         curve_immediate_matched_weighted_price: curve_price,
         delayed_matched_weighted_price: delayed_price,
         favorable_price_improvement: improvement,
@@ -608,7 +608,7 @@ fn prefix_weighted_price(fills: &[FillSlice], matched_qty: f64) -> Option<f64> {
     let mut remaining = matched_qty;
     let mut weighted = 0.0;
     for fill in fills {
-        let used = remaining.min(fill.native_qty);
+        let used = remaining.min(fill.position_qty);
         weighted += used * fill.price;
         remaining -= used;
         if remaining <= f64::EPSILON {
@@ -750,7 +750,7 @@ fn restart_sensitivity(
     }))
 }
 
-fn native_qty_per_exposure_unit(input: &DecisionEvaluationInput) -> Result<f64> {
+fn position_qty_per_exposure_unit(input: &DecisionEvaluationInput) -> Result<f64> {
     let config = input.replay.definition.track_config();
     let unit_qty = input
         .replay
@@ -767,7 +767,7 @@ fn native_qty_per_exposure_unit(input: &DecisionEvaluationInput) -> Result<f64> 
         .value();
     ensure!(
         unit_qty.is_finite() && unit_qty > f64::EPSILON,
-        "native quantity per exposure unit must be finite and positive"
+        "position quantity per exposure unit must be finite and positive"
     );
     Ok(unit_qty)
 }

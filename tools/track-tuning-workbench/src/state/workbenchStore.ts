@@ -410,21 +410,14 @@ function prepareLoadedSnapshot(snapshot: WorkbenchSnapshot): WorkbenchSnapshot {
 
 function prepareLoadedDraft(draft: TrackDraft): TrackDraft {
   const nextDraft = cloneDraft(draft);
-  removeLegacyExchangeRules(nextDraft);
   refreshTrackDraftParsedNumbers(nextDraft);
   return nextDraft;
 }
 
 function normalizeDraft(draft: TrackDraft): TrackDraft {
   const nextDraft = cloneDraft(draft);
-  removeLegacyExchangeRules(nextDraft);
   refreshTrackDraftParsedNumbers(nextDraft);
   return nextDraft;
-}
-
-function removeLegacyExchangeRules(draft: TrackDraft) {
-  const attachments = draft.attachments as TrackDraft['attachments'] & Record<string, unknown>;
-  delete attachments.exchangeRules;
 }
 
 function isSupportedSnapshot(snapshot: WorkbenchSnapshot): boolean {

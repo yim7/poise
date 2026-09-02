@@ -45,12 +45,12 @@ export interface WorkbenchBridgeQuoteRequest {
   exchangeVenue?: string | null;
 }
 
-export type WorkbenchRulesFixtureId = 'base_asset_v1' | 'inverse_contract_v1';
+export type WorkbenchInstrumentFixtureId = 'base_asset_v1' | 'inverse_contract_v1';
 
 export interface WorkbenchEvaluationRequest {
   draft: TrackDraft;
   exchangeVenue: string;
-  rulesFixture: WorkbenchRulesFixtureId;
+  instrumentFixture: WorkbenchInstrumentFixtureId;
 }
 
 export type WorkbenchEvaluationPricePrecision =
@@ -61,25 +61,28 @@ export type WorkbenchEvaluationPricePrecision =
       significantFigures: number;
     };
 
-export interface WorkbenchEvaluationRules {
-  fixtureId: WorkbenchRulesFixtureId;
+export interface WorkbenchEvaluationInstrumentFixture {
+  fixtureId: WorkbenchInstrumentFixtureId;
+  baseAsset: string;
+  quoteAsset: string;
+  notionalAsset: string;
   priceTick: number;
   pricePrecision: WorkbenchEvaluationPricePrecision;
-  quantityKind: 'base_asset' | 'inverse_contract';
-  contractNotional: number | null;
+  positionBasis: 'base_asset' | 'contracts';
+  contractValue: number | null;
   settlementAsset: string;
-  quantityStep: number;
-  minQty: number;
+  positionQtyStep: number;
+  minPositionQty: number;
   minNotional: number;
   makerFeeRate: number;
   takerFeeRate: number;
-  nativeQtyPerExposureUnit: number;
+  positionQtyPerExposureUnit: number;
 }
 
 export interface WorkbenchEvaluationAssumptions {
-  rulesNotice: string;
+  instrumentFixtureNotice: string;
   fillModelNotice: string;
-  initialNativeQuantity: number;
+  initialPositionQty: number;
   initialExposure: number;
 }
 
@@ -96,13 +99,13 @@ export interface WorkbenchEvaluationHorizon {
 }
 
 export interface WorkbenchScenarioAssumptions {
-  initialNativeQuantity: number;
+  initialPositionQty: number;
   initialExposure: number;
   deterministicFillNotice: string;
 }
 
 export interface WorkbenchRiskIncreaseFillMetrics {
-  nativeQty: number;
+  positionQty: number;
   weightedFillPrice: number | null;
 }
 
@@ -140,9 +143,9 @@ export interface WorkbenchDelayedEvaluationLane extends WorkbenchEvaluationLane 
 }
 
 export interface WorkbenchMatchedPriceComparison {
-  curveImmediateTotalNativeQty: number;
-  delayedTotalNativeQty: number;
-  matchedNativeQty: number;
+  curveImmediateTotalPositionQty: number;
+  delayedTotalPositionQty: number;
+  matchedPositionQty: number;
   curveImmediateMatchedWeightedPrice: number | null;
   delayedMatchedWeightedPrice: number | null;
   favorablePriceImprovement: number | null;
@@ -170,11 +173,11 @@ export interface WorkbenchReplayRow {
   observedAt: string;
   action: string;
   strategyPrice: number | null;
-  simulatedPositionNativeQuantity: number;
+  simulatedPositionQty: number;
   simulatedPositionExposure: number;
-  observedPositionNativeQuantity: number;
+  observedPositionQty: number;
   observedPositionExposure: number;
-  signedFilledNativeQuantity: number;
+  signedFilledPositionQty: number;
   policyTarget: number | null;
   riskApprovedTarget: number | null;
   acquisitionFrontier: number | null;
@@ -198,7 +201,7 @@ export interface WorkbenchScenarioReport {
 }
 
 export interface WorkbenchEvaluationReport {
-  rules: WorkbenchEvaluationRules;
+  instrumentFixture: WorkbenchEvaluationInstrumentFixture;
   assumptions: WorkbenchEvaluationAssumptions;
   curvePoints: WorkbenchCurvePoint[];
   scenarios: WorkbenchScenarioReport[];
@@ -422,7 +425,7 @@ function createTauriWorkbenchBridge(): WorkbenchBridge {
         request: {
           draft: toTrackDraftPayload(request.draft),
           exchange_venue: request.exchangeVenue,
-          rules_fixture: request.rulesFixture,
+          instrument_fixture: request.instrumentFixture,
         },
       });
     },

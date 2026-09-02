@@ -132,8 +132,8 @@ function createMockBridge(
 
 function sentinelEvaluationReport(): WorkbenchEvaluationReport {
   const immediateExecution = {
-    longRiskIncrease: { nativeQty: 11, weightedFillPrice: 91.25 },
-    shortRiskIncrease: { nativeQty: 0, weightedFillPrice: null },
+    longRiskIncrease: { positionQty: 11, weightedFillPrice: 91.25 },
+    shortRiskIncrease: { positionQty: 0, weightedFillPrice: null },
     turnoverNotional: 1100,
     estimatedTakerFee: 0.55,
     feeAsset: 'USDT',
@@ -141,8 +141,8 @@ function sentinelEvaluationReport(): WorkbenchEvaluationReport {
     maxMarginRequirement: 707,
   };
   const delayedExecution = {
-    longRiskIncrease: { nativeQty: 5, weightedFillPrice: 88.75 },
-    shortRiskIncrease: { nativeQty: 0, weightedFillPrice: null },
+    longRiskIncrease: { positionQty: 5, weightedFillPrice: 88.75 },
+    shortRiskIncrease: { positionQty: 0, weightedFillPrice: null },
     turnoverNotional: 500,
     estimatedTakerFee: 0.25,
     feeAsset: 'USDT',
@@ -150,24 +150,27 @@ function sentinelEvaluationReport(): WorkbenchEvaluationReport {
     maxMarginRequirement: 329.666,
   };
   return {
-    rules: {
+    instrumentFixture: {
       fixtureId: 'base_asset_v1',
+      baseAsset: 'BTC',
+      quoteAsset: 'USDT',
+      notionalAsset: 'USDT',
       priceTick: 0.1,
       pricePrecision: { kind: 'fixed_tick' },
-      quantityKind: 'base_asset',
-      contractNotional: null,
+      positionBasis: 'base_asset',
+      contractValue: null,
       settlementAsset: 'USDT',
-      quantityStep: 0.001,
-      minQty: 0.001,
+      positionQtyStep: 0.001,
+      minPositionQty: 0.001,
       minNotional: 5,
       makerFeeRate: 0.0002,
       takerFeeRate: 0.0005,
-      nativeQtyPerExposureUnit: 0.123456,
+      positionQtyPerExposureUnit: 0.123456,
     },
     assumptions: {
-      rulesNotice: 'RULES_SENTINEL：确定性评估假设，不是实时规则',
+      instrumentFixtureNotice: 'RULES_SENTINEL：确定性评估假设，不是实时规则',
       fillModelNotice: 'FILL_SENTINEL：不是成交概率、滑点或 PnL 预测',
-      initialNativeQuantity: 0,
+      initialPositionQty: 0,
       initialExposure: 0,
     },
     curvePoints: [
@@ -188,7 +191,7 @@ function sentinelEvaluationReport(): WorkbenchEvaluationReport {
           liveDurationSeconds: 180,
         },
         assumptions: {
-          initialNativeQuantity: 0,
+          initialPositionQty: 0,
           initialExposure: 0,
           deterministicFillNotice: 'SCENARIO_FILL_SENTINEL',
         },
@@ -221,17 +224,17 @@ function sentinelEvaluationReport(): WorkbenchEvaluationReport {
           curveImmediateMaxTrackingErrorUnits: 0.25,
           delayedMaxTrackingErrorUnits: 5.5,
           longRiskIncreasePrice: {
-            curveImmediateTotalNativeQty: 11,
-            delayedTotalNativeQty: 5,
-            matchedNativeQty: 5,
+            curveImmediateTotalPositionQty: 11,
+            delayedTotalPositionQty: 5,
+            matchedPositionQty: 5,
             curveImmediateMatchedWeightedPrice: 91.25,
             delayedMatchedWeightedPrice: 88.75,
             favorablePriceImprovement: 2.5,
           },
           shortRiskIncreasePrice: {
-            curveImmediateTotalNativeQty: 0,
-            delayedTotalNativeQty: 0,
-            matchedNativeQty: 0,
+            curveImmediateTotalPositionQty: 0,
+            delayedTotalPositionQty: 0,
+            matchedPositionQty: 0,
             curveImmediateMatchedWeightedPrice: null,
             delayedMatchedWeightedPrice: null,
             favorablePriceImprovement: null,
@@ -242,11 +245,11 @@ function sentinelEvaluationReport(): WorkbenchEvaluationReport {
             observedAt: '2026-01-01T00:01:00Z',
             action: 'execution_quote',
             strategyPrice: 95,
-            simulatedPositionNativeQuantity: 5,
+            simulatedPositionQty: 5,
             simulatedPositionExposure: 1.75,
-            observedPositionNativeQuantity: 4,
+            observedPositionQty: 4,
             observedPositionExposure: 1.5,
-            signedFilledNativeQuantity: 5,
+            signedFilledPositionQty: 5,
             policyTarget: 7.125,
             riskApprovedTarget: 3.5,
             acquisitionFrontier: 3.25,
@@ -288,7 +291,7 @@ describe('AppShell', () => {
 
     const metricRegion = screen.getByRole('region', { name: '关键指标区' });
     expect(within(metricRegion).getByText('曲线立即执行与延迟决策对照')).toBeInTheDocument();
-    expect(within(metricRegion).getByLabelText('评估规则 fixture')).toBeInTheDocument();
+    expect(within(metricRegion).getByLabelText('评估标的 fixture')).toBeInTheDocument();
     expect(within(metricRegion).getByText(/Rust evaluator 不可用/)).toBeInTheDocument();
   });
 
@@ -343,27 +346,27 @@ describe('AppShell', () => {
       );
     });
 
-    expect(screen.getByLabelText('评估规则 fixture')).toHaveValue('');
+    expect(screen.getByLabelText('评估标的 fixture')).toHaveValue('');
     expect(bridge.evaluateTrack).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText('评估规则 fixture'), {
+    fireEvent.change(screen.getByLabelText('评估标的 fixture'), {
       target: { value: 'base_asset_v1' },
     });
     expect(await screen.findByText(/RULES_SENTINEL/)).toBeInTheDocument();
     expect(screen.getAllByText(/FILL_SENTINEL/).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('tick 0.1000')).toBeInTheDocument();
-    expect(screen.getByText(/quantity step 0\.0010/)).toBeInTheDocument();
+    expect(screen.getByText(/position qty step 0\.0010/)).toBeInTheDocument();
     expect(screen.getByText('qty 0.0010')).toBeInTheDocument();
     expect(screen.getByText(/notional 5\.0000/)).toBeInTheDocument();
-    expect(screen.getByText('contract notional --')).toBeInTheDocument();
-    expect(screen.getByText('settlement USDT')).toBeInTheDocument();
+    expect(screen.getByText('base asset quantity')).toBeInTheDocument();
+    expect(screen.getByText('base BTC · quote USDT · settlement USDT')).toBeInTheDocument();
 
     const immediate = screen.getByRole('region', { name: 'Curve-immediate benchmark' });
     const delayed = screen.getByRole('region', { name: 'Delayed decision replay' });
     expect(within(immediate).getByText('2,121.0000')).toBeInTheDocument();
-    expect(within(immediate).getByText('native qty 11.0000')).toBeInTheDocument();
+    expect(within(immediate).getByText('position qty 11.0000')).toBeInTheDocument();
     expect(within(immediate).getByText('weighted price 91.2500')).toBeInTheDocument();
     expect(within(delayed).getByText('989.0000')).toBeInTheDocument();
-    expect(within(delayed).getByText('native qty 5.0000')).toBeInTheDocument();
+    expect(within(delayed).getByText('position qty 5.0000')).toBeInTheDocument();
     expect(within(delayed).getByText('weighted price 88.7500')).toBeInTheDocument();
     expect(within(delayed).getByText('6.5000')).toBeInTheDocument();
     expect(within(delayed).getByText('policy 7.1250')).toBeInTheDocument();
@@ -372,7 +375,7 @@ describe('AppShell', () => {
     expect(within(delayed).getByText('execution 3.0000')).toBeInTheDocument();
     expect(within(delayed).getByText('waiting_risk_release')).toBeInTheDocument();
     expect(within(delayed).getByText('revision 77')).toBeInTheDocument();
-    expect(screen.getByText(/matched native qty 5\.0000/)).toBeInTheDocument();
+    expect(screen.getByText(/matched position qty 5\.0000/)).toBeInTheDocument();
     expect(screen.getByText(/immediate matched weighted price 91\.2500/)).toBeInTheDocument();
     expect(screen.getByText(/delayed matched weighted price 88\.7500/)).toBeInTheDocument();
     expect(screen.getByText(/favorable improvement 2\.5000/)).toBeInTheDocument();
@@ -405,7 +408,7 @@ describe('AppShell', () => {
         <AppShell bridge={bridge} />
       </WorkbenchStoreProvider>,
     );
-    fireEvent.change(screen.getByLabelText('评估规则 fixture'), {
+    fireEvent.change(screen.getByLabelText('评估标的 fixture'), {
       target: { value: 'base_asset_v1' },
     });
     await screen.findByRole('heading', { name: 'SENTINEL 价格优势 long' });
@@ -437,21 +440,21 @@ describe('AppShell', () => {
         <AppShell bridge={bridge} />
       </WorkbenchStoreProvider>,
     );
-    expect(screen.getByLabelText('评估规则 fixture')).toHaveValue('');
+    expect(screen.getByLabelText('评估标的 fixture')).toHaveValue('');
     expect(bridge.evaluateTrack).not.toHaveBeenCalled();
 
-    fireEvent.change(screen.getByLabelText('评估规则 fixture'), {
+    fireEvent.change(screen.getByLabelText('评估标的 fixture'), {
       target: { value: 'base_asset_v1' },
     });
     await waitFor(() => expect(bridge.evaluateTrack).toHaveBeenCalledTimes(1));
 
-    fireEvent.change(screen.getByLabelText('评估规则 fixture'), {
+    fireEvent.change(screen.getByLabelText('评估标的 fixture'), {
       target: { value: 'inverse_contract_v1' },
     });
     await waitFor(() => expect(bridge.evaluateTrack).toHaveBeenLastCalledWith(
-      expect.objectContaining({ rulesFixture: 'inverse_contract_v1' }),
+      expect.objectContaining({ instrumentFixture: 'inverse_contract_v1' }),
     ));
-    expect(store.getState().drafts[0].attachments).not.toHaveProperty('rulesFixture');
+    expect(store.getState().drafts[0].attachments).not.toHaveProperty('instrumentFixture');
   });
 
   it('shows evaluator loading and error states without retaining an old report', async () => {
@@ -477,7 +480,7 @@ describe('AppShell', () => {
       </WorkbenchStoreProvider>,
     );
 
-    fireEvent.change(screen.getByLabelText('评估规则 fixture'), {
+    fireEvent.change(screen.getByLabelText('评估标的 fixture'), {
       target: { value: 'base_asset_v1' },
     });
     expect(await screen.findByText('Rust evaluator 正在运行…')).toBeInTheDocument();

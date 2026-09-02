@@ -266,11 +266,9 @@ impl UserDataEvent {
 pub trait AccountSummaryPort: Send + Sync {
     async fn get_account_summary(&self) -> Result<AccountSummarySnapshot>;
 
-    async fn get_available_balance(&self, instrument: &Instrument) -> Result<f64> {
+    async fn get_available_balance(&self, _instrument: &Instrument) -> Result<f64> {
         let summary = self.get_account_summary().await?;
-        Ok(summary
-            .available_for_asset(&instrument.quote_asset())
-            .unwrap_or(summary.available))
+        Ok(summary.available)
     }
 }
 

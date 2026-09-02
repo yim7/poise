@@ -29,7 +29,7 @@ impl ReplayFeeRates {
 #[serde(deny_unknown_fields)]
 pub struct ReplayInput {
     pub prices: Vec<f64>,
-    pub initial_native_quantity: f64,
+    pub initial_position_qty: f64,
     pub leverage: u32,
     pub track_config: TrackConfig,
     pub instrument_spec: InstrumentSpec,
@@ -48,10 +48,10 @@ impl ReplayInput {
                 ));
             }
         }
-        if !self.initial_native_quantity.is_finite() {
+        if !self.initial_position_qty.is_finite() {
             return Err(format!(
-                "initial_native_quantity must be finite, got {}",
-                self.initial_native_quantity
+                "initial_position_qty must be finite, got {}",
+                self.initial_position_qty
             ));
         }
         if self.leverage == 0 {
@@ -76,9 +76,9 @@ pub struct ReplayReport {
 pub struct ReplaySample {
     pub price: f64,
     pub target_exposure: f64,
-    pub position_native_quantity: f64,
+    pub position_qty: f64,
     pub position_notional: f64,
-    pub trade_native_quantity: f64,
+    pub trade_position_qty: f64,
     pub trade_notional: f64,
     pub estimated_fee: f64,
 }
@@ -88,7 +88,7 @@ pub struct ReplaySample {
 pub struct ReplayStats {
     pub trade_count: usize,
     pub trade_density: f64,
-    pub max_abs_native_quantity: f64,
+    pub max_abs_position_qty: f64,
     pub max_abs_notional: f64,
     pub max_margin_requirement: f64,
     pub estimated_fee: f64,
@@ -102,8 +102,8 @@ pub struct ReplayPositionDistribution {
     pub min_exposure: f64,
     pub max_exposure: f64,
     pub mean_abs_exposure: f64,
-    pub min_native_quantity: f64,
-    pub max_native_quantity: f64,
+    pub min_position_qty: f64,
+    pub max_position_qty: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -205,7 +205,7 @@ fn replay_comparison_item(
 /// part of the question.
 pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
     input.validate()?;
-    let native_quantity_per_unit = input
+    let position_qty_per_unit = input
         .instrument_spec
         .position_qty_for_notional(
             Amount::new(
@@ -215,39 +215,38 @@ pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
             input.track_config.band_center(),
         )?
         .value();
-    if !native_quantity_per_unit.is_finite() || native_quantity_per_unit <= 0.0 {
-        return Err("native quantity per exposure unit must be positive".to_string());
+    if !position_qty_per_unit.is_finite() || position_qty_per_unit <= 0.0 {
+        return Err("position quantity per exposure unit must be positive".to_string());
     }
 
-    let mut position_native_quantity = input.initial_native_quantity;
-    let mut current_exposure = position_native_quantity / native_quantity_per_unit;
+    let mut position_qty = input.initial_position_qty;
+    let mut current_exposure = position_qty / position_qty_per_unit;
     let mut samples = Vec::with_capacity(input.prices.len());
     let mut trade_count = 0;
     let mut estimated_fee = 0.0;
-    let mut max_abs_native_quantity = position_native_quantity.abs();
+    let mut max_abs_position_qty = position_qty.abs();
     let mut max_abs_notional = position_notional(
         &input.instrument_spec,
-        position_native_quantity,
+        position_qty,
         input.track_config.band_center(),
     )?;
     let mut min_exposure = current_exposure;
     let mut max_exposure = current_exposure;
-    let mut min_native_quantity = position_native_quantity;
-    let mut max_native_quantity = position_native_quantity;
+    let mut min_position_qty = position_qty;
+    let mut max_position_qty = position_qty;
     let mut abs_exposure_sum = 0.0;
 
     for price in &input.prices {
         let target_exposure = desired_exposure(*price, &input.track_config).0;
         let exposure_delta = target_exposure - current_exposure;
-        let mut trade_native_quantity = 0.0;
+        let mut trade_position_qty = 0.0;
         let mut trade_notional = 0.0;
         let mut sample_fee = 0.0;
 
         if exposure_delta.abs() + f64::EPSILON >= input.track_config.min_rebalance_units {
-            let target_native_quantity = target_exposure * native_quantity_per_unit;
-            trade_native_quantity = target_native_quantity - position_native_quantity;
-            trade_notional =
-                position_notional(&input.instrument_spec, trade_native_quantity, *price)?;
+            let target_position_qty = target_exposure * position_qty_per_unit;
+            trade_position_qty = target_position_qty - position_qty;
+            trade_notional = position_notional(&input.instrument_spec, trade_position_qty, *price)?;
             sample_fee = estimate_settlement_fee(
                 &input.instrument_spec,
                 trade_notional,
@@ -256,26 +255,25 @@ pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
             )?;
             estimated_fee += sample_fee;
             trade_count += 1;
-            position_native_quantity = target_native_quantity;
+            position_qty = target_position_qty;
             current_exposure = target_exposure;
         }
 
-        let position_notional =
-            position_notional(&input.instrument_spec, position_native_quantity, *price)?;
-        max_abs_native_quantity = max_abs_native_quantity.max(position_native_quantity.abs());
+        let position_notional = position_notional(&input.instrument_spec, position_qty, *price)?;
+        max_abs_position_qty = max_abs_position_qty.max(position_qty.abs());
         max_abs_notional = max_abs_notional.max(position_notional);
         min_exposure = min_exposure.min(current_exposure);
         max_exposure = max_exposure.max(current_exposure);
-        min_native_quantity = min_native_quantity.min(position_native_quantity);
-        max_native_quantity = max_native_quantity.max(position_native_quantity);
+        min_position_qty = min_position_qty.min(position_qty);
+        max_position_qty = max_position_qty.max(position_qty);
         abs_exposure_sum += current_exposure.abs();
 
         samples.push(ReplaySample {
             price: *price,
             target_exposure,
-            position_native_quantity,
+            position_qty,
             position_notional,
-            trade_native_quantity,
+            trade_position_qty,
             trade_notional,
             estimated_fee: sample_fee,
         });
@@ -285,7 +283,7 @@ pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
         stats: ReplayStats {
             trade_count,
             trade_density: trade_count as f64 / input.prices.len() as f64,
-            max_abs_native_quantity,
+            max_abs_position_qty,
             max_abs_notional,
             max_margin_requirement: max_abs_notional / input.leverage as f64,
             estimated_fee,
@@ -298,8 +296,8 @@ pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
                 min_exposure,
                 max_exposure,
                 mean_abs_exposure: abs_exposure_sum / input.prices.len() as f64,
-                min_native_quantity,
-                max_native_quantity,
+                min_position_qty,
+                max_position_qty,
             },
         },
         samples,
@@ -427,7 +425,7 @@ mod tests {
             r#"
 {
   "prices": [60000.0, 65000.0, 70000.0],
-  "initial_native_quantity": 12.0,
+  "initial_position_qty": 12.0,
   "leverage": 3,
   "track_config": {
     "lower_price": 60000.0,
@@ -473,7 +471,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(input.prices, vec![60_000.0, 65_000.0, 70_000.0]);
-        assert_eq!(input.initial_native_quantity, 12.0);
+        assert_eq!(input.initial_position_qty, 12.0);
         assert_eq!(input.leverage, 3);
         assert_eq!(input.track_config.notional_per_unit, 300.0);
         assert_eq!(input.fee_rates.taker_fee_rate, 0.0005);
@@ -503,7 +501,7 @@ mod tests {
         assert_eq!(report.samples.len(), 3);
         assert_eq!(report.stats.trade_count, 2);
         assert_close(report.stats.trade_density, 0.6666666666666666);
-        assert_eq!(report.stats.max_abs_native_quantity, 18.0);
+        assert_eq!(report.stats.max_abs_position_qty, 18.0);
         assert_eq!(report.stats.max_abs_notional, 1_800.0);
         assert_eq!(report.stats.max_margin_requirement, 600.0);
         assert_eq!(report.stats.fee_asset, "BTC");
@@ -515,12 +513,12 @@ mod tests {
             3.6666666666666665,
         );
         assert_eq!(report.samples[0].target_exposure, 4.0);
-        assert_eq!(report.samples[0].position_native_quantity, 12.0);
-        assert_eq!(report.samples[0].trade_native_quantity, 0.0);
+        assert_eq!(report.samples[0].position_qty, 12.0);
+        assert_eq!(report.samples[0].trade_position_qty, 0.0);
         assert_eq!(report.samples[1].target_exposure, -1.0);
-        assert_eq!(report.samples[1].position_native_quantity, -3.0);
+        assert_eq!(report.samples[1].position_qty, -3.0);
         assert_eq!(report.samples[2].target_exposure, -6.0);
-        assert_eq!(report.samples[2].position_native_quantity, -18.0);
+        assert_eq!(report.samples[2].position_qty, -18.0);
     }
 
     #[test]
@@ -576,7 +574,7 @@ mod tests {
             higher_leverage.stats.max_margin_requirement < baseline.stats.max_margin_requirement
         );
         assert!(larger_unit.stats.max_abs_notional > baseline.stats.max_abs_notional);
-        assert!(wider_band.stats.max_abs_native_quantity < baseline.stats.max_abs_native_quantity);
+        assert!(wider_band.stats.max_abs_position_qty < baseline.stats.max_abs_position_qty);
     }
 
     #[test]
@@ -592,27 +590,27 @@ mod tests {
                     {
                         "price": 60000.0,
                         "target_exposure": 4.0,
-                        "position_native_quantity": 12.0,
+                        "position_qty": 12.0,
                         "position_notional": 1200.0,
-                        "trade_native_quantity": 0.0,
+                        "trade_position_qty": 0.0,
                         "trade_notional": 0.0,
                         "estimated_fee": 0.0
                     },
                     {
                         "price": 65000.0,
                         "target_exposure": -1.0,
-                        "position_native_quantity": -3.0,
+                        "position_qty": -3.0,
                         "position_notional": 300.0,
-                        "trade_native_quantity": -15.0,
+                        "trade_position_qty": -15.0,
                         "trade_notional": 1500.0,
                         "estimated_fee": 0.000011538461538461538
                     },
                     {
                         "price": 70000.0,
                         "target_exposure": -6.0,
-                        "position_native_quantity": -18.0,
+                        "position_qty": -18.0,
                         "position_notional": 1800.0,
-                        "trade_native_quantity": -15.0,
+                        "trade_position_qty": -15.0,
                         "trade_notional": 1500.0,
                         "estimated_fee": 0.000010714285714285714
                     }
@@ -620,7 +618,7 @@ mod tests {
                 "stats": {
                     "trade_count": 2,
                     "trade_density": 0.6666666666666666,
-                    "max_abs_native_quantity": 18.0,
+                    "max_abs_position_qty": 18.0,
                     "max_abs_notional": 1800.0,
                     "max_margin_requirement": 600.0,
                     "estimated_fee": 0.000022252747252747252,
@@ -629,8 +627,8 @@ mod tests {
                         "min_exposure": -6.0,
                         "max_exposure": 4.0,
                         "mean_abs_exposure": 3.6666666666666665,
-                        "min_native_quantity": -18.0,
-                        "max_native_quantity": 12.0
+                        "min_position_qty": -18.0,
+                        "max_position_qty": 12.0
                     }
                 }
             })
@@ -665,7 +663,7 @@ mod tests {
     fn replay_input() -> ReplayInput {
         ReplayInput {
             prices: vec![60_000.0, 65_000.0, 70_000.0],
-            initial_native_quantity: 12.0,
+            initial_position_qty: 12.0,
             leverage: 3,
             track_config: TrackConfig {
                 lower_price: 60_000.0,

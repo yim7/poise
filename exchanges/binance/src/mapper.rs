@@ -94,12 +94,8 @@ impl TryFrom<BinanceOpenOrder> for ExchangeOrder {
 
 pub(crate) fn track_pnl_record_from_trade(value: BinanceAccountTrade) -> Result<TrackPnlRecord> {
     let instrument = Instrument::new(Venue::Binance, &value.symbol);
-    let settlement_asset = instrument.quote_asset();
-    ensure!(
-        value.margin_asset == settlement_asset,
-        "Binance margin asset `{}` does not match settlement asset `{settlement_asset}`",
-        value.margin_asset
-    );
+    let settlement_asset = value.margin_asset.trim().to_string();
+    ensure!(!settlement_asset.is_empty(), "missing Binance margin asset");
     let occurred_at = millis_to_utc("trade.time", value.time)?;
     let trade_id = value.id.to_string();
     let commission = parse_decimal("commission", &value.commission)?;

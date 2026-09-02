@@ -51,24 +51,27 @@ function makeDraft(initialRatio = '0.5', quotePriceInput = '') {
 
 function report(id: string): WorkbenchEvaluationReport {
   return {
-    rules: {
+    instrumentFixture: {
       fixtureId: 'base_asset_v1',
+      baseAsset: 'BTC',
+      quoteAsset: 'USDT',
+      notionalAsset: 'USDT',
       priceTick: 0.1,
       pricePrecision: { kind: 'fixed_tick' },
-      quantityKind: 'base_asset',
-      contractNotional: null,
+      positionBasis: 'base_asset',
+      contractValue: null,
       settlementAsset: 'USDT',
-      quantityStep: 0.001,
-      minQty: 0.001,
+      positionQtyStep: 0.001,
+      minPositionQty: 0.001,
       minNotional: 5,
       makerFeeRate: 0.0002,
       takerFeeRate: 0.0005,
-      nativeQtyPerExposureUnit: 1,
+      positionQtyPerExposureUnit: 1,
     },
     assumptions: {
-      rulesNotice: id,
+      instrumentFixtureNotice: id,
       fillModelNotice: 'deterministic',
-      initialNativeQuantity: 0,
+      initialPositionQty: 0,
       initialExposure: 0,
     },
     curvePoints: [],
@@ -100,14 +103,14 @@ function bridge(evaluateTrack: WorkbenchBridge['evaluateTrack']): WorkbenchBridg
 }
 
 describe('useTrackEvaluation', () => {
-  it('requires an explicit rules fixture before invoking Rust', async () => {
+  it('requires an explicit instrument fixture before invoking Rust', async () => {
     const evaluateTrack = vi.fn(async () => report('MUST_NOT_RUN'));
     const resolvedBridge = bridge(evaluateTrack);
     const { result } = renderHook(() => useTrackEvaluation({
       bridge: resolvedBridge,
       draft: makeDraft(),
       exchangeVenue: 'binance',
-      rulesFixture: null,
+      instrumentFixture: null,
     }));
 
     await waitFor(() => expect(result.current.status).toBe('blocked'));
@@ -127,7 +130,7 @@ describe('useTrackEvaluation', () => {
         bridge: resolvedBridge,
         draft,
         exchangeVenue: 'binance',
-        rulesFixture: 'base_asset_v1',
+        instrumentFixture: 'base_asset_v1',
       }),
       { initialProps: { draft: makeDraft('0.5') } },
     );
@@ -137,11 +140,11 @@ describe('useTrackEvaluation', () => {
     await waitFor(() => expect(evaluateTrack).toHaveBeenCalledTimes(2));
 
     await act(async () => second.resolve(report('NEW_REPORT')));
-    await waitFor(() => expect(result.current.report?.assumptions.rulesNotice).toBe('NEW_REPORT'));
+    await waitFor(() => expect(result.current.report?.assumptions.instrumentFixtureNotice).toBe('NEW_REPORT'));
     await act(async () => first.resolve(report('STALE_REPORT')));
 
     expect(result.current.status).toBe('ready');
-    expect(result.current.report?.assumptions.rulesNotice).toBe('NEW_REPORT');
+    expect(result.current.report?.assumptions.instrumentFixtureNotice).toBe('NEW_REPORT');
   });
 
   it('does not block synthetic evaluation on a missing or invalid manual quote', async () => {
@@ -152,7 +155,7 @@ describe('useTrackEvaluation', () => {
         bridge: resolvedBridge,
         draft,
         exchangeVenue: 'binance',
-        rulesFixture: 'base_asset_v1',
+        instrumentFixture: 'base_asset_v1',
       }),
       { initialProps: { draft: makeDraft('0.5', '') } },
     );
@@ -179,12 +182,12 @@ describe('useTrackEvaluation', () => {
         bridge: resolvedBridge,
         draft,
         exchangeVenue: 'binance',
-        rulesFixture: 'base_asset_v1',
+        instrumentFixture: 'base_asset_v1',
       }),
       { initialProps: { draft: makeDraft('0.5') } },
     );
 
-    await waitFor(() => expect(result.current.report?.assumptions.rulesNotice).toBe('OLD_REPORT'));
+    await waitFor(() => expect(result.current.report?.assumptions.instrumentFixtureNotice).toBe('OLD_REPORT'));
     rerender({ draft: makeDraft('0.75') });
     await waitFor(() => expect(result.current.status).toBe('loading'));
     expect(result.current.report).toBeNull();

@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import {
   createSourceSnapshot,
   type WorkbenchBridge,
-  type WorkbenchRulesFixtureId,
+  type WorkbenchInstrumentFixtureId,
 } from '@/app/workbenchBridge';
 import {
   createTrackDraft,
@@ -42,8 +42,8 @@ export function AppShell({ bridge }: AppShellProps) {
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const [riskAcquisitionDefaults, setRiskAcquisitionDefaults] =
     useState<RiskAcquisitionDraft | null>(null);
-  const [rulesFixture, setRulesFixture] =
-    useState<WorkbenchRulesFixtureId | null>(null);
+  const [instrumentFixture, setInstrumentFixture] =
+    useState<WorkbenchInstrumentFixtureId | null>(null);
   const [selectedScenarioId, setSelectedScenarioId] = useState('');
   const {
     selectedDraft,
@@ -59,7 +59,7 @@ export function AppShell({ bridge }: AppShellProps) {
     bridge: resolvedBridge,
     draft: selectedDraft,
     exchangeVenue: selectedExchangeVenue,
-    rulesFixture,
+    instrumentFixture,
   });
 
   useEffect(() => {
@@ -327,8 +327,8 @@ export function AppShell({ bridge }: AppShellProps) {
             <ServerLivePanel enabled={Boolean(resolvedBridge?.isTauriEnvironment())} />
             <MetricCards
               evaluation={evaluation}
-              rulesFixture={rulesFixture}
-              onRulesFixtureChange={setRulesFixture}
+              instrumentFixture={instrumentFixture}
+              onInstrumentFixtureChange={setInstrumentFixture}
               selectedScenarioId={selectedScenarioId}
               onSelectedScenarioChange={setSelectedScenarioId}
               priceStatus={priceStatus}

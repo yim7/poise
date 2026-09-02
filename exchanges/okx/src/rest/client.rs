@@ -203,7 +203,7 @@ impl OkxRestClient {
     pub(crate) async fn get_position(&self, symbol: &str) -> Result<Position> {
         let metadata = self.get_or_fetch_instrument_metadata(symbol).await?;
         match self.get_position_snapshot(symbol).await? {
-            Some(position) => position_from_snapshot_with_metadata(position, Some(&metadata)),
+            Some(position) => position_from_snapshot_with_metadata(position, &metadata),
             None => Ok(Position {
                 instrument: Instrument::new(Venue::Okx, symbol),
                 qty: 0.0,
@@ -230,7 +230,7 @@ impl OkxRestClient {
             .await?;
         response
             .into_iter()
-            .map(|order| open_order_from_snapshot_with_metadata(order, Some(&metadata)))
+            .map(|order| open_order_from_snapshot_with_metadata(order, &metadata))
             .collect::<Result<Vec<_>>>()
     }
 
@@ -269,7 +269,7 @@ impl OkxRestClient {
             .await?;
         response
             .into_iter()
-            .map(|fill| track_pnl_record_from_trade_fill_with_metadata(fill, Some(metadata)))
+            .map(|fill| track_pnl_record_from_trade_fill_with_metadata(fill, metadata))
             .collect::<Result<Vec<_>>>()
     }
 
@@ -296,8 +296,7 @@ impl OkxRestClient {
                 .await?;
             for bill in response {
                 records.push(track_pnl_record_from_funding_bill_with_metadata(
-                    bill,
-                    Some(metadata),
+                    bill, metadata,
                 )?);
             }
         }

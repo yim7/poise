@@ -481,7 +481,10 @@ pub struct TrackRuntime {
     pub(crate) tick_timeout_secs: u64,
 }
 
-pub fn native_qty_per_exposure_unit(config: &TrackConfig, instrument_spec: &InstrumentSpec) -> f64 {
+pub fn position_qty_per_exposure_unit(
+    config: &TrackConfig,
+    instrument_spec: &InstrumentSpec,
+) -> f64 {
     let notional = Amount::new(
         config.notional_per_unit,
         instrument_spec.notional_asset().clone(),
@@ -498,7 +501,7 @@ pub fn exposure_from_position_qty(
     instrument_spec: &InstrumentSpec,
     position_qty: f64,
 ) -> Exposure {
-    let unit_qty = native_qty_per_exposure_unit(config, instrument_spec);
+    let unit_qty = position_qty_per_exposure_unit(config, instrument_spec);
     if !unit_qty.is_finite() || unit_qty <= f64::EPSILON {
         Exposure(0.0)
     } else {
@@ -656,8 +659,8 @@ impl TrackRuntime {
         }
     }
 
-    pub fn native_qty_per_exposure_unit(&self) -> f64 {
-        native_qty_per_exposure_unit(self.config(), &self.instrument_spec)
+    pub fn position_qty_per_exposure_unit(&self) -> f64 {
+        position_qty_per_exposure_unit(self.config(), &self.instrument_spec)
     }
 
     pub fn exposure_from_position_qty(&self, position_qty: f64) -> Exposure {
@@ -1248,7 +1251,7 @@ mod tests {
         config.notional_per_unit = 1_000.0;
         let rules = inverse_rules();
 
-        assert_eq!(native_qty_per_exposure_unit(&config, &rules), 10.0);
+        assert_eq!(position_qty_per_exposure_unit(&config, &rules), 10.0);
         assert_eq!(
             exposure_from_position_qty(&config, &rules, -30.0),
             Exposure(-3.0)

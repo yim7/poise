@@ -224,7 +224,8 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                 } else {
                     0.0
                 };
-                let quote_asset = instrument.quote_asset();
+                let quote_asset = quote_asset_for_symbol(&order.symbol)
+                    .context("cannot determine Binance settlement asset from order symbol")?;
                 let trading_fee = match order.commission_asset.as_deref() {
                     Some(asset) if asset == quote_asset => commission_amount,
                     None if commission_amount.abs() <= f64::EPSILON => 0.0,

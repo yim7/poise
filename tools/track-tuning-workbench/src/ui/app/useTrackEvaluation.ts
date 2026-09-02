@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   WorkbenchBridge,
   WorkbenchEvaluationReport,
-  WorkbenchRulesFixtureId,
+  WorkbenchInstrumentFixtureId,
 } from '@/app/workbenchBridge';
 import type { TrackDraft } from '@/domain/trackDraft';
 import { validateTrackDraft } from '@/domain/trackValidation';
@@ -26,7 +26,7 @@ export interface UseTrackEvaluationOptions {
   bridge?: WorkbenchBridge;
   draft: TrackDraft | null;
   exchangeVenue: string;
-  rulesFixture: WorkbenchRulesFixtureId | null;
+  instrumentFixture: WorkbenchInstrumentFixtureId | null;
 }
 
 const BROWSER_UNAVAILABLE_MESSAGE =
@@ -36,7 +36,7 @@ export function useTrackEvaluation({
   bridge,
   draft,
   exchangeVenue,
-  rulesFixture,
+  instrumentFixture,
 }: UseTrackEvaluationOptions): TrackEvaluationState {
   const generation = useRef(0);
   const [state, setState] = useState<TrackEvaluationState>(() => ({
@@ -64,11 +64,11 @@ export function useTrackEvaluation({
       return;
     }
 
-    if (!rulesFixture) {
+    if (!instrumentFixture) {
       setState({
         status: 'blocked',
         report: null,
-        message: '请选择完整的评估规则 fixture。',
+        message: '请选择完整的评估标的 fixture。',
       });
       return;
     }
@@ -84,7 +84,7 @@ export function useTrackEvaluation({
     void bridge.evaluateTrack({
       draft,
       exchangeVenue,
-      rulesFixture,
+      instrumentFixture,
     }).then(
       (report) => {
         if (cancelled || generation.current !== requestGeneration) {
@@ -107,7 +107,7 @@ export function useTrackEvaluation({
     return () => {
       cancelled = true;
     };
-  }, [blockingMessage, bridge, draft?.draftId, exchangeVenue, requestKey, rulesFixture]);
+  }, [blockingMessage, bridge, draft?.draftId, exchangeVenue, requestKey, instrumentFixture]);
 
   return state;
 }

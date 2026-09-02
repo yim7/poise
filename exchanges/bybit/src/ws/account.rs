@@ -241,7 +241,8 @@ fn parse_execution_update(
     let symbol = update.symbol;
     let exec_id = update.exec_id;
     let instrument = Instrument::new(Venue::Bybit, symbol.clone());
-    let quote_asset = instrument.quote_asset();
+    let quote_asset = bybit_settlement_asset_for_symbol(&symbol)
+        .context("cannot determine Bybit settlement asset from execution symbol")?;
     let trading_fee = match normalized_fee_currency(update.fee_currency.as_deref()) {
         Some(asset) if asset == quote_asset => update.exec_fee,
         Some(_) => 0.0,
@@ -269,6 +270,12 @@ fn parse_execution_update(
 
 fn normalized_fee_currency(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn bybit_settlement_asset_for_symbol(symbol: &str) -> Option<&'static str> {
+    ["USDT", "USDC"]
+        .into_iter()
+        .find(|asset| symbol.ends_with(asset))
 }
 
 #[cfg(test)]

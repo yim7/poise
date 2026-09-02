@@ -340,7 +340,9 @@ fn parse_side(value: &str) -> Result<poise_core::types::Side> {
 }
 
 fn quote_asset_for_symbol(symbol: &str) -> Option<&'static str> {
-    poise_core::track::quote_asset_for_symbol(symbol)
+    ["USDT", "USDC", "FDUSD", "BUSD"]
+        .into_iter()
+        .find(|asset| symbol.ends_with(asset))
 }
 
 #[cfg(test)]

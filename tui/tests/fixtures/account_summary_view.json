@@ -13,7 +13,7 @@
         "track_id": "btc-coin",
         "instrument": { "venue": "okx", "symbol": "BTC-USD-SWAP" },
         "settlement_asset": "BTC",
-        "native_quantity": -30.0,
+        "position_qty": -30.0,
         "contract_count": -30.0,
         "signed_usd_notional": -3000.0,
         "abs_usd_notional": 3000.0,
