@@ -401,7 +401,7 @@ base_exposure_from_position_qty
 | S3 | OKX linear `InstrumentSpec` | 已完成 | `f913d39`、`7f019c7`、`de37b11`、`10ca055` |
 | S4 | OKX inverse 与其他 venue | 已完成 | `1833c7c`、`ddb2e9a`、`a9613e1` |
 | S5 | 账户估值与 PNL cashflow | 已完成 | `63cbf90`、`da3a3e1`、`2d94796` |
-| S6 | queries、装配和最终删除 | 实施中（definition/query ownership、历史兼容清理、exchange port 归属已完成） | `2ab98ac`、`1f29019`、`c4f300f` |
+| S6 | queries、装配和最终删除 | 实施中（definition/query ownership、历史兼容清理、exchange port 归属、单一 venue 装配已完成） | `2ab98ac`、`1f29019`、`c4f300f`、`b90298b` |
 
 ### 切片 1：不可变 transition 与唯一更新入口
 
