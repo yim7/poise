@@ -11,7 +11,6 @@ use crate::execution_gate::ExecutionGateDecision;
 use crate::execution_plan::{DecisionReason, TrackEffect};
 use crate::executor;
 use crate::ledger::{TrackPnlRecord, TrackPnlStats};
-use crate::mutation_frame::TrackMutationFrame;
 use crate::observation::{
     CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
     TrackObservation,
@@ -190,31 +189,31 @@ impl TrackManager {
         id: &TrackId,
         observation: MarketObservation,
     ) -> Result<MarketMutationOutcome> {
-        let previous_frame = self
+        let previous_state = self
             .tracks
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
-            .mutation_frame();
+            .clone();
         let previous_exchange_observation_revision = self
             .tracks
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
             .exchange_observation_revision();
         let (events, effects) = self.observe_market(id, observation)?;
-        let next_frame = self
+        let candidate_state = self
             .tracks
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
-            .mutation_frame();
+            .clone();
 
-        if market_mutation_requires_durable_write(&previous_frame, &next_frame, &events, &effects) {
-            let next_runtime = self
-                .tracks
-                .get(id)
-                .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
-                .clone();
+        if market_mutation_requires_durable_write(
+            &previous_state,
+            &candidate_state,
+            &events,
+            &effects,
+        ) {
             return Ok(MarketMutationOutcome::Durable(Box::new(
-                TrackTransition::new(next_runtime, events, effects),
+                TrackTransition::new(candidate_state, events, effects),
             )));
         }
 
@@ -254,11 +253,12 @@ impl TrackManager {
             )
         };
 
+        let executor_view_changed = previous_state.executor_view_changed(&candidate_state);
         let track = self
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        track.rollback_to_frame(&previous_frame)?;
+        *track = previous_state;
         track.restore_revision_after_speculative_market_mutation(
             previous_exchange_observation_revision,
         );
@@ -267,11 +267,7 @@ impl TrackManager {
         track.inventory_decision_revision = inventory_decision_revision;
         track.applied_risk_acquisition_release = applied_risk_acquisition_release;
         track.fresh_acquisition_session = fresh_acquisition_session;
-        retain_live_only_executor_state(
-            track,
-            executor_state,
-            previous_frame.executor_view_changed(&next_frame),
-        );
+        retain_live_only_executor_state(track, executor_state, executor_view_changed);
         track.strategy_price = strategy_price;
         track.strategy_price_status = strategy_price_status;
         track.mark_price = mark_price;
@@ -569,10 +565,6 @@ impl TrackManager {
         }
     }
 
-    pub fn mutation_frame(&self, id: &str) -> Option<TrackMutationFrame> {
-        self.get_track(id).map(TrackRuntime::mutation_frame)
-    }
-
     pub fn track_live_view(&self, id: &TrackId) -> Result<TrackLiveView> {
         let track = self
             .tracks
@@ -605,15 +597,6 @@ impl TrackManager {
         Ok(self
             .track_with_current_pnl_day(track)
             .strategy_target_view())
-    }
-
-    pub fn rollback_track_state(&mut self, frame: &TrackMutationFrame) -> Result<()> {
-        let track = self
-            .tracks
-            .get_mut(&frame.track_id)
-            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", frame.track_id.as_str()))?;
-        track.rollback_to_frame(frame)?;
-        Ok(())
     }
 
     pub fn set_account_capacity_available_notional(
@@ -1403,42 +1386,52 @@ struct PlannedInventoryExecution {
 }
 
 fn market_mutation_requires_durable_write(
-    previous_frame: &TrackMutationFrame,
-    next_frame: &TrackMutationFrame,
+    previous_state: &TrackRuntime,
+    next_state: &TrackRuntime,
     events: &[DomainEvent],
     effects: &[TrackEffect],
 ) -> bool {
-    let desired_exposure_changed = previous_frame.desired_exposure != next_frame.desired_exposure;
+    let desired_exposure_changed = previous_state.desired_exposure != next_state.desired_exposure;
     let has_non_target_events = events
         .iter()
         .any(|event| !matches!(event, DomainEvent::ExposureTargetChanged { .. }));
     let has_execution_effects = !effects.is_empty();
-    let frame_changed_without_target = {
-        let mut normalized_next = next_frame.clone();
-        normalized_next.desired_exposure = previous_frame.desired_exposure.clone();
-        normalized_next.inventory_decision = previous_frame.inventory_decision.clone();
-        normalized_next.inventory_decision_revision = previous_frame.inventory_decision_revision;
+    let durable_state_changed_without_target = {
+        let mut normalized_next = next_state.clone();
+        normalized_next.desired_exposure = previous_state.desired_exposure.clone();
+        normalized_next.inventory_decision = previous_state.inventory_decision.clone();
+        normalized_next.inventory_decision_revision = previous_state.inventory_decision_revision;
         normalized_next.applied_risk_acquisition_release =
-            previous_frame.applied_risk_acquisition_release.clone();
+            previous_state.applied_risk_acquisition_release.clone();
         normalized_next.fresh_acquisition_session =
-            previous_frame.fresh_acquisition_session.clone();
+            previous_state.fresh_acquisition_session.clone();
         if !has_non_target_events && !has_execution_effects {
-            normalized_next.executor_state = previous_frame.executor_state.clone();
+            normalized_next.executor_state = previous_state.executor_state.clone();
         }
-        normalized_next.pnl_stats = previous_frame.pnl_stats.clone();
-        normalized_next != *previous_frame
+        normalized_next.pnl_stats = previous_state.pnl_stats.clone();
+        normalized_next.strategy_price = previous_state.strategy_price;
+        normalized_next.strategy_price_status = previous_state.strategy_price_status;
+        normalized_next.mark_price = previous_state.mark_price;
+        normalized_next.best_bid = previous_state.best_bid;
+        normalized_next.best_ask = previous_state.best_ask;
+        normalized_next.price_execution_gate = previous_state.price_execution_gate;
+        normalized_next.last_tick_at = previous_state.last_tick_at;
+        normalized_next.restore_revision_after_speculative_market_mutation(
+            previous_state.exchange_observation_revision(),
+        );
+        normalized_next != *previous_state
     };
-    let target_reached_without_new_effects = next_frame
+    let target_reached_without_new_effects = next_state
         .desired_exposure
         .as_ref()
-        .is_some_and(|target| previous_frame.current_exposure.delta(target).is_zero());
+        .is_some_and(|target| previous_state.current_exposure.delta(target).is_zero());
     let durable_target_change = desired_exposure_changed
         && (has_execution_effects
             || has_non_target_events
             || target_reached_without_new_effects
-            || next_frame.desired_exposure.is_none());
+            || next_state.desired_exposure.is_none());
 
-    frame_changed_without_target
+    durable_state_changed_without_target
         || has_non_target_events
         || has_execution_effects
         || durable_target_change
@@ -1908,12 +1901,12 @@ mod tests {
         let (mut manager, id) = manager();
         let track = manager.tracks.get_mut(&id).unwrap();
         let previous_revision = track.exchange_observation_revision();
-        let previous_frame = track.mutation_frame();
+        let previous_state = track.clone();
         let mut executor_state = track.executor_state.clone();
         executor_state.ledger_state.ledger_anchor_exposure = Exposure(2.0);
-        let mut next_frame = previous_frame.clone();
-        next_frame.executor_state = executor_state.clone();
-        let executor_view_changed = previous_frame.executor_view_changed(&next_frame);
+        let mut next_state = previous_state.clone();
+        next_state.executor_state = executor_state.clone();
+        let executor_view_changed = previous_state.executor_view_changed(&next_state);
 
         assert!(!executor_view_changed);
 
@@ -1958,10 +1951,10 @@ mod tests {
     }
 
     #[test]
-    fn rollback_restores_committed_inventory_decision() {
+    fn installing_a_previous_candidate_restores_its_inventory_decision() {
         let (mut manager, id) = manager();
         manager.observe(&id, market(95.0)).unwrap();
-        let previous_frame = manager.mutation_frame(id.as_str()).unwrap();
+        let previous_state = manager.get_track(id.as_str()).cloned().unwrap();
         let previous_decision = manager
             .get_track(id.as_str())
             .unwrap()
@@ -1974,7 +1967,7 @@ mod tests {
             previous_decision.as_ref()
         );
 
-        manager.rollback_track_state(&previous_frame).unwrap();
+        manager.install_planned_runtime(previous_state);
         assert_eq!(
             manager.get_track(id.as_str()).unwrap().inventory_decision(),
             previous_decision.as_ref()
@@ -2739,7 +2732,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let pending_frame = manager.mutation_frame(id.as_str()).unwrap();
+        let pending_state = manager.get_track(id.as_str()).cloned().unwrap();
 
         manager.observe(&id, market(92.5)).unwrap();
         assert!(
@@ -2749,7 +2742,7 @@ mod tests {
                 .fresh_acquisition_pending()
         );
 
-        manager.rollback_track_state(&pending_frame).unwrap();
+        manager.install_planned_runtime(pending_state);
 
         assert!(
             manager

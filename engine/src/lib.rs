@@ -7,7 +7,6 @@ pub mod executor;
 pub mod ledger;
 pub mod loss_guard;
 pub mod manager;
-pub mod mutation_frame;
 pub mod observation;
 pub mod ports;
 pub mod price_gate;

@@ -135,10 +135,10 @@ mod tests {
     async fn load_track_recovery_summary_projects_application_owned_issue() {
         let write_repository = Arc::new(MemoryRepository::default());
         let mut manager = seeded_manager();
-        let mut snapshot = manager.mutation_frame("btc-core").unwrap();
+        let mut snapshot = manager.get_track("btc-core").cloned().unwrap();
         snapshot.set_recovery_anomaly(Some(RecoveryAnomaly::UnknownLiveOrder));
         snapshot.clear_executor_bindings();
-        manager.rollback_track_state(&snapshot).unwrap();
+        manager.install_planned_runtime(snapshot);
         let (services, _) = track_write_services(manager, write_repository);
         let service = services.runtime_lifecycle;
 
@@ -261,10 +261,10 @@ mod tests {
         {
             let manager_handle = services.runtime_lifecycle.manager();
             let mut manager = manager_handle.write().await;
-            let mut snapshot = manager.mutation_frame("btc-core").unwrap();
+            let mut snapshot = manager.get_track("btc-core").cloned().unwrap();
             snapshot.set_exposure_state(Exposure(9.0), Some(Exposure(4.0)));
             snapshot.set_recovery_anomaly(Some(RecoveryAnomaly::UnknownLiveOrder));
-            manager.rollback_track_state(&snapshot).unwrap();
+            manager.install_planned_runtime(snapshot);
         }
 
         assert!(
@@ -305,7 +305,7 @@ mod tests {
 
         let manager = services.runtime_lifecycle.manager();
         let manager = manager.read().await;
-        let snapshot = manager.mutation_frame("btc-core").unwrap();
+        let snapshot = manager.get_track("btc-core").unwrap();
         assert_eq!(
             snapshot.status(),
             poise_engine::runtime::TrackStatus::Paused
@@ -371,9 +371,9 @@ mod tests {
         {
             let manager_handle = services.runtime_lifecycle.manager();
             let mut manager = manager_handle.write().await;
-            let mut snapshot = manager.mutation_frame("btc-core").unwrap();
+            let mut snapshot = manager.get_track("btc-core").cloned().unwrap();
             snapshot.set_recovery_anomaly(Some(RecoveryAnomaly::UnknownLiveOrder));
-            manager.rollback_track_state(&snapshot).unwrap();
+            manager.install_planned_runtime(snapshot);
         }
 
         let summary = services
@@ -396,7 +396,8 @@ mod tests {
             .manager()
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .unwrap();
         services
             .observation
@@ -422,10 +423,10 @@ mod tests {
         {
             let manager_handle = services.runtime_lifecycle.manager();
             let mut manager = manager_handle.write().await;
-            let mut snapshot = manager.mutation_frame("btc-core").unwrap();
+            let mut snapshot = manager.get_track("btc-core").cloned().unwrap();
             snapshot.set_recovery_anomaly(Some(RecoveryAnomaly::UnknownLiveOrder));
             assert!(snapshot.has_executor_bindings());
-            manager.rollback_track_state(&snapshot).unwrap();
+            manager.install_planned_runtime(snapshot);
         }
 
         services
@@ -439,7 +440,8 @@ mod tests {
             .manager()
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .unwrap();
         let effects = repository.pending_effects();
         assert!(!snapshot.has_executor_bindings());

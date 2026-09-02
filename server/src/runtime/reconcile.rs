@@ -682,7 +682,8 @@ mod tests {
             .manager()
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .unwrap();
         assert_eq!(during_retry.unrealized_pnl(), 9.0);
         assert!(during_retry.current_exposure().0 > 0.0);
@@ -694,7 +695,8 @@ mod tests {
             .manager()
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .unwrap();
         assert_eq!(final_frame.unrealized_pnl(), 9.0);
         assert!(final_frame.current_exposure().0 > 0.0);
@@ -808,7 +810,8 @@ mod tests {
             .manager()
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .unwrap();
         assert_eq!(final_frame.unrealized_pnl(), 12.0);
         assert!(
@@ -909,7 +912,8 @@ mod tests {
             .manager()
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .unwrap();
         assert_eq!(
             during_retry.binding_is_active_for_client_order_id(&tracked_request.client_order_id),
@@ -924,7 +928,8 @@ mod tests {
             .manager()
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .unwrap();
         assert_ne!(
             final_frame.binding_is_active_for_client_order_id(&tracked_request.client_order_id),
@@ -1339,14 +1344,14 @@ mod tests {
         {
             let manager_handle = services.runtime_lifecycle_service.manager();
             let mut manager = manager_handle.write().await;
-            let mut snapshot = manager.mutation_frame("btc-core").unwrap();
+            let mut snapshot = manager.get_track("btc-core").cloned().unwrap();
             assert!(snapshot.set_binding_order_status_for_client_order_id(
                 &tracked_request.client_order_id,
                 Some("tracked-order".to_string()),
                 BindingStatus::Working,
             ));
             snapshot.set_recovery_anomaly(Some(anomaly));
-            manager.rollback_track_state(&snapshot).unwrap();
+            manager.install_planned_runtime(snapshot);
         }
 
         let exchange = OrderSetRecoveryExchange::new(

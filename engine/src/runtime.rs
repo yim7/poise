@@ -1,4 +1,3 @@
-use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +16,6 @@ use crate::executor::boundary::{ProfileRevision, profile_revision_for_config};
 use crate::executor::ledger::BoundaryLedgerState;
 use crate::executor::policy::PolicyKind;
 use crate::ledger::TrackPnlStats;
-use crate::mutation_frame::{TrackMutationFrame, TrackMutationFrameRevision};
 use crate::ports::ExecutionQuote;
 use crate::price_gate::{
     PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
@@ -450,11 +448,11 @@ impl ExecutorState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TrackRuntime {
     definition: TrackDefinition,
-    // Process-local invalidation clock for composite REST snapshots. It is intentionally not part
-    // of TrackMutationFrame: rolling business state back must never make an old token current.
+    // Process-local invalidation clock for composite REST snapshots. Candidate business state may
+    // fail to commit, but this clock is retained separately by application and never moves back.
     exchange_observation_revision: ExchangeObservationRevision,
     pub(crate) exchange_rules: ExchangeRules,
     pub(crate) track_state: TrackState,
@@ -729,7 +727,7 @@ impl TrackRuntime {
         fresh
     }
 
-    pub(crate) fn fresh_acquisition_pending(&self) -> bool {
+    pub fn fresh_acquisition_pending(&self) -> bool {
         matches!(
             self.fresh_acquisition_session,
             Some(FreshAcquisitionSession::Pending { .. })
@@ -786,6 +784,188 @@ impl TrackRuntime {
         self.inventory_decision.as_ref()
     }
 
+    pub fn runtime_state(&self) -> &TrackState {
+        &self.track_state
+    }
+
+    pub fn inventory_decision_revision(&self) -> Option<u64> {
+        self.inventory_decision
+            .as_ref()
+            .map(|decision| decision.revision)
+    }
+
+    pub fn market_data_stale(&self) -> bool {
+        self.market_data_stale_since.is_some()
+    }
+
+    pub fn executor_view_changed(&self, next: &Self) -> bool {
+        self.executor_state.view() != next.executor_state.view()
+    }
+
+    pub fn pnl_stats(&self) -> &TrackPnlStats {
+        &self.pnl_stats
+    }
+
+    pub fn recovery_anomaly_active(&self) -> bool {
+        self.executor_state.recovery_anomaly.is_some()
+    }
+
+    pub fn has_recorded_order_fact_for_client_order_id(&self, client_order_id: &str) -> bool {
+        self.executor_state.bindings.iter().any(|binding| {
+            binding.request.client_order_id == client_order_id && binding.order_id.is_some()
+        }) || self
+            .executor_state
+            .recent_terminal_orders
+            .iter()
+            .any(|order| order.client_order_id == client_order_id)
+    }
+
+    pub fn has_absorbed_binding_for_cancel_receipt(
+        &self,
+        order_id: &str,
+        receipt: &crate::ports::OrderReceipt,
+    ) -> bool {
+        self.executor_state.bindings.iter().any(|binding| {
+            binding.absorbed_exposure_qty > f64::EPSILON
+                && (binding.order_id.as_deref() == Some(order_id)
+                    || binding.order_id.as_deref() == Some(receipt.order_id.as_str())
+                    || binding.request.client_order_id == receipt.client_order_id)
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_runtime_state(&mut self, runtime_state: TrackState) {
+        self.track_state = runtime_state;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_risk_exposure_gate_state(
+        &mut self,
+        frontier: Exposure,
+        anchor_price: f64,
+        anchor_target: Exposure,
+        stale_since: DateTime<Utc>,
+    ) {
+        self.track_state =
+            TrackState::Running(ControlState::Automatic(AutoState::RiskExposureGated {
+                gate: RiskExposureGateState {
+                    risk_release_frontier: frontier,
+                    release_anchor_price: anchor_price,
+                    release_anchor_target: anchor_target,
+                    stale_since,
+                },
+            }));
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn current_exposure(&self) -> &Exposure {
+        &self.current_exposure
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn desired_exposure(&self) -> Option<&Exposure> {
+        self.desired_exposure.as_ref()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_exposure_state(
+        &mut self,
+        current_exposure: Exposure,
+        desired_exposure: Option<Exposure>,
+    ) {
+        self.current_exposure = current_exposure;
+        self.desired_exposure = desired_exposure;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn replace_pnl_stats(&mut self, pnl_stats: TrackPnlStats) {
+        self.pnl_stats = pnl_stats;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_unrealized_pnl(&mut self, unrealized_pnl: f64) {
+        self.risk_state.unrealized_pnl = unrealized_pnl;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn unrealized_pnl(&self) -> f64 {
+        self.risk_state.unrealized_pnl
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_recovery_anomaly(&mut self, recovery_anomaly: Option<RecoveryAnomaly>) {
+        self.executor_state.recovery_anomaly = recovery_anomaly;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_executor_bindings(&mut self) {
+        self.executor_state.bindings.clear();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_executor_bindings(&self) -> bool {
+        !self.executor_state.bindings.is_empty()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn executor_ledger_anchor_exposure(&self) -> &Exposure {
+        &self.executor_state.ledger_state.ledger_anchor_exposure
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_market_data_stale_since(&mut self, stale_since: Option<DateTime<Utc>>) {
+        self.market_data_stale_since = stale_since;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn binding_receipt_for_client_order_id(
+        &self,
+        client_order_id: &str,
+    ) -> Option<(Option<String>, BindingStatus)> {
+        self.executor_state
+            .bindings
+            .iter()
+            .find(|binding| binding.request.client_order_id == client_order_id)
+            .map(|binding| (binding.order_id.clone(), binding.status))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_binding_order_status_for_client_order_id(
+        &mut self,
+        client_order_id: &str,
+        order_id: Option<String>,
+        status: BindingStatus,
+    ) -> bool {
+        let Some(binding) = self
+            .executor_state
+            .bindings
+            .iter_mut()
+            .find(|binding| binding.request.client_order_id == client_order_id)
+        else {
+            return false;
+        };
+        binding.order_id = order_id;
+        binding.status = status;
+        true
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn binding_is_active_for_client_order_id(&self, client_order_id: &str) -> Option<bool> {
+        self.executor_state
+            .bindings
+            .iter()
+            .find(|binding| binding.request.client_order_id == client_order_id)
+            .map(|binding| binding.is_active())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_active_binding_for_order_id(&self, order_id: &str) -> bool {
+        self.executor_state
+            .bindings
+            .iter()
+            .any(|binding| binding.is_active() && binding.order_id.as_deref() == Some(order_id))
+    }
+
     pub(crate) fn next_inventory_decision_revision(&self) -> u64 {
         self.inventory_decision_revision
             .checked_add(1)
@@ -816,77 +996,6 @@ impl TrackRuntime {
         }
         self.inventory_decision = decision;
         self.applied_risk_acquisition_release = applied_release;
-    }
-
-    pub fn mutation_frame(&self) -> TrackMutationFrame {
-        TrackMutationFrame {
-            track_id: self.id().clone(),
-            frame_revision: TrackMutationFrameRevision::for_track(self.instrument(), self.config()),
-            runtime_state: self.track_state.clone(),
-            current_exposure: self.current_exposure.clone(),
-            current_position_qty: self.current_position_qty,
-            desired_exposure: self.desired_exposure.clone(),
-            inventory_decision: self.inventory_decision.clone(),
-            inventory_decision_revision: self.inventory_decision_revision,
-            applied_risk_acquisition_release: self.applied_risk_acquisition_release.clone(),
-            fresh_acquisition_session: self.fresh_acquisition_session.clone(),
-            executor_state: self.executor_state.clone(),
-            execution_gate_state: self.execution_gate_state.clone(),
-            pnl_stats: self.pnl_stats.clone(),
-            risk: self.risk_state.clone(),
-            out_of_band_since: self.out_of_band_since,
-            market_data_stale_since: self.market_data_stale_since,
-        }
-    }
-
-    pub fn rollback_to_frame(&mut self, frame: &TrackMutationFrame) -> Result<()> {
-        if self.id() != &frame.track_id {
-            anyhow::bail!(
-                "mutation frame track id mismatch: runtime has `{}`, frame has `{}`",
-                self.id().as_str(),
-                frame.track_id.as_str()
-            );
-        }
-        let expected_revision =
-            TrackMutationFrameRevision::for_track(self.instrument(), self.config());
-        if expected_revision != frame.frame_revision {
-            anyhow::bail!(
-                "mutation frame revision mismatch for `{}`",
-                self.id().as_str()
-            );
-        }
-        validate_frame_invariants(frame)?;
-
-        self.track_state = frame.runtime_state.clone();
-        self.current_exposure = frame.current_exposure.clone();
-        self.current_position_qty = frame.current_position_qty;
-        self.desired_exposure = frame.desired_exposure.clone();
-        self.inventory_decision = frame.inventory_decision.clone();
-        self.inventory_decision_revision = frame.inventory_decision_revision;
-        self.applied_risk_acquisition_release = frame.applied_risk_acquisition_release.clone();
-        self.fresh_acquisition_session = frame.fresh_acquisition_session.clone();
-        self.executor_state = frame.executor_state.clone();
-        self.pnl_stats = frame.pnl_stats.clone();
-        self.risk_state = frame.risk.clone();
-        self.execution_gate_state = frame.execution_gate_state.clone();
-        self.strategy_price = None;
-        self.strategy_price_status = StrategyPriceStatus::Stale;
-        self.mark_price = None;
-        self.best_bid = None;
-        self.best_ask = None;
-        self.price_execution_gate = PriceExecutionGate::NoSubmit {
-            reason: PriceExecutionBlockReason::MissingExecutionQuote,
-        };
-        self.out_of_band_since = frame.out_of_band_since;
-        self.last_tick_at = None;
-        self.market_data_stale_since = frame.market_data_stale_since;
-        debug_assert_eq!(
-            self.mutation_frame(),
-            *frame,
-            "rollback_to_frame left frame fields unsynced"
-        );
-
-        Ok(())
     }
 
     pub fn live_quote_state(&self) -> LiveQuoteState {
@@ -1094,27 +1203,6 @@ fn gate_state_from_track_state(state: Option<&TrackState>) -> Option<&RiskExposu
     }
 }
 
-fn validate_frame_invariants(frame: &TrackMutationFrame) -> Result<()> {
-    if matches!(
-        frame.runtime_state,
-        TrackState::Running(ControlState::Manual(ManualState::Flattened))
-    ) && frame.runtime_state.manual_target_override() != Some(Exposure(0.0))
-    {
-        anyhow::bail!("manual_flattening requires manual_target_override = 0");
-    }
-
-    if let Some(decision) = &frame.inventory_decision
-        && decision.revision != frame.inventory_decision_revision
-    {
-        anyhow::bail!("inventory decision revision does not match frame revision");
-    }
-    if frame.inventory_decision.is_none() && frame.applied_risk_acquisition_release.is_some() {
-        anyhow::bail!("applied risk acquisition release requires an inventory decision");
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
@@ -1153,17 +1241,13 @@ mod tests {
     }
 
     #[test]
-    fn runtime_frame_is_current_process_state_not_persisted_document() {
+    fn runtime_clone_preserves_current_process_state() {
         let mut runtime = TrackRuntime::new(test_definition(), test_rules(0.1), Utc::now());
         runtime.executor_state = dirty_executor_state();
 
-        let runtime_frame = runtime.mutation_frame();
+        let candidate = runtime.clone();
         assert!(
-            !runtime_frame
-                .executor_state
-                .ledger_state
-                .progress
-                .is_empty(),
+            !candidate.executor_state.ledger_state.progress.is_empty(),
             "runtime clones must preserve current-session progress"
         );
     }
@@ -1408,7 +1492,7 @@ mod tests {
     }
 
     #[test]
-    fn acquisition_session_initialization_round_trips_through_mutation_frame() {
+    fn acquisition_session_initialization_only_changes_candidate_runtime() {
         let started_at = Utc.with_ymd_and_hms(2026, 4, 23, 8, 2, 0).unwrap();
         let mut runtime = test_runtime().fresh_start(
             TrackState::WaitingMarketData,
@@ -1421,7 +1505,7 @@ mod tests {
             },
             started_at,
         );
-        let pending_frame = runtime.mutation_frame();
+        let pending_runtime = runtime.clone();
 
         runtime.apply_fresh_acquisition_initialization(Some(FreshAcquisitionInitialization {
             initial_frontier: Exposure(2.0),
@@ -1437,7 +1521,7 @@ mod tests {
             })
         );
 
-        runtime.rollback_to_frame(&pending_frame).unwrap();
+        runtime = pending_runtime;
 
         assert!(runtime.fresh_acquisition_pending());
         assert_eq!(

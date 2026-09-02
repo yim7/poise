@@ -439,7 +439,8 @@ mod tests {
         let snapshot = manager
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .expect("track snapshot");
         let (order_id, status) = snapshot
             .binding_receipt_for_client_order_id(&target.request.client_order_id)
@@ -538,7 +539,8 @@ mod tests {
         let snapshot = manager
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .expect("track snapshot");
         let (order_id, status) = snapshot
             .binding_receipt_for_client_order_id(&target.request.client_order_id)

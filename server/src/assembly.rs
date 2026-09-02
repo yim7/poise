@@ -1270,7 +1270,8 @@ total_loss_limit = 600.0
             .manager()
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .unwrap();
         assert_eq!(
             snapshot.status(),

@@ -391,10 +391,14 @@ impl DecisionReplayRunner {
         transition: &TrackTransition,
         accumulator: &mut StepAccumulator,
     ) {
-        let Some(decision) = transition.frame.inventory_decision.as_ref() else {
+        let Some(decision) = transition.next_state().inventory_decision.as_ref() else {
             return;
         };
-        let Some(release) = transition.frame.applied_risk_acquisition_release.as_ref() else {
+        let Some(release) = transition
+            .next_state()
+            .applied_risk_acquisition_release
+            .as_ref()
+        else {
             return;
         };
         let key = (self.session, decision.revision);

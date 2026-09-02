@@ -595,10 +595,11 @@ mod tests {
     {
         let mut manager = test_manager();
         let mut snapshot = manager
-            .mutation_frame("btc-core")
-            .expect("seeded manager should expose mutation frame");
-        seed_frame_pnl_stats(&mut snapshot);
-        manager.rollback_track_state(&snapshot).unwrap();
+            .get_track("btc-core")
+            .cloned()
+            .expect("seeded manager should expose runtime state");
+        seed_runtime_pnl_stats(&mut snapshot);
+        manager.install_planned_runtime(snapshot);
         observe_seed_market(&mut manager);
         repository
             .commit_track_transition(
@@ -669,10 +670,11 @@ mod tests {
     {
         let mut manager = test_manager();
         let mut snapshot = manager
-            .mutation_frame("btc-core")
-            .expect("seeded manager should expose mutation frame");
-        seed_frame_pnl_stats(&mut snapshot);
-        manager.rollback_track_state(&snapshot).unwrap();
+            .get_track("btc-core")
+            .cloned()
+            .expect("seeded manager should expose runtime state");
+        seed_runtime_pnl_stats(&mut snapshot);
+        manager.install_planned_runtime(snapshot);
         let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
         let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();
         let effect_store: Arc<dyn TrackEffectJournal> = repository.clone();
@@ -727,10 +729,11 @@ mod tests {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let mut manager = test_manager();
         let mut snapshot = manager
-            .mutation_frame("btc-core")
-            .expect("seeded manager should expose mutation frame");
-        seed_frame_pnl_stats(&mut snapshot);
-        manager.rollback_track_state(&snapshot).unwrap();
+            .get_track("btc-core")
+            .cloned()
+            .expect("seeded manager should expose runtime state");
+        seed_runtime_pnl_stats(&mut snapshot);
+        manager.install_planned_runtime(snapshot);
         observe_seed_market(&mut manager);
         repository
             .commit_track_transition(
@@ -856,7 +859,7 @@ mod tests {
             .unwrap();
     }
 
-    fn seed_frame_pnl_stats(snapshot: &mut poise_engine::mutation_frame::TrackMutationFrame) {
+    fn seed_runtime_pnl_stats(snapshot: &mut poise_engine::runtime::TrackRuntime) {
         snapshot.set_unrealized_pnl(265.2);
         let mut pnl_stats = snapshot.pnl_stats().clone();
         pnl_stats.pnl_utc_day = chrono::NaiveDate::from_ymd_opt(2026, 3, 24).unwrap();
@@ -1105,10 +1108,11 @@ mod tests {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let mut manager = test_manager();
         let mut snapshot = manager
-            .mutation_frame("btc-core")
-            .expect("seeded manager should expose mutation frame");
+            .get_track("btc-core")
+            .cloned()
+            .expect("seeded manager should expose runtime state");
         snapshot.set_market_data_stale_since(Some(Utc::now()));
-        manager.rollback_track_state(&snapshot).unwrap();
+        manager.install_planned_runtime(snapshot);
         let state = {
             let (notifications, _) = tokio::sync::broadcast::channel::<ApplicationNotification>(16);
             let mutation_store: Arc<dyn TrackMutationStore> = repository.clone();

@@ -20,7 +20,6 @@ use poise_engine::executor::{
 use poise_engine::ledger::{TrackPnlRecord, TrackPnlStats};
 use poise_engine::manager::MarketMutationOutcome;
 use poise_engine::manager::{ExchangeSyncMode, SubmitRecoveryOrderLookup, TrackManager};
-use poise_engine::mutation_frame::TrackMutationFrame;
 use poise_engine::observation::{
     CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
     TrackObservation,
@@ -28,7 +27,7 @@ use poise_engine::observation::{
 use poise_engine::ports::{OrderReceipt, OrderRequest};
 use poise_engine::runtime::{
     ExchangeObservationRevision, FreshSessionExternalInputs, QuoteHealthView, StrategyTargetView,
-    TerminationCause, TrackLiveView, TrackRuntimeView, TrackState,
+    TerminationCause, TrackLiveView, TrackRuntime, TrackRuntimeView, TrackState,
 };
 use poise_engine::transition::TrackTransition;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
@@ -84,9 +83,8 @@ struct TrackMutationGuards {
 
 struct OwnedTrackMutationCommit {
     id: String,
-    previous_frame: TrackMutationFrame,
-    next_frame: TrackMutationFrame,
-    next_runtime: Option<poise_engine::runtime::TrackRuntime>,
+    previous_state: TrackRuntime,
+    next_state: TrackRuntime,
     domain_events: Vec<DomainEvent>,
     effects: Vec<TrackEffect>,
     effect_status_updates: Vec<EffectStatusUpdate>,
@@ -447,7 +445,7 @@ impl MutationExecutor {
         observation: MarketObservation,
     ) -> Result<TrackTransition> {
         let mutation_guard = self.lock_track_mutation(id).await;
-        let (previous_frame, outcome, next_frame, next_runtime) = self
+        let (previous_state, outcome, next_state) = self
             .plan_manager_mutation(id, |manager| {
                 manager.observe_market_mutation(&TrackId::new(id), observation.clone())
             })
@@ -459,12 +457,12 @@ impl MutationExecutor {
                 self.manager
                     .write()
                     .await
-                    .install_planned_runtime(next_runtime.clone());
-                self.notify_live_only_executor_changes(id, &previous_frame, &next_frame);
+                    .install_planned_runtime(next_state.clone());
+                self.notify_live_only_executor_changes(id, &previous_state, &next_state);
                 self.session_effect_queue
                     .wake_track_for(&TrackId::new(id), WakeSignal::FreshMarket);
 
-                Ok(TrackTransition::new(next_runtime, Vec::new(), Vec::new()))
+                Ok(TrackTransition::new(next_state, Vec::new(), Vec::new()))
             }
             MarketMutationOutcome::Durable(transition) => {
                 let transition = *transition;
@@ -472,9 +470,8 @@ impl MutationExecutor {
                     .commit_planned_track_mutation(
                         mutation_guard,
                         id,
-                        &previous_frame,
-                        &transition.frame,
-                        next_runtime,
+                        &previous_state,
+                        transition.next_state(),
                         &transition,
                         None,
                         false,
@@ -492,19 +489,19 @@ impl MutationExecutor {
     fn notify_live_only_executor_changes(
         &self,
         id: &str,
-        previous_frame: &TrackMutationFrame,
-        next_frame: &TrackMutationFrame,
+        previous_state: &TrackRuntime,
+        next_state: &TrackRuntime,
     ) {
         let recovery_anomaly_changed =
-            previous_frame.recovery_anomaly_active() != next_frame.recovery_anomaly_active();
+            previous_state.recovery_anomaly_active() != next_state.recovery_anomaly_active();
         if recovery_anomaly_changed {
             self.recovery_anomaly_observer
                 .observe_recovery_anomaly_change(
                     &TrackId::new(id),
-                    next_frame.recovery_anomaly_active(),
+                    next_state.recovery_anomaly_active(),
                 );
         }
-        if previous_frame.executor_view_changed(next_frame) {
+        if previous_state.executor_view_changed(next_state) {
             self.emit_internal_notification(ApplicationNotification::TrackChanged {
                 track_id: TrackId::new(id),
             });
@@ -513,26 +510,26 @@ impl MutationExecutor {
 
     pub async fn command(&self, id: &str, command: TrackCommand) -> Result<TrackTransition> {
         let mutation_guard = self.lock_track_mutation(id).await;
-        let (previous_frame, transition, next_frame, control_state_override) = {
-            let (previous_frame, mut candidate_manager) = {
+        let (previous_state, transition, next_state, control_state_override) = {
+            let (previous_state, mut candidate_manager) = {
                 let manager = self.manager.read().await;
-                let previous_frame = manager.mutation_frame(id).ok_or_else(|| {
+                let previous_state = manager.get_track(id).cloned().ok_or_else(|| {
                     TrackMutationError::Mutation(anyhow!("track `{id}` not found"))
                 })?;
-                (previous_frame, manager.clone())
+                (previous_state, manager.clone())
             };
             self.sync_account_capacity_gate_state(&mut candidate_manager, id)
                 .map_err(TrackMutationError::Mutation)?;
             let control_state_override =
-                persisted_control_state_after_command(previous_frame.runtime_state(), &command);
+                persisted_control_state_after_command(previous_state.runtime_state(), &command);
             let transition = candidate_manager
                 .command(&TrackId::new(id), command)
                 .map_err(TrackMutationError::Mutation)?;
-            let next_frame = transition.frame.clone();
+            let next_state = transition.next_state().clone();
             (
-                previous_frame,
+                previous_state,
                 transition,
-                next_frame,
+                next_state,
                 control_state_override,
             )
         };
@@ -541,9 +538,8 @@ impl MutationExecutor {
             .commit_planned_track_mutation(
                 mutation_guard,
                 id,
-                &previous_frame,
-                &next_frame,
-                transition.next_runtime().clone(),
+                &previous_state,
+                &next_state,
                 &transition,
                 None,
                 false,
@@ -620,7 +616,7 @@ impl MutationExecutor {
     ) -> Result<(TrackTransition, OrderUpdateAbsorbResult)> {
         let mutation_guard = self.lock_track_mutation(id).await;
         let client_order_id = observation.client_order_id.clone();
-        let (previous_frame, result, next_frame, next_runtime) = self
+        let (previous_state, result, next_state) = self
             .plan_manager_mutation(id, |manager| {
                 manager.observe_order_update(&TrackId::new(id), observation)
             })
@@ -631,9 +627,8 @@ impl MutationExecutor {
             .commit_planned_track_mutation(
                 mutation_guard,
                 id,
-                &previous_frame,
-                &next_frame,
-                next_runtime,
+                &previous_state,
+                &next_state,
                 &result,
                 None,
                 false,
@@ -642,7 +637,7 @@ impl MutationExecutor {
             .await
             .map_err(anyhow::Error::new)?;
 
-        if result.1 != OrderUpdateAbsorbResult::Unabsorbed && !next_frame.recovery_anomaly_active()
+        if result.1 != OrderUpdateAbsorbResult::Unabsorbed && !next_state.recovery_anomaly_active()
         {
             let resolved_effect_ids = self
                 .session_effect_queue
@@ -665,20 +660,20 @@ impl MutationExecutor {
         initial_snapshot_confirmed: bool,
     ) -> Result<bool> {
         let _mutation_guard = self.lock_track_mutation(id).await;
-        let frame_facts = {
+        let state_facts = {
             let manager = self.manager.read().await;
             manager
-                .mutation_frame(id)
-                .map(|frame| {
+                .get_track(id)
+                .map(|state| {
                     (
-                        frame.recovery_anomaly_active(),
-                        frame.has_recorded_order_fact_for_client_order_id(client_order_id),
+                        state.recovery_anomaly_active(),
+                        state.has_recorded_order_fact_for_client_order_id(client_order_id),
                     )
                 })
                 .ok_or_else(|| anyhow!("track `{id}` not found"))
         };
         let effective_initial_snapshot_confirmed = initial_snapshot_confirmed
-            && frame_facts
+            && state_facts
                 .as_ref()
                 .is_ok_and(|(recovery_anomaly_active, _)| !recovery_anomaly_active);
         if !self
@@ -688,7 +683,7 @@ impl MutationExecutor {
             return Ok(false);
         }
 
-        let (recovery_anomaly_active, recorded_order_fact) = frame_facts?;
+        let (recovery_anomaly_active, recorded_order_fact) = state_facts?;
         if recovery_anomaly_active || !recorded_order_fact {
             return Ok(true);
         }
@@ -803,10 +798,9 @@ impl MutationExecutor {
         let id = token.track_id.as_str();
         let mutation_guard = self.lock_track_mutation(id).await;
         let (
-            previous_frame,
+            previous_state,
             transition,
-            next_frame,
-            next_runtime,
+            next_state,
             follow_up_plan,
             submit_awaiting_initial_snapshot_effect_ids,
             submit_awaiting_resolution_effect_ids,
@@ -834,8 +828,8 @@ impl MutationExecutor {
                         } else {
                             mode
                         };
-                        let previous_frame =
-                            candidate_manager.mutation_frame(id).ok_or_else(|| {
+                        let previous_state =
+                            candidate_manager.get_track(id).cloned().ok_or_else(|| {
                                 TrackMutationError::Mutation(anyhow!("track `{id}` not found"))
                             })?;
                         self.sync_account_capacity_gate_state(&mut candidate_manager, id)
@@ -859,16 +853,14 @@ impl MutationExecutor {
                                 )
                                 .map_err(TrackMutationError::Mutation)?
                         };
-                        let next_runtime = candidate_manager
+                        let next_state = candidate_manager
                             .get_track(id)
                             .cloned()
                             .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-                        let next_frame = next_runtime.mutation_frame();
                         Ok::<_, TrackMutationError>((
-                            previous_frame,
+                            previous_state,
                             transition,
-                            next_frame,
-                            next_runtime,
+                            next_state,
                             follow_up_plan,
                             queue_context.submit_awaiting_initial_snapshot_effect_ids,
                             queue_context.submit_awaiting_resolution_effect_ids,
@@ -892,9 +884,8 @@ impl MutationExecutor {
             .commit_planned_track_mutation(
                 mutation_guard,
                 id,
-                &previous_frame,
-                &next_frame,
-                next_runtime,
+                &previous_state,
+                &next_state,
                 &transition,
                 None,
                 false,
@@ -910,14 +901,14 @@ impl MutationExecutor {
             .await?;
 
         let mut resolved_initial_snapshot_effect_ids = Vec::new();
-        if !next_frame.recovery_anomaly_active() {
+        if !next_state.recovery_anomaly_active() {
             resolved_initial_snapshot_effect_ids = self
                 .session_effect_queue
                 .resolve_submit_initial_snapshot_effects_with_recorded_order_fact(
                     &token.track_id,
                     &submit_awaiting_initial_snapshot_effect_ids,
                     |client_order_id| {
-                        next_frame.has_recorded_order_fact_for_client_order_id(client_order_id)
+                        next_state.has_recorded_order_fact_for_client_order_id(client_order_id)
                     },
                 );
             self.session_effect_queue
@@ -927,7 +918,7 @@ impl MutationExecutor {
                 );
         }
 
-        let mut resolved_submit_effect_ids = if next_frame.recovery_anomaly_active() {
+        let mut resolved_submit_effect_ids = if next_state.recovery_anomaly_active() {
             Vec::new()
         } else {
             self.session_effect_queue
@@ -1116,22 +1107,21 @@ impl MutationExecutor {
     ) -> Result<CancelReceiptResolution> {
         let mutation_guard = self.lock_track_mutation(id).await;
         let cancel_effect_status_update = EffectStatusUpdate::succeeded(effect_id.to_string());
-        let (previous_frame, (), next_frame, next_runtime) = self
+        let (previous_state, (), next_state) = self
             .plan_manager_mutation(id, |manager| {
                 manager.record_cancel_order_success(&TrackId::new(id), order_id, receipt)
             })
             .await
             .map_err(anyhow::Error::new)?;
         let cancel_progressed =
-            next_frame.has_absorbed_binding_for_cancel_receipt(order_id, receipt);
+            next_state.has_absorbed_binding_for_cancel_receipt(order_id, receipt);
 
         let _mutation_guard = self
             .commit_planned_track_mutation(
                 mutation_guard,
                 id,
-                &previous_frame,
-                &next_frame,
-                next_runtime,
+                &previous_state,
+                &next_state,
                 &(),
                 Some(&cancel_effect_status_update),
                 false,
@@ -1229,7 +1219,7 @@ impl MutationExecutor {
         order_lookup: &SubmitRecoveryOrderLookup,
     ) -> Result<SubmitRecoveryResolution> {
         let mutation_guard = self.lock_track_mutation(id).await;
-        let (previous_frame, plan, next_frame, next_runtime) = self
+        let (previous_state, plan, next_state) = self
             .plan_manager_mutation(id, |manager| {
                 manager.recover_submit_effect(&TrackId::new(id), recovery_token, order_lookup)
             })
@@ -1251,9 +1241,8 @@ impl MutationExecutor {
             .commit_planned_track_mutation(
                 mutation_guard,
                 id,
-                &previous_frame,
-                &next_frame,
-                next_runtime,
+                &previous_state,
+                &next_state,
                 &plan,
                 effect_status_update.as_ref(),
                 true,
@@ -1276,16 +1265,14 @@ impl MutationExecutor {
         R: TransitionResult,
     {
         let mutation_guard = self.lock_track_mutation(id).await;
-        let (previous_frame, result, next_frame, next_runtime) =
-            self.plan_manager_mutation(id, mutate).await?;
+        let (previous_state, result, next_state) = self.plan_manager_mutation(id, mutate).await?;
 
         let _mutation_guard = self
             .commit_planned_track_mutation(
                 mutation_guard,
                 id,
-                &previous_frame,
-                &next_frame,
-                next_runtime,
+                &previous_state,
+                &next_state,
                 &result,
                 Some(&effect_status_update),
                 false,
@@ -1330,16 +1317,14 @@ impl MutationExecutor {
         R: TransitionResult,
     {
         let mutation_guard = self.lock_track_mutation(id).await;
-        let (previous_frame, result, next_frame, next_runtime) =
-            self.plan_manager_mutation(id, mutate).await?;
+        let (previous_state, result, next_state) = self.plan_manager_mutation(id, mutate).await?;
 
         let _mutation_guard = self
             .commit_planned_track_mutation(
                 mutation_guard,
                 id,
-                &previous_frame,
-                &next_frame,
-                next_runtime,
+                &previous_state,
+                &next_state,
                 &result,
                 None,
                 skip_when_no_work,
@@ -1353,24 +1338,17 @@ impl MutationExecutor {
         &self,
         id: &str,
         mutate: F,
-    ) -> std::result::Result<
-        (
-            TrackMutationFrame,
-            R,
-            TrackMutationFrame,
-            poise_engine::runtime::TrackRuntime,
-        ),
-        TrackMutationError,
-    >
+    ) -> std::result::Result<(TrackRuntime, R, TrackRuntime), TrackMutationError>
     where
         F: FnOnce(&mut TrackManager) -> Result<R>,
     {
-        let (previous_frame, mut candidate_manager) = {
+        let (previous_state, mut candidate_manager) = {
             let manager = self.manager.read().await;
-            let previous_frame = manager
-                .mutation_frame(id)
+            let previous_state = manager
+                .get_track(id)
+                .cloned()
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            (previous_frame, manager.clone())
+            (previous_state, manager.clone())
         };
 
         self.sync_account_capacity_gate_state(&mut candidate_manager, id)
@@ -1386,12 +1364,11 @@ impl MutationExecutor {
             .retain_exchange_observation_revision(&track_id, candidate_revision)
             .map_err(TrackMutationError::Mutation)?;
         let result = result.map_err(TrackMutationError::Mutation)?;
-        let next_runtime = candidate_manager
+        let next_state = candidate_manager
             .get_track(id)
             .cloned()
             .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-        let next_frame = next_runtime.mutation_frame();
-        Ok((previous_frame, result, next_frame, next_runtime))
+        Ok((previous_state, result, next_state))
     }
 
     async fn lock_track_mutation(&self, id: &str) -> OwnedMutexGuard<()> {
@@ -1414,8 +1391,8 @@ impl MutationExecutor {
         &self,
         mutation_guard: OwnedMutexGuard<()>,
         id: &str,
-        previous_frame: &TrackMutationFrame,
-        next_frame: &TrackMutationFrame,
+        previous_state: &TrackRuntime,
+        next_state: &TrackRuntime,
         result: &R,
         effect_status_update: Option<&EffectStatusUpdate>,
         skip_when_no_work: bool,
@@ -1431,8 +1408,8 @@ impl MutationExecutor {
         self.commit_track_mutation_with_effect_status_updates(
             mutation_guard,
             id,
-            previous_frame,
-            next_frame,
+            previous_state,
+            next_state,
             result,
             effect_status_updates,
             skip_when_no_work,
@@ -1446,9 +1423,8 @@ impl MutationExecutor {
         &self,
         mutation_guard: OwnedMutexGuard<()>,
         id: &str,
-        previous_frame: &TrackMutationFrame,
-        next_frame: &TrackMutationFrame,
-        next_runtime: poise_engine::runtime::TrackRuntime,
+        previous_state: &TrackRuntime,
+        next_state: &TrackRuntime,
         result: &R,
         effect_status_update: Option<&EffectStatusUpdate>,
         skip_when_no_work: bool,
@@ -1464,13 +1440,12 @@ impl MutationExecutor {
         self.commit_track_mutation_with_effect_status_updates_and_install(
             mutation_guard,
             id,
-            previous_frame,
-            next_frame,
+            previous_state,
+            next_state,
             result,
             effect_status_updates,
             skip_when_no_work,
             control_state_override,
-            Some(next_runtime),
         )
         .await
     }
@@ -1481,8 +1456,8 @@ impl MutationExecutor {
         &self,
         mutation_guard: OwnedMutexGuard<()>,
         id: &str,
-        previous_frame: &TrackMutationFrame,
-        next_frame: &TrackMutationFrame,
+        previous_state: &TrackRuntime,
+        next_state: &TrackRuntime,
         result: &R,
         effect_status_updates: &[EffectStatusUpdate],
         skip_when_no_work: bool,
@@ -1494,13 +1469,12 @@ impl MutationExecutor {
         self.commit_track_mutation_with_effect_status_updates_and_install(
             mutation_guard,
             id,
-            previous_frame,
-            next_frame,
+            previous_state,
+            next_state,
             result,
             effect_status_updates,
             skip_when_no_work,
             control_state_override,
-            None,
         )
         .await
     }
@@ -1510,22 +1484,20 @@ impl MutationExecutor {
         &self,
         mutation_guard: OwnedMutexGuard<()>,
         id: &str,
-        previous_frame: &TrackMutationFrame,
-        next_frame: &TrackMutationFrame,
+        previous_state: &TrackRuntime,
+        next_state: &TrackRuntime,
         result: &R,
         effect_status_updates: &[EffectStatusUpdate],
         skip_when_no_work: bool,
         control_state_override: Option<&TrackControlState>,
-        next_runtime: Option<poise_engine::runtime::TrackRuntime>,
     ) -> std::result::Result<OwnedMutexGuard<()>, TrackMutationError>
     where
         R: TransitionResult,
     {
         let commit = OwnedTrackMutationCommit {
             id: id.to_string(),
-            previous_frame: previous_frame.clone(),
-            next_frame: next_frame.clone(),
-            next_runtime,
+            previous_state: previous_state.clone(),
+            next_state: next_state.clone(),
             domain_events: result.domain_events().to_vec(),
             effects: result.effects().to_vec(),
             effect_status_updates: effect_status_updates.to_vec(),
@@ -1552,9 +1524,8 @@ impl MutationExecutor {
     ) -> std::result::Result<(), TrackMutationError> {
         let OwnedTrackMutationCommit {
             id,
-            previous_frame,
-            next_frame,
-            next_runtime,
+            previous_state,
+            next_state,
             domain_events,
             effects,
             effect_status_updates,
@@ -1562,23 +1533,23 @@ impl MutationExecutor {
             control_state_override,
         } = commit;
         let control_state_update = persisted_control_state_after_transition(
-            previous_frame.runtime_state(),
-            next_frame.runtime_state(),
+            previous_state.runtime_state(),
+            next_state.runtime_state(),
             control_state_override.as_ref(),
         );
         let has_session_effects = !effects.is_empty();
         let has_track_write = control_state_update.is_some() || !domain_events.is_empty();
         let has_effect_status_update = !effect_status_updates.is_empty();
         let has_work = has_track_write || has_effect_status_update || has_session_effects;
-        let decision_changed = previous_frame.inventory_decision_revision()
-            != next_frame.inventory_decision_revision();
+        let decision_changed = previous_state.inventory_decision_revision()
+            != next_state.inventory_decision_revision();
         let market_data_stale_changed =
-            previous_frame.market_data_stale() != next_frame.market_data_stale();
-        let executor_view_changed = previous_frame.executor_view_changed(&next_frame);
+            previous_state.market_data_stale() != next_state.market_data_stale();
+        let executor_view_changed = previous_state.executor_view_changed(&next_state);
         let public_view_changed =
             decision_changed || market_data_stale_changed || executor_view_changed;
-        let previous_recovery_anomaly_active = previous_frame.recovery_anomaly_active();
-        let next_recovery_anomaly_active = next_frame.recovery_anomaly_active();
+        let previous_recovery_anomaly_active = previous_state.recovery_anomaly_active();
+        let next_recovery_anomaly_active = next_state.recovery_anomaly_active();
         let recovery_anomaly_changed =
             previous_recovery_anomaly_active != next_recovery_anomaly_active;
         if skip_when_no_work && !has_work && !public_view_changed && !recovery_anomaly_changed {
@@ -1591,28 +1562,13 @@ impl MutationExecutor {
                 .commit_track_transition(&id, control_state_update.as_ref(), &domain_events)
                 .await;
 
-            if let Err(error) = persistence_result {
-                if next_runtime.is_none() {
-                    let rollback_result = {
-                        let mut manager = self.manager.write().await;
-                        manager.rollback_track_state(&previous_frame)
-                    };
-                    if let Err(rollback_error) = rollback_result {
-                        return Err(TrackMutationError::Persistence(anyhow!(
-                            "failed to persist track `{id}`: {error}; rollback failed: {rollback_error}"
-                        )));
-                    }
-                }
-                return Err(TrackMutationError::Persistence(error));
-            }
+            persistence_result.map_err(TrackMutationError::Persistence)?;
         }
 
-        if let Some(next_runtime) = next_runtime {
-            self.manager
-                .write()
-                .await
-                .install_planned_runtime(next_runtime);
-        }
+        self.manager
+            .write()
+            .await
+            .install_planned_runtime(next_state);
 
         let effect_created_at = chrono::Utc::now();
         let enqueued_effects = self.session_effect_queue.enqueue_transition_effects(
@@ -2165,11 +2121,11 @@ mod tests {
     };
     use poise_engine::ledger::{TrackPnlRecord, TrackPnlStats};
     use poise_engine::manager::SubmitRecoveryOrderLookup;
-    use poise_engine::mutation_frame::TrackMutationFrame;
     use poise_engine::observation::{
         CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
     };
     use poise_engine::ports::{ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus};
+    use poise_engine::runtime::TrackRuntime;
     use poise_engine::runtime::{
         AutoState, ControlState, FreshSessionExternalInputs, InventoryDecisionSnapshot,
         InventoryDecisionView, TerminationCause, TrackState,
@@ -2347,9 +2303,9 @@ mod tests {
         (manager, decision)
     }
 
-    fn frame_with_recovery_anomaly(active: bool) -> TrackMutationFrame {
+    fn frame_with_recovery_anomaly(active: bool) -> TrackRuntime {
         let manager = seeded_manager();
-        let mut snapshot = manager.get_track("btc-core").unwrap().mutation_frame();
+        let mut snapshot = manager.get_track("btc-core").unwrap().clone();
         snapshot.set_recovery_anomaly(active.then_some(RecoveryAnomaly::UnknownLiveOrder));
         snapshot
     }
@@ -2360,11 +2316,11 @@ mod tests {
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
         let executor = test_executor(repository, observer.clone());
 
-        let previous_frame = frame_with_recovery_anomaly(false);
-        let mut next_frame = previous_frame.clone();
-        next_frame.set_exposure_state(
+        let previous_state = frame_with_recovery_anomaly(false);
+        let mut next_state = previous_state.clone();
+        next_state.set_exposure_state(
             poise_core::types::Exposure(1.0),
-            previous_frame.desired_exposure().cloned(),
+            previous_state.desired_exposure().cloned(),
         );
 
         let mutation_guard = executor.lock_track_mutation("btc-core").await;
@@ -2372,8 +2328,8 @@ mod tests {
             .commit_track_mutation(
                 mutation_guard,
                 "btc-core",
-                &previous_frame,
-                &next_frame,
+                &previous_state,
+                &next_state,
                 &(),
                 None,
                 false,
@@ -2385,14 +2341,14 @@ mod tests {
 
         assert!(observer.recorded().is_empty());
 
-        let next_frame = frame_with_recovery_anomaly(true);
+        let next_state = frame_with_recovery_anomaly(true);
         let mutation_guard = executor.lock_track_mutation("btc-core").await;
         executor
             .commit_track_mutation(
                 mutation_guard,
                 "btc-core",
-                &previous_frame,
-                &next_frame,
+                &previous_state,
+                &next_state,
                 &(),
                 None,
                 false,
@@ -2419,10 +2375,10 @@ mod tests {
             Arc::new(NoopGuard),
             observer.clone(),
         );
-        let previous_frame = frame_with_recovery_anomaly(false);
-        let next_frame = frame_with_recovery_anomaly(true);
+        let previous_state = frame_with_recovery_anomaly(false);
+        let next_state = frame_with_recovery_anomaly(true);
 
-        executor.notify_live_only_executor_changes("btc-core", &previous_frame, &next_frame);
+        executor.notify_live_only_executor_changes("btc-core", &previous_state, &next_state);
 
         assert_eq!(observer.recorded(), vec![("btc-core".to_string(), true)]);
         assert_eq!(
@@ -2439,16 +2395,16 @@ mod tests {
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
         let executor = test_executor(repository, observer.clone());
 
-        let previous_frame = frame_with_recovery_anomaly(true);
-        let next_frame = frame_with_recovery_anomaly(false);
+        let previous_state = frame_with_recovery_anomaly(true);
+        let next_state = frame_with_recovery_anomaly(false);
 
         let mutation_guard = executor.lock_track_mutation("btc-core").await;
         executor
             .commit_track_mutation(
                 mutation_guard,
                 "btc-core",
-                &previous_frame,
-                &next_frame,
+                &previous_state,
+                &next_state,
                 &(),
                 None,
                 false,
@@ -2475,17 +2431,17 @@ mod tests {
             Arc::new(NoopGuard),
             observer.clone(),
         );
-        let previous_frame = frame_with_recovery_anomaly(true);
-        let mut next_frame = previous_frame.clone();
-        next_frame.set_recovery_anomaly(Some(RecoveryAnomaly::DuplicateLiveOrders));
+        let previous_state = frame_with_recovery_anomaly(true);
+        let mut next_state = previous_state.clone();
+        next_state.set_recovery_anomaly(Some(RecoveryAnomaly::DuplicateLiveOrders));
 
         let mutation_guard = executor.lock_track_mutation("btc-core").await;
         executor
             .commit_track_mutation(
                 mutation_guard,
                 "btc-core",
-                &previous_frame,
-                &next_frame,
+                &previous_state,
+                &next_state,
                 &(),
                 None,
                 true,
@@ -2549,7 +2505,8 @@ mod tests {
             .manager()
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .unwrap();
         assert!(snapshot.current_exposure().0 > 0.0);
         assert_eq!(snapshot.unrealized_pnl(), 12.0);
@@ -2682,15 +2639,16 @@ mod tests {
             submitted.state,
             SessionPendingEffectState::SubmitAwaitingResolution
         );
-        let frame = services
+        let state = services
             .submit_effect
             .manager()
             .read()
             .await
-            .mutation_frame(track_id.as_str())
-            .expect("track frame");
-        assert!(frame.recovery_anomaly_active());
-        let (_, status) = frame
+            .get_track(track_id.as_str())
+            .cloned()
+            .expect("track state");
+        assert!(state.recovery_anomaly_active());
+        let (_, status) = state
             .binding_receipt_for_client_order_id(&request.client_order_id)
             .expect("authorized binding should remain owned");
         assert_eq!(status, BindingStatus::CancelAfterSubmit);
@@ -2868,7 +2826,8 @@ mod tests {
             .manager()
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .unwrap();
         assert_eq!(snapshot.current_exposure(), &Exposure(0.0));
         assert_eq!(snapshot.unrealized_pnl(), 0.0);
@@ -3235,7 +3194,7 @@ mod tests {
                 .get_track("btc-core")
                 .cloned()
                 .expect("seeded track should exist");
-            let mut updated = track.mutation_frame();
+            let mut updated = track.clone();
             updated.set_runtime_state(TrackState::Running(ControlState::Automatic(
                 AutoState::FollowingBand,
             )));
@@ -3243,9 +3202,7 @@ mod tests {
                 poise_core::types::Exposure(2.4),
                 Some(poise_core::types::Exposure(2.4)),
             );
-            manager
-                .rollback_track_state(&updated)
-                .expect("failed to seed active exposure state");
+            manager.install_planned_runtime(updated);
         }
         let token_before_tick = executor
             .prepare_exchange_state_sync("btc-core")
@@ -3385,20 +3342,20 @@ mod tests {
             Arc::new(NoopGuard),
             observer,
         );
-        let previous_frame = {
+        let previous_state = {
             let manager = executor.manager.read().await;
-            manager.mutation_frame("btc-core").unwrap()
+            manager.get_track("btc-core").cloned().unwrap()
         };
-        let mut next_frame = previous_frame.clone();
-        next_frame.set_market_data_stale_since(Some(Utc::now()));
+        let mut next_state = previous_state.clone();
+        next_state.set_market_data_stale_since(Some(Utc::now()));
 
         let mutation_guard = executor.lock_track_mutation("btc-core").await;
         executor
             .commit_track_mutation(
                 mutation_guard,
                 "btc-core",
-                &previous_frame,
-                &next_frame,
+                &previous_state,
+                &next_state,
                 &(),
                 None,
                 true,
@@ -3848,7 +3805,8 @@ mod tests {
             let manager = manager.read().await;
             (
                 manager
-                    .mutation_frame("btc-core")
+                    .get_track("btc-core")
+                    .cloned()
                     .expect("seeded track should exist"),
                 manager
                     .get_track("btc-core")
@@ -4229,7 +4187,7 @@ mod tests {
                 .get_track("btc-core")
                 .cloned()
                 .expect("seeded track should exist");
-            let mut updated = track.mutation_frame();
+            let mut updated = track.clone();
             updated.set_runtime_state(TrackState::Running(ControlState::Automatic(
                 AutoState::FollowingBand,
             )));
@@ -4240,9 +4198,7 @@ mod tests {
             pnl_stats.gross_realized_pnl_cumulative = -290.0;
             updated.replace_pnl_stats(pnl_stats);
             updated.set_unrealized_pnl(-20.0);
-            manager
-                .rollback_track_state(&updated)
-                .expect("failed to seed risk termination state");
+            manager.install_planned_runtime(updated);
         }
 
         let transition = executor
@@ -4259,7 +4215,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            transition.frame.runtime_state(),
+            transition.next_state().runtime_state(),
             &TrackState::Terminated {
                 cause: TerminationCause::Risk(RiskTerminationCause::DailyLossLimit),
             }
@@ -4321,8 +4277,9 @@ mod tests {
         {
             let mut manager = manager.write().await;
             let mut snapshot = manager
-                .mutation_frame("btc-core")
-                .expect("track mutation frame");
+                .get_track("btc-core")
+                .cloned()
+                .expect("track runtime");
             assert!(
                 snapshot.set_binding_order_status_for_client_order_id(
                     &blocked_client_order_id,
@@ -4331,9 +4288,7 @@ mod tests {
                 ),
                 "blocked submit binding should exist"
             );
-            manager
-                .rollback_track_state(&snapshot)
-                .expect("updated track mutation frame");
+            manager.install_planned_runtime(snapshot);
         }
         let resolution = services
             .effect
@@ -4366,8 +4321,9 @@ mod tests {
         let snapshot = manager
             .read()
             .await
-            .mutation_frame("btc-core")
-            .expect("track mutation frame");
+            .get_track("btc-core")
+            .cloned()
+            .expect("track runtime");
         let (_, blocked_binding_status) = snapshot
             .binding_receipt_for_client_order_id(&blocked_client_order_id)
             .expect("blocked binding should remain in runtime history");
@@ -4424,8 +4380,9 @@ mod tests {
         {
             let mut manager = manager.write().await;
             let mut snapshot = manager
-                .mutation_frame("btc-core")
-                .expect("track mutation frame");
+                .get_track("btc-core")
+                .cloned()
+                .expect("track runtime");
             assert!(
                 snapshot.set_binding_order_status_for_client_order_id(
                     &blocked_client_order_id,
@@ -4434,9 +4391,7 @@ mod tests {
                 ),
                 "blocked submit binding should exist"
             );
-            manager
-                .rollback_track_state(&snapshot)
-                .expect("updated track mutation frame");
+            manager.install_planned_runtime(snapshot);
         }
         let outcome_writes_before_cancel = repository.effect_outcome_write_call_count();
 
@@ -4476,8 +4431,9 @@ mod tests {
         let snapshot = manager
             .read()
             .await
-            .mutation_frame("btc-core")
-            .expect("track mutation frame");
+            .get_track("btc-core")
+            .cloned()
+            .expect("track runtime");
         let (_, blocked_binding_status) = snapshot
             .binding_receipt_for_client_order_id(&blocked_client_order_id)
             .expect("blocked binding should remain in runtime history");

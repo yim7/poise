@@ -852,14 +852,14 @@ mod tests {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let mut manager = seeded_manager();
         {
-            let mut snapshot = manager.mutation_frame("btc-core").unwrap();
+            let mut snapshot = manager.get_track("btc-core").cloned().unwrap();
             snapshot.set_risk_exposure_gate_state(
                 Exposure(9.0),
                 90.0,
                 Exposure(10.0),
                 Utc.with_ymd_and_hms(2026, 5, 1, 8, 0, 0).unwrap(),
             );
-            manager.rollback_track_state(&snapshot).unwrap();
+            manager.install_planned_runtime(snapshot);
         }
         seed_persisted_pending_submit_effect(repository.as_ref(), "btc-core")
             .await
@@ -937,7 +937,8 @@ mod tests {
             .manager()
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .unwrap();
         assert!(!snapshot.has_executor_bindings());
         assert!(!snapshot.recovery_anomaly_active());
@@ -1001,7 +1002,7 @@ mod tests {
         {
             let manager_handle = services.observation_service.manager();
             let mut manager = manager_handle.write().await;
-            let mut snapshot = manager.mutation_frame("btc-core").unwrap();
+            let mut snapshot = manager.get_track("btc-core").cloned().unwrap();
             snapshot.set_runtime_state(poise_engine::runtime::TrackState::Terminated {
                 cause: TerminationCause::ManualCommand,
             });
@@ -1009,7 +1010,7 @@ mod tests {
             snapshot.set_recovery_anomaly(Some(
                 poise_engine::executor::RecoveryAnomaly::UnknownLiveOrder,
             ));
-            manager.rollback_track_state(&snapshot).unwrap();
+            manager.install_planned_runtime(snapshot);
         }
 
         let account_monitor = unavailable_account_monitor(notifications.clone());
@@ -1056,7 +1057,8 @@ mod tests {
             .manager()
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .unwrap();
         assert_eq!(snapshot.status(), TrackStatus::Paused);
         assert_eq!(snapshot.current_exposure(), &Exposure(0.0));
@@ -1147,7 +1149,8 @@ mod tests {
             .manager()
             .read()
             .await
-            .mutation_frame("btc-core")
+            .get_track("btc-core")
+            .cloned()
             .unwrap();
         assert_eq!(snapshot.current_exposure(), &Exposure(0.3333333333333333));
         assert_eq!(snapshot.unrealized_pnl(), 12.0);
@@ -1288,7 +1291,8 @@ mod tests {
                     .manager()
                     .read()
                     .await
-                    .mutation_frame("btc-core")
+                    .get_track("btc-core")
+                    .cloned()
                     .unwrap();
                 if snapshot.current_exposure() == &Exposure(0.3333333333333333)
                     && snapshot.unrealized_pnl() == 12.0
