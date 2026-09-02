@@ -2,7 +2,7 @@ use std::fmt;
 
 use reqwest::{Method, StatusCode};
 
-use poise_engine::ports::ExecutionPortErrorKind;
+use poise_application::exchange::ExecutionPortErrorKind;
 
 use super::models::BinanceErrorResponse;
 
@@ -170,7 +170,7 @@ mod tests {
 
         assert_eq!(
             error.execution_error_kind(),
-            Some(poise_engine::ports::ExecutionPortErrorKind::InsufficientMargin)
+            Some(poise_application::exchange::ExecutionPortErrorKind::InsufficientMargin)
         );
     }
 }

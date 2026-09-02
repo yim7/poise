@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::exchange::{OrderReceipt, OrderRequest};
 use crate::session_effect_queue::{
     EnqueuedEffectJournalEntry, FollowUpQueueAction, SessionExchangeStateRevision, WakeSignal,
 };
@@ -24,7 +25,6 @@ use poise_engine::observation::{
     CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
     TrackObservation,
 };
-use poise_engine::ports::{OrderReceipt, OrderRequest};
 use poise_engine::runtime::{
     ExchangeObservationRevision, FreshSessionExternalInputs, QuoteHealthView, StrategyTargetView,
     TerminationCause, TrackLiveView, TrackRuntime, TrackRuntimeView, TrackState,
@@ -1926,11 +1926,13 @@ pub(crate) mod test_support {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
+    use poise_engine::clock::ClockPort;
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::ledger::{TrackPnlRecord, TrackPnlStats};
     use poise_engine::manager::TrackManager;
-    use poise_engine::ports::{ClockPort, OrderRequest};
+
+    use crate::exchange::OrderRequest;
     use tokio::sync::broadcast;
 
     use crate::{
@@ -2374,6 +2376,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use crate::exchange::{ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus};
     use crate::session_effect_queue::{
         DeferredUntil, SessionEffectOutcome, SessionPendingEffectState, WakeSignal,
     };
@@ -2396,7 +2399,6 @@ mod tests {
     use poise_engine::observation::{
         CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
     };
-    use poise_engine::ports::{ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus};
     use poise_engine::runtime::TrackRuntime;
     use poise_engine::runtime::{
         AutoState, ControlState, FreshSessionExternalInputs, InventoryDecisionSnapshot,
@@ -4574,7 +4576,7 @@ mod tests {
                     order_id: "closed-order".to_string(),
                     client_order_id: blocked_client_order_id.clone(),
                     filled_qty: 0.0,
-                    status: poise_engine::ports::OrderStatus::Canceled,
+                    status: crate::exchange::OrderStatus::Canceled,
                 },
             )
             .await
@@ -4679,7 +4681,7 @@ mod tests {
                     order_id: "closed-order".to_string(),
                     client_order_id: blocked_client_order_id.clone(),
                     filled_qty: 0.05,
-                    status: poise_engine::ports::OrderStatus::Canceled,
+                    status: crate::exchange::OrderStatus::Canceled,
                 },
             )
             .await

@@ -11,8 +11,8 @@ use tokio_tungstenite::{
     tungstenite::{Error as WebSocketError, error::ProtocolError},
 };
 
+use poise_application::exchange::{MarketDataTick, UserDataEvent};
 use poise_core::track::Instrument;
-use poise_engine::ports::{MarketDataTick, UserDataEvent};
 
 use crate::{Credentials, instrument::OkxInstrumentRegistry};
 
@@ -158,10 +158,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use futures_util::{SinkExt, StreamExt};
+    use poise_application::exchange::TrackPnlRecordKind;
+    use poise_application::exchange::{
+        ExecutionQuote, MarketDataTick, OrderStatus, UserDataPayload,
+    };
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
-    use poise_engine::ledger::TrackPnlRecordKind;
-    use poise_engine::ports::{ExecutionQuote, MarketDataTick, OrderStatus, UserDataPayload};
     use tokio::{
         net::TcpListener,
         time::{Duration, timeout},

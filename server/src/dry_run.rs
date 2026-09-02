@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow, ensure};
+use poise_application::exchange::{AccountSummarySnapshot, ExchangePorts, MarketDataPort};
 use poise_core::instrument::{InstrumentSpec, PositionBasis};
 use poise_core::track::{Instrument, TrackDefinition};
-use poise_engine::ports::{AccountSummarySnapshot, ExchangePorts, MarketDataPort};
 use poise_protocol::{
     ConfigDryRunAccountView, ConfigDryRunCapacityView, ConfigDryRunResponse, ConfigDryRunTrackView,
     InstrumentView, TrackPositionQuantityUnitView,
@@ -224,13 +224,13 @@ mod tests {
 
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
-    use poise_core::instrument::{Amount, Asset, InstrumentSpec};
-    use poise_core::track::{Instrument, Venue};
-    use poise_engine::ports::{
+    use poise_application::exchange::{
         AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot,
         ExchangeInfo, ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, MarketDataPort,
         MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position, RecentTrackPnlRecords,
     };
+    use poise_core::instrument::{Amount, Asset, InstrumentSpec};
+    use poise_core::track::{Instrument, Venue};
     use poise_protocol::TrackPositionQuantityUnitView;
     use tokio::sync::mpsc;
 
@@ -456,7 +456,7 @@ total_loss_limit = 0.03
         async fn submit_order(
             &self,
             _req: OrderRequest,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
             panic!("dry-run must not submit orders")
         }
 
@@ -464,28 +464,28 @@ total_loss_limit = 0.03
             &self,
             _instrument: &Instrument,
             _order_id: &str,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
             panic!("dry-run must not cancel orders")
         }
 
         async fn cancel_all(
             &self,
             _instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<()> {
+        ) -> poise_application::exchange::ExecutionResult<()> {
             panic!("dry-run must not cancel orders")
         }
 
         async fn get_position(
             &self,
             _instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<Position> {
+        ) -> poise_application::exchange::ExecutionResult<Position> {
             panic!("dry-run must not load positions in task 3.2")
         }
 
         async fn get_open_orders(
             &self,
             _instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
+        ) -> poise_application::exchange::ExecutionResult<ExchangeOpenOrderSnapshot> {
             panic!("dry-run must not load open orders")
         }
     }
@@ -502,14 +502,14 @@ total_loss_limit = 0.03
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
-            _required_window: &poise_engine::ports::PnlHistoryWindow,
+            _required_window: &poise_application::exchange::PnlHistoryWindow,
         ) -> Result<RecentTrackPnlRecords> {
             Ok(RecentTrackPnlRecords::Unsupported)
         }
 
         async fn subscribe_user_data(
             &self,
-        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
+        ) -> Result<mpsc::Receiver<poise_application::exchange::UserDataEvent>> {
             panic!("dry-run must not subscribe user data")
         }
     }

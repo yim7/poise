@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
+use poise_application::exchange::{ExecutionPort, ExecutionPortError};
 use poise_application::{
     ExchangeStateSyncOutcome, RecoveryAnomalyObserver, TrackInput, TrackInstrument,
     TrackMutationError, TrackRecoveryIssue, TrackUpdateReceipt,
@@ -10,7 +11,6 @@ use poise_application::{
 use poise_core::track::TrackId;
 use poise_engine::manager::ExchangeSyncMode;
 use poise_engine::observation::CompleteOpenOrderSnapshot;
-use poise_engine::ports::{ExecutionPort, ExecutionPortError};
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, sleep};
@@ -522,15 +522,15 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use poise_application::exchange::{
+        ExchangeOpenOrderSnapshot, ExchangeOrder, ExecutionPort, OrderReceipt, OrderRequest,
+        OrderStatus, Position, UserDataEvent, UserDataPayload,
+    };
     use poise_application::{TrackEffectJournal, TrackInput, TrackMutationStore, TrackQueryStore};
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_engine::command::TrackCommand;
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
     use poise_engine::manager::ExchangeSyncMode;
-    use poise_engine::ports::{
-        ExchangeOpenOrderSnapshot, ExchangeOrder, ExecutionPort, OrderReceipt, OrderRequest,
-        OrderStatus, Position, UserDataEvent, UserDataPayload,
-    };
     use poise_storage::sqlite::SqliteStorage;
 
     use super::*;
@@ -1000,7 +1000,7 @@ mod tests {
         async fn submit_order(
             &self,
             _req: OrderRequest,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
             unreachable!("submit_order is not used")
         }
 
@@ -1008,21 +1008,21 @@ mod tests {
             &self,
             _instrument: &Instrument,
             _order_id: &str,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
             unreachable!("cancel_order is not used")
         }
 
         async fn cancel_all(
             &self,
             _instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<()> {
+        ) -> poise_application::exchange::ExecutionResult<()> {
             unreachable!("cancel_all is not used")
         }
 
         async fn get_position(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<Position> {
+        ) -> poise_application::exchange::ExecutionResult<Position> {
             assert_eq!(instrument, &self.instrument);
             let call = self.get_position_calls.fetch_add(1, Ordering::SeqCst) + 1;
             match call {
@@ -1055,7 +1055,7 @@ mod tests {
         async fn get_open_orders(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
+        ) -> poise_application::exchange::ExecutionResult<ExchangeOpenOrderSnapshot> {
             assert_eq!(instrument, &self.instrument);
             self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
             Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
@@ -1069,7 +1069,7 @@ mod tests {
         async fn submit_order(
             &self,
             _req: OrderRequest,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
             unreachable!("submit_order is not used")
         }
 
@@ -1077,21 +1077,21 @@ mod tests {
             &self,
             _instrument: &Instrument,
             _order_id: &str,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
             unreachable!("cancel_order is not used")
         }
 
         async fn cancel_all(
             &self,
             _instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<()> {
+        ) -> poise_application::exchange::ExecutionResult<()> {
             unreachable!("cancel_all is not used")
         }
 
         async fn get_position(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<Position> {
+        ) -> poise_application::exchange::ExecutionResult<Position> {
             assert_eq!(instrument, &self.instrument);
             let attempt = self.get_position_calls.fetch_add(1, Ordering::SeqCst);
             let started = self
@@ -1116,7 +1116,7 @@ mod tests {
         async fn get_open_orders(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
+        ) -> poise_application::exchange::ExecutionResult<ExchangeOpenOrderSnapshot> {
             assert_eq!(instrument, &self.instrument);
             self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
             Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
@@ -1130,7 +1130,7 @@ mod tests {
         async fn submit_order(
             &self,
             _req: OrderRequest,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
             unreachable!("submit_order is not used")
         }
 
@@ -1138,21 +1138,21 @@ mod tests {
             &self,
             _instrument: &Instrument,
             _order_id: &str,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
             unreachable!("cancel_order is not used")
         }
 
         async fn cancel_all(
             &self,
             _instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<()> {
+        ) -> poise_application::exchange::ExecutionResult<()> {
             unreachable!("cancel_all is not used")
         }
 
         async fn get_position(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<Position> {
+        ) -> poise_application::exchange::ExecutionResult<Position> {
             assert_eq!(instrument, &self.instrument);
             self.get_position_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Position {
@@ -1167,7 +1167,7 @@ mod tests {
         async fn get_open_orders(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
+        ) -> poise_application::exchange::ExecutionResult<ExchangeOpenOrderSnapshot> {
             assert_eq!(instrument, &self.instrument);
             let call = self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst) + 1;
             match call {
@@ -1396,8 +1396,8 @@ mod tests {
         async fn submit_order(
             &self,
             _req: OrderRequest,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
-            Err(poise_engine::ports::ExecutionPortError::failed(
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
+            Err(poise_application::exchange::ExecutionPortError::failed(
                 "submit_order is not used in this test",
             ))
         }
@@ -1406,9 +1406,9 @@ mod tests {
             &self,
             _instrument: &Instrument,
             _order_id: &str,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
             self.cancel_order_calls.fetch_add(1, Ordering::SeqCst);
-            Err(poise_engine::ports::ExecutionPortError::failed(
+            Err(poise_application::exchange::ExecutionPortError::failed(
                 "cancel_order should not be used in this test",
             ))
         }
@@ -1416,7 +1416,7 @@ mod tests {
         async fn cancel_all(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<()> {
+        ) -> poise_application::exchange::ExecutionResult<()> {
             assert_eq!(instrument, &self.instrument);
             self.cancel_all_calls.fetch_add(1, Ordering::SeqCst);
             *self.clear_on_next_read.lock().unwrap() = true;
@@ -1426,7 +1426,7 @@ mod tests {
         async fn get_position(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<Position> {
+        ) -> poise_application::exchange::ExecutionResult<Position> {
             assert_eq!(instrument, &self.instrument);
             self.get_position_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Position {
@@ -1441,7 +1441,7 @@ mod tests {
         async fn get_open_orders(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
+        ) -> poise_application::exchange::ExecutionResult<ExchangeOpenOrderSnapshot> {
             assert_eq!(instrument, &self.instrument);
             self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
             let should_clear = {

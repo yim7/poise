@@ -5,9 +5,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{DateTime, Utc};
 use poise_application::TrackInput;
+use poise_application::exchange::{AccountCapacitySnapshot, Position, UserDataEvent};
 use poise_core::instrument::{InstrumentSpec, PositionBasis};
 use poise_core::track::{Instrument, TrackId};
-use poise_engine::ports::{AccountCapacitySnapshot, Position, UserDataEvent};
 use poise_engine::runtime::FreshSessionExternalInputs;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
@@ -66,13 +66,13 @@ struct CleanupOrderIdentity {
 }
 
 impl CleanupOrderIdentity {
-    fn matches(&self, order: &poise_engine::ports::ExchangeOrder) -> bool {
+    fn matches(&self, order: &poise_application::exchange::ExchangeOrder) -> bool {
         self.order_id == order.order_id || self.client_order_id == order.client_order_id
     }
 }
 
 impl CleanupReplayFilter {
-    fn from_orders(orders: &[poise_engine::ports::ExchangeOrder]) -> Self {
+    fn from_orders(orders: &[poise_application::exchange::ExchangeOrder]) -> Self {
         Self {
             orders: orders
                 .iter()
@@ -84,7 +84,7 @@ impl CleanupReplayFilter {
         }
     }
 
-    fn matches_order(&self, order: &poise_engine::ports::ExchangeOrder) -> bool {
+    fn matches_order(&self, order: &poise_application::exchange::ExchangeOrder) -> bool {
         self.orders.iter().any(|expected| expected.matches(order))
     }
 }
@@ -109,7 +109,9 @@ impl CleanupTracker {
             return false;
         };
         match &event.payload {
-            poise_engine::ports::UserDataPayload::OrderUpdate(order) => filter.matches_order(order),
+            poise_application::exchange::UserDataPayload::OrderUpdate(order) => {
+                filter.matches_order(order)
+            }
             _ => false,
         }
     }
@@ -492,6 +494,11 @@ mod tests {
 
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
+    use poise_application::exchange::{
+        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort,
+        MarketDataTick, MetadataPort, OrderReceipt, OrderStatus, Position, RecentTrackPnlRecords,
+        UserDataEvent, UserDataPayload,
+    };
     use poise_application::{
         EffectStatus, TrackEffectJournal, TrackIdentityStore, TrackMutationStore, TrackQueryStore,
     };
@@ -501,11 +508,6 @@ mod tests {
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::manager::TrackManager;
-    use poise_engine::ports::{
-        AccountPort, AccountSummaryPort, ExchangeInfo, ExchangeOrder, ExecutionPort,
-        MarketDataTick, MetadataPort, OrderReceipt, OrderStatus, Position, RecentTrackPnlRecords,
-        UserDataEvent, UserDataPayload,
-    };
     use poise_engine::runtime::{TerminationCause, TrackStatus};
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
@@ -1478,9 +1480,10 @@ mod tests {
     impl ExecutionPort for StartupExchange {
         async fn submit_order(
             &self,
-            _req: poise_engine::ports::OrderRequest,
-        ) -> poise_engine::ports::ExecutionResult<poise_engine::ports::OrderReceipt> {
-            Err(poise_engine::ports::ExecutionPortError::failed(
+            _req: poise_application::exchange::OrderRequest,
+        ) -> poise_application::exchange::ExecutionResult<poise_application::exchange::OrderReceipt>
+        {
+            Err(poise_application::exchange::ExecutionPortError::failed(
                 "submit_order is not used during startup bootstrap tests",
             ))
         }
@@ -1489,8 +1492,8 @@ mod tests {
             &self,
             _instrument: &Instrument,
             _order_id: &str,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
-            Err(poise_engine::ports::ExecutionPortError::failed(
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
+            Err(poise_application::exchange::ExecutionPortError::failed(
                 "cancel_order is not used during startup bootstrap tests",
             ))
         }
@@ -1498,7 +1501,7 @@ mod tests {
         async fn cancel_all(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<()> {
+        ) -> poise_application::exchange::ExecutionResult<()> {
             assert_eq!(instrument, &self.instrument);
             self.cancel_all_calls.fetch_add(1, Ordering::SeqCst);
             self.inherited_order_present.store(false, Ordering::SeqCst);
@@ -1508,7 +1511,7 @@ mod tests {
         async fn get_position(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<Position> {
+        ) -> poise_application::exchange::ExecutionResult<Position> {
             assert_eq!(instrument, &self.instrument);
             self.get_position_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Position {
@@ -1523,20 +1526,21 @@ mod tests {
         async fn get_open_orders(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<poise_engine::ports::ExchangeOpenOrderSnapshot>
-        {
+        ) -> poise_application::exchange::ExecutionResult<
+            poise_application::exchange::ExchangeOpenOrderSnapshot,
+        > {
             assert_eq!(instrument, &self.instrument);
             self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
             if !self.inherited_order_present.load(Ordering::SeqCst) {
                 return Ok(
-                    poise_engine::ports::ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                    poise_application::exchange::ExchangeOpenOrderSnapshot::from_complete_exchange_query(
                         Vec::new(),
                     ),
                 );
             }
 
             Ok(
-                poise_engine::ports::ExchangeOpenOrderSnapshot::from_complete_exchange_query(vec![
+                poise_application::exchange::ExchangeOpenOrderSnapshot::from_complete_exchange_query(vec![
                     ExchangeOrder {
                         instrument: instrument.clone(),
                         order_id: "inherited-order".into(),
@@ -1554,7 +1558,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AccountSummaryPort for StartupExchange {
-        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+        async fn get_account_summary(
+            &self,
+        ) -> Result<poise_application::exchange::AccountSummarySnapshot> {
             self.account_summary_calls.fetch_add(1, Ordering::SeqCst);
             let available = *self.available_balance.lock().unwrap();
             let available_by_asset = self
@@ -1569,7 +1575,7 @@ mod tests {
                     )
                 })
                 .collect();
-            poise_engine::ports::AccountSummarySnapshot::try_new(
+            poise_application::exchange::AccountSummarySnapshot::try_new(
                 crate::test_support::test_amount(1_000_000.0, "USD"),
                 Some(crate::test_support::test_amount(available, "USD")),
                 available_by_asset,
@@ -1591,10 +1597,10 @@ mod tests {
         async fn get_account_capacity_snapshot(
             &self,
             instrument: &Instrument,
-        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
+        ) -> Result<poise_application::exchange::AccountCapacitySnapshot> {
             assert_eq!(instrument, &self.instrument);
             self.account_capacity_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(poise_engine::ports::AccountCapacitySnapshot {
+            Ok(poise_application::exchange::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,
             })
         }
@@ -1602,10 +1608,10 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
-            required_window: &poise_engine::ports::PnlHistoryWindow,
+            required_window: &poise_application::exchange::PnlHistoryWindow,
         ) -> Result<RecentTrackPnlRecords> {
             Ok(RecentTrackPnlRecords::Available(
-                poise_engine::ports::RecentTrackPnlBatch::complete(
+                poise_application::exchange::RecentTrackPnlBatch::complete(
                     required_window.clone(),
                     Vec::new(),
                 ),
@@ -1614,7 +1620,7 @@ mod tests {
 
         async fn subscribe_user_data(
             &self,
-        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
+        ) -> Result<mpsc::Receiver<poise_application::exchange::UserDataEvent>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
         }
@@ -1638,7 +1644,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl poise_engine::ports::MarketDataPort for StartupExchange {
+    impl poise_application::exchange::MarketDataPort for StartupExchange {
         async fn subscribe_prices(
             &self,
             _instrument: &Instrument,

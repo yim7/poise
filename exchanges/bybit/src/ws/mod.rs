@@ -11,8 +11,8 @@ use tokio_tungstenite::{
     tungstenite::{Error as WebSocketError, error::ProtocolError},
 };
 
+use poise_application::exchange::{MarketDataTick, UserDataEvent};
 use poise_core::track::Instrument;
-use poise_engine::ports::{MarketDataTick, UserDataEvent};
 
 type WebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 

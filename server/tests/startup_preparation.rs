@@ -3,11 +3,11 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
+use poise_application::exchange::{ExchangeInfo, MetadataPort};
 use poise_core::instrument::{Amount, Asset, InstrumentSpec};
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
 use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-use poise_engine::ports::{ExchangeInfo, MetadataPort};
 
 #[path = "../src/startup_preparation.rs"]
 mod startup_preparation;

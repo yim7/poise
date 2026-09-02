@@ -120,7 +120,7 @@ pub(super) fn spawn_market_data_health_task(
 async fn apply_dirty_tracks(
     state: &ReconcileState,
     runtime_health: &RuntimeHealth,
-    clock: &dyn poise_engine::ports::ClockPort,
+    clock: &dyn poise_engine::clock::ClockPort,
     market_data_health_state: &MarketDataHealthState,
     max_sleep_interval: Duration,
     deadlines: &mut HashMap<String, DateTime<Utc>>,
@@ -141,7 +141,7 @@ async fn apply_dirty_tracks(
 async fn refresh_due_tracks(
     state: &ReconcileState,
     runtime_health: &RuntimeHealth,
-    clock: &dyn poise_engine::ports::ClockPort,
+    clock: &dyn poise_engine::clock::ClockPort,
     due_track_ids: &[String],
     max_sleep_interval: Duration,
     deadlines: &mut HashMap<String, DateTime<Utc>>,
@@ -182,7 +182,7 @@ async fn refresh_due_tracks(
 async fn update_deadline(
     state: &ReconcileState,
     runtime_health: &RuntimeHealth,
-    clock: &dyn poise_engine::ports::ClockPort,
+    clock: &dyn poise_engine::clock::ClockPort,
     track_id: &str,
     max_sleep_interval: Duration,
     deadlines: &mut HashMap<String, DateTime<Utc>>,

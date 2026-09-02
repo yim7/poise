@@ -16,6 +16,8 @@ use poise_core::strategy::TrackConfig;
 use poise_core::track::TrackDefinition;
 use poise_core::types::{Exposure, Side};
 
+use crate::clock::ClockPort;
+use crate::exchange::{ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus};
 use crate::execution_gate::added_risk_units;
 use crate::execution_plan::TrackEffect;
 use crate::executor::SubmitRecoveryResolution;
@@ -24,7 +26,6 @@ use crate::manager::{SubmitRecoveryOrderLookup, TrackManager};
 use crate::observation::{
     MarketObservation, OrderObservation, PositionObservation, TrackObservation,
 };
-use crate::ports::{ClockPort, ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus};
 use crate::price_gate::SubmitPurpose;
 use crate::risk_exposure_gate::AppliedRiskAcquisitionReleaseTrigger;
 use crate::runtime::{
@@ -905,9 +906,9 @@ mod tests {
     use poise_core::types::Exposure;
 
     use super::*;
+    use crate::exchange::ExecutionQuote;
     use crate::execution_plan::DecisionReason;
     use crate::observation::MarketObservation;
-    use crate::ports::ExecutionQuote;
 
     #[test]
     fn decision_replay_is_stable_and_normalizes_runtime_order_identity() {

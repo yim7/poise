@@ -871,6 +871,7 @@ fn project_binding_label(index: usize, is_passive_execution: bool) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
+    use crate::exchange::OrderRequest;
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
     use poise_core::instrument::{Asset, InstrumentSpec};
@@ -880,7 +881,6 @@ mod tests {
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::{DecisionReason, TrackEffect};
     use poise_engine::executor::{BindingStatus, PolicyKind, SubmitRecoveryToken};
-    use poise_engine::ports::OrderRequest;
     use poise_engine::runtime::{
         AcquisitionResetReason, AcquisitionSessionRuntimeView, BindingView, ExecutorView,
         InventoryDecisionView, RiskAcquisitionDirection, RiskAcquisitionRuntimeView,

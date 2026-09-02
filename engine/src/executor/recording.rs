@@ -1,6 +1,6 @@
+use crate::exchange::{OrderReceipt, OrderRequest, OrderStatus};
 use crate::execution_plan::TrackEffect;
 use crate::observation::OrderObservation;
-use crate::ports::{OrderReceipt, OrderRequest, OrderStatus};
 use crate::runtime::{ExecutorState, RecentTerminalOrder};
 use poise_core::types::Exposure;
 
@@ -387,10 +387,10 @@ mod tests {
     use poise_core::types::Exposure;
 
     use super::*;
+    use crate::exchange::ExecutionQuote;
     use crate::execution_plan::TrackEffect;
     use crate::executor::ledger::BoundaryLedgerState;
     use crate::executor::{ExecutorInput, PolicyContext, SubmitIntentInput, plan};
-    use crate::ports::ExecutionQuote;
     use crate::price_gate::{PriceExecutionGate, SubmitPurpose};
     use poise_core::track::{Instrument, Venue};
 

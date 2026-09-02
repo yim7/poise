@@ -3,6 +3,7 @@ pub mod account_monitor_store;
 pub mod account_read_model;
 pub mod debug_query_service;
 pub mod diagnostics;
+pub mod exchange;
 pub mod notifications;
 mod query_service;
 pub mod read_model;

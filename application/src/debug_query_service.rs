@@ -71,6 +71,7 @@ fn format_source_key_sample(source_keys: &[String]) -> String {
 mod tests {
     use std::sync::Arc;
 
+    use crate::exchange::OrderRequest;
     use anyhow::Result;
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
@@ -79,7 +80,6 @@ mod tests {
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
-    use poise_engine::ports::OrderRequest;
 
     use crate::trading_runtime::test_support::{
         MemoryRepository, seeded_manager, track_write_services,

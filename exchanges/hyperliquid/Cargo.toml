@@ -11,7 +11,7 @@ futures-util.workspace = true
 hex.workspace = true
 k256 = { version = "0.13", features = ["ecdsa"] }
 poise-core = { path = "../../core" }
-poise-engine = { path = "../../engine" }
+poise-application = { path = "../../application" }
 rmp-serde = "1"
 reqwest.workspace = true
 serde.workspace = true

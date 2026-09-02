@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::ports::{ExecutionQuote, OrderStatus};
+use crate::exchange::{ExecutionQuote, OrderStatus};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MarketObservation {

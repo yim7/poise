@@ -1210,6 +1210,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use poise_application::exchange::OrderRequest;
     use poise_application::{
         EffectStatus, TrackEffectJournal, TrackIdentityStore, TrackMutationStore, TrackQueryStore,
     };
@@ -1222,7 +1223,6 @@ mod tests {
     use poise_engine::ledger::{
         PnlAggregateCompleteness, TrackPnlCashflowKind, TrackPnlRecord, UnvaluedCashflow,
     };
-    use poise_engine::ports::OrderRequest;
     use rusqlite::Connection;
 
     fn test_instrument(symbol: &str) -> Instrument {

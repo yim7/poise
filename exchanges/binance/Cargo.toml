@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-poise-engine = { path = "../../engine" }
+poise-application = { path = "../../application" }
 poise-core = { path = "../../core" }
 reqwest.workspace = true
 tokio-tungstenite.workspace = true

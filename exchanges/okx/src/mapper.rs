@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{TimeZone, Utc};
 
+use poise_application::exchange::TrackPnlRecord;
+use poise_application::exchange::{AccountSummarySnapshot, ExchangeOrder, OrderStatus, Position};
 use poise_core::instrument::{Amount, Asset};
 use poise_core::track::{Instrument, Venue};
 use poise_core::types::Side;
-use poise_engine::ledger::TrackPnlRecord;
-use poise_engine::ports::{AccountSummarySnapshot, ExchangeOrder, OrderStatus, Position};
 
 use crate::instrument::OkxInstrumentMetadata;
 use crate::rest::models::{
@@ -273,10 +273,10 @@ fn non_empty_string(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use poise_application::exchange::{ExchangeOrder, OrderStatus, Position};
     use poise_core::instrument::{Amount, Asset, PositionBasis, PositionQty};
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
-    use poise_engine::ports::{ExchangeOrder, OrderStatus, Position};
 
     use super::*;
     use crate::instrument::{OkxInstrumentMetadata, exchange_info_from_instrument};
@@ -496,7 +496,7 @@ mod tests {
 
         assert_eq!(
             record.kind(),
-            poise_engine::ledger::TrackPnlRecordKind::Funding
+            poise_application::exchange::TrackPnlRecordKind::Funding
         );
         assert_eq!(record.source, "okx:bills");
         assert_eq!(

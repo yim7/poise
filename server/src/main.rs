@@ -148,12 +148,13 @@ mod tests {
     use axum::http::StatusCode;
     use axum::routing::get;
     use chrono::Utc;
-    use poise_core::track::{Instrument, Venue};
-    use poise_engine::ports::{
-        AccountPort, ClockPort, ExchangeInfo, ExchangeOpenOrderSnapshot, ExchangePorts,
-        ExecutionPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, OrderStatus,
-        Position, RecentTrackPnlRecords,
+    use poise_application::exchange::{
+        AccountPort, ExchangeInfo, ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort,
+        MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, OrderStatus, Position,
+        RecentTrackPnlRecords,
     };
+    use poise_core::track::{Instrument, Venue};
+    use poise_engine::clock::ClockPort;
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
@@ -829,8 +830,10 @@ total_loss_limit = 600.0
     struct FakeExchange;
 
     #[async_trait::async_trait]
-    impl poise_engine::ports::AccountSummaryPort for FakeExchange {
-        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+    impl poise_application::exchange::AccountSummaryPort for FakeExchange {
+        async fn get_account_summary(
+            &self,
+        ) -> Result<poise_application::exchange::AccountSummarySnapshot> {
             Ok(crate::test_support::test_account_summary_snapshot(
                 "USD",
                 1_000_000.0,
@@ -847,7 +850,7 @@ total_loss_limit = 600.0
         async fn submit_order(
             &self,
             _req: OrderRequest,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
             Ok(OrderReceipt {
                 order_id: "order-1".into(),
                 client_order_id: "client-1".into(),
@@ -860,7 +863,7 @@ total_loss_limit = 600.0
             &self,
             _instrument: &Instrument,
             order_id: &str,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
             Ok(OrderReceipt {
                 order_id: order_id.to_string(),
                 client_order_id: String::new(),
@@ -872,14 +875,14 @@ total_loss_limit = 600.0
         async fn cancel_all(
             &self,
             _instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<()> {
+        ) -> poise_application::exchange::ExecutionResult<()> {
             Ok(())
         }
 
         async fn get_position(
             &self,
             _instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<Position> {
+        ) -> poise_application::exchange::ExecutionResult<Position> {
             Ok(Position {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 qty: 0.0,
@@ -892,7 +895,7 @@ total_loss_limit = 600.0
         async fn get_open_orders(
             &self,
             _instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
+        ) -> poise_application::exchange::ExecutionResult<ExchangeOpenOrderSnapshot> {
             Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
                 Vec::new(),
             ))
@@ -904,8 +907,8 @@ total_loss_limit = 600.0
         async fn get_account_capacity_snapshot(
             &self,
             _instrument: &Instrument,
-        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
-            Ok(poise_engine::ports::AccountCapacitySnapshot {
+        ) -> Result<poise_application::exchange::AccountCapacitySnapshot> {
+            Ok(poise_application::exchange::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,
             })
         }
@@ -913,10 +916,10 @@ total_loss_limit = 600.0
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
-            required_window: &poise_engine::ports::PnlHistoryWindow,
+            required_window: &poise_application::exchange::PnlHistoryWindow,
         ) -> Result<RecentTrackPnlRecords> {
             Ok(RecentTrackPnlRecords::Available(
-                poise_engine::ports::RecentTrackPnlBatch::complete(
+                poise_application::exchange::RecentTrackPnlBatch::complete(
                     required_window.clone(),
                     Vec::new(),
                 ),
@@ -925,7 +928,7 @@ total_loss_limit = 600.0
 
         async fn subscribe_user_data(
             &self,
-        ) -> Result<mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
+        ) -> Result<mpsc::Receiver<poise_application::exchange::UserDataEvent>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
         }
@@ -950,7 +953,7 @@ total_loss_limit = 600.0
     }
 
     #[async_trait::async_trait]
-    impl poise_engine::ports::MarketDataPort for FakeMarketData {
+    impl poise_application::exchange::MarketDataPort for FakeMarketData {
         async fn subscribe_prices(
             &self,
             instrument: &Instrument,
@@ -966,7 +969,7 @@ total_loss_limit = 600.0
     struct FailingStartMarketData;
 
     #[async_trait::async_trait]
-    impl poise_engine::ports::MarketDataPort for FailingStartMarketData {
+    impl poise_application::exchange::MarketDataPort for FailingStartMarketData {
         async fn subscribe_prices(
             &self,
             _instrument: &Instrument,

@@ -1,9 +1,9 @@
+use poise_application::exchange::{
+    ExchangeOrder, ExecutionPort, OrderStatus, Position, UserDataEvent, UserDataPayload,
+};
 use poise_application::{TrackInput, TrackMutationError, TrackUpdateReceipt};
 use poise_core::track::TrackId;
 use poise_engine::observation::{OrderObservation, PositionObservation};
-use poise_engine::ports::{
-    ExchangeOrder, ExecutionPort, OrderStatus, Position, UserDataEvent, UserDataPayload,
-};
 
 use crate::exchange_freshness::ExchangeFreshnessReason;
 use crate::order_outcome::{ReconcileReason, ReconcileRequest};
@@ -123,12 +123,12 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
-    use poise_core::track::{Instrument, TrackDefinition, Venue};
-    use poise_engine::ports::{
+    use poise_application::exchange::{
         ExchangeOpenOrderSnapshot, ExchangeOrder, ExecutionPort, OrderReceipt, OrderRequest,
         OrderStatus, Position, UserDataEvent, UserDataPayload,
     };
+    use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
+    use poise_core::track::{Instrument, TrackDefinition, Venue};
     use poise_storage::sqlite::SqliteStorage;
 
     use crate::runtime::exchange_state::apply_user_data_event;
@@ -250,8 +250,8 @@ mod tests {
         async fn submit_order(
             &self,
             _req: OrderRequest,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
-            Err(poise_engine::ports::ExecutionPortError::failed(
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
+            Err(poise_application::exchange::ExecutionPortError::failed(
                 "submit_order is not used in this test",
             ))
         }
@@ -260,8 +260,8 @@ mod tests {
             &self,
             _instrument: &Instrument,
             _order_id: &str,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
-            Err(poise_engine::ports::ExecutionPortError::failed(
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
+            Err(poise_application::exchange::ExecutionPortError::failed(
                 "cancel_order is not used in this test",
             ))
         }
@@ -269,8 +269,8 @@ mod tests {
         async fn cancel_all(
             &self,
             _instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<()> {
-            Err(poise_engine::ports::ExecutionPortError::failed(
+        ) -> poise_application::exchange::ExecutionResult<()> {
+            Err(poise_application::exchange::ExecutionPortError::failed(
                 "cancel_all is not used in this test",
             ))
         }
@@ -278,7 +278,7 @@ mod tests {
         async fn get_position(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<Position> {
+        ) -> poise_application::exchange::ExecutionResult<Position> {
             assert_eq!(instrument, &self.position.instrument);
             self.get_position_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.position.clone())
@@ -287,7 +287,7 @@ mod tests {
         async fn get_open_orders(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
+        ) -> poise_application::exchange::ExecutionResult<ExchangeOpenOrderSnapshot> {
             assert_eq!(instrument, &self.position.instrument);
             self.get_open_orders_calls.fetch_add(1, Ordering::SeqCst);
             Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(

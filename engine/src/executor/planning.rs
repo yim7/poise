@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
+use crate::exchange::{ExecutionQuote, OrderRequest};
 use crate::execution_gate::ExecutionGateDecision;
 use crate::execution_plan::{DecisionReason, TrackEffect};
-use crate::ports::{ExecutionQuote, OrderRequest};
 use crate::price_gate::{
     PriceExecutionGate, SubmitPurpose, WorkingOrderGateAction, allows_submit,
     working_order_gate_action,
@@ -620,9 +620,9 @@ mod tests {
     use std::sync::LazyLock;
 
     use super::*;
+    use crate::exchange::ExecutionQuote;
     use crate::executor::boundary::{BoundaryId, ProfileRevision};
     use crate::executor::ledger::BoundaryProgress;
-    use crate::ports::ExecutionQuote;
     use crate::price_gate::PriceExecutionGate;
     use poise_core::track::{Instrument, Venue};
 

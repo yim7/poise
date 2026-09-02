@@ -9,10 +9,10 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
+use poise_application::exchange::TrackPnlRecord;
+use poise_application::exchange::{ExchangeOrder, Position, UserDataEvent, UserDataPayload};
 use poise_core::instrument::{Amount, Asset};
 use poise_core::track::{Instrument, Venue};
-use poise_engine::ledger::TrackPnlRecord;
-use poise_engine::ports::{ExchangeOrder, Position, UserDataEvent, UserDataPayload};
 
 use super::{
     backoff_delay, connect_websocket,
@@ -322,7 +322,7 @@ mod tests {
                 assert_eq!(order.side, Side::Buy);
                 assert_eq!(order.price, 64000.10);
                 assert_eq!(order.qty, 0.010);
-                assert_eq!(order.status, poise_engine::ports::OrderStatus::New);
+                assert_eq!(order.status, poise_application::exchange::OrderStatus::New);
             }
             other => panic!("expected order update, got {other:?}"),
         }

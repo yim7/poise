@@ -779,10 +779,10 @@ mod tests {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_core::types::Exposure;
+    use poise_engine::clock::ClockPort;
     use poise_engine::command::TrackCommand;
     use poise_engine::execution_plan::{DecisionReason, TrackEffect};
     use poise_engine::manager::TrackManager;
-    use poise_engine::ports::ClockPort;
     use poise_engine::runtime::{
         AcquisitionResetReason, AcquisitionSessionRuntimeView, InventoryDecisionView,
         RiskAcquisitionDirection, RiskAcquisitionRuntimeView, StrategyPriceStatus, TrackLiveView,
@@ -1670,7 +1670,7 @@ mod tests {
                 &TrackId::new("btc-core"),
                 poise_engine::observation::TrackObservation::Market(
                     poise_engine::observation::MarketObservation::ExecutionQuote {
-                        execution_quote: poise_engine::ports::ExecutionQuote {
+                        execution_quote: poise_application::exchange::ExecutionQuote {
                             best_bid: 95.0,
                             best_ask: 95.0,
                         },
@@ -1941,8 +1941,10 @@ mod tests {
     struct NoopExchange;
 
     #[async_trait::async_trait]
-    impl poise_engine::ports::AccountSummaryPort for NoopExchange {
-        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+    impl poise_application::exchange::AccountSummaryPort for NoopExchange {
+        async fn get_account_summary(
+            &self,
+        ) -> Result<poise_application::exchange::AccountSummarySnapshot> {
             Ok(crate::test_support::test_account_summary_snapshot(
                 "USD",
                 12_500.0,
@@ -1955,16 +1957,17 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl poise_engine::ports::ExecutionPort for NoopExchange {
+    impl poise_application::exchange::ExecutionPort for NoopExchange {
         async fn submit_order(
             &self,
-            req: poise_engine::ports::OrderRequest,
-        ) -> poise_engine::ports::ExecutionResult<poise_engine::ports::OrderReceipt> {
-            Ok(poise_engine::ports::OrderReceipt {
+            req: poise_application::exchange::OrderRequest,
+        ) -> poise_application::exchange::ExecutionResult<poise_application::exchange::OrderReceipt>
+        {
+            Ok(poise_application::exchange::OrderReceipt {
                 order_id: "noop-order".into(),
                 client_order_id: req.client_order_id,
                 filled_qty: 0.0,
-                status: poise_engine::ports::OrderStatus::New,
+                status: poise_application::exchange::OrderStatus::New,
             })
         }
 
@@ -1972,27 +1975,29 @@ mod tests {
             &self,
             _instrument: &poise_core::track::Instrument,
             order_id: &str,
-        ) -> poise_engine::ports::ExecutionResult<poise_engine::ports::OrderReceipt> {
-            Ok(poise_engine::ports::OrderReceipt {
+        ) -> poise_application::exchange::ExecutionResult<poise_application::exchange::OrderReceipt>
+        {
+            Ok(poise_application::exchange::OrderReceipt {
                 order_id: order_id.to_string(),
                 client_order_id: String::new(),
                 filled_qty: 0.0,
-                status: poise_engine::ports::OrderStatus::Canceled,
+                status: poise_application::exchange::OrderStatus::Canceled,
             })
         }
 
         async fn cancel_all(
             &self,
             _instrument: &poise_core::track::Instrument,
-        ) -> poise_engine::ports::ExecutionResult<()> {
+        ) -> poise_application::exchange::ExecutionResult<()> {
             Ok(())
         }
 
         async fn get_position(
             &self,
             instrument: &poise_core::track::Instrument,
-        ) -> poise_engine::ports::ExecutionResult<poise_engine::ports::Position> {
-            Ok(poise_engine::ports::Position {
+        ) -> poise_application::exchange::ExecutionResult<poise_application::exchange::Position>
+        {
+            Ok(poise_application::exchange::Position {
                 instrument: instrument.clone(),
                 qty: 0.0,
                 avg_price: 0.0,
@@ -2004,10 +2009,11 @@ mod tests {
         async fn get_open_orders(
             &self,
             _instrument: &poise_core::track::Instrument,
-        ) -> poise_engine::ports::ExecutionResult<poise_engine::ports::ExchangeOpenOrderSnapshot>
-        {
+        ) -> poise_application::exchange::ExecutionResult<
+            poise_application::exchange::ExchangeOpenOrderSnapshot,
+        > {
             Ok(
-                poise_engine::ports::ExchangeOpenOrderSnapshot::from_complete_exchange_query(
+                poise_application::exchange::ExchangeOpenOrderSnapshot::from_complete_exchange_query(
                     Vec::new(),
                 ),
             )
@@ -2015,12 +2021,12 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl poise_engine::ports::AccountPort for NoopExchange {
+    impl poise_application::exchange::AccountPort for NoopExchange {
         async fn get_account_capacity_snapshot(
             &self,
             _instrument: &poise_core::track::Instrument,
-        ) -> Result<poise_engine::ports::AccountCapacitySnapshot> {
-            Ok(poise_engine::ports::AccountCapacitySnapshot {
+        ) -> Result<poise_application::exchange::AccountCapacitySnapshot> {
+            Ok(poise_application::exchange::AccountCapacitySnapshot {
                 max_increase_notional: 1_000_000.0,
             })
         }
@@ -2028,19 +2034,22 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &poise_core::track::Instrument,
-            required_window: &poise_engine::ports::PnlHistoryWindow,
-        ) -> Result<poise_engine::ports::RecentTrackPnlRecords> {
-            Ok(poise_engine::ports::RecentTrackPnlRecords::Available(
-                poise_engine::ports::RecentTrackPnlBatch::complete(
-                    required_window.clone(),
-                    Vec::new(),
+            required_window: &poise_application::exchange::PnlHistoryWindow,
+        ) -> Result<poise_application::exchange::RecentTrackPnlRecords> {
+            Ok(
+                poise_application::exchange::RecentTrackPnlRecords::Available(
+                    poise_application::exchange::RecentTrackPnlBatch::complete(
+                        required_window.clone(),
+                        Vec::new(),
+                    ),
                 ),
-            ))
+            )
         }
 
         async fn subscribe_user_data(
             &self,
-        ) -> Result<tokio::sync::mpsc::Receiver<poise_engine::ports::UserDataEvent>> {
+        ) -> Result<tokio::sync::mpsc::Receiver<poise_application::exchange::UserDataEvent>>
+        {
             let (_sender, receiver) = tokio::sync::mpsc::channel(1);
             Ok(receiver)
         }

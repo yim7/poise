@@ -2,7 +2,7 @@ use std::fmt;
 
 use reqwest::{Method, StatusCode};
 
-use poise_engine::ports::ExecutionPortErrorKind;
+use poise_application::exchange::ExecutionPortErrorKind;
 
 #[derive(Debug)]
 pub(crate) struct BybitSubmitOutcomeUnknown {

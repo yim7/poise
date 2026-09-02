@@ -1,8 +1,8 @@
 use anyhow::{Result, bail};
 use poise_application::TrackInput;
+use poise_application::exchange::RecentPnlCompleteness;
 use poise_core::events::DomainEvent;
 use poise_core::track::TrackId;
-use poise_engine::ports::RecentPnlCompleteness;
 
 use crate::pnl_audit::{RecentFillCoverage, RecentFillsAuditError, RecentPnlAvailability};
 use crate::server_context::RuntimeState;
@@ -133,6 +133,9 @@ mod tests {
 
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
+    use poise_application::exchange::{
+        AccountCapacitySnapshot, AccountPort, RecentTrackPnlRecords, UserDataEvent,
+    };
     use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
     use poise_core::events::DomainEvent;
     use poise_core::instrument::{Amount, Asset};
@@ -142,9 +145,6 @@ mod tests {
     use poise_core::types::Side;
     use poise_engine::ledger::TrackPnlRecord;
     use poise_engine::manager::TrackManager;
-    use poise_engine::ports::{
-        AccountCapacitySnapshot, AccountPort, RecentTrackPnlRecords, UserDataEvent,
-    };
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
@@ -446,28 +446,30 @@ mod tests {
     struct UnexpectedStartupPort;
 
     #[async_trait::async_trait]
-    impl poise_engine::ports::AccountSummaryPort for UnexpectedStartupPort {
-        async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
+    impl poise_application::exchange::AccountSummaryPort for UnexpectedStartupPort {
+        async fn get_account_summary(
+            &self,
+        ) -> Result<poise_application::exchange::AccountSummarySnapshot> {
             anyhow::bail!("account summary should not run before PNL capability gate")
         }
     }
 
     #[async_trait::async_trait]
-    impl poise_engine::ports::MarketDataPort for UnexpectedStartupPort {
+    impl poise_application::exchange::MarketDataPort for UnexpectedStartupPort {
         async fn subscribe_prices(
             &self,
             _instrument: &Instrument,
-        ) -> Result<mpsc::Receiver<poise_engine::ports::MarketDataTick>> {
+        ) -> Result<mpsc::Receiver<poise_application::exchange::MarketDataTick>> {
             anyhow::bail!("market data should not run before PNL capability gate")
         }
     }
 
     #[async_trait::async_trait]
-    impl poise_engine::ports::MetadataPort for UnexpectedStartupPort {
+    impl poise_application::exchange::MetadataPort for UnexpectedStartupPort {
         async fn get_exchange_info(
             &self,
             _instrument: &Instrument,
-        ) -> Result<poise_engine::ports::ExchangeInfo> {
+        ) -> Result<poise_application::exchange::ExchangeInfo> {
             anyhow::bail!("metadata should not run before PNL capability gate")
         }
 
@@ -490,19 +492,19 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
-            required_window: &poise_engine::ports::PnlHistoryWindow,
+            required_window: &poise_application::exchange::PnlHistoryWindow,
         ) -> Result<RecentTrackPnlRecords> {
             match &self.response {
                 FakeRecentFillsResponse::Available(records) => {
                     Ok(RecentTrackPnlRecords::Available(
-                        poise_engine::ports::RecentTrackPnlBatch::complete(
+                        poise_application::exchange::RecentTrackPnlBatch::complete(
                             required_window.clone(),
                             records.clone(),
                         ),
                     ))
                 }
                 FakeRecentFillsResponse::Incomplete => Ok(RecentTrackPnlRecords::Available(
-                    poise_engine::ports::RecentTrackPnlBatch::incomplete(None, Vec::new()),
+                    poise_application::exchange::RecentTrackPnlBatch::incomplete(None, Vec::new()),
                 )),
                 FakeRecentFillsResponse::Unsupported => Ok(RecentTrackPnlRecords::Unsupported),
                 FakeRecentFillsResponse::Error(message) => anyhow::bail!(message.clone()),

@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
+use crate::exchange::{ExecutionPort, OrderReceipt, OrderRequest};
 use anyhow::{Error, Result};
 use poise_core::track::TrackId;
 use poise_engine::executor::SubmitRecoveryToken;
 use poise_engine::manager::SubmitRecoveryOrderLookup;
 #[cfg(any(test, feature = "server-test-support"))]
 use poise_engine::manager::TrackManager;
-use poise_engine::ports::{ExecutionPort, OrderReceipt, OrderRequest};
 #[cfg(any(test, feature = "server-test-support"))]
 use tokio::sync::RwLock;
 
@@ -305,6 +305,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use crate::exchange::{ExchangeOrder, ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus};
     use crate::trading_runtime::test_support::{
         MemoryRepository, manager_with_pending_submit, seeded_manager, track_write_services,
     };
@@ -314,9 +315,6 @@ mod tests {
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::observation::MarketObservation;
-    use poise_engine::ports::{
-        ExchangeOrder, ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus,
-    };
     use tokio::time::timeout;
 
     use super::{

@@ -1,5 +1,5 @@
+use poise_application::exchange::OrderStatus;
 use poise_core::types::Side;
-use poise_engine::ports::OrderStatus;
 use serde::{Deserialize, Deserializer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

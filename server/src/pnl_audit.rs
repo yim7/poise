@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use poise_application::TrackQueryStore;
-use poise_core::track::{Instrument, TrackId};
-use poise_engine::ledger::{TrackPnlRecord, TrackPnlRecordKind};
-use poise_engine::ports::{
+use poise_application::exchange::{
     AccountPort, PnlHistoryWindow, RecentPnlCompleteness, RecentTrackPnlRecords,
 };
+use poise_core::track::{Instrument, TrackId};
+use poise_engine::ledger::{TrackPnlRecord, TrackPnlRecordKind};
 
 const RECENT_PNL_LOOKBACK: Duration = Duration::hours(24);
 
@@ -181,14 +181,14 @@ mod tests {
 
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
+    use poise_application::exchange::{
+        AccountCapacitySnapshot, AccountPort, RecentTrackPnlRecords, UserDataEvent,
+    };
     use poise_application::{TrackIdentityStore, TrackMutationStore, TrackQueryStore};
     use poise_core::instrument::{Amount, Asset};
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::Side;
     use poise_engine::ledger::TrackPnlRecord;
-    use poise_engine::ports::{
-        AccountCapacitySnapshot, AccountPort, RecentTrackPnlRecords, UserDataEvent,
-    };
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
@@ -311,14 +311,14 @@ mod tests {
         assert_eq!(available.records_seen, 0);
         assert_eq!(
             available.completeness,
-            poise_engine::ports::RecentPnlCompleteness::Complete
+            poise_application::exchange::RecentPnlCompleteness::Complete
         );
         assert!(available.covered_window.is_some());
         assert_eq!(unsupported.availability, RecentPnlAvailability::Unsupported);
         assert_eq!(unsupported.records_seen, 0);
         assert_eq!(
             incomplete.completeness,
-            poise_engine::ports::RecentPnlCompleteness::Incomplete
+            poise_application::exchange::RecentPnlCompleteness::Incomplete
         );
         assert_eq!(incomplete.covered_window, None);
     }
@@ -465,12 +465,12 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
-            required_window: &poise_engine::ports::PnlHistoryWindow,
+            required_window: &poise_application::exchange::PnlHistoryWindow,
         ) -> Result<RecentTrackPnlRecords> {
             match &self.response {
                 FakeRecentFillsResponse::Available(records) => {
                     Ok(RecentTrackPnlRecords::Available(
-                        poise_engine::ports::RecentTrackPnlBatch::complete(
+                        poise_application::exchange::RecentTrackPnlBatch::complete(
                             required_window.clone(),
                             records.clone(),
                         ),
@@ -478,7 +478,10 @@ mod tests {
                 }
                 FakeRecentFillsResponse::Incomplete(records) => {
                     Ok(RecentTrackPnlRecords::Available(
-                        poise_engine::ports::RecentTrackPnlBatch::incomplete(None, records.clone()),
+                        poise_application::exchange::RecentTrackPnlBatch::incomplete(
+                            None,
+                            records.clone(),
+                        ),
                     ))
                 }
                 FakeRecentFillsResponse::Unsupported => Ok(RecentTrackPnlRecords::Unsupported),

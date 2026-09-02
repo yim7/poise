@@ -7,8 +7,10 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
+use poise_application::exchange::{
+    ExecutionQuote, ExecutionQuoteTick, MarkPriceTick, MarketDataTick,
+};
 use poise_core::track::{Instrument, Venue};
-use poise_engine::ports::{ExecutionQuote, ExecutionQuoteTick, MarkPriceTick, MarketDataTick};
 
 use super::{
     backoff_delay, connect_websocket, log_websocket_error,
@@ -177,7 +179,7 @@ mod tests {
     use super::*;
     use crate::rest::BinanceRestClient;
     use crate::ws::BinanceWsClient;
-    use poise_engine::ports::ExecutionQuote;
+    use poise_application::exchange::ExecutionQuote;
 
     #[test]
     fn parses_binance_mark_and_book_into_separate_market_ticks() {

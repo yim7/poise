@@ -11,7 +11,7 @@ use tokio::time::Duration;
 use url::form_urlencoded::Serializer;
 use url::{Host, Url};
 
-use poise_engine::ports::{
+use poise_application::exchange::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderRequest, OrderStatus, Position,
 };
@@ -608,7 +608,10 @@ mod tests {
 
         assert_eq!(receipt.order_id, "12345");
         assert_eq!(receipt.client_order_id, "client-1");
-        assert_eq!(receipt.status, poise_engine::ports::OrderStatus::Submitting);
+        assert_eq!(
+            receipt.status,
+            poise_application::exchange::OrderStatus::Submitting
+        );
 
         let request = &server.requests()[0];
         assert_eq!(request.method, "POST");
@@ -637,7 +640,7 @@ mod tests {
             build_http_client(&server.base_url()),
         );
 
-        let result = poise_engine::ports::ExecutionPort::submit_order(
+        let result = poise_application::exchange::ExecutionPort::submit_order(
             &client,
             OrderRequest {
                 instrument: poise_core::track::Instrument::new(
@@ -656,7 +659,7 @@ mod tests {
         assert_eq!(server.requests().len(), 1);
         assert_eq!(
             result.unwrap_err().kind(),
-            poise_engine::ports::ExecutionPortErrorKind::Failed
+            poise_application::exchange::ExecutionPortErrorKind::Failed
         );
     }
 
@@ -921,7 +924,7 @@ mod tests {
             build_http_client(&server.base_url()),
         );
 
-        let error = poise_engine::ports::ExecutionPort::submit_order(
+        let error = poise_application::exchange::ExecutionPort::submit_order(
             &client,
             OrderRequest {
                 instrument: poise_core::track::Instrument::new(
@@ -940,7 +943,7 @@ mod tests {
 
         assert_eq!(
             error.kind(),
-            poise_engine::ports::ExecutionPortErrorKind::InsufficientMargin
+            poise_application::exchange::ExecutionPortErrorKind::InsufficientMargin
         );
         assert!(error.to_string().contains("110007"));
     }

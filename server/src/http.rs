@@ -308,10 +308,10 @@ fn project_recent_fills_audit(
             end: window.end.to_rfc3339(),
         }),
         completeness: match audit.completeness {
-            poise_engine::ports::RecentPnlCompleteness::Complete => {
+            poise_application::exchange::RecentPnlCompleteness::Complete => {
                 RecentPnlCompletenessView::Complete
             }
-            poise_engine::ports::RecentPnlCompleteness::Incomplete => {
+            poise_application::exchange::RecentPnlCompleteness::Incomplete => {
                 RecentPnlCompletenessView::Incomplete
             }
         },
@@ -447,6 +447,10 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use chrono::{TimeZone, Utc};
+    use poise_application::exchange::{
+        AccountCapacitySnapshot, AccountPort, AccountSummarySnapshot, RecentTrackPnlRecords,
+        UserDataEvent,
+    };
     use poise_application::{
         CommittedTrackWrite, EffectJournalEntry, EffectStatusUpdate, PersistedTrackEffect,
         StoredTrackEvent, TrackEffectJournal, TrackIdentityStore, TrackMutationStore,
@@ -460,12 +464,9 @@ mod tests {
         events::DomainEvent,
         types::{Exposure, Side},
     };
+    use poise_engine::clock::ClockPort;
     use poise_engine::ledger::TrackPnlRecord;
     use poise_engine::manager::TrackManager;
-    use poise_engine::ports::{
-        AccountCapacitySnapshot, AccountPort, AccountSummarySnapshot, ClockPort,
-        RecentTrackPnlRecords, UserDataEvent,
-    };
     use poise_protocol::{
         AccountSummaryView, DecisionReasonView, ExecutionBindingIntentView,
         ExecutionBindingStatusView, ExecutionStatusView, RecentFillCoverageView,
@@ -518,7 +519,7 @@ mod tests {
     struct AccountSummaryOnlyExchange;
 
     #[async_trait::async_trait]
-    impl poise_engine::ports::AccountSummaryPort for AccountSummaryOnlyExchange {
+    impl poise_application::exchange::AccountSummaryPort for AccountSummaryOnlyExchange {
         async fn get_account_summary(&self) -> anyhow::Result<AccountSummarySnapshot> {
             Ok(crate::test_support::test_account_summary_snapshot(
                 "USD",
@@ -856,7 +857,7 @@ mod tests {
                 &TrackId::new("btc-core"),
                 poise_engine::observation::TrackObservation::Market(
                     poise_engine::observation::MarketObservation::ExecutionQuote {
-                        execution_quote: poise_engine::ports::ExecutionQuote {
+                        execution_quote: poise_application::exchange::ExecutionQuote {
                             best_bid: 95.0,
                             best_ask: 95.0,
                         },
@@ -1961,12 +1962,12 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
-            required_window: &poise_engine::ports::PnlHistoryWindow,
+            required_window: &poise_application::exchange::PnlHistoryWindow,
         ) -> anyhow::Result<RecentTrackPnlRecords> {
             match &self.response {
                 FakeRecentFillsResponse::Available(records) => {
                     Ok(RecentTrackPnlRecords::Available(
-                        poise_engine::ports::RecentTrackPnlBatch::complete(
+                        poise_application::exchange::RecentTrackPnlBatch::complete(
                             required_window.clone(),
                             records.clone(),
                         ),

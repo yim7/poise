@@ -224,13 +224,13 @@ mod tests {
     use std::time::Duration;
 
     use chrono::Utc;
+    use poise_application::exchange::{
+        ExchangeOpenOrderSnapshot, ExecutionPort, OrderReceipt, OrderRequest, Position,
+    };
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
-    use poise_engine::ports::{
-        ExchangeOpenOrderSnapshot, ExecutionPort, OrderReceipt, OrderRequest, Position,
-    };
     use poise_engine::price_gate::SubmitPurpose;
     use poise_storage::sqlite::SqliteStorage;
 
@@ -389,12 +389,12 @@ mod tests {
         async fn submit_order(
             &self,
             req: OrderRequest,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
             Ok(OrderReceipt {
                 order_id: "test-order".into(),
                 client_order_id: req.client_order_id,
                 filled_qty: 0.0,
-                status: poise_engine::ports::OrderStatus::New,
+                status: poise_application::exchange::OrderStatus::New,
             })
         }
 
@@ -402,9 +402,9 @@ mod tests {
             &self,
             _instrument: &Instrument,
             _order_id: &str,
-        ) -> poise_engine::ports::ExecutionResult<OrderReceipt> {
-            Err(poise_engine::ports::ExecutionPortError::new(
-                poise_engine::ports::ExecutionPortErrorKind::CancelOutcomeUnknown,
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
+            Err(poise_application::exchange::ExecutionPortError::new(
+                poise_application::exchange::ExecutionPortErrorKind::CancelOutcomeUnknown,
                 anyhow::anyhow!("Unknown order sent."),
             ))
         }
@@ -412,14 +412,14 @@ mod tests {
         async fn cancel_all(
             &self,
             _instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<()> {
+        ) -> poise_application::exchange::ExecutionResult<()> {
             Ok(())
         }
 
         async fn get_position(
             &self,
             instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<Position> {
+        ) -> poise_application::exchange::ExecutionResult<Position> {
             Ok(Position {
                 instrument: instrument.clone(),
                 qty: 0.0,
@@ -432,7 +432,7 @@ mod tests {
         async fn get_open_orders(
             &self,
             _instrument: &Instrument,
-        ) -> poise_engine::ports::ExecutionResult<ExchangeOpenOrderSnapshot> {
+        ) -> poise_application::exchange::ExecutionResult<ExchangeOpenOrderSnapshot> {
             Ok(ExchangeOpenOrderSnapshot::from_complete_exchange_query(
                 Vec::new(),
             ))

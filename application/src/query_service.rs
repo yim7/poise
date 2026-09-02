@@ -36,6 +36,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use crate::exchange::ExecutionQuote;
+    use crate::exchange::OrderRequest;
     use anyhow::Result;
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
@@ -45,8 +47,6 @@ mod tests {
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::observation::MarketObservation;
-    use poise_engine::ports::ExecutionQuote;
-    use poise_engine::ports::OrderRequest;
 
     use crate::trading_runtime::test_support::{
         MemoryRepository, seeded_manager, track_write_services,

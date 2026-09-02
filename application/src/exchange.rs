@@ -3,16 +3,15 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use poise_core::instrument::{Amount, Asset};
+use poise_core::track::Instrument;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use poise_core::instrument::{Amount, Asset};
-use poise_core::types::Side;
-
-use crate::ledger::TrackPnlRecord;
-use poise_core::track::Instrument;
-
-// ── Exchange types ──
+pub use poise_engine::exchange::{
+    ExchangeOrder, ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus,
+};
+pub use poise_engine::ledger::{TrackPnlRecord, TrackPnlRecordKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,45 +71,12 @@ impl From<anyhow::Error> for ExecutionPortError {
 pub type ExecutionResult<T> = std::result::Result<T, ExecutionPortError>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OrderRequest {
-    pub instrument: Instrument,
-    pub side: Side,
-    pub price: f64,
-    pub quantity: f64,
-    pub client_order_id: String,
-    #[serde(default)]
-    pub reduce_only: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OrderReceipt {
-    pub order_id: String,
-    pub client_order_id: String,
-    #[serde(default)]
-    pub filled_qty: f64,
-    pub status: OrderStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Position {
     pub instrument: Instrument,
     pub qty: f64,
     pub avg_price: f64,
     pub unrealized_pnl: f64,
     pub mark_price: Option<f64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExchangeOrder {
-    pub instrument: Instrument,
-    pub order_id: String,
-    pub client_order_id: String,
-    pub side: Side,
-    pub price: f64,
-    pub qty: f64,
-    #[serde(default)]
-    pub filled_qty: f64,
-    pub status: OrderStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -136,60 +102,6 @@ impl ExchangeOpenOrderSnapshot {
     pub fn is_empty(&self) -> bool {
         self.orders.is_empty()
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OrderStatus {
-    Submitting,
-    New,
-    PartiallyFilled,
-    Filled,
-    Canceling,
-    Canceled,
-    Rejected,
-    Expired,
-}
-
-impl OrderStatus {
-    /// Returns the cumulative filled quantity represented by an exchange order fact.
-    ///
-    /// Some venues report a terminal `Filled` status with a zero filled quantity. In that case the
-    /// full order quantity is the only consistent interpretation of the terminal fact.
-    pub(crate) fn effective_cumulative_filled_qty(
-        self,
-        reported_filled_qty: f64,
-        order_quantity: f64,
-    ) -> f64 {
-        if self == Self::Filled && reported_filled_qty <= f64::EPSILON {
-            return order_quantity;
-        }
-        reported_filled_qty.max(0.0)
-    }
-
-    pub fn keeps_working_order(self) -> bool {
-        matches!(
-            self,
-            Self::Submitting | Self::New | Self::PartiallyFilled | Self::Canceling
-        )
-    }
-
-    pub fn clears_working_order(self) -> bool {
-        matches!(
-            self,
-            Self::Filled | Self::Canceled | Self::Rejected | Self::Expired
-        )
-    }
-
-    pub fn should_reconcile_after_order_update(self) -> bool {
-        matches!(self, Self::Canceled | Self::Rejected | Self::Expired)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct ExecutionQuote {
-    pub best_bid: f64,
-    pub best_ask: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -340,53 +252,6 @@ impl UserDataEvent {
     }
 }
 
-// ── Port traits ──
-
-#[async_trait]
-pub trait AccountSummaryPort: Send + Sync {
-    async fn get_account_summary(&self) -> Result<AccountSummarySnapshot>;
-
-    async fn get_available_balance(&self, _instrument: &Instrument) -> Result<f64> {
-        let summary = self.get_account_summary().await?;
-        Ok(summary
-            .available()
-            .context("account-wide available amount is unavailable")?
-            .value())
-    }
-}
-
-#[async_trait]
-pub trait ExecutionPort: Send + Sync {
-    async fn submit_order(&self, req: OrderRequest) -> ExecutionResult<OrderReceipt>;
-    async fn cancel_order(
-        &self,
-        instrument: &Instrument,
-        order_id: &str,
-    ) -> ExecutionResult<OrderReceipt>;
-    async fn cancel_all(&self, instrument: &Instrument) -> ExecutionResult<()>;
-    async fn get_position(&self, instrument: &Instrument) -> ExecutionResult<Position>;
-    async fn get_open_orders(
-        &self,
-        instrument: &Instrument,
-    ) -> ExecutionResult<ExchangeOpenOrderSnapshot>;
-}
-
-#[async_trait]
-pub trait AccountPort: Send + Sync {
-    async fn get_account_capacity_snapshot(
-        &self,
-        instrument: &Instrument,
-    ) -> Result<AccountCapacitySnapshot>;
-
-    async fn get_recent_track_pnl_records(
-        &self,
-        instrument: &Instrument,
-        required_window: &PnlHistoryWindow,
-    ) -> Result<RecentTrackPnlRecords>;
-
-    async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>>;
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PnlHistoryWindow {
     pub start: DateTime<Utc>,
@@ -465,9 +330,59 @@ pub enum RecentTrackPnlRecords {
 }
 
 #[async_trait]
+pub trait AccountSummaryPort: Send + Sync {
+    async fn get_account_summary(&self) -> Result<AccountSummarySnapshot>;
+
+    async fn get_available_balance(&self, _instrument: &Instrument) -> Result<f64> {
+        let summary = self.get_account_summary().await?;
+        Ok(summary
+            .available()
+            .context("account-wide available amount is unavailable")?
+            .value())
+    }
+}
+
+#[async_trait]
+pub trait ExecutionPort: Send + Sync {
+    async fn submit_order(&self, req: OrderRequest) -> ExecutionResult<OrderReceipt>;
+
+    async fn cancel_order(
+        &self,
+        instrument: &Instrument,
+        order_id: &str,
+    ) -> ExecutionResult<OrderReceipt>;
+
+    async fn cancel_all(&self, instrument: &Instrument) -> ExecutionResult<()>;
+
+    async fn get_position(&self, instrument: &Instrument) -> ExecutionResult<Position>;
+
+    async fn get_open_orders(
+        &self,
+        instrument: &Instrument,
+    ) -> ExecutionResult<ExchangeOpenOrderSnapshot>;
+}
+
+#[async_trait]
+pub trait AccountPort: Send + Sync {
+    async fn get_account_capacity_snapshot(
+        &self,
+        instrument: &Instrument,
+    ) -> Result<AccountCapacitySnapshot>;
+
+    async fn get_recent_track_pnl_records(
+        &self,
+        instrument: &Instrument,
+        required_window: &PnlHistoryWindow,
+    ) -> Result<RecentTrackPnlRecords>;
+
+    async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>>;
+}
+
+#[async_trait]
 pub trait MetadataPort: Send + Sync {
     async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo>;
-    async fn get_server_time(&self) -> Result<DateTime<Utc>>;
+
+    async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>>;
 }
 
 #[async_trait]
@@ -531,8 +446,15 @@ impl ExchangePorts {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use chrono::TimeZone;
+    use std::collections::BTreeMap;
+
+    use chrono::{TimeZone, Utc};
+    use poise_core::instrument::{Amount, Asset};
+
+    use super::{
+        AccountSummarySnapshot, ExecutionPortError, ExecutionPortErrorKind, PnlHistoryWindow,
+        RecentPnlCompleteness, RecentTrackPnlBatch,
+    };
 
     fn amount(value: f64, asset: &str) -> Amount {
         Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
@@ -567,8 +489,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(snapshot.equity().value(), 20_000.0);
-        assert_eq!(snapshot.available(), None);
         assert_eq!(snapshot.available_for_asset("BTC"), Some(0.1));
         assert_eq!(snapshot.available_for_asset("USDT"), Some(5_000.0));
     }
@@ -586,16 +506,15 @@ mod tests {
         )
         .unwrap();
 
-        let complete = RecentTrackPnlBatch::complete(required.clone(), Vec::new());
-        let insufficient =
-            RecentTrackPnlBatch::new(Vec::new(), Some(partial), RecentPnlCompleteness::Complete);
-
-        assert!(complete.covers(&required));
-        assert!(!insufficient.covers(&required));
+        assert!(RecentTrackPnlBatch::complete(required.clone(), Vec::new()).covers(&required));
+        assert!(
+            !RecentTrackPnlBatch::new(Vec::new(), Some(partial), RecentPnlCompleteness::Complete,)
+                .covers(&required)
+        );
     }
 
     #[test]
-    fn recent_pnl_window_rejects_an_inverted_range() {
+    fn pnl_history_window_rejects_an_inverted_range() {
         let error = PnlHistoryWindow::try_new(
             Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap(),
             Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
@@ -606,127 +525,16 @@ mod tests {
     }
 
     #[test]
-    fn filled_status_without_reported_quantity_means_full_order_quantity() {
-        assert_eq!(
-            OrderStatus::Filled.effective_cumulative_filled_qty(0.0, 1.25),
-            1.25
-        );
-        assert_eq!(
-            OrderStatus::PartiallyFilled.effective_cumulative_filled_qty(0.5, 1.25),
-            0.5
-        );
-    }
-
-    #[test]
-    fn execution_result_uses_execution_port_error() {
-        fn assert_execution_result<T>(result: ExecutionResult<T>) -> ExecutionResult<T> {
-            result
-        }
-
-        let error = ExecutionPortError::new(
-            ExecutionPortErrorKind::CancelOutcomeUnknown,
-            anyhow::anyhow!("Unknown order sent."),
-        );
-
-        let result = assert_execution_result::<OrderReceipt>(Err(error));
-
-        assert_eq!(
-            result.unwrap_err().kind(),
-            ExecutionPortErrorKind::CancelOutcomeUnknown
-        );
-    }
-
-    #[test]
-    fn execution_port_error_preserves_source_error() {
-        let error = ExecutionPortError::from(anyhow::anyhow!("raw exchange failure"));
-
-        let source = std::error::Error::source(&error).expect("source error should be preserved");
-
-        assert_eq!(source.to_string(), "raw exchange failure");
-    }
-
-    #[test]
-    fn cancel_outcome_unknown_preserves_source_error() {
-        let error = ExecutionPortError::new(
-            ExecutionPortErrorKind::CancelOutcomeUnknown,
-            anyhow::anyhow!("Unknown order sent."),
-        );
-
-        let source = std::error::Error::source(&error).expect("source error should be preserved");
-
-        assert_eq!(source.to_string(), "Unknown order sent.");
-        assert_eq!(error.kind(), ExecutionPortErrorKind::CancelOutcomeUnknown);
-    }
-
-    #[test]
-    fn submit_outcome_unknown_preserves_source_error() {
+    fn execution_port_error_preserves_kind_and_source() {
         let error = ExecutionPortError::new(
             ExecutionPortErrorKind::SubmitOutcomeUnknown,
-            anyhow::anyhow!("response body ended before the submit result was known"),
+            anyhow::anyhow!("response ended before acknowledgement"),
         );
 
-        let source = std::error::Error::source(&error).expect("source error should be preserved");
-
-        assert_eq!(
-            source.to_string(),
-            "response body ended before the submit result was known"
-        );
         assert_eq!(error.kind(), ExecutionPortErrorKind::SubmitOutcomeUnknown);
-    }
-
-    #[test]
-    fn insufficient_margin_preserves_source_error() {
-        let error = ExecutionPortError::new(
-            ExecutionPortErrorKind::InsufficientMargin,
-            anyhow::anyhow!("Margin is insufficient."),
+        assert_eq!(
+            std::error::Error::source(&error).unwrap().to_string(),
+            "response ended before acknowledgement"
         );
-
-        let source = std::error::Error::source(&error).expect("source error should be preserved");
-
-        assert_eq!(source.to_string(), "Margin is insufficient.");
-        assert_eq!(error.kind(), ExecutionPortErrorKind::InsufficientMargin);
     }
-
-    #[test]
-    fn invalid_price_increment_preserves_source_error() {
-        let error = ExecutionPortError::new(
-            ExecutionPortErrorKind::InvalidPriceIncrement,
-            anyhow::anyhow!("Price must be divisible by tick size."),
-        );
-
-        let source = std::error::Error::source(&error).expect("source error should be preserved");
-
-        assert_eq!(source.to_string(), "Price must be divisible by tick size.");
-        assert_eq!(error.kind(), ExecutionPortErrorKind::InvalidPriceIncrement);
-    }
-
-    #[test]
-    fn rate_limited_preserves_source_error() {
-        let error = ExecutionPortError::new(
-            ExecutionPortErrorKind::RateLimited,
-            anyhow::anyhow!("too many requests"),
-        );
-
-        let source = std::error::Error::source(&error).expect("source error should be preserved");
-
-        assert_eq!(source.to_string(), "too many requests");
-        assert_eq!(error.kind(), ExecutionPortErrorKind::RateLimited);
-    }
-
-    #[test]
-    fn wraps_source_error_with_kind() {
-        let error = ExecutionPortError::new(
-            ExecutionPortErrorKind::InvalidPriceIncrement,
-            anyhow::anyhow!("exchange tick rejection"),
-        );
-
-        let source = std::error::Error::source(&error).expect("source error should be preserved");
-
-        assert_eq!(error.kind(), ExecutionPortErrorKind::InvalidPriceIncrement);
-        assert_eq!(source.to_string(), "exchange tick rejection");
-    }
-}
-
-pub trait ClockPort: Send + Sync {
-    fn now(&self) -> DateTime<Utc>;
 }

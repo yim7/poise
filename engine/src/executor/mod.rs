@@ -32,6 +32,7 @@ mod tests {
     use poise_core::types::{Exposure, Side};
 
     use super::*;
+    use crate::exchange::{ExecutionQuote, OrderRequest};
     use crate::execution_plan::TrackEffect;
     use crate::executor::binding::{
         BindingOperationAllocation, BindingPolicyState, BindingStatus, LiveOrderBinding,
@@ -40,7 +41,6 @@ mod tests {
         BoundaryDirection, BoundaryOperation, discretize_boundaries, profile_revision_for_config,
     };
     use crate::executor::policy::PolicyKind;
-    use crate::ports::{ExecutionQuote, OrderRequest};
     use crate::price_gate::{PriceExecutionGate, SubmitPurpose};
     use crate::runtime::ExecutorState;
     use poise_core::track::{Instrument, Venue};

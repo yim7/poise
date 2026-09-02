@@ -4,13 +4,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use poise_core::track::Instrument;
-use poise_engine::ports::{
+use poise_application::exchange::{
     AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
     MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, PnlHistoryWindow,
     Position, RecentTrackPnlRecords, UserDataEvent,
 };
+use poise_core::track::Instrument;
 
 use crate::{
     Config, instrument::OkxInstrumentRegistry, rest::client::OkxRestClient,
@@ -331,10 +331,12 @@ mod tests {
 
         assert_eq!(
             outcome,
-            RecentTrackPnlRecords::Available(poise_engine::ports::RecentTrackPnlBatch::complete(
-                required_window,
-                Vec::new()
-            ))
+            RecentTrackPnlRecords::Available(
+                poise_application::exchange::RecentTrackPnlBatch::complete(
+                    required_window,
+                    Vec::new()
+                )
+            )
         );
     }
 

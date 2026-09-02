@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+use crate::exchange::OrderRequest;
 use crate::executor::boundary::BoundaryOperation;
 use crate::executor::policy::PolicyKind;
-use crate::ports::OrderRequest;
 use crate::price_gate::SubmitPurpose;
 use poise_core::types::Exposure;
 

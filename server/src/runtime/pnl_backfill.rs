@@ -2,9 +2,9 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use poise_application::exchange::{AccountPort, RecentTrackPnlRecords};
 use poise_application::{TrackInput, TrackUpdateReceipt};
 use poise_core::track::TrackId;
-use poise_engine::ports::{AccountPort, RecentTrackPnlRecords};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
@@ -282,6 +282,9 @@ mod tests {
 
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
+    use poise_application::exchange::{
+        AccountCapacitySnapshot, AccountPort, RecentTrackPnlRecords, UserDataEvent,
+    };
     use poise_application::{
         TrackEffectJournal, TrackIdentityStore, TrackMutationStore, TrackQueryStore,
     };
@@ -292,9 +295,6 @@ mod tests {
     use poise_core::types::Side;
     use poise_engine::ledger::TrackPnlRecord;
     use poise_engine::manager::TrackManager;
-    use poise_engine::ports::{
-        AccountCapacitySnapshot, AccountPort, RecentTrackPnlRecords, UserDataEvent,
-    };
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
 
@@ -634,18 +634,21 @@ mod tests {
         async fn get_recent_track_pnl_records(
             &self,
             instrument: &Instrument,
-            required_window: &poise_engine::ports::PnlHistoryWindow,
+            required_window: &poise_application::exchange::PnlHistoryWindow,
         ) -> Result<RecentTrackPnlRecords> {
             self.calls.lock().unwrap().push(instrument.symbol.clone());
             match &self.response {
                 FakeAccountResponse::Records(records) => Ok(RecentTrackPnlRecords::Available(
-                    poise_engine::ports::RecentTrackPnlBatch::complete(
+                    poise_application::exchange::RecentTrackPnlBatch::complete(
                         required_window.clone(),
                         records.clone(),
                     ),
                 )),
                 FakeAccountResponse::Incomplete(records) => Ok(RecentTrackPnlRecords::Available(
-                    poise_engine::ports::RecentTrackPnlBatch::incomplete(None, records.clone()),
+                    poise_application::exchange::RecentTrackPnlBatch::incomplete(
+                        None,
+                        records.clone(),
+                    ),
                 )),
                 FakeAccountResponse::Unsupported => Ok(RecentTrackPnlRecords::Unsupported),
                 FakeAccountResponse::Error(message) => anyhow::bail!(message.clone()),

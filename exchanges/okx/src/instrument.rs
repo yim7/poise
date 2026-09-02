@@ -3,9 +3,9 @@ use std::sync::RwLock;
 
 use anyhow::{Context, Result, anyhow, ensure};
 
+use poise_application::exchange::ExchangeInfo;
 use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
 use poise_core::track::{Instrument, Venue};
-use poise_engine::ports::ExchangeInfo;
 
 use crate::rest::models::InstrumentInfo;
 

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::exchange::ExecutionQuote;
 use crate::executor::OrderRole;
-use crate::ports::ExecutionQuote;
 
 pub const MAX_MARK_BOOK_DIVERGENCE_BPS: u32 = 300;
 pub const RECOVER_MARK_BOOK_DIVERGENCE_BPS: u32 = 150;

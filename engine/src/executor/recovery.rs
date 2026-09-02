@@ -5,9 +5,9 @@ use poise_core::types::Exposure;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+use crate::exchange::{OrderReceipt, OrderRequest};
 use crate::execution_plan::TrackEffect;
 use crate::observation::{CompleteOpenOrderSnapshot, OrderObservation};
-use crate::ports::{OrderReceipt, OrderRequest};
 use crate::runtime::ExecutorState;
 
 use super::binding::SubmitRecoveryToken;
@@ -412,6 +412,7 @@ mod tests {
     use std::sync::LazyLock;
 
     use super::*;
+    use crate::exchange::OrderStatus;
     use crate::executor::binding::{
         BindingOperationAllocation, BindingPolicyState, BindingProposal, BindingStatus,
         LiveOrderBinding, SubmitRecoveryToken,
@@ -421,7 +422,6 @@ mod tests {
     };
     use crate::executor::ledger::BoundaryProgress;
     use crate::executor::policy::PolicyKind;
-    use crate::ports::OrderStatus;
     use crate::price_gate::SubmitPurpose;
     use poise_core::track::{Instrument, Venue};
 

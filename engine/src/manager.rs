@@ -6,7 +6,9 @@ use poise_core::events::DomainEvent;
 use poise_core::instrument::InstrumentSpec;
 use poise_core::types::Exposure;
 
+use crate::clock::ClockPort;
 use crate::command::TrackCommand;
+use crate::exchange::{ExchangeOrder, ExecutionQuote, OrderReceipt, OrderRequest};
 use crate::execution_gate::ExecutionGateDecision;
 use crate::execution_plan::{DecisionReason, TrackEffect};
 use crate::executor;
@@ -15,7 +17,6 @@ use crate::observation::{
     CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
     TrackObservation,
 };
-use crate::ports::{ClockPort, ExchangeOrder, ExecutionQuote, OrderReceipt, OrderRequest};
 use crate::price_gate::{SubmitPurpose, evaluate_price_execution_gate};
 use crate::reconciler;
 use crate::risk_exposure_gate::{AppliedRiskAcquisitionRelease, FreshAcquisitionInitialization};
@@ -1465,11 +1466,11 @@ mod tests {
     use poise_core::track::TrackDefinition;
     use poise_core::types::Side;
 
+    use crate::exchange::ExecutionQuote;
     use crate::execution_plan::TrackEffect;
     use crate::executor::binding::LiveOrderBinding;
     use crate::executor::{PolicyContext, policy::PolicyKind};
     use crate::ledger::TrackPnlStats;
-    use crate::ports::ExecutionQuote;
     use crate::price_gate::{PriceExecutionBlockReason, PriceExecutionGate};
     use crate::risk_exposure_gate::RiskExposureGateState;
     use crate::runtime::{CurrentMarketData, TrackStatus};
@@ -1828,7 +1829,7 @@ mod tests {
                 },
                 allocations: Vec::new(),
                 absorbed_exposure_qty: 0.0,
-                request: crate::ports::OrderRequest {
+                request: crate::exchange::OrderRequest {
                     instrument: track.instrument().clone(),
                     side: Side::Buy,
                     price: 100.1,
@@ -2105,7 +2106,7 @@ mod tests {
                 },
                 allocations: Vec::new(),
                 absorbed_exposure_qty: 0.0,
-                request: crate::ports::OrderRequest {
+                request: crate::exchange::OrderRequest {
                     instrument: track.instrument().clone(),
                     side: Side::Buy,
                     price: 85.1,
@@ -2127,7 +2128,7 @@ mod tests {
                 },
                 allocations: Vec::new(),
                 absorbed_exposure_qty: 0.0,
-                request: crate::ports::OrderRequest {
+                request: crate::exchange::OrderRequest {
                     instrument: track.instrument().clone(),
                     side: Side::Sell,
                     price: 94.9,
@@ -2300,7 +2301,7 @@ mod tests {
                 },
                 allocations: Vec::new(),
                 absorbed_exposure_qty: 0.0,
-                request: crate::ports::OrderRequest {
+                request: crate::exchange::OrderRequest {
                     instrument: track.instrument().clone(),
                     side: Side::Buy,
                     price: 99.9,
@@ -2539,7 +2540,7 @@ mod tests {
                 },
                 allocations: Vec::new(),
                 absorbed_exposure_qty: 0.0,
-                request: crate::ports::OrderRequest {
+                request: crate::exchange::OrderRequest {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                     side: Side::Buy,
                     price: 100.0,

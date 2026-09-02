@@ -8,6 +8,7 @@ use poise_core::types::{Exposure, PriceRounding, Side};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::exchange::{ExecutionQuote, OrderRequest};
 use crate::execution_plan::DecisionReason;
 use crate::execution_plan::is_meetable_minimum;
 use crate::executor::binding::{
@@ -18,7 +19,6 @@ use crate::executor::boundary::{
     BoundaryBlueprint, BoundaryDirection, BoundaryOperation, trigger_price_for_boundary,
 };
 use crate::executor::ledger::BoundaryLedgerView;
-use crate::ports::{ExecutionQuote, OrderRequest};
 use crate::price_gate::SubmitPurpose;
 use poise_core::track::Instrument;
 
@@ -1013,11 +1013,11 @@ mod tests {
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, PricePrecision};
 
+    use crate::exchange::ExecutionQuote;
     use crate::executor::boundary::{
         BoundaryDirection, BoundaryId, BoundaryOperation, ProfileRevision, discretize_boundaries,
     };
     use crate::executor::ledger::{BoundaryLedgerView, BoundaryOperationView};
-    use crate::ports::ExecutionQuote;
     use crate::price_gate::SubmitPurpose;
     use poise_core::track::{Instrument, Venue};
 

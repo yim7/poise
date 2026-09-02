@@ -1426,13 +1426,13 @@ impl SessionTrackEffectExt for TrackEffect {
 
 #[cfg(test)]
 mod tests {
+    use crate::exchange::{OrderRequest, OrderStatus};
     use chrono::Utc;
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::{PendingSubmitPhase, SubmitRecoveryToken};
     use poise_engine::observation::{CompleteOpenOrderSnapshot, OrderObservation};
-    use poise_engine::ports::{OrderRequest, OrderStatus};
     use poise_engine::price_gate::SubmitPurpose;
 
     use super::{

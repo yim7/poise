@@ -7,12 +7,12 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use tokio::sync::{Mutex as AsyncMutex, OnceCell};
 
-use poise_core::types::PriceRounding;
-use poise_engine::ledger::TrackPnlRecord;
-use poise_engine::ports::{
+use poise_application::exchange::TrackPnlRecord;
+use poise_application::exchange::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderRequest as PortOrderRequest, OrderStatus, PnlHistoryWindow, Position, RecentTrackPnlBatch,
 };
+use poise_core::types::PriceRounding;
 
 use crate::client_order_id::ClientOrderIdMapper;
 use crate::config::{Config, Credentials};
@@ -890,10 +890,12 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::sync::Arc;
 
+    use poise_application::exchange::TrackPnlRecordKind;
+    use poise_application::exchange::{
+        OrderRequest as PortOrderRequest, OrderStatus, PnlHistoryWindow,
+    };
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
-    use poise_engine::ledger::TrackPnlRecordKind;
-    use poise_engine::ports::{OrderRequest as PortOrderRequest, OrderStatus, PnlHistoryWindow};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -935,7 +937,7 @@ mod tests {
     async fn recent_pnl_records(
         client: &HyperliquidRestClient,
         symbol: &str,
-    ) -> anyhow::Result<Vec<poise_engine::ledger::TrackPnlRecord>> {
+    ) -> anyhow::Result<Vec<poise_application::exchange::TrackPnlRecord>> {
         let end_millis = i64::try_from((client.timestamp_provider)())?;
         let end = chrono::DateTime::from_timestamp_millis(end_millis).unwrap();
         let required_window = PnlHistoryWindow::try_new(end - chrono::Duration::hours(24), end)
@@ -1994,7 +1996,7 @@ mod tests {
             build_http_client().unwrap(),
         );
 
-        let result = poise_engine::ports::ExecutionPort::submit_order(
+        let result = poise_application::exchange::ExecutionPort::submit_order(
             &client,
             PortOrderRequest {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
@@ -2012,7 +2014,7 @@ mod tests {
         assert_eq!(requests[1].path, "/exchange");
         assert_eq!(
             result.unwrap_err().kind(),
-            poise_engine::ports::ExecutionPortErrorKind::Failed
+            poise_application::exchange::ExecutionPortErrorKind::Failed
         );
     }
 
@@ -2246,7 +2248,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let error = poise_engine::ports::ExecutionPort::submit_order(
+        let error = poise_application::exchange::ExecutionPort::submit_order(
             &client,
             PortOrderRequest {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
@@ -2262,7 +2264,7 @@ mod tests {
 
         assert_eq!(
             error.kind(),
-            poise_engine::ports::ExecutionPortErrorKind::InvalidPriceIncrement
+            poise_application::exchange::ExecutionPortErrorKind::InvalidPriceIncrement
         );
         assert!(error.to_string().contains("tick size"));
     }
@@ -2284,7 +2286,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let error = poise_engine::ports::ExecutionPort::submit_order(
+        let error = poise_application::exchange::ExecutionPort::submit_order(
             &client,
             PortOrderRequest {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
@@ -2300,7 +2302,7 @@ mod tests {
 
         assert_eq!(
             error.kind(),
-            poise_engine::ports::ExecutionPortErrorKind::SubmitOutcomeUnknown
+            poise_application::exchange::ExecutionPortErrorKind::SubmitOutcomeUnknown
         );
     }
 
@@ -2321,7 +2323,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let error = poise_engine::ports::ExecutionPort::submit_order(
+        let error = poise_application::exchange::ExecutionPort::submit_order(
             &client,
             PortOrderRequest {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
@@ -2337,7 +2339,7 @@ mod tests {
 
         assert_eq!(
             error.kind(),
-            poise_engine::ports::ExecutionPortErrorKind::SubmitOutcomeUnknown
+            poise_application::exchange::ExecutionPortErrorKind::SubmitOutcomeUnknown
         );
     }
 
@@ -2361,7 +2363,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let error = poise_engine::ports::ExecutionPort::submit_order(
+        let error = poise_application::exchange::ExecutionPort::submit_order(
             &client,
             PortOrderRequest {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
@@ -2377,7 +2379,7 @@ mod tests {
 
         assert_eq!(
             error.kind(),
-            poise_engine::ports::ExecutionPortErrorKind::SubmitOutcomeUnknown
+            poise_application::exchange::ExecutionPortErrorKind::SubmitOutcomeUnknown
         );
     }
 
@@ -2398,7 +2400,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let error = poise_engine::ports::ExecutionPort::submit_order(
+        let error = poise_application::exchange::ExecutionPort::submit_order(
             &client,
             PortOrderRequest {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
@@ -2414,7 +2416,7 @@ mod tests {
 
         assert_eq!(
             error.kind(),
-            poise_engine::ports::ExecutionPortErrorKind::Failed
+            poise_application::exchange::ExecutionPortErrorKind::Failed
         );
     }
 
@@ -2429,7 +2431,7 @@ mod tests {
             reqwest::Client::builder().no_proxy().build().unwrap(),
         );
 
-        let error = poise_engine::ports::ExecutionPort::submit_order(
+        let error = poise_application::exchange::ExecutionPort::submit_order(
             &client,
             PortOrderRequest {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
@@ -2445,7 +2447,7 @@ mod tests {
 
         assert_eq!(
             error.kind(),
-            poise_engine::ports::ExecutionPortErrorKind::Failed
+            poise_application::exchange::ExecutionPortErrorKind::Failed
         );
     }
 
@@ -2465,7 +2467,7 @@ mod tests {
         client.asset_descriptor("BTC").await.unwrap();
         tokio::task::yield_now().await;
 
-        let error = poise_engine::ports::ExecutionPort::submit_order(
+        let error = poise_application::exchange::ExecutionPort::submit_order(
             &client,
             PortOrderRequest {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
@@ -2481,7 +2483,7 @@ mod tests {
 
         assert_eq!(
             error.kind(),
-            poise_engine::ports::ExecutionPortErrorKind::Failed
+            poise_application::exchange::ExecutionPortErrorKind::Failed
         );
     }
 

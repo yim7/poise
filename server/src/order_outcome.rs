@@ -1,5 +1,5 @@
 use anyhow::Error;
-use poise_engine::ports::{ExecutionPortError, ExecutionPortErrorKind};
+use poise_application::exchange::{ExecutionPortError, ExecutionPortErrorKind};
 
 use crate::exchange_freshness::ExchangeFreshnessReason;
 
@@ -104,7 +104,7 @@ pub fn reconcile_execution(
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
-    use poise_engine::ports::{ExecutionPortError, ExecutionPortErrorKind};
+    use poise_application::exchange::{ExecutionPortError, ExecutionPortErrorKind};
 
     use super::*;
 

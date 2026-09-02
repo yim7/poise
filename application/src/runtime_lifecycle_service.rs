@@ -119,13 +119,13 @@ impl TrackRuntimeLifecycleService {
 mod tests {
     use std::sync::Arc;
 
+    use crate::exchange::ExecutionQuote;
     use chrono::{NaiveDate, TimeZone, Utc};
     use poise_core::instrument::{Amount, Asset};
     use poise_core::track::TrackId;
     use poise_core::types::Exposure;
     use poise_engine::executor::RecoveryAnomaly;
     use poise_engine::ledger::TrackPnlRecord;
-    use poise_engine::ports::ExecutionQuote;
     use poise_engine::runtime::{CurrentMarketData, FreshSessionExternalInputs};
 
     use crate::trading_runtime::test_support::{
@@ -337,7 +337,7 @@ mod tests {
             .handle_market_for_test(
                 "btc-core",
                 poise_engine::observation::MarketObservation::ExecutionQuote {
-                    execution_quote: poise_engine::ports::ExecutionQuote {
+                    execution_quote: crate::exchange::ExecutionQuote {
                         best_bid: 94.5,
                         best_ask: 95.5,
                     },

@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
+use crate::exchange::{AccountSummaryPort, AccountSummarySnapshot};
 use anyhow::{Result, ensure};
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
 use poise_core::instrument::Amount;
-use poise_engine::ports::{AccountSummaryPort, AccountSummarySnapshot};
 use serde::Deserialize;
 use tokio::sync::{RwLock, broadcast};
 
@@ -413,11 +413,11 @@ mod tests {
         AccountMonitor, AccountMonitorConfig, InMemoryAccountMonitorState,
         InMemoryAccountMonitorStore, build_read_model,
     };
+    use crate::exchange::AccountSummarySnapshot;
     use crate::{
         AccountMonitorStore, AccountRiskSignal, ApplicationNotification, StoredAccountMonitorState,
     };
     use poise_core::instrument::{Amount, Asset};
-    use poise_engine::ports::AccountSummarySnapshot;
 
     fn amount(value: f64, asset: &str) -> Amount {
         Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
@@ -527,7 +527,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl poise_engine::ports::AccountSummaryPort for SummaryOnlySource {
+    impl crate::exchange::AccountSummaryPort for SummaryOnlySource {
         async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
             Ok(self.snapshot.clone())
         }
@@ -550,16 +550,15 @@ mod tests {
 
     #[tokio::test]
     async fn restore_keeps_baseline_without_restoring_current_account_summary() {
-        let source: Arc<dyn poise_engine::ports::AccountSummaryPort> =
-            Arc::new(SummaryOnlySource {
-                snapshot: account_snapshot(
-                    12_700.0,
-                    Some(9_100.0),
-                    &[("BTC", 0.25)],
-                    Some(-125.0),
-                    Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
-                ),
-            });
+        let source: Arc<dyn crate::exchange::AccountSummaryPort> = Arc::new(SummaryOnlySource {
+            snapshot: account_snapshot(
+                12_700.0,
+                Some(9_100.0),
+                &[("BTC", 0.25)],
+                Some(-125.0),
+                Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+            ),
+        });
         let (notifications, _) = broadcast::channel(1);
         let monitor = AccountMonitor::restore(
             source,
@@ -592,17 +591,16 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_rejects_a_valuation_asset_change_within_the_same_day() {
-        let source: Arc<dyn poise_engine::ports::AccountSummaryPort> =
-            Arc::new(SummaryOnlySource {
-                snapshot: AccountSummarySnapshot::try_new(
-                    amount(12_700.0, "USDT"),
-                    Some(amount(9_100.0, "USDT")),
-                    Default::default(),
-                    Some(amount(-125.0, "USDT")),
-                    Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
-                )
-                .unwrap(),
-            });
+        let source: Arc<dyn crate::exchange::AccountSummaryPort> = Arc::new(SummaryOnlySource {
+            snapshot: AccountSummarySnapshot::try_new(
+                amount(12_700.0, "USDT"),
+                Some(amount(9_100.0, "USDT")),
+                Default::default(),
+                Some(amount(-125.0, "USDT")),
+                Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+            )
+            .unwrap(),
+        });
         let (notifications, _) = broadcast::channel(1);
         let monitor = AccountMonitor::restore(
             source,
@@ -627,16 +625,15 @@ mod tests {
 
     #[tokio::test]
     async fn account_monitor_can_be_built_from_summary_only_source() {
-        let source: Arc<dyn poise_engine::ports::AccountSummaryPort> =
-            Arc::new(SummaryOnlySource {
-                snapshot: account_snapshot(
-                    12_500.0,
-                    Some(9_000.0),
-                    &[],
-                    Some(-350.0),
-                    Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
-                ),
-            });
+        let source: Arc<dyn crate::exchange::AccountSummaryPort> = Arc::new(SummaryOnlySource {
+            snapshot: account_snapshot(
+                12_500.0,
+                Some(9_000.0),
+                &[],
+                Some(-350.0),
+                Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+            ),
+        });
         let (notifications, _) = broadcast::channel(1);
         let monitor = AccountMonitor::restore(
             source,
@@ -662,16 +659,15 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_once_emits_account_changed_notification() {
-        let source: Arc<dyn poise_engine::ports::AccountSummaryPort> =
-            Arc::new(SummaryOnlySource {
-                snapshot: account_snapshot(
-                    12_500.0,
-                    Some(9_000.0),
-                    &[],
-                    Some(-350.0),
-                    Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
-                ),
-            });
+        let source: Arc<dyn crate::exchange::AccountSummaryPort> = Arc::new(SummaryOnlySource {
+            snapshot: account_snapshot(
+                12_500.0,
+                Some(9_000.0),
+                &[],
+                Some(-350.0),
+                Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+            ),
+        });
         let (notifications, _) = broadcast::channel(1);
         let monitor = AccountMonitor::restore(
             source,

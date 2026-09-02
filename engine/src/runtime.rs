@@ -8,6 +8,7 @@ use poise_core::strategy::{BandBoundary, TrackConfig};
 use poise_core::track::{Instrument, TrackDefinition, TrackId};
 use poise_core::types::{Exposure, Side};
 
+use crate::exchange::ExecutionQuote;
 use crate::execution_gate::{ExecutionGateDecision, ExecutionGateState};
 use crate::execution_plan::DecisionReason;
 use crate::executor::RecoveryAnomaly;
@@ -17,7 +18,6 @@ use crate::executor::boundary::{ProfileRevision, profile_revision_for_config};
 use crate::executor::ledger::BoundaryLedgerState;
 use crate::executor::policy::PolicyKind;
 use crate::ledger::TrackPnlStats;
-use crate::ports::ExecutionQuote;
 use crate::price_gate::{
     PriceExecutionBlockReason, PriceExecutionGate, evaluate_price_execution_gate,
 };
@@ -845,7 +845,7 @@ impl TrackRuntime {
     pub fn has_absorbed_binding_for_cancel_receipt(
         &self,
         order_id: &str,
-        receipt: &crate::ports::OrderReceipt,
+        receipt: &crate::exchange::OrderReceipt,
     ) -> bool {
         self.executor_state.bindings.iter().any(|binding| {
             binding.absorbed_exposure_qty > f64::EPSILON
@@ -989,7 +989,7 @@ impl TrackRuntime {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn first_executor_order_request(&self) -> Option<&crate::ports::OrderRequest> {
+    pub fn first_executor_order_request(&self) -> Option<&crate::exchange::OrderRequest> {
         self.executor_state
             .bindings
             .first()
@@ -1238,12 +1238,12 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
+    use crate::exchange::OrderRequest;
     use crate::executor::binding::{
         BindingPolicyState, BindingProposalKey, BindingStatus, LiveOrderBinding,
     };
     use crate::executor::boundary::{BoundaryDirection, BoundaryId, BoundaryOperation};
     use crate::executor::policy::PolicyKind;
-    use crate::ports::OrderRequest;
     use crate::price_gate::SubmitPurpose;
     use poise_core::track::{TrackDefinition, Venue};
 
