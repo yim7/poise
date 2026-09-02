@@ -3,24 +3,21 @@ use std::sync::Arc;
 use anyhow::Result;
 use poise_core::track::TrackId;
 
-use crate::{StoredTrackEvent, TrackObservationService, TrackQueryStore};
+use crate::{StoredTrackEvent, TrackQueryStore, TradingRuntime};
 
 pub(crate) const DIAGNOSTIC_EVENTS_LIMIT: usize = 20;
 
 #[derive(Clone)]
 pub(crate) struct TrackDiagnosticEventLoader {
     repository: Arc<dyn TrackQueryStore>,
-    observation: Arc<TrackObservationService>,
+    runtime: Arc<TradingRuntime>,
 }
 
 impl TrackDiagnosticEventLoader {
-    pub(crate) fn new(
-        repository: Arc<dyn TrackQueryStore>,
-        observation: Arc<TrackObservationService>,
-    ) -> Self {
+    pub(crate) fn new(repository: Arc<dyn TrackQueryStore>, runtime: Arc<TradingRuntime>) -> Self {
         Self {
             repository,
-            observation,
+            runtime,
         }
     }
 
@@ -28,11 +25,7 @@ impl TrackDiagnosticEventLoader {
         &self,
         track_id: &TrackId,
     ) -> Result<Option<Vec<StoredTrackEvent>>> {
-        let Some(_) = self
-            .observation
-            .track_runtime_view(track_id.as_str())
-            .await?
-        else {
+        let Some(_) = self.runtime.track_runtime_view(track_id.as_str()).await? else {
             return Ok(None);
         };
 

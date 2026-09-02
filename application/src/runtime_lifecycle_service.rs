@@ -6,8 +6,7 @@ use poise_core::track::TrackId;
 use poise_engine::ledger::TrackPnlStats;
 use poise_engine::runtime::FreshSessionExternalInputs;
 
-use crate::mutation_executor::MutationExecutor;
-use crate::{TrackControlState, TrackObservationService, TrackQueryStore, TrackRecoveryIssue};
+use crate::{TrackControlState, TrackQueryStore, TrackRecoveryIssue, TradingRuntime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackRecoverySummary {
@@ -17,26 +16,23 @@ pub struct TrackRecoverySummary {
 
 #[derive(Clone)]
 pub struct TrackRuntimeLifecycleService {
-    executor: Arc<MutationExecutor>,
+    runtime: Arc<TradingRuntime>,
     query_store: Arc<dyn TrackQueryStore>,
-    observation: Arc<TrackObservationService>,
 }
 
 impl TrackRuntimeLifecycleService {
-    pub(crate) fn from_executor(
-        executor: Arc<MutationExecutor>,
-        query_store: Arc<dyn TrackQueryStore>,
-        observation: Arc<TrackObservationService>,
-    ) -> Self {
+    pub fn new(runtime: Arc<TradingRuntime>, query_store: Arc<dyn TrackQueryStore>) -> Self {
         Self {
-            executor,
+            runtime,
             query_store,
-            observation,
         }
     }
 
     pub async fn prepare_fresh_session_for_activation(&self, id: &str) -> Result<()> {
-        self.executor.prepare_fresh_session_for_activation(id).await
+        self.runtime
+            .handle(&TrackId::new(id), crate::TrackInput::PrepareFreshSession)
+            .await?;
+        Ok(())
     }
 
     pub async fn load_track_control_state(
@@ -78,20 +74,28 @@ impl TrackRuntimeLifecycleService {
         let (control_state, pnl_stats) = self
             .load_persisted_components(track_id, current_utc_day)
             .await?;
-        self.executor
-            .fresh_start_track_runtime(track_id, control_state, pnl_stats, external_inputs)
-            .await
+        match self
+            .runtime
+            .handle(
+                track_id,
+                crate::TrackInput::StartFreshSession {
+                    control_state,
+                    pnl_stats,
+                    external_inputs,
+                },
+            )
+            .await?
+        {
+            crate::TrackUpdateReceipt::FreshSessionStarted { track_found } => Ok(track_found),
+            _ => unreachable!("fresh session input must return its update receipt"),
+        }
     }
 
     pub async fn load_track_recovery_summary(
         &self,
         track_id: &TrackId,
     ) -> Result<Option<TrackRecoverySummary>> {
-        let Some(runtime) = self
-            .observation
-            .track_runtime_view(track_id.as_str())
-            .await?
-        else {
+        let Some(runtime) = self.runtime.track_runtime_view(track_id.as_str()).await? else {
             return Ok(None);
         };
 
@@ -107,7 +111,7 @@ impl TrackRuntimeLifecycleService {
 
     #[cfg(any(test, feature = "server-test-support"))]
     pub fn manager(&self) -> Arc<tokio::sync::RwLock<poise_engine::manager::TrackManager>> {
-        self.executor.manager()
+        self.runtime.manager()
     }
 }
 
@@ -123,7 +127,7 @@ mod tests {
     use poise_engine::ports::ExecutionQuote;
     use poise_engine::runtime::{CurrentMarketData, FreshSessionExternalInputs};
 
-    use crate::mutation_executor::test_support::{
+    use crate::trading_runtime::test_support::{
         MemoryRepository, seeded_manager, track_write_services,
     };
     use crate::{
@@ -328,16 +332,16 @@ mod tests {
         let repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
         services
-            .observation
-            .observe_market(
+            .runtime
+            .handle_market_for_test(
                 "btc-core",
                 poise_engine::observation::MarketObservation::MarkPrice { mark_price: 95.0 },
             )
             .await
             .unwrap();
         services
-            .observation
-            .observe_market(
+            .runtime
+            .handle_market_for_test(
                 "btc-core",
                 poise_engine::observation::MarketObservation::ExecutionQuote {
                     execution_quote: poise_engine::ports::ExecutionQuote {
@@ -350,7 +354,7 @@ mod tests {
             .unwrap();
 
         let runtime = services
-            .observation
+            .runtime
             .track_runtime_view("btc-core")
             .await
             .unwrap()
@@ -400,16 +404,16 @@ mod tests {
             .cloned()
             .unwrap();
         services
-            .observation
-            .observe_market(
+            .runtime
+            .handle_market_for_test(
                 "btc-core",
                 poise_engine::observation::MarketObservation::MarkPrice { mark_price: 95.0 },
             )
             .await
             .unwrap();
         services
-            .observation
-            .observe_market(
+            .runtime
+            .handle_market_for_test(
                 "btc-core",
                 poise_engine::observation::MarketObservation::ExecutionQuote {
                     execution_quote: ExecutionQuote {

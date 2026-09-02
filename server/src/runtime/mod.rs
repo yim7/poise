@@ -306,12 +306,7 @@ impl ServerRuntime {
             let _ = handles.effect_task.await;
         }
 
-        let tracks = self
-            .state
-            .reconcile
-            .observation_service
-            .track_instruments()
-            .await;
+        let tracks = self.state.reconcile.runtime.track_instruments().await;
         for track in &tracks {
             if let Err(error) = self.execution.cancel_all(&track.instrument).await {
                 tracing::warn!(

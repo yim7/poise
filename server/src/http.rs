@@ -3,7 +3,8 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use poise_application::{
-    DiagnosticSeverity, TrackMutationError, build_account_analysis_read_model_with_account,
+    DiagnosticSeverity, TrackInput, TrackMutationError,
+    build_account_analysis_read_model_with_account,
 };
 use poise_core::track::TrackId;
 use poise_engine::command::TrackCommand;
@@ -328,14 +329,14 @@ async fn submit_command(
     State(state): State<HttpState>,
     Json(request): Json<TrackCommandRequest>,
 ) -> Result<Json<TrackCommandAccepted>, (StatusCode, Json<ErrorResponse>)> {
-    if !state.command_service.has_track(&id).await {
+    if !state.runtime.has_track(&id).await {
         return Err(not_found(format!("track `{id}` not found")));
     }
 
     let command = map_command(request.command)?;
     state
-        .command_service
-        .command(&id, command)
+        .runtime
+        .handle(&TrackId::new(&id), TrackInput::Command(command))
         .await
         .map_err(map_command_error)?;
 
@@ -628,11 +629,11 @@ mod tests {
         let query_service = Arc::new(TrackQueryService::new(
             query_store.clone(),
             test_track_definition_registry("btc-core"),
-            services.observation_service.clone(),
+            services.runtime.clone(),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
             query_store.clone(),
-            services.observation_service.clone(),
+            services.runtime.clone(),
         ));
         let projector = Arc::new(TrackProjector::new());
         let account_monitor = unavailable_account_monitor(services.notifications.clone());
@@ -652,7 +653,7 @@ mod tests {
                 Arc::new(TrackQueryService::new(
                     repository as Arc<dyn TrackQueryStore>,
                     test_track_definition_registry("btc-core"),
-                    services.observation_service.clone(),
+                    services.runtime.clone(),
                 )),
                 projector,
                 account_monitor,
@@ -691,18 +692,18 @@ mod tests {
         let query_service = Arc::new(TrackQueryService::new(
             query_store.clone(),
             test_track_definition_registry("btc-core"),
-            services.observation_service.clone(),
+            services.runtime.clone(),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
             query_store.clone(),
-            services.observation_service.clone(),
+            services.runtime.clone(),
         ));
         let projector = Arc::new(TrackProjector::new());
         let account_monitor = unavailable_account_monitor(services.notifications.clone());
         let account_projector = Arc::new(AccountProjector::new());
         HttpTestState {
             http_state: crate::assembly::build_http_state(
-                Arc::clone(&services.command_service),
+                Arc::clone(&services.runtime),
                 query_service.clone(),
                 debug_query_service,
                 projector.clone(),
@@ -784,11 +785,11 @@ mod tests {
         let query_service = Arc::new(TrackQueryService::new(
             query_store.clone(),
             test_track_definition_registry("btc-core"),
-            services.observation_service.clone(),
+            services.runtime.clone(),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
             query_store.clone(),
-            services.observation_service.clone(),
+            services.runtime.clone(),
         ));
         HttpTestState {
             http_state: build_http_state(
@@ -1130,11 +1131,11 @@ mod tests {
             let query_service = Arc::new(TrackQueryService::new(
                 query_store.clone(),
                 test_track_definition_registry("btc-core"),
-                services.observation_service.clone(),
+                services.runtime.clone(),
             ));
             let debug_query_service = Arc::new(TrackDebugQueryService::new(
                 query_store.clone(),
-                services.observation_service.clone(),
+                services.runtime.clone(),
             ));
             let projector = Arc::new(TrackProjector::new());
             let account_monitor = unavailable_account_monitor(services.notifications.clone());
@@ -1154,7 +1155,7 @@ mod tests {
                     Arc::new(TrackQueryService::new(
                         repository as Arc<dyn TrackQueryStore>,
                         test_track_definition_registry("btc-core"),
-                        services.observation_service.clone(),
+                        services.runtime.clone(),
                     )),
                     projector,
                     account_monitor,
@@ -1406,7 +1407,7 @@ mod tests {
         state.http_state.query_service = Arc::new(TrackQueryService::new(
             Arc::new(FailingQueryStore),
             test_track_definition_registry("btc-core"),
-            state.websocket_state.observation_service.clone(),
+            state.websocket_state.runtime.clone(),
         ));
 
         let response = router(state)
@@ -1533,7 +1534,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_command_rolls_back_detail_when_persistence_fails() {
+    async fn submit_command_keeps_committed_detail_when_persistence_fails() {
         let repository = Arc::new(FailingRepository::default());
         let manager = test_manager();
         repository.seed_track(&TrackId::new("btc-core"));
@@ -1553,14 +1554,14 @@ mod tests {
         let query_service = Arc::new(TrackQueryService::new(
             query_store.clone(),
             test_track_definition_registry("btc-core"),
-            services.observation_service.clone(),
+            services.runtime.clone(),
         ));
         let projector = Arc::new(TrackProjector::new());
         let account_monitor = unavailable_account_monitor(services.notifications.clone());
         let account_projector = Arc::new(AccountProjector::new());
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
             query_store.clone(),
-            services.observation_service.clone(),
+            services.runtime.clone(),
         ));
         let app = router(HttpTestState {
             http_state: build_http_state(

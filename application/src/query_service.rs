@@ -4,8 +4,8 @@ use anyhow::Result;
 use poise_core::track::TrackId;
 
 use crate::{
-    TrackDefinitionRegistry, TrackListReadModel, TrackObservationService, TrackQueryStore,
-    TrackReadModel, track_read_source_loader::TrackReadSourceLoader,
+    TrackDefinitionRegistry, TrackListReadModel, TrackQueryStore, TrackReadModel, TradingRuntime,
+    track_read_source_loader::TrackReadSourceLoader,
 };
 
 pub struct TrackQueryService {
@@ -16,13 +16,13 @@ impl TrackQueryService {
     pub fn new(
         repository: Arc<dyn TrackQueryStore>,
         track_definition_registry: Arc<TrackDefinitionRegistry>,
-        observation: Arc<TrackObservationService>,
+        runtime: Arc<TradingRuntime>,
     ) -> Self {
         Self {
             loader: Arc::new(TrackReadSourceLoader::new(
                 repository,
                 track_definition_registry,
-                observation,
+                runtime,
             )),
         }
     }
@@ -58,7 +58,7 @@ mod tests {
     use poise_engine::ports::ExecutionQuote;
     use poise_engine::ports::OrderRequest;
 
-    use crate::mutation_executor::test_support::{
+    use crate::trading_runtime::test_support::{
         MemoryRepository, seeded_manager, track_write_services,
     };
     use crate::{
@@ -108,7 +108,7 @@ mod tests {
         let source = TrackReadSourceLoader::new(
             Arc::new(FakeReadRepository::new()),
             test_track_definition_registry(),
-            Arc::new(services.observation),
+            services.runtime.clone(),
         )
         .load_track_read_source(&TrackId::new("btc-core"))
         .await
@@ -125,16 +125,16 @@ mod tests {
         let live_repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), live_repository);
         services
-            .observation
-            .observe_market(
+            .runtime
+            .handle_market_for_test(
                 "btc-core",
                 MarketObservation::MarkPrice { mark_price: 95.0 },
             )
             .await
             .unwrap();
         services
-            .observation
-            .observe_market(
+            .runtime
+            .handle_market_for_test(
                 "btc-core",
                 MarketObservation::ExecutionQuote {
                     execution_quote: ExecutionQuote {
@@ -148,7 +148,7 @@ mod tests {
         let service = TrackQueryService::new(
             repository,
             test_track_definition_registry(),
-            Arc::new(services.observation),
+            services.runtime.clone(),
         );
 
         let source = service
@@ -171,7 +171,7 @@ mod tests {
         let service = TrackQueryService::new(
             repository,
             test_track_definition_registry(),
-            Arc::new(services.observation),
+            services.runtime.clone(),
         );
 
         let sources = service.list_track_sources().await.unwrap();
@@ -189,7 +189,7 @@ mod tests {
         let service = TrackQueryService::new(
             repository,
             test_track_definition_registry(),
-            Arc::new(services.observation),
+            services.runtime.clone(),
         );
 
         let source = service
@@ -210,7 +210,7 @@ mod tests {
         let service = TrackQueryService::new(
             repository.clone(),
             test_track_definition_registry(),
-            Arc::new(services.observation),
+            services.runtime.clone(),
         );
         (service, repository)
     }

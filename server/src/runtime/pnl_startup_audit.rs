@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use poise_application::TrackInput;
 use poise_core::events::DomainEvent;
 use poise_core::track::TrackId;
 
@@ -16,11 +17,7 @@ pub(super) struct StartupPnlAuditSummary {
 }
 
 pub(super) async fn run_startup_pnl_audit(state: &RuntimeState) -> Result<StartupPnlAuditSummary> {
-    let tracks = state
-        .reconcile
-        .observation_service
-        .track_instruments()
-        .await;
+    let tracks = state.reconcile.runtime.track_instruments().await;
     let mut summary = StartupPnlAuditSummary::default();
     let mut available_audits = Vec::new();
 
@@ -86,11 +83,14 @@ pub(super) async fn run_startup_pnl_audit(state: &RuntimeState) -> Result<Startu
         };
         match state
             .reconcile
-            .observation_service
-            .record_track_events(&track_id, &[event])
+            .runtime
+            .handle(
+                &TrackId::new(&track_id),
+                TrackInput::DurableEvents(vec![event]),
+            )
             .await
         {
-            Ok(()) => {
+            Ok(_) => {
                 summary.missing_records += audit.records_missing;
                 summary.diagnostics_written += 1;
             }

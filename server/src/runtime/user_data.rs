@@ -45,12 +45,7 @@ pub(super) fn spawn_user_task(
             };
 
             let instrument = event.instrument().clone();
-            let Some(track_id) = state
-                .reconcile
-                .observation_service
-                .resolve_track_id(&instrument)
-                .await
-            else {
+            let Some(track_id) = state.reconcile.runtime.resolve_track_id(&instrument).await else {
                 state.runtime_health.record_error_now(
                     RuntimeHealthComponent::UserData,
                     format!(

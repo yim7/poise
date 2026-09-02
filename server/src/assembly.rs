@@ -8,9 +8,8 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
-    AccountMonitor, ApplicationNotification, TrackCommandService, TrackDebugQueryService,
-    TrackDefinitionRegistry, TrackEffectService, TrackObservationService, TrackQueryService,
-    TrackRuntimeLifecycleService, TrackServiceSet,
+    AccountMonitor, ApplicationNotification, TrackDebugQueryService, TrackDefinitionRegistry,
+    TrackQueryService, TrackRuntimeLifecycleService, TradingRuntime,
 };
 use poise_binance::connect as connect_binance;
 use poise_bybit::connect as connect_bybit;
@@ -197,34 +196,33 @@ async fn assemble_with_state_store(
     let effect_store = repositories.effect_store();
     let account_margin_guard = Arc::new(AccountMarginGuardStore::default());
     let recovery_dirty_state = Arc::new(RecoveryDirtyState::default());
-    let write_services = TrackServiceSet::new_with_recovery_anomaly_observer(
+    let trading_runtime = Arc::new(TradingRuntime::new_with_recovery_anomaly_observer(
         manager,
         mutation_store.clone(),
-        query_store.clone(),
         effect_store.clone(),
         notifications.clone(),
-        account_margin_guard.clone(),
+        account_margin_guard.clone() as Arc<dyn poise_application::AccountCapacityGuard>,
         Arc::new(RecoveryAnomalyDirtyObserver::new(
             recovery_dirty_state.clone(),
         )),
-    );
-    let effect_journal_diagnostics = write_services.effect_journal_diagnostics.clone();
-    let session_effect_queue = write_services.session_effect_queue.clone();
-    let command_service = Arc::new(write_services.command);
-    let observation_service = Arc::new(write_services.observation);
-    let effect_service = Arc::new(write_services.effect);
-    let submit_effect_service = Arc::new(write_services.submit_effect);
-    let runtime_lifecycle_service = Arc::new(write_services.runtime_lifecycle);
+    ));
+    let effect_journal_diagnostics = trading_runtime.effect_journal_diagnostics();
+    let session_effect_queue = trading_runtime.session_effect_queue();
+    let submit_effect_service = Arc::new(SubmitEffectService::new(Arc::clone(&trading_runtime)));
+    let runtime_lifecycle_service = Arc::new(TrackRuntimeLifecycleService::new(
+        Arc::clone(&trading_runtime),
+        query_store.clone(),
+    ));
     #[cfg(test)]
-    let manager = observation_service.manager();
+    let manager = trading_runtime.manager();
     let query_service = Arc::new(TrackQueryService::new(
         query_store.clone(),
         track_definition_registry.clone(),
-        observation_service.clone(),
+        trading_runtime.clone(),
     ));
     let debug_query_service = Arc::new(TrackDebugQueryService::new(
         query_store.clone(),
-        observation_service.clone(),
+        trading_runtime.clone(),
     ));
     let projector = Arc::new(TrackProjector::new());
     let account_projector = Arc::new(AccountProjector::new());
@@ -254,7 +252,7 @@ async fn assemble_with_state_store(
         query_store.clone(),
     ));
     let reconcile_state = build_reconcile_state(
-        observation_service.clone(),
+        trading_runtime.clone(),
         runtime_lifecycle_service.clone(),
         session_effect_queue.clone(),
         exchange_freshness.clone(),
@@ -263,7 +261,7 @@ async fn assemble_with_state_store(
         recovery_dirty_state.clone(),
     );
     let http_state = build_http_state(
-        command_service.clone(),
+        trading_runtime.clone(),
         query_service.clone(),
         debug_query_service.clone(),
         projector.clone(),
@@ -279,7 +277,7 @@ async fn assemble_with_state_store(
     let websocket_state = build_websocket_state(
         notifications.clone(),
         live_view_notifications.clone(),
-        observation_service.clone(),
+        trading_runtime.clone(),
         query_service.clone(),
         projector.clone(),
         account_monitor.clone(),
@@ -297,7 +295,6 @@ async fn assemble_with_state_store(
     );
     let effect_worker_state = build_effect_worker_state(
         reconcile_state.clone(),
-        effect_service.clone(),
         submit_effect_service.clone(),
         account_margin_guard.clone(),
         session_effect_queue,
@@ -309,7 +306,7 @@ async fn assemble_with_state_store(
             runtime_state.clone(),
             effect_worker_state.clone(),
             notifications.clone(),
-            observation_service.clone(),
+            trading_runtime.clone(),
         );
 
     Ok(ServerPlatform {
@@ -391,7 +388,7 @@ impl ClockPort for SystemClock {
 }
 
 pub(crate) fn build_http_state(
-    command_service: Arc<TrackCommandService>,
+    runtime: Arc<TradingRuntime>,
     query_service: Arc<TrackQueryService>,
     debug_query_service: Arc<TrackDebugQueryService>,
     projector: Arc<TrackProjector>,
@@ -405,7 +402,7 @@ pub(crate) fn build_http_state(
     recent_fills_auditor: Arc<RecentFillsAuditor>,
 ) -> HttpState {
     HttpState {
-        command_service,
+        runtime,
         query_service,
         debug_query_service,
         projector,
@@ -423,7 +420,7 @@ pub(crate) fn build_http_state(
 pub(crate) fn build_websocket_state(
     notifications: broadcast::Sender<ApplicationNotification>,
     live_view_notifications: broadcast::Sender<String>,
-    observation_service: Arc<TrackObservationService>,
+    runtime: Arc<TradingRuntime>,
     query_service: Arc<TrackQueryService>,
     projector: Arc<TrackProjector>,
     account_monitor: Arc<AccountMonitor>,
@@ -432,7 +429,7 @@ pub(crate) fn build_websocket_state(
     WebSocketState {
         notifications,
         live_view_notifications,
-        observation_service,
+        runtime,
         query_service,
         projector,
         account_monitor,
@@ -443,7 +440,7 @@ pub(crate) fn build_websocket_state(
 }
 
 pub(crate) fn build_reconcile_state(
-    observation_service: Arc<TrackObservationService>,
+    runtime: Arc<TradingRuntime>,
     runtime_lifecycle_service: Arc<TrackRuntimeLifecycleService>,
     session_effect_queue: poise_application::SessionEffectQueue,
     exchange_freshness: Arc<ExchangeFreshness>,
@@ -452,7 +449,7 @@ pub(crate) fn build_reconcile_state(
     recovery_dirty_state: Arc<RecoveryDirtyState>,
 ) -> ReconcileState {
     ReconcileState {
-        observation_service,
+        runtime,
         runtime_lifecycle_service,
         session_effect_queue,
         exchange_freshness,
@@ -486,7 +483,6 @@ pub(crate) fn build_runtime_state(
 
 pub(crate) fn build_effect_worker_state(
     reconcile: ReconcileState,
-    effect_service: Arc<TrackEffectService>,
     submit_effect_service: Arc<SubmitEffectService>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
     session_effect_queue: poise_application::SessionEffectQueue,
@@ -494,7 +490,6 @@ pub(crate) fn build_effect_worker_state(
 ) -> EffectWorkerState {
     EffectWorkerState {
         reconcile,
-        effect_service,
         submit_effect_service,
         account_margin_guard,
         session_effect_queue,
@@ -1389,11 +1384,11 @@ total_loss_limit = 600.0
         let query_service = Arc::new(TrackQueryService::new(
             query_store.clone(),
             crate::test_support::test_track_definition_registry("btc-core"),
-            services.observation_service.clone(),
+            services.runtime.clone(),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
             query_store.clone(),
-            services.observation_service.clone(),
+            services.runtime.clone(),
         ));
         let projector = Arc::new(TrackProjector::new());
         let account_monitor = Arc::new(
@@ -1433,7 +1428,7 @@ total_loss_limit = 600.0
                     account_monitor,
                     account_projector,
                 ),
-                manager: services.observation_service.manager(),
+                manager: services.runtime.manager(),
                 runtime_test_context: runtime_test_context.clone(),
                 effect_worker_test_context: effect_worker_test_context.clone(),
                 runtime: crate::runtime::ServerRuntime::new(

@@ -3,26 +3,23 @@ pub mod account_monitor_store;
 pub mod account_read_model;
 pub mod debug_query_service;
 pub mod diagnostics;
-mod mutation_executor;
 pub mod notifications;
 pub mod query_service;
 pub mod read_model;
 mod runtime_lifecycle_service;
 mod session_effect_queue;
 pub mod submit_effect_service;
-pub mod track_command_service;
 pub mod track_control_state;
 pub mod track_definition;
 mod track_diagnostic_event_loader;
-pub mod track_effect_service;
 pub mod track_effect_store;
 pub mod track_identity_store;
 pub mod track_mutation_store;
-pub mod track_observation_service;
 pub mod track_persistence;
 pub mod track_query_store;
 mod track_read_source;
 mod track_read_source_loader;
+mod trading_runtime;
 
 pub use account_monitor::{AccountMonitor, AccountMonitorConfig};
 pub use account_monitor_store::{AccountMonitorStore, StoredAccountMonitorState};
@@ -31,11 +28,6 @@ pub use debug_query_service::TrackDebugQueryService;
 pub use diagnostics::{
     DiagnosticSeverity, EffectJournalDiagnostics, EffectJournalDiagnosticsSnapshot,
     EffectJournalFailure, TrackDiagnosticItem,
-};
-pub use mutation_executor::{
-    AccountCapacityGuard, ExchangeStateSyncOutcome, ExchangeStateSyncToken,
-    RecoveryAnomalyObserver, TrackInstrument, TrackMutationError, TrackServiceSet,
-    is_loaded_track_invariant_violation,
 };
 pub use notifications::ApplicationNotification;
 pub use query_service::TrackQueryService;
@@ -54,16 +46,18 @@ pub use session_effect_queue::{
     CancelQueueAction, CancelReceiptResolution, DeferredUntil, SessionEffectOutcome,
     SessionEffectQueue, SessionQueueAction, SessionTrackEffect,
 };
-pub use track_command_service::TrackCommandService;
 pub use track_control_state::{PersistedControlMode, TrackControlCommand, TrackControlState};
 pub use track_definition::TrackDefinitionRegistry;
-pub use track_effect_service::TrackEffectService;
 pub use track_effect_store::TrackEffectJournal;
 pub use track_identity_store::{TrackIdentityGuardOutcome, TrackIdentityStore};
 pub use track_mutation_store::TrackMutationStore;
-pub use track_observation_service::TrackObservationService;
 pub use track_persistence::{
     CommittedTrackWrite, EffectJournalEntry, EffectStatus, EffectStatusUpdate,
     PersistedTrackEffect, StoredTrackEvent,
 };
 pub use track_query_store::TrackQueryStore;
+pub use trading_runtime::{
+    AccountCapacityGuard, ExchangeStateSyncOutcome, ExchangeStateSyncToken,
+    RecoveryAnomalyObserver, SubmitRecoveryReceipt, TrackInput, TrackInstrument,
+    TrackMutationError, TrackUpdateReceipt, TradingRuntime, is_loaded_track_invariant_violation,
+};

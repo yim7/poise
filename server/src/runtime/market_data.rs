@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use poise_application::TrackInput;
+use poise_core::track::TrackId;
 use poise_engine::observation::MarketObservation;
 use poise_engine::ports::MarketDataTick;
 use tokio::sync::watch;
@@ -17,11 +19,7 @@ pub(super) fn spawn_market_task(
     let runtime_health = Arc::clone(&runtime.state.runtime_health);
 
     tokio::spawn(async move {
-        let tracks = state
-            .reconcile
-            .observation_service
-            .track_instruments()
-            .await;
+        let tracks = state.reconcile.runtime.track_instruments().await;
         runtime_health.register_track_scopes(
             RuntimeHealthComponent::MarketData,
             tracks.iter().map(|track| track.id.clone()).collect(),
@@ -95,8 +93,11 @@ pub(super) fn spawn_market_task(
 
                                     match state
                                         .reconcile
-                                        .observation_service
-                                        .observe_market(&track.id, observation)
+                                        .runtime
+                                        .handle(
+                                            &TrackId::new(&track.id),
+                                            TrackInput::Market(observation),
+                                        )
                                         .await
                                     {
                                         Ok(_) => {

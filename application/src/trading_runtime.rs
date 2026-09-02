@@ -32,17 +32,7 @@ use poise_engine::runtime::{
 use poise_engine::transition::TrackTransition;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
-use crate::submit_effect_service::{SubmitAttemptResult, SubmitExecutionRecovery};
-
-pub struct TrackServiceSet {
-    pub command: crate::TrackCommandService,
-    pub observation: crate::TrackObservationService,
-    pub effect: crate::TrackEffectService,
-    pub submit_effect: crate::submit_effect_service::SubmitEffectService,
-    pub runtime_lifecycle: crate::TrackRuntimeLifecycleService,
-    pub session_effect_queue: SessionEffectQueue,
-    pub effect_journal_diagnostics: Arc<crate::EffectJournalDiagnostics>,
-}
+use crate::submit_effect_service::SubmitAttemptResult;
 
 pub trait AccountCapacityGuard: Send + Sync {
     fn available_notional_for(&self, instrument: &Instrument) -> Option<f64>;
@@ -108,7 +98,7 @@ impl TrackMutationGuards {
 }
 
 #[derive(Clone)]
-pub(crate) struct MutationExecutor {
+pub struct TradingRuntime {
     manager: SharedManager,
     mutation_store: Arc<dyn TrackMutationStore>,
     effect_journal: Arc<dyn TrackEffectJournal>,
@@ -126,6 +116,104 @@ pub struct TrackInstrument {
     pub instrument: Instrument,
 }
 
+#[derive(Debug, Clone)]
+pub enum TrackInput {
+    Command(TrackCommand),
+    Market(MarketObservation),
+    RefreshMarketDataHealth,
+    Position(PositionObservation),
+    Order(OrderObservation),
+    TrackPnl(TrackPnlRecord),
+    DurableEvents(Vec<DomainEvent>),
+    PrepareFreshSession,
+    StartFreshSession {
+        control_state: TrackControlState,
+        pnl_stats: TrackPnlStats,
+        external_inputs: FreshSessionExternalInputs,
+    },
+    SyncExchangeState {
+        token: ExchangeStateSyncToken,
+        position: PositionObservation,
+        open_orders: CompleteOpenOrderSnapshot,
+        reconcile: bool,
+    },
+    EffectsSuperseded {
+        effect_ids: Vec<String>,
+    },
+    SubmitOutcomeUnknown {
+        effect_id: String,
+        client_order_id: String,
+        initial_snapshot_confirmed: bool,
+    },
+    SubmitCompleted {
+        effect_id: String,
+        request: OrderRequest,
+        desired_exposure: poise_core::types::Exposure,
+        receipt: OrderReceipt,
+    },
+    SubmitFailed {
+        effect_id: String,
+        client_order_id: String,
+        error: String,
+    },
+    SubmitEffectFailed {
+        effect_id: String,
+        error: String,
+    },
+    RecoverSubmit {
+        effect_id: String,
+        recovery_token: SubmitRecoveryToken,
+        order_lookup: SubmitRecoveryOrderLookup,
+    },
+    CancelOrderSucceeded {
+        effect_id: String,
+        order_id: String,
+        receipt: OrderReceipt,
+    },
+    CancelAllSucceeded {
+        effect_id: String,
+    },
+    EffectSucceeded {
+        effect_id: String,
+    },
+    EffectFailed {
+        effect_id: String,
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubmitRecoveryReceipt {
+    Dispatch {
+        request: OrderRequest,
+        desired_exposure: poise_core::types::Exposure,
+    },
+    Finished(SubmitAttemptResult),
+}
+
+#[derive(Debug, Clone)]
+pub enum TrackUpdateReceipt {
+    Committed {
+        decision_revision: Option<u64>,
+    },
+    OrderObserved {
+        absorb_result: OrderUpdateAbsorbResult,
+    },
+    PnlRecorded {
+        inserted: bool,
+    },
+    FreshSessionStarted {
+        track_found: bool,
+    },
+    ExchangeStateSynced(ExchangeStateSyncOutcome),
+    SubmitOutcomeUnknownRecorded {
+        changed: bool,
+    },
+    SubmitAttemptFinished(SubmitAttemptResult),
+    SubmitRecovery(SubmitRecoveryReceipt),
+    CancelOrderResolved(CancelReceiptResolution),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExchangeStateSyncToken {
     track_id: TrackId,
@@ -135,7 +223,7 @@ pub struct ExchangeStateSyncToken {
 
 #[derive(Debug, Clone)]
 pub enum ExchangeStateSyncOutcome {
-    Applied(TrackTransition),
+    Applied,
     RevisionChanged,
 }
 
@@ -277,8 +365,44 @@ fn persisted_control_state_after_transition(
     }
 }
 
-impl MutationExecutor {
-    pub(crate) fn new(
+impl TradingRuntime {
+    pub fn new(
+        manager: TrackManager,
+        mutation_store: Arc<dyn TrackMutationStore>,
+        effect_journal: Arc<dyn TrackEffectJournal>,
+        notifications: broadcast::Sender<ApplicationNotification>,
+        account_margin_guard: Arc<dyn AccountCapacityGuard>,
+    ) -> Self {
+        Self::new_with_recovery_anomaly_observer(
+            manager,
+            mutation_store,
+            effect_journal,
+            notifications,
+            account_margin_guard,
+            Arc::new(NoopRecoveryAnomalyObserver),
+        )
+    }
+
+    pub fn new_with_recovery_anomaly_observer(
+        manager: TrackManager,
+        mutation_store: Arc<dyn TrackMutationStore>,
+        effect_journal: Arc<dyn TrackEffectJournal>,
+        notifications: broadcast::Sender<ApplicationNotification>,
+        account_margin_guard: Arc<dyn AccountCapacityGuard>,
+        recovery_anomaly_observer: Arc<dyn RecoveryAnomalyObserver>,
+    ) -> Self {
+        Self::with_session_queue(
+            manager,
+            mutation_store,
+            effect_journal,
+            SessionEffectQueue::default(),
+            notifications,
+            account_margin_guard,
+            recovery_anomaly_observer,
+        )
+    }
+
+    pub(crate) fn with_session_queue(
         manager: TrackManager,
         mutation_store: Arc<dyn TrackMutationStore>,
         effect_journal: Arc<dyn TrackEffectJournal>,
@@ -301,12 +425,191 @@ impl MutationExecutor {
         }
     }
 
+    pub fn session_effect_queue(&self) -> SessionEffectQueue {
+        self.session_effect_queue.clone()
+    }
+
+    pub fn effect_journal_diagnostics(&self) -> Arc<crate::EffectJournalDiagnostics> {
+        Arc::clone(&self.effect_journal_diagnostics)
+    }
+
+    pub async fn handle(
+        &self,
+        track_id: &TrackId,
+        input: TrackInput,
+    ) -> Result<TrackUpdateReceipt> {
+        let id = track_id.as_str();
+        match input {
+            TrackInput::Command(command) => {
+                self.command(id, command).await?;
+                self.committed_receipt(id).await
+            }
+            TrackInput::Market(observation) => {
+                self.observe_market(id, observation).await?;
+                self.committed_receipt(id).await
+            }
+            TrackInput::RefreshMarketDataHealth => {
+                self.refresh_market_data_health(id).await?;
+                self.committed_receipt(id).await
+            }
+            TrackInput::Position(observation) => {
+                self.observe_position(id, observation).await?;
+                self.committed_receipt(id).await
+            }
+            TrackInput::Order(observation) => {
+                let (_, absorb_result) = self
+                    .observe_order_with_absorb_result(id, observation)
+                    .await?;
+                Ok(TrackUpdateReceipt::OrderObserved { absorb_result })
+            }
+            TrackInput::TrackPnl(record) => {
+                let inserted = self.record_track_pnl(id, record).await?;
+                Ok(TrackUpdateReceipt::PnlRecorded { inserted })
+            }
+            TrackInput::DurableEvents(events) => {
+                self.record_track_events(id, &events).await?;
+                self.committed_receipt(id).await
+            }
+            TrackInput::PrepareFreshSession => {
+                self.prepare_fresh_session_for_activation(id).await?;
+                self.committed_receipt(id).await
+            }
+            TrackInput::StartFreshSession {
+                control_state,
+                pnl_stats,
+                external_inputs,
+            } => {
+                let track_found = self
+                    .fresh_start_track_runtime(track_id, control_state, pnl_stats, external_inputs)
+                    .await?;
+                Ok(TrackUpdateReceipt::FreshSessionStarted { track_found })
+            }
+            TrackInput::SyncExchangeState {
+                token,
+                position,
+                open_orders,
+                reconcile,
+            } => {
+                anyhow::ensure!(
+                    token.track_id == *track_id,
+                    "exchange state token belongs to track `{}`, not `{}`",
+                    token.track_id.as_str(),
+                    id
+                );
+                let outcome = if reconcile {
+                    self.sync_exchange_state(token, position, open_orders)
+                        .await?
+                } else {
+                    self.sync_exchange_state_without_reconcile(token, position, open_orders)
+                        .await?
+                };
+                Ok(TrackUpdateReceipt::ExchangeStateSynced(outcome))
+            }
+            TrackInput::EffectsSuperseded { effect_ids } => {
+                self.record_effects_superseded(id, &effect_ids).await?;
+                self.committed_receipt(id).await
+            }
+            TrackInput::SubmitOutcomeUnknown {
+                effect_id,
+                client_order_id,
+                initial_snapshot_confirmed,
+            } => {
+                let changed = self
+                    .record_submit_outcome_unknown(
+                        id,
+                        &effect_id,
+                        &client_order_id,
+                        initial_snapshot_confirmed,
+                    )
+                    .await?;
+                Ok(TrackUpdateReceipt::SubmitOutcomeUnknownRecorded { changed })
+            }
+            TrackInput::SubmitCompleted {
+                effect_id,
+                request,
+                desired_exposure,
+                receipt,
+            } => Ok(TrackUpdateReceipt::SubmitAttemptFinished(
+                self.complete_submit_execution(
+                    id,
+                    &effect_id,
+                    &request,
+                    desired_exposure,
+                    &receipt,
+                )
+                .await?,
+            )),
+            TrackInput::SubmitFailed {
+                effect_id,
+                client_order_id,
+                error,
+            } => Ok(TrackUpdateReceipt::SubmitAttemptFinished(
+                self.record_submit_failure(id, &effect_id, &client_order_id, &error)
+                    .await?,
+            )),
+            TrackInput::SubmitEffectFailed { effect_id, error } => {
+                Ok(TrackUpdateReceipt::SubmitAttemptFinished(
+                    self.complete_submit_effect_failed(id, &effect_id, &error)
+                        .await?,
+                ))
+            }
+            TrackInput::RecoverSubmit {
+                effect_id,
+                recovery_token,
+                order_lookup,
+            } => Ok(TrackUpdateReceipt::SubmitRecovery(
+                self.recover_submit_execution(id, &effect_id, &recovery_token, &order_lookup)
+                    .await?,
+            )),
+            TrackInput::CancelOrderSucceeded {
+                effect_id,
+                order_id,
+                receipt,
+            } => Ok(TrackUpdateReceipt::CancelOrderResolved(
+                self.record_cancel_order_success(id, &effect_id, &order_id, &receipt)
+                    .await?,
+            )),
+            TrackInput::CancelAllSucceeded { effect_id } => {
+                self.record_cancel_all_success(id, &effect_id).await?;
+                self.committed_receipt(id).await
+            }
+            TrackInput::EffectSucceeded { effect_id } => {
+                self.complete_effect_succeeded(id, &effect_id).await?;
+                self.committed_receipt(id).await
+            }
+            TrackInput::EffectFailed { effect_id, error } => {
+                self.complete_effect_failed(id, &effect_id, &error).await?;
+                self.committed_receipt(id).await
+            }
+        }
+    }
+
     #[cfg(any(test, feature = "server-test-support"))]
-    pub(crate) fn manager(&self) -> SharedManager {
+    pub async fn handle_market_for_test(
+        &self,
+        id: &str,
+        observation: MarketObservation,
+    ) -> Result<TrackUpdateReceipt> {
+        self.handle(&TrackId::new(id), TrackInput::Market(observation))
+            .await
+    }
+
+    async fn committed_receipt(&self, id: &str) -> Result<TrackUpdateReceipt> {
+        let manager = self.manager.read().await;
+        let state = manager
+            .get_track(id)
+            .ok_or_else(|| anyhow!("track `{id}` not found"))?;
+        Ok(TrackUpdateReceipt::Committed {
+            decision_revision: state.inventory_decision_revision(),
+        })
+    }
+
+    #[cfg(any(test, feature = "server-test-support"))]
+    pub fn manager(&self) -> SharedManager {
         Arc::clone(&self.manager)
     }
 
-    pub(crate) async fn prepare_fresh_session_for_activation(&self, id: &str) -> Result<()> {
+    async fn prepare_fresh_session_for_activation(&self, id: &str) -> Result<()> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let track_id = TrackId::new(id);
         self.session_effect_queue.clear_track(&track_id);
@@ -318,7 +621,7 @@ impl MutationExecutor {
         Ok(())
     }
 
-    pub(crate) async fn fresh_start_track_runtime(
+    async fn fresh_start_track_runtime(
         &self,
         track_id: &TrackId,
         control_state: TrackControlState,
@@ -353,12 +656,12 @@ impl MutationExecutor {
             .record_failure(&TrackId::new(id), operation, error);
     }
 
-    pub(crate) async fn has_track(&self, id: &str) -> bool {
+    pub async fn has_track(&self, id: &str) -> bool {
         let manager = self.manager.read().await;
         manager.get_track(id).is_some()
     }
 
-    pub(crate) async fn track_instruments(&self) -> Vec<TrackInstrument> {
+    pub async fn track_instruments(&self) -> Vec<TrackInstrument> {
         let manager = self.manager.read().await;
         manager
             .list_tracks()
@@ -370,7 +673,7 @@ impl MutationExecutor {
             .collect()
     }
 
-    pub(crate) async fn resolve_track_id(&self, instrument: &Instrument) -> Option<String> {
+    pub async fn resolve_track_id(&self, instrument: &Instrument) -> Option<String> {
         let manager = self.manager.read().await;
         manager
             .resolve_track_id(instrument)
@@ -378,68 +681,8 @@ impl MutationExecutor {
     }
 }
 
-impl TrackServiceSet {
-    pub fn new(
-        manager: TrackManager,
-        mutation_store: Arc<dyn TrackMutationStore>,
-        query_store: Arc<dyn crate::TrackQueryStore>,
-        effect_store: Arc<dyn TrackEffectJournal>,
-        notifications: broadcast::Sender<ApplicationNotification>,
-        account_margin_guard: Arc<dyn AccountCapacityGuard>,
-    ) -> Self {
-        Self::new_with_recovery_anomaly_observer(
-            manager,
-            mutation_store,
-            query_store,
-            effect_store,
-            notifications,
-            account_margin_guard,
-            Arc::new(NoopRecoveryAnomalyObserver),
-        )
-    }
-
-    pub fn new_with_recovery_anomaly_observer(
-        manager: TrackManager,
-        mutation_store: Arc<dyn TrackMutationStore>,
-        query_store: Arc<dyn crate::TrackQueryStore>,
-        effect_store: Arc<dyn TrackEffectJournal>,
-        notifications: broadcast::Sender<ApplicationNotification>,
-        account_margin_guard: Arc<dyn AccountCapacityGuard>,
-        recovery_anomaly_observer: Arc<dyn RecoveryAnomalyObserver>,
-    ) -> Self {
-        let session_effect_queue = SessionEffectQueue::default();
-        let executor = Arc::new(MutationExecutor::new(
-            manager,
-            mutation_store,
-            effect_store,
-            session_effect_queue.clone(),
-            notifications,
-            account_margin_guard,
-            recovery_anomaly_observer,
-        ));
-        let effect_journal_diagnostics = Arc::clone(&executor.effect_journal_diagnostics);
-        let observation = Arc::new(crate::TrackObservationService::from_executor(
-            executor.clone(),
-        ));
-        Self {
-            command: crate::TrackCommandService::from_executor(executor.clone()),
-            observation: observation.as_ref().clone(),
-            effect: crate::TrackEffectService::from_executor(executor.clone()),
-            submit_effect: crate::submit_effect_service::SubmitEffectService::from_executor(
-                executor.clone(),
-            ),
-            runtime_lifecycle: crate::TrackRuntimeLifecycleService::from_executor(
-                executor,
-                query_store,
-                observation,
-            ),
-            session_effect_queue,
-            effect_journal_diagnostics,
-        }
-    }
-}
-impl MutationExecutor {
-    pub(crate) async fn observe_market(
+impl TradingRuntime {
+    async fn observe_market(
         &self,
         id: &str,
         observation: MarketObservation,
@@ -508,7 +751,7 @@ impl MutationExecutor {
         }
     }
 
-    pub async fn command(&self, id: &str, command: TrackCommand) -> Result<TrackTransition> {
+    async fn command(&self, id: &str, command: TrackCommand) -> Result<TrackTransition> {
         let mutation_guard = self.lock_track_mutation(id).await;
         let (previous_state, transition, next_state, control_state_override) = {
             let (previous_state, mut candidate_manager) = {
@@ -550,7 +793,7 @@ impl MutationExecutor {
         Ok(transition)
     }
 
-    pub async fn refresh_market_data_health(&self, id: &str) -> Result<TrackTransition> {
+    async fn refresh_market_data_health(&self, id: &str) -> Result<TrackTransition> {
         self.mutate_track_skip_when_no_work(id, |manager| {
             manager.refresh_market_data_health(&TrackId::new(id))
         })
@@ -558,7 +801,7 @@ impl MutationExecutor {
         .map_err(anyhow::Error::new)
     }
 
-    pub(crate) async fn market_data_health_deadline(
+    pub async fn market_data_health_deadline(
         &self,
         id: &str,
     ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
@@ -567,13 +810,13 @@ impl MutationExecutor {
         manager.market_data_health_deadline(&TrackId::new(id))
     }
 
-    pub(crate) async fn track_live_view(&self, id: &str) -> Result<TrackLiveView> {
+    pub async fn track_live_view(&self, id: &str) -> Result<TrackLiveView> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let manager = self.manager.read().await;
         manager.track_live_view(&TrackId::new(id))
     }
 
-    pub(crate) async fn track_runtime_view(&self, id: &str) -> Result<Option<TrackRuntimeView>> {
+    pub async fn track_runtime_view(&self, id: &str) -> Result<Option<TrackRuntimeView>> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let manager = self.manager.read().await;
         if manager.get_track(id).is_none() {
@@ -582,19 +825,19 @@ impl MutationExecutor {
         manager.track_runtime_view(&TrackId::new(id)).map(Some)
     }
 
-    pub(crate) async fn quote_health_view(&self, id: &str) -> Result<QuoteHealthView> {
+    pub async fn quote_health_view(&self, id: &str) -> Result<QuoteHealthView> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let manager = self.manager.read().await;
         manager.quote_health_view(&TrackId::new(id))
     }
 
-    pub(crate) async fn strategy_target_view(&self, id: &str) -> Result<StrategyTargetView> {
+    pub async fn strategy_target_view(&self, id: &str) -> Result<StrategyTargetView> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let manager = self.manager.read().await;
         manager.strategy_target_view(&TrackId::new(id))
     }
 
-    pub async fn observe_position(
+    async fn observe_position(
         &self,
         id: &str,
         observation: PositionObservation,
@@ -609,7 +852,7 @@ impl MutationExecutor {
         .map_err(anyhow::Error::new)
     }
 
-    pub async fn observe_order_with_absorb_result(
+    async fn observe_order_with_absorb_result(
         &self,
         id: &str,
         observation: OrderObservation,
@@ -652,7 +895,7 @@ impl MutationExecutor {
         Ok(result)
     }
 
-    pub(crate) async fn record_submit_outcome_unknown(
+    async fn record_submit_outcome_unknown(
         &self,
         id: &str,
         effect_id: &str,
@@ -699,7 +942,7 @@ impl MutationExecutor {
         Ok(true)
     }
 
-    pub async fn record_track_pnl(&self, id: &str, record: TrackPnlRecord) -> Result<bool> {
+    async fn record_track_pnl(&self, id: &str, record: TrackPnlRecord) -> Result<bool> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let track_id = TrackId::new(id);
         {
@@ -723,7 +966,7 @@ impl MutationExecutor {
         Ok(inserted)
     }
 
-    pub async fn record_track_events(&self, id: &str, events: &[DomainEvent]) -> Result<()> {
+    async fn record_track_events(&self, id: &str, events: &[DomainEvent]) -> Result<()> {
         if events.is_empty() {
             return Ok(());
         }
@@ -744,10 +987,7 @@ impl MutationExecutor {
         Ok(())
     }
 
-    pub(crate) async fn prepare_exchange_state_sync(
-        &self,
-        id: &str,
-    ) -> Result<ExchangeStateSyncToken> {
+    pub async fn prepare_exchange_state_sync(&self, id: &str) -> Result<ExchangeStateSyncToken> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let track_id = TrackId::new(id);
         let observation_revision = self
@@ -763,7 +1003,7 @@ impl MutationExecutor {
         })
     }
 
-    pub async fn sync_exchange_state(
+    async fn sync_exchange_state(
         &self,
         token: ExchangeStateSyncToken,
         position: PositionObservation,
@@ -778,7 +1018,7 @@ impl MutationExecutor {
         .await
     }
 
-    pub async fn sync_exchange_state_without_reconcile(
+    async fn sync_exchange_state_without_reconcile(
         &self,
         token: ExchangeStateSyncToken,
         position: PositionObservation,
@@ -940,7 +1180,7 @@ impl MutationExecutor {
                 );
         }
 
-        Ok(ExchangeStateSyncOutcome::Applied(transition))
+        Ok(ExchangeStateSyncOutcome::Applied)
     }
 
     async fn handle_follow_up_queue_actions(
@@ -990,11 +1230,7 @@ impl MutationExecutor {
         Ok(())
     }
 
-    pub(crate) async fn record_effects_superseded(
-        &self,
-        id: &str,
-        effect_ids: &[String],
-    ) -> Result<()> {
+    async fn record_effects_superseded(&self, id: &str, effect_ids: &[String]) -> Result<()> {
         self.record_effect_outcomes_best_effort(
             id,
             effect_ids
@@ -1043,7 +1279,7 @@ impl MutationExecutor {
         Ok(())
     }
 
-    pub(crate) async fn complete_submit_execution(
+    async fn complete_submit_execution(
         &self,
         id: &str,
         effect_id: &str,
@@ -1068,7 +1304,7 @@ impl MutationExecutor {
         .map_err(anyhow::Error::new)
     }
 
-    pub(crate) async fn record_submit_failure(
+    async fn record_submit_failure(
         &self,
         id: &str,
         effect_id: &str,
@@ -1088,7 +1324,7 @@ impl MutationExecutor {
         .map_err(anyhow::Error::new)
     }
 
-    pub(crate) async fn complete_submit_effect_failed(
+    async fn complete_submit_effect_failed(
         &self,
         id: &str,
         effect_id: &str,
@@ -1098,7 +1334,7 @@ impl MutationExecutor {
         Ok(SubmitAttemptResult::changed())
     }
 
-    pub async fn record_cancel_order_success(
+    async fn record_cancel_order_success(
         &self,
         id: &str,
         effect_id: &str,
@@ -1137,7 +1373,7 @@ impl MutationExecutor {
         ))
     }
 
-    pub async fn record_cancel_all_success(&self, id: &str, effect_id: &str) -> Result<()> {
+    async fn record_cancel_all_success(&self, id: &str, effect_id: &str) -> Result<()> {
         self.mutate_track_with_effect_status(
             id,
             EffectStatusUpdate::succeeded(effect_id.to_string()),
@@ -1151,7 +1387,7 @@ impl MutationExecutor {
         .map_err(anyhow::Error::new)
     }
 
-    pub async fn complete_effect_succeeded(&self, id: &str, effect_id: &str) -> Result<()> {
+    async fn complete_effect_succeeded(&self, id: &str, effect_id: &str) -> Result<()> {
         self.mutate_track_with_effect_status(
             id,
             EffectStatusUpdate::succeeded(effect_id.to_string()),
@@ -1162,12 +1398,7 @@ impl MutationExecutor {
         .map_err(anyhow::Error::new)
     }
 
-    pub async fn complete_effect_failed(
-        &self,
-        id: &str,
-        effect_id: &str,
-        error: &str,
-    ) -> Result<()> {
+    async fn complete_effect_failed(&self, id: &str, effect_id: &str, error: &str) -> Result<()> {
         self.mutate_track_with_effect_status(
             id,
             effect_status_failed(effect_id, error),
@@ -1178,13 +1409,13 @@ impl MutationExecutor {
         .map_err(anyhow::Error::new)
     }
 
-    pub(crate) async fn recover_submit_execution(
+    async fn recover_submit_execution(
         &self,
         id: &str,
         effect_id: &str,
         recovery_token: &SubmitRecoveryToken,
         order_lookup: &SubmitRecoveryOrderLookup,
-    ) -> Result<SubmitExecutionRecovery> {
+    ) -> Result<SubmitRecoveryReceipt> {
         Ok(
             match self
                 .recover_submit_effect(id, effect_id, recovery_token, order_lookup)
@@ -1194,18 +1425,18 @@ impl MutationExecutor {
                     request,
                     desired_exposure,
                     ..
-                } => SubmitExecutionRecovery::Dispatch {
+                } => SubmitRecoveryReceipt::Dispatch {
                     request,
                     desired_exposure,
                 },
                 SubmitRecoveryResolution::Recovered { .. } => {
-                    SubmitExecutionRecovery::Finished(SubmitAttemptResult::changed())
+                    SubmitRecoveryReceipt::Finished(SubmitAttemptResult::changed())
                 }
                 SubmitRecoveryResolution::Superseded { .. } => {
-                    SubmitExecutionRecovery::Finished(SubmitAttemptResult::changed())
+                    SubmitRecoveryReceipt::Finished(SubmitAttemptResult::changed())
                 }
                 SubmitRecoveryResolution::AwaitExchangeState => {
-                    SubmitExecutionRecovery::Finished(SubmitAttemptResult::unchanged())
+                    SubmitRecoveryReceipt::Finished(SubmitAttemptResult::unchanged())
                 }
             },
         )
@@ -1672,11 +1903,19 @@ pub(crate) mod test_support {
 
     use crate::{
         ApplicationNotification, CommittedTrackWrite, EffectJournalEntry, EffectStatus,
-        EffectStatusUpdate, PersistedTrackEffect, TrackControlState, TrackEffectJournal,
-        TrackMutationStore,
+        EffectStatusUpdate, PersistedTrackEffect, SessionEffectQueue, TrackControlState,
+        TrackEffectJournal, TrackMutationStore,
     };
 
-    use super::{AccountCapacityGuard, TrackServiceSet};
+    use super::{AccountCapacityGuard, TradingRuntime};
+
+    pub(crate) struct TestRuntimeSet {
+        pub(crate) runtime: Arc<TradingRuntime>,
+        pub(crate) submit_effect: crate::submit_effect_service::SubmitEffectService,
+        pub(crate) runtime_lifecycle: crate::TrackRuntimeLifecycleService,
+        pub(crate) session_effect_queue: SessionEffectQueue,
+        pub(crate) effect_journal_diagnostics: Arc<crate::EffectJournalDiagnostics>,
+    }
 
     #[derive(Default)]
     pub(crate) struct NoopGuard;
@@ -2037,16 +2276,27 @@ pub(crate) mod test_support {
     pub(crate) fn track_write_services(
         manager: TrackManager,
         repository: Arc<MemoryRepository>,
-    ) -> (TrackServiceSet, broadcast::Sender<ApplicationNotification>) {
+    ) -> (TestRuntimeSet, broadcast::Sender<ApplicationNotification>) {
         let (notifications, _) = broadcast::channel(16);
-        let services = TrackServiceSet::new(
+        let runtime = Arc::new(TradingRuntime::new(
             manager,
             repository.clone(),
             repository.clone(),
-            repository,
             notifications.clone(),
             Arc::new(NoopGuard),
-        );
+        ));
+        let services = TestRuntimeSet {
+            runtime: Arc::clone(&runtime),
+            submit_effect: crate::submit_effect_service::SubmitEffectService::new(Arc::clone(
+                &runtime,
+            )),
+            runtime_lifecycle: crate::TrackRuntimeLifecycleService::new(
+                Arc::clone(&runtime),
+                repository,
+            ),
+            session_effect_queue: runtime.session_effect_queue(),
+            effect_journal_diagnostics: runtime.effect_journal_diagnostics(),
+        };
         (services, notifications)
     }
 
@@ -2136,7 +2386,7 @@ mod tests {
 
     use super::test_support::{MemoryRepository, NoopGuard, seeded_manager, track_write_services};
     use super::{
-        AccountCapacityGuard, ExchangeStateSyncOutcome, MutationExecutor, RecoveryAnomalyObserver,
+        AccountCapacityGuard, ExchangeStateSyncOutcome, RecoveryAnomalyObserver, TradingRuntime,
         effect_journal_entries_from_enqueued,
     };
     use crate::{CommittedTrackWrite, TrackControlState, TrackMutationStore, TrackQueryStore};
@@ -2263,9 +2513,9 @@ mod tests {
     fn test_executor(
         repository: Arc<MemoryRepository>,
         observer: Arc<RecordingRecoveryAnomalyObserver>,
-    ) -> MutationExecutor {
+    ) -> TradingRuntime {
         let (notifications, _) = broadcast::channel(16);
-        MutationExecutor::new(
+        TradingRuntime::with_session_queue(
             seeded_manager(),
             repository.clone(),
             repository.clone(),
@@ -2366,7 +2616,7 @@ mod tests {
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
         let (notifications, _) = broadcast::channel(16);
         let mut receiver = notifications.subscribe();
-        let executor = MutationExecutor::new(
+        let executor = TradingRuntime::with_session_queue(
             seeded_manager(),
             repository.clone(),
             repository,
@@ -2422,7 +2672,7 @@ mod tests {
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
         let (notifications, _) = broadcast::channel(16);
         let mut receiver = notifications.subscribe();
-        let executor = MutationExecutor::new(
+        let executor = TradingRuntime::with_session_queue(
             seeded_manager(),
             repository.clone(),
             repository.clone(),
@@ -2464,7 +2714,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mutation_executor_exposes_market_data_health_deadline() {
+    async fn trading_runtime_exposes_market_data_health_deadline() {
         let repository = Arc::new(MemoryRepository::default());
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
         let executor = test_executor(repository, observer);
@@ -2500,7 +2750,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(outcome, ExchangeStateSyncOutcome::Applied(_)));
+        assert!(matches!(outcome, ExchangeStateSyncOutcome::Applied));
         let snapshot = executor
             .manager()
             .read()
@@ -2531,7 +2781,7 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), repository);
         let track_id = TrackId::new("btc-core");
         services
-            .observation
+            .runtime
             .observe_market(
                 track_id.as_str(),
                 MarketObservation::ExecutionQuote {
@@ -2577,7 +2827,7 @@ mod tests {
         );
 
         services
-            .observation
+            .runtime
             .observe_market(
                 track_id.as_str(),
                 MarketObservation::ExecutionQuote {
@@ -2590,7 +2840,7 @@ mod tests {
             .await
             .unwrap();
         let token = services
-            .observation
+            .runtime
             .prepare_exchange_state_sync(track_id.as_str())
             .await
             .unwrap();
@@ -2616,7 +2866,7 @@ mod tests {
         ]);
 
         let outcome = services
-            .observation
+            .runtime
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
@@ -2627,7 +2877,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(matches!(outcome, ExchangeStateSyncOutcome::Applied(_)));
+        assert!(matches!(outcome, ExchangeStateSyncOutcome::Applied));
 
         let queue = services.session_effect_queue.snapshot_for_track(&track_id);
         let submitted = queue
@@ -2660,7 +2910,7 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), repository);
         let track_id = TrackId::new("btc-core");
         services
-            .observation
+            .runtime
             .observe_market(
                 track_id.as_str(),
                 MarketObservation::ExecutionQuote {
@@ -2712,7 +2962,7 @@ mod tests {
         );
 
         services
-            .observation
+            .runtime
             .observe_market(
                 track_id.as_str(),
                 MarketObservation::ExecutionQuote {
@@ -2725,7 +2975,7 @@ mod tests {
             .await
             .unwrap();
         let (_, unabsorbed) = services
-            .observation
+            .runtime
             .observe_order_with_absorb_result(
                 track_id.as_str(),
                 OrderObservation {
@@ -2751,7 +3001,7 @@ mod tests {
             "an unrelated order fact must not release submit ownership"
         );
         let (_, absorb_result) = services
-            .observation
+            .runtime
             .observe_order_with_absorb_result(
                 track_id.as_str(),
                 OrderObservation {
@@ -3176,7 +3426,7 @@ mod tests {
         let repository = Arc::new(MemoryRepository::default());
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
         let (notifications, _) = broadcast::channel(16);
-        let executor = MutationExecutor::new(
+        let executor = TradingRuntime::with_session_queue(
             seeded_manager(),
             repository.clone(),
             repository.clone(),
@@ -3299,7 +3549,7 @@ mod tests {
         let (notifications, _) = broadcast::channel(16);
         let mut receiver = notifications.subscribe();
         let queue = SessionEffectQueue::default();
-        let executor = MutationExecutor::new(
+        let executor = TradingRuntime::with_session_queue(
             seeded_manager(),
             repository.clone(),
             repository.clone(),
@@ -3333,7 +3583,7 @@ mod tests {
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
         let (notifications, _) = broadcast::channel(16);
         let mut receiver = notifications.subscribe();
-        let executor = MutationExecutor::new(
+        let executor = TradingRuntime::with_session_queue(
             seeded_manager(),
             repository.clone(),
             repository.clone(),
@@ -3379,7 +3629,7 @@ mod tests {
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
         let guard = Arc::new(MutableCapacityGuard::default());
         let (notifications, _) = broadcast::channel(16);
-        let executor = MutationExecutor::new(
+        let executor = TradingRuntime::with_session_queue(
             seeded_manager(),
             repository.clone(),
             repository,
@@ -3427,7 +3677,7 @@ mod tests {
         let effect_journal = Arc::new(MemoryRepository::default());
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
         let (notifications, _) = broadcast::channel(16);
-        let executor = MutationExecutor::new(
+        let executor = TradingRuntime::with_session_queue(
             manager,
             mutation_store.clone(),
             effect_journal,
@@ -3437,9 +3687,9 @@ mod tests {
             observer,
         );
 
-        let mutation_executor = executor.clone();
+        let trading_runtime = executor.clone();
         let mutation = tokio::spawn(async move {
-            mutation_executor
+            trading_runtime
                 .command("btc-core", poise_engine::command::TrackCommand::Pause)
                 .await
         });
@@ -3498,7 +3748,7 @@ mod tests {
         let effect_journal = Arc::new(MemoryRepository::default());
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
         let (notifications, _) = broadcast::channel(16);
-        let executor = MutationExecutor::new(
+        let executor = TradingRuntime::with_session_queue(
             seeded_manager(),
             mutation_store.clone(),
             effect_journal,
@@ -3508,9 +3758,9 @@ mod tests {
             observer,
         );
 
-        let mutation_executor = executor.clone();
+        let trading_runtime = executor.clone();
         let mutation = tokio::spawn(async move {
-            mutation_executor
+            trading_runtime
                 .observe_market(
                     "btc-core",
                     MarketObservation::ExecutionQuote {
@@ -3548,7 +3798,7 @@ mod tests {
         let effect_journal = Arc::new(MemoryRepository::default());
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
         let (notifications, _) = broadcast::channel(16);
-        let executor = MutationExecutor::new(
+        let executor = TradingRuntime::with_session_queue(
             manager,
             mutation_store.clone(),
             effect_journal,
@@ -3558,9 +3808,9 @@ mod tests {
             observer,
         );
 
-        let mutation_executor = executor.clone();
+        let trading_runtime = executor.clone();
         let mutation = tokio::spawn(async move {
-            mutation_executor
+            trading_runtime
                 .command("btc-core", poise_engine::command::TrackCommand::Pause)
                 .await
         });
@@ -3684,7 +3934,7 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), repository);
 
         let transition = services
-            .observation
+            .runtime
             .observe_market(
                 "btc-core",
                 MarketObservation::ExecutionQuote {
@@ -3710,13 +3960,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn effect_journal_append_failure_warns_without_rolling_back_current_session_work() {
+    async fn effect_journal_append_failure_warns_without_discarding_current_session_work() {
         let repository = Arc::new(MemoryRepository::default());
         repository.fail_effect_journal_appends("journal disk is read-only");
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
 
         let transition = services
-            .observation
+            .runtime
             .observe_market(
                 "btc-core",
                 MarketObservation::ExecutionQuote {
@@ -3763,7 +4013,7 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
 
         services
-            .effect
+            .runtime
             .complete_effect_succeeded("btc-core", "btc-core:batch-1:0")
             .await
             .unwrap();
@@ -3780,7 +4030,7 @@ mod tests {
         );
 
         services
-            .effect
+            .runtime
             .complete_effect_succeeded("btc-core", "btc-core:batch-1:0")
             .await
             .unwrap();
@@ -3898,13 +4148,13 @@ mod tests {
             },
         );
         let token = services
-            .observation
+            .runtime
             .prepare_exchange_state_sync("btc-core")
             .await
             .unwrap();
 
         services
-            .observation
+            .runtime
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
@@ -3963,7 +4213,7 @@ mod tests {
         );
 
         let result = services
-            .observation
+            .runtime
             .prepare_exchange_state_sync(track_id.as_str())
             .await;
 
@@ -3983,7 +4233,7 @@ mod tests {
         let (services, notifications) = track_write_services(seeded_manager(), repository.clone());
         let track_id = TrackId::new("btc-core");
         services
-            .observation
+            .runtime
             .observe_market(
                 track_id.as_str(),
                 MarketObservation::ExecutionQuote {
@@ -3996,7 +4246,7 @@ mod tests {
             .await
             .unwrap();
         let revision_before_sync = services
-            .observation
+            .runtime
             .track_runtime_view(track_id.as_str())
             .await
             .unwrap()
@@ -4024,14 +4274,14 @@ mod tests {
             },
         );
         let token = services
-            .observation
+            .runtime
             .prepare_exchange_state_sync(track_id.as_str())
             .await
             .unwrap();
         let mut receiver = notifications.subscribe();
 
         let outcome = services
-            .observation
+            .runtime
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
@@ -4042,12 +4292,12 @@ mod tests {
             )
             .await
             .unwrap();
-        let ExchangeStateSyncOutcome::Applied(transition) = outcome else {
+        let ExchangeStateSyncOutcome::Applied = outcome else {
             panic!("current exchange snapshot should apply");
         };
 
         let decision_after_sync = services
-            .observation
+            .runtime
             .track_runtime_view(track_id.as_str())
             .await
             .unwrap()
@@ -4058,7 +4308,6 @@ mod tests {
             Some(revision_before_sync + 1),
             "closed cancel follow-up should force reconcile even when no effect is needed"
         );
-        assert!(transition.effects.is_empty());
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(1), receiver.recv())
                 .await
@@ -4115,13 +4364,13 @@ mod tests {
             },
         );
         let token = services
-            .observation
+            .runtime
             .prepare_exchange_state_sync("btc-core")
             .await
             .unwrap();
 
         services
-            .observation
+            .runtime
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
@@ -4237,7 +4486,7 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
 
         services
-            .observation
+            .runtime
             .observe_market(
                 "btc-core",
                 MarketObservation::ExecutionQuote {
@@ -4273,7 +4522,7 @@ mod tests {
         let cancel_effect = repository
             .replace_submit_effect_with_cancel_order(&blocked_submit.effect_id, closed_order_id);
 
-        let manager = services.effect.manager();
+        let manager = services.runtime.manager();
         {
             let mut manager = manager.write().await;
             let mut snapshot = manager
@@ -4291,7 +4540,7 @@ mod tests {
             manager.install_planned_runtime(snapshot);
         }
         let resolution = services
-            .effect
+            .runtime
             .record_cancel_order_success(
                 "btc-core",
                 &cancel_effect.effect_id,
@@ -4340,7 +4589,7 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
 
         services
-            .observation
+            .runtime
             .observe_market(
                 "btc-core",
                 MarketObservation::ExecutionQuote {
@@ -4376,7 +4625,7 @@ mod tests {
         let cancel_effect = repository
             .replace_submit_effect_with_cancel_order(&blocked_submit.effect_id, closed_order_id);
 
-        let manager = services.effect.manager();
+        let manager = services.runtime.manager();
         {
             let mut manager = manager.write().await;
             let mut snapshot = manager
@@ -4396,7 +4645,7 @@ mod tests {
         let outcome_writes_before_cancel = repository.effect_outcome_write_call_count();
 
         let resolution = services
-            .effect
+            .runtime
             .record_cancel_order_success(
                 "btc-core",
                 &cancel_effect.effect_id,

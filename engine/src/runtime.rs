@@ -966,6 +966,14 @@ impl TrackRuntime {
             .any(|binding| binding.is_active() && binding.order_id.as_deref() == Some(order_id))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn first_executor_order_request(&self) -> Option<&crate::ports::OrderRequest> {
+        self.executor_state
+            .bindings
+            .first()
+            .map(|binding| &binding.request)
+    }
+
     pub(crate) fn next_inventory_decision_revision(&self) -> u64 {
         self.inventory_decision_revision
             .checked_add(1)

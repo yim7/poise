@@ -1,4 +1,5 @@
-use poise_application::TrackMutationError;
+use poise_application::{TrackInput, TrackMutationError, TrackUpdateReceipt};
+use poise_core::track::TrackId;
 use poise_engine::observation::{OrderObservation, PositionObservation};
 use poise_engine::ports::{
     ExchangeOrder, ExecutionPort, OrderStatus, Position, UserDataEvent, UserDataPayload,
@@ -21,23 +22,32 @@ pub(super) async fn apply_user_data_event(
     match event.payload {
         UserDataPayload::PositionUpdate(position) => {
             let _ = state
-                .observation_service
-                .observe_position(track_id, position_observation(&position))
+                .runtime
+                .handle(
+                    &TrackId::new(track_id),
+                    TrackInput::Position(position_observation(&position)),
+                )
                 .await
                 .map_err(preserve_track_mutation_error)?;
         }
         UserDataPayload::OrderUpdate(order) => {
-            let (_, absorb_result): (_, poise_engine::executor::OrderUpdateAbsorbResult) = state
-                .observation_service
-                .observe_order_with_absorb_result(track_id, order_observation(&order))
+            let receipt = state
+                .runtime
+                .handle(
+                    &TrackId::new(track_id),
+                    TrackInput::Order(order_observation(&order)),
+                )
                 .await
                 .map_err(preserve_track_mutation_error)?;
+            let TrackUpdateReceipt::OrderObserved { absorb_result } = receipt else {
+                unreachable!("order input must return its update receipt");
+            };
             if absorb_result == poise_engine::executor::OrderUpdateAbsorbResult::Unabsorbed {
                 if is_terminal_no_fill_unknown_order(&order) {
                     return Ok(());
                 }
                 let runtime = state
-                    .observation_service
+                    .runtime
                     .track_runtime_view(track_id)
                     .await
                     .ok()
@@ -73,8 +83,8 @@ pub(super) async fn apply_user_data_event(
         }
         UserDataPayload::TrackPnl(record) => {
             state
-                .observation_service
-                .record_track_pnl(track_id, record)
+                .runtime
+                .handle(&TrackId::new(track_id), TrackInput::TrackPnl(record))
                 .await
                 .map_err(preserve_track_mutation_error)?;
         }
@@ -115,7 +125,6 @@ mod tests {
 
     use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
     use poise_core::track::{Instrument, TrackDefinition, Venue};
-    use poise_engine::execution_plan::TrackEffect;
     use poise_engine::ports::{
         ExchangeOpenOrderSnapshot, ExchangeOrder, ExecutionPort, OrderReceipt, OrderRequest,
         OrderStatus, Position, UserDataEvent, UserDataPayload,
@@ -150,18 +159,10 @@ mod tests {
                 account_monitor,
             );
 
-        let transition = runtime_context
-            .observe_market("btc-core", 95.0)
+        let request = runtime_context
+            .seed_market_order_request("btc-core", 95.0)
             .await
             .unwrap();
-        let request = transition
-            .effects
-            .iter()
-            .find_map(|effect| match effect {
-                TrackEffect::SubmitOrder { request, .. } => Some(request.clone()),
-                _ => None,
-            })
-            .expect("seed market should create a tracked submit order");
         let exchange = SyncCountingExchange::new(Position {
             instrument: request.instrument.clone(),
             qty: request.quantity,

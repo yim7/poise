@@ -604,7 +604,7 @@ async fn push_live_view_update(
     diagnostics: &mut WebSocketDiagnostics,
 ) -> bool {
     let query_started_at = Instant::now();
-    let live_view = match state.observation_service.track_live_view(track_id).await {
+    let live_view = match state.runtime.track_live_view(track_id).await {
         Ok(live_view) => {
             diagnostics.record_live_query(query_started_at.elapsed());
             live_view
@@ -802,7 +802,7 @@ mod tests {
     };
     use poise_application::{
         AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
-        StoredAccountMonitorState, TrackCommandService, TrackQueryService,
+        StoredAccountMonitorState, TrackInput, TrackQueryService, TradingRuntime,
     };
 
     use super::{WebSocketDiagnostics, WebSocketDiagnosticsSnapshot, ws_handler_with_test_state};
@@ -810,7 +810,7 @@ mod tests {
     #[derive(Clone)]
     struct WebSocketTestContext {
         websocket_state: WebSocketState,
-        command_service: Arc<TrackCommandService>,
+        runtime: Arc<TradingRuntime>,
         notifications: tokio::sync::broadcast::Sender<ApplicationNotification>,
     }
 
@@ -950,7 +950,7 @@ mod tests {
         let query_service = Arc::new(TrackQueryService::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
             test_track_definition_registry("btc-core"),
-            Arc::clone(&services.observation_service),
+            Arc::clone(&services.runtime),
         ));
         let websocket_state = build_websocket_state(
             &services,
@@ -971,7 +971,7 @@ mod tests {
             format!("ws://{address}/ws"),
             WebSocketTestContext {
                 websocket_state,
-                command_service: services.command_service.clone(),
+                runtime: services.runtime.clone(),
                 notifications: services.notifications.clone(),
             },
         )
@@ -998,7 +998,7 @@ mod tests {
         let query_service = Arc::new(TrackQueryService::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
             test_track_definition_registry("btc-core"),
-            Arc::clone(&services.observation_service),
+            Arc::clone(&services.runtime),
         ));
         let websocket_state = build_websocket_state(
             &services,
@@ -1019,7 +1019,7 @@ mod tests {
             format!("ws://{address}/ws"),
             WebSocketTestContext {
                 websocket_state,
-                command_service: services.command_service.clone(),
+                runtime: services.runtime.clone(),
                 notifications: services.notifications.clone(),
             },
         )
@@ -1051,7 +1051,7 @@ mod tests {
         let query_service = Arc::new(TrackQueryService::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
             test_track_definition_registry("btc-core"),
-            Arc::clone(&services.observation_service),
+            Arc::clone(&services.runtime),
         ));
         let mut websocket_state = build_websocket_state(
             &services,
@@ -1073,7 +1073,7 @@ mod tests {
             format!("ws://{address}/ws"),
             WebSocketTestContext {
                 websocket_state,
-                command_service: services.command_service.clone(),
+                runtime: services.runtime.clone(),
                 notifications: services.notifications.clone(),
             },
             diagnostics_rx,
@@ -1233,8 +1233,11 @@ mod tests {
         let (_, mut stream) = client.split();
 
         state
-            .command_service
-            .command("btc-core", TrackCommand::Pause)
+            .runtime
+            .handle(
+                &TrackId::new("btc-core"),
+                TrackInput::Command(TrackCommand::Pause),
+            )
             .await
             .unwrap();
 
@@ -1287,8 +1290,15 @@ mod tests {
         }
         assert!(state.notifications.receiver_count() > 0);
         effect_worker_state
-            .effect_service
-            .complete_effect_failed("btc-core", "effect-1", "injected cancel failure")
+            .reconcile
+            .runtime
+            .handle(
+                &TrackId::new("btc-core"),
+                TrackInput::EffectFailed {
+                    effect_id: "effect-1".to_string(),
+                    error: "injected cancel failure".to_string(),
+                },
+            )
             .await
             .unwrap();
 

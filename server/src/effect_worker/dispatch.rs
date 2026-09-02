@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use poise_application::{
     CancelQueueAction, CancelReceiptResolution, SessionEffectOutcome, SessionQueueAction,
-    SessionTrackEffect,
+    SessionTrackEffect, TrackInput,
 };
 use poise_core::track::{Instrument, TrackId};
 use poise_engine::execution_plan::TrackEffect;
@@ -135,9 +135,16 @@ async fn record_superseded_effects(
 ) -> Result<()> {
     worker
         .state
-        .effect_service
-        .record_effects_superseded(track_id.as_str(), effect_ids)
+        .reconcile
+        .runtime
+        .handle(
+            track_id,
+            TrackInput::EffectsSuperseded {
+                effect_ids: effect_ids.to_vec(),
+            },
+        )
         .await
+        .map(|_| ())
 }
 
 async fn trigger_queue_reconcile(

@@ -10,7 +10,9 @@ use poise_engine::ports::{OrderReceipt, OrderRequest};
 #[cfg(any(test, feature = "server-test-support"))]
 use tokio::sync::RwLock;
 
-use crate::mutation_executor::MutationExecutor;
+use crate::trading_runtime::{
+    SubmitRecoveryReceipt, TrackInput, TrackUpdateReceipt, TradingRuntime,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubmitAttemptResult {
@@ -51,7 +53,7 @@ pub enum SubmitAttempt {
 /// }
 /// ```
 pub struct SubmitDispatch {
-    executor: Arc<MutationExecutor>,
+    runtime: Arc<TradingRuntime>,
     track_id: TrackId,
     effect_id: String,
     request: OrderRequest,
@@ -60,14 +62,14 @@ pub struct SubmitDispatch {
 
 impl SubmitDispatch {
     fn new(
-        executor: Arc<MutationExecutor>,
+        runtime: Arc<TradingRuntime>,
         track_id: TrackId,
         effect_id: String,
         request: OrderRequest,
         desired_exposure: poise_core::types::Exposure,
     ) -> Self {
         Self {
-            executor,
+            runtime,
             track_id,
             effect_id,
             request,
@@ -84,27 +86,30 @@ impl SubmitDispatch {
         receipt: &OrderReceipt,
     ) -> std::result::Result<SubmitAttemptResult, SubmitReceiptWritebackFailure> {
         let SubmitDispatch {
-            executor,
+            runtime,
             track_id,
             effect_id,
             request,
             desired_exposure,
         } = self;
-        match executor
-            .complete_submit_execution(
-                track_id.as_str(),
-                &effect_id,
-                &request,
-                desired_exposure.clone(),
-                receipt,
+        match runtime
+            .handle(
+                &track_id,
+                TrackInput::SubmitCompleted {
+                    effect_id: effect_id.clone(),
+                    request: request.clone(),
+                    desired_exposure: desired_exposure.clone(),
+                    receipt: receipt.clone(),
+                },
             )
             .await
         {
-            Ok(result) => Ok(result),
+            Ok(TrackUpdateReceipt::SubmitAttemptFinished(result)) => Ok(result),
+            Ok(_) => unreachable!("submit completion must return a submit attempt receipt"),
             Err(error) => Err(SubmitReceiptWritebackFailure {
                 error,
                 dispatch: SubmitDispatch {
-                    executor,
+                    runtime,
                     track_id,
                     effect_id,
                     request,
@@ -115,20 +120,38 @@ impl SubmitDispatch {
     }
 
     pub async fn record_failure(self, error: &str) -> Result<SubmitAttemptResult> {
-        self.executor
-            .record_submit_failure(
-                self.track_id.as_str(),
-                &self.effect_id,
-                &self.request.client_order_id,
-                error,
+        match self
+            .runtime
+            .handle(
+                &self.track_id,
+                TrackInput::SubmitFailed {
+                    effect_id: self.effect_id,
+                    client_order_id: self.request.client_order_id,
+                    error: error.to_string(),
+                },
             )
-            .await
+            .await?
+        {
+            TrackUpdateReceipt::SubmitAttemptFinished(result) => Ok(result),
+            _ => unreachable!("submit failure must return a submit attempt receipt"),
+        }
     }
 
     pub async fn record_completion_failure(self, error: &str) -> Result<SubmitAttemptResult> {
-        self.executor
-            .complete_submit_effect_failed(self.track_id.as_str(), &self.effect_id, error)
-            .await
+        match self
+            .runtime
+            .handle(
+                &self.track_id,
+                TrackInput::SubmitEffectFailed {
+                    effect_id: self.effect_id,
+                    error: error.to_string(),
+                },
+            )
+            .await?
+        {
+            TrackUpdateReceipt::SubmitAttemptFinished(result) => Ok(result),
+            _ => unreachable!("submit effect failure must return a submit attempt receipt"),
+        }
     }
 }
 
@@ -143,23 +166,14 @@ impl SubmitReceiptWritebackFailure {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum SubmitExecutionRecovery {
-    Dispatch {
-        request: OrderRequest,
-        desired_exposure: poise_core::types::Exposure,
-    },
-    Finished(SubmitAttemptResult),
-}
-
 #[derive(Clone)]
 pub struct SubmitEffectService {
-    executor: Arc<MutationExecutor>,
+    runtime: Arc<TradingRuntime>,
 }
 
 impl SubmitEffectService {
-    pub(crate) fn from_executor(executor: Arc<MutationExecutor>) -> Self {
-        Self { executor }
+    pub fn new(runtime: Arc<TradingRuntime>) -> Self {
+        Self { runtime }
     }
 
     pub async fn recover_or_dispatch(
@@ -170,12 +184,22 @@ impl SubmitEffectService {
         order_lookup: SubmitRecoveryOrderLookup,
     ) -> Result<SubmitAttempt> {
         let recovery = self
-            .executor
-            .recover_submit_execution(id, effect_id, &recovery_token, &order_lookup)
+            .runtime
+            .handle(
+                &TrackId::new(id),
+                TrackInput::RecoverSubmit {
+                    effect_id: effect_id.to_string(),
+                    recovery_token,
+                    order_lookup,
+                },
+            )
             .await?;
+        let TrackUpdateReceipt::SubmitRecovery(recovery) = recovery else {
+            unreachable!("submit recovery must return a recovery receipt");
+        };
 
         Ok(submit_attempt_from_recovery(
-            Arc::clone(&self.executor),
+            Arc::clone(&self.runtime),
             id,
             effect_id,
             recovery,
@@ -189,40 +213,47 @@ impl SubmitEffectService {
         client_order_id: &str,
         initial_snapshot_confirmed: bool,
     ) -> Result<bool> {
-        self.executor
-            .record_submit_outcome_unknown(
-                id,
-                effect_id,
-                client_order_id,
-                initial_snapshot_confirmed,
+        match self
+            .runtime
+            .handle(
+                &TrackId::new(id),
+                TrackInput::SubmitOutcomeUnknown {
+                    effect_id: effect_id.to_string(),
+                    client_order_id: client_order_id.to_string(),
+                    initial_snapshot_confirmed,
+                },
             )
-            .await
+            .await?
+        {
+            TrackUpdateReceipt::SubmitOutcomeUnknownRecorded { changed } => Ok(changed),
+            _ => unreachable!("unknown submit outcome must return its update receipt"),
+        }
     }
 
     #[cfg(any(test, feature = "server-test-support"))]
     pub fn manager(&self) -> Arc<RwLock<TrackManager>> {
-        self.executor.manager()
+        self.runtime.manager()
     }
 }
 
 fn submit_attempt_from_recovery(
-    executor: Arc<MutationExecutor>,
+    runtime: Arc<TradingRuntime>,
     id: &str,
     effect_id: &str,
-    recovery: SubmitExecutionRecovery,
+    recovery: SubmitRecoveryReceipt,
 ) -> SubmitAttempt {
     match recovery {
-        SubmitExecutionRecovery::Dispatch {
+        SubmitRecoveryReceipt::Dispatch {
             request,
             desired_exposure,
         } => SubmitAttempt::Dispatch(SubmitDispatch::new(
-            executor,
+            runtime,
             TrackId::new(id),
             effect_id.to_string(),
             request,
             desired_exposure,
         )),
-        SubmitExecutionRecovery::Finished(result) => SubmitAttempt::Finished(result),
+        SubmitRecoveryReceipt::Finished(result) => SubmitAttempt::Finished(result),
     }
 }
 
@@ -231,7 +262,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use crate::mutation_executor::test_support::{
+    use crate::trading_runtime::test_support::{
         MemoryRepository, manager_with_pending_submit, seeded_manager, track_write_services,
     };
     use crate::{ApplicationNotification, EffectStatus};
@@ -246,7 +277,7 @@ mod tests {
     use tokio::time::timeout;
 
     use super::{
-        SubmitDispatch, SubmitEffectService, SubmitExecutionRecovery, SubmitRecoveryOrderLookup,
+        SubmitDispatch, SubmitEffectService, SubmitRecoveryOrderLookup, SubmitRecoveryReceipt,
         submit_attempt_from_recovery,
     };
 
@@ -274,7 +305,7 @@ mod tests {
         let repository = Arc::new(MemoryRepository::default());
         let service = test_service(repository.clone());
         let dispatch = SubmitDispatch::new(
-            service.0.executor.clone(),
+            service.0.runtime.clone(),
             TrackId::new("btc-core"),
             "btc-core:batch-1:0".into(),
             OrderRequest {
@@ -305,7 +336,7 @@ mod tests {
         let repository = Arc::new(MemoryRepository::default());
         let service = test_service(repository);
         let dispatch = SubmitDispatch::new(
-            service.0.executor.clone(),
+            service.0.runtime.clone(),
             TrackId::new("missing-track"),
             "btc-core:batch-1:0".into(),
             OrderRequest {
@@ -358,10 +389,10 @@ mod tests {
         };
 
         let attempt = submit_attempt_from_recovery(
-            services.submit_effect.executor.clone(),
+            services.submit_effect.runtime.clone(),
             "btc-core",
             "btc-core:batch-1:0",
-            SubmitExecutionRecovery::Dispatch {
+            SubmitRecoveryReceipt::Dispatch {
                 request: current_request.clone(),
                 desired_exposure: Exposure(-4.0),
             },
@@ -385,8 +416,8 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
 
         services
-            .observation
-            .observe_market(
+            .runtime
+            .handle_market_for_test(
                 "btc-core",
                 MarketObservation::ExecutionQuote {
                     execution_quote: ExecutionQuote {
@@ -462,8 +493,8 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
 
         services
-            .observation
-            .observe_market(
+            .runtime
+            .handle_market_for_test(
                 "btc-core",
                 MarketObservation::ExecutionQuote {
                     execution_quote: ExecutionQuote {
@@ -500,8 +531,8 @@ mod tests {
         };
 
         services
-            .observation
-            .observe_market(
+            .runtime
+            .handle_market_for_test(
                 "btc-core",
                 MarketObservation::ExecutionQuote {
                     execution_quote: ExecutionQuote {
@@ -560,8 +591,8 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), repository.clone());
 
         services
-            .observation
-            .observe_market(
+            .runtime
+            .handle_market_for_test(
                 "btc-core",
                 MarketObservation::ExecutionQuote {
                     execution_quote: ExecutionQuote {
@@ -578,8 +609,8 @@ mod tests {
             .expect("test requires a submit effect");
 
         services
-            .observation
-            .observe_market(
+            .runtime
+            .handle_market_for_test(
                 "btc-core",
                 MarketObservation::ExecutionQuote {
                     execution_quote: ExecutionQuote {

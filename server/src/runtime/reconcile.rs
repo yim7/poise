@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use poise_application::{
-    ExchangeStateSyncOutcome, RecoveryAnomalyObserver, TrackInstrument, TrackMutationError,
-    TrackRecoveryIssue,
+    ExchangeStateSyncOutcome, RecoveryAnomalyObserver, TrackInput, TrackInstrument,
+    TrackMutationError, TrackRecoveryIssue, TrackUpdateReceipt,
 };
 use poise_core::track::TrackId;
 use poise_engine::manager::ExchangeSyncMode;
@@ -99,11 +99,7 @@ pub(super) fn spawn_recovery_task(
     let audit_interval = runtime.audit_interval;
 
     tokio::spawn(async move {
-        let instruments = state
-            .reconcile
-            .observation_service
-            .track_instruments()
-            .await;
+        let instruments = state.reconcile.runtime.track_instruments().await;
         state.runtime_health.register_track_scopes(
             RuntimeHealthComponent::Recovery,
             instruments.iter().map(|track| track.id.clone()).collect(),
@@ -241,7 +237,7 @@ pub(super) async fn sync_exchange_state_from_exchange(
     let _reconcile_guard = state.reconcile_guards.lock(track_id).await;
     for attempt in 1..=EXCHANGE_STATE_SNAPSHOT_MAX_ATTEMPTS {
         let snapshot_token = state
-            .observation_service
+            .runtime
             .prepare_exchange_state_sync(track_id)
             .await
             .map_err(preserve_track_mutation_error)?;
@@ -267,7 +263,7 @@ pub(super) async fn sync_exchange_state_from_exchange(
             && !open_orders.is_empty()
         {
             let runtime = state
-                .observation_service
+                .runtime
                 .track_runtime_view(track_id)
                 .await
                 .ok()
@@ -299,30 +295,25 @@ pub(super) async fn sync_exchange_state_from_exchange(
                 .collect(),
         );
 
-        let outcome = if matches!(mode, ExchangeSyncMode::RecoverAndReconcile) {
-            state
-                .observation_service
-                .sync_exchange_state(
-                    snapshot_token,
-                    exchange_state::position_observation(&position),
+        let receipt = state
+            .runtime
+            .handle(
+                &TrackId::new(track_id),
+                TrackInput::SyncExchangeState {
+                    token: snapshot_token,
+                    position: exchange_state::position_observation(&position),
                     open_orders,
-                )
-                .await
-                .map_err(preserve_track_mutation_error)?
-        } else {
-            state
-                .observation_service
-                .sync_exchange_state_without_reconcile(
-                    snapshot_token,
-                    exchange_state::position_observation(&position),
-                    open_orders,
-                )
-                .await
-                .map_err(preserve_track_mutation_error)?
+                    reconcile: matches!(mode, ExchangeSyncMode::RecoverAndReconcile),
+                },
+            )
+            .await
+            .map_err(preserve_track_mutation_error)?;
+        let TrackUpdateReceipt::ExchangeStateSynced(outcome) = receipt else {
+            unreachable!("exchange state input must return its update receipt");
         };
 
         match outcome {
-            ExchangeStateSyncOutcome::Applied(_) => {
+            ExchangeStateSyncOutcome::Applied => {
                 if !state
                     .session_effect_queue
                     .has_unresolved_submit_outcome_for_track(&TrackId::new(track_id))
@@ -531,10 +522,9 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use poise_application::{TrackEffectJournal, TrackMutationStore, TrackQueryStore};
+    use poise_application::{TrackEffectJournal, TrackInput, TrackMutationStore, TrackQueryStore};
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_engine::command::TrackCommand;
-    use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::{BindingStatus, RecoveryAnomaly};
     use poise_engine::manager::ExchangeSyncMode;
     use poise_engine::ports::{
@@ -840,21 +830,16 @@ mod tests {
             repository as Arc<dyn TrackEffectJournal>,
             account_monitor,
         );
-        let transition = runtime_context
-            .observe_market("btc-core", 95.0)
+        let tracked_request = runtime_context
+            .seed_market_order_request("btc-core", 95.0)
             .await
             .unwrap();
-        let tracked_request = transition
-            .effects
-            .iter()
-            .find_map(|effect| match effect {
-                TrackEffect::SubmitOrder { request, .. } => Some(request.clone()),
-                _ => None,
-            })
-            .expect("seed market should create a tracked submit order");
         services
-            .command_service
-            .command("btc-core", TrackCommand::Pause)
+            .runtime
+            .handle(
+                &TrackId::new("btc-core"),
+                TrackInput::Command(TrackCommand::Pause),
+            )
             .await
             .unwrap();
         let working_order = ExchangeOrder {
@@ -1328,18 +1313,10 @@ mod tests {
                 account_monitor,
             );
 
-        let transition = runtime_context
-            .observe_market("btc-core", 95.0)
+        let tracked_request = runtime_context
+            .seed_market_order_request("btc-core", 95.0)
             .await
             .unwrap();
-        let tracked_request = transition
-            .effects
-            .iter()
-            .find_map(|effect| match effect {
-                TrackEffect::SubmitOrder { request, .. } => Some(request.clone()),
-                _ => None,
-            })
-            .expect("seed market should create a tracked submit order");
 
         {
             let manager_handle = services.runtime_lifecycle_service.manager();

@@ -6,8 +6,8 @@ use poise_core::track::{TrackDefinition, TrackId};
 use poise_engine::runtime::TrackRuntimeView;
 
 use crate::{
-    TrackDefinitionRegistry, TrackListReadModel, TrackObservationService, TrackQueryStore,
-    TrackReadModel, track_read_source::TrackReadSource,
+    TrackDefinitionRegistry, TrackListReadModel, TrackQueryStore, TrackReadModel, TradingRuntime,
+    track_read_source::TrackReadSource,
 };
 
 pub(crate) const DETAIL_EVENTS_LIMIT: usize = 20;
@@ -17,19 +17,19 @@ pub(crate) const DETAIL_EFFECTS_LIMIT: usize = 20;
 pub(crate) struct TrackReadSourceLoader {
     repository: Arc<dyn TrackQueryStore>,
     track_definition_registry: Arc<TrackDefinitionRegistry>,
-    observation: Arc<TrackObservationService>,
+    runtime: Arc<TradingRuntime>,
 }
 
 impl TrackReadSourceLoader {
     pub(crate) fn new(
         repository: Arc<dyn TrackQueryStore>,
         track_definition_registry: Arc<TrackDefinitionRegistry>,
-        observation: Arc<TrackObservationService>,
+        runtime: Arc<TradingRuntime>,
     ) -> Self {
         Self {
             repository,
             track_definition_registry,
-            observation,
+            runtime,
         }
     }
 
@@ -37,11 +37,7 @@ impl TrackReadSourceLoader {
         let mut read_models = Vec::new();
         for definition in self.track_definition_registry.iter() {
             let track_id = definition.track_id().clone();
-            let Some(runtime) = self
-                .observation
-                .track_runtime_view(track_id.as_str())
-                .await?
-            else {
+            let Some(runtime) = self.runtime.track_runtime_view(track_id.as_str()).await? else {
                 continue;
             };
             let definition = self.definition_for(&track_id)?.clone();
@@ -75,11 +71,7 @@ impl TrackReadSourceLoader {
         &self,
         track_id: &TrackId,
     ) -> Result<Option<TrackReadSource>> {
-        let Some(runtime) = self
-            .observation
-            .track_runtime_view(track_id.as_str())
-            .await?
-        else {
+        let Some(runtime) = self.runtime.track_runtime_view(track_id.as_str()).await? else {
             return Ok(None);
         };
 

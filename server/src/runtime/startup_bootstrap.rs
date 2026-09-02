@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{DateTime, Utc};
-use poise_core::track::Instrument;
+use poise_application::TrackInput;
+use poise_core::track::{Instrument, TrackId};
 use poise_core::types::{ExchangeRules, QuantityKind};
 use poise_engine::ports::{AccountCapacitySnapshot, Position, UserDataEvent};
 use poise_engine::runtime::FreshSessionExternalInputs;
@@ -208,10 +209,10 @@ async fn rebuild_fresh_sessions(
         runtime
             .state
             .reconcile
-            .observation_service
-            .observe_position(
-                seed.track_id(),
-                exchange_state::position_observation(&preflight.position),
+            .runtime
+            .handle(
+                &TrackId::new(seed.track_id()),
+                TrackInput::Position(exchange_state::position_observation(&preflight.position)),
             )
             .await?;
         account_capacity_snapshots.insert(instrument, preflight.account_capacity_snapshot);
@@ -431,7 +432,7 @@ async fn collect_startup_replay_events(
         let Some(track_id) = runtime
             .state
             .reconcile
-            .observation_service
+            .runtime
             .resolve_track_id(&instrument)
             .await
         else {
@@ -933,7 +934,7 @@ mod tests {
         );
 
         let snapshot = services
-            .observation_service
+            .runtime
             .manager()
             .read()
             .await
@@ -1000,7 +1001,7 @@ mod tests {
             account_margin_guard,
         );
         {
-            let manager_handle = services.observation_service.manager();
+            let manager_handle = services.runtime.manager();
             let mut manager = manager_handle.write().await;
             let mut snapshot = manager.get_track("btc-core").cloned().unwrap();
             snapshot.set_runtime_state(poise_engine::runtime::TrackState::Terminated {
@@ -1053,7 +1054,7 @@ mod tests {
             .unwrap();
 
         let snapshot = services
-            .observation_service
+            .runtime
             .manager()
             .read()
             .await
@@ -1145,7 +1146,7 @@ mod tests {
         assert_eq!(exchange.get_open_orders_calls.load(Ordering::SeqCst), 2);
         assert_eq!(exchange.get_position_calls.load(Ordering::SeqCst), 1);
         let snapshot = services
-            .observation_service
+            .runtime
             .manager()
             .read()
             .await
@@ -1287,7 +1288,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
                 let snapshot = services
-                    .observation_service
+                    .runtime
                     .manager()
                     .read()
                     .await

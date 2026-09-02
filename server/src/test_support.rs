@@ -4,9 +4,8 @@ use anyhow::Result;
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountCapacityGuard, AccountMonitor, ApplicationNotification, EffectJournalDiagnostics,
-    TrackCommandService, TrackDefinitionRegistry, TrackEffectJournal, TrackEffectService,
-    TrackMutationStore, TrackObservationService, TrackQueryStore, TrackRuntimeLifecycleService,
-    TrackServiceSet,
+    TrackDefinitionRegistry, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
+    TrackRuntimeLifecycleService, TradingRuntime,
 };
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
@@ -21,7 +20,6 @@ use poise_engine::ports::{
     OrderReceipt, OrderRequest, OrderStatus, Position, RecentTrackPnlRecords, UserDataEvent,
 };
 use poise_engine::price_gate::SubmitPurpose;
-use poise_engine::transition::TrackTransition;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
@@ -37,9 +35,7 @@ use crate::submit_preflight::SubmitPreflight;
 
 #[derive(Clone)]
 pub(crate) struct TestApplicationServices {
-    pub(crate) command_service: Arc<TrackCommandService>,
-    pub(crate) observation_service: Arc<TrackObservationService>,
-    pub(crate) effect_service: Arc<TrackEffectService>,
+    pub(crate) runtime: Arc<TradingRuntime>,
     pub(crate) submit_effect_service: Arc<SubmitEffectService>,
     pub(crate) runtime_lifecycle_service: Arc<TrackRuntimeLifecycleService>,
     pub(crate) session_effect_queue: poise_application::SessionEffectQueue,
@@ -55,7 +51,7 @@ pub(crate) struct RuntimeTestContext {
     pub(crate) notifications: broadcast::Sender<ApplicationNotification>,
     pub(crate) exchange_freshness: Arc<ExchangeFreshness>,
     pub(crate) submit_preflight: Arc<SubmitPreflight>,
-    observation_service: Arc<TrackObservationService>,
+    runtime: Arc<TradingRuntime>,
 }
 
 impl RuntimeTestContext {
@@ -64,24 +60,24 @@ impl RuntimeTestContext {
     }
 
     pub(crate) async fn track_instruments(&self) -> Vec<poise_application::TrackInstrument> {
-        self.observation_service.track_instruments().await
+        self.runtime.track_instruments().await
     }
 
     pub(crate) async fn observe_market(
         &self,
         id: &str,
         reference_price: f64,
-    ) -> Result<TrackTransition, anyhow::Error> {
-        self.observation_service
-            .observe_market(
+    ) -> Result<(), anyhow::Error> {
+        self.runtime
+            .handle_market_for_test(
                 id,
                 MarketObservation::MarkPrice {
                     mark_price: reference_price,
                 },
             )
             .await?;
-        self.observation_service
-            .observe_market(
+        self.runtime
+            .handle_market_for_test(
                 id,
                 MarketObservation::ExecutionQuote {
                     execution_quote: ExecutionQuote {
@@ -90,7 +86,24 @@ impl RuntimeTestContext {
                     },
                 },
             )
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn seed_market_order_request(
+        &self,
+        id: &str,
+        reference_price: f64,
+    ) -> Result<OrderRequest, anyhow::Error> {
+        self.observe_market(id, reference_price).await?;
+        self.runtime
+            .manager()
+            .read()
             .await
+            .get_track(id)
+            .and_then(|state| state.first_executor_order_request())
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("seed market did not create an order request"))
     }
 }
 
@@ -136,25 +149,25 @@ pub(crate) fn build_test_application_services_with_recovery_dirty_state(
     account_margin_guard: Arc<AccountMarginGuardStore>,
     recovery_dirty_state: Arc<RecoveryDirtyState>,
 ) -> TestApplicationServices {
-    let services = TrackServiceSet::new_with_recovery_anomaly_observer(
+    let runtime = Arc::new(TradingRuntime::new_with_recovery_anomaly_observer(
         manager,
         mutation_store,
-        query_store,
         effect_store,
         notifications.clone(),
         account_margin_guard.clone() as Arc<dyn AccountCapacityGuard>,
         Arc::new(RecoveryAnomalyDirtyObserver::new(
             recovery_dirty_state.clone(),
         )),
-    );
+    ));
     TestApplicationServices {
-        command_service: Arc::new(services.command),
-        observation_service: Arc::new(services.observation),
-        effect_service: Arc::new(services.effect),
-        submit_effect_service: Arc::new(services.submit_effect),
-        runtime_lifecycle_service: Arc::new(services.runtime_lifecycle),
-        session_effect_queue: services.session_effect_queue,
-        effect_journal_diagnostics: services.effect_journal_diagnostics,
+        runtime: Arc::clone(&runtime),
+        submit_effect_service: Arc::new(SubmitEffectService::new(Arc::clone(&runtime))),
+        runtime_lifecycle_service: Arc::new(TrackRuntimeLifecycleService::new(
+            Arc::clone(&runtime),
+            query_store,
+        )),
+        session_effect_queue: runtime.session_effect_queue(),
+        effect_journal_diagnostics: runtime.effect_journal_diagnostics(),
         notifications,
         account_margin_guard,
         recovery_dirty_state,
@@ -454,7 +467,7 @@ pub(crate) fn build_http_state(
     account_projector: Arc<crate::account_projector::AccountProjector>,
 ) -> crate::server_context::HttpState {
     crate::assembly::build_http_state(
-        Arc::clone(&services.command_service),
+        Arc::clone(&services.runtime),
         query_service,
         debug_query_service,
         projector,
@@ -482,7 +495,7 @@ pub(crate) fn build_websocket_state(
     crate::assembly::build_websocket_state(
         services.notifications.clone(),
         broadcast::channel(1024).0,
-        Arc::clone(&services.observation_service),
+        Arc::clone(&services.runtime),
         query_service,
         projector,
         account_monitor,
@@ -506,7 +519,7 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
         query_store,
     ));
     let reconcile = crate::assembly::build_reconcile_state(
-        Arc::clone(&services.observation_service),
+        Arc::clone(&services.runtime),
         Arc::clone(&services.runtime_lifecycle_service),
         services.session_effect_queue.clone(),
         exchange_freshness.clone(),
@@ -526,7 +539,6 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
     );
     let effect_worker_state = crate::assembly::build_effect_worker_state(
         reconcile,
-        Arc::clone(&services.effect_service),
         Arc::clone(&services.submit_effect_service),
         Arc::clone(&services.account_margin_guard),
         services.session_effect_queue.clone(),
@@ -536,7 +548,7 @@ pub(crate) fn build_runtime_and_effect_worker_test_contexts(
         runtime_state,
         effect_worker_state,
         services.notifications.clone(),
-        Arc::clone(&services.observation_service),
+        Arc::clone(&services.runtime),
     )
 }
 
@@ -544,7 +556,7 @@ pub(crate) fn build_test_contexts_from_runtime_states(
     runtime_state: RuntimeState,
     effect_worker_state: EffectWorkerState,
     notifications: broadcast::Sender<ApplicationNotification>,
-    observation_service: Arc<TrackObservationService>,
+    runtime: Arc<TradingRuntime>,
 ) -> (RuntimeTestContext, EffectWorkerTestContext) {
     debug_assert!(Arc::ptr_eq(
         &runtime_state.reconcile.exchange_freshness,
@@ -568,7 +580,7 @@ pub(crate) fn build_test_contexts_from_runtime_states(
             notifications,
             exchange_freshness: Arc::clone(&exchange_freshness),
             submit_preflight: Arc::clone(&submit_preflight),
-            observation_service: Arc::clone(&observation_service),
+            runtime: Arc::clone(&runtime),
         },
         EffectWorkerTestContext {
             effect_worker_state,
@@ -587,7 +599,7 @@ pub(crate) fn build_effect_worker_test_context(
     let submit_preflight = Arc::new(SubmitPreflight::new());
     let runtime_health = Arc::new(RuntimeHealth::new());
     let reconcile = crate::assembly::build_reconcile_state(
-        Arc::clone(&services.observation_service),
+        Arc::clone(&services.runtime),
         Arc::clone(&services.runtime_lifecycle_service),
         services.session_effect_queue.clone(),
         exchange_freshness.clone(),
@@ -598,7 +610,6 @@ pub(crate) fn build_effect_worker_test_context(
     EffectWorkerTestContext {
         effect_worker_state: crate::assembly::build_effect_worker_state(
             reconcile,
-            Arc::clone(&services.effect_service),
             Arc::clone(&services.submit_effect_service),
             Arc::clone(&services.account_margin_guard),
             services.session_effect_queue.clone(),

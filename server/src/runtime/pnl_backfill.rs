@@ -2,6 +2,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use poise_application::{TrackInput, TrackUpdateReceipt};
+use poise_core::track::TrackId;
 use poise_engine::ports::{AccountPort, RecentTrackPnlRecords};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -173,7 +175,7 @@ pub(super) async fn backfill_recent_pnl_once(
     state: &ReconcileState,
     account: &dyn AccountPort,
 ) -> PnlBackfillSummary {
-    let tracks = state.observation_service.track_instruments().await;
+    let tracks = state.runtime.track_instruments().await;
     let mut summary = PnlBackfillSummary::default();
 
     for track in tracks {
@@ -213,10 +215,7 @@ pub(super) async fn backfill_recent_pnl_once(
             let track_id = if record.instrument == track.instrument {
                 Some(track.id.clone())
             } else {
-                state
-                    .observation_service
-                    .resolve_track_id(&record.instrument)
-                    .await
+                state.runtime.resolve_track_id(&record.instrument).await
             };
             let Some(track_id) = track_id else {
                 summary.records_skipped += 1;
@@ -230,12 +229,17 @@ pub(super) async fn backfill_recent_pnl_once(
             };
 
             match state
-                .observation_service
-                .record_track_pnl(&track_id, record)
+                .runtime
+                .handle(&TrackId::new(&track_id), TrackInput::TrackPnl(record))
                 .await
             {
-                Ok(true) => summary.records_inserted += 1,
-                Ok(false) => summary.records_skipped += 1,
+                Ok(TrackUpdateReceipt::PnlRecorded { inserted: true }) => {
+                    summary.records_inserted += 1
+                }
+                Ok(TrackUpdateReceipt::PnlRecorded { inserted: false }) => {
+                    summary.records_skipped += 1
+                }
+                Ok(_) => unreachable!("track PNL input must return its update receipt"),
                 Err(error) => {
                     summary.failures += 1;
                     summary.last_error = Some(error.to_string());

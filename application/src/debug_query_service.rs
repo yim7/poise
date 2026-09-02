@@ -5,8 +5,8 @@ use poise_core::events::DomainEvent;
 use poise_core::track::TrackId;
 
 use crate::{
-    DiagnosticSeverity, StoredTrackEvent, TrackDiagnosticItem, TrackObservationService,
-    TrackQueryStore, track_diagnostic_event_loader::TrackDiagnosticEventLoader,
+    DiagnosticSeverity, StoredTrackEvent, TrackDiagnosticItem, TrackQueryStore, TradingRuntime,
+    track_diagnostic_event_loader::TrackDiagnosticEventLoader,
 };
 
 pub struct TrackDebugQueryService {
@@ -14,12 +14,9 @@ pub struct TrackDebugQueryService {
 }
 
 impl TrackDebugQueryService {
-    pub fn new(
-        repository: Arc<dyn TrackQueryStore>,
-        observation: Arc<TrackObservationService>,
-    ) -> Self {
+    pub fn new(repository: Arc<dyn TrackQueryStore>, runtime: Arc<TradingRuntime>) -> Self {
         Self {
-            loader: Arc::new(TrackDiagnosticEventLoader::new(repository, observation)),
+            loader: Arc::new(TrackDiagnosticEventLoader::new(repository, runtime)),
         }
     }
 
@@ -84,7 +81,7 @@ mod tests {
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::ports::OrderRequest;
 
-    use crate::mutation_executor::test_support::{
+    use crate::trading_runtime::test_support::{
         MemoryRepository, seeded_manager, track_write_services,
     };
     use crate::{
@@ -98,7 +95,7 @@ mod tests {
         let repository = Arc::new(FakeReadRepository::new());
         let live_repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), live_repository);
-        let service = TrackDebugQueryService::new(repository, Arc::new(services.observation));
+        let service = TrackDebugQueryService::new(repository, services.runtime.clone());
 
         let diagnostics = service
             .load_track_diagnostics(&TrackId::new("btc-core"))
@@ -125,8 +122,7 @@ mod tests {
         let repository = Arc::new(FakeReadRepository::new());
         let live_repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), live_repository);
-        let service =
-            TrackDebugQueryService::new(repository.clone(), Arc::new(services.observation));
+        let service = TrackDebugQueryService::new(repository.clone(), services.runtime.clone());
 
         let diagnostics = service
             .load_track_diagnostics(&TrackId::new("btc-core"))
@@ -153,7 +149,7 @@ mod tests {
         let repository = Arc::new(repository);
         let live_repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), live_repository);
-        let service = TrackDebugQueryService::new(repository, Arc::new(services.observation));
+        let service = TrackDebugQueryService::new(repository, services.runtime.clone());
 
         let diagnostics = service
             .load_track_diagnostics(&TrackId::new("btc-core"))

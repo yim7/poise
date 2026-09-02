@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use poise_application::TrackInput;
+use poise_core::track::TrackId;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
@@ -45,11 +47,7 @@ pub(super) fn spawn_market_data_health_task(
     let max_sleep_interval = runtime.market_data_health_max_sleep_interval;
 
     tokio::spawn(async move {
-        let tracks = state
-            .reconcile
-            .observation_service
-            .track_instruments()
-            .await;
+        let tracks = state.reconcile.runtime.track_instruments().await;
         let mut deadlines = HashMap::new();
         for track in &tracks {
             update_deadline(
@@ -150,8 +148,8 @@ async fn refresh_due_tracks(
 ) {
     for track_id in due_track_ids {
         if let Err(error) = state
-            .observation_service
-            .refresh_market_data_health(track_id)
+            .runtime
+            .handle(&TrackId::new(track_id), TrackInput::RefreshMarketDataHealth)
             .await
         {
             runtime_health.record_track_health_error_now(
@@ -189,11 +187,7 @@ async fn update_deadline(
     max_sleep_interval: Duration,
     deadlines: &mut HashMap<String, DateTime<Utc>>,
 ) {
-    match state
-        .observation_service
-        .market_data_health_deadline(track_id)
-        .await
-    {
+    match state.runtime.market_data_health_deadline(track_id).await {
         Ok(Some(deadline)) => {
             deadlines.insert(track_id.to_string(), deadline);
             runtime_health

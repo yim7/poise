@@ -1884,7 +1884,7 @@ mod tests {
         assert_eq!(
             bindings[0].status,
             crate::executor::binding::BindingStatus::CancelAfterSubmit,
-            "live-only rollback must retain queued terminalization and in-flight protection"
+            "live-only mutation must retain queued terminalization and in-flight protection"
         );
         assert_ne!(
             manager
@@ -2717,7 +2717,7 @@ mod tests {
     }
 
     #[test]
-    fn rollback_restores_pending_fresh_acquisition_session() {
+    fn installing_planned_runtime_restores_pending_fresh_acquisition_session() {
         let (mut manager, id) = manager();
         manager
             .fresh_start_track(

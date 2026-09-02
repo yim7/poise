@@ -1,8 +1,8 @@
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use poise_application::{
-    CancelReceiptResolution, SessionEffectOutcome, SessionTrackEffect,
-    is_loaded_track_invariant_violation,
+    CancelReceiptResolution, SessionEffectOutcome, SessionTrackEffect, TrackInput,
+    TrackUpdateReceipt, is_loaded_track_invariant_violation,
 };
 use poise_engine::executor::SubmitRecoveryToken;
 use poise_engine::ports::{OrderReceipt, OrderRequest};
@@ -285,20 +285,32 @@ pub(super) async fn execute_cancellation(
                     };
                     let resolution = worker
                         .state
-                        .effect_service
-                        .record_cancel_order_success(
-                            effect.track_id.as_str(),
-                            &effect.effect_id,
-                            order_id,
-                            receipt,
+                        .reconcile
+                        .runtime
+                        .handle(
+                            &effect.track_id,
+                            TrackInput::CancelOrderSucceeded {
+                                effect_id: effect.effect_id.clone(),
+                                order_id: order_id.clone(),
+                                receipt: receipt.clone(),
+                            },
                         )
                         .await?;
+                    let TrackUpdateReceipt::CancelOrderResolved(resolution) = resolution else {
+                        unreachable!("cancel receipt input must return its update receipt");
+                    };
                     Ok(SessionDispatchResult::Cancel(resolution))
                 }
                 Cancellation::All { .. } => worker
                     .state
-                    .effect_service
-                    .record_cancel_all_success(effect.track_id.as_str(), &effect.effect_id)
+                    .reconcile
+                    .runtime
+                    .handle(
+                        &effect.track_id,
+                        TrackInput::CancelAllSucceeded {
+                            effect_id: effect.effect_id.clone(),
+                        },
+                    )
                     .await
                     .map(|_| SessionDispatchResult::Outcome(SessionEffectOutcome::Finished)),
             };
@@ -330,11 +342,14 @@ pub(super) async fn execute_cancellation(
             }
             worker
                 .state
-                .effect_service
-                .complete_effect_failed(
-                    effect.track_id.as_str(),
-                    &effect.effect_id,
-                    &error.to_string(),
+                .reconcile
+                .runtime
+                .handle(
+                    &effect.track_id,
+                    TrackInput::EffectFailed {
+                        effect_id: effect.effect_id.clone(),
+                        error: error.to_string(),
+                    },
                 )
                 .await?;
             Err(error.into())

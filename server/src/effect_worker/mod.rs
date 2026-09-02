@@ -221,7 +221,8 @@ mod tests {
 
     use chrono::Utc;
     use poise_application::{
-        DeferredUntil, EffectStatus, SessionEffectOutcome, SessionTrackEffect, TrackQueryStore,
+        DeferredUntil, EffectStatus, SessionEffectOutcome, SessionTrackEffect, TrackInput,
+        TrackQueryStore,
     };
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_engine::observation::{MarketObservation, OrderObservation};
@@ -253,14 +254,9 @@ mod tests {
     async fn protection_after_submit_prepare_dispatches_cancel_follow_up() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let effect_worker_context = build_effect_worker_context_for_repository(repository);
-        let observation_service = Arc::clone(
-            &effect_worker_context
-                .effect_worker_state
-                .reconcile
-                .observation_service,
-        );
-        observation_service
-            .observe_market(
+        let runtime = Arc::clone(&effect_worker_context.effect_worker_state.reconcile.runtime);
+        runtime
+            .handle_market_for_test(
                 "btc-core",
                 MarketObservation::ExecutionQuote {
                     execution_quote: ExecutionQuote {
@@ -284,8 +280,8 @@ mod tests {
         timeout(Duration::from_secs(1), execution.wait_for_submit_started())
             .await
             .expect("submit should reach the exchange after prepare");
-        observation_service
-            .observe_market(
+        runtime
+            .handle_market_for_test(
                 "btc-core",
                 MarketObservation::ExecutionQuote {
                     execution_quote: ExecutionQuote {
@@ -442,10 +438,10 @@ mod tests {
         effect_worker_context
             .effect_worker_state
             .reconcile
-            .observation_service
-            .observe_order_with_absorb_result(
-                "btc-core",
-                OrderObservation {
+            .runtime
+            .handle(
+                &TrackId::new("btc-core"),
+                TrackInput::Order(OrderObservation {
                     order_id: "accepted-before-network-error".to_string(),
                     client_order_id: request.client_order_id,
                     side: request.side,
@@ -453,7 +449,7 @@ mod tests {
                     quantity: request.quantity,
                     filled_qty: 0.0,
                     status: OrderStatus::New,
-                },
+                }),
             )
             .await
             .unwrap();
@@ -679,8 +675,8 @@ mod tests {
         effect_worker_context
             .effect_worker_state
             .reconcile
-            .observation_service
-            .observe_market(
+            .runtime
+            .handle_market_for_test(
                 "btc-core",
                 MarketObservation::ExecutionQuote {
                     execution_quote: ExecutionQuote {
@@ -1080,8 +1076,8 @@ mod tests {
         effect_worker_context
             .effect_worker_state
             .reconcile
-            .observation_service
-            .observe_market(
+            .runtime
+            .handle_market_for_test(
                 "btc-core",
                 MarketObservation::ExecutionQuote {
                     execution_quote: ExecutionQuote { best_bid, best_ask },

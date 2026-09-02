@@ -3,8 +3,7 @@ use std::sync::Arc;
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountMonitor, ApplicationNotification, EffectJournalDiagnostics, SessionEffectQueue,
-    TrackCommandService, TrackDebugQueryService, TrackEffectService, TrackObservationService,
-    TrackQueryService, TrackRuntimeLifecycleService,
+    TrackDebugQueryService, TrackQueryService, TrackRuntimeLifecycleService, TradingRuntime,
 };
 use tokio::sync::broadcast;
 
@@ -20,7 +19,7 @@ use crate::submit_preflight::SubmitPreflight;
 
 #[derive(Clone)]
 pub struct HttpState {
-    pub command_service: Arc<TrackCommandService>,
+    pub runtime: Arc<TradingRuntime>,
     pub query_service: Arc<TrackQueryService>,
     pub debug_query_service: Arc<TrackDebugQueryService>,
     pub projector: Arc<TrackProjector>,
@@ -38,7 +37,7 @@ pub struct HttpState {
 pub struct WebSocketState {
     pub notifications: broadcast::Sender<ApplicationNotification>,
     pub live_view_notifications: broadcast::Sender<String>,
-    pub observation_service: Arc<TrackObservationService>,
+    pub runtime: Arc<TradingRuntime>,
     pub query_service: Arc<TrackQueryService>,
     pub projector: Arc<TrackProjector>,
     pub account_monitor: Arc<AccountMonitor>,
@@ -50,7 +49,7 @@ pub struct WebSocketState {
 
 #[derive(Clone)]
 pub struct ReconcileState {
-    pub observation_service: Arc<TrackObservationService>,
+    pub runtime: Arc<TradingRuntime>,
     pub runtime_lifecycle_service: Arc<TrackRuntimeLifecycleService>,
     pub session_effect_queue: SessionEffectQueue,
     pub exchange_freshness: Arc<ExchangeFreshness>,
@@ -74,7 +73,6 @@ pub struct RuntimeState {
 #[derive(Clone)]
 pub struct EffectWorkerState {
     pub reconcile: ReconcileState,
-    pub effect_service: Arc<TrackEffectService>,
     pub submit_effect_service: Arc<SubmitEffectService>,
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
     pub session_effect_queue: SessionEffectQueue,
