@@ -56,9 +56,8 @@ async fn main() -> Result<()> {
             StateBootstrapError::Unexpected(error) => error,
         })?;
     let (platform, runtime_handles, listener) = prepared_state
-        .run_startup(|repositories, track_definition_registry| async {
-            let platform =
-                assembly::assemble(&config, track_definition_registry, repositories).await?;
+        .run_startup(|repositories, track_definitions| async {
+            let platform = assembly::assemble(&config, track_definitions, repositories).await?;
             start_platform(&config, platform).await
         })
         .await?;
@@ -149,7 +148,6 @@ mod tests {
     use axum::http::StatusCode;
     use axum::routing::get;
     use chrono::Utc;
-    use poise_application::TrackDefinitionRegistry;
     use poise_core::track::{Instrument, Venue};
     use poise_engine::ports::{
         AccountPort, ClockPort, ExchangeInfo, ExchangeOpenOrderSnapshot, ExchangePorts,
@@ -163,16 +161,10 @@ mod tests {
 
     use super::{StartupOptions, parse_startup_options};
 
-    fn test_track_definition_registry(
+    fn test_track_definitions(
         config: &crate::config::Config,
-    ) -> Arc<TrackDefinitionRegistry> {
-        let configured = config
-            .tracks
-            .iter()
-            .map(|track| track.to_track_definition(config.exchange.venue()))
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        Arc::new(TrackDefinitionRegistry::new(configured).unwrap())
+    ) -> Vec<poise_core::track::TrackDefinition> {
+        config.track_definitions().unwrap()
     }
 
     #[test]
@@ -645,7 +637,7 @@ total_loss_limit = 600.0
         let exchange = Arc::new(FakeExchange);
         let platform = crate::assembly::assemble_with_exchange_ports(
             &config,
-            test_track_definition_registry(&config),
+            test_track_definitions(&config),
             ExchangePorts::new(
                 exchange.clone(),
                 Arc::new(FakeMarketData::default()),
@@ -808,7 +800,7 @@ total_loss_limit = 600.0
         let exchange = Arc::new(FakeExchange);
         let platform = crate::assembly::assemble_with_exchange_ports(
             &config,
-            test_track_definition_registry(&config),
+            test_track_definitions(&config),
             ExchangePorts::new(
                 exchange.clone(),
                 Arc::new(FailingStartMarketData),

@@ -90,8 +90,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use anyhow::anyhow;
-    use poise_application::TrackDefinitionRegistry;
-    use poise_core::track::{Instrument, TrackId, Venue};
+    use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
 
     use super::{build_exchange_startup_control, build_track_leverage_index};
     use crate::config::{ExchangeConfig, TrackSpec};
@@ -166,17 +165,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_exchange_startup_controls_validates_then_uses_track_index_in_registry_order() {
+    async fn apply_exchange_startup_controls_validates_then_uses_definition_order() {
         let tracks = vec![
             track_spec("btc-core", "BTCUSDT", Some(20)),
             track_spec("eth-core", "ETHUSDT", None),
         ];
-        let registry = track_definition_registry(&tracks);
+        let definitions = track_definitions(&tracks);
         let index = build_track_leverage_index(&tracks).unwrap();
         let calls = Arc::new(Mutex::new(Vec::new()));
 
         apply_exchange_startup_controls(
-            &registry,
+            &definitions,
             &index,
             &RecordingExchangeStartupControl::succeed(calls.clone()),
         )
@@ -198,11 +197,11 @@ mod tests {
     #[tokio::test]
     async fn apply_exchange_startup_controls_adds_track_symbol_and_leverage_context() {
         let tracks = vec![track_spec("btc-core", "BTCUSDT", Some(7))];
-        let registry = track_definition_registry(&tracks);
+        let definitions = track_definitions(&tracks);
         let index = build_track_leverage_index(&tracks).unwrap();
 
         let error = apply_exchange_startup_controls(
-            &registry,
+            &definitions,
             &index,
             &RecordingExchangeStartupControl::fail("exchange rejected leverage"),
         )
@@ -219,11 +218,11 @@ mod tests {
     #[tokio::test]
     async fn apply_exchange_startup_controls_preserves_account_mode_error_context() {
         let tracks = vec![track_spec("btc-core", "BTCUSDT", Some(7))];
-        let registry = track_definition_registry(&tracks);
+        let definitions = track_definitions(&tracks);
         let index = build_track_leverage_index(&tracks).unwrap();
 
         let error = apply_exchange_startup_controls(
-            &registry,
+            &definitions,
             &index,
             &RecordingExchangeStartupControl::fail_account_mode(
                 "OKX account position mode must be `net_mode`, got `long_short_mode`",
@@ -238,13 +237,12 @@ mod tests {
         assert!(message.contains("long_short_mode"));
     }
 
-    fn track_definition_registry(tracks: &[TrackSpec]) -> TrackDefinitionRegistry {
-        let configured = tracks
+    fn track_definitions(tracks: &[TrackSpec]) -> Vec<TrackDefinition> {
+        tracks
             .iter()
             .map(|track| track.to_track_definition(Venue::Binance))
             .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        TrackDefinitionRegistry::new(configured).unwrap()
+            .unwrap()
     }
 
     fn track_spec(track_id: &str, symbol: &str, leverage: Option<u32>) -> TrackSpec {

@@ -4,26 +4,18 @@ use anyhow::Result;
 use poise_core::track::TrackId;
 
 use crate::{
-    TrackDefinitionRegistry, TrackListReadModel, TrackQueryStore, TrackReadModel, TradingRuntime,
+    TrackListReadModel, TrackQueryStore, TrackReadModel, TradingRuntime,
     track_read_source_loader::TrackReadSourceLoader,
 };
 
-pub struct TrackQueryService {
+pub struct TradingQueries {
     loader: Arc<TrackReadSourceLoader>,
 }
 
-impl TrackQueryService {
-    pub fn new(
-        repository: Arc<dyn TrackQueryStore>,
-        track_definition_registry: Arc<TrackDefinitionRegistry>,
-        runtime: Arc<TradingRuntime>,
-    ) -> Self {
+impl TradingQueries {
+    pub fn new(repository: Arc<dyn TrackQueryStore>, runtime: Arc<TradingRuntime>) -> Self {
         Self {
-            loader: Arc::new(TrackReadSourceLoader::new(
-                repository,
-                track_definition_registry,
-                runtime,
-            )),
+            loader: Arc::new(TrackReadSourceLoader::new(repository, runtime)),
         }
     }
 
@@ -48,9 +40,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
-    use poise_core::risk::LossLimits;
-    use poise_core::strategy::{BandProtectionPolicy, ShapeFamily};
-    use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
+    use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
@@ -62,14 +52,14 @@ mod tests {
         MemoryRepository, seeded_manager, track_write_services,
     };
     use crate::{
-        EffectStatus, PersistedTrackEffect, StoredTrackEvent, TrackDefinitionRegistry,
-        TrackQueryStore, track_read_source_loader::TrackReadSourceLoader,
+        EffectStatus, PersistedTrackEffect, StoredTrackEvent, TrackQueryStore,
+        track_read_source_loader::TrackReadSourceLoader,
     };
 
-    use super::TrackQueryService;
+    use super::TradingQueries;
 
     #[tokio::test]
-    async fn list_track_sources_reads_all_registered_snapshots() {
+    async fn list_track_sources_reads_all_committed_runtime_snapshots() {
         let (service, repository) = test_query_service();
         let sources = service.list_track_sources().await.unwrap();
 
@@ -107,7 +97,6 @@ mod tests {
         let (services, _) = track_write_services(seeded_manager(), live_repository);
         let source = TrackReadSourceLoader::new(
             Arc::new(FakeReadRepository::new()),
-            test_track_definition_registry(),
             services.runtime.clone(),
         )
         .load_track_read_source(&TrackId::new("btc-core"))
@@ -145,11 +134,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let service = TrackQueryService::new(
-            repository,
-            test_track_definition_registry(),
-            services.runtime.clone(),
-        );
+        let service = TradingQueries::new(repository, services.runtime.clone());
 
         let source = service
             .load_track_detail_source(&TrackId::new("btc-core"))
@@ -168,11 +153,7 @@ mod tests {
         let repository = Arc::new(FakeReadRepository::without_snapshots());
         let live_repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), live_repository);
-        let service = TrackQueryService::new(
-            repository,
-            test_track_definition_registry(),
-            services.runtime.clone(),
-        );
+        let service = TradingQueries::new(repository, services.runtime.clone());
 
         let sources = service.list_track_sources().await.unwrap();
 
@@ -186,11 +167,7 @@ mod tests {
         let repository = Arc::new(FakeReadRepository::without_snapshots());
         let live_repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), live_repository);
-        let service = TrackQueryService::new(
-            repository,
-            test_track_definition_registry(),
-            services.runtime.clone(),
-        );
+        let service = TradingQueries::new(repository, services.runtime.clone());
 
         let source = service
             .load_track_detail_source(&TrackId::new("btc-core"))
@@ -203,46 +180,12 @@ mod tests {
         assert_eq!(source.recent_activity.len(), 1);
     }
 
-    fn test_query_service() -> (TrackQueryService, Arc<FakeReadRepository>) {
+    fn test_query_service() -> (TradingQueries, Arc<FakeReadRepository>) {
         let repository = Arc::new(FakeReadRepository::new());
         let live_repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), live_repository);
-        let service = TrackQueryService::new(
-            repository.clone(),
-            test_track_definition_registry(),
-            services.runtime.clone(),
-        );
+        let service = TradingQueries::new(repository.clone(), services.runtime.clone());
         (service, repository)
-    }
-
-    fn test_track_definition_registry() -> Arc<TrackDefinitionRegistry> {
-        Arc::new(
-            TrackDefinitionRegistry::new(vec![
-                TrackDefinition::try_new(
-                    TrackId::new("btc-core"),
-                    Instrument::new(Venue::Binance, "BTCUSDT"),
-                    poise_core::strategy::TrackConfig {
-                        lower_price: 90.0,
-                        upper_price: 110.0,
-                        long_exposure_units: 8.0,
-                        short_exposure_units: 8.0,
-                        notional_per_unit: 375.0,
-                        min_rebalance_units: 0.5,
-                        shape_family: ShapeFamily::Linear,
-                        out_of_band_policy: BandProtectionPolicy::Freeze,
-                        risk_acquisition: Default::default(),
-                    },
-                    None,
-                    LossLimits {
-                        daily_loss_limit: 100.0,
-                        total_loss_limit: 300.0,
-                    },
-                    Some(30),
-                )
-                .unwrap(),
-            ])
-            .unwrap(),
-        )
     }
 
     struct FakeReadRepository {

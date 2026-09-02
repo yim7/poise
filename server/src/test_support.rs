@@ -5,8 +5,8 @@ use chrono::{DateTime, Utc};
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountCapacityGuard, AccountMonitor, ApplicationNotification, EffectJournalDiagnostics,
-    TrackDefinitionRegistry, TrackEffectJournal, TrackMutationStore, TrackQueryStore,
-    TrackRuntimeLifecycleService, TradingRuntime,
+    TrackEffectJournal, TrackMutationStore, TrackQueryStore, TrackRuntimeLifecycleService,
+    TradingRuntime,
 };
 use poise_core::instrument::{Amount, Asset, InstrumentSpec};
 use poise_core::risk::LossLimits;
@@ -219,8 +219,8 @@ pub(crate) fn test_loss_limits() -> LossLimits {
     }
 }
 
-pub(crate) fn test_track_definition_registry(track_id: &str) -> Arc<TrackDefinitionRegistry> {
-    track_definition_registry_for(
+pub(crate) fn test_track_definition(track_id: &str) -> TrackDefinition {
+    test_track_definition_for(
         track_id,
         default_symbol_for(track_id),
         test_max_notional(),
@@ -228,36 +228,31 @@ pub(crate) fn test_track_definition_registry(track_id: &str) -> Arc<TrackDefinit
     )
 }
 
-fn track_definition_registry_for(
+fn test_track_definition_for(
     track_id: &str,
     symbol: &str,
     max_notional: f64,
     loss_limits: LossLimits,
-) -> Arc<TrackDefinitionRegistry> {
-    Arc::new(
-        TrackDefinitionRegistry::new(vec![
-            TrackDefinition::try_new(
-                TrackId::new(track_id),
-                Instrument::new(Venue::Binance, symbol.to_string()),
-                TrackConfig {
-                    lower_price: 90.0,
-                    upper_price: 110.0,
-                    long_exposure_units: 8.0,
-                    short_exposure_units: 8.0,
-                    notional_per_unit: 375.0,
-                    min_rebalance_units: 0.5,
-                    shape_family: ShapeFamily::Linear,
-                    out_of_band_policy: BandProtectionPolicy::Freeze,
-                    risk_acquisition: Default::default(),
-                },
-                Some(max_notional),
-                loss_limits,
-                Some(30),
-            )
-            .unwrap(),
-        ])
-        .unwrap(),
+) -> TrackDefinition {
+    TrackDefinition::try_new(
+        TrackId::new(track_id),
+        Instrument::new(Venue::Binance, symbol.to_string()),
+        TrackConfig {
+            lower_price: 90.0,
+            upper_price: 110.0,
+            long_exposure_units: 8.0,
+            short_exposure_units: 8.0,
+            notional_per_unit: 375.0,
+            min_rebalance_units: 0.5,
+            shape_family: ShapeFamily::Linear,
+            out_of_band_policy: BandProtectionPolicy::Freeze,
+            risk_acquisition: Default::default(),
+        },
+        Some(max_notional),
+        loss_limits,
+        Some(30),
     )
+    .unwrap()
 }
 
 fn default_symbol_for(track_id: &str) -> &str {
@@ -516,7 +511,7 @@ impl AccountPort for NoopAccountPort {
 pub(crate) fn build_http_state(
     services: &TestApplicationServices,
     query_store: Arc<dyn TrackQueryStore>,
-    query_service: Arc<poise_application::TrackQueryService>,
+    query_service: Arc<poise_application::TradingQueries>,
     debug_query_service: Arc<poise_application::TrackDebugQueryService>,
     projector: Arc<TrackProjector>,
     account_monitor: Arc<AccountMonitor>,
@@ -543,7 +538,7 @@ pub(crate) fn build_http_state(
 
 pub(crate) fn build_websocket_state(
     services: &TestApplicationServices,
-    query_service: Arc<poise_application::TrackQueryService>,
+    query_service: Arc<poise_application::TradingQueries>,
     projector: Arc<TrackProjector>,
     account_monitor: Arc<AccountMonitor>,
     account_projector: Arc<crate::account_projector::AccountProjector>,

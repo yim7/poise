@@ -3,7 +3,7 @@ use std::sync::Arc;
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountMonitor, ApplicationNotification, EffectJournalDiagnostics, SessionEffectQueue,
-    TrackDebugQueryService, TrackQueryService, TrackRuntimeLifecycleService, TradingRuntime,
+    TrackDebugQueryService, TrackRuntimeLifecycleService, TradingQueries, TradingRuntime,
 };
 use tokio::sync::broadcast;
 
@@ -19,7 +19,7 @@ use crate::runtime::{
 #[derive(Clone)]
 pub struct HttpState {
     pub runtime: Arc<TradingRuntime>,
-    pub query_service: Arc<TrackQueryService>,
+    pub query_service: Arc<TradingQueries>,
     pub debug_query_service: Arc<TrackDebugQueryService>,
     pub projector: Arc<TrackProjector>,
     pub account_monitor: Arc<AccountMonitor>,
@@ -37,7 +37,7 @@ pub struct WebSocketState {
     pub notifications: broadcast::Sender<ApplicationNotification>,
     pub live_view_notifications: broadcast::Sender<String>,
     pub runtime: Arc<TradingRuntime>,
-    pub query_service: Arc<TrackQueryService>,
+    pub query_service: Arc<TradingQueries>,
     pub projector: Arc<TrackProjector>,
     pub account_monitor: Arc<AccountMonitor>,
     pub account_projector: Arc<AccountProjector>,

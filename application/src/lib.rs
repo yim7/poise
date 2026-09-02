@@ -4,13 +4,12 @@ pub mod account_read_model;
 pub mod debug_query_service;
 pub mod diagnostics;
 pub mod notifications;
-pub mod query_service;
+mod query_service;
 pub mod read_model;
 mod runtime_lifecycle_service;
 mod session_effect_queue;
 pub mod submit_effect_service;
 pub mod track_control_state;
-pub mod track_definition;
 mod track_diagnostic_event_loader;
 pub mod track_effect_store;
 pub mod track_identity_store;
@@ -33,7 +32,7 @@ pub use diagnostics::{
     EffectJournalFailure, TrackDiagnosticItem,
 };
 pub use notifications::ApplicationNotification;
-pub use query_service::TrackQueryService;
+pub use query_service::TradingQueries;
 pub use read_model::{
     AccountAnalysisReadModel, AccountAssetExposureReadModel, AccountAssetQuantitySource,
     AccountHedgeLikeReadModel, AccountTrackAnalysisReadModel, ReadModelBinding,
@@ -50,7 +49,6 @@ pub use session_effect_queue::{
     SessionEffectQueue, SessionQueueAction, SessionTrackEffect,
 };
 pub use track_control_state::{PersistedControlMode, TrackControlCommand, TrackControlState};
-pub use track_definition::TrackDefinitionRegistry;
 pub use track_effect_store::TrackEffectJournal;
 pub use track_identity_store::{TrackIdentityGuardOutcome, TrackIdentityStore};
 pub use track_mutation_store::TrackMutationStore;

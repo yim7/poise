@@ -798,11 +798,11 @@ mod tests {
     use crate::server_context::WebSocketState;
     use crate::test_support::{
         build_effect_worker_test_context, build_test_application_services, build_websocket_state,
-        test_instrument_spec, test_track_definition_registry, unavailable_account_monitor,
+        test_instrument_spec, unavailable_account_monitor,
     };
     use poise_application::{
         AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
-        StoredAccountMonitorState, TrackInput, TrackQueryService, TradingRuntime,
+        StoredAccountMonitorState, TrackInput, TradingQueries, TradingRuntime,
     };
 
     use super::{WebSocketDiagnostics, WebSocketDiagnosticsSnapshot, ws_handler_with_test_state};
@@ -947,9 +947,8 @@ mod tests {
             notifications,
             account_margin_guard.clone(),
         );
-        let query_service = Arc::new(TrackQueryService::new(
+        let query_service = Arc::new(TradingQueries::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
-            test_track_definition_registry("btc-core"),
             Arc::clone(&services.runtime),
         ));
         let websocket_state = build_websocket_state(
@@ -995,9 +994,8 @@ mod tests {
             notifications,
             account_margin_guard.clone(),
         );
-        let query_service = Arc::new(TrackQueryService::new(
+        let query_service = Arc::new(TradingQueries::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
-            test_track_definition_registry("btc-core"),
             Arc::clone(&services.runtime),
         ));
         let websocket_state = build_websocket_state(
@@ -1048,9 +1046,8 @@ mod tests {
             notifications,
             account_margin_guard.clone(),
         );
-        let query_service = Arc::new(TrackQueryService::new(
+        let query_service = Arc::new(TradingQueries::new(
             repository.clone() as Arc<dyn TrackQueryStore>,
-            test_track_definition_registry("btc-core"),
             Arc::clone(&services.runtime),
         ));
         let mut websocket_state = build_websocket_state(

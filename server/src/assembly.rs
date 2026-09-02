@@ -8,12 +8,12 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
-    AccountMonitor, ApplicationNotification, TrackDebugQueryService, TrackDefinitionRegistry,
-    TrackQueryService, TrackRuntimeLifecycleService, TradingRuntime,
+    AccountMonitor, ApplicationNotification, TrackDebugQueryService, TrackRuntimeLifecycleService,
+    TradingQueries, TradingRuntime,
 };
 use poise_binance::connect as connect_binance;
 use poise_bybit::connect as connect_bybit;
-use poise_core::track::Venue;
+use poise_core::track::{TrackDefinition, Venue};
 use poise_engine::manager::TrackManager;
 use poise_engine::ports::{ClockPort, ExchangePorts};
 use poise_hyperliquid::connect as connect_hyperliquid;
@@ -58,11 +58,11 @@ pub struct ServerPlatform {
     pub runtime: ServerRuntime,
 }
 
-fn validate_registry_venue(
-    track_definition_registry: &TrackDefinitionRegistry,
+fn validate_definition_venues(
+    track_definitions: &[TrackDefinition],
     exchange_venue: Venue,
 ) -> Result<(), anyhow::Error> {
-    for definition in track_definition_registry.iter() {
+    for definition in track_definitions {
         let instrument = definition.instrument();
         if instrument.venue != exchange_venue {
             return Err(anyhow!(
@@ -99,22 +99,19 @@ pub(crate) async fn build_exchange(config: &ExchangeConfig) -> Result<(Venue, Ex
 
 pub async fn assemble(
     config: &Config,
-    track_definition_registry: Arc<TrackDefinitionRegistry>,
+    track_definitions: Vec<TrackDefinition>,
     repositories: StateRepositories,
 ) -> Result<ServerPlatform> {
     let track_leverage_index = build_track_leverage_index(&config.tracks)?;
-    validate_registry_venue(track_definition_registry.as_ref(), config.exchange.venue())?;
-    let (exchange_venue, exchange_ports) = build_exchange_and_prepare_startup(
-        config,
-        track_definition_registry.as_ref(),
-        &track_leverage_index,
-    )
-    .await?;
+    validate_definition_venues(&track_definitions, config.exchange.venue())?;
+    let (exchange_venue, exchange_ports) =
+        build_exchange_and_prepare_startup(config, &track_definitions, &track_leverage_index)
+            .await?;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock);
 
     assemble_with_state_store(
         config,
-        track_definition_registry,
+        track_definitions,
         exchange_venue,
         exchange_ports,
         repositories,
@@ -126,11 +123,11 @@ pub async fn assemble(
 
 async fn build_exchange_and_prepare_startup(
     config: &Config,
-    track_definition_registry: &TrackDefinitionRegistry,
+    track_definitions: &[TrackDefinition],
     track_leverage_index: &TrackLeverageIndex,
 ) -> Result<(Venue, ExchangePorts)> {
     prepare_exchange_startup_with(
-        track_definition_registry,
+        track_definitions,
         track_leverage_index,
         || build_exchange(&config.exchange),
         || build_exchange_startup_control(&config.exchange),
@@ -141,7 +138,7 @@ async fn build_exchange_and_prepare_startup(
 #[cfg(test)]
 pub(crate) async fn assemble_with_exchange_ports(
     config: &Config,
-    track_definition_registry: Arc<TrackDefinitionRegistry>,
+    track_definitions: Vec<TrackDefinition>,
     exchange_ports: ExchangePorts,
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
@@ -149,7 +146,7 @@ pub(crate) async fn assemble_with_exchange_ports(
     let track_leverage_index = build_track_leverage_index(&config.tracks)?;
     assemble_with_state_store(
         config,
-        track_definition_registry,
+        track_definitions,
         config.exchange.venue(),
         exchange_ports,
         repositories,
@@ -161,19 +158,19 @@ pub(crate) async fn assemble_with_exchange_ports(
 
 async fn assemble_with_state_store(
     config: &Config,
-    track_definition_registry: Arc<TrackDefinitionRegistry>,
+    track_definitions: Vec<TrackDefinition>,
     exchange_venue: Venue,
     exchange_ports: ExchangePorts,
     repositories: StateRepositories,
     clock: Arc<dyn ClockPort>,
     track_leverage_index: &TrackLeverageIndex,
 ) -> Result<ServerPlatform> {
-    validate_registry_venue(track_definition_registry.as_ref(), exchange_venue)?;
+    validate_definition_venues(&track_definitions, exchange_venue)?;
 
     let mut manager = TrackManager::new(clock.clone());
     let mut startup_definitions = Vec::new();
     let metadata = exchange_ports.metadata();
-    for track in track_definition_registry.iter() {
+    for track in &track_definitions {
         let track_id = track.track_id().clone();
         let instrument = track.instrument().clone();
         let info = load_exchange_info_with_retry(metadata.as_ref(), &instrument).await?;
@@ -214,9 +211,8 @@ async fn assemble_with_state_store(
     ));
     #[cfg(test)]
     let manager = trading_runtime.manager();
-    let query_service = Arc::new(TrackQueryService::new(
+    let query_service = Arc::new(TradingQueries::new(
         query_store.clone(),
-        track_definition_registry.clone(),
         trading_runtime.clone(),
     ));
     let debug_query_service = Arc::new(TrackDebugQueryService::new(
@@ -384,7 +380,7 @@ impl ClockPort for SystemClock {
 
 pub(crate) fn build_http_state(
     runtime: Arc<TradingRuntime>,
-    query_service: Arc<TrackQueryService>,
+    query_service: Arc<TradingQueries>,
     debug_query_service: Arc<TrackDebugQueryService>,
     projector: Arc<TrackProjector>,
     account_monitor: Arc<AccountMonitor>,
@@ -416,7 +412,7 @@ pub(crate) fn build_websocket_state(
     notifications: broadcast::Sender<ApplicationNotification>,
     live_view_notifications: broadcast::Sender<String>,
     runtime: Arc<TradingRuntime>,
-    query_service: Arc<TrackQueryService>,
+    query_service: Arc<TradingQueries>,
     projector: Arc<TrackProjector>,
     account_monitor: Arc<AccountMonitor>,
     account_projector: Arc<AccountProjector>,
@@ -526,22 +522,18 @@ mod tests {
         build_http_state as build_test_http_state, build_runtime_and_effect_worker_test_contexts,
         build_test_application_services, build_websocket_state as build_test_websocket_state,
     };
-    use poise_application::{TrackDebugQueryService, TrackDefinitionRegistry, TrackQueryService};
+    use poise_application::{TrackDebugQueryService, TradingQueries};
 
-    use super::{ServerPlatform, SystemClock, assemble, build_exchange, validate_registry_venue};
+    use super::{
+        ServerPlatform, SystemClock, assemble, build_exchange, validate_definition_venues,
+    };
 
     fn test_instrument_spec() -> poise_core::instrument::InstrumentSpec {
         crate::test_support::test_instrument_spec()
     }
 
-    fn test_track_definition_registry(config: &Config) -> Arc<TrackDefinitionRegistry> {
-        let configured = config
-            .tracks
-            .iter()
-            .map(|track| track.to_track_definition(config.exchange.venue()))
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        Arc::new(TrackDefinitionRegistry::new(configured).unwrap())
+    fn test_track_definitions(config: &Config) -> Vec<TrackDefinition> {
+        config.track_definitions().unwrap()
     }
 
     #[test]
@@ -566,11 +558,7 @@ total_loss_limit = 600.0
         )
         .unwrap();
 
-        let instrument = test_track_definition_registry(&config)
-            .get(&TrackId::new("btc-core"))
-            .unwrap()
-            .instrument()
-            .clone();
+        let instrument = test_track_definitions(&config)[0].instrument().clone();
 
         assert_eq!(instrument.venue, Venue::Binance);
         assert_eq!(instrument.symbol, "BTCUSDT");
@@ -602,7 +590,7 @@ total_loss_limit = 600.0
 
         let platform = super::assemble_with_exchange_ports(
             &config,
-            test_track_definition_registry(&config),
+            test_track_definitions(&config),
             super::ExchangePorts::new(
                 Arc::new(FakeExecutionPort),
                 Arc::new(FakeMarketDataPort),
@@ -751,14 +739,10 @@ total_loss_limit = 600.0
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let repositories = StateRepositories::new(repository);
 
-        let error = assemble(
-            &config,
-            test_track_definition_registry(&config),
-            repositories,
-        )
-        .await
-        .err()
-        .unwrap();
+        let error = assemble(&config, test_track_definitions(&config), repositories)
+            .await
+            .err()
+            .unwrap();
         assert!(
             error
                 .to_string()
@@ -830,7 +814,7 @@ total_loss_limit = 600.0
     }
 
     #[test]
-    fn assemble_rejects_registry_venue_that_does_not_match_exchange() {
+    fn assemble_rejects_definition_venue_that_does_not_match_exchange() {
         let config = parse_config(
             r#"
 [exchange]
@@ -851,9 +835,9 @@ total_loss_limit = 600.0
         )
         .unwrap();
         let mismatched_definition = config.tracks[0].to_track_definition(Venue::Bybit).unwrap();
-        let registry = TrackDefinitionRegistry::new(vec![mismatched_definition]).unwrap();
+        let definitions = vec![mismatched_definition];
 
-        let error = validate_registry_venue(&registry, config.exchange.venue()).unwrap_err();
+        let error = validate_definition_venues(&definitions, config.exchange.venue()).unwrap_err();
 
         assert!(
             error
@@ -890,14 +874,10 @@ total_loss_limit = 600.0
 
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let repositories = StateRepositories::new(repository);
-        let error = assemble(
-            &config,
-            test_track_definition_registry(&config),
-            repositories,
-        )
-        .await
-        .err()
-        .unwrap();
+        let error = assemble(&config, test_track_definitions(&config), repositories)
+            .await
+            .err()
+            .unwrap();
         assert!(
             error
                 .to_string()
@@ -1282,7 +1262,7 @@ total_loss_limit = 600.0
         let exchange = Arc::new(FakeExchange);
         super::assemble_with_exchange_ports(
             config,
-            test_track_definition_registry(config),
+            test_track_definitions(config),
             super::ExchangePorts::new(
                 exchange.clone(),
                 Arc::new(FakeMarketData::empty()),
@@ -1351,9 +1331,8 @@ total_loss_limit = 600.0
             account_margin_guard.clone(),
         );
         let query_store = repository.clone() as Arc<dyn TrackQueryStore>;
-        let query_service = Arc::new(TrackQueryService::new(
+        let query_service = Arc::new(TradingQueries::new(
             query_store.clone(),
-            crate::test_support::test_track_definition_registry("btc-core"),
             services.runtime.clone(),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
@@ -1413,10 +1392,7 @@ total_loss_limit = 600.0
                         Arc::new(SystemClock),
                     ),
                     vec![crate::runtime::RuntimeStartupDefinition::new(
-                        crate::test_support::test_track_definition_registry("btc-core")
-                            .get(&TrackId::new("btc-core"))
-                            .unwrap()
-                            .clone(),
+                        crate::test_support::test_track_definition("btc-core"),
                         10,
                     )],
                 ),

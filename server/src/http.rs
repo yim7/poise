@@ -485,12 +485,12 @@ mod tests {
     use crate::server_context::{HttpState, WebSocketState};
     use crate::test_support::{
         build_http_state, build_test_application_services, build_websocket_state,
-        test_track_definition_registry, unavailable_account_monitor,
+        unavailable_account_monitor,
     };
 
     use poise_application::{
         AccountMonitor, AccountMonitorConfig, AccountMonitorStore, ApplicationNotification,
-        StoredAccountMonitorState, TrackDebugQueryService, TrackQueryService,
+        StoredAccountMonitorState, TrackDebugQueryService, TradingQueries,
     };
 
     fn amount(value: f64, asset: &str) -> Amount {
@@ -636,9 +636,8 @@ mod tests {
             notifications,
             account_margin_guard.clone(),
         );
-        let query_service = Arc::new(TrackQueryService::new(
+        let query_service = Arc::new(TradingQueries::new(
             query_store.clone(),
-            test_track_definition_registry("btc-core"),
             services.runtime.clone(),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
@@ -660,9 +659,8 @@ mod tests {
             ),
             websocket_state: build_websocket_state(
                 &services,
-                Arc::new(TrackQueryService::new(
+                Arc::new(TradingQueries::new(
                     repository as Arc<dyn TrackQueryStore>,
-                    test_track_definition_registry("btc-core"),
                     services.runtime.clone(),
                 )),
                 projector,
@@ -699,9 +697,8 @@ mod tests {
             notifications,
             account_margin_guard,
         );
-        let query_service = Arc::new(TrackQueryService::new(
+        let query_service = Arc::new(TradingQueries::new(
             query_store.clone(),
-            test_track_definition_registry("btc-core"),
             services.runtime.clone(),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
@@ -792,9 +789,8 @@ mod tests {
         let account_monitor = Arc::new(account_monitor);
         let projector = Arc::new(TrackProjector::new());
         let account_projector = Arc::new(AccountProjector::new());
-        let query_service = Arc::new(TrackQueryService::new(
+        let query_service = Arc::new(TradingQueries::new(
             query_store.clone(),
-            test_track_definition_registry("btc-core"),
             services.runtime.clone(),
         ));
         let debug_query_service = Arc::new(TrackDebugQueryService::new(
@@ -1138,9 +1134,8 @@ mod tests {
                 notifications,
                 account_margin_guard.clone(),
             );
-            let query_service = Arc::new(TrackQueryService::new(
+            let query_service = Arc::new(TradingQueries::new(
                 query_store.clone(),
-                test_track_definition_registry("btc-core"),
                 services.runtime.clone(),
             ));
             let debug_query_service = Arc::new(TrackDebugQueryService::new(
@@ -1162,9 +1157,8 @@ mod tests {
                 ),
                 websocket_state: build_websocket_state(
                     &services,
-                    Arc::new(TrackQueryService::new(
+                    Arc::new(TradingQueries::new(
                         repository as Arc<dyn TrackQueryStore>,
-                        test_track_definition_registry("btc-core"),
                         services.runtime.clone(),
                     )),
                     projector,
@@ -1415,9 +1409,8 @@ mod tests {
     #[tokio::test]
     async fn get_account_keeps_summary_when_analysis_query_fails() {
         let mut state = app_state_with_account_summary().await;
-        state.http_state.query_service = Arc::new(TrackQueryService::new(
+        state.http_state.query_service = Arc::new(TradingQueries::new(
             Arc::new(FailingQueryStore),
-            test_track_definition_registry("btc-core"),
             state.websocket_state.runtime.clone(),
         ));
 
@@ -1562,9 +1555,8 @@ mod tests {
             account_margin_guard,
         );
         let query_store = repository.clone() as Arc<dyn TrackQueryStore>;
-        let query_service = Arc::new(TrackQueryService::new(
+        let query_service = Arc::new(TradingQueries::new(
             query_store.clone(),
-            test_track_definition_registry("btc-core"),
             services.runtime.clone(),
         ));
         let projector = Arc::new(TrackProjector::new());

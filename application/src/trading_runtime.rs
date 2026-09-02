@@ -115,6 +115,12 @@ pub struct TrackInstrument {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct CommittedTrackSnapshot {
+    pub definition: poise_core::track::TrackDefinition,
+    pub runtime: TrackRuntimeView,
+}
+
+#[derive(Debug, Clone)]
 pub enum TrackInput {
     Command(TrackCommand),
     Market(MarketObservation),
@@ -675,6 +681,34 @@ impl TradingRuntime {
                 instrument: track.instrument().clone(),
             })
             .collect()
+    }
+
+    pub(crate) async fn committed_track_snapshots(&self) -> Result<Vec<CommittedTrackSnapshot>> {
+        let manager = self.manager.read().await;
+        manager
+            .list_tracks()
+            .into_iter()
+            .map(|track| {
+                Ok(CommittedTrackSnapshot {
+                    definition: track.definition().clone(),
+                    runtime: manager.track_runtime_view(track.id())?,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) async fn committed_track_snapshot(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Option<CommittedTrackSnapshot>> {
+        let manager = self.manager.read().await;
+        let Some(track) = manager.get_track(track_id.as_str()) else {
+            return Ok(None);
+        };
+        Ok(Some(CommittedTrackSnapshot {
+            definition: track.definition().clone(),
+            runtime: manager.track_runtime_view(track_id)?,
+        }))
     }
 
     pub async fn resolve_track_id(&self, instrument: &Instrument) -> Option<String> {

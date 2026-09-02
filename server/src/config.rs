@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -86,14 +87,37 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<Config> {
 pub fn parse_config(input: &str) -> Result<Config> {
     let config: Config = toml_edit::de::from_str(input)
         .map_err(|error| anyhow::anyhow!("failed to parse TOML config: {error}"))?;
-    for track in &config.tracks {
-        track
-            .to_track_definition(config.exchange.venue())
-            .map_err(|error| anyhow::anyhow!("invalid track `{}`: {error}", track.track_id))?;
-    }
+    config.track_definitions()?;
     build_track_leverage_index(&config.tracks)?;
     config.account_monitor.validate()?;
     Ok(config)
+}
+
+impl Config {
+    pub(crate) fn track_definitions(&self) -> Result<Vec<TrackDefinition>> {
+        let mut definitions = Vec::with_capacity(self.tracks.len());
+        let mut track_ids = HashSet::new();
+        let mut instruments = HashSet::new();
+        for track in &self.tracks {
+            let definition = track
+                .to_track_definition(self.exchange.venue())
+                .map_err(|error| anyhow::anyhow!("invalid track `{}`: {error}", track.track_id))?;
+            let track_id = definition.track_id().as_str().to_string();
+            if !track_ids.insert(track_id.clone()) {
+                return Err(anyhow::anyhow!("duplicate track id `{track_id}`"));
+            }
+            if !instruments.insert(definition.instrument().clone()) {
+                let instrument = definition.instrument();
+                return Err(anyhow::anyhow!(
+                    "duplicate instrument `{}:{}`",
+                    instrument.venue.as_str(),
+                    instrument.symbol
+                ));
+            }
+            definitions.push(definition);
+        }
+        Ok(definitions)
+    }
 }
 
 impl TrackSpec {
@@ -201,6 +225,80 @@ total_loss_limit = 600.0
         .unwrap();
 
         assert_eq!(config.tracks[0].leverage, Some(20));
+    }
+
+    #[test]
+    fn parse_config_rejects_duplicate_track_ids() {
+        let error = parse_config(
+            r#"
+[exchange]
+venue = "binance"
+
+[[tracks]]
+track_id = "duplicate"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+
+[[tracks]]
+track_id = "duplicate"
+symbol = "ETHUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("duplicate track id `duplicate`"));
+    }
+
+    #[test]
+    fn parse_config_rejects_duplicate_instruments() {
+        let error = parse_config(
+            r#"
+[exchange]
+venue = "binance"
+
+[[tracks]]
+track_id = "btc-primary"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+
+[[tracks]]
+track_id = "btc-secondary"
+symbol = "BTCUSDT"
+lower_price = 90.0
+upper_price = 110.0
+long_exposure_units = 8.0
+short_exposure_units = 6.0
+notional_per_unit = 375.0
+daily_loss_limit = 300.0
+total_loss_limit = 600.0
+"#,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate instrument `binance:BTCUSDT`")
+        );
     }
 
     #[test]

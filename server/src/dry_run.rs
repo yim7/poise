@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, anyhow, ensure};
-use poise_application::TrackDefinitionRegistry;
 use poise_core::instrument::{InstrumentSpec, PositionBasis};
 use poise_core::track::{Instrument, TrackDefinition};
 use poise_engine::ports::{AccountSummarySnapshot, ExchangePorts, MarketDataPort};
@@ -17,7 +16,7 @@ pub(crate) async fn run_config_dry_run_with_ports(
     exchange_ports: ExchangePorts,
 ) -> Result<ConfigDryRunResponse> {
     let track_leverage_index = build_track_leverage_index(&config.tracks)?;
-    let registry = track_definition_registry(config)?;
+    let track_definitions = config.track_definitions()?;
     let account = exchange_ports
         .account_summary()
         .get_account_summary()
@@ -27,7 +26,7 @@ pub(crate) async fn run_config_dry_run_with_ports(
     let market_data = exchange_ports.market_data();
     let mut tracks = Vec::new();
 
-    for track in registry.iter() {
+    for track in &track_definitions {
         let info = metadata
             .get_exchange_info(track.instrument())
             .await
@@ -69,15 +68,6 @@ pub(crate) async fn run_config_dry_run_with_ports(
         tracks,
         warnings: Vec::new(),
     })
-}
-
-fn track_definition_registry(config: &Config) -> Result<TrackDefinitionRegistry> {
-    let tracks = config
-        .tracks
-        .iter()
-        .map(|track| track.to_track_definition(config.exchange.venue()))
-        .collect::<Result<Vec<_>>>()?;
-    TrackDefinitionRegistry::new(tracks).map_err(anyhow::Error::msg)
 }
 
 fn project_account(account: AccountSummarySnapshot) -> ConfigDryRunAccountView {

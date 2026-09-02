@@ -3,8 +3,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use poise_application::TrackDefinitionRegistry;
-use poise_core::track::{Instrument, TrackId};
+use poise_core::track::{Instrument, TrackDefinition, TrackId};
 use poise_engine::ports::{ExchangeInfo, MetadataPort};
 use tokio::time::{Duration, sleep};
 
@@ -24,7 +23,7 @@ pub(crate) trait ExchangeStartupControl: Send + Sync {
 }
 
 pub(crate) async fn apply_exchange_startup_controls(
-    track_definition_registry: &TrackDefinitionRegistry,
+    track_definitions: &[TrackDefinition],
     track_leverage_index: &TrackLeverageIndex,
     exchange_startup_control: &dyn ExchangeStartupControl,
 ) -> Result<()> {
@@ -34,7 +33,7 @@ pub(crate) async fn apply_exchange_startup_controls(
         ));
     }
 
-    for track in track_definition_registry.iter() {
+    for track in track_definitions {
         let track_id = track.track_id().clone();
         let instrument = track.instrument().clone();
         let leverage = track_leverage_index
@@ -79,7 +78,7 @@ pub(crate) async fn prepare_exchange_startup_with<
     BuildExchangeFuture,
     BuildSetter,
 >(
-    track_definition_registry: &TrackDefinitionRegistry,
+    track_definitions: &[TrackDefinition],
     track_leverage_index: &TrackLeverageIndex,
     build_exchange_fn: BuildExchange,
     build_exchange_startup_control_fn: BuildSetter,
@@ -92,7 +91,7 @@ where
     let exchange = build_exchange_fn().await?;
     let exchange_startup_control = build_exchange_startup_control_fn()?;
     apply_exchange_startup_controls(
-        track_definition_registry,
+        track_definitions,
         track_leverage_index,
         exchange_startup_control.as_ref(),
     )

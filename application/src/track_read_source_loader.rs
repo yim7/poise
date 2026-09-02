@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use poise_core::track::{TrackDefinition, TrackId};
+use poise_core::track::TrackId;
 use poise_engine::runtime::TrackRuntimeView;
 
 use crate::{
-    TrackDefinitionRegistry, TrackListReadModel, TrackQueryStore, TrackReadModel, TradingRuntime,
-    track_read_source::TrackReadSource,
+    TrackListReadModel, TrackQueryStore, TrackReadModel, TradingRuntime,
+    track_read_source::TrackReadSource, trading_runtime::CommittedTrackSnapshot,
 };
 
 pub(crate) const DETAIL_EVENTS_LIMIT: usize = 20;
@@ -16,39 +16,29 @@ pub(crate) const DETAIL_EFFECTS_LIMIT: usize = 20;
 #[derive(Clone)]
 pub(crate) struct TrackReadSourceLoader {
     repository: Arc<dyn TrackQueryStore>,
-    track_definition_registry: Arc<TrackDefinitionRegistry>,
     runtime: Arc<TradingRuntime>,
 }
 
 impl TrackReadSourceLoader {
-    pub(crate) fn new(
-        repository: Arc<dyn TrackQueryStore>,
-        track_definition_registry: Arc<TrackDefinitionRegistry>,
-        runtime: Arc<TradingRuntime>,
-    ) -> Self {
+    pub(crate) fn new(repository: Arc<dyn TrackQueryStore>, runtime: Arc<TradingRuntime>) -> Self {
         Self {
             repository,
-            track_definition_registry,
             runtime,
         }
     }
 
     pub(crate) async fn list_track_read_models(&self) -> Result<Vec<TrackListReadModel>> {
         let mut read_models = Vec::new();
-        for definition in self.track_definition_registry.iter() {
-            let track_id = definition.track_id().clone();
-            let Some(runtime) = self.runtime.track_runtime_view(track_id.as_str()).await? else {
-                continue;
-            };
-            let definition = self.definition_for(&track_id)?.clone();
+        for snapshot in self.runtime.committed_track_snapshots().await? {
+            let track_id = snapshot.definition.track_id().clone();
             let updated_at = self
                 .repository
                 .load_track_updated_at(&track_id)
                 .await?
-                .unwrap_or_else(|| infer_runtime_updated_at(&runtime));
+                .unwrap_or_else(|| infer_runtime_updated_at(&snapshot.runtime));
             read_models.push(TrackListReadModel::from_parts(
-                &definition,
-                &runtime,
+                &snapshot.definition,
+                &snapshot.runtime,
                 updated_at,
             ));
         }
@@ -71,7 +61,7 @@ impl TrackReadSourceLoader {
         &self,
         track_id: &TrackId,
     ) -> Result<Option<TrackReadSource>> {
-        let Some(runtime) = self.runtime.track_runtime_view(track_id.as_str()).await? else {
+        let Some(snapshot) = self.runtime.committed_track_snapshot(track_id).await? else {
             return Ok(None);
         };
 
@@ -87,42 +77,30 @@ impl TrackReadSourceLoader {
             .repository
             .load_track_updated_at(track_id)
             .await?
-            .unwrap_or_else(|| infer_runtime_updated_at(&runtime));
+            .unwrap_or_else(|| infer_runtime_updated_at(&snapshot.runtime));
 
-        Ok(Some(
-            self.read_source_from_runtime(
-                track_id.clone(),
-                runtime,
-                updated_at,
-                recent_track_events,
-                recent_effects,
-            )
-            .await?,
-        ))
-    }
-
-    async fn read_source_from_runtime(
-        &self,
-        track_id: TrackId,
-        runtime: TrackRuntimeView,
-        updated_at: DateTime<Utc>,
-        recent_track_events: Vec<crate::StoredTrackEvent>,
-        recent_effects: Vec<crate::PersistedTrackEffect>,
-    ) -> Result<TrackReadSource> {
-        let definition = self.definition_for(&track_id)?.clone();
-        Ok(TrackReadSource {
-            definition,
-            runtime,
+        Ok(Some(self.read_source_from_runtime(
+            snapshot,
             updated_at,
             recent_track_events,
             recent_effects,
-        })
+        )))
     }
 
-    fn definition_for(&self, track_id: &TrackId) -> Result<&TrackDefinition> {
-        self.track_definition_registry
-            .get(track_id)
-            .ok_or_else(|| anyhow::anyhow!("missing track definition for `{}`", track_id.as_str()))
+    fn read_source_from_runtime(
+        &self,
+        snapshot: CommittedTrackSnapshot,
+        updated_at: DateTime<Utc>,
+        recent_track_events: Vec<crate::StoredTrackEvent>,
+        recent_effects: Vec<crate::PersistedTrackEffect>,
+    ) -> TrackReadSource {
+        TrackReadSource {
+            definition: snapshot.definition,
+            runtime: snapshot.runtime,
+            updated_at,
+            recent_track_events,
+            recent_effects,
+        }
     }
 }
 

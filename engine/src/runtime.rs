@@ -595,6 +595,10 @@ impl TrackRuntime {
         self.definition.instrument()
     }
 
+    pub fn definition(&self) -> &TrackDefinition {
+        &self.definition
+    }
+
     pub fn config(&self) -> &TrackConfig {
         self.definition.track_config()
     }

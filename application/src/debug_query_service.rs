@@ -118,7 +118,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_track_diagnostics_does_not_require_track_definition_registry_or_effects() {
+    async fn load_track_diagnostics_does_not_require_a_separate_definition_index_or_effects() {
         let repository = Arc::new(FakeReadRepository::new());
         let live_repository = Arc::new(MemoryRepository::default());
         let (services, _) = track_write_services(seeded_manager(), live_repository);

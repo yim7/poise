@@ -514,8 +514,8 @@ mod tests {
     use crate::runtime::{RuntimePorts, RuntimeStartupDefinition};
     use crate::test_support::{
         build_runtime_and_effect_worker_test_contexts, build_test_application_services,
-        seed_persisted_pending_submit_effect, test_instrument_spec_for,
-        test_track_definition_registry, unavailable_account_monitor,
+        seed_persisted_pending_submit_effect, test_instrument_spec_for, test_track_definition,
+        unavailable_account_monitor,
     };
 
     use super::complete_startup;
@@ -560,10 +560,7 @@ mod tests {
                 Arc::new(SystemClock),
             ),
             vec![RuntimeStartupDefinition::new(
-                test_track_definition_registry("btc-core")
-                    .get(&TrackId::new("btc-core"))
-                    .unwrap()
-                    .clone(),
+                test_track_definition("btc-core"),
                 25,
             )],
         );
@@ -855,10 +852,7 @@ mod tests {
                 Arc::new(SystemClock),
             ),
             vec![RuntimeStartupDefinition::new(
-                test_track_definition_registry("btc-core")
-                    .get(&TrackId::new("btc-core"))
-                    .unwrap()
-                    .clone(),
+                test_track_definition("btc-core"),
                 10,
             )],
         );
@@ -994,10 +988,7 @@ mod tests {
                 Arc::new(SystemClock),
             ),
             vec![RuntimeStartupDefinition::new(
-                test_track_definition_registry("btc-core")
-                    .get(&TrackId::new("btc-core"))
-                    .unwrap()
-                    .clone(),
+                test_track_definition("btc-core"),
                 10,
             )],
         );
@@ -1063,10 +1054,7 @@ mod tests {
                 Arc::new(SystemClock),
             ),
             vec![RuntimeStartupDefinition::new(
-                test_track_definition_registry("btc-core")
-                    .get(&TrackId::new("btc-core"))
-                    .unwrap()
-                    .clone(),
+                test_track_definition("btc-core"),
                 10,
             )],
         );
@@ -1151,10 +1139,7 @@ mod tests {
                 Arc::new(SystemClock),
             ),
             vec![RuntimeStartupDefinition::new(
-                test_track_definition_registry("btc-core")
-                    .get(&TrackId::new("btc-core"))
-                    .unwrap()
-                    .clone(),
+                test_track_definition("btc-core"),
                 10,
             )],
         );
@@ -1211,10 +1196,7 @@ mod tests {
                 Arc::new(SystemClock),
             ),
             vec![RuntimeStartupDefinition::new(
-                test_track_definition_registry("btc-core")
-                    .get(&TrackId::new("btc-core"))
-                    .unwrap()
-                    .clone(),
+                test_track_definition("btc-core"),
                 10,
             )],
         );

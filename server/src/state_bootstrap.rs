@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use poise_application::{
-    AccountMonitorStore, TrackDefinitionRegistry, TrackEffectJournal, TrackIdentityGuardOutcome,
-    TrackIdentityStore, TrackMutationStore, TrackQueryStore,
+    AccountMonitorStore, TrackEffectJournal, TrackIdentityGuardOutcome, TrackIdentityStore,
+    TrackMutationStore, TrackQueryStore,
 };
+use poise_core::track::TrackDefinition;
 use poise_storage::sqlite::SqliteStorage;
 
 use crate::config::Config;
@@ -39,17 +40,17 @@ pub struct StateRepositories {
 pub struct PreparedStateStore {
     repositories: StateRepositories,
     identity_store: Arc<dyn TrackIdentityStore>,
-    track_definition_registry: Arc<TrackDefinitionRegistry>,
+    track_definitions: Vec<TrackDefinition>,
 }
 
 impl PreparedStateStore {
     pub async fn run_startup<T, F, Fut>(self, startup: F) -> Result<T>
     where
-        F: FnOnce(StateRepositories, Arc<TrackDefinitionRegistry>) -> Fut,
+        F: FnOnce(StateRepositories, Vec<TrackDefinition>) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
         let identities = self
-            .track_definition_registry
+            .track_definitions
             .iter()
             .map(|definition| {
                 (
@@ -63,18 +64,14 @@ impl PreparedStateStore {
             .guard_track_identities(&identities)
             .await
             .context("failed to guard configured track identities")?;
-        log_track_identity_guard_outcomes(&self.track_definition_registry, &outcomes);
+        log_track_identity_guard_outcomes(&self.track_definitions, &outcomes);
 
-        startup(
-            self.repositories.clone(),
-            Arc::clone(&self.track_definition_registry),
-        )
-        .await
+        startup(self.repositories.clone(), self.track_definitions).await
     }
 
     #[cfg(test)]
-    pub fn registry(&self) -> &TrackDefinitionRegistry {
-        &self.track_definition_registry
+    pub fn track_definitions(&self) -> &[TrackDefinition] {
+        &self.track_definitions
     }
 }
 
@@ -123,14 +120,15 @@ fn unexpected(error: anyhow::Error) -> StateBootstrapError {
 }
 
 fn log_track_identity_guard_outcomes(
-    registry: &TrackDefinitionRegistry,
+    definitions: &[TrackDefinition],
     outcomes: &[TrackIdentityGuardOutcome],
 ) {
     for outcome in outcomes {
         match outcome {
             TrackIdentityGuardOutcome::AdoptedLegacyPnl(track_id) => {
-                let definition = registry
-                    .get(track_id)
+                let definition = definitions
+                    .iter()
+                    .find(|definition| definition.track_id() == track_id)
                     .expect("identity guard outcome must reference a configured track");
                 let instrument = definition.instrument();
                 tracing::info!(
@@ -142,8 +140,9 @@ fn log_track_identity_guard_outcomes(
                 );
             }
             TrackIdentityGuardOutcome::AdoptedLegacyWithoutInstrumentEvidence(track_id) => {
-                let definition = registry
-                    .get(track_id)
+                let definition = definitions
+                    .iter()
+                    .find(|definition| definition.track_id() == track_id)
                     .expect("identity guard outcome must reference a configured track");
                 let instrument = definition.instrument();
                 tracing::warn!(
@@ -165,24 +164,15 @@ pub async fn prepare_state_repository(
 ) -> BootstrapResult<PreparedStateStore> {
     ensure_parent_dir(db_path).map_err(unexpected)?;
     let db_path = db_path.to_path_buf();
-    let track_definition_registry =
-        Arc::new(build_track_definition_registry(config).map_err(unexpected)?);
+    let track_definitions = config.track_definitions().map_err(unexpected)?;
 
     let repository = SqliteStorage::new(&db_path).map_err(unexpected)?;
     let repository = Arc::new(repository);
     Ok(PreparedStateStore {
         repositories: StateRepositories::from_sqlite_storage(repository.clone()),
         identity_store: repository,
-        track_definition_registry,
+        track_definitions,
     })
-}
-
-fn build_track_definition_registry(config: &Config) -> Result<TrackDefinitionRegistry> {
-    let mut configured = Vec::with_capacity(config.tracks.len());
-    for track in &config.tracks {
-        configured.push(track.to_track_definition(config.exchange.venue())?);
-    }
-    TrackDefinitionRegistry::new(configured)
 }
 
 fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
@@ -201,7 +191,6 @@ mod tests {
 
     use poise_application::PersistedControlMode;
     use poise_application::TrackControlState;
-    use poise_application::TrackDefinitionRegistry;
     use poise_application::TrackIdentityStore;
     use poise_application::TrackMutationStore;
     use poise_application::TrackQueryStore;
@@ -222,15 +211,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_state_repository_builds_track_definition_registry_for_startup() {
+    async fn prepare_state_repository_builds_track_definitions_for_startup() {
         let instance_dir = tempfile::tempdir().unwrap();
         let config = test_config(90.0);
         let db_path = test_db_path(instance_dir.path());
         let prepared = prepare_state_repository(&config, &db_path).await.unwrap();
 
-        let registry: &TrackDefinitionRegistry = prepared.registry();
-        assert_eq!(registry.iter().count(), 1);
-        assert!(registry.get(&TrackId::new("btc-core")).is_some());
+        let definitions = prepared.track_definitions();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].track_id(), &TrackId::new("btc-core"));
     }
 
     #[tokio::test]
@@ -242,7 +231,7 @@ mod tests {
         let first = prepare_state_repository(&config, &db_path)
             .await
             .unwrap()
-            .run_startup(move |_repositories, _registry| async move {
+            .run_startup(move |_repositories, _definitions| async move {
                 Ok(load_track_identity(&first_query_path, "btc-core").unwrap())
             })
             .await
@@ -251,7 +240,7 @@ mod tests {
         let second = prepare_state_repository(&config, &db_path)
             .await
             .unwrap()
-            .run_startup(move |_repositories, _registry| async move {
+            .run_startup(move |_repositories, _definitions| async move {
                 Ok(load_track_identity(&second_query_path, "btc-core").unwrap())
             })
             .await
@@ -287,7 +276,7 @@ mod tests {
         let error = prepare_state_repository(&config, &db_path)
             .await
             .unwrap()
-            .run_startup(move |_repositories, _registry| async move {
+            .run_startup(move |_repositories, _definitions| async move {
                 observed.store(true, Ordering::SeqCst);
                 Ok(())
             })
@@ -310,7 +299,7 @@ mod tests {
         prepare_state_repository(&config, &db_path)
             .await
             .unwrap()
-            .run_startup(|_repositories, _registry| async { Ok(()) })
+            .run_startup(|_repositories, _definitions| async { Ok(()) })
             .await
             .unwrap();
 
@@ -336,7 +325,7 @@ mod tests {
         let error = prepare_state_repository(&config, &db_path)
             .await
             .unwrap()
-            .run_startup(move |_repositories, _registry| async move {
+            .run_startup(move |_repositories, _definitions| async move {
                 observed.store(true, Ordering::SeqCst);
                 Ok(())
             })
@@ -364,7 +353,7 @@ mod tests {
         let state = prepare_state_repository(&config, &db_path)
             .await
             .unwrap()
-            .run_startup(|repositories, _registry| async move {
+            .run_startup(|repositories, _definitions| async move {
                 TrackQueryStore::load_track_control_state(
                     repositories.query_store().as_ref(),
                     &TrackId::new("btc-core"),
@@ -391,7 +380,7 @@ mod tests {
         prepare_state_repository(&config, &db_path)
             .await
             .unwrap()
-            .run_startup(|_repositories, _registry| async { Ok(()) })
+            .run_startup(|_repositories, _definitions| async { Ok(()) })
             .await
             .unwrap();
         let empty_config = Config {
@@ -403,7 +392,7 @@ mod tests {
         prepare_state_repository(&empty_config, &db_path)
             .await
             .unwrap()
-            .run_startup(|_repositories, _registry| async { Ok(()) })
+            .run_startup(|_repositories, _definitions| async { Ok(()) })
             .await
             .unwrap();
         assert!(load_track_identity(&db_path, "btc-core").is_some());
@@ -413,7 +402,7 @@ mod tests {
         let error = prepare_state_repository(&reused_config, &db_path)
             .await
             .unwrap()
-            .run_startup(|_repositories, _registry| async { Ok(()) })
+            .run_startup(|_repositories, _definitions| async { Ok(()) })
             .await
             .unwrap_err();
 
@@ -475,7 +464,7 @@ mod tests {
         persist_control_state(&db_path).await;
 
         let prepared = prepare_state_repository(&config, &db_path).await.unwrap();
-        assert_eq!(prepared.registry().iter().count(), 0);
+        assert!(prepared.track_definitions().is_empty());
     }
 
     #[tokio::test]
@@ -485,7 +474,10 @@ mod tests {
         let db_path = test_db_path(instance_dir.path());
 
         let prepared = prepare_state_repository(&config, &db_path).await.unwrap();
-        assert!(prepared.registry().get(&TrackId::new("btc-core")).is_some());
+        assert_eq!(
+            prepared.track_definitions()[0].track_id(),
+            &TrackId::new("btc-core")
+        );
     }
 
     #[tokio::test]
@@ -496,7 +488,10 @@ mod tests {
         persist_presence_without_business_truth(&db_path).await;
 
         let prepared = prepare_state_repository(&config, &db_path).await.unwrap();
-        assert!(prepared.registry().get(&TrackId::new("btc-core")).is_some());
+        assert_eq!(
+            prepared.track_definitions()[0].track_id(),
+            &TrackId::new("btc-core")
+        );
     }
 
     #[tokio::test]
