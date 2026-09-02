@@ -791,6 +791,7 @@ mod tests {
         let mut app = App::new(track_list_items());
 
         app.apply_account_summary(AccountSummaryView {
+            valuation_asset: Some("USD".to_string()),
             equity: Some(12_500.0),
             available: Some(9_000.0),
             unrealized_pnl: Some(-350.0),
@@ -805,6 +806,7 @@ mod tests {
         assert_eq!(
             app.account_summary,
             Some(AccountSummaryView {
+                valuation_asset: Some("USD".to_string()),
                 equity: Some(12_500.0),
                 available: Some(9_000.0),
                 unrealized_pnl: Some(-350.0),

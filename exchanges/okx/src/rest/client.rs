@@ -785,7 +785,7 @@ mod tests {
             ),
             MockResponse::json(
                 200,
-                r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[{"ccy":"USDT","availEq":"9800.25","upl":"-120.75"}]}]}"#,
+                r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[{"ccy":"USDT","availBal":"9800.25","availEq":"9800.25","upl":"-120.75"}]}]}"#,
             ),
         ])
         .await;
@@ -839,8 +839,8 @@ mod tests {
             MockResponse::json(
                 200,
                 r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[
-                {"ccy":"USDT","availEq":"9800.25","upl":"-120.75"},
-                {"ccy":"BTC","availEq":"200.0","upl":"10.0"}
+                {"ccy":"USDT","availBal":"9800.25","availEq":"9800.25","upl":"-120.75"},
+                {"ccy":"BTC","availBal":"200.0","availEq":"200.0","upl":"10.0"}
             ]}]}"#,
             ),
         ])
@@ -866,8 +866,8 @@ mod tests {
             MockResponse::json(
                 200,
                 r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[
-                {"ccy":"USD","availEq":"9800.25","upl":"0"},
-                {"ccy":"BTC","availEq":"0.5","upl":"0"}
+                {"ccy":"USD","availBal":"9800.25","availEq":"9800.25","upl":"0"},
+                {"ccy":"BTC","availBal":"0.5","availEq":"0.5","upl":"0"}
             ]}]}"#,
             ),
         ])
@@ -1092,8 +1092,8 @@ mod tests {
             MockResponse::json(
                 200,
                 r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[
-                    {"ccy":"USDT","availEq":"100.25","upl":"0"},
-                    {"ccy":"BTC","availEq":"9.0","upl":"0"}
+                    {"ccy":"USDT","availBal":"100.25","availEq":"100.25","upl":"0"},
+                    {"ccy":"BTC","availBal":"9.0","availEq":"9.0","upl":"0"}
                 ]}]}"#,
             ),
             MockResponse::json(
@@ -1118,7 +1118,7 @@ mod tests {
             MockResponse::json(200, inverse_instrument_response()),
             MockResponse::json(
                 200,
-                r#"{"code":"0","msg":"","data":[{"totalEq":"50000","details":[{"ccy":"BTC","availEq":"0.5","upl":"0"}]}]}"#,
+                r#"{"code":"0","msg":"","data":[{"totalEq":"50000","details":[{"ccy":"BTC","availBal":"0.5","availEq":"0.5","upl":"0"}]}]}"#,
             ),
             MockResponse::json(
                 200,
@@ -1142,7 +1142,7 @@ mod tests {
             MockResponse::json(200, inverse_instrument_response()),
             MockResponse::json(
                 200,
-                r#"{"code":"0","msg":"","data":[{"totalEq":"25000","details":[{"ccy":"BTC","availEq":"0.5","upl":"0"}]}]}"#,
+                r#"{"code":"0","msg":"","data":[{"totalEq":"25000","details":[{"ccy":"BTC","availBal":"0.5","availEq":"0.5","upl":"0"}]}]}"#,
             ),
             MockResponse::json(
                 200,
@@ -1166,7 +1166,7 @@ mod tests {
             MockResponse::json(200, inverse_instrument_response()),
             MockResponse::json(
                 200,
-                r#"{"code":"0","msg":"","data":[{"totalEq":"37500","details":[{"ccy":"BTC","availEq":"0.5","upl":"0"}]}]}"#,
+                r#"{"code":"0","msg":"","data":[{"totalEq":"37500","details":[{"ccy":"BTC","availBal":"0.5","availEq":"0.5","upl":"0"}]}]}"#,
             ),
             MockResponse::json(
                 200,

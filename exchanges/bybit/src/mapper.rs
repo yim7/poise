@@ -77,13 +77,31 @@ impl TryFrom<InstrumentInfoResult> for ExchangeInfo {
 impl WalletBalanceResult {
     pub(crate) fn into_account_summary_snapshot(self) -> Result<AccountSummarySnapshot> {
         let balance = first_wallet_balance(&self)?;
-        Ok(AccountSummarySnapshot {
-            equity: required_value("totalEquity", balance.total_equity)?,
-            available: required_value("totalAvailableBalance", balance.total_available_balance)?,
-            available_by_asset: Default::default(),
-            unrealized_pnl: required_value("totalPerpUPL", balance.total_perp_upl)?,
-            observed_at: Utc::now(),
-        })
+        let valuation_asset = Asset::try_new("USD").map_err(anyhow::Error::msg)?;
+        AccountSummarySnapshot::try_new(
+            Amount::new(
+                required_value("totalEquity", balance.total_equity)?,
+                valuation_asset.clone(),
+            )
+            .map_err(anyhow::Error::msg)?,
+            Some(
+                Amount::new(
+                    required_value("totalAvailableBalance", balance.total_available_balance)?,
+                    valuation_asset.clone(),
+                )
+                .map_err(anyhow::Error::msg)?,
+            ),
+            Default::default(),
+            Some(
+                Amount::new(
+                    required_value("totalPerpUPL", balance.total_perp_upl)?,
+                    valuation_asset,
+                )
+                .map_err(anyhow::Error::msg)?,
+            ),
+            Utc::now(),
+        )
+        .map_err(anyhow::Error::msg)
     }
 }
 
@@ -382,9 +400,10 @@ mod tests {
 
         let snapshot = balances.into_account_summary_snapshot().unwrap();
 
-        assert_eq!(snapshot.equity, 125.5);
-        assert_eq!(snapshot.available, 100.25);
-        assert_eq!(snapshot.unrealized_pnl, -2.75);
+        assert_eq!(snapshot.valuation_asset().as_str(), "USD");
+        assert_eq!(snapshot.equity().value(), 125.5);
+        assert_eq!(snapshot.available().unwrap().value(), 100.25);
+        assert_eq!(snapshot.unrealized_pnl().unwrap().value(), -2.75);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountCapacityGuard, AccountMonitor, ApplicationNotification, EffectJournalDiagnostics,
@@ -17,8 +18,9 @@ use poise_engine::executor::SubmitRecoveryToken;
 use poise_engine::manager::TrackManager;
 use poise_engine::observation::MarketObservation;
 use poise_engine::ports::{
-    AccountCapacitySnapshot, AccountPort, ExchangeOpenOrderSnapshot, ExecutionPort, ExecutionQuote,
-    OrderReceipt, OrderRequest, OrderStatus, Position, RecentTrackPnlRecords, UserDataEvent,
+    AccountCapacitySnapshot, AccountPort, AccountSummarySnapshot, ExchangeOpenOrderSnapshot,
+    ExecutionPort, ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus, Position,
+    RecentTrackPnlRecords, UserDataEvent,
 };
 use poise_engine::price_gate::SubmitPurpose;
 use tokio::sync::broadcast;
@@ -32,6 +34,31 @@ use crate::runtime::{
     RuntimeHealth, TrackReconcileGuards,
 };
 use crate::server_context::{EffectWorkerState, RuntimeState};
+
+pub(crate) fn test_amount(value: f64, asset: &str) -> Amount {
+    Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+}
+
+pub(crate) fn test_account_summary_snapshot(
+    valuation_asset: &str,
+    equity: f64,
+    available: Option<f64>,
+    available_by_asset: &[(&str, f64)],
+    unrealized_pnl: Option<f64>,
+    observed_at: DateTime<Utc>,
+) -> AccountSummarySnapshot {
+    AccountSummarySnapshot::try_new(
+        test_amount(equity, valuation_asset),
+        available.map(|value| test_amount(value, valuation_asset)),
+        available_by_asset
+            .iter()
+            .map(|(asset, value)| (Asset::try_new(*asset).unwrap(), *value))
+            .collect(),
+        unrealized_pnl.map(|value| test_amount(value, valuation_asset)),
+        observed_at,
+    )
+    .unwrap()
+}
 
 #[derive(Clone)]
 pub(crate) struct TestApplicationServices {

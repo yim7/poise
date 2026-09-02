@@ -1,6 +1,7 @@
 {
   "type": "account_summary_changed",
   "summary": {
+    "valuation_asset": "USD",
     "equity": 12420.0,
     "available": 2235.6,
     "unrealized_pnl": -512.4,

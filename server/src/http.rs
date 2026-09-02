@@ -496,13 +496,14 @@ mod tests {
     #[async_trait::async_trait]
     impl poise_engine::ports::AccountSummaryPort for AccountSummaryOnlyExchange {
         async fn get_account_summary(&self) -> anyhow::Result<AccountSummarySnapshot> {
-            Ok(AccountSummarySnapshot {
-                equity: 12_500.0,
-                available: 9_000.0,
-                available_by_asset: Default::default(),
-                unrealized_pnl: -350.0,
-                observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
-            })
+            Ok(crate::test_support::test_account_summary_snapshot(
+                "USD",
+                12_500.0,
+                Some(9_000.0),
+                &[],
+                Some(-350.0),
+                Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
+            ))
         }
     }
 
@@ -750,7 +751,7 @@ mod tests {
         account_store
             .save_state(&StoredAccountMonitorState {
                 trading_day: chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
-                baseline_equity: 13_000.0,
+                baseline_equity: crate::test_support::test_amount(13_000.0, "USD"),
                 baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),
             })
             .await

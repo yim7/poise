@@ -173,7 +173,7 @@ fn project_hedge_like(
             let account_asset_quantity = account.and_then(|account| {
                 account
                     .available_by_asset
-                    .get(&exposure.asset)
+                    .get(exposure.asset.as_str())
                     .copied()
                     .filter(|value| value.is_finite())
             });
@@ -864,7 +864,7 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
-    use poise_core::instrument::InstrumentSpec;
+    use poise_core::instrument::{Asset, InstrumentSpec};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
@@ -985,10 +985,11 @@ mod tests {
 
     fn test_account_read_model() -> AccountReadModel {
         AccountReadModel {
+            valuation_asset: Asset::try_new("USD").unwrap(),
             equity: 12_500.0,
-            available: 9_000.0,
-            available_by_asset: BTreeMap::from([("BTC".to_string(), 0.20)]),
-            unrealized_pnl: -350.0,
+            available: Some(9_000.0),
+            available_by_asset: BTreeMap::from([(Asset::try_new("BTC").unwrap(), 0.20)]),
+            unrealized_pnl: Some(-350.0),
             baseline_equity: 12_800.0,
             day_base_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),
             day_change_pct: Some(-2.75),

@@ -24,12 +24,23 @@ pub struct BinancePositionRisk {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BinanceAccountSummaryInformation {
+    #[serde(default, rename = "multiAssetsMargin")]
+    pub multi_assets_margin: bool,
     #[serde(rename = "availableBalance")]
     pub available_balance: String,
     #[serde(rename = "totalMarginBalance")]
     pub total_margin_balance: String,
     #[serde(rename = "totalUnrealizedProfit")]
     pub total_unrealized_profit: String,
+    #[serde(default)]
+    pub assets: Vec<BinanceAssetBalance>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BinanceAssetBalance {
+    pub asset: String,
+    #[serde(rename = "availableBalance")]
+    pub available_balance: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

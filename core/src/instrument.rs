@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 
 use crate::track::Instrument;
 use crate::types::{PricePrecision, PriceRounding};
@@ -18,6 +19,12 @@ impl Asset {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl Borrow<str> for Asset {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }
 

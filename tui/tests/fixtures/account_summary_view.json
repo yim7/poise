@@ -1,4 +1,5 @@
 {
+  "valuation_asset": "USD",
   "equity": 12500.0,
   "available": 9000.0,
   "unrealized_pnl": -350.0,

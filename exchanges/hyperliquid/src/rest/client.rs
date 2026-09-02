@@ -151,11 +151,25 @@ impl HyperliquidRestClient {
     pub(crate) async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
         let uses_spot_margin_balance = self.uses_spot_margin_balance().await?;
         let state = self.account_state().await?;
-        let mut summary = account_summary_from_state(&state)?;
+        let summary = account_summary_from_state(&state)?;
         if uses_spot_margin_balance {
             let spot_state = self.spot_user_state().await?;
-            summary.equity = usdc_total_balance(&spot_state)?;
-            summary.available = usdc_available_after_maintenance(&spot_state)?;
+            let asset =
+                poise_core::instrument::Asset::try_new("USDC").map_err(anyhow::Error::msg)?;
+            return summary
+                .with_equity_and_available(
+                    poise_core::instrument::Amount::new(
+                        usdc_total_balance(&spot_state)?,
+                        asset.clone(),
+                    )
+                    .map_err(anyhow::Error::msg)?,
+                    poise_core::instrument::Amount::new(
+                        usdc_available_after_maintenance(&spot_state)?,
+                        asset,
+                    )
+                    .map_err(anyhow::Error::msg)?,
+                )
+                .map_err(anyhow::Error::msg);
         }
         Ok(summary)
     }
@@ -1513,7 +1527,7 @@ mod tests {
             info.instrument_spec.instrument(),
             &Instrument::new(Venue::Hyperliquid, "BTC")
         );
-        assert_eq!(summary.equity, 125.5);
+        assert_eq!(summary.equity().value(), 125.5);
         assert_eq!(position.qty, 0.02);
         assert_eq!(capacity.max_increase_notional, 1002.5);
         assert_eq!(open_orders.len(), 1);
@@ -1554,9 +1568,10 @@ mod tests {
 
         let summary = client.get_account_summary().await.unwrap();
 
-        assert_eq!(summary.equity, 891.55684101);
-        assert_eq!(summary.available, 871.15175301);
-        assert_eq!(summary.unrealized_pnl, -30.85317);
+        assert_eq!(summary.valuation_asset().as_str(), "USDC");
+        assert_eq!(summary.equity().value(), 891.55684101);
+        assert_eq!(summary.available().unwrap().value(), 871.15175301);
+        assert_eq!(summary.unrealized_pnl().unwrap().value(), -30.85317);
         let requests = server.requests().await;
         assert_eq!(requests[0].json_body()["type"], "userAbstraction");
         assert_eq!(requests[1].json_body()["type"], "clearinghouseState");

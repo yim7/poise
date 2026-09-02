@@ -13,6 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::schema;
 use poise_core::events::DomainEvent;
+use poise_core::instrument::{Amount, Asset};
 use poise_core::track::{Instrument, TrackId};
 use poise_core::types::Side;
 use poise_engine::execution_plan::TrackEffect;
@@ -26,6 +27,7 @@ pub struct SqliteStorage {
 pub struct AccountMonitorStateRow {
     pub trading_day: NaiveDate,
     pub baseline_equity: f64,
+    pub baseline_asset: String,
     pub baseline_captured_at: DateTime<Utc>,
 }
 
@@ -152,20 +154,22 @@ impl SqliteStorage {
             .query_row(
                 "SELECT trading_day,
                         baseline_equity,
+                        baseline_asset,
                         baseline_captured_at
                  FROM account_monitor_state
                  WHERE singleton_key = 1",
                 [],
                 |row| {
                     let trading_day: String = row.get(0)?;
-                    let baseline_captured_at: String = row.get(2)?;
+                    let baseline_captured_at: String = row.get(3)?;
 
                     Ok(AccountMonitorStateRow {
                         trading_day: Self::deserialize_trading_day(&trading_day, 0)?,
                         baseline_equity: row.get(1)?,
+                        baseline_asset: row.get(2)?,
                         baseline_captured_at: Self::deserialize_timestamp(
                             &baseline_captured_at,
-                            2,
+                            3,
                         )?,
                     })
                 },
@@ -186,15 +190,18 @@ impl SqliteStorage {
                 singleton_key,
                 trading_day,
                 baseline_equity,
+                baseline_asset,
                 baseline_captured_at
-            ) VALUES (1, ?1, ?2, ?3)
+            ) VALUES (1, ?1, ?2, ?3, ?4)
             ON CONFLICT(singleton_key) DO UPDATE SET
                 trading_day = excluded.trading_day,
                 baseline_equity = excluded.baseline_equity,
+                baseline_asset = excluded.baseline_asset,
                 baseline_captured_at = excluded.baseline_captured_at",
             params![
                 row.trading_day.format("%F").to_string(),
                 row.baseline_equity,
+                row.baseline_asset,
                 row.baseline_captured_at.to_rfc3339(),
             ],
         )
@@ -1244,17 +1251,25 @@ impl app::AccountMonitorStore for SqliteStorage {
         Ok(self
             .load_account_monitor_state_row()
             .await?
-            .map(|row| app::StoredAccountMonitorState {
-                trading_day: row.trading_day,
-                baseline_equity: row.baseline_equity,
-                baseline_captured_at: row.baseline_captured_at,
-            }))
+            .map(|row| -> Result<_> {
+                Ok(app::StoredAccountMonitorState {
+                    trading_day: row.trading_day,
+                    baseline_equity: Amount::new(
+                        row.baseline_equity,
+                        Asset::try_new(row.baseline_asset).map_err(anyhow::Error::msg)?,
+                    )
+                    .map_err(anyhow::Error::msg)?,
+                    baseline_captured_at: row.baseline_captured_at,
+                })
+            })
+            .transpose()?)
     }
 
     async fn save_state(&self, state: &app::StoredAccountMonitorState) -> Result<()> {
         let row = AccountMonitorStateRow {
             trading_day: state.trading_day,
-            baseline_equity: state.baseline_equity,
+            baseline_equity: state.baseline_equity.value(),
+            baseline_asset: state.baseline_equity.asset().as_str().to_string(),
             baseline_captured_at: state.baseline_captured_at,
         };
         self.save_account_monitor_state_row(&row).await
@@ -1884,6 +1899,7 @@ mod tests {
         let expected = AccountMonitorStateRow {
             trading_day: NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
             baseline_equity: 12_500.5,
+            baseline_asset: "USD".to_string(),
             baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 1, 2).unwrap(),
         };
 
@@ -1902,7 +1918,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let expected = app::StoredAccountMonitorState {
             trading_day: NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
-            baseline_equity: 12_500.5,
+            baseline_equity: Amount::new(12_500.5, Asset::try_new("USD").unwrap()).unwrap(),
             baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 1, 2).unwrap(),
         };
 
@@ -1923,7 +1939,11 @@ mod tests {
             .expect("row should remain");
 
         assert_eq!(row.trading_day, expected.trading_day);
-        assert_eq!(row.baseline_equity, expected.baseline_equity);
+        assert_eq!(row.baseline_equity, expected.baseline_equity.value());
+        assert_eq!(
+            row.baseline_asset,
+            expected.baseline_equity.asset().as_str()
+        );
         assert_eq!(row.baseline_captured_at, expected.baseline_captured_at);
     }
 

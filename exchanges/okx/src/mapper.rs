@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{TimeZone, Utc};
 
+use poise_core::instrument::{Amount, Asset};
 use poise_core::track::{Instrument, Venue};
 use poise_core::types::Side;
 use poise_engine::ledger::TrackPnlRecord;
@@ -23,25 +24,31 @@ pub(crate) fn account_summary_from_balance(
         return Err(anyhow!("missing OKX balance details"));
     }
 
-    let mut available = 0.0;
     let mut available_by_asset = BTreeMap::new();
-    let mut unrealized_pnl = 0.0;
     for detail in value.details {
-        let currency = detail.currency;
-        let asset_available =
-            parse_decimal(&format!("details[{currency}].availEq"), &detail.avail_eq)?;
-        available += asset_available;
-        available_by_asset.insert(currency.clone(), asset_available);
-        unrealized_pnl += parse_decimal(&format!("details[{currency}].upl"), &detail.upl)?;
+        let asset = Asset::try_new(detail.currency).map_err(anyhow::Error::msg)?;
+        if let Some(available) = detail
+            .avail_bal
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            available_by_asset.insert(
+                asset.clone(),
+                parse_decimal(&format!("details[{}].availBal", asset.as_str()), available)?,
+            );
+        }
     }
 
-    Ok(AccountSummarySnapshot {
-        equity: parse_decimal("totalEq", &value.total_eq)?,
-        available,
+    let valuation_asset = Asset::try_new("USD").map_err(anyhow::Error::msg)?;
+    AccountSummarySnapshot::try_new(
+        Amount::new(parse_decimal("totalEq", &value.total_eq)?, valuation_asset)
+            .map_err(anyhow::Error::msg)?,
+        None,
         available_by_asset,
-        unrealized_pnl,
-        observed_at: Utc::now(),
-    })
+        None,
+        Utc::now(),
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 pub(crate) fn available_balance_from_balance(
@@ -54,7 +61,10 @@ pub(crate) fn available_balance_from_balance(
         .find(|detail| detail.currency == quote_asset)
         .with_context(|| format!("missing OKX balance detail for quote asset `{quote_asset}`"))?;
 
-    parse_decimal(&format!("details[{quote_asset}].availEq"), &detail.avail_eq)
+    let available = detail.avail_bal.as_deref().with_context(|| {
+        format!("missing OKX available balance for quote asset `{quote_asset}`")
+    })?;
+    parse_decimal(&format!("details[{quote_asset}].availBal"), available)
 }
 
 pub(crate) fn position_from_snapshot_with_metadata(
@@ -264,7 +274,7 @@ mod tests {
     use poise_core::instrument::{Amount, Asset, PositionBasis, PositionQty};
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
-    use poise_engine::ports::{AccountSummarySnapshot, ExchangeOrder, OrderStatus, Position};
+    use poise_engine::ports::{ExchangeOrder, OrderStatus, Position};
 
     use super::*;
     use crate::instrument::{OkxInstrumentMetadata, exchange_info_from_instrument};
@@ -565,31 +575,22 @@ mod tests {
             details: vec![
                 BalanceDetail {
                     currency: "USDT".to_string(),
-                    avail_eq: "9800.25".to_string(),
-                    upl: "-120.75".to_string(),
+                    avail_bal: Some("9800.25".to_string()),
                 },
                 BalanceDetail {
                     currency: "BTC".to_string(),
-                    avail_eq: "200.0".to_string(),
-                    upl: "10.0".to_string(),
+                    avail_bal: Some("0.2".to_string()),
                 },
             ],
         })
         .unwrap();
 
-        assert_eq!(
-            summary,
-            AccountSummarySnapshot {
-                equity: 12_500.5,
-                available: 10_000.25,
-                available_by_asset: BTreeMap::from([
-                    ("BTC".to_string(), 200.0),
-                    ("USDT".to_string(), 9_800.25),
-                ]),
-                unrealized_pnl: -110.75,
-                observed_at: summary.observed_at,
-            }
-        );
+        assert_eq!(summary.valuation_asset().as_str(), "USD");
+        assert_eq!(summary.equity().value(), 12_500.5);
+        assert_eq!(summary.available(), None);
+        assert_eq!(summary.unrealized_pnl(), None);
+        assert_eq!(summary.available_for_asset("BTC"), Some(0.2));
+        assert_eq!(summary.available_for_asset("USDT"), Some(9_800.25));
     }
 
     #[test]
@@ -599,13 +600,11 @@ mod tests {
             details: vec![
                 BalanceDetail {
                     currency: "USDT".to_string(),
-                    avail_eq: "9800.25".to_string(),
-                    upl: "-120.75".to_string(),
+                    avail_bal: Some("9800.25".to_string()),
                 },
                 BalanceDetail {
                     currency: "BTC".to_string(),
-                    avail_eq: "200.0".to_string(),
-                    upl: "10.0".to_string(),
+                    avail_bal: Some("0.2".to_string()),
                 },
             ],
         };
@@ -616,7 +615,7 @@ mod tests {
         );
         assert_eq!(
             available_balance_from_balance(&balance, "BTC").unwrap(),
-            200.0
+            0.2
         );
     }
 

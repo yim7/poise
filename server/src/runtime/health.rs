@@ -665,10 +665,11 @@ mod tests {
     fn healthy_account() -> AccountReadModel {
         let at = Utc.with_ymd_and_hms(2026, 6, 17, 3, 0, 0).unwrap();
         AccountReadModel {
+            valuation_asset: poise_core::instrument::Asset::try_new("USD").unwrap(),
             equity: 10_000.0,
-            available: 8_000.0,
+            available: Some(8_000.0),
             available_by_asset: Default::default(),
-            unrealized_pnl: 0.0,
+            unrealized_pnl: Some(0.0),
             baseline_equity: 10_000.0,
             day_base_at: at,
             day_change_pct: Some(0.0),

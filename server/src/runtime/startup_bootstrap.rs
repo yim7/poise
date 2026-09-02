@@ -1572,13 +1572,26 @@ mod tests {
         async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
             self.account_summary_calls.fetch_add(1, Ordering::SeqCst);
             let available = *self.available_balance.lock().unwrap();
-            Ok(poise_engine::ports::AccountSummarySnapshot {
-                equity: 1_000_000.0,
-                available,
-                available_by_asset: self.available_by_asset.lock().unwrap().clone(),
-                unrealized_pnl: 0.0,
-                observed_at: Utc::now(),
-            })
+            let available_by_asset = self
+                .available_by_asset
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(asset, value)| {
+                    (
+                        poise_core::instrument::Asset::try_new(asset).unwrap(),
+                        *value,
+                    )
+                })
+                .collect();
+            poise_engine::ports::AccountSummarySnapshot::try_new(
+                crate::test_support::test_amount(1_000_000.0, "USD"),
+                Some(crate::test_support::test_amount(available, "USD")),
+                available_by_asset,
+                Some(crate::test_support::test_amount(0.0, "USD")),
+                Utc::now(),
+            )
+            .map_err(anyhow::Error::msg)
         }
 
         async fn get_available_balance(&self, instrument: &Instrument) -> Result<f64> {

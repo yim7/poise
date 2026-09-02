@@ -49,13 +49,49 @@ impl TryFrom<BinancePositionRisk> for Position {
 
 impl BinanceAccountSummaryInformation {
     pub fn into_account_summary_snapshot(self) -> Result<AccountSummarySnapshot> {
-        Ok(AccountSummarySnapshot {
-            equity: parse_decimal("totalMarginBalance", &self.total_margin_balance)?,
-            available: parse_decimal("availableBalance", &self.available_balance)?,
-            available_by_asset: Default::default(),
-            unrealized_pnl: parse_decimal("totalUnrealizedProfit", &self.total_unrealized_profit)?,
-            observed_at: Utc::now(),
+        let valuation_asset = Asset::try_new(if self.multi_assets_margin {
+            "USD"
+        } else {
+            "USDT"
         })
+        .map_err(anyhow::Error::msg)?;
+        let available_by_asset = self
+            .assets
+            .into_iter()
+            .map(|balance| {
+                let asset = Asset::try_new(balance.asset).map_err(anyhow::Error::msg)?;
+                let value = parse_decimal(
+                    &format!("assets[{}].availableBalance", asset.as_str()),
+                    &balance.available_balance,
+                )?;
+                Ok((asset, value))
+            })
+            .collect::<Result<_>>()?;
+
+        AccountSummarySnapshot::try_new(
+            Amount::new(
+                parse_decimal("totalMarginBalance", &self.total_margin_balance)?,
+                valuation_asset.clone(),
+            )
+            .map_err(anyhow::Error::msg)?,
+            Some(
+                Amount::new(
+                    parse_decimal("availableBalance", &self.available_balance)?,
+                    valuation_asset.clone(),
+                )
+                .map_err(anyhow::Error::msg)?,
+            ),
+            available_by_asset,
+            Some(
+                Amount::new(
+                    parse_decimal("totalUnrealizedProfit", &self.total_unrealized_profit)?,
+                    valuation_asset,
+                )
+                .map_err(anyhow::Error::msg)?,
+            ),
+            Utc::now(),
+        )
+        .map_err(anyhow::Error::msg)
     }
 }
 
@@ -228,12 +264,10 @@ fn millis_to_utc(field: &str, value: i64) -> Result<chrono::DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
-    use poise_core::instrument::{Amount, Asset, PositionBasis, PositionQty};
-    use poise_core::types::{PriceRounding, Side};
-    use poise_engine::ports::AccountSummarySnapshot;
-
     use super::*;
     use crate::rest::models::BinanceExchangeInfoResponse;
+    use poise_core::instrument::{Amount, Asset, PositionBasis, PositionQty};
+    use poise_core::types::{PriceRounding, Side};
 
     #[test]
     fn converts_order_response_into_order_receipt() {
@@ -289,25 +323,48 @@ mod tests {
     fn converts_account_information_into_account_summary_snapshot() {
         let payload = r#"
         {
+            "multiAssetsMargin": false,
             "availableBalance": "9800.25",
             "totalMarginBalance": "12500.5",
-            "totalUnrealizedProfit": "-120.75"
+            "totalUnrealizedProfit": "-120.75",
+            "assets": [
+                { "asset": "USDT", "availableBalance": "9800.25" }
+            ]
         }
         "#;
 
         let account: BinanceAccountSummaryInformation = serde_json::from_str(payload).unwrap();
         let snapshot = account.into_account_summary_snapshot().unwrap();
 
-        assert_eq!(
-            snapshot,
-            AccountSummarySnapshot {
-                equity: 12_500.5,
-                available: 9_800.25,
-                available_by_asset: Default::default(),
-                unrealized_pnl: -120.75,
-                observed_at: snapshot.observed_at,
-            }
-        );
+        assert_eq!(snapshot.valuation_asset().as_str(), "USDT");
+        assert_eq!(snapshot.equity().value(), 12_500.5);
+        assert_eq!(snapshot.available().unwrap().value(), 9_800.25);
+        assert_eq!(snapshot.unrealized_pnl().unwrap().value(), -120.75);
+        assert_eq!(snapshot.available_for_asset("USDT"), Some(9_800.25));
+    }
+
+    #[test]
+    fn multi_asset_account_totals_use_usd_valuation() {
+        let payload = r#"
+        {
+            "multiAssetsMargin": true,
+            "availableBalance": "19000.0",
+            "totalMarginBalance": "20000.0",
+            "totalUnrealizedProfit": "-100.0",
+            "assets": [
+                { "asset": "BTC", "availableBalance": "0.1" },
+                { "asset": "USDT", "availableBalance": "5000.0" }
+            ]
+        }
+        "#;
+
+        let account: BinanceAccountSummaryInformation = serde_json::from_str(payload).unwrap();
+        let snapshot = account.into_account_summary_snapshot().unwrap();
+
+        assert_eq!(snapshot.valuation_asset().as_str(), "USD");
+        assert_eq!(snapshot.available().unwrap().value(), 19_000.0);
+        assert_eq!(snapshot.available_for_asset("BTC"), Some(0.1));
+        assert_eq!(snapshot.available_for_asset("USDT"), Some(5_000.0));
     }
 
     #[test]

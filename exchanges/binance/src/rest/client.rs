@@ -1275,9 +1275,10 @@ mod tests {
         let snapshot = client.get_account_summary().await.unwrap();
         let requests = server.requests().await;
 
-        assert_eq!(snapshot.equity, 2445.57387887);
-        assert_eq!(snapshot.available, 2191.26188188);
-        assert_eq!(snapshot.unrealized_pnl, -37.68082866);
+        assert_eq!(snapshot.valuation_asset().as_str(), "USDT");
+        assert_eq!(snapshot.equity().value(), 2445.57387887);
+        assert_eq!(snapshot.available().unwrap().value(), 2191.26188188);
+        assert_eq!(snapshot.unrealized_pnl().unwrap().value(), -37.68082866);
         assert_eq!(requests.len(), 1);
         assert!(requests[0].path.starts_with("/fapi/v3/account?timestamp="));
     }

@@ -25,7 +25,8 @@ fn lines(summary: Option<&AccountSummaryView>) -> Vec<Line<'static>> {
 
     let mut result = vec![
         Line::from(format!(
-            "equity {} | available {} | unrealized pnl {} | day change {}",
+            "valuation {} | equity {} | available {} | unrealized pnl {} | day change {}",
+            summary.valuation_asset.as_deref().unwrap_or("-"),
             format_optional_amount(summary.equity),
             format_optional_amount(summary.available),
             format_optional_amount(summary.unrealized_pnl),
@@ -193,6 +194,7 @@ mod tests {
 
         assert!(text.contains(&format!("day base {expected_day_base_at}")));
         assert!(text.contains(&format!("updated {expected_updated_at}")));
+        assert!(text.contains("valuation USD"));
         assert!(!text.contains(original_day_base_at));
         assert!(!text.contains(original_updated_at));
     }

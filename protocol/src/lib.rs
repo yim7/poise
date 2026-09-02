@@ -134,11 +134,12 @@ pub struct ConfigDryRunResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigDryRunAccountView {
+    pub valuation_asset: String,
     pub equity: f64,
-    pub available: f64,
+    pub available: Option<f64>,
     #[serde(default)]
     pub available_by_asset: BTreeMap<String, f64>,
-    pub unrealized_pnl: f64,
+    pub unrealized_pnl: Option<f64>,
     pub observed_at: String,
 }
 
@@ -592,6 +593,8 @@ pub enum RiskSignalView {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct AccountSummaryView {
+    #[serde(default)]
+    pub valuation_asset: Option<String>,
     #[serde(default)]
     pub equity: Option<f64>,
     #[serde(default)]
@@ -1539,6 +1542,7 @@ mod tests {
             r#"{
                 "type":"account_summary_changed",
                 "summary":{
+                    "valuation_asset":"USD",
                     "equity":12500.5,
                     "available":9800.25,
                     "unrealized_pnl":-120.75,
@@ -1582,6 +1586,7 @@ mod tests {
                 assert_eq!(
                     summary,
                     AccountSummaryView {
+                        valuation_asset: Some("USD".to_string()),
                         equity: Some(12_500.5),
                         available: Some(9_800.25),
                         unrealized_pnl: Some(-120.75),

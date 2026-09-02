@@ -44,20 +44,40 @@ pub(crate) fn build_exchange_info(meta: &MetaResponse, symbol: &str) -> Result<E
 pub(crate) fn account_summary_from_state(
     state: &ClearinghouseStateResponse,
 ) -> Result<AccountSummarySnapshot> {
-    Ok(AccountSummarySnapshot {
-        equity: parse_decimal(
-            "marginSummary.accountValue",
-            &state.margin_summary.account_value,
-        )?,
-        available: parse_decimal("withdrawable", &state.withdrawable)?,
-        available_by_asset: Default::default(),
-        unrealized_pnl: state
-            .asset_positions
-            .iter()
-            .map(|asset| parse_decimal("position.unrealizedPnl", &asset.position.unrealized_pnl))
-            .sum::<Result<f64>>()?,
-        observed_at: Utc::now(),
-    })
+    let valuation_asset = Asset::try_new("USDC").map_err(anyhow::Error::msg)?;
+    AccountSummarySnapshot::try_new(
+        Amount::new(
+            parse_decimal(
+                "marginSummary.accountValue",
+                &state.margin_summary.account_value,
+            )?,
+            valuation_asset.clone(),
+        )
+        .map_err(anyhow::Error::msg)?,
+        Some(
+            Amount::new(
+                parse_decimal("withdrawable", &state.withdrawable)?,
+                valuation_asset.clone(),
+            )
+            .map_err(anyhow::Error::msg)?,
+        ),
+        Default::default(),
+        Some(
+            Amount::new(
+                state
+                    .asset_positions
+                    .iter()
+                    .map(|asset| {
+                        parse_decimal("position.unrealizedPnl", &asset.position.unrealized_pnl)
+                    })
+                    .sum::<Result<f64>>()?,
+                valuation_asset,
+            )
+            .map_err(anyhow::Error::msg)?,
+        ),
+        Utc::now(),
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 pub(crate) fn position_from_state(
@@ -330,9 +350,10 @@ mod tests {
         let position = position_from_state(&state, "BTC").unwrap();
         let flat_position = position_from_state(&state, "ETH").unwrap();
 
-        assert_eq!(summary.equity, 125.5);
-        assert_eq!(summary.available, 100.25);
-        assert_eq!(summary.unrealized_pnl, -3.25);
+        assert_eq!(summary.valuation_asset().as_str(), "USDC");
+        assert_eq!(summary.equity().value(), 125.5);
+        assert_eq!(summary.available().unwrap().value(), 100.25);
+        assert_eq!(summary.unrealized_pnl().unwrap().value(), -3.25);
         assert_eq!(
             position,
             Position {

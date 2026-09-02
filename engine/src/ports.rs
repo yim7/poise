@@ -1,11 +1,12 @@
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use poise_core::instrument::{Amount, Asset};
 use poise_core::types::Side;
 
 use crate::ledger::TrackPnlRecord;
@@ -223,17 +224,96 @@ pub struct AccountCapacitySnapshot {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountSummarySnapshot {
-    pub equity: f64,
-    pub available: f64,
+    equity: Amount,
+    available: Option<Amount>,
     #[serde(default)]
-    pub available_by_asset: BTreeMap<String, f64>,
-    pub unrealized_pnl: f64,
-    pub observed_at: DateTime<Utc>,
+    available_by_asset: BTreeMap<Asset, f64>,
+    unrealized_pnl: Option<Amount>,
+    observed_at: DateTime<Utc>,
 }
 
 impl AccountSummarySnapshot {
+    pub fn try_new(
+        equity: Amount,
+        available: Option<Amount>,
+        available_by_asset: BTreeMap<Asset, f64>,
+        unrealized_pnl: Option<Amount>,
+        observed_at: DateTime<Utc>,
+    ) -> Result<Self, String> {
+        for amount in [available.as_ref(), unrealized_pnl.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if amount.asset() != equity.asset() {
+                return Err(format!(
+                    "account amount asset `{}` does not match valuation asset `{}`",
+                    amount.asset().as_str(),
+                    equity.asset().as_str()
+                ));
+            }
+        }
+        for (asset, value) in &available_by_asset {
+            if !value.is_finite() {
+                return Err(format!(
+                    "available balance for `{}` must be finite, got {value}",
+                    asset.as_str()
+                ));
+            }
+        }
+
+        Ok(Self {
+            equity,
+            available,
+            available_by_asset,
+            unrealized_pnl,
+            observed_at,
+        })
+    }
+
+    pub fn valuation_asset(&self) -> &Asset {
+        self.equity.asset()
+    }
+
+    pub fn equity(&self) -> &Amount {
+        &self.equity
+    }
+
+    pub fn available(&self) -> Option<&Amount> {
+        self.available.as_ref()
+    }
+
+    pub fn available_by_asset(&self) -> &BTreeMap<Asset, f64> {
+        &self.available_by_asset
+    }
+
+    pub fn unrealized_pnl(&self) -> Option<&Amount> {
+        self.unrealized_pnl.as_ref()
+    }
+
+    pub fn observed_at(&self) -> DateTime<Utc> {
+        self.observed_at
+    }
+
+    pub fn with_equity_and_available(
+        mut self,
+        equity: Amount,
+        available: Amount,
+    ) -> Result<Self, String> {
+        if equity.asset() != self.valuation_asset() || available.asset() != self.valuation_asset() {
+            return Err(format!(
+                "replacement account amounts must use valuation asset `{}`",
+                self.valuation_asset().as_str()
+            ));
+        }
+        self.equity = equity;
+        self.available = Some(available);
+        Ok(self)
+    }
+
     pub fn available_for_asset(&self, asset: &str) -> Option<f64> {
-        self.available_by_asset.get(asset).copied()
+        self.available_by_asset
+            .iter()
+            .find_map(|(candidate, value)| (candidate.as_str() == asset).then_some(*value))
     }
 }
 
@@ -268,7 +348,10 @@ pub trait AccountSummaryPort: Send + Sync {
 
     async fn get_available_balance(&self, _instrument: &Instrument) -> Result<f64> {
         let summary = self.get_account_summary().await?;
-        Ok(summary.available)
+        Ok(summary
+            .available()
+            .context("account-wide available amount is unavailable")?
+            .value())
     }
 }
 
@@ -377,6 +460,46 @@ impl ExchangePorts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+
+    fn amount(value: f64, asset: &str) -> Amount {
+        Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn account_summary_rejects_mixed_valuation_assets() {
+        let error = AccountSummarySnapshot::try_new(
+            amount(10_000.0, "USD"),
+            Some(amount(8_000.0, "USDT")),
+            BTreeMap::new(),
+            Some(amount(-50.0, "USD")),
+            Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("USDT"));
+        assert!(error.contains("USD"));
+    }
+
+    #[test]
+    fn account_summary_keeps_per_asset_balances_separate() {
+        let snapshot = AccountSummarySnapshot::try_new(
+            amount(20_000.0, "USD"),
+            None,
+            BTreeMap::from([
+                (Asset::try_new("BTC").unwrap(), 0.1),
+                (Asset::try_new("USDT").unwrap(), 5_000.0),
+            ]),
+            None,
+            Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.equity().value(), 20_000.0);
+        assert_eq!(snapshot.available(), None);
+        assert_eq!(snapshot.available_for_asset("BTC"), Some(0.1));
+        assert_eq!(snapshot.available_for_asset("USDT"), Some(5_000.0));
+    }
 
     #[test]
     fn filled_status_without_reported_quantity_means_full_order_quantity() {

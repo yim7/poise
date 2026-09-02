@@ -70,9 +70,12 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
             trading_day TEXT NOT NULL,
             baseline_equity REAL NOT NULL,
+            baseline_asset TEXT NOT NULL,
             baseline_captured_at TEXT NOT NULL
         );",
     )?;
+
+    migrate_untyped_account_monitor_state(conn)?;
 
     ensure_table_schema(
         conn,
@@ -166,9 +169,15 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "singleton_key",
             "trading_day",
             "baseline_equity",
+            "baseline_asset",
             "baseline_captured_at",
         ],
-        &["trading_day", "baseline_equity", "baseline_captured_at"],
+        &[
+            "trading_day",
+            "baseline_equity",
+            "baseline_asset",
+            "baseline_captured_at",
+        ],
     )?;
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_track_events_created_at
@@ -183,6 +192,33 @@ pub fn initialize(conn: &Connection) -> Result<()> {
          CREATE UNIQUE INDEX IF NOT EXISTS idx_track_pnl_records_source_key
          ON track_pnl_records(source_key)
          WHERE source_key IS NOT NULL;",
+    )?;
+    Ok(())
+}
+
+fn migrate_untyped_account_monitor_state(conn: &Connection) -> Result<()> {
+    let columns = table_columns(conn, "account_monitor_state")?;
+    let legacy_columns = [
+        "singleton_key",
+        "trading_day",
+        "baseline_equity",
+        "baseline_captured_at",
+    ];
+    if columns != legacy_columns {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE account_monitor_state
+             RENAME TO account_monitor_state_legacy_without_asset;
+
+         CREATE TABLE account_monitor_state (
+             singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
+             trading_day TEXT NOT NULL,
+             baseline_equity REAL NOT NULL,
+             baseline_asset TEXT NOT NULL,
+             baseline_captured_at TEXT NOT NULL
+         );",
     )?;
     Ok(())
 }
@@ -397,6 +433,7 @@ mod tests {
                 "singleton_key".to_string(),
                 "trading_day".to_string(),
                 "baseline_equity".to_string(),
+                "baseline_asset".to_string(),
                 "baseline_captured_at".to_string(),
             ]
         );
@@ -512,6 +549,7 @@ mod tests {
                 singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
                 trading_day TEXT NOT NULL,
                 baseline_equity REAL,
+                baseline_asset TEXT NOT NULL,
                 baseline_captured_at TEXT NOT NULL
             );",
         )
@@ -523,6 +561,54 @@ mod tests {
         assert!(
             format!("{error:#}").contains("column `baseline_equity` allows NULL"),
             "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn initialize_preserves_untyped_account_baseline_as_legacy_audit_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE account_monitor_state (
+                singleton_key INTEGER PRIMARY KEY CHECK (singleton_key = 1),
+                trading_day TEXT NOT NULL,
+                baseline_equity REAL NOT NULL,
+                baseline_captured_at TEXT NOT NULL
+            );
+            INSERT INTO account_monitor_state (
+                singleton_key,
+                trading_day,
+                baseline_equity,
+                baseline_captured_at
+            ) VALUES (1, '2026-09-02', 12500.5, '2026-09-02T00:00:00Z');",
+        )
+        .unwrap();
+
+        initialize(&conn).unwrap();
+        initialize(&conn).unwrap();
+
+        let current_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM account_monitor_state", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let legacy_row: (String, f64, String) = conn
+            .query_row(
+                "SELECT trading_day, baseline_equity, baseline_captured_at
+                 FROM account_monitor_state_legacy_without_asset
+                 WHERE singleton_key = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(current_count, 0);
+        assert_eq!(
+            legacy_row,
+            (
+                "2026-09-02".to_string(),
+                12_500.5,
+                "2026-09-02T00:00:00Z".to_string()
+            )
         );
     }
 

@@ -255,7 +255,7 @@ mod tests {
     async fn connected_account_summary_port_routes_rest_client() {
         let server = MockHttpServer::spawn(vec![MockResponse::json(
             200,
-            r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[{"ccy":"USDT","availEq":"9800.25","upl":"-120.75"}]}]}"#,
+            r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[{"ccy":"USDT","availBal":"9800.25","availEq":"9800.25","upl":"-120.75"}]}]}"#,
         )])
         .await;
         let rest = Arc::new(OkxRestClient::with_http_client_and_timestamp_provider(
@@ -280,8 +280,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(summary.equity, 12_500.5);
-        assert_eq!(summary.available, 9_800.25);
+        assert_eq!(summary.valuation_asset().as_str(), "USD");
+        assert_eq!(summary.equity().value(), 12_500.5);
+        assert_eq!(summary.available(), None);
         assert_eq!(server.requests()[0].path, "/api/v5/account/balance");
     }
 

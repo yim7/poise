@@ -22,9 +22,10 @@ impl AccountProjector {
         analysis: Option<&AccountAnalysisReadModel>,
     ) -> AccountSummaryView {
         AccountSummaryView {
+            valuation_asset: model.map(|model| model.valuation_asset.as_str().to_string()),
             equity: model.map(|model| model.equity),
-            available: model.map(|model| model.available),
-            unrealized_pnl: model.map(|model| model.unrealized_pnl),
+            available: model.and_then(|model| model.available),
+            unrealized_pnl: model.and_then(|model| model.unrealized_pnl),
             day_change_pct: model.and_then(|model| model.day_change_pct),
             risk_signal: model
                 .map(|model| project_risk_signal(model.risk_signal))
@@ -131,15 +132,17 @@ mod tests {
         AccountHedgeLikeReadModel, AccountReadModel, AccountRiskSignal,
         AccountTrackAnalysisReadModel,
     };
+    use poise_core::instrument::Asset;
 
     #[test]
     fn projects_account_read_model_to_summary_view() {
         let projector = AccountProjector::new();
         let model = AccountReadModel {
+            valuation_asset: Asset::try_new("USD").unwrap(),
             equity: 12_500.0,
-            available: 9_000.0,
-            available_by_asset: BTreeMap::from([("BTC".to_string(), 0.2)]),
-            unrealized_pnl: -350.0,
+            available: Some(9_000.0),
+            available_by_asset: BTreeMap::from([(Asset::try_new("BTC").unwrap(), 0.2)]),
+            unrealized_pnl: Some(-350.0),
             baseline_equity: 12_800.0,
             day_base_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),
             day_change_pct: Some(-2.75),
@@ -151,6 +154,7 @@ mod tests {
         assert_eq!(
             projector.project_summary_with_analysis(Some(&model), None),
             AccountSummaryView {
+                valuation_asset: Some("USD".to_string()),
                 equity: Some(12_500.0),
                 available: Some(9_000.0),
                 unrealized_pnl: Some(-350.0),
@@ -168,10 +172,11 @@ mod tests {
     fn projects_account_analysis_to_summary_view() {
         let projector = AccountProjector::new();
         let model = AccountReadModel {
+            valuation_asset: Asset::try_new("USD").unwrap(),
             equity: 12_500.0,
-            available: 9_000.0,
-            available_by_asset: BTreeMap::from([("BTC".to_string(), 0.2)]),
-            unrealized_pnl: -350.0,
+            available: Some(9_000.0),
+            available_by_asset: BTreeMap::from([(Asset::try_new("BTC").unwrap(), 0.2)]),
+            unrealized_pnl: Some(-350.0),
             baseline_equity: 12_800.0,
             day_base_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),
             day_change_pct: Some(-2.75),

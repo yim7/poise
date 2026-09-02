@@ -82,11 +82,16 @@ fn track_definition_registry(config: &Config) -> Result<TrackDefinitionRegistry>
 
 fn project_account(account: AccountSummarySnapshot) -> ConfigDryRunAccountView {
     ConfigDryRunAccountView {
-        equity: account.equity,
-        available: account.available,
-        available_by_asset: account.available_by_asset,
-        unrealized_pnl: account.unrealized_pnl,
-        observed_at: account.observed_at.to_rfc3339(),
+        valuation_asset: account.valuation_asset().as_str().to_string(),
+        equity: account.equity().value(),
+        available: account.available().map(|amount| amount.value()),
+        available_by_asset: account
+            .available_by_asset()
+            .iter()
+            .map(|(asset, value)| (asset.as_str().to_string(), *value))
+            .collect(),
+        unrealized_pnl: account.unrealized_pnl().map(|amount| amount.value()),
+        observed_at: account.observed_at().to_rfc3339(),
     }
 }
 
@@ -171,9 +176,16 @@ async fn estimate_capacity(
                     available_asset
                 )
             })?,
-        PositionBasis::BaseAsset => account
-            .available_for_asset(&available_asset)
-            .unwrap_or(account.available),
+        PositionBasis::BaseAsset => {
+            match account.available_for_asset(&available_asset).or_else(|| {
+                (account.valuation_asset() == instrument_spec.notional_asset())
+                    .then(|| account.available().map(|amount| amount.value()))
+                    .flatten()
+            }) {
+                Some(available) => available,
+                None => return Ok(None),
+            }
+        }
     };
     ensure!(
         available.is_finite(),
@@ -218,7 +230,6 @@ async fn estimate_capacity(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
     use anyhow::{Result, anyhow};
@@ -422,13 +433,14 @@ total_loss_limit = 0.03
     impl AccountSummaryPort for RecordingDryRunExchange {
         async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
             self.record("account_summary");
-            Ok(AccountSummarySnapshot {
-                equity: 0.3,
-                available: 0.25,
-                available_by_asset: BTreeMap::from([("BTC".to_string(), 0.25)]),
-                unrealized_pnl: 0.0,
-                observed_at: Utc.with_ymd_and_hms(2026, 6, 17, 8, 0, 0).unwrap(),
-            })
+            Ok(crate::test_support::test_account_summary_snapshot(
+                "USD",
+                0.3,
+                Some(0.25),
+                &[("BTC", 0.25)],
+                Some(0.0),
+                Utc.with_ymd_and_hms(2026, 6, 17, 8, 0, 0).unwrap(),
+            ))
         }
     }
 

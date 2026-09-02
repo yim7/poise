@@ -39,10 +39,8 @@ pub(crate) struct BalanceSnapshot {
 pub(crate) struct BalanceDetail {
     #[serde(rename = "ccy")]
     pub currency: String,
-    #[serde(rename = "availEq")]
-    pub avail_eq: String,
-    #[serde(rename = "upl")]
-    pub upl: String,
+    #[serde(default, rename = "availBal")]
+    pub avail_bal: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -200,7 +198,7 @@ mod tests {
             {
                 "totalEq": "12500.5",
                 "details": [
-                    { "ccy": "USDT", "availEq": "9800.25", "upl": "-120.75" }
+                    { "ccy": "USDT", "availBal": "9800.25", "availEq": "9800.25", "upl": "-120.75" }
                 ]
             }
             "#,
@@ -208,8 +206,7 @@ mod tests {
         .unwrap();
         assert_eq!(balance.total_eq, "12500.5");
         assert_eq!(balance.details[0].currency, "USDT");
-        assert_eq!(balance.details[0].avail_eq, "9800.25");
-        assert_eq!(balance.details[0].upl, "-120.75");
+        assert_eq!(balance.details[0].avail_bal.as_deref(), Some("9800.25"));
 
         let position: PositionSnapshot = serde_json::from_str(
             r#"

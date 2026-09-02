@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
+use poise_core::instrument::Amount;
 use poise_engine::ports::{AccountSummaryPort, AccountSummarySnapshot};
 use serde::Deserialize;
 use tokio::sync::{RwLock, broadcast};
@@ -32,7 +33,7 @@ pub struct AccountMonitorConfig {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct InMemoryAccountMonitorState {
     pub trading_day: Option<NaiveDate>,
-    pub baseline_equity: Option<f64>,
+    pub baseline_equity: Option<Amount>,
     pub baseline_captured_at: Option<DateTime<Utc>>,
     pub current_account_snapshot: Option<ObservedAccountSnapshot>,
 }
@@ -128,7 +129,7 @@ impl AccountMonitor {
             let mut state = self.state.write().await;
             let previous_state = state.clone();
             let before = build_read_model(&previous_state, &self.config, None);
-            apply_snapshot(&mut state, snapshot);
+            apply_snapshot(&mut state, snapshot)?;
             let next_state = state.clone();
             let after = build_read_model(&next_state, &self.config, None);
             (previous_state, next_state, before, after)
@@ -166,24 +167,43 @@ fn stored_state_from_in_memory(
 ) -> Option<StoredAccountMonitorState> {
     Some(StoredAccountMonitorState {
         trading_day: state.trading_day?,
-        baseline_equity: state.baseline_equity?,
+        baseline_equity: state.baseline_equity.clone()?,
         baseline_captured_at: state.baseline_captured_at?,
     })
 }
 
-fn apply_snapshot(state: &mut InMemoryAccountMonitorState, snapshot: ObservedAccountSnapshot) {
-    let trading_day = trading_day_for(snapshot.observed_at);
+fn apply_snapshot(
+    state: &mut InMemoryAccountMonitorState,
+    snapshot: ObservedAccountSnapshot,
+) -> Result<()> {
+    let trading_day = trading_day_for(snapshot.observed_at());
     let should_reset_baseline = state.trading_day != Some(trading_day)
         || state.baseline_equity.is_none()
         || state.baseline_captured_at.is_none();
 
     if should_reset_baseline {
         state.trading_day = Some(trading_day);
-        state.baseline_equity = Some(snapshot.equity);
-        state.baseline_captured_at = Some(snapshot.observed_at);
+        state.baseline_equity = Some(snapshot.equity().clone());
+        state.baseline_captured_at = Some(snapshot.observed_at());
+    } else if state
+        .baseline_equity
+        .as_ref()
+        .is_some_and(|baseline| baseline.asset() != snapshot.valuation_asset())
+    {
+        anyhow::bail!(
+            "account valuation asset changed from `{}` to `{}` within trading day",
+            state
+                .baseline_equity
+                .as_ref()
+                .expect("checked baseline")
+                .asset()
+                .as_str(),
+            snapshot.valuation_asset().as_str()
+        );
     }
 
     state.current_account_snapshot = Some(snapshot);
+    Ok(())
 }
 
 fn trading_day_for(observed_at: DateTime<Utc>) -> NaiveDate {
@@ -198,28 +218,36 @@ fn build_read_model(
     snapshot: Option<ObservedAccountSnapshot>,
 ) -> Option<AccountReadModel> {
     let snapshot = snapshot.or_else(|| state.current_account_snapshot.clone())?;
-    let baseline_equity = state.baseline_equity.unwrap_or(snapshot.equity);
-    let day_base_at = state.baseline_captured_at.unwrap_or(snapshot.observed_at);
+    let baseline_equity = state
+        .baseline_equity
+        .as_ref()
+        .map(Amount::value)
+        .unwrap_or_else(|| snapshot.equity().value());
+    let day_base_at = state
+        .baseline_captured_at
+        .unwrap_or_else(|| snapshot.observed_at());
+    let equity = snapshot.equity().value();
+    let available = snapshot.available().map(Amount::value);
+    let unrealized_pnl = snapshot.unrealized_pnl().map(Amount::value);
 
-    if snapshot.equity <= 0.0 {
+    if equity <= 0.0 {
         return Some(AccountReadModel {
-            equity: snapshot.equity,
-            available: snapshot.available,
-            available_by_asset: snapshot.available_by_asset,
-            unrealized_pnl: snapshot.unrealized_pnl,
+            valuation_asset: snapshot.valuation_asset().clone(),
+            equity,
+            available,
+            available_by_asset: snapshot.available_by_asset().clone(),
+            unrealized_pnl,
             baseline_equity,
             day_base_at,
             day_change_pct: None,
             risk_signal: AccountRiskSignal::Critical,
             reason: Some("equity <= 0".to_string()),
-            updated_at: snapshot.observed_at,
+            updated_at: snapshot.observed_at(),
         });
     }
 
-    let day_change_pct = (baseline_equity > 0.0)
-        .then_some(((snapshot.equity - baseline_equity) / baseline_equity) * 100.0);
-    let available_ratio_pct = (snapshot.available / snapshot.equity) * 100.0;
-    let unrealized_ratio_pct = (snapshot.unrealized_pnl / snapshot.equity) * 100.0;
+    let day_change_pct =
+        (baseline_equity > 0.0).then_some(((equity - baseline_equity) / baseline_equity) * 100.0);
 
     let mut risk_signal = AccountRiskSignal::Normal;
     let mut reasons = Vec::new();
@@ -236,37 +264,50 @@ fn build_read_model(
         }
     }
 
-    let available_signal = classify_signal(
-        available_ratio_pct,
-        config.available_ratio_attention_pct,
-        config.available_ratio_critical_pct,
-    );
-    risk_signal = max_signal(risk_signal, available_signal);
-    if available_signal != AccountRiskSignal::Normal {
-        reasons.push(format!("available {available_ratio_pct:.1}%"));
+    if let Some(available) = available {
+        let available_ratio_pct = (available / equity) * 100.0;
+        let available_signal = classify_signal(
+            available_ratio_pct,
+            config.available_ratio_attention_pct,
+            config.available_ratio_critical_pct,
+        );
+        risk_signal = max_signal(risk_signal, available_signal);
+        if available_signal != AccountRiskSignal::Normal {
+            reasons.push(format!("available {available_ratio_pct:.1}%"));
+        }
+    } else {
+        risk_signal = max_signal(risk_signal, AccountRiskSignal::Attention);
+        reasons.push("account-wide available unavailable".to_string());
     }
 
-    let unrealized_signal = classify_signal(
-        unrealized_ratio_pct,
-        config.unrealized_loss_attention_pct,
-        config.unrealized_loss_critical_pct,
-    );
-    risk_signal = max_signal(risk_signal, unrealized_signal);
-    if unrealized_signal != AccountRiskSignal::Normal {
-        reasons.push(format!("unrealized_pnl {unrealized_ratio_pct:.1}%"));
+    if let Some(unrealized_pnl) = unrealized_pnl {
+        let unrealized_ratio_pct = (unrealized_pnl / equity) * 100.0;
+        let unrealized_signal = classify_signal(
+            unrealized_ratio_pct,
+            config.unrealized_loss_attention_pct,
+            config.unrealized_loss_critical_pct,
+        );
+        risk_signal = max_signal(risk_signal, unrealized_signal);
+        if unrealized_signal != AccountRiskSignal::Normal {
+            reasons.push(format!("unrealized_pnl {unrealized_ratio_pct:.1}%"));
+        }
+    } else {
+        risk_signal = max_signal(risk_signal, AccountRiskSignal::Attention);
+        reasons.push("account-wide unrealized_pnl unavailable".to_string());
     }
 
     Some(AccountReadModel {
-        equity: snapshot.equity,
-        available: snapshot.available,
-        available_by_asset: snapshot.available_by_asset,
-        unrealized_pnl: snapshot.unrealized_pnl,
+        valuation_asset: snapshot.valuation_asset().clone(),
+        equity,
+        available,
+        available_by_asset: snapshot.available_by_asset().clone(),
+        unrealized_pnl,
         baseline_equity,
         day_base_at,
         day_change_pct,
         risk_signal,
         reason: (!reasons.is_empty()).then_some(reasons.join(", ")),
-        updated_at: snapshot.observed_at,
+        updated_at: snapshot.observed_at(),
     })
 }
 
@@ -370,25 +411,50 @@ mod tests {
 
     use super::{
         AccountMonitor, AccountMonitorConfig, InMemoryAccountMonitorState,
-        InMemoryAccountMonitorStore, ObservedAccountSnapshot, build_read_model,
+        InMemoryAccountMonitorStore, build_read_model,
     };
     use crate::{
         AccountMonitorStore, AccountRiskSignal, ApplicationNotification, StoredAccountMonitorState,
     };
+    use poise_core::instrument::{Amount, Asset};
     use poise_engine::ports::AccountSummarySnapshot;
+
+    fn amount(value: f64, asset: &str) -> Amount {
+        Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+    }
+
+    fn account_snapshot(
+        equity: f64,
+        available: Option<f64>,
+        balances: &[(&str, f64)],
+        unrealized_pnl: Option<f64>,
+        observed_at: chrono::DateTime<Utc>,
+    ) -> AccountSummarySnapshot {
+        AccountSummarySnapshot::try_new(
+            amount(equity, "USD"),
+            available.map(|value| amount(value, "USD")),
+            balances
+                .iter()
+                .map(|(asset, value)| (Asset::try_new(*asset).unwrap(), *value))
+                .collect(),
+            unrealized_pnl.map(|value| amount(value, "USD")),
+            observed_at,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn marks_equity_below_zero_as_critical() {
         let summary = build_read_model(
             &InMemoryAccountMonitorState::default(),
             &AccountMonitorConfig::default(),
-            Some(ObservedAccountSnapshot {
-                equity: -10.0,
-                available: 2.5,
-                available_by_asset: Default::default(),
-                unrealized_pnl: -1.25,
-                observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
-            }),
+            Some(account_snapshot(
+                -10.0,
+                Some(2.5),
+                &[],
+                Some(-1.25),
+                Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+            )),
         )
         .expect("summary should exist");
 
@@ -404,15 +470,15 @@ mod tests {
         let summary = build_read_model(
             &InMemoryAccountMonitorState {
                 trading_day: Some(observed_at.date_naive()),
-                baseline_equity: Some(12_800.0),
+                baseline_equity: Some(amount(12_800.0, "USD")),
                 baseline_captured_at: Some(baseline_at),
-                current_account_snapshot: Some(ObservedAccountSnapshot {
-                    equity: 12_500.0,
-                    available: 9_000.0,
-                    available_by_asset: BTreeMap::from([("BTC".to_string(), 0.25)]),
-                    unrealized_pnl: -350.0,
+                current_account_snapshot: Some(account_snapshot(
+                    12_500.0,
+                    Some(9_000.0),
+                    &[("BTC", 0.25)],
+                    Some(-350.0),
                     observed_at,
-                }),
+                )),
             },
             &AccountMonitorConfig::default(),
             None,
@@ -420,15 +486,40 @@ mod tests {
         .expect("summary should exist");
 
         assert_eq!(summary.equity, 12_500.0);
-        assert_eq!(summary.available, 9_000.0);
-        assert_eq!(summary.unrealized_pnl, -350.0);
+        assert_eq!(summary.valuation_asset.as_str(), "USD");
+        assert_eq!(summary.available, Some(9_000.0));
+        assert_eq!(summary.unrealized_pnl, Some(-350.0));
         assert_eq!(
             summary.available_by_asset,
-            BTreeMap::from([("BTC".to_string(), 0.25)])
+            BTreeMap::from([(Asset::try_new("BTC").unwrap(), 0.25)])
         );
         assert_eq!(summary.baseline_equity, 12_800.0);
         assert_eq!(summary.day_base_at, baseline_at);
         assert_eq!(summary.updated_at, observed_at);
+    }
+
+    #[test]
+    fn missing_account_wide_values_are_visible_without_cross_asset_arithmetic() {
+        let summary = build_read_model(
+            &InMemoryAccountMonitorState::default(),
+            &AccountMonitorConfig::default(),
+            Some(account_snapshot(
+                20_000.0,
+                None,
+                &[("BTC", 0.1), ("USDT", 5_000.0)],
+                None,
+                Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+            )),
+        )
+        .unwrap();
+
+        assert_eq!(summary.available, None);
+        assert_eq!(summary.unrealized_pnl, None);
+        assert_eq!(summary.risk_signal, AccountRiskSignal::Attention);
+        assert_eq!(
+            summary.reason.as_deref(),
+            Some("account-wide available unavailable, account-wide unrealized_pnl unavailable")
+        );
     }
 
     struct SummaryOnlySource {
@@ -461,13 +552,13 @@ mod tests {
     async fn restore_keeps_baseline_without_restoring_current_account_summary() {
         let source: Arc<dyn poise_engine::ports::AccountSummaryPort> =
             Arc::new(SummaryOnlySource {
-                snapshot: AccountSummarySnapshot {
-                    equity: 12_700.0,
-                    available: 9_100.0,
-                    available_by_asset: BTreeMap::from([("BTC".to_string(), 0.25)]),
-                    unrealized_pnl: -125.0,
-                    observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
-                },
+                snapshot: account_snapshot(
+                    12_700.0,
+                    Some(9_100.0),
+                    &[("BTC", 0.25)],
+                    Some(-125.0),
+                    Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+                ),
             });
         let (notifications, _) = broadcast::channel(1);
         let monitor = AccountMonitor::restore(
@@ -475,7 +566,7 @@ mod tests {
             Arc::new(RestoredBaselineStore {
                 state: StoredAccountMonitorState {
                     trading_day: chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
-                    baseline_equity: 12_800.0,
+                    baseline_equity: amount(12_800.0, "USD"),
                     baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),
                 },
             }),
@@ -493,23 +584,58 @@ mod tests {
         assert_eq!(summary.equity, 12_700.0);
         assert_eq!(
             summary.available_by_asset,
-            BTreeMap::from([("BTC".to_string(), 0.25)])
+            BTreeMap::from([(Asset::try_new("BTC").unwrap(), 0.25)])
         );
         assert_eq!(summary.baseline_equity, 12_800.0);
         assert_eq!(summary.day_change_pct, Some(-0.78125));
     }
 
     #[tokio::test]
+    async fn refresh_rejects_a_valuation_asset_change_within_the_same_day() {
+        let source: Arc<dyn poise_engine::ports::AccountSummaryPort> =
+            Arc::new(SummaryOnlySource {
+                snapshot: AccountSummarySnapshot::try_new(
+                    amount(12_700.0, "USDT"),
+                    Some(amount(9_100.0, "USDT")),
+                    Default::default(),
+                    Some(amount(-125.0, "USDT")),
+                    Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+                )
+                .unwrap(),
+            });
+        let (notifications, _) = broadcast::channel(1);
+        let monitor = AccountMonitor::restore(
+            source,
+            Arc::new(RestoredBaselineStore {
+                state: StoredAccountMonitorState {
+                    trading_day: chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
+                    baseline_equity: amount(12_800.0, "USD"),
+                    baseline_captured_at: Utc.with_ymd_and_hms(2026, 4, 4, 0, 0, 1).unwrap(),
+                },
+            }),
+            notifications,
+            AccountMonitorConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        let error = monitor.refresh_once().await.unwrap_err();
+
+        assert!(error.to_string().contains("changed from `USD` to `USDT`"));
+        assert_eq!(monitor.current_summary().await, None);
+    }
+
+    #[tokio::test]
     async fn account_monitor_can_be_built_from_summary_only_source() {
         let source: Arc<dyn poise_engine::ports::AccountSummaryPort> =
             Arc::new(SummaryOnlySource {
-                snapshot: AccountSummarySnapshot {
-                    equity: 12_500.0,
-                    available: 9_000.0,
-                    available_by_asset: Default::default(),
-                    unrealized_pnl: -350.0,
-                    observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
-                },
+                snapshot: account_snapshot(
+                    12_500.0,
+                    Some(9_000.0),
+                    &[],
+                    Some(-350.0),
+                    Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+                ),
             });
         let (notifications, _) = broadcast::channel(1);
         let monitor = AccountMonitor::restore(
@@ -530,21 +656,21 @@ mod tests {
             .await
             .expect("summary should exist");
         assert_eq!(summary.equity, 12_500.0);
-        assert_eq!(summary.available, 9_000.0);
-        assert_eq!(summary.unrealized_pnl, -350.0);
+        assert_eq!(summary.available, Some(9_000.0));
+        assert_eq!(summary.unrealized_pnl, Some(-350.0));
     }
 
     #[tokio::test]
     async fn refresh_once_emits_account_changed_notification() {
         let source: Arc<dyn poise_engine::ports::AccountSummaryPort> =
             Arc::new(SummaryOnlySource {
-                snapshot: AccountSummarySnapshot {
-                    equity: 12_500.0,
-                    available: 9_000.0,
-                    available_by_asset: Default::default(),
-                    unrealized_pnl: -350.0,
-                    observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
-                },
+                snapshot: account_snapshot(
+                    12_500.0,
+                    Some(9_000.0),
+                    &[],
+                    Some(-350.0),
+                    Utc.with_ymd_and_hms(2026, 4, 4, 1, 2, 3).unwrap(),
+                ),
             });
         let (notifications, _) = broadcast::channel(1);
         let monitor = AccountMonitor::restore(

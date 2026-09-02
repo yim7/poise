@@ -839,13 +839,14 @@ total_loss_limit = 600.0
     #[async_trait::async_trait]
     impl poise_engine::ports::AccountSummaryPort for FakeExchange {
         async fn get_account_summary(&self) -> Result<poise_engine::ports::AccountSummarySnapshot> {
-            Ok(poise_engine::ports::AccountSummarySnapshot {
-                equity: 1_000_000.0,
-                available: 1_000_000.0,
-                available_by_asset: Default::default(),
-                unrealized_pnl: 0.0,
-                observed_at: Utc::now(),
-            })
+            Ok(crate::test_support::test_account_summary_snapshot(
+                "USD",
+                1_000_000.0,
+                Some(1_000_000.0),
+                &[],
+                Some(0.0),
+                Utc::now(),
+            ))
         }
     }
 

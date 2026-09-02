@@ -105,13 +105,14 @@ mod tests {
     #[tokio::test]
     async fn refresh_monitor_populates_current_summary_and_marks_health_ok() {
         let monitor = account_monitor_with_source(Arc::new(SummarySource {
-            snapshot: AccountSummarySnapshot {
-                equity: 12_500.0,
-                available: 9_000.0,
-                available_by_asset: BTreeMap::from([("BTC".to_string(), 0.25)]),
-                unrealized_pnl: -350.0,
-                observed_at: Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
-            },
+            snapshot: crate::test_support::test_account_summary_snapshot(
+                "USD",
+                12_500.0,
+                Some(9_000.0),
+                &[("BTC", 0.25)],
+                Some(-350.0),
+                Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
+            ),
         }))
         .await;
         let health = RuntimeHealth::new();
@@ -127,7 +128,7 @@ mod tests {
         assert_eq!(summary.equity, 12_500.0);
         assert_eq!(
             summary.available_by_asset,
-            BTreeMap::from([("BTC".to_string(), 0.25)])
+            BTreeMap::from([(poise_core::instrument::Asset::try_new("BTC").unwrap(), 0.25)])
         );
         assert_eq!(
             account_monitor_health_status(&health),
