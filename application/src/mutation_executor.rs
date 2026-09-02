@@ -186,9 +186,6 @@ pub fn is_loaded_track_invariant_violation(error: &anyhow::Error) -> bool {
 pub(crate) trait TransitionResult {
     fn domain_events(&self) -> &[DomainEvent];
     fn effects(&self) -> &[TrackEffect];
-    fn next_runtime(&self) -> Option<&poise_engine::runtime::TrackRuntime> {
-        None
-    }
 }
 
 impl TransitionResult for () {
@@ -209,10 +206,6 @@ impl TransitionResult for TrackTransition {
     fn effects(&self) -> &[TrackEffect] {
         &self.effects
     }
-
-    fn next_runtime(&self) -> Option<&poise_engine::runtime::TrackRuntime> {
-        Some(self.next_runtime())
-    }
 }
 
 impl TransitionResult for (TrackTransition, OrderUpdateAbsorbResult) {
@@ -222,10 +215,6 @@ impl TransitionResult for (TrackTransition, OrderUpdateAbsorbResult) {
 
     fn effects(&self) -> &[TrackEffect] {
         self.0.effects()
-    }
-
-    fn next_runtime(&self) -> Option<&poise_engine::runtime::TrackRuntime> {
-        Some(self.0.next_runtime())
     }
 }
 
@@ -458,15 +447,8 @@ impl MutationExecutor {
         observation: MarketObservation,
     ) -> Result<TrackTransition> {
         let mutation_guard = self.lock_track_mutation(id).await;
-        let previous_frame = {
-            let manager = self.manager.read().await;
-            manager
-                .mutation_frame(id)
-                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?
-        };
-
-        let outcome = self
-            .with_manager_mutation(id, |manager| {
+        let (previous_frame, outcome, next_frame, next_runtime) = self
+            .plan_manager_mutation(id, |manager| {
                 manager.observe_market_mutation(&TrackId::new(id), observation.clone())
             })
             .await
@@ -474,17 +456,10 @@ impl MutationExecutor {
 
         match outcome {
             MarketMutationOutcome::LiveOnly => {
-                let (next_frame, next_runtime) = {
-                    let manager = self.manager.read().await;
-                    let next_runtime = manager
-                        .get_track(id)
-                        .cloned()
-                        .ok_or_else(|| anyhow!("track `{id}` not found"))?;
-                    let next_frame = manager
-                        .mutation_frame(id)
-                        .ok_or_else(|| anyhow!("track `{id}` not found"))?;
-                    (next_frame, next_runtime)
-                };
+                self.manager
+                    .write()
+                    .await
+                    .install_planned_runtime(next_runtime.clone());
                 self.notify_live_only_executor_changes(id, &previous_frame, &next_frame);
                 self.session_effect_queue
                     .wake_track_for(&TrackId::new(id), WakeSignal::FreshMarket);
@@ -494,11 +469,12 @@ impl MutationExecutor {
             MarketMutationOutcome::Durable(transition) => {
                 let transition = *transition;
                 let _mutation_guard = self
-                    .commit_track_mutation(
+                    .commit_planned_track_mutation(
                         mutation_guard,
                         id,
                         &previous_frame,
                         &transition.frame,
+                        next_runtime,
                         &transition,
                         None,
                         false,
@@ -567,6 +543,7 @@ impl MutationExecutor {
                 id,
                 &previous_frame,
                 &next_frame,
+                transition.next_runtime().clone(),
                 &transition,
                 None,
                 false,
@@ -643,33 +620,20 @@ impl MutationExecutor {
     ) -> Result<(TrackTransition, OrderUpdateAbsorbResult)> {
         let mutation_guard = self.lock_track_mutation(id).await;
         let client_order_id = observation.client_order_id.clone();
-        let (previous_frame, result, next_frame) = {
-            let mut manager = self.manager.write().await;
-            let previous_frame = manager
-                .mutation_frame(id)
-                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
-            self.sync_account_capacity_gate_state(&mut manager, id)
-                .map_err(TrackMutationError::Mutation)?;
-            let result = manager
-                .observe_order_update(&TrackId::new(id), observation)
-                .map_err(|error| {
-                    manager
-                        .rollback_track_state(&previous_frame)
-                        .expect("failed to restore previous frame after order observation error");
-                    TrackMutationError::Mutation(error)
-                })?;
-            let next_frame = manager
-                .mutation_frame(id)
-                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
-            (previous_frame, result, next_frame)
-        };
+        let (previous_frame, result, next_frame, next_runtime) = self
+            .plan_manager_mutation(id, |manager| {
+                manager.observe_order_update(&TrackId::new(id), observation)
+            })
+            .await
+            .map_err(anyhow::Error::new)?;
 
         let _mutation_guard = self
-            .commit_track_mutation(
+            .commit_planned_track_mutation(
                 mutation_guard,
                 id,
                 &previous_frame,
                 &next_frame,
+                next_runtime,
                 &result,
                 None,
                 false,
@@ -842,16 +806,21 @@ impl MutationExecutor {
             previous_frame,
             transition,
             next_frame,
+            next_runtime,
             follow_up_plan,
             submit_awaiting_initial_snapshot_effect_ids,
             submit_awaiting_resolution_effect_ids,
             exchange_state_wake_token,
         ) = {
-            let mut manager = self.manager.write().await;
-            if manager.exchange_observation_revision(&token.track_id)? != token.observation_revision
-            {
-                return Ok(ExchangeStateSyncOutcome::RevisionChanged);
-            }
+            let mut candidate_manager = {
+                let manager = self.manager.read().await;
+                if manager.exchange_observation_revision(&token.track_id)?
+                    != token.observation_revision
+                {
+                    return Ok(ExchangeStateSyncOutcome::RevisionChanged);
+                }
+                manager.clone()
+            };
             let Some(result) = self
                 .session_effect_queue
                 .with_exchange_snapshot_context_if_current(
@@ -865,47 +834,41 @@ impl MutationExecutor {
                         } else {
                             mode
                         };
-                        let previous_frame = manager.mutation_frame(id).ok_or_else(|| {
-                            TrackMutationError::Mutation(anyhow!("track `{id}` not found"))
-                        })?;
-                        self.sync_account_capacity_gate_state(&mut manager, id)
+                        let previous_frame =
+                            candidate_manager.mutation_frame(id).ok_or_else(|| {
+                                TrackMutationError::Mutation(anyhow!("track `{id}` not found"))
+                            })?;
+                        self.sync_account_capacity_gate_state(&mut candidate_manager, id)
                             .map_err(TrackMutationError::Mutation)?;
                         let transition = if effective_mode.allows_follow_up_reconcile() {
-                            manager
+                            candidate_manager
                                 .sync_exchange_state(
                                     &token.track_id,
                                     position,
                                     open_orders.clone(),
                                     queue_context.pending_submit_hints,
                                 )
-                                .map_err(|error| {
-                                    manager
-                                        .rollback_track_state(&previous_frame)
-                                        .expect("failed to restore previous frame after sync_exchange_state mutation error");
-                                    TrackMutationError::Mutation(error)
-                                })?
+                                .map_err(TrackMutationError::Mutation)?
                         } else {
-                            manager
+                            candidate_manager
                                 .sync_exchange_state_without_reconcile(
                                     &token.track_id,
                                     position,
                                     open_orders.clone(),
                                     queue_context.pending_submit_hints,
                                 )
-                                .map_err(|error| {
-                                    manager
-                                        .rollback_track_state(&previous_frame)
-                                        .expect("failed to restore previous frame after sync_exchange_state_without_reconcile mutation error");
-                                    TrackMutationError::Mutation(error)
-                                })?
+                                .map_err(TrackMutationError::Mutation)?
                         };
-                        let next_frame = manager.mutation_frame(id).ok_or_else(|| {
-                            TrackMutationError::Mutation(anyhow!("track `{id}` not found"))
-                        })?;
+                        let next_runtime = candidate_manager
+                            .get_track(id)
+                            .cloned()
+                            .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
+                        let next_frame = next_runtime.mutation_frame();
                         Ok::<_, TrackMutationError>((
                             previous_frame,
                             transition,
                             next_frame,
+                            next_runtime,
                             follow_up_plan,
                             queue_context.submit_awaiting_initial_snapshot_effect_ids,
                             queue_context.submit_awaiting_resolution_effect_ids,
@@ -916,15 +879,22 @@ impl MutationExecutor {
             else {
                 return Ok(ExchangeStateSyncOutcome::RevisionChanged);
             };
+            let candidate_revision =
+                candidate_manager.exchange_observation_revision(&token.track_id)?;
+            self.manager
+                .write()
+                .await
+                .retain_exchange_observation_revision(&token.track_id, candidate_revision)?;
             result.map_err(anyhow::Error::new)?
         };
 
         let _mutation_guard = self
-            .commit_track_mutation(
+            .commit_planned_track_mutation(
                 mutation_guard,
                 id,
                 &previous_frame,
                 &next_frame,
+                next_runtime,
                 &transition,
                 None,
                 false,
@@ -1146,31 +1116,24 @@ impl MutationExecutor {
     ) -> Result<CancelReceiptResolution> {
         let mutation_guard = self.lock_track_mutation(id).await;
         let cancel_effect_status_update = EffectStatusUpdate::succeeded(effect_id.to_string());
-        let (previous_frame, next_frame, cancel_progressed) = {
-            let mut manager = self.manager.write().await;
-            let previous_frame = manager
-                .mutation_frame(id)
-                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            manager
-                .record_cancel_order_success(&TrackId::new(id), order_id, receipt)
-                .map_err(TrackMutationError::Mutation)?;
-            let cancel_progressed =
-                cancel_receipt_absorbed_exposure(&manager, id, order_id, receipt)
-                    .map_err(TrackMutationError::Mutation)?;
-            let next_frame = manager
-                .mutation_frame(id)
-                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            (previous_frame, next_frame, cancel_progressed)
-        };
+        let (previous_frame, (), next_frame, next_runtime) = self
+            .plan_manager_mutation(id, |manager| {
+                manager.record_cancel_order_success(&TrackId::new(id), order_id, receipt)
+            })
+            .await
+            .map_err(anyhow::Error::new)?;
+        let cancel_progressed =
+            next_frame.has_absorbed_binding_for_cancel_receipt(order_id, receipt);
 
         let _mutation_guard = self
-            .commit_track_mutation_with_effect_status_updates(
+            .commit_planned_track_mutation(
                 mutation_guard,
                 id,
                 &previous_frame,
                 &next_frame,
+                next_runtime,
                 &(),
-                std::slice::from_ref(&cancel_effect_status_update),
+                Some(&cancel_effect_status_update),
                 false,
                 None,
             )
@@ -1266,30 +1229,12 @@ impl MutationExecutor {
         order_lookup: &SubmitRecoveryOrderLookup,
     ) -> Result<SubmitRecoveryResolution> {
         let mutation_guard = self.lock_track_mutation(id).await;
-        let (previous_frame, plan, next_frame) = {
-            let mut manager = self.manager.write().await;
-            let previous_frame = manager
-                .mutation_frame(id)
-                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            self.sync_account_capacity_gate_state(&mut manager, id)
-                .map_err(TrackMutationError::Mutation)?;
-            let plan = manager
-                .recover_submit_effect(
-                    &TrackId::new(id),
-                    recovery_token,
-                    order_lookup,
-                )
-                .map_err(|error| {
-                    manager
-                        .rollback_track_state(&previous_frame)
-                        .expect("failed to restore previous frame after recover_submit_effect mutation error");
-                    TrackMutationError::Mutation(error)
-                })?;
-            let next_frame = manager
-                .mutation_frame(id)
-                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            (previous_frame, plan, next_frame)
-        };
+        let (previous_frame, plan, next_frame, next_runtime) = self
+            .plan_manager_mutation(id, |manager| {
+                manager.recover_submit_effect(&TrackId::new(id), recovery_token, order_lookup)
+            })
+            .await
+            .map_err(anyhow::Error::new)?;
 
         let effect_status_update = match plan.resolution {
             SubmitRecoveryResolution::Recovered { .. } => {
@@ -1303,11 +1248,12 @@ impl MutationExecutor {
         };
 
         let _mutation_guard = self
-            .commit_track_mutation(
+            .commit_planned_track_mutation(
                 mutation_guard,
                 id,
                 &previous_frame,
                 &next_frame,
+                next_runtime,
                 &plan,
                 effect_status_update.as_ref(),
                 true,
@@ -1330,31 +1276,16 @@ impl MutationExecutor {
         R: TransitionResult,
     {
         let mutation_guard = self.lock_track_mutation(id).await;
-        let (previous_frame, result, next_frame) = {
-            let mut manager = self.manager.write().await;
-            let previous_frame = manager
-                .mutation_frame(id)
-                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            self.sync_account_capacity_gate_state(&mut manager, id)
-                .map_err(TrackMutationError::Mutation)?;
-            let result = mutate(&mut manager).map_err(|error| {
-                manager
-                    .rollback_track_state(&previous_frame)
-                    .expect("failed to restore previous frame after mutation error");
-                TrackMutationError::Mutation(error)
-            })?;
-            let next_frame = manager
-                .mutation_frame(id)
-                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            (previous_frame, result, next_frame)
-        };
+        let (previous_frame, result, next_frame, next_runtime) =
+            self.plan_manager_mutation(id, mutate).await?;
 
         let _mutation_guard = self
-            .commit_track_mutation(
+            .commit_planned_track_mutation(
                 mutation_guard,
                 id,
                 &previous_frame,
                 &next_frame,
+                next_runtime,
                 &result,
                 Some(&effect_status_update),
                 false,
@@ -1399,31 +1330,16 @@ impl MutationExecutor {
         R: TransitionResult,
     {
         let mutation_guard = self.lock_track_mutation(id).await;
-        let (previous_frame, result, next_frame) = {
-            let mut manager = self.manager.write().await;
-            let previous_frame = manager
-                .mutation_frame(id)
-                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
-            self.sync_account_capacity_gate_state(&mut manager, id)
-                .map_err(TrackMutationError::Mutation)?;
-            let result = mutate(&mut manager).map_err(|error| {
-                manager
-                    .rollback_track_state(&previous_frame)
-                    .expect("failed to restore previous frame after mutation error");
-                TrackMutationError::Mutation(error)
-            })?;
-            let next_frame = manager
-                .mutation_frame(id)
-                .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
-            (previous_frame, result, next_frame)
-        };
+        let (previous_frame, result, next_frame, next_runtime) =
+            self.plan_manager_mutation(id, mutate).await?;
 
         let _mutation_guard = self
-            .commit_track_mutation(
+            .commit_planned_track_mutation(
                 mutation_guard,
                 id,
                 &previous_frame,
                 &next_frame,
+                next_runtime,
                 &result,
                 None,
                 skip_when_no_work,
@@ -1433,26 +1349,49 @@ impl MutationExecutor {
         Ok(result)
     }
 
-    async fn with_manager_mutation<R, F>(
+    async fn plan_manager_mutation<R, F>(
         &self,
         id: &str,
         mutate: F,
-    ) -> std::result::Result<R, TrackMutationError>
+    ) -> std::result::Result<
+        (
+            TrackMutationFrame,
+            R,
+            TrackMutationFrame,
+            poise_engine::runtime::TrackRuntime,
+        ),
+        TrackMutationError,
+    >
     where
         F: FnOnce(&mut TrackManager) -> Result<R>,
     {
-        let mut manager = self.manager.write().await;
-        let previous_frame = manager
-            .mutation_frame(id)
-            .ok_or_else(|| TrackMutationError::Mutation(anyhow!("track `{id}` not found")))?;
-        self.sync_account_capacity_gate_state(&mut manager, id)
+        let (previous_frame, mut candidate_manager) = {
+            let manager = self.manager.read().await;
+            let previous_frame = manager
+                .mutation_frame(id)
+                .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
+            (previous_frame, manager.clone())
+        };
+
+        self.sync_account_capacity_gate_state(&mut candidate_manager, id)
             .map_err(TrackMutationError::Mutation)?;
-        mutate(&mut manager).map_err(|error| {
-            manager
-                .rollback_track_state(&previous_frame)
-                .expect("failed to restore previous frame after mutation error");
-            TrackMutationError::Mutation(error)
-        })
+        let result = mutate(&mut candidate_manager);
+        let track_id = TrackId::new(id);
+        let candidate_revision = candidate_manager
+            .exchange_observation_revision(&track_id)
+            .map_err(TrackMutationError::Mutation)?;
+        self.manager
+            .write()
+            .await
+            .retain_exchange_observation_revision(&track_id, candidate_revision)
+            .map_err(TrackMutationError::Mutation)?;
+        let result = result.map_err(TrackMutationError::Mutation)?;
+        let next_runtime = candidate_manager
+            .get_track(id)
+            .cloned()
+            .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
+        let next_frame = next_runtime.mutation_frame();
+        Ok((previous_frame, result, next_frame, next_runtime))
     }
 
     async fn lock_track_mutation(&self, id: &str) -> OwnedMutexGuard<()> {
@@ -1469,6 +1408,7 @@ impl MutationExecutor {
         manager.set_account_capacity_available_notional(id, available_notional)
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     async fn commit_track_mutation<R>(
         &self,
@@ -1508,6 +1448,7 @@ impl MutationExecutor {
         id: &str,
         previous_frame: &TrackMutationFrame,
         next_frame: &TrackMutationFrame,
+        next_runtime: poise_engine::runtime::TrackRuntime,
         result: &R,
         effect_status_update: Option<&EffectStatusUpdate>,
         skip_when_no_work: bool,
@@ -1529,11 +1470,12 @@ impl MutationExecutor {
             effect_status_updates,
             skip_when_no_work,
             control_state_override,
-            true,
+            Some(next_runtime),
         )
         .await
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     async fn commit_track_mutation_with_effect_status_updates<R>(
         &self,
@@ -1558,7 +1500,7 @@ impl MutationExecutor {
             effect_status_updates,
             skip_when_no_work,
             control_state_override,
-            false,
+            None,
         )
         .await
     }
@@ -1574,7 +1516,7 @@ impl MutationExecutor {
         effect_status_updates: &[EffectStatusUpdate],
         skip_when_no_work: bool,
         control_state_override: Option<&TrackControlState>,
-        install_next_runtime: bool,
+        next_runtime: Option<poise_engine::runtime::TrackRuntime>,
     ) -> std::result::Result<OwnedMutexGuard<()>, TrackMutationError>
     where
         R: TransitionResult,
@@ -1583,9 +1525,7 @@ impl MutationExecutor {
             id: id.to_string(),
             previous_frame: previous_frame.clone(),
             next_frame: next_frame.clone(),
-            next_runtime: install_next_runtime
-                .then(|| result.next_runtime().cloned())
-                .flatten(),
+            next_runtime,
             domain_events: result.domain_events().to_vec(),
             effects: result.effects().to_vec(),
             effect_status_updates: effect_status_updates.to_vec(),
@@ -1730,18 +1670,6 @@ fn effect_status_failed(effect_id: &str, error: &str) -> EffectStatusUpdate {
         attempt_delta: 1,
         last_error: Some(error.to_string()),
     }
-}
-
-fn cancel_receipt_absorbed_exposure(
-    manager: &TrackManager,
-    id: &str,
-    order_id: &str,
-    receipt: &OrderReceipt,
-) -> Result<bool> {
-    let snapshot = manager
-        .mutation_frame(id)
-        .ok_or_else(|| anyhow!("track `{id}` not found"))?;
-    Ok(snapshot.has_absorbed_binding_for_cancel_receipt(order_id, receipt))
 }
 
 fn classify_cancel_receipt_resolution(
@@ -3140,7 +3068,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mutation_rollback_does_not_make_an_old_exchange_snapshot_token_current_again() {
+    async fn rejected_candidate_does_not_make_an_old_exchange_snapshot_token_current_again() {
         let repository = Arc::new(MemoryRepository::default());
         let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
         let executor = test_executor(repository, observer);
@@ -3158,7 +3086,7 @@ mod tests {
                         unrealized_pnl: 0.0,
                     }),
                 )?;
-                anyhow::bail!("forced mutation rollback")
+                anyhow::bail!("forced candidate rejection")
             })
             .await;
         assert!(mutation.is_err());

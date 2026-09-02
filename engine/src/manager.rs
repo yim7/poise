@@ -138,6 +138,19 @@ impl TrackManager {
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))
     }
 
+    pub fn retain_exchange_observation_revision(
+        &mut self,
+        id: &TrackId,
+        revision: ExchangeObservationRevision,
+    ) -> Result<()> {
+        let track = self
+            .tracks
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+        track.restore_revision_after_speculative_market_mutation(revision);
+        Ok(())
+    }
+
     pub fn observe(
         &mut self,
         id: &TrackId,
