@@ -147,7 +147,7 @@ impl TrackManager {
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        track.restore_revision_after_speculative_market_mutation(revision);
+        track.set_exchange_observation_revision(revision);
         Ok(())
     }
 
@@ -195,11 +195,6 @@ impl TrackManager {
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
             .clone();
-        let previous_exchange_observation_revision = self
-            .tracks
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
-            .exchange_observation_revision();
         let (events, effects) = self.observe_market(id, observation)?;
         let candidate_state = self
             .tracks
@@ -260,9 +255,6 @@ impl TrackManager {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         *track = previous_state;
-        track.restore_revision_after_speculative_market_mutation(
-            previous_exchange_observation_revision,
-        );
         track.desired_exposure = desired_exposure;
         track.inventory_decision = inventory_decision;
         track.inventory_decision_revision = inventory_decision_revision;
@@ -1417,9 +1409,8 @@ fn market_mutation_requires_durable_write(
         normalized_next.best_ask = previous_state.best_ask;
         normalized_next.price_execution_gate = previous_state.price_execution_gate;
         normalized_next.last_tick_at = previous_state.last_tick_at;
-        normalized_next.restore_revision_after_speculative_market_mutation(
-            previous_state.exchange_observation_revision(),
-        );
+        normalized_next
+            .set_exchange_observation_revision(previous_state.exchange_observation_revision());
         normalized_next != *previous_state
     };
     let target_reached_without_new_effects = next_state

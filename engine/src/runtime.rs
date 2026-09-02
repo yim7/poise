@@ -684,7 +684,7 @@ impl TrackRuntime {
         self.exchange_observation_revision = self.exchange_observation_revision.next();
     }
 
-    pub(crate) fn restore_revision_after_speculative_market_mutation(
+    pub(crate) fn set_exchange_observation_revision(
         &mut self,
         revision: ExchangeObservationRevision,
     ) {
