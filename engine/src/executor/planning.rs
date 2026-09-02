@@ -1040,7 +1040,7 @@ mod tests {
         let mut input = input_with_native_qty_per_unit(
             &config,
             &rules,
-            config.base_qty_per_unit(),
+            crate::runtime::native_qty_per_exposure_unit(&config, &rules),
             Exposure(-0.1056),
             Exposure(0.4172),
         );
@@ -1102,7 +1102,7 @@ mod tests {
         let plan = plan(input_with_native_qty_per_unit(
             &config,
             &rules,
-            config.base_qty_per_unit(),
+            crate::runtime::native_qty_per_exposure_unit(&config, &rules),
             Exposure(9.75),
             Exposure(3.75),
         ));
@@ -1122,9 +1122,9 @@ mod tests {
             .iter()
             .map(|allocation| allocation.exposure_qty)
             .sum::<f64>();
+        let position_qty_per_unit = crate::runtime::native_qty_per_exposure_unit(&config, &rules);
         assert!(
-            (allocated_exposure - catch_up_binding.request.quantity / config.base_qty_per_unit())
-                .abs()
+            (allocated_exposure - catch_up_binding.request.quantity / position_qty_per_unit).abs()
                 < 1e-9
         );
     }
@@ -1147,7 +1147,7 @@ mod tests {
         let plan = plan(input_with_native_qty_per_unit(
             &config,
             &rules,
-            config.base_qty_per_unit(),
+            crate::runtime::native_qty_per_exposure_unit(&config, &rules),
             Exposure(0.75),
             Exposure(1.8705),
         ));

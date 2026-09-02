@@ -1,9 +1,10 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use poise_core::replay::estimate_settlement_fee;
+use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
+use poise_core::replay::{ReplayFeeRates, estimate_settlement_fee};
 use poise_core::risk::LossLimits;
 use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
 use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
-use poise_core::types::{ExchangeRules, Exposure, QuantityKind};
+use poise_core::types::Exposure;
 use poise_engine::decision_evaluation::{DecisionEvaluationInput, run_decision_evaluation};
 use poise_engine::decision_replay::{
     DecisionOrderObservation, DecisionReplayEffect, DecisionReplayFillModel, DecisionReplayInput,
@@ -412,8 +413,10 @@ fn late_fill_crossing_zero_counts_only_post_zero_risk_but_full_turnover() {
         fill.2,
         input
             .replay
-            .exchange_rules
-            .notional_from_native_qty(fill.0, fill.1),
+            .instrument_spec
+            .notional_from_position_qty(PositionQty::new(fill.0).unwrap(), fill.1)
+            .unwrap()
+            .value(),
     );
 }
 
@@ -783,10 +786,10 @@ fn inverse_contract_uses_contract_notional_for_quantity_fee_and_margin() {
         })
         .unwrap();
     let expected_fee = estimate_settlement_fee(
-        &input.replay.exchange_rules,
+        &input.replay.instrument_spec,
         trade_notional,
         fill_price,
-        input.replay.exchange_rules.taker_fee_rate,
+        input.replay.fee_rates.taker_fee_rate,
     )
     .unwrap();
 
@@ -813,7 +816,7 @@ fn evaluation_input(
 
 fn evaluation_input_with(
     definition: TrackDefinition,
-    exchange_rules: ExchangeRules,
+    instrument_spec: InstrumentSpec,
     initial_position_qty: f64,
     steps: Vec<DecisionScenarioStep>,
     ended_at: DateTime<Utc>,
@@ -827,7 +830,11 @@ fn evaluation_input_with(
     DecisionEvaluationInput {
         replay: DecisionReplayInput {
             definition,
-            exchange_rules,
+            instrument_spec,
+            fee_rates: ReplayFeeRates {
+                maker_fee_rate: 0.0002,
+                taker_fee_rate: 0.001,
+            },
             started_at,
             initial_position: PositionObservation {
                 qty: initial_position_qty,
@@ -866,19 +873,20 @@ fn definition() -> TrackDefinition {
     .unwrap()
 }
 
-fn rules() -> ExchangeRules {
-    ExchangeRules {
-        price_tick: 0.1,
-        price_precision: Default::default(),
-        quantity_kind: QuantityKind::BaseAsset,
-        contract_notional: None,
-        settlement_asset: "USDT".to_string(),
-        quantity_step: 0.1,
-        min_qty: 0.0,
-        min_notional: 0.0,
-        maker_fee_rate: 0.0002,
-        taker_fee_rate: 0.001,
-    }
+fn rules() -> InstrumentSpec {
+    let usdt = Asset::try_new("USDT").unwrap();
+    InstrumentSpec::try_linear(
+        Instrument::new(Venue::Binance, "BTCUSDT"),
+        Asset::try_new("BTC").unwrap(),
+        usdt.clone(),
+        usdt.clone(),
+        Default::default(),
+        0.1,
+        0.1,
+        0.0,
+        Amount::new(0.0, usdt).unwrap(),
+    )
+    .unwrap()
 }
 
 fn inverse_definition() -> TrackDefinition {
@@ -906,19 +914,21 @@ fn inverse_definition() -> TrackDefinition {
     .unwrap()
 }
 
-fn inverse_rules() -> ExchangeRules {
-    ExchangeRules {
-        price_tick: 0.1,
-        price_precision: Default::default(),
-        quantity_kind: QuantityKind::InverseContract,
-        contract_notional: Some(100.0),
-        settlement_asset: "BTC".to_string(),
-        quantity_step: 1.0,
-        min_qty: 1.0,
-        min_notional: 100.0,
-        maker_fee_rate: 0.0002,
-        taker_fee_rate: 0.001,
-    }
+fn inverse_rules() -> InstrumentSpec {
+    let usd = Asset::try_new("USD").unwrap();
+    InstrumentSpec::try_inverse(
+        Instrument::new(Venue::Binance, "BTCUSD_PERP"),
+        Asset::try_new("BTC").unwrap(),
+        usd.clone(),
+        Asset::try_new("BTC").unwrap(),
+        Amount::new(100.0, usd.clone()).unwrap(),
+        Default::default(),
+        0.1,
+        1.0,
+        1.0,
+        Amount::new(100.0, usd).unwrap(),
+    )
+    .unwrap()
 }
 
 fn quote_step(observed_at: DateTime<Utc>, price: f64) -> DecisionScenarioStep {

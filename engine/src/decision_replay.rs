@@ -10,11 +10,11 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
-use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
-use poise_core::replay::{estimate_settlement_fee, validate_replay_exchange_rules};
+use poise_core::instrument::{Amount, InstrumentSpec, PositionQty};
+use poise_core::replay::{ReplayFeeRates, estimate_settlement_fee};
 use poise_core::strategy::TrackConfig;
-use poise_core::track::{TrackDefinition, Venue};
-use poise_core::types::{ExchangeRules, Exposure, QuantityKind, Side};
+use poise_core::track::TrackDefinition;
+use poise_core::types::{Exposure, Side};
 
 use crate::execution_gate::added_risk_units;
 use crate::execution_plan::TrackEffect;
@@ -60,7 +60,8 @@ pub enum DecisionReplayReleaseTrigger {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionReplayInput {
     pub definition: TrackDefinition,
-    pub exchange_rules: ExchangeRules,
+    pub instrument_spec: InstrumentSpec,
+    pub fee_rates: ReplayFeeRates,
     pub started_at: DateTime<Utc>,
     pub initial_position: PositionObservation,
     pub steps: Vec<DecisionScenarioStep>,
@@ -195,7 +196,7 @@ struct DecisionReplayRunner {
     track_id: poise_core::track::TrackId,
     track_config: TrackConfig,
     instrument_spec: InstrumentSpec,
-    exchange_rules: ExchangeRules,
+    fee_rates: ReplayFeeRates,
     fill_model: DecisionReplayFillModel,
     last_observed_at: DateTime<Utc>,
     simulated_position_qty: f64,
@@ -228,8 +229,20 @@ struct StepAccumulator {
 impl DecisionReplayRunner {
     fn new(input: &DecisionReplayInput) -> Result<Self> {
         validate_position(&input.initial_position).context("invalid initial position")?;
-        validate_replay_exchange_rules(&input.exchange_rules).map_err(anyhow::Error::msg)?;
-        let instrument_spec = replay_instrument_spec(&input.definition, &input.exchange_rules)?;
+        input
+            .instrument_spec
+            .validate()
+            .map_err(anyhow::Error::msg)?;
+        input.fee_rates.validate().map_err(anyhow::Error::msg)?;
+        ensure!(
+            input.instrument_spec.instrument() == input.definition.instrument(),
+            "replay instrument mismatch: definition is `{}:{}`, spec is `{}:{}`",
+            input.definition.instrument().venue.as_str(),
+            input.definition.instrument().symbol,
+            input.instrument_spec.instrument().venue.as_str(),
+            input.instrument_spec.instrument().symbol,
+        );
+        let instrument_spec = input.instrument_spec.clone();
         let unit_qty = instrument_spec
             .position_qty_for_notional(
                 Amount::new(
@@ -284,7 +297,7 @@ impl DecisionReplayRunner {
             track_id,
             track_config,
             instrument_spec,
-            exchange_rules: input.exchange_rules.clone(),
+            fee_rates: input.fee_rates,
             fill_model: input.fill_model,
             last_observed_at: input.started_at,
             simulated_position_qty: input.initial_position.qty,
@@ -325,7 +338,7 @@ impl DecisionReplayRunner {
             final_observed_position_qty: observed.position_qty,
             final_observed_exposure: observed.current_exposure,
             total_estimated_taker_fee: self.total_estimated_taker_fee,
-            fee_asset: self.exchange_rules.settlement_asset.clone(),
+            fee_asset: self.instrument_spec.settlement_asset().as_str().to_string(),
         })
     }
 
@@ -775,10 +788,10 @@ impl DecisionReplayRunner {
             .map_err(anyhow::Error::msg)?
             .value();
         let fee = estimate_settlement_fee(
-            &self.exchange_rules,
+            &self.instrument_spec,
             trade_notional,
             price,
-            self.exchange_rules.taker_fee_rate,
+            self.fee_rates.taker_fee_rate,
         )
         .map_err(anyhow::Error::msg)?;
         accumulator.estimated_taker_fee += fee;
@@ -848,75 +861,6 @@ impl DecisionReplayRunner {
     }
 }
 
-fn replay_instrument_spec(
-    definition: &TrackDefinition,
-    rules: &ExchangeRules,
-) -> Result<InstrumentSpec> {
-    let instrument = definition.instrument().clone();
-    let settlement_asset =
-        Asset::try_new(rules.settlement_asset.clone()).map_err(anyhow::Error::msg)?;
-    let (base_asset, quote_asset) = match rules.quantity_kind {
-        QuantityKind::BaseAsset => {
-            let quote_asset = settlement_asset.clone();
-            let base_asset = match instrument.venue {
-                Venue::Okx => instrument
-                    .symbol
-                    .split('-')
-                    .next()
-                    .unwrap_or(&instrument.symbol),
-                Venue::Hyperliquid => instrument.symbol.as_str(),
-                _ => instrument
-                    .symbol
-                    .strip_suffix(quote_asset.as_str())
-                    .unwrap_or(&instrument.symbol),
-            };
-            (
-                Asset::try_new(base_asset).map_err(anyhow::Error::msg)?,
-                quote_asset,
-            )
-        }
-        QuantityKind::InverseContract => (
-            settlement_asset.clone(),
-            Asset::try_new("USD").map_err(anyhow::Error::msg)?,
-        ),
-    };
-    let min_notional =
-        Amount::new(rules.min_notional, quote_asset.clone()).map_err(anyhow::Error::msg)?;
-
-    match rules.quantity_kind {
-        QuantityKind::BaseAsset => InstrumentSpec::try_linear(
-            instrument,
-            base_asset,
-            quote_asset.clone(),
-            settlement_asset,
-            rules.price_precision,
-            rules.price_tick,
-            rules.quantity_step,
-            rules.min_qty,
-            min_notional,
-        ),
-        QuantityKind::InverseContract => InstrumentSpec::try_inverse(
-            instrument,
-            base_asset,
-            quote_asset.clone(),
-            settlement_asset,
-            Amount::new(
-                rules
-                    .contract_notional
-                    .context("inverse replay rules missing contract_notional")?,
-                quote_asset,
-            )
-            .map_err(anyhow::Error::msg)?,
-            rules.price_precision,
-            rules.price_tick,
-            rules.quantity_step,
-            rules.min_qty,
-            min_notional,
-        ),
-    }
-    .map_err(anyhow::Error::msg)
-}
-
 fn validate_position(position: &PositionObservation) -> Result<()> {
     ensure!(position.qty.is_finite(), "position qty must be finite");
     ensure!(
@@ -958,7 +902,7 @@ mod tests {
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackId, Venue};
-    use poise_core::types::{ExchangeRules, Exposure, QuantityKind};
+    use poise_core::types::Exposure;
 
     use super::*;
     use crate::execution_plan::DecisionReason;
@@ -1472,9 +1416,9 @@ mod tests {
     }
 
     #[test]
-    fn decision_replay_rejects_invalid_rules_even_when_orders_never_fill() {
+    fn decision_replay_rejects_invalid_fee_rates_even_when_orders_never_fill() {
         let mut input = replay_input(0.0, DecisionReplayFillModel::NeverFill);
-        input.exchange_rules.taker_fee_rate = f64::NAN;
+        input.fee_rates.taker_fee_rate = f64::NAN;
 
         let error = run_decision_replay(&input).unwrap_err().to_string();
 
@@ -1546,7 +1490,11 @@ mod tests {
         let started_at = at(2026, 7, 1, 9, 0);
         DecisionReplayInput {
             definition: definition(),
-            exchange_rules: rules(),
+            instrument_spec: crate::test_instrument::linear_spec(0.1, 0.1, 0.0, 0.0),
+            fee_rates: ReplayFeeRates {
+                maker_fee_rate: 0.0002,
+                taker_fee_rate: 0.001,
+            },
             started_at,
             initial_position: PositionObservation {
                 qty: initial_qty,
@@ -1583,21 +1531,6 @@ mod tests {
             None,
         )
         .unwrap()
-    }
-
-    fn rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: QuantityKind::BaseAsset,
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.1,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0002,
-            taker_fee_rate: 0.001,
-        }
     }
 
     fn market_step(observed_at: DateTime<Utc>, price: f64) -> DecisionScenarioStep {

@@ -1,9 +1,11 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use poise_core::{
+    instrument::{Amount, Asset, InstrumentSpec, PositionBasis},
+    replay::ReplayFeeRates,
     risk::LossLimits,
     strategy::{ShapeFamily, TrackConfig, desired_exposure},
     track::{Instrument, TrackDefinition, TrackId, Venue},
-    types::{ExchangeRules, PricePrecision, QuantityKind},
+    types::PricePrecision,
 };
 use poise_engine::{
     decision_evaluation::{
@@ -31,6 +33,12 @@ const CURVE_POINT_COUNT: usize = 41;
 const RULES_NOTICE: &str = "确定性评估假设，不是交易所实时规则";
 const FILL_MODEL_NOTICE: &str =
     "ImmediateFullAtOrderPrice 只是确定性成交假设，不是成交概率、滑点或 PnL 预测";
+
+#[derive(Debug, Clone)]
+struct EvaluationInstrumentFixture {
+    instrument_spec: InstrumentSpec,
+    fee_rates: ReplayFeeRates,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -274,10 +282,20 @@ pub fn evaluate_workbench_draft(
     let draft = TrackDraft::try_from(request.draft)
         .map_err(|error| evaluation_error(format!("draft 配置无效: {error}")))?;
     let definition = build_definition(draft, &request.exchange_venue)?;
-    let rules = rules_fixture(fixture_id);
+    let rules = rules_fixture(fixture_id, definition.instrument().clone());
     let track_config = definition.track_config();
     let unit_qty = rules
-        .native_qty_per_exposure_unit(track_config.notional_per_unit, track_config.band_center());
+        .instrument_spec
+        .position_qty_for_notional(
+            Amount::new(
+                track_config.notional_per_unit,
+                rules.instrument_spec.notional_asset().clone(),
+            )
+            .map_err(evaluation_error)?,
+            track_config.band_center(),
+        )
+        .map_err(evaluation_error)?
+        .value();
     if !unit_qty.is_finite() || unit_qty <= f64::EPSILON {
         return Err(evaluation_error(
             "rules fixture 无法为当前配置生成有效的每单位原生数量",
@@ -384,32 +402,52 @@ fn parse_venue(value: &str) -> Result<Venue, CommandError> {
     }
 }
 
-fn rules_fixture(fixture_id: EvaluationRulesFixtureId) -> ExchangeRules {
+fn rules_fixture(
+    fixture_id: EvaluationRulesFixtureId,
+    instrument: Instrument,
+) -> EvaluationInstrumentFixture {
+    let fee_rates = ReplayFeeRates {
+        maker_fee_rate: 0.0002,
+        taker_fee_rate: 0.001,
+    };
     match fixture_id {
-        EvaluationRulesFixtureId::BaseAssetV1 => ExchangeRules {
-            price_tick: 0.00000001,
-            price_precision: PricePrecision::FixedTick,
-            quantity_kind: QuantityKind::BaseAsset,
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            quantity_step: 0.00000001,
-            min_qty: 0.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0002,
-            taker_fee_rate: 0.001,
-        },
-        EvaluationRulesFixtureId::InverseContractV1 => ExchangeRules {
-            price_tick: 0.1,
-            price_precision: PricePrecision::FixedTick,
-            quantity_kind: QuantityKind::InverseContract,
-            contract_notional: Some(100.0),
-            settlement_asset: "BTC".to_string(),
-            quantity_step: 1.0,
-            min_qty: 1.0,
-            min_notional: 100.0,
-            maker_fee_rate: 0.0002,
-            taker_fee_rate: 0.001,
-        },
+        EvaluationRulesFixtureId::BaseAssetV1 => {
+            let usdt = Asset::try_new("USDT").expect("fixed fixture asset must be valid");
+            EvaluationInstrumentFixture {
+                instrument_spec: InstrumentSpec::try_linear(
+                    instrument,
+                    Asset::try_new("BTC").expect("fixed fixture asset must be valid"),
+                    usdt.clone(),
+                    usdt.clone(),
+                    PricePrecision::FixedTick,
+                    0.00000001,
+                    0.00000001,
+                    0.0,
+                    Amount::new(0.0, usdt).expect("fixed fixture amount must be valid"),
+                )
+                .expect("fixed linear fixture must be valid"),
+                fee_rates,
+            }
+        }
+        EvaluationRulesFixtureId::InverseContractV1 => {
+            let usd = Asset::try_new("USD").expect("fixed fixture asset must be valid");
+            EvaluationInstrumentFixture {
+                instrument_spec: InstrumentSpec::try_inverse(
+                    instrument,
+                    Asset::try_new("BTC").expect("fixed fixture asset must be valid"),
+                    usd.clone(),
+                    Asset::try_new("BTC").expect("fixed fixture asset must be valid"),
+                    Amount::new(100.0, usd.clone()).expect("fixed fixture amount must be valid"),
+                    PricePrecision::FixedTick,
+                    0.1,
+                    1.0,
+                    1.0,
+                    Amount::new(100.0, usd).expect("fixed fixture amount must be valid"),
+                )
+                .expect("fixed inverse fixture must be valid"),
+                fee_rates,
+            }
+        }
     }
 }
 
@@ -429,7 +467,7 @@ fn curve_points(config: &TrackConfig) -> Vec<CurvePointDto> {
 
 fn run_scenario(
     definition: &TrackDefinition,
-    rules: &ExchangeRules,
+    rules: &EvaluationInstrumentFixture,
     leverage: u32,
     kind: ScenarioKind,
     direction: EvaluationDirectionDto,
@@ -446,7 +484,7 @@ fn run_scenario(
 
 fn build_scenario_input(
     definition: &TrackDefinition,
-    rules: &ExchangeRules,
+    rules: &EvaluationInstrumentFixture,
     leverage: u32,
     kind: ScenarioKind,
     direction: EvaluationDirectionDto,
@@ -501,7 +539,8 @@ fn build_scenario_input(
     Ok(DecisionEvaluationInput {
         replay: DecisionReplayInput {
             definition: definition.clone(),
-            exchange_rules: rules.clone(),
+            instrument_spec: rules.instrument_spec.clone(),
+            fee_rates: rules.fee_rates,
             started_at,
             initial_position: PositionObservation {
                 qty: 0.0,
@@ -676,13 +715,14 @@ fn scenario_title(kind: ScenarioKind, direction: EvaluationDirectionDto) -> Stri
 
 fn project_rules(
     fixture_id: EvaluationRulesFixtureId,
-    rules: &ExchangeRules,
+    rules: &EvaluationInstrumentFixture,
     native_qty_per_exposure_unit: f64,
 ) -> EvaluationRulesDto {
+    let spec = &rules.instrument_spec;
     EvaluationRulesDto {
         fixture_id,
-        price_tick: rules.price_tick,
-        price_precision: match rules.price_precision {
+        price_tick: spec.price_tick(),
+        price_precision: match spec.price_precision() {
             PricePrecision::FixedTick => EvaluationPricePrecisionDto::FixedTick,
             PricePrecision::SignificantFigures {
                 max_decimals,
@@ -692,17 +732,17 @@ fn project_rules(
                 significant_figures,
             },
         },
-        quantity_kind: match rules.quantity_kind {
-            QuantityKind::BaseAsset => EvaluationQuantityKindDto::BaseAsset,
-            QuantityKind::InverseContract => EvaluationQuantityKindDto::InverseContract,
+        quantity_kind: match spec.position_basis() {
+            PositionBasis::BaseAsset => EvaluationQuantityKindDto::BaseAsset,
+            PositionBasis::Contracts { .. } => EvaluationQuantityKindDto::InverseContract,
         },
-        contract_notional: rules.contract_notional,
-        settlement_asset: rules.settlement_asset.clone(),
-        quantity_step: rules.quantity_step,
-        min_qty: rules.min_qty,
-        min_notional: rules.min_notional,
-        maker_fee_rate: rules.maker_fee_rate,
-        taker_fee_rate: rules.taker_fee_rate,
+        contract_notional: spec.contract_value().map(|amount| amount.value()),
+        settlement_asset: spec.settlement_asset().as_str().to_string(),
+        quantity_step: spec.position_qty_step().value(),
+        min_qty: spec.min_position_qty().value(),
+        min_notional: spec.min_notional().value(),
+        maker_fee_rate: rules.fee_rates.maker_fee_rate,
+        taker_fee_rate: rules.fee_rates.taker_fee_rate,
         native_qty_per_exposure_unit,
     }
 }
@@ -1175,7 +1215,7 @@ mod tests {
             &request.exchange_venue,
         )
         .unwrap();
-        let rules = super::rules_fixture(request.rules_fixture);
+        let rules = super::rules_fixture(request.rules_fixture, definition.instrument().clone());
         let raw_input = super::build_scenario_input(
             &definition,
             &rules,

@@ -8,8 +8,22 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::instrument::{Amount, InstrumentSpec, PositionBasis, PositionQty};
 use crate::strategy::{TrackConfig, desired_exposure, validate_config};
-use crate::types::{ExchangeRules, QuantityKind};
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayFeeRates {
+    pub maker_fee_rate: f64,
+    pub taker_fee_rate: f64,
+}
+
+impl ReplayFeeRates {
+    pub fn validate(self) -> Result<(), String> {
+        validate_fee_rate("maker_fee_rate", self.maker_fee_rate)?;
+        validate_fee_rate("taker_fee_rate", self.taker_fee_rate)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,7 +32,8 @@ pub struct ReplayInput {
     pub initial_native_quantity: f64,
     pub leverage: u32,
     pub track_config: TrackConfig,
-    pub exchange_rules: ExchangeRules,
+    pub instrument_spec: InstrumentSpec,
+    pub fee_rates: ReplayFeeRates,
 }
 
 impl ReplayInput {
@@ -43,7 +58,8 @@ impl ReplayInput {
             return Err("leverage must be positive".to_string());
         }
         validate_config(&self.track_config)?;
-        validate_replay_exchange_rules(&self.exchange_rules)?;
+        self.instrument_spec.validate()?;
+        self.fee_rates.validate()?;
         Ok(())
     }
 }
@@ -189,10 +205,16 @@ fn replay_comparison_item(
 /// part of the question.
 pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
     input.validate()?;
-    let native_quantity_per_unit = input.exchange_rules.native_qty_per_exposure_unit(
-        input.track_config.notional_per_unit,
-        input.track_config.band_center(),
-    );
+    let native_quantity_per_unit = input
+        .instrument_spec
+        .position_qty_for_notional(
+            Amount::new(
+                input.track_config.notional_per_unit,
+                input.instrument_spec.notional_asset().clone(),
+            )?,
+            input.track_config.band_center(),
+        )?
+        .value();
     if !native_quantity_per_unit.is_finite() || native_quantity_per_unit <= 0.0 {
         return Err("native quantity per exposure unit must be positive".to_string());
     }
@@ -203,9 +225,11 @@ pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
     let mut trade_count = 0;
     let mut estimated_fee = 0.0;
     let mut max_abs_native_quantity = position_native_quantity.abs();
-    let mut max_abs_notional = input
-        .exchange_rules
-        .notional_from_native_qty(position_native_quantity, input.track_config.band_center());
+    let mut max_abs_notional = position_notional(
+        &input.instrument_spec,
+        position_native_quantity,
+        input.track_config.band_center(),
+    )?;
     let mut min_exposure = current_exposure;
     let mut max_exposure = current_exposure;
     let mut min_native_quantity = position_native_quantity;
@@ -222,14 +246,13 @@ pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
         if exposure_delta.abs() + f64::EPSILON >= input.track_config.min_rebalance_units {
             let target_native_quantity = target_exposure * native_quantity_per_unit;
             trade_native_quantity = target_native_quantity - position_native_quantity;
-            trade_notional = input
-                .exchange_rules
-                .notional_from_native_qty(trade_native_quantity, *price);
+            trade_notional =
+                position_notional(&input.instrument_spec, trade_native_quantity, *price)?;
             sample_fee = estimate_settlement_fee(
-                &input.exchange_rules,
+                &input.instrument_spec,
                 trade_notional,
                 *price,
-                input.exchange_rules.taker_fee_rate,
+                input.fee_rates.taker_fee_rate,
             )?;
             estimated_fee += sample_fee;
             trade_count += 1;
@@ -237,9 +260,8 @@ pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
             current_exposure = target_exposure;
         }
 
-        let position_notional = input
-            .exchange_rules
-            .notional_from_native_qty(position_native_quantity, *price);
+        let position_notional =
+            position_notional(&input.instrument_spec, position_native_quantity, *price)?;
         max_abs_native_quantity = max_abs_native_quantity.max(position_native_quantity.abs());
         max_abs_notional = max_abs_notional.max(position_notional);
         min_exposure = min_exposure.min(current_exposure);
@@ -267,7 +289,11 @@ pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
             max_abs_notional,
             max_margin_requirement: max_abs_notional / input.leverage as f64,
             estimated_fee,
-            fee_asset: input.exchange_rules.settlement_asset.clone(),
+            fee_asset: input
+                .instrument_spec
+                .settlement_asset()
+                .as_str()
+                .to_string(),
             position_distribution: ReplayPositionDistribution {
                 min_exposure,
                 max_exposure,
@@ -285,7 +311,7 @@ pub fn run_replay(input: &ReplayInput) -> Result<ReplayReport, String> {
 /// Base-asset contracts settle the notional fee directly. Inverse contracts settle in the base
 /// asset, so the notional fee is divided by the fill price.
 pub fn estimate_settlement_fee(
-    rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
     trade_notional: f64,
     price: f64,
     fee_rate: f64,
@@ -310,9 +336,23 @@ pub fn estimate_settlement_fee(
     if !fee_notional.is_finite() {
         return Err("settlement fee notional must be finite".to_string());
     }
-    let settlement_fee = match rules.quantity_kind {
-        QuantityKind::BaseAsset => fee_notional,
-        QuantityKind::InverseContract => fee_notional / price,
+    let settlement_fee = if instrument_spec.notional_asset() == instrument_spec.settlement_asset() {
+        fee_notional
+    } else {
+        match instrument_spec.position_basis() {
+            PositionBasis::Contracts { .. }
+                if instrument_spec.settlement_asset() == instrument_spec.base_asset() =>
+            {
+                fee_notional / price
+            }
+            _ => {
+                return Err(format!(
+                    "fee estimate cannot convert notional asset `{}` to settlement asset `{}` without an explicit valuation",
+                    instrument_spec.notional_asset().as_str(),
+                    instrument_spec.settlement_asset().as_str()
+                ));
+            }
+        }
     };
     if !settlement_fee.is_finite() {
         return Err("settlement fee must be finite".to_string());
@@ -320,77 +360,43 @@ pub fn estimate_settlement_fee(
     Ok(settlement_fee)
 }
 
-/// Validates exchange rules required by deterministic replay evaluators.
-pub fn validate_replay_exchange_rules(rules: &ExchangeRules) -> Result<(), String> {
-    if !rules.price_tick.is_finite() || rules.price_tick <= 0.0 {
+fn position_notional(
+    instrument_spec: &InstrumentSpec,
+    quantity: f64,
+    price: f64,
+) -> Result<f64, String> {
+    instrument_spec
+        .notional_from_position_qty(PositionQty::new(quantity)?, price)
+        .map(|amount| amount.value())
+}
+
+fn validate_fee_rate(field: &str, value: f64) -> Result<(), String> {
+    if !value.is_finite() || value < 0.0 {
         return Err(format!(
-            "price_tick must be finite and positive, got {}",
-            rules.price_tick
+            "{field} must be finite and non-negative, got {value}"
         ));
-    }
-    if !rules.quantity_step.is_finite() || rules.quantity_step <= 0.0 {
-        return Err(format!(
-            "quantity_step must be finite and positive, got {}",
-            rules.quantity_step
-        ));
-    }
-    if !rules.min_qty.is_finite() || rules.min_qty < 0.0 {
-        return Err(format!(
-            "min_qty must be finite and non-negative, got {}",
-            rules.min_qty
-        ));
-    }
-    if !rules.min_notional.is_finite() || rules.min_notional < 0.0 {
-        return Err(format!(
-            "min_notional must be finite and non-negative, got {}",
-            rules.min_notional
-        ));
-    }
-    if rules.settlement_asset.trim().is_empty() {
-        return Err("settlement_asset must not be empty".to_string());
-    }
-    if !rules.maker_fee_rate.is_finite() || rules.maker_fee_rate < 0.0 {
-        return Err(format!(
-            "maker_fee_rate must be finite and non-negative, got {}",
-            rules.maker_fee_rate
-        ));
-    }
-    if !rules.taker_fee_rate.is_finite() || rules.taker_fee_rate < 0.0 {
-        return Err(format!(
-            "taker_fee_rate must be finite and non-negative, got {}",
-            rules.taker_fee_rate
-        ));
-    }
-    if matches!(rules.quantity_kind, QuantityKind::InverseContract) {
-        let Some(contract_notional) = rules.contract_notional else {
-            return Err("inverse replay input requires contract_notional".to_string());
-        };
-        if !contract_notional.is_finite() || contract_notional <= 0.0 {
-            return Err(format!(
-                "contract_notional must be finite and positive, got {contract_notional}"
-            ));
-        }
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::instrument::{Amount, Asset, InstrumentSpec};
     use crate::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
-    use crate::types::{ExchangeRules, QuantityKind};
+    use crate::track::{Instrument, Venue};
 
-    use super::{ReplayInput, estimate_settlement_fee, run_replay};
+    use super::{ReplayFeeRates, ReplayInput, estimate_settlement_fee, run_replay};
 
     #[test]
     fn settlement_fee_keeps_base_asset_fee_in_settlement_notional() {
-        let fee = estimate_settlement_fee(&base_rules(), 1_500.0, 65_000.0, 0.0005).unwrap();
+        let fee = estimate_settlement_fee(&base_spec(), 1_500.0, 65_000.0, 0.0005).unwrap();
 
         assert_close(fee, 0.75);
     }
 
     #[test]
     fn settlement_fee_converts_inverse_notional_to_settlement_asset() {
-        let fee = estimate_settlement_fee(&inverse_rules(), 1_500.0, 65_000.0, 0.0005).unwrap();
+        let fee = estimate_settlement_fee(&inverse_spec(), 1_500.0, 65_000.0, 0.0005).unwrap();
 
         assert_close(fee, 0.000011538461538461538);
     }
@@ -405,7 +411,7 @@ mod tests {
             (1_500.0, 65_000.0, f64::NAN, "fee_rate"),
             (1_500.0, 65_000.0, -0.0005, "fee_rate"),
         ] {
-            let error = estimate_settlement_fee(&inverse_rules(), trade_notional, price, fee_rate)
+            let error = estimate_settlement_fee(&inverse_spec(), trade_notional, price, fee_rate)
                 .unwrap_err();
 
             assert!(
@@ -441,15 +447,23 @@ mod tests {
       "stale_release_minutes": 60.0
     }
   },
-  "exchange_rules": {
+  "instrument_spec": {
+    "instrument": {"venue": "okx", "symbol": "BTC-USD-SWAP"},
+    "base_asset": "BTC",
+    "quote_asset": "USD",
+    "notional_asset": "USD",
+    "settlement_asset": "BTC",
+    "position_basis": {
+      "kind": "contracts",
+      "contract_value": {"value": 100.0, "asset": "USD"}
+    },
     "price_tick": 0.1,
     "price_precision": {"kind": "fixed_tick"},
-    "quantity_kind": "inverse_contract",
-    "contract_notional": 100.0,
-    "settlement_asset": "BTC",
-    "quantity_step": 1.0,
-    "min_qty": 1.0,
-    "min_notional": 0.0,
+    "position_qty_step": 1.0,
+    "min_position_qty": 1.0,
+    "min_notional": {"value": 0.0, "asset": "USD"}
+  },
+  "fee_rates": {
     "maker_fee_rate": 0.0002,
     "taker_fee_rate": 0.0005
   }
@@ -462,7 +476,11 @@ mod tests {
         assert_eq!(input.initial_native_quantity, 12.0);
         assert_eq!(input.leverage, 3);
         assert_eq!(input.track_config.notional_per_unit, 300.0);
-        assert_eq!(input.exchange_rules.taker_fee_rate, 0.0005);
+        assert_eq!(input.fee_rates.taker_fee_rate, 0.0005);
+        assert_eq!(
+            input.instrument_spec.instrument(),
+            &Instrument::new(Venue::Okx, "BTC-USD-SWAP")
+        );
         input.validate().unwrap();
     }
 
@@ -627,8 +645,17 @@ mod tests {
             .iter()
             .map(|price| {
                 input
-                    .exchange_rules
-                    .native_qty_per_exposure_unit(input.track_config.notional_per_unit, *price)
+                    .instrument_spec
+                    .position_qty_for_notional(
+                        Amount::new(
+                            input.track_config.notional_per_unit,
+                            input.instrument_spec.notional_asset().clone(),
+                        )
+                        .unwrap(),
+                        *price,
+                    )
+                    .unwrap()
+                    .value()
             })
             .collect::<Vec<_>>();
 
@@ -651,32 +678,45 @@ mod tests {
                 out_of_band_policy: BandProtectionPolicy::Freeze,
                 risk_acquisition: Default::default(),
             },
-            exchange_rules: inverse_rules(),
+            instrument_spec: inverse_spec(),
+            fee_rates: ReplayFeeRates {
+                maker_fee_rate: 0.0002,
+                taker_fee_rate: 0.0005,
+            },
         }
     }
 
-    fn inverse_rules() -> ExchangeRules {
-        ExchangeRules {
-            price_tick: 0.1,
-            price_precision: Default::default(),
-            quantity_kind: QuantityKind::InverseContract,
-            contract_notional: Some(100.0),
-            settlement_asset: "BTC".to_string(),
-            quantity_step: 1.0,
-            min_qty: 1.0,
-            min_notional: 0.0,
-            maker_fee_rate: 0.0002,
-            taker_fee_rate: 0.0005,
-        }
+    fn inverse_spec() -> InstrumentSpec {
+        let usd = Asset::try_new("USD").unwrap();
+        InstrumentSpec::try_inverse(
+            Instrument::new(Venue::Okx, "BTC-USD-SWAP"),
+            Asset::try_new("BTC").unwrap(),
+            usd.clone(),
+            Asset::try_new("BTC").unwrap(),
+            Amount::new(100.0, usd.clone()).unwrap(),
+            Default::default(),
+            0.1,
+            1.0,
+            1.0,
+            Amount::new(0.0, usd).unwrap(),
+        )
+        .unwrap()
     }
 
-    fn base_rules() -> ExchangeRules {
-        ExchangeRules {
-            quantity_kind: QuantityKind::BaseAsset,
-            contract_notional: None,
-            settlement_asset: "USDT".to_string(),
-            ..inverse_rules()
-        }
+    fn base_spec() -> InstrumentSpec {
+        let usdt = Asset::try_new("USDT").unwrap();
+        InstrumentSpec::try_linear(
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            Asset::try_new("BTC").unwrap(),
+            usdt.clone(),
+            usdt.clone(),
+            Default::default(),
+            0.1,
+            0.001,
+            0.001,
+            Amount::new(5.0, usdt).unwrap(),
+        )
+        .unwrap()
     }
 
     fn assert_close(actual: f64, expected: f64) {

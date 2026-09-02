@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::risk::{LossLimits, validate_loss_limits, validate_max_notional};
 use crate::strategy::{TrackConfig, validate_config};
-use crate::types::Exposure;
 
 pub const DEFAULT_TICK_TIMEOUT_SECS: u64 = 30;
 
@@ -154,22 +153,6 @@ impl TrackDefinition {
     pub fn tick_timeout_secs(&self) -> u64 {
         self.tick_timeout_secs
     }
-
-    pub fn required_additional_notional(&self, position_qty: f64) -> f64 {
-        let current_position_notional = self
-            .track_config
-            .abs_notional_from_position_qty(position_qty);
-        (self.max_notional - current_position_notional).max(0.0)
-    }
-
-    pub fn exposure_from_position_qty(&self, position_qty: f64) -> Exposure {
-        let unit_qty = self.track_config.base_qty_per_unit();
-        if unit_qty <= f64::EPSILON {
-            Exposure(0.0)
-        } else {
-            Exposure(position_qty / unit_qty)
-        }
-    }
 }
 
 pub fn curve_max_notional(config: &TrackConfig) -> f64 {
@@ -290,27 +273,5 @@ mod tests {
         assert_eq!(definition.curve_max_notional(), 3_000.0);
         assert_eq!(definition.max_notional(), 2_000.0);
         assert_eq!(definition.effective_max_notional(), 2_000.0);
-    }
-
-    #[test]
-    fn track_definition_required_additional_notional_subtracts_existing_position_notional() {
-        let definition = track_definition(Some(3_000.0));
-
-        assert_eq!(definition.required_additional_notional(15.0), 1_500.0);
-    }
-
-    #[test]
-    fn track_definition_required_additional_notional_clamps_to_zero() {
-        let definition = track_definition(Some(3_000.0));
-
-        assert_eq!(definition.required_additional_notional(30.0), 0.0);
-        assert_eq!(definition.required_additional_notional(45.0), 0.0);
-    }
-
-    #[test]
-    fn track_definition_exposure_from_position_qty_uses_config_unit_size() {
-        let definition = track_definition(Some(3_000.0));
-
-        assert_eq!(definition.exposure_from_position_qty(15.0).0, 4.0);
     }
 }

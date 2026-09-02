@@ -167,19 +167,7 @@ impl InstrumentSpec {
         min_position_qty: f64,
         min_notional: Amount,
     ) -> Result<Self, String> {
-        validate_positive("price tick", price_tick)?;
-        validate_positive("position quantity step", position_qty_step)?;
-        validate_non_negative("minimum position quantity", min_position_qty)?;
-        validate_non_negative("minimum notional", min_notional.value)?;
-        if min_notional.asset != notional_asset {
-            return Err(format!(
-                "minimum notional asset `{}` does not match notional asset `{}`",
-                min_notional.asset.as_str(),
-                notional_asset.as_str()
-            ));
-        }
-
-        Ok(Self {
+        let spec = Self {
             instrument,
             base_asset,
             quote_asset,
@@ -191,7 +179,56 @@ impl InstrumentSpec {
             position_qty_step: PositionQty(position_qty_step),
             min_position_qty: PositionQty(min_position_qty),
             min_notional,
-        })
+        };
+        spec.validate()?;
+        Ok(spec)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.instrument.symbol.trim().is_empty() {
+            return Err("instrument symbol must not be empty".to_string());
+        }
+        for (field, asset) in [
+            ("base asset", &self.base_asset),
+            ("quote asset", &self.quote_asset),
+            ("notional asset", &self.notional_asset),
+            ("settlement asset", &self.settlement_asset),
+            ("minimum notional asset", self.min_notional.asset()),
+        ] {
+            if asset.as_str().trim().is_empty() {
+                return Err(format!("{field} must not be empty"));
+            }
+        }
+        validate_positive("price tick", self.price_tick)?;
+        validate_positive("position quantity step", self.position_qty_step.0)?;
+        validate_non_negative("minimum position quantity", self.min_position_qty.0)?;
+        validate_non_negative("minimum notional", self.min_notional.value)?;
+        if let PricePrecision::SignificantFigures {
+            significant_figures,
+            ..
+        } = self.price_precision
+            && significant_figures == 0
+        {
+            return Err("price significant figures must be positive".to_string());
+        }
+        if self.min_notional.asset != self.notional_asset {
+            return Err(format!(
+                "minimum notional asset `{}` does not match notional asset `{}`",
+                self.min_notional.asset.as_str(),
+                self.notional_asset.as_str()
+            ));
+        }
+        if let PositionBasis::Contracts { contract_value } = &self.position_basis {
+            validate_positive("contract value", contract_value.value)?;
+            if contract_value.asset != self.notional_asset {
+                return Err(format!(
+                    "contract value asset `{}` does not match notional asset `{}`",
+                    contract_value.asset.as_str(),
+                    self.notional_asset.as_str()
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn instrument(&self) -> &Instrument {
@@ -426,6 +463,18 @@ mod tests {
         .unwrap();
 
         assert!(!spec.prices_match(1_234.6, 1_234.7));
+    }
+
+    #[test]
+    fn deserialized_spec_must_revalidate_its_invariants() {
+        let mut value = serde_json::to_value(btc_usdt_linear()).unwrap();
+        value["price_tick"] = serde_json::json!(0.0);
+        let spec: InstrumentSpec = serde_json::from_value(value).unwrap();
+
+        let error = spec.validate().unwrap_err();
+
+        assert!(error.contains("price tick"));
+        assert!(error.contains("positive"));
     }
 
     #[test]

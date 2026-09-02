@@ -2,8 +2,9 @@
 
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
+use poise_core::instrument::{Amount, InstrumentSpec, PositionQty};
 use poise_core::replay::{ReplayInput, ReplayReport, run_replay};
-use poise_core::types::{ExchangeRules, Side};
+use poise_core::types::Side;
 
 use crate::decision_replay::{
     DecisionReplayEffect, DecisionReplayFillModel, DecisionReplayInput,
@@ -125,14 +126,14 @@ pub fn run_decision_evaluation(
     let curve_max_notional = max_lane_notional(
         &aligned,
         &live_window.active_after_step,
-        &input.replay.exchange_rules,
+        &input.replay.instrument_spec,
         Lane::CurveImmediate,
         None,
     );
     let delayed_max_notional = max_lane_notional(
         &aligned,
         &live_window.active_after_step,
-        &input.replay.exchange_rules,
+        &input.replay.instrument_spec,
         Lane::Delayed,
         Some(&delayed),
     );
@@ -241,7 +242,8 @@ fn run_curve_immediate_benchmark(
         initial_native_quantity: input.replay.initial_position.qty,
         leverage: input.leverage,
         track_config: input.replay.definition.track_config().clone(),
-        exchange_rules: input.replay.exchange_rules.clone(),
+        instrument_spec: input.replay.instrument_spec.clone(),
+        fee_rates: input.replay.fee_rates,
     })
     .map_err(anyhow::Error::msg)
     .context("run curve-immediate benchmark")
@@ -625,7 +627,7 @@ enum Lane {
 fn max_lane_notional(
     aligned: &[AlignedStep],
     active: &[bool],
-    rules: &ExchangeRules,
+    instrument_spec: &InstrumentSpec,
     lane: Lane,
     delayed: Option<&DecisionReplayReport>,
 ) -> f64 {
@@ -642,8 +644,8 @@ fn max_lane_notional(
             Lane::Delayed => (step.delayed_position_before_qty, step.delayed_position_qty),
         };
         max_notional = max_notional
-            .max(rules.notional_from_native_qty(before, price))
-            .max(rules.notional_from_native_qty(after, price));
+            .max(position_notional(instrument_spec, before, price))
+            .max(position_notional(instrument_spec, after, price));
         if let (Lane::Delayed, Some(report)) = (lane, delayed) {
             for effect in &report.steps[index].effects {
                 if let DecisionReplayEffect::FillOrder {
@@ -653,8 +655,16 @@ fn max_lane_notional(
                 } = effect
                 {
                     max_notional = max_notional
-                        .max(rules.notional_from_native_qty(*position_before_qty, price))
-                        .max(rules.notional_from_native_qty(*position_after_qty, price));
+                        .max(position_notional(
+                            instrument_spec,
+                            *position_before_qty,
+                            price,
+                        ))
+                        .max(position_notional(
+                            instrument_spec,
+                            *position_after_qty,
+                            price,
+                        ));
                 }
             }
         }
@@ -744,13 +754,32 @@ fn native_qty_per_exposure_unit(input: &DecisionEvaluationInput) -> Result<f64> 
     let config = input.replay.definition.track_config();
     let unit_qty = input
         .replay
-        .exchange_rules
-        .native_qty_per_exposure_unit(config.notional_per_unit, config.band_center());
+        .instrument_spec
+        .position_qty_for_notional(
+            Amount::new(
+                config.notional_per_unit,
+                input.replay.instrument_spec.notional_asset().clone(),
+            )
+            .map_err(anyhow::Error::msg)?,
+            config.band_center(),
+        )
+        .map_err(anyhow::Error::msg)?
+        .value();
     ensure!(
         unit_qty.is_finite() && unit_qty > f64::EPSILON,
         "native quantity per exposure unit must be finite and positive"
     );
     Ok(unit_qty)
+}
+
+fn position_notional(instrument_spec: &InstrumentSpec, quantity: f64, price: f64) -> f64 {
+    instrument_spec
+        .notional_from_position_qty(
+            PositionQty::new(quantity).expect("evaluated position quantity must be finite"),
+            price,
+        )
+        .expect("validated evaluation input must define position notional")
+        .value()
 }
 
 fn is_execution_quote_step(step: &crate::decision_replay::DecisionScenarioStep) -> bool {

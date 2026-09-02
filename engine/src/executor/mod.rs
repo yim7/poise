@@ -267,7 +267,11 @@ mod tests {
         }
     }
 
-    fn maker_binding(config: &TrackConfig, operation: BoundaryOperation) -> LiveOrderBinding {
+    fn maker_binding(
+        config: &TrackConfig,
+        rules: &InstrumentSpec,
+        operation: BoundaryOperation,
+    ) -> LiveOrderBinding {
         let proposal = binding::BindingProposal {
             policy: PolicyKind::CurveMaker,
             operations: vec![operation.clone()],
@@ -284,7 +288,7 @@ mod tests {
                 instrument: instrument(),
                 side: Side::Buy,
                 price: 98.75,
-                quantity: config.base_qty_per_unit(),
+                quantity: crate::runtime::native_qty_per_exposure_unit(config, rules),
                 client_order_id: "maker-client".to_string(),
                 reduce_only: false,
             },
@@ -298,7 +302,11 @@ mod tests {
         }
     }
 
-    fn catch_up_binding(config: &TrackConfig, operation: BoundaryOperation) -> LiveOrderBinding {
+    fn catch_up_binding(
+        config: &TrackConfig,
+        rules: &InstrumentSpec,
+        operation: BoundaryOperation,
+    ) -> LiveOrderBinding {
         let proposal = binding::BindingProposal {
             policy: PolicyKind::CatchUp,
             operations: vec![operation.clone()],
@@ -315,7 +323,7 @@ mod tests {
                 instrument: instrument(),
                 side: Side::Buy,
                 price: 100.1,
-                quantity: config.base_qty_per_unit(),
+                quantity: crate::runtime::native_qty_per_exposure_unit(config, rules),
                 client_order_id: "catch-up-client".to_string(),
                 reduce_only: false,
             },
@@ -359,6 +367,7 @@ mod tests {
         let mut state = ExecutorState::empty(observed_at()).ensure_revision(&config, Exposure(0.0));
         state.bindings.push(maker_binding(
             &config,
+            &rules,
             operation(&config, 0.0, 1.0, BoundaryDirection::Up),
         ));
 
@@ -428,7 +437,7 @@ mod tests {
         let instrument = instrument();
         let maker_operation = operation(&config, 0.0, 1.0, BoundaryDirection::Up);
         let mut state = ExecutorState::empty(observed_at()).ensure_revision(&config, Exposure(0.0));
-        let mut maker = maker_binding(&config, maker_operation.clone());
+        let mut maker = maker_binding(&config, &rules, maker_operation.clone());
         maker.status = BindingStatus::CancelPending;
         state.bindings.push(maker);
 
@@ -524,6 +533,7 @@ mod tests {
         let mut state = ExecutorState::empty(observed_at()).ensure_revision(&config, Exposure(1.0));
         state.bindings.push(catch_up_binding(
             &config,
+            &rules,
             operation(&config, 0.0, 1.0, BoundaryDirection::Up),
         ));
 
