@@ -263,6 +263,7 @@ fn parse_decimal(field: &str, value: &str) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use poise_core::instrument::{Asset, PositionBasis, PositionQty};
+    use poise_core::types::PriceRounding;
 
     use super::*;
 
@@ -276,6 +277,19 @@ mod tests {
             ct_val: Some("0.01".to_string()),
             ct_val_ccy: Some("BTC".to_string()),
             settle_ccy: Some("USDT".to_string()),
+        }
+    }
+
+    fn inverse_instrument() -> InstrumentInfo {
+        InstrumentInfo {
+            inst_id: "BTC-USD-SWAP".to_string(),
+            ct_type: Some("inverse".to_string()),
+            tick_sz: "0.1".to_string(),
+            lot_sz: "1".to_string(),
+            min_sz: "1".to_string(),
+            ct_val: Some("100".to_string()),
+            ct_val_ccy: Some("USD".to_string()),
+            settle_ccy: Some("BTC".to_string()),
         }
     }
 
@@ -310,6 +324,55 @@ mod tests {
 
         assert_eq!(wire_contracts, 3.0);
         assert!((round_trip.value() - canonical.value()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn inverse_metadata_keeps_contract_notional_and_base_exposure_units() {
+        let metadata = OkxInstrumentMetadata::from_instrument_info(&inverse_instrument()).unwrap();
+        let spec = metadata.instrument_spec();
+        let canonical = PositionQty::new(30.0).unwrap();
+
+        assert_eq!(spec.base_asset(), &Asset::try_new("BTC").unwrap());
+        assert_eq!(spec.quote_asset(), &Asset::try_new("USD").unwrap());
+        assert_eq!(spec.notional_asset(), &Asset::try_new("USD").unwrap());
+        assert_eq!(spec.settlement_asset(), &Asset::try_new("BTC").unwrap());
+        assert_eq!(
+            spec.contract_value(),
+            Some(&Amount::new(100.0, Asset::try_new("USD").unwrap()).unwrap())
+        );
+        assert_eq!(
+            spec.notional_from_position_qty(canonical, 60_000.0)
+                .unwrap(),
+            Amount::new(3_000.0, Asset::try_new("USD").unwrap()).unwrap()
+        );
+        assert_eq!(
+            spec.base_exposure_from_position_qty(canonical, 60_000.0)
+                .unwrap(),
+            Amount::new(0.05, Asset::try_new("BTC").unwrap()).unwrap()
+        );
+        assert_eq!(
+            spec.position_qty_for_notional(
+                Amount::new(3_000.0, Asset::try_new("USD").unwrap()).unwrap(),
+                60_000.0,
+            )
+            .unwrap(),
+            canonical
+        );
+        assert_eq!(
+            metadata
+                .wire_contracts_from_position_qty(canonical)
+                .unwrap(),
+            30.0
+        );
+        assert_eq!(
+            metadata.position_qty_from_wire_contracts(30.0).unwrap(),
+            canonical
+        );
+        assert_eq!(
+            spec.normalize_position_qty(PositionQty::new(30.9).unwrap()),
+            canonical
+        );
+        assert!((spec.normalize_price(60_000.19, PriceRounding::Down) - 60_000.1).abs() < 1e-9);
     }
 
     #[test]

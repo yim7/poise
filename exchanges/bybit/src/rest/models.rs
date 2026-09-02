@@ -34,6 +34,12 @@ pub(crate) struct InstrumentInfoResult {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct LinearInstrumentInfo {
     pub symbol: String,
+    #[serde(rename = "baseCoin")]
+    pub base_coin: String,
+    #[serde(rename = "quoteCoin")]
+    pub quote_coin: String,
+    #[serde(rename = "settleCoin")]
+    pub settle_coin: String,
     #[serde(rename = "priceFilter")]
     pub price_filter: PriceFilter,
     #[serde(rename = "lotSizeFilter")]

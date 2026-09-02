@@ -199,8 +199,9 @@ fn ensure_non_empty<'a>(field: &str, value: &'a str) -> Result<&'a str> {
 
 #[cfg(test)]
 mod tests {
+    use poise_core::instrument::{Amount, Asset, PositionBasis, PositionQty};
     use poise_core::track::{Instrument, Venue};
-    use poise_core::types::{PricePrecision, Side};
+    use poise_core::types::{PricePrecision, PriceRounding, Side};
     use poise_engine::ports::{ExchangeOrder, OrderStatus, Position};
 
     use crate::rest::models::{
@@ -241,6 +242,41 @@ mod tests {
         assert_eq!(spec.position_qty_step().value(), 0.00001);
         assert_eq!(spec.min_position_qty().value(), 0.00001);
         assert_eq!(spec.min_notional().value(), 10.0);
+        assert_eq!(spec.base_asset(), &Asset::try_new("BTC").unwrap());
+        assert_eq!(spec.quote_asset(), &Asset::try_new("USDC").unwrap());
+        assert_eq!(spec.notional_asset(), &Asset::try_new("USDC").unwrap());
+        assert_eq!(spec.settlement_asset(), &Asset::try_new("USDC").unwrap());
+        assert_eq!(spec.position_basis(), &PositionBasis::BaseAsset);
+
+        let canonical = PositionQty::new(0.02).unwrap();
+        let notional = spec
+            .notional_from_position_qty(canonical, 65_000.0)
+            .unwrap();
+        assert_eq!(
+            notional,
+            Amount::new(1_300.0, Asset::try_new("USDC").unwrap()).unwrap()
+        );
+        assert_eq!(
+            spec.position_qty_for_notional(notional, 65_000.0).unwrap(),
+            canonical
+        );
+        assert_eq!(
+            spec.base_exposure_from_position_qty(canonical, 65_000.0)
+                .unwrap(),
+            Amount::new(0.02, Asset::try_new("BTC").unwrap()).unwrap()
+        );
+        assert!(
+            (spec
+                .normalize_position_qty(PositionQty::new(0.020009).unwrap())
+                .value()
+                - 0.02)
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(
+            spec.normalize_price(65_000.9, PriceRounding::Down),
+            65_000.0
+        );
     }
 
     #[test]

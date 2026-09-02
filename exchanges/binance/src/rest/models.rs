@@ -105,6 +105,12 @@ pub struct BinanceExchangeInfoResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BinanceExchangeInfo {
     pub symbol: String,
+    #[serde(rename = "baseAsset")]
+    pub base_asset: String,
+    #[serde(rename = "quoteAsset")]
+    pub quote_asset: String,
+    #[serde(rename = "marginAsset")]
+    pub margin_asset: String,
     pub filters: Vec<BinanceSymbolFilter>,
 }
 

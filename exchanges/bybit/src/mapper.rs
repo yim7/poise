@@ -46,9 +46,9 @@ impl TryFrom<InstrumentInfoResult> for ExchangeInfo {
             .into_iter()
             .next()
             .context("missing linear instrument info")?;
-        let (base_asset, quote_asset) = bybit_linear_assets(&info.symbol)?;
-        let base_asset = Asset::try_new(base_asset).map_err(anyhow::Error::msg)?;
-        let quote_asset = Asset::try_new(quote_asset).map_err(anyhow::Error::msg)?;
+        let base_asset = Asset::try_new(info.base_coin).map_err(anyhow::Error::msg)?;
+        let quote_asset = Asset::try_new(info.quote_coin).map_err(anyhow::Error::msg)?;
+        let settlement_asset = Asset::try_new(info.settle_coin).map_err(anyhow::Error::msg)?;
         let instrument = Instrument::new(Venue::Bybit, info.symbol);
         let min_notional = required_value(
             "lotSizeFilter.minNotionalValue",
@@ -59,7 +59,7 @@ impl TryFrom<InstrumentInfoResult> for ExchangeInfo {
                 instrument,
                 base_asset,
                 quote_asset.clone(),
-                quote_asset.clone(),
+                settlement_asset,
                 Default::default(),
                 required_value("priceFilter.tickSize", info.price_filter.tick_size)?,
                 required_value("lotSizeFilter.qtyStep", info.lot_size_filter.qty_step)?,
@@ -72,17 +72,6 @@ impl TryFrom<InstrumentInfoResult> for ExchangeInfo {
             .map_err(anyhow::Error::msg)?,
         })
     }
-}
-
-fn bybit_linear_assets(symbol: &str) -> Result<(&str, &str)> {
-    for quote_asset in ["USDT", "USDC"] {
-        if let Some(base_asset) = symbol.strip_suffix(quote_asset)
-            && !base_asset.is_empty()
-        {
-            return Ok((base_asset, quote_asset));
-        }
-    }
-    Err(anyhow!("cannot determine Bybit assets for `{symbol}`"))
 }
 
 impl WalletBalanceResult {
@@ -279,13 +268,17 @@ mod tests {
         OpenOrderSnapshot, PositionSnapshot, PriceFilter, ServerTimeResult, UnifiedWalletBalance,
         WalletBalanceResult,
     };
-    use poise_core::types::Side;
+    use poise_core::instrument::{PositionBasis, PositionQty};
+    use poise_core::types::{PriceRounding, Side};
     use poise_engine::ports::{OrderReceipt, OrderStatus, Position};
 
     #[test]
-    fn converts_linear_instrument_info_into_exchange_info() {
+    fn exchange_metadata_builds_complete_linear_instrument_spec() {
         let info = LinearInstrumentInfo {
-            symbol: "BTCUSDT".to_string(),
+            symbol: "PERPETUAL-42".to_string(),
+            base_coin: "BTC".to_string(),
+            quote_coin: "USD".to_string(),
+            settle_coin: "USDC".to_string(),
             price_filter: PriceFilter {
                 tick_size: Some(0.10),
             },
@@ -301,7 +294,27 @@ mod tests {
 
         assert_eq!(
             exchange_info.instrument_spec.instrument(),
-            &Instrument::new(Venue::Bybit, "BTCUSDT")
+            &Instrument::new(Venue::Bybit, "PERPETUAL-42")
+        );
+        assert_eq!(
+            exchange_info.instrument_spec.base_asset(),
+            &Asset::try_new("BTC").unwrap()
+        );
+        assert_eq!(
+            exchange_info.instrument_spec.quote_asset(),
+            &Asset::try_new("USD").unwrap()
+        );
+        assert_eq!(
+            exchange_info.instrument_spec.notional_asset(),
+            &Asset::try_new("USD").unwrap()
+        );
+        assert_eq!(
+            exchange_info.instrument_spec.settlement_asset(),
+            &Asset::try_new("USDC").unwrap()
+        );
+        assert_eq!(
+            exchange_info.instrument_spec.position_basis(),
+            &PositionBasis::BaseAsset
         );
         assert_eq!(exchange_info.instrument_spec.price_tick(), 0.1);
         assert_eq!(
@@ -313,6 +326,47 @@ mod tests {
             0.001
         );
         assert_eq!(exchange_info.instrument_spec.min_notional().value(), 5.0);
+
+        let canonical = PositionQty::new(0.02).unwrap();
+        let notional = exchange_info
+            .instrument_spec
+            .notional_from_position_qty(canonical, 65_000.0)
+            .unwrap();
+        assert_eq!(
+            notional,
+            Amount::new(1_300.0, Asset::try_new("USD").unwrap()).unwrap()
+        );
+        assert_eq!(
+            exchange_info
+                .instrument_spec
+                .position_qty_for_notional(notional, 65_000.0)
+                .unwrap(),
+            canonical
+        );
+        assert_eq!(
+            exchange_info
+                .instrument_spec
+                .base_exposure_from_position_qty(canonical, 65_000.0)
+                .unwrap(),
+            Amount::new(0.02, Asset::try_new("BTC").unwrap()).unwrap()
+        );
+        assert!(
+            (exchange_info
+                .instrument_spec
+                .normalize_position_qty(PositionQty::new(0.0209).unwrap())
+                .value()
+                - 0.02)
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (exchange_info
+                .instrument_spec
+                .normalize_price(65_000.19, PriceRounding::Down)
+                - 65_000.1)
+                .abs()
+                < 1e-9
+        );
     }
 
     #[test]
