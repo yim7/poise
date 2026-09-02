@@ -1773,9 +1773,14 @@ mod tests {
             Some("okx:fills:recorded"),
             Some("recorded"),
         );
-        TrackMutationStore::insert_track_pnl_record(&*repository, &track_id, &recorded)
-            .await
-            .unwrap();
+        TrackMutationStore::insert_track_pnl_record(
+            &*repository,
+            &track_id,
+            &recorded,
+            &crate::test_support::test_instrument_spec_for(recorded.instrument.clone()),
+        )
+        .await
+        .unwrap();
         let missing = audit_trade_record(
             instrument.clone(),
             Some("okx:fills:missing"),
@@ -2028,6 +2033,7 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _record: &poise_engine::ledger::TrackPnlRecord,
+            _instrument_spec: &poise_core::instrument::InstrumentSpec,
         ) -> anyhow::Result<bool> {
             Err(anyhow!("persistence unavailable"))
         }

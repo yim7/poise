@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use poise_core::events::DomainEvent;
+use poise_core::instrument::InstrumentSpec;
 use poise_core::track::TrackId;
 use poise_engine::ledger::TrackPnlRecord;
 
@@ -26,9 +27,12 @@ pub trait TrackMutationStore: Send + Sync {
         track_id: &TrackId,
         state: &TrackControlState,
     ) -> Result<()>;
+    /// 保存交易所 cashflow 事实；`instrument_spec` 是记录入库时的合约规格，
+    /// store 必须与成交数量一起保存其 canonical unit 与合约面值语义。
     async fn insert_track_pnl_record(
         &self,
         track_id: &TrackId,
         record: &TrackPnlRecord,
+        instrument_spec: &InstrumentSpec,
     ) -> Result<bool>;
 }

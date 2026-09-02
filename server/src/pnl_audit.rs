@@ -216,9 +216,14 @@ mod tests {
             Some("okx:fills:recorded"),
             Some("recorded"),
         );
-        TrackMutationStore::insert_track_pnl_record(&*repository, &track_id, &recorded)
-            .await
-            .unwrap();
+        TrackMutationStore::insert_track_pnl_record(
+            &*repository,
+            &track_id,
+            &recorded,
+            &crate::test_support::test_instrument_spec_for(recorded.instrument.clone()),
+        )
+        .await
+        .unwrap();
 
         let missing = trade_record(
             instrument.clone(),

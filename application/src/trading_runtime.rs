@@ -983,16 +983,18 @@ impl TradingRuntime {
     async fn record_track_pnl(&self, id: &str, record: TrackPnlRecord) -> Result<bool> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let track_id = TrackId::new(id);
-        {
+        let instrument_spec = {
             let manager = self.manager.read().await;
-            if manager.get_track(id).is_none() {
-                return Err(anyhow!("track `{id}` not found"));
-            }
-        }
+            manager
+                .get_track(id)
+                .ok_or_else(|| anyhow!("track `{id}` not found"))?
+                .instrument_spec()
+                .clone()
+        };
 
         let inserted = self
             .mutation_store
-            .insert_track_pnl_record(&track_id, &record)
+            .insert_track_pnl_record(&track_id, &record, &instrument_spec)
             .await?;
         if inserted {
             {
@@ -2259,6 +2261,7 @@ pub(crate) mod test_support {
             &self,
             track_id: &TrackId,
             record: &TrackPnlRecord,
+            _instrument_spec: &poise_core::instrument::InstrumentSpec,
         ) -> Result<bool> {
             self.pnl_records
                 .lock()
@@ -2516,6 +2519,7 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _record: &TrackPnlRecord,
+            _instrument_spec: &poise_core::instrument::InstrumentSpec,
         ) -> anyhow::Result<bool> {
             Ok(true)
         }

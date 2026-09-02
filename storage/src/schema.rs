@@ -40,6 +40,10 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             side TEXT,
             price REAL,
             qty REAL,
+            position_unit TEXT,
+            base_asset TEXT,
+            contract_value REAL,
+            contract_value_asset TEXT,
             realized_pnl REAL,
             realized_pnl_asset TEXT,
             trading_fee REAL,
@@ -52,6 +56,28 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             CHECK (realized_pnl_asset IS NULL OR TRIM(realized_pnl_asset) <> ''),
             CHECK (trading_fee_asset IS NULL OR TRIM(trading_fee_asset) <> ''),
             CHECK (funding_fee_asset IS NULL OR TRIM(funding_fee_asset) <> ''),
+            CHECK (
+                (qty IS NULL
+                    AND position_unit IS NULL
+                    AND base_asset IS NULL
+                    AND contract_value IS NULL
+                    AND contract_value_asset IS NULL)
+                OR
+                (qty IS NOT NULL
+                    AND position_unit = 'base_asset'
+                    AND base_asset IS NOT NULL
+                    AND TRIM(base_asset) <> ''
+                    AND contract_value IS NULL
+                    AND contract_value_asset IS NULL)
+                OR
+                (qty IS NOT NULL
+                    AND position_unit = 'contracts'
+                    AND base_asset IS NULL
+                    AND contract_value IS NOT NULL
+                    AND contract_value > 0
+                    AND contract_value_asset IS NOT NULL
+                    AND TRIM(contract_value_asset) <> '')
+            ),
             CHECK (
                 (kind = 'trade' AND realized_pnl IS NOT NULL AND funding_fee IS NULL)
                 OR
@@ -129,6 +155,10 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             "side",
             "price",
             "qty",
+            "position_unit",
+            "base_asset",
+            "contract_value",
+            "contract_value_asset",
             "realized_pnl",
             "realized_pnl_asset",
             "trading_fee",
@@ -402,6 +432,10 @@ mod tests {
                 "side".to_string(),
                 "price".to_string(),
                 "qty".to_string(),
+                "position_unit".to_string(),
+                "base_asset".to_string(),
+                "contract_value".to_string(),
+                "contract_value_asset".to_string(),
                 "realized_pnl".to_string(),
                 "realized_pnl_asset".to_string(),
                 "trading_fee".to_string(),
@@ -486,6 +520,10 @@ mod tests {
                 side TEXT,
                 price REAL,
                 qty REAL,
+                position_unit TEXT,
+                base_asset TEXT,
+                contract_value REAL,
+                contract_value_asset TEXT,
                 realized_pnl REAL,
                 realized_pnl_asset TEXT,
                 trading_fee REAL,

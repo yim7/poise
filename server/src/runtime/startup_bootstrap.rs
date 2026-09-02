@@ -926,6 +926,7 @@ mod tests {
                     amount(42.0, "USDT"),
                     Some(amount(0.0, "USDT")),
                 ),
+                &linear_rules("BTCUSDT"),
             )
             .await
             .unwrap();

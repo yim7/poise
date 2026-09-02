@@ -185,6 +185,7 @@ mod tests {
                 amount(100.0, "USDT"),
                 Some(amount(8.0, "USDT")),
             ),
+            &crate::test_instrument::linear_spec(0.1, 0.001, 0.001, 5.0),
         )
         .await
         .unwrap();
@@ -198,6 +199,7 @@ mod tests {
                 None,
                 amount(-4.0, "USDT"),
             ),
+            &crate::test_instrument::linear_spec(0.1, 0.001, 0.001, 5.0),
         )
         .await
         .unwrap();
@@ -259,6 +261,7 @@ mod tests {
                 amount(42.0, "USDT"),
                 Some(amount(0.0, "USDT")),
             ),
+            &crate::test_instrument::linear_spec(0.1, 0.001, 0.001, 5.0),
         )
         .await
         .unwrap();
