@@ -72,7 +72,7 @@ pub(crate) fn position_from_snapshot_with_metadata(
             value.pos_side
         ));
     }
-    let qty = native_qty_from_okx_contracts(parse_decimal("pos", &value.pos)?, metadata);
+    let qty = position_qty_from_okx_contracts(parse_decimal("pos", &value.pos)?, metadata)?;
     let mark_price = parse_optional_decimal("markPx", value.mark_px.as_deref())?;
     if qty == 0.0 {
         return Ok(Position {
@@ -114,11 +114,11 @@ pub(crate) fn open_order_from_snapshot_with_metadata(
         client_order_id: value.client_order_id,
         side: side_from_okx(&value.side)?,
         price: parse_decimal("px", price)?,
-        qty: native_qty_from_okx_contracts(parse_decimal("sz", &value.size)?, metadata),
-        filled_qty: native_qty_from_okx_contracts(
+        qty: position_qty_from_okx_contracts(parse_decimal("sz", &value.size)?, metadata)?,
+        filled_qty: position_qty_from_okx_contracts(
             parse_decimal("accFillSz", &value.acc_fill_sz)?,
             metadata,
-        ),
+        )?,
         status: order_status_from_okx_state(&value.state)?,
     })
 }
@@ -132,7 +132,7 @@ pub(crate) fn track_pnl_record_from_trade_fill_with_metadata(
     let side = side_from_okx(&value.side)?;
     let fill_price = parse_decimal("fillPx", &value.fill_price)?;
     let fill_size =
-        native_qty_from_okx_contracts(parse_decimal("fillSz", &value.fill_size)?, metadata);
+        position_qty_from_okx_contracts(parse_decimal("fillSz", &value.fill_size)?, metadata)?;
     let realized_pnl = parse_optional_decimal("fillPnl", value.fill_pnl.as_deref())?
         .or(parse_optional_decimal("pnl", value.pnl.as_deref())?)
         .unwrap_or(0.0);
@@ -237,13 +237,18 @@ pub(crate) fn side_to_okx(side: Side) -> &'static str {
     }
 }
 
-pub(crate) fn native_qty_from_okx_contracts(
+pub(crate) fn position_qty_from_okx_contracts(
     okx_contract_qty: f64,
     metadata: Option<&OkxInstrumentMetadata>,
-) -> f64 {
-    metadata
-        .map(|metadata| metadata.native_qty_from_okx_contracts(okx_contract_qty))
-        .unwrap_or(okx_contract_qty)
+) -> Result<f64> {
+    match metadata {
+        Some(metadata) => Ok(metadata
+            .position_qty_from_wire_contracts(okx_contract_qty)?
+            .value()),
+        None => poise_core::instrument::PositionQty::new(okx_contract_qty)
+            .map(poise_core::instrument::PositionQty::value)
+            .map_err(anyhow::Error::msg),
+    }
 }
 
 fn parse_decimal(field: &str, value: &str) -> Result<f64> {

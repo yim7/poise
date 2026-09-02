@@ -308,7 +308,9 @@ impl OkxRestClient {
         let metadata = self
             .get_or_fetch_instrument_metadata(&req.instrument.symbol)
             .await?;
-        let order_size = metadata.okx_contract_qty_from_native(req.quantity);
+        let position_qty =
+            poise_core::instrument::PositionQty::new(req.quantity).map_err(anyhow::Error::msg)?;
+        let order_size = metadata.wire_contracts_from_position_qty(position_qty)?;
         let body = serde_json::to_string(&PlaceOrderBody {
             inst_id: req.instrument.symbol,
             td_mode: "cross",

@@ -15,8 +15,8 @@ use poise_engine::ports::{UserDataEvent, UserDataPayload};
 use crate::Credentials;
 use crate::instrument::{OkxInstrumentMetadata, OkxInstrumentRegistry};
 use crate::mapper::{
-    native_qty_from_okx_contracts, open_order_from_snapshot_with_metadata,
-    position_from_snapshot_with_metadata,
+    open_order_from_snapshot_with_metadata, position_from_snapshot_with_metadata,
+    position_qty_from_okx_contracts,
 };
 use crate::rest::auth::sign_okx_payload;
 use crate::rest::models::{PendingOrderSnapshot, PositionSnapshot};
@@ -181,7 +181,7 @@ fn parse_orders(
         let fill_size = optional_decimal(&value, "fillSz")?.unwrap_or(0.0);
         let trade_id = optional_str(&value, "tradeId");
         if fill_size > f64::EPSILON || trade_id.is_some() {
-            let fill_size = native_qty_from_okx_contracts(fill_size, metadata.as_ref());
+            let fill_size = position_qty_from_okx_contracts(fill_size, metadata.as_ref())?;
             let fill_price = optional_decimal(&value, "fillPx")?.unwrap_or(order.price);
             let realized_pnl = optional_decimal(&value, "fillPnl")?
                 .or(optional_decimal(&value, "pnl")?)

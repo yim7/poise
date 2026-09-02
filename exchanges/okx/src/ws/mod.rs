@@ -243,9 +243,11 @@ mod tests {
     }
 
     #[test]
-    fn orders_message_maps_to_order_update_and_trade_pnl() {
-        let events = account::parse_user_data_message(
-            r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"BTC-USDT-SWAP","ordId":"123","clOrdId":"client-1","side":"buy","px":"64000.1","sz":"0.2","accFillSz":"0.05","state":"partially_filled","fillPx":"64000.0","fillSz":"0.05","fillPnl":"12.34","fee":"-1.25","feeCcy":"USDT","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
+    fn orders_message_maps_wire_contracts_to_canonical_order_and_fill_quantities() {
+        let registry = registry_with_metadata(linear_metadata());
+        let events = account::parse_user_data_message_with_registry(
+            r#"{"arg":{"channel":"orders","instType":"SWAP"},"data":[{"instId":"BTC-USDT-SWAP","ordId":"123","clOrdId":"client-1","side":"buy","px":"64000.1","sz":"20","accFillSz":"5","state":"partially_filled","fillPx":"64000.0","fillSz":"5","fillPnl":"12.34","fee":"-1.25","feeCcy":"USDT","tradeId":"trade-1","uTime":"1700000000000"}]}"#,
+            &registry,
         )
         .unwrap();
 
@@ -257,6 +259,8 @@ mod tests {
                     Instrument::new(Venue::Okx, "BTC-USDT-SWAP")
                 );
                 assert_eq!(order.side, Side::Buy);
+                assert_eq!(order.qty, 0.2);
+                assert_eq!(order.filled_qty, 0.05);
                 assert_eq!(order.status, OrderStatus::PartiallyFilled);
             }
             other => panic!("expected order update, got {other:?}"),
@@ -265,6 +269,7 @@ mod tests {
             UserDataPayload::TrackPnl(record) => {
                 assert_eq!(record.kind, TrackPnlRecordKind::Trade);
                 assert_eq!(record.trade_id.as_deref(), Some("trade-1"));
+                assert_eq!(record.qty, Some(0.05));
                 assert_eq!(record.realized_pnl, 12.34);
                 assert_eq!(record.trading_fee, 1.25);
             }
@@ -379,9 +384,11 @@ mod tests {
     }
 
     #[test]
-    fn positions_message_maps_to_position_update() {
-        let events = account::parse_user_data_message(
-            r#"{"arg":{"channel":"positions","instType":"SWAP"},"data":[{"instId":"BTC-USDT-SWAP","pos":"-0.25","avgPx":"65000.5","upl":"123.45","posSide":"net","lever":"20","uTime":"1700000000000"}]}"#,
+    fn positions_message_maps_wire_contracts_to_canonical_position_quantity() {
+        let registry = registry_with_metadata(linear_metadata());
+        let events = account::parse_user_data_message_with_registry(
+            r#"{"arg":{"channel":"positions","instType":"SWAP"},"data":[{"instId":"BTC-USDT-SWAP","pos":"-25","avgPx":"65000.5","upl":"123.45","posSide":"net","lever":"20","uTime":"1700000000000"}]}"#,
+            &registry,
         )
         .unwrap();
 

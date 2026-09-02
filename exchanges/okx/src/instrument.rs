@@ -3,7 +3,7 @@ use std::sync::RwLock;
 
 use anyhow::{Context, Result, anyhow, ensure};
 
-use poise_core::instrument::{Amount, Asset, InstrumentSpec};
+use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
 use poise_core::track::{Instrument, Venue};
 use poise_core::types::{ExchangeRules, QuantityKind};
 use poise_engine::ports::ExchangeInfo;
@@ -192,18 +192,49 @@ impl OkxInstrumentMetadata {
         })
     }
 
-    pub(crate) fn okx_contract_qty_from_native(&self, native_qty: f64) -> f64 {
-        match self.contract_kind {
-            OkxContractKind::Inverse => native_qty,
-            OkxContractKind::Linear => native_qty / self.linear_contract_size(),
-        }
+    pub(crate) fn wire_contracts_from_position_qty(
+        &self,
+        position_qty: PositionQty,
+    ) -> Result<f64> {
+        let normalized = self
+            .instrument_spec
+            .normalize_position_qty(position_qty)
+            .value();
+        let tolerance = self.instrument_spec.position_qty_step().value() * 1e-9;
+        ensure!(
+            (normalized - position_qty.value()).abs() <= tolerance.max(f64::EPSILON),
+            "canonical position quantity {} is not normalized to step {} for `{}`",
+            position_qty.value(),
+            self.instrument_spec.position_qty_step().value(),
+            self.symbol()
+        );
+
+        let wire_contracts = match self.contract_kind {
+            OkxContractKind::Inverse => position_qty.value(),
+            OkxContractKind::Linear => position_qty.value() / self.linear_contract_size(),
+        };
+        ensure!(
+            wire_contracts.is_finite(),
+            "wire contract quantity for `{}` must be finite",
+            self.symbol()
+        );
+        Ok(wire_contracts)
     }
 
-    pub(crate) fn native_qty_from_okx_contracts(&self, okx_contract_qty: f64) -> f64 {
-        match self.contract_kind {
-            OkxContractKind::Inverse => okx_contract_qty,
-            OkxContractKind::Linear => okx_contract_qty * self.linear_contract_size(),
-        }
+    pub(crate) fn position_qty_from_wire_contracts(
+        &self,
+        wire_contracts: f64,
+    ) -> Result<PositionQty> {
+        ensure!(
+            wire_contracts.is_finite(),
+            "wire contract quantity for `{}` must be finite",
+            self.symbol()
+        );
+        let position_qty = match self.contract_kind {
+            OkxContractKind::Inverse => wire_contracts,
+            OkxContractKind::Linear => wire_contracts * self.linear_contract_size(),
+        };
+        PositionQty::new(position_qty).map_err(anyhow::Error::msg)
     }
 
     fn linear_contract_size(&self) -> f64 {
@@ -294,6 +325,33 @@ mod tests {
         assert_eq!(spec.position_qty_step(), PositionQty::new(0.01).unwrap());
         assert_eq!(spec.min_position_qty(), PositionQty::new(0.01).unwrap());
         assert_eq!(spec.min_notional().value(), 0.0);
+    }
+
+    #[test]
+    fn linear_wire_contracts_round_trip_canonical_position_quantity() {
+        let metadata = OkxInstrumentMetadata::from_instrument_info(&linear_instrument()).unwrap();
+        let canonical = PositionQty::new(0.03).unwrap();
+
+        let wire_contracts = metadata
+            .wire_contracts_from_position_qty(canonical)
+            .unwrap();
+        let round_trip = metadata
+            .position_qty_from_wire_contracts(wire_contracts)
+            .unwrap();
+
+        assert_eq!(wire_contracts, 3.0);
+        assert!((round_trip.value() - canonical.value()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn linear_wire_conversion_rejects_non_normalized_quantity() {
+        let metadata = OkxInstrumentMetadata::from_instrument_info(&linear_instrument()).unwrap();
+
+        let error = metadata
+            .wire_contracts_from_position_qty(PositionQty::new(0.030_001).unwrap())
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not normalized"));
     }
 
     #[test]
