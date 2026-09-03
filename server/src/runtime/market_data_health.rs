@@ -149,7 +149,12 @@ async fn refresh_due_tracks(
     for track_id in due_track_ids {
         if let Err(error) = state
             .runtime
-            .handle(&TrackId::new(track_id), TrackInput::RefreshMarketDataHealth)
+            .handle(
+                &TrackId::new(track_id),
+                TrackInput::RefreshMarketDataHealth {
+                    observed_at: clock.now(),
+                },
+            )
             .await
         {
             runtime_health.record_track_health_error_now(

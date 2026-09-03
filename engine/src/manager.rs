@@ -26,19 +26,13 @@ use crate::runtime::{
     StrategyPriceStatus, StrategyTargetView, TerminationCause, TrackLiveView, TrackRuntime,
     TrackRuntimeView, TrackState,
 };
-use crate::transition::TrackTransition;
+use crate::transition::{CommitIntent, TrackTransition};
 use poise_core::track::{DEFAULT_TICK_TIMEOUT_SECS, Instrument, TrackDefinition, TrackId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExchangeSyncMode {
     RecoverOnly,
     RecoverAndReconcile,
-}
-
-#[derive(Debug, Clone)]
-pub enum MarketMutationOutcome {
-    LiveOnly,
-    Durable(Box<TrackTransition>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -157,10 +151,7 @@ impl TrackManager {
         observation: TrackObservation,
     ) -> Result<TrackTransition> {
         if let TrackObservation::Market(observation) = observation {
-            return match self.observe_market_mutation(id, observation)? {
-                MarketMutationOutcome::LiveOnly => self.transition_for(id, vec![], vec![]),
-                MarketMutationOutcome::Durable(transition) => Ok(*transition),
-            };
+            return self.observe_market_mutation(id, observation, self.clock.now());
         }
 
         if let TrackObservation::Order(observation) = observation {
@@ -189,87 +180,18 @@ impl TrackManager {
         &mut self,
         id: &TrackId,
         observation: MarketObservation,
-    ) -> Result<MarketMutationOutcome> {
-        let previous_state = self
+        observed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<TrackTransition> {
+        let (facts, effects, commit_intent) = self.observe_market(id, observation, observed_at)?;
+        let next_state = self
             .tracks
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
             .clone();
-        let (events, effects) = self.observe_market(id, observation)?;
-        let candidate_state = self
-            .tracks
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
-            .clone();
-
-        if market_mutation_requires_durable_write(
-            &previous_state,
-            &candidate_state,
-            &events,
-            &effects,
-        ) {
-            return Ok(MarketMutationOutcome::Durable(Box::new(
-                TrackTransition::new(candidate_state, events, effects),
-            )));
-        }
-
-        let (
-            strategy_price,
-            strategy_price_status,
-            mark_price,
-            best_bid,
-            best_ask,
-            price_execution_gate,
-            last_tick_at,
-            desired_exposure,
-            inventory_decision,
-            inventory_decision_revision,
-            applied_risk_acquisition_release,
-            fresh_acquisition_session,
-            executor_state,
-        ) = {
-            let track = self
-                .tracks
-                .get(id)
-                .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-            (
-                track.strategy_price,
-                track.strategy_price_status,
-                track.mark_price,
-                track.best_bid,
-                track.best_ask,
-                track.price_execution_gate,
-                track.last_tick_at,
-                track.desired_exposure.clone(),
-                track.inventory_decision.clone(),
-                track.inventory_decision_revision,
-                track.applied_risk_acquisition_release.clone(),
-                track.fresh_acquisition_session.clone(),
-                track.executor_state.clone(),
-            )
-        };
-
-        let executor_view_changed = previous_state.executor_view_changed(&candidate_state);
-        let track = self
-            .tracks
-            .get_mut(id)
-            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        *track = previous_state;
-        track.desired_exposure = desired_exposure;
-        track.inventory_decision = inventory_decision;
-        track.inventory_decision_revision = inventory_decision_revision;
-        track.applied_risk_acquisition_release = applied_risk_acquisition_release;
-        track.fresh_acquisition_session = fresh_acquisition_session;
-        retain_live_only_executor_state(track, executor_state, executor_view_changed);
-        track.strategy_price = strategy_price;
-        track.strategy_price_status = strategy_price_status;
-        track.mark_price = mark_price;
-        track.best_bid = best_bid;
-        track.best_ask = best_ask;
-        track.price_execution_gate = price_execution_gate;
-        track.last_tick_at = last_tick_at;
-
-        Ok(MarketMutationOutcome::LiveOnly)
+        Ok(match commit_intent {
+            CommitIntent::LiveOnly => TrackTransition::live_only(next_state),
+            CommitIntent::Commit => TrackTransition::commit(next_state, facts, effects),
+        })
     }
 
     pub fn observe_order_update(
@@ -353,8 +275,12 @@ impl TrackManager {
         self.transition_for(id, events, effects)
     }
 
-    pub fn refresh_market_data_health(&mut self, id: &TrackId) -> Result<TrackTransition> {
-        let _ = self.guard_market_data_freshness(id)?;
+    pub fn refresh_market_data_health(
+        &mut self,
+        id: &TrackId,
+        observed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<TrackTransition> {
+        let _ = self.guard_market_data_freshness(id, observed_at)?;
         self.transition_for(id, vec![], vec![])
     }
 
@@ -783,7 +709,7 @@ impl TrackManager {
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?
             .clone();
-        Ok(TrackTransition::new(next_runtime, events, effects))
+        Ok(TrackTransition::commit(next_runtime, events, effects))
     }
 
     fn live_strategy_price(&self, id: &TrackId) -> Result<Option<f64>> {
@@ -827,8 +753,8 @@ impl TrackManager {
         &mut self,
         id: &TrackId,
         observation: MarketObservation,
-    ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
-        let now = self.clock.now();
+        observed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>, CommitIntent)> {
         let strategy_price = {
             let track = self
                 .tracks
@@ -840,7 +766,7 @@ impl TrackManager {
                     track.mark_price = Some(mark_price);
                 }
                 MarketObservation::ExecutionQuote { execution_quote } => {
-                    track.last_tick_at = Some(now);
+                    track.last_tick_at = Some(observed_at);
                     track.market_data_stale_since = None;
                     track.best_bid = Some(execution_quote.best_bid);
                     track.best_ask = Some(execution_quote.best_ask);
@@ -862,8 +788,8 @@ impl TrackManager {
         };
 
         match strategy_price {
-            Some(strategy_price) => self.reconcile_track(id, strategy_price),
-            None => Ok((vec![], vec![])),
+            Some(strategy_price) => self.reconcile_market_track(id, strategy_price, observed_at),
+            None => Ok((vec![], vec![], CommitIntent::LiveOnly)),
         }
     }
 
@@ -976,7 +902,7 @@ impl TrackManager {
                     return Ok((vec![], recovery_effects));
                 }
 
-                if self.guard_market_data_freshness(id)? {
+                if self.guard_market_data_freshness(id, observed_at)? {
                     let track = self
                         .tracks
                         .get_mut(id)
@@ -985,8 +911,11 @@ impl TrackManager {
                     return Ok((vec![], recovery_effects));
                 }
 
-                let planned =
-                    self.plan_inventory_execution_for_track(&planned_track, strategy_price)?;
+                let planned = self.plan_inventory_execution_for_track(
+                    &planned_track,
+                    strategy_price,
+                    observed_at,
+                )?;
                 recovery_effects.extend(
                     planned
                         .effects
@@ -1018,7 +947,8 @@ impl TrackManager {
         id: &TrackId,
         strategy_price: f64,
     ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
-        if self.guard_market_data_freshness(id)? {
+        let observed_at = self.clock.now();
+        if self.guard_market_data_freshness(id, observed_at)? {
             return Ok((vec![], vec![]));
         }
 
@@ -1032,15 +962,64 @@ impl TrackManager {
             .tracks
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        let planned = self.plan_inventory_execution_for_track(track, strategy_price)?;
+        let planned =
+            self.plan_inventory_execution_for_track(track, strategy_price, observed_at)?;
 
         let track = self.tracks.get_mut(id).unwrap();
         Ok(Self::install_planned_inventory_execution(track, planned))
     }
 
+    fn reconcile_market_track(
+        &mut self,
+        id: &TrackId,
+        strategy_price: f64,
+        observed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>, CommitIntent)> {
+        if self.guard_market_data_freshness(id, observed_at)? {
+            return Ok((vec![], vec![], CommitIntent::LiveOnly));
+        }
+
+        if self.tracks[id].track_state.is_paused() {
+            let track = self.tracks.get_mut(id).unwrap();
+            Self::clear_targeting_state(track);
+            return Ok((vec![], vec![], CommitIntent::LiveOnly));
+        }
+
+        let track = self
+            .tracks
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+        let planned =
+            self.plan_inventory_execution_for_track(track, strategy_price, observed_at)?;
+        let commit_intent = market_commit_intent(track, &planned);
+
+        let track = self.tracks.get_mut(id).unwrap();
+        let (mut facts, effects) = Self::install_planned_inventory_execution_with_commit_intent(
+            track,
+            planned,
+            commit_intent,
+        );
+        if commit_intent == CommitIntent::LiveOnly {
+            facts.clear();
+        }
+        Ok((facts, effects, commit_intent))
+    }
+
     fn install_planned_inventory_execution(
         track: &mut TrackRuntime,
         planned: PlannedInventoryExecution,
+    ) -> (Vec<DomainEvent>, Vec<TrackEffect>) {
+        Self::install_planned_inventory_execution_with_commit_intent(
+            track,
+            planned,
+            CommitIntent::Commit,
+        )
+    }
+
+    fn install_planned_inventory_execution_with_commit_intent(
+        track: &mut TrackRuntime,
+        planned: PlannedInventoryExecution,
+        commit_intent: CommitIntent,
     ) -> (Vec<DomainEvent>, Vec<TrackEffect>) {
         let PlannedInventoryExecution {
             events,
@@ -1064,7 +1043,10 @@ impl TrackManager {
             Some(inventory_decision),
             applied_risk_acquisition_release,
         );
-        track.replace_executor_state(executor_state);
+        match commit_intent {
+            CommitIntent::LiveOnly => install_executor_state(track, executor_state),
+            CommitIntent::Commit => track.replace_executor_state(executor_state),
+        }
 
         (events, effects)
     }
@@ -1086,8 +1068,11 @@ impl TrackManager {
         );
     }
 
-    fn guard_market_data_freshness(&mut self, id: &TrackId) -> Result<bool> {
-        let now = self.clock.now();
+    fn guard_market_data_freshness(
+        &mut self,
+        id: &TrackId,
+        observed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
         let track = self
             .tracks
             .get_mut(id)
@@ -1097,7 +1082,7 @@ impl TrackManager {
             return Ok(false);
         };
 
-        let age_ms = (now - last_tick_at).num_milliseconds().max(0);
+        let age_ms = (observed_at - last_tick_at).num_milliseconds().max(0);
         if age_ms
             <= i64::try_from(track.tick_timeout_secs)
                 .unwrap_or(i64::try_from(DEFAULT_TICK_TIMEOUT_SECS).unwrap_or(30))
@@ -1107,7 +1092,7 @@ impl TrackManager {
         }
 
         if track.market_data_stale_since.is_none() {
-            track.market_data_stale_since = Some(now);
+            track.market_data_stale_since = Some(observed_at);
         }
 
         Ok(true)
@@ -1174,10 +1159,10 @@ impl TrackManager {
         &self,
         track: &TrackRuntime,
         strategy_price: f64,
+        observed_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<PlannedInventoryExecution> {
-        let normalized_track = self.track_with_current_pnl_day(track);
+        let normalized_track = self.track_with_pnl_day(track, observed_at.date_naive());
         let track = &normalized_track;
-        let observed_at = self.clock.now();
         let reconciliation =
             reconciler::reconcile_target_at_with_metadata(track, strategy_price, observed_at);
         let applied_risk_acquisition_release = reconciliation.applied_risk_acquisition_release;
@@ -1333,12 +1318,14 @@ impl TrackManager {
         self.clock.now().date_naive()
     }
 
-    fn track_with_current_pnl_day(&self, track: &TrackRuntime) -> TrackRuntime {
+    fn track_with_pnl_day(&self, track: &TrackRuntime, utc_day: chrono::NaiveDate) -> TrackRuntime {
         let mut track = track.clone();
+        track.pnl_stats.normalize_utc_day(utc_day);
         track
-            .pnl_stats
-            .normalize_utc_day(self.current_pnl_utc_day());
-        track
+    }
+
+    fn track_with_current_pnl_day(&self, track: &TrackRuntime) -> TrackRuntime {
+        self.track_with_pnl_day(track, self.current_pnl_utc_day())
     }
 }
 
@@ -1371,68 +1358,45 @@ struct PlannedInventoryExecution {
     applied_risk_acquisition_release: Option<AppliedRiskAcquisitionRelease>,
 }
 
-fn market_mutation_requires_durable_write(
-    previous_state: &TrackRuntime,
-    next_state: &TrackRuntime,
-    events: &[DomainEvent],
-    effects: &[TrackEffect],
-) -> bool {
-    let desired_exposure_changed = previous_state.desired_exposure != next_state.desired_exposure;
-    let has_non_target_events = events
+fn market_commit_intent(
+    current: &TrackRuntime,
+    planned: &PlannedInventoryExecution,
+) -> CommitIntent {
+    let has_non_target_facts = planned
+        .events
         .iter()
         .any(|event| !matches!(event, DomainEvent::ExposureTargetChanged { .. }));
-    let has_execution_effects = !effects.is_empty();
-    let durable_state_changed_without_target = {
-        let mut normalized_next = next_state.clone();
-        normalized_next.desired_exposure = previous_state.desired_exposure.clone();
-        normalized_next.inventory_decision = previous_state.inventory_decision.clone();
-        normalized_next.inventory_decision_revision = previous_state.inventory_decision_revision;
-        normalized_next.applied_risk_acquisition_release =
-            previous_state.applied_risk_acquisition_release.clone();
-        normalized_next.fresh_acquisition_session =
-            previous_state.fresh_acquisition_session.clone();
-        if !has_non_target_events && !has_execution_effects {
-            normalized_next.executor_state = previous_state.executor_state.clone();
-        }
-        normalized_next.pnl_stats = previous_state.pnl_stats.clone();
-        normalized_next.strategy_price = previous_state.strategy_price;
-        normalized_next.strategy_price_status = previous_state.strategy_price_status;
-        normalized_next.mark_price = previous_state.mark_price;
-        normalized_next.best_bid = previous_state.best_bid;
-        normalized_next.best_ask = previous_state.best_ask;
-        normalized_next.price_execution_gate = previous_state.price_execution_gate;
-        normalized_next.last_tick_at = previous_state.last_tick_at;
-        normalized_next
-            .set_exchange_observation_revision(previous_state.exchange_observation_revision());
-        normalized_next != *previous_state
-    };
-    let target_reached_without_new_effects = next_state
-        .desired_exposure
+    let has_effects = !planned.effects.is_empty();
+    let changes_durable_control = planned
+        .new_runtime_state
         .as_ref()
-        .is_some_and(|target| previous_state.current_exposure.delta(target).is_zero());
-    let durable_target_change = desired_exposure_changed
-        && (has_execution_effects
-            || has_non_target_events
-            || target_reached_without_new_effects
-            || next_state.desired_exposure.is_none());
+        .is_some_and(|next| next != &current.track_state);
+    let target_reached = current
+        .current_exposure
+        .delta(&planned.inventory_decision.risk_approved_target)
+        .is_zero();
+    let has_target_fact = planned
+        .events
+        .iter()
+        .any(|event| matches!(event, DomainEvent::ExposureTargetChanged { .. }));
 
-    durable_state_changed_without_target
-        || has_non_target_events
-        || has_execution_effects
-        || durable_target_change
+    if has_non_target_facts
+        || has_effects
+        || changes_durable_control
+        || (has_target_fact && target_reached)
+    {
+        CommitIntent::Commit
+    } else {
+        CommitIntent::LiveOnly
+    }
 }
 
-fn retain_live_only_executor_state(
-    track: &mut TrackRuntime,
-    executor_state: ExecutorState,
-    executor_view_changed: bool,
-) {
-    if executor_view_changed {
+fn install_executor_state(track: &mut TrackRuntime, executor_state: ExecutorState) {
+    let mut candidate = track.clone();
+    candidate.executor_state = executor_state.clone();
+    if track.executor_view_changed(&candidate) {
         track.replace_executor_state(executor_state);
     } else {
-        // Market planning may legitimately advance private ledger/timer state. Keep that
-        // state without invalidating an exchange snapshot whose binding interpretation is
-        // unchanged.
         track.executor_state = executor_state;
     }
 }
@@ -1681,7 +1645,7 @@ mod tests {
                 .revision,
             first_revision + 1
         );
-        assert!(!transition.events.is_empty());
+        assert!(!transition.facts.is_empty());
     }
 
     #[test]
@@ -1743,10 +1707,11 @@ mod tests {
                         best_ask: 95.1,
                     },
                 },
+                Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
             )
             .unwrap();
 
-        assert!(matches!(outcome, MarketMutationOutcome::LiveOnly));
+        assert_eq!(outcome.commit_intent(), CommitIntent::LiveOnly);
         let next = manager
             .get_track(id.as_str())
             .unwrap()
@@ -1755,6 +1720,45 @@ mod tests {
         assert_eq!(next.revision, previous.revision + 1);
         assert_eq!(next.risk_approved_target, previous.risk_approved_target);
         assert_eq!(next.execution_target, previous.execution_target);
+    }
+
+    #[test]
+    fn market_transition_uses_explicit_observation_time_and_commit_intent() {
+        let (mut manager, id) = manager();
+        manager.observe(&id, market(95.0)).unwrap();
+        let observed_at = Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 1).unwrap();
+
+        let transition = manager
+            .observe_market_mutation(
+                &id,
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 94.9,
+                        best_ask: 95.1,
+                    },
+                },
+                observed_at,
+            )
+            .unwrap();
+
+        assert_eq!(
+            transition.next_state().last_tick_at,
+            Some(observed_at),
+            "transition time must come from the input, not TrackManager's clock"
+        );
+        assert_eq!(
+            transition
+                .next_state()
+                .inventory_decision()
+                .unwrap()
+                .observed_at,
+            observed_at
+        );
+        assert_eq!(
+            transition.commit_intent(),
+            crate::transition::CommitIntent::LiveOnly
+        );
+        assert!(transition.facts.is_empty());
     }
 
     #[test]
@@ -1783,10 +1787,11 @@ mod tests {
                         best_ask: 92.6,
                     },
                 },
+                Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
             )
             .unwrap();
 
-        assert!(matches!(outcome, MarketMutationOutcome::Durable(_)));
+        assert_eq!(outcome.commit_intent(), CommitIntent::Commit);
         let track = manager.get_track(id.as_str()).unwrap();
         assert_eq!(
             track.inventory_decision().unwrap().execution_target,
@@ -1839,10 +1844,14 @@ mod tests {
             .exchange_observation_revision();
 
         let outcome = manager
-            .observe_market_mutation(&id, MarketObservation::MarkPrice { mark_price: 200.0 })
+            .observe_market_mutation(
+                &id,
+                MarketObservation::MarkPrice { mark_price: 200.0 },
+                Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
+            )
             .unwrap();
 
-        assert!(matches!(outcome, MarketMutationOutcome::LiveOnly));
+        assert_eq!(outcome.commit_intent(), CommitIntent::LiveOnly);
         let bindings = &manager
             .get_track(id.as_str())
             .unwrap()
@@ -1878,7 +1887,7 @@ mod tests {
 
         assert!(!executor_view_changed);
 
-        retain_live_only_executor_state(track, executor_state.clone(), executor_view_changed);
+        install_executor_state(track, executor_state.clone());
 
         assert_eq!(track.executor_state, executor_state);
         assert_eq!(track.exchange_observation_revision(), previous_revision);
@@ -1904,10 +1913,11 @@ mod tests {
                         best_ask: 96.35,
                     },
                 },
+                Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
             )
             .unwrap();
 
-        assert!(matches!(outcome, MarketMutationOutcome::LiveOnly));
+        assert_eq!(outcome.commit_intent(), CommitIntent::LiveOnly);
         let track = manager.get_track(id.as_str()).unwrap();
         let decision = track.inventory_decision().unwrap();
         assert_ne!(decision.risk_approved_target, previous.risk_approved_target);
@@ -2049,7 +2059,7 @@ mod tests {
 
         let transition = manager.observe(&id, market(93.75)).unwrap();
 
-        assert!(transition.events.iter().any(|event| matches!(
+        assert!(transition.facts.iter().any(|event| matches!(
             event,
             DomainEvent::ExecutionGateApplied {
                 reason: ExecutionGateReason::AccountCapacityInsufficient { .. }

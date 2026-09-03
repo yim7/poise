@@ -78,16 +78,22 @@ pub(super) fn spawn_market_task(
                                         break;
                                     };
 
-                                    let observation = match tick {
+                                    let (observation, observed_at) = match tick {
                                         MarketDataTick::ExecutionQuote(tick) => {
-                                            MarketObservation::ExecutionQuote {
-                                                execution_quote: tick.execution_quote,
-                                            }
+                                            (
+                                                MarketObservation::ExecutionQuote {
+                                                    execution_quote: tick.execution_quote,
+                                                },
+                                                tick.timestamp,
+                                            )
                                         }
                                         MarketDataTick::MarkPrice(tick) => {
-                                            MarketObservation::MarkPrice {
-                                                mark_price: tick.mark_price,
-                                            }
+                                            (
+                                                MarketObservation::MarkPrice {
+                                                    mark_price: tick.mark_price,
+                                                },
+                                                tick.timestamp,
+                                            )
                                         }
                                     };
 
@@ -96,7 +102,10 @@ pub(super) fn spawn_market_task(
                                         .runtime
                                         .handle(
                                             &TrackId::new(&track.id),
-                                            TrackInput::Market(observation),
+                                            TrackInput::Market {
+                                                observation,
+                                                observed_at,
+                                            },
                                         )
                                         .await
                                     {

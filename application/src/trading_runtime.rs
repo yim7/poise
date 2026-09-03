@@ -19,7 +19,6 @@ use poise_engine::executor::{
     OrderUpdateAbsorbResult, SubmitRecoveryPlan, SubmitRecoveryResolution, SubmitRecoveryToken,
 };
 use poise_engine::ledger::{TrackPnlRecord, TrackPnlStats};
-use poise_engine::manager::MarketMutationOutcome;
 use poise_engine::manager::{ExchangeSyncMode, SubmitRecoveryOrderLookup, TrackManager};
 use poise_engine::observation::{
     CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
@@ -29,7 +28,7 @@ use poise_engine::runtime::{
     ExchangeObservationRevision, FreshSessionExternalInputs, QuoteHealthView, StrategyTargetView,
     TerminationCause, TrackLiveView, TrackRuntime, TrackRuntimeView, TrackState,
 };
-use poise_engine::transition::TrackTransition;
+use poise_engine::transition::{CommitIntent, TrackTransition};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
 pub trait AccountCapacityGuard: Send + Sync {
@@ -123,8 +122,13 @@ pub(crate) struct CommittedTrackSnapshot {
 #[derive(Debug, Clone)]
 pub enum TrackInput {
     Command(TrackCommand),
-    Market(MarketObservation),
-    RefreshMarketDataHealth,
+    Market {
+        observation: MarketObservation,
+        observed_at: chrono::DateTime<chrono::Utc>,
+    },
+    RefreshMarketDataHealth {
+        observed_at: chrono::DateTime<chrono::Utc>,
+    },
     Position(PositionObservation),
     Order(OrderObservation),
     TrackPnl(TrackPnlRecord),
@@ -290,7 +294,7 @@ impl TransitionResult for () {
 
 impl TransitionResult for TrackTransition {
     fn domain_events(&self) -> &[DomainEvent] {
-        &self.events
+        &self.facts
     }
 
     fn effects(&self) -> &[TrackEffect] {
@@ -448,12 +452,15 @@ impl TradingRuntime {
                 self.command(id, command).await?;
                 self.committed_receipt(id).await
             }
-            TrackInput::Market(observation) => {
-                self.observe_market(id, observation).await?;
+            TrackInput::Market {
+                observation,
+                observed_at,
+            } => {
+                self.observe_market_at(id, observation, observed_at).await?;
                 self.committed_receipt(id).await
             }
-            TrackInput::RefreshMarketDataHealth => {
-                self.refresh_market_data_health(id).await?;
+            TrackInput::RefreshMarketDataHealth { observed_at } => {
+                self.refresh_market_data_health_at(id, observed_at).await?;
                 self.committed_receipt(id).await
             }
             TrackInput::Position(observation) => {
@@ -595,8 +602,15 @@ impl TradingRuntime {
         id: &str,
         observation: MarketObservation,
     ) -> Result<TrackUpdateReceipt> {
-        self.handle(&TrackId::new(id), TrackInput::Market(observation))
-            .await
+        let observed_at = self.manager.read().await.clock().now();
+        self.handle(
+            &TrackId::new(id),
+            TrackInput::Market {
+                observation,
+                observed_at,
+            },
+        )
+        .await
     }
 
     async fn committed_receipt(&self, id: &str) -> Result<TrackUpdateReceipt> {
@@ -720,21 +734,22 @@ impl TradingRuntime {
 }
 
 impl TradingRuntime {
-    async fn observe_market(
+    async fn observe_market_at(
         &self,
         id: &str,
         observation: MarketObservation,
+        observed_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<TrackTransition> {
         let mutation_guard = self.lock_track_mutation(id).await;
         let (previous_state, outcome, next_state) = self
             .plan_manager_mutation(id, |manager| {
-                manager.observe_market_mutation(&TrackId::new(id), observation.clone())
+                manager.observe_market_mutation(&TrackId::new(id), observation.clone(), observed_at)
             })
             .await
             .map_err(anyhow::Error::new)?;
 
-        match outcome {
-            MarketMutationOutcome::LiveOnly => {
+        match outcome.commit_intent() {
+            CommitIntent::LiveOnly => {
                 self.manager
                     .write()
                     .await
@@ -743,10 +758,10 @@ impl TradingRuntime {
                 self.session_effect_queue
                     .wake_track_for(&TrackId::new(id), WakeSignal::FreshMarket);
 
-                Ok(TrackTransition::new(next_state, Vec::new(), Vec::new()))
+                Ok(outcome)
             }
-            MarketMutationOutcome::Durable(transition) => {
-                let transition = *transition;
+            CommitIntent::Commit => {
+                let transition = outcome;
                 let _mutation_guard = self
                     .commit_planned_track_mutation(
                         mutation_guard,
@@ -765,6 +780,16 @@ impl TradingRuntime {
                 Ok(transition)
             }
         }
+    }
+
+    #[cfg(test)]
+    async fn observe_market(
+        &self,
+        id: &str,
+        observation: MarketObservation,
+    ) -> Result<TrackTransition> {
+        let observed_at = self.manager.read().await.clock().now();
+        self.observe_market_at(id, observation, observed_at).await
     }
 
     fn notify_live_only_executor_changes(
@@ -831,12 +856,22 @@ impl TradingRuntime {
         Ok(transition)
     }
 
-    async fn refresh_market_data_health(&self, id: &str) -> Result<TrackTransition> {
+    async fn refresh_market_data_health_at(
+        &self,
+        id: &str,
+        observed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<TrackTransition> {
         self.mutate_track_skip_when_no_work(id, |manager| {
-            manager.refresh_market_data_health(&TrackId::new(id))
+            manager.refresh_market_data_health(&TrackId::new(id), observed_at)
         })
         .await
         .map_err(anyhow::Error::new)
+    }
+
+    #[cfg(test)]
+    async fn refresh_market_data_health(&self, id: &str) -> Result<TrackTransition> {
+        let observed_at = self.manager.read().await.clock().now();
+        self.refresh_market_data_health_at(id, observed_at).await
     }
 
     pub async fn market_data_health_deadline(
@@ -3686,9 +3721,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(transition.events.is_empty());
+        assert!(transition.facts.is_empty());
         assert!(transition.effects.is_empty());
-        assert!(second_transition.events.is_empty());
+        assert!(second_transition.facts.is_empty());
         assert!(second_transition.effects.is_empty());
         assert_eq!(queried_decisions[0], queried_decisions[1]);
         assert_eq!(
@@ -3742,7 +3777,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(transition.events.is_empty());
+        assert!(transition.facts.is_empty());
         assert!(transition.effects.is_empty());
         assert_eq!(repository.business_write_call_count(), 0);
         assert!(repository.pending_effects().is_empty());
@@ -4094,7 +4129,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            !transition.effects.is_empty() || !transition.events.is_empty(),
+            !transition.effects.is_empty() || !transition.facts.is_empty(),
             "test requires a durable transition"
         );
         assert_eq!(
@@ -4255,7 +4290,7 @@ mod tests {
             submit_purpose: poise_engine::price_gate::SubmitPurpose::AutoReconcile,
             recovery_token: poise_engine::executor::SubmitRecoveryToken::empty(),
         };
-        let transition = TrackTransition::new(runtime, Vec::new(), vec![effect]);
+        let transition = TrackTransition::commit(runtime, Vec::new(), vec![effect]);
 
         let mutation_guard = executor.lock_track_mutation("btc-core").await;
         executor
