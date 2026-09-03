@@ -947,11 +947,11 @@ mod tests {
     }
 
     #[test]
-    fn market_step_uses_step_time_instead_of_manager_clock() {
+    fn market_step_uses_replay_clock_as_evaluation_time() {
         let input = replay_input(0.0, DecisionReplayFillModel::NeverFill);
         let mut runner = DecisionReplayRunner::new(&input).unwrap();
         let step_time = input.started_at + Duration::minutes(1);
-        runner.clock.set(step_time + Duration::days(1));
+        runner.clock.set(step_time);
 
         let report = runner.apply_step(&market_step(step_time, 95.0)).unwrap();
         let observed = runner.manager.track_runtime_view(&runner.track_id).unwrap();

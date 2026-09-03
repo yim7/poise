@@ -148,9 +148,11 @@ impl TrackManager {
         &mut self,
         id: &TrackId,
         observation: MarketObservation,
-        observed_at: chrono::DateTime<chrono::Utc>,
+        occurred_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<TrackTransition> {
-        let (facts, effects, commit_intent) = self.observe_market(id, observation, observed_at)?;
+        let evaluated_at = self.clock.now();
+        let (facts, effects, commit_intent) =
+            self.observe_market(id, observation, occurred_at, evaluated_at)?;
         let next_state = self
             .tracks
             .get(id)
@@ -167,9 +169,14 @@ impl TrackManager {
         id: &TrackId,
         observation: PositionObservation,
     ) -> Result<TrackTransition> {
+        let evaluated_at = self.clock.now();
         self.observe_position(id, observation)?;
         let (facts, effects) = match self.live_strategy_price(id)? {
-            Some(strategy_price) => self.reconcile_track(id, strategy_price)?,
+            Some(strategy_price) => {
+                let (facts, effects, _) =
+                    self.reconcile_track(id, strategy_price, evaluated_at, false)?;
+                (facts, effects)
+            }
             None => (vec![], vec![]),
         };
         self.transition_for(id, facts, effects)
@@ -180,10 +187,15 @@ impl TrackManager {
         id: &TrackId,
         observation: OrderObservation,
     ) -> Result<(TrackTransition, executor::OrderUpdateAbsorbResult)> {
+        let evaluated_at = self.clock.now();
         let should_reconcile = observation.status.should_reconcile_after_order_update();
         let (absorb_result, mut effects) = self.observe_order(id, observation)?;
         let (events, reconcile_effects) = match (should_reconcile, self.live_strategy_price(id)?) {
-            (true, Some(strategy_price)) => self.reconcile_track(id, strategy_price)?,
+            (true, Some(strategy_price)) => {
+                let (events, effects, _) =
+                    self.reconcile_track(id, strategy_price, evaluated_at, false)?;
+                (events, effects)
+            }
             _ => (vec![], vec![]),
         };
         effects.extend(reconcile_effects);
@@ -209,12 +221,14 @@ impl TrackManager {
         open_orders: CompleteOpenOrderSnapshot,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
     ) -> Result<TrackTransition> {
+        let evaluated_at = self.clock.now();
         let (events, effects) = self.apply_exchange_state_sync(
             id,
             position,
             open_orders,
             pending_submit_hints,
             ExchangeSyncMode::RecoverAndReconcile,
+            evaluated_at,
         )?;
         self.transition_for(id, events, effects)
     }
@@ -226,42 +240,44 @@ impl TrackManager {
         open_orders: CompleteOpenOrderSnapshot,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
     ) -> Result<TrackTransition> {
+        let evaluated_at = self.clock.now();
         let (events, effects) = self.apply_exchange_state_sync(
             id,
             position,
             open_orders,
             pending_submit_hints,
             ExchangeSyncMode::RecoverOnly,
+            evaluated_at,
         )?;
         self.transition_for(id, events, effects)
     }
 
     pub fn command(&mut self, id: &TrackId, command: TrackCommand) -> Result<TrackTransition> {
+        let evaluated_at = self.clock.now();
         let (events, effects) = match command {
             TrackCommand::Pause => {
                 self.pause_track(id.as_str())?;
                 (vec![], vec![])
             }
-            TrackCommand::Resume => self.resume_track(id.as_str())?,
+            TrackCommand::Resume => self.resume_track_at(id.as_str(), evaluated_at)?,
             TrackCommand::Reconcile => {
                 let Some(strategy_price) = self.live_strategy_price(id)? else {
                     return self.transition_for(id, vec![], vec![]);
                 };
-                self.reconcile_track(id, strategy_price)?
+                let (events, effects, _) =
+                    self.reconcile_track(id, strategy_price, evaluated_at, false)?;
+                (events, effects)
             }
-            TrackCommand::Terminate => self.terminate_track(id)?,
-            TrackCommand::Flatten => self.flatten_track(id)?,
+            TrackCommand::Terminate => self.terminate_track(id, evaluated_at)?,
+            TrackCommand::Flatten => self.flatten_track(id, evaluated_at)?,
         };
 
         self.transition_for(id, events, effects)
     }
 
-    pub fn refresh_market_data_health(
-        &mut self,
-        id: &TrackId,
-        observed_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<TrackTransition> {
-        let _ = self.guard_market_data_freshness(id, observed_at)?;
+    pub fn refresh_market_data_health(&mut self, id: &TrackId) -> Result<TrackTransition> {
+        let evaluated_at = self.clock.now();
+        let _ = self.guard_market_data_freshness(id, evaluated_at)?;
         self.transition_for(id, vec![], vec![])
     }
 
@@ -342,6 +358,15 @@ impl TrackManager {
     }
 
     pub fn resume_track(&mut self, id: &str) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
+        let evaluated_at = self.clock.now();
+        self.resume_track_at(id, evaluated_at)
+    }
+
+    fn resume_track_at(
+        &mut self,
+        id: &str,
+        evaluated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
         let track_id = TrackId::from(id);
         let track = self
             .tracks
@@ -366,7 +391,11 @@ impl TrackManager {
             };
 
             return match strategy_price {
-                Some(strategy_price) => self.reconcile_track(&track_id, strategy_price),
+                Some(strategy_price) => {
+                    let (events, effects, _) =
+                        self.reconcile_track(&track_id, strategy_price, evaluated_at, false)?;
+                    Ok((events, effects))
+                }
                 None => Ok((vec![], vec![])),
             };
         }
@@ -412,7 +441,11 @@ impl TrackManager {
         Ok((vec![], vec![]))
     }
 
-    fn terminate_track(&mut self, id: &TrackId) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
+    fn terminate_track(
+        &mut self,
+        id: &TrackId,
+        evaluated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
         let strategy_price = {
             let track = self
                 .tracks
@@ -431,12 +464,20 @@ impl TrackManager {
         };
 
         match strategy_price {
-            Some(strategy_price) => self.reconcile_track(id, strategy_price),
+            Some(strategy_price) => {
+                let (events, effects, _) =
+                    self.reconcile_track(id, strategy_price, evaluated_at, false)?;
+                Ok((events, effects))
+            }
             None => Ok((vec![], vec![])),
         }
     }
 
-    fn flatten_track(&mut self, id: &TrackId) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
+    fn flatten_track(
+        &mut self,
+        id: &TrackId,
+        evaluated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
         let strategy_price = {
             let track = self
                 .tracks
@@ -453,7 +494,11 @@ impl TrackManager {
         };
 
         match strategy_price {
-            Some(strategy_price) => self.reconcile_track(id, strategy_price),
+            Some(strategy_price) => {
+                let (events, effects, _) =
+                    self.reconcile_track(id, strategy_price, evaluated_at, false)?;
+                Ok((events, effects))
+            }
             None => Ok((vec![], vec![])),
         }
     }
@@ -661,6 +706,20 @@ impl TrackManager {
         self.tracks.get(&TrackId::from(id))
     }
 
+    pub fn candidate_for_track(&self, id: &TrackId) -> Result<Self> {
+        let runtime = self
+            .tracks
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+        let instrument = runtime.instrument().clone();
+        Ok(Self {
+            tracks: HashMap::from([(id.clone(), runtime)]),
+            instruments: HashMap::from([(instrument, id.clone())]),
+            clock: Arc::clone(&self.clock),
+        })
+    }
+
     pub fn install_planned_runtime(&mut self, runtime: TrackRuntime) {
         let id = runtime.id().clone();
         let current = self
@@ -734,7 +793,8 @@ impl TrackManager {
         &mut self,
         id: &TrackId,
         observation: MarketObservation,
-        observed_at: chrono::DateTime<chrono::Utc>,
+        occurred_at: chrono::DateTime<chrono::Utc>,
+        evaluated_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>, CommitIntent)> {
         let strategy_price = {
             let track = self
@@ -747,7 +807,7 @@ impl TrackManager {
                     track.mark_price = Some(mark_price);
                 }
                 MarketObservation::ExecutionQuote { execution_quote } => {
-                    track.last_tick_at = Some(observed_at);
+                    track.last_tick_at = Some(occurred_at);
                     track.market_data_stale_since = None;
                     track.best_bid = Some(execution_quote.best_bid);
                     track.best_ask = Some(execution_quote.best_ask);
@@ -769,7 +829,7 @@ impl TrackManager {
         };
 
         match strategy_price {
-            Some(strategy_price) => self.reconcile_market_track(id, strategy_price, observed_at),
+            Some(strategy_price) => self.reconcile_track(id, strategy_price, evaluated_at, true),
             None => Ok((vec![], vec![], CommitIntent::LiveOnly)),
         }
     }
@@ -820,9 +880,9 @@ impl TrackManager {
         open_orders: CompleteOpenOrderSnapshot,
         pending_submit_hints: Vec<executor::PendingSubmitHint>,
         mode: ExchangeSyncMode,
+        evaluated_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
         self.observe_position(id, position)?;
-        let observed_at = self.clock.now();
         let track = self
             .tracks
             .get(id)
@@ -837,7 +897,7 @@ impl TrackManager {
             previous_state: Some(&previous_state),
             open_orders: &open_orders,
             pending_submit_hints: &pending_submit_hints,
-            observed_at,
+            observed_at: evaluated_at,
         });
 
         match recovery {
@@ -883,7 +943,7 @@ impl TrackManager {
                     return Ok((vec![], recovery_effects));
                 }
 
-                if self.guard_market_data_freshness(id, observed_at)? {
+                if self.guard_market_data_freshness(id, evaluated_at)? {
                     let track = self
                         .tracks
                         .get_mut(id)
@@ -895,7 +955,7 @@ impl TrackManager {
                 let planned = self.plan_inventory_execution_for_track(
                     &planned_track,
                     strategy_price,
-                    observed_at,
+                    evaluated_at,
                 )?;
                 recovery_effects.extend(
                     planned
@@ -927,43 +987,22 @@ impl TrackManager {
         &mut self,
         id: &TrackId,
         strategy_price: f64,
-    ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>)> {
-        let observed_at = self.clock.now();
-        if self.guard_market_data_freshness(id, observed_at)? {
-            return Ok((vec![], vec![]));
-        }
-
-        if self.tracks[id].track_state.is_paused() {
-            let track = self.tracks.get_mut(id).unwrap();
-            Self::clear_targeting_state(track);
-            return Ok((vec![], vec![]));
-        }
-
-        let track = self
-            .tracks
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        let planned =
-            self.plan_inventory_execution_for_track(track, strategy_price, observed_at)?;
-
-        let track = self.tracks.get_mut(id).unwrap();
-        Ok(Self::install_planned_inventory_execution(track, planned))
-    }
-
-    fn reconcile_market_track(
-        &mut self,
-        id: &TrackId,
-        strategy_price: f64,
-        observed_at: chrono::DateTime<chrono::Utc>,
+        evaluated_at: chrono::DateTime<chrono::Utc>,
+        market_driven: bool,
     ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>, CommitIntent)> {
-        if self.guard_market_data_freshness(id, observed_at)? {
-            return Ok((vec![], vec![], CommitIntent::LiveOnly));
+        let no_work_intent = if market_driven {
+            CommitIntent::LiveOnly
+        } else {
+            CommitIntent::Commit
+        };
+        if self.guard_market_data_freshness(id, evaluated_at)? {
+            return Ok((vec![], vec![], no_work_intent));
         }
 
         if self.tracks[id].track_state.is_paused() {
             let track = self.tracks.get_mut(id).unwrap();
             Self::clear_targeting_state(track);
-            return Ok((vec![], vec![], CommitIntent::LiveOnly));
+            return Ok((vec![], vec![], no_work_intent));
         }
 
         let track = self
@@ -971,8 +1010,12 @@ impl TrackManager {
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         let planned =
-            self.plan_inventory_execution_for_track(track, strategy_price, observed_at)?;
-        let commit_intent = market_commit_intent(track, &planned);
+            self.plan_inventory_execution_for_track(track, strategy_price, evaluated_at)?;
+        let commit_intent = if market_driven {
+            market_commit_intent(track, &planned)
+        } else {
+            CommitIntent::Commit
+        };
 
         let track = self.tracks.get_mut(id).unwrap();
         let (mut facts, effects) = Self::install_planned_inventory_execution_with_commit_intent(
@@ -1384,6 +1427,8 @@ fn install_executor_state(track: &mut TrackRuntime, executor_state: ExecutorStat
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use chrono::{TimeZone, Utc};
     use poise_core::events::ExecutionGateReason;
@@ -1434,6 +1479,102 @@ mod tests {
         .unwrap();
         manager.add_track(definition, rules()).unwrap();
         (manager, id)
+    }
+
+    #[test]
+    fn track_candidate_contains_only_the_requested_runtime() {
+        let (mut manager, id) = manager();
+        let other_id = TrackId::from("other");
+        let other_instrument = Instrument::new(Venue::Binance, "PERPETUAL-42");
+        let other_definition = TrackDefinition::try_new(
+            other_id.clone(),
+            other_instrument.clone(),
+            config(),
+            Some(10_000.0),
+            loss_limits(),
+            None,
+        )
+        .unwrap();
+        let other_spec = InstrumentSpec::try_linear(
+            other_instrument.clone(),
+            Asset::try_new("BTC").unwrap(),
+            Asset::try_new("USD").unwrap(),
+            Asset::try_new("USDC").unwrap(),
+            Default::default(),
+            0.1,
+            0.001,
+            0.001,
+            amount(5.0, "USD"),
+        )
+        .unwrap();
+        manager.add_track(other_definition, other_spec).unwrap();
+
+        let mut candidate = manager.candidate_for_track(&id).unwrap();
+        candidate.pause_track(id.as_str()).unwrap();
+
+        assert!(candidate.get_track(other_id.as_str()).is_none());
+        assert!(candidate.resolve_track_id(&other_instrument).is_none());
+        assert!(
+            !manager
+                .get_track(id.as_str())
+                .unwrap()
+                .runtime_state()
+                .is_paused()
+        );
+        assert!(
+            candidate
+                .get_track(id.as_str())
+                .unwrap()
+                .runtime_state()
+                .is_paused()
+        );
+    }
+
+    #[derive(Debug)]
+    struct CountingClock {
+        now: chrono::DateTime<Utc>,
+        calls: AtomicUsize,
+    }
+
+    impl ClockPort for CountingClock {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.now
+        }
+    }
+
+    #[test]
+    fn position_update_samples_evaluation_time_once() {
+        let clock = Arc::new(CountingClock {
+            now: Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
+            calls: AtomicUsize::new(0),
+        });
+        let mut manager = TrackManager::new(clock.clone());
+        let id = TrackId::from("test");
+        let definition = TrackDefinition::try_new(
+            id.clone(),
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            config(),
+            Some(10_000.0),
+            loss_limits(),
+            None,
+        )
+        .unwrap();
+        manager.add_track(definition, rules()).unwrap();
+        observe_market(&mut manager, &id, 95.0).unwrap();
+        clock.calls.store(0, Ordering::SeqCst);
+
+        manager
+            .observe_position_update(
+                &id,
+                PositionObservation {
+                    qty: PositionQty::new(1.0).unwrap(),
+                    unrealized_pnl: 0.0,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(clock.calls.load(Ordering::SeqCst), 1);
     }
 
     fn config() -> TrackConfig {
@@ -1712,10 +1853,11 @@ mod tests {
     }
 
     #[test]
-    fn market_transition_uses_explicit_observation_time_and_commit_intent() {
+    fn market_transition_separates_occurrence_and_evaluation_time() {
         let (mut manager, id) = manager();
         observe_market(&mut manager, &id, 95.0).unwrap();
-        let observed_at = Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 1).unwrap();
+        let occurred_at = Utc.with_ymd_and_hms(2026, 4, 22, 8, 59, 59).unwrap();
+        let evaluated_at = Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap();
 
         let transition = manager
             .observe_market_mutation(
@@ -1726,14 +1868,14 @@ mod tests {
                         best_ask: 95.1,
                     },
                 },
-                observed_at,
+                occurred_at,
             )
             .unwrap();
 
         assert_eq!(
             transition.next_state().last_tick_at,
-            Some(observed_at),
-            "transition time must come from the input, not TrackManager's clock"
+            Some(occurred_at),
+            "last tick time must preserve the exchange occurrence time"
         );
         assert_eq!(
             transition
@@ -1741,13 +1883,41 @@ mod tests {
                 .inventory_decision()
                 .unwrap()
                 .observed_at,
-            observed_at
+            evaluated_at,
+            "decision time must use the locally sampled evaluation time"
         );
         assert_eq!(
             transition.commit_intent(),
             crate::transition::CommitIntent::LiveOnly
         );
         assert!(transition.facts.is_empty());
+    }
+
+    #[test]
+    fn delayed_market_tick_cannot_acquire_new_risk() {
+        let (mut manager, id) = manager();
+        let occurred_at = Utc.with_ymd_and_hms(2026, 4, 22, 8, 59, 0).unwrap();
+        let evaluated_at = Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap();
+
+        let transition = manager
+            .observe_market_mutation(
+                &id,
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 94.9,
+                        best_ask: 95.1,
+                    },
+                },
+                occurred_at,
+            )
+            .unwrap();
+
+        assert!(transition.effects.is_empty());
+        assert_eq!(transition.next_state().last_tick_at, Some(occurred_at));
+        assert_eq!(
+            transition.next_state().market_data_stale_since,
+            Some(evaluated_at)
+        );
     }
 
     #[test]
@@ -2300,7 +2470,14 @@ mod tests {
             });
         }
 
-        let (_, effects) = manager.reconcile_track(&id, 100.0).unwrap();
+        let (_, effects, _) = manager
+            .reconcile_track(
+                &id,
+                100.0,
+                Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
+                false,
+            )
+            .unwrap();
 
         assert!(effects.iter().any(|effect| matches!(
             effect,

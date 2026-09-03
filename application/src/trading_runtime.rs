@@ -123,11 +123,9 @@ pub enum TrackInput {
     Command(TrackCommand),
     Market {
         observation: MarketObservation,
-        observed_at: chrono::DateTime<chrono::Utc>,
+        occurred_at: chrono::DateTime<chrono::Utc>,
     },
-    RefreshMarketDataHealth {
-        observed_at: chrono::DateTime<chrono::Utc>,
-    },
+    RefreshMarketDataHealth,
     Position(PositionObservation),
     Order(OrderObservation),
     TrackPnl(TrackPnlRecord),
@@ -453,13 +451,13 @@ impl TradingRuntime {
             }
             TrackInput::Market {
                 observation,
-                observed_at,
+                occurred_at,
             } => {
-                self.observe_market_at(id, observation, observed_at).await?;
+                self.observe_market_at(id, observation, occurred_at).await?;
                 self.committed_receipt(id).await
             }
-            TrackInput::RefreshMarketDataHealth { observed_at } => {
-                self.refresh_market_data_health_at(id, observed_at).await?;
+            TrackInput::RefreshMarketDataHealth => {
+                self.refresh_market_data_health(id).await?;
                 self.committed_receipt(id).await
             }
             TrackInput::Position(observation) => {
@@ -601,12 +599,12 @@ impl TradingRuntime {
         id: &str,
         observation: MarketObservation,
     ) -> Result<TrackUpdateReceipt> {
-        let observed_at = self.manager.read().await.clock().now();
+        let occurred_at = self.manager.read().await.clock().now();
         self.handle(
             &TrackId::new(id),
             TrackInput::Market {
                 observation,
-                observed_at,
+                occurred_at,
             },
         )
         .await
@@ -737,12 +735,12 @@ impl TradingRuntime {
         &self,
         id: &str,
         observation: MarketObservation,
-        observed_at: chrono::DateTime<chrono::Utc>,
+        occurred_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<TrackTransition> {
         let mutation_guard = self.lock_track_mutation(id).await;
         let (previous_state, outcome, next_state) = self
             .plan_manager_mutation(id, |manager| {
-                manager.observe_market_mutation(&TrackId::new(id), observation.clone(), observed_at)
+                manager.observe_market_mutation(&TrackId::new(id), observation.clone(), occurred_at)
             })
             .await
             .map_err(anyhow::Error::new)?;
@@ -787,8 +785,8 @@ impl TradingRuntime {
         id: &str,
         observation: MarketObservation,
     ) -> Result<TrackTransition> {
-        let observed_at = self.manager.read().await.clock().now();
-        self.observe_market_at(id, observation, observed_at).await
+        let occurred_at = self.manager.read().await.clock().now();
+        self.observe_market_at(id, observation, occurred_at).await
     }
 
     fn notify_live_only_executor_changes(
@@ -821,7 +819,12 @@ impl TradingRuntime {
                 let previous_state = manager.get_track(id).cloned().ok_or_else(|| {
                     TrackMutationError::Mutation(anyhow!("track `{id}` not found"))
                 })?;
-                (previous_state, manager.clone())
+                (
+                    previous_state,
+                    manager
+                        .candidate_for_track(&TrackId::new(id))
+                        .map_err(TrackMutationError::Mutation)?,
+                )
             };
             self.sync_account_capacity_gate_state(&mut candidate_manager, id)
                 .map_err(TrackMutationError::Mutation)?;
@@ -855,22 +858,12 @@ impl TradingRuntime {
         Ok(transition)
     }
 
-    async fn refresh_market_data_health_at(
-        &self,
-        id: &str,
-        observed_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<TrackTransition> {
+    async fn refresh_market_data_health(&self, id: &str) -> Result<TrackTransition> {
         self.mutate_track_skip_when_no_work(id, |manager| {
-            manager.refresh_market_data_health(&TrackId::new(id), observed_at)
+            manager.refresh_market_data_health(&TrackId::new(id))
         })
         .await
         .map_err(anyhow::Error::new)
-    }
-
-    #[cfg(test)]
-    async fn refresh_market_data_health(&self, id: &str) -> Result<TrackTransition> {
-        let observed_at = self.manager.read().await.clock().now();
-        self.refresh_market_data_health_at(id, observed_at).await
     }
 
     pub async fn market_data_health_deadline(
@@ -1019,7 +1012,7 @@ impl TradingRuntime {
             manager
                 .get_track(id)
                 .ok_or_else(|| anyhow!("track `{id}` not found"))?;
-            let mut candidate = manager.clone();
+            let mut candidate = manager.candidate_for_track(&track_id)?;
             candidate.apply_pnl_record(&track_id, &record)?;
             candidate
                 .get_track(id)
@@ -1128,7 +1121,7 @@ impl TradingRuntime {
                 {
                     return Ok(ExchangeStateSyncOutcome::RevisionChanged);
                 }
-                manager.clone()
+                manager.candidate_for_track(&token.track_id)?
             };
             let Some(result) = self
                 .session_effect_queue
@@ -1648,7 +1641,12 @@ impl TradingRuntime {
                 .get_track(id)
                 .cloned()
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            (previous_state, manager.clone())
+            (
+                previous_state,
+                manager
+                    .candidate_for_track(&TrackId::new(id))
+                    .map_err(TrackMutationError::Mutation)?,
+            )
         };
 
         self.sync_account_capacity_gate_state(&mut candidate_manager, id)

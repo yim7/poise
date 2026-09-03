@@ -78,7 +78,7 @@ pub(super) fn spawn_market_task(
                                         break;
                                     };
 
-                                    let (observation, observed_at) = match tick {
+                                    let (observation, occurred_at) = match tick {
                                         MarketDataTick::ExecutionQuote(tick) => {
                                             (
                                                 MarketObservation::ExecutionQuote {
@@ -104,7 +104,7 @@ pub(super) fn spawn_market_task(
                                             &TrackId::new(&track.id),
                                             TrackInput::Market {
                                                 observation,
-                                                observed_at,
+                                                occurred_at,
                                             },
                                         )
                                         .await
