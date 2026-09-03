@@ -74,12 +74,12 @@
 
 ### F2 修正 Binance PNL metadata ownership
 
-- [ ] 在 Binance adapter 内建立 REST/WS 共享的私有 instrument metadata registry，并由 `get_exchange_info` 填充。
-- [ ] REST recent trades、WebSocket trades 和 funding 归属均从 registry 读取 base/settlement 事实，删除 `strip_suffix` 与硬编码 quote suffix 推断。
-- [ ] WebSocket trade 使用订单成交时间字段作为 PNL occurrence time；event time 只保留为消息时间。
-- [ ] WebSocket trade 读取消息中的 margin asset，funding 读取 balance asset；registry 用于验证归属和补足 quantity unit。registry 缺项或归属不一致时显式失败，非结算币 fee 保留原始 asset，不能静默猜测或丢弃。
-- [ ] 验收：覆盖非普通 symbol、event time 与 trade time 不同、非结算币 fee、metadata 缺失四类测试；REST/WS 对同一成交生成相同 quantity unit。
-- Commit SHA：待执行
+- [x] 在 Binance adapter 内建立 REST/WS 共享的私有 instrument metadata registry，并由 `get_exchange_info` 填充。
+- [x] REST recent trades、WebSocket trades 和 funding 归属均从 registry 读取 base/settlement 事实，删除 `strip_suffix` 与硬编码 quote suffix 推断。
+- [x] WebSocket trade 使用订单成交时间字段作为 PNL occurrence time；event time 只保留为消息时间。
+- [x] WebSocket trade 读取消息中的 margin asset，funding 读取 balance asset；registry 用于验证归属和补足 quantity unit。registry 缺项或归属不一致时显式失败，非结算币 fee 保留原始 asset，不能静默猜测或丢弃。
+- [x] 验收：覆盖非普通 symbol、event time 与 trade time 不同、非结算币 fee、metadata 缺失四类测试；REST/WS 对同一成交生成相同 quantity unit。
+- Commit SHA：`bbd8c36`
 
 ### F3 改为单 track 规划并统一时间语义
 
