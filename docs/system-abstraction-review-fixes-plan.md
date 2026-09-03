@@ -23,6 +23,6 @@
 - [x] F2：PNL 异资产记录通过 `TradingRuntime::handle` 原子进入 SQLite 和 committed state，并保持 `Incomplete` 聚合。Commit：`a689d25`
 - [x] F3：共享 order、position、observation 与 PNL quantity 边界统一使用 `PositionQty`，adapter wire 转换保持私有。Commit：`3efb2e7`
 - [x] F4：PNL fact 保存发生时 quantity 语义，storage 不读取当前 metadata 补写历史字段。Commit：`91a4e66`
-- [ ] F5：时间成为 engine 输入，market transition 删除字段排除 diff 和手工状态恢复。Commit：待完成
+- [x] F5：时间成为 engine 输入，market transition 删除字段排除 diff 和手工状态恢复。Commit：`8af282c`
 - [ ] F6：删除 Hyperliquid 隐藏 `10x` 及无效的运行期 capacity port 查询。Commit：待完成
 - [ ] F7：运行 workspace 验收、复审最终 diff，更新 `system-overview.md` 并删除本文。Commit：待完成
