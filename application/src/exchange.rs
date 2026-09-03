@@ -132,11 +132,6 @@ pub struct ExchangeInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AccountCapacitySnapshot {
-    pub max_increase_notional: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountSummarySnapshot {
     equity: Amount,
     available: Option<Amount>,

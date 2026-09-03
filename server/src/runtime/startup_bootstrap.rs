@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{DateTime, Utc};
 use poise_application::TrackInput;
-use poise_application::exchange::{AccountCapacitySnapshot, Position, UserDataEvent};
+use poise_application::exchange::{Position, UserDataEvent};
 use poise_core::instrument::{InstrumentSpec, PositionBasis, PositionQty};
 use poise_core::track::{Instrument, TrackId};
 use poise_engine::runtime::FreshSessionExternalInputs;
@@ -14,7 +14,7 @@ use tokio::time::sleep;
 
 use super::{
     RuntimeStartupDefinition, STARTUP_RETRY_ATTEMPTS, STARTUP_RETRY_DELAY, ServerRuntime,
-    exchange_state,
+    exchange_state, guards::AccountCapacitySnapshot,
 };
 
 struct TrackStartupSeed {

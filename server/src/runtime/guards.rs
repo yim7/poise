@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use poise_application::exchange::AccountCapacitySnapshot;
 use poise_core::track::Instrument;
 use tokio::sync::{Mutex, OwnedMutexGuard};
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AccountCapacitySnapshot {
+    pub(crate) max_increase_notional: f64,
+}
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct AccountCapacityConstraint {
