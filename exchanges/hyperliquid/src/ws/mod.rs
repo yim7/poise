@@ -737,7 +737,7 @@ mod tests {
                 2376.0,
                 TrackPnlQuantity::base_asset(
                     PositionQty::new(0.0064).unwrap(),
-                    Asset::try_new("BTC").unwrap(),
+                    Asset::try_new("ETH").unwrap(),
                 ),
                 amount(-0.100416, "USDC"),
                 Some(amount(0.002189, "USDC")),
