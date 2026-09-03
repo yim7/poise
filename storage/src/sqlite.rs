@@ -13,11 +13,13 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::schema;
 use poise_core::events::DomainEvent;
-use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionBasis};
+use poise_core::instrument::{Amount, Asset};
 use poise_core::track::{Instrument, TrackId};
 use poise_core::types::Side;
 use poise_engine::execution_plan::TrackEffect;
-use poise_engine::ledger::{TrackPnlCashflow, TrackPnlRecord, TrackPnlRecordKind, TrackPnlStats};
+use poise_engine::ledger::{
+    TrackPnlCashflow, TrackPnlQuantityUnit, TrackPnlRecord, TrackPnlRecordKind, TrackPnlStats,
+};
 
 pub struct SqliteStorage {
     conn: Arc<Mutex<Connection>>,
@@ -725,16 +727,7 @@ impl SqliteStorage {
         conn: Arc<Mutex<Connection>>,
         track_id: TrackId,
         record: TrackPnlRecord,
-        instrument_spec: InstrumentSpec,
     ) -> Result<bool> {
-        ensure!(
-            &record.instrument == instrument_spec.instrument(),
-            "PNL record instrument `{}:{}` does not match instrument spec `{}:{}`",
-            record.instrument.venue.as_str(),
-            record.instrument.symbol,
-            instrument_spec.instrument().venue.as_str(),
-            instrument_spec.instrument().symbol,
-        );
         let (
             realized_pnl,
             realized_pnl_asset,
@@ -765,21 +758,25 @@ impl SqliteStorage {
                 Some(funding.asset().as_str().to_string()),
             ),
         };
-        let (position_unit, base_asset, contract_value, contract_value_asset) =
-            match (record.qty, instrument_spec.position_basis()) {
-                (None, _) => (None, None, None, None),
-                (Some(_), PositionBasis::BaseAsset) => (
-                    Some("base_asset"),
-                    Some(instrument_spec.base_asset().as_str().to_string()),
-                    None,
-                    None,
-                ),
-                (Some(_), PositionBasis::Contracts { contract_value }) => (
-                    Some("contracts"),
-                    None,
-                    Some(contract_value.value()),
-                    Some(contract_value.asset().as_str().to_string()),
-                ),
+        let (qty, position_unit, base_asset, contract_value, contract_value_asset) =
+            match record.quantity.as_ref() {
+                None => (None, None, None, None, None),
+                Some(quantity) => match quantity.unit() {
+                    TrackPnlQuantityUnit::BaseAsset { asset } => (
+                        Some(quantity.qty().value()),
+                        Some("base_asset"),
+                        Some(asset.as_str().to_string()),
+                        None,
+                        None,
+                    ),
+                    TrackPnlQuantityUnit::Contracts { contract_value } => (
+                        Some(quantity.qty().value()),
+                        Some("contracts"),
+                        None,
+                        Some(contract_value.value()),
+                        Some(contract_value.asset().as_str().to_string()),
+                    ),
+                },
             };
         let mut conn = Self::lock_connection(&conn)?;
         let tx = conn
@@ -825,7 +822,7 @@ impl SqliteStorage {
                     record.trade_id,
                     record.side.map(side_as_str),
                     record.price,
-                    record.qty.map(poise_core::instrument::PositionQty::value),
+                    qty,
                     position_unit,
                     base_asset,
                     contract_value,
@@ -1077,15 +1074,12 @@ impl TrackMutationStore for SqliteStorage {
         &self,
         track_id: &TrackId,
         record: &TrackPnlRecord,
-        instrument_spec: &InstrumentSpec,
     ) -> Result<bool> {
         let conn = Arc::clone(&self.conn);
         let track_id = track_id.clone();
         let record = record.clone();
-        let instrument_spec = instrument_spec.clone();
-
         tokio::task::spawn_blocking(move || {
-            Self::insert_track_pnl_record_blocking(conn, track_id, record, instrument_spec)
+            Self::insert_track_pnl_record_blocking(conn, track_id, record)
         })
         .await
         .context("failed to join insert_track_pnl_record blocking task")?
@@ -1257,29 +1251,13 @@ mod tests {
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::SubmitRecoveryToken;
     use poise_engine::ledger::{
-        PnlAggregateCompleteness, TrackPnlCashflowKind, TrackPnlRecord, UnvaluedCashflow,
+        PnlAggregateCompleteness, TrackPnlCashflowKind, TrackPnlQuantity, TrackPnlRecord,
+        UnvaluedCashflow,
     };
     use rusqlite::Connection;
 
     fn test_instrument(symbol: &str) -> Instrument {
         Instrument::new(Venue::Binance, symbol)
-    }
-
-    fn test_instrument_spec(symbol: &str) -> InstrumentSpec {
-        let base_asset = symbol.strip_suffix("USDT").unwrap_or(symbol);
-        let settlement_asset = Asset::try_new("USDT").unwrap();
-        InstrumentSpec::try_linear(
-            test_instrument(symbol),
-            Asset::try_new(base_asset).unwrap(),
-            settlement_asset.clone(),
-            settlement_asset.clone(),
-            PricePrecision::FixedTick,
-            0.1,
-            0.001,
-            0.001,
-            Amount::new(5.0, settlement_asset).unwrap(),
-        )
-        .unwrap()
     }
 
     fn inverse_instrument_spec() -> InstrumentSpec {
@@ -1796,14 +1774,9 @@ mod tests {
             Some(amount(0.0, "USDT")),
         );
 
-        let error = TrackMutationStore::insert_track_pnl_record(
-            &storage,
-            &track_id,
-            &record,
-            &test_instrument_spec("BTCUSDT"),
-        )
-        .await
-        .unwrap_err();
+        let error = TrackMutationStore::insert_track_pnl_record(&storage, &track_id, &record)
+            .await
+            .unwrap_err();
 
         assert!(format!("{error:#}").contains("track identity"));
         assert_eq!(track_pnl_record_count(&storage, &track_id), 0);
@@ -1823,14 +1796,9 @@ mod tests {
             amount(1.0, "USDT"),
             Some(amount(0.0, "USDT")),
         );
-        TrackMutationStore::insert_track_pnl_record(
-            &storage,
-            &track_id,
-            &matching,
-            &test_instrument_spec("BTCUSDT"),
-        )
-        .await
-        .unwrap();
+        TrackMutationStore::insert_track_pnl_record(&storage, &track_id, &matching)
+            .await
+            .unwrap();
         let mismatched = TrackPnlRecord::trade_summary(
             test_instrument("ETHUSDT"),
             Utc::now(),
@@ -1841,14 +1809,9 @@ mod tests {
             Some(amount(0.0, "USDT")),
         );
 
-        let error = TrackMutationStore::insert_track_pnl_record(
-            &storage,
-            &track_id,
-            &mismatched,
-            &test_instrument_spec("ETHUSDT"),
-        )
-        .await
-        .unwrap_err();
+        let error = TrackMutationStore::insert_track_pnl_record(&storage, &track_id, &mismatched)
+            .await
+            .unwrap_err();
 
         assert!(format!("{error:#}").contains("ETHUSDT"));
         assert_eq!(track_pnl_record_count(&storage, &track_id), 1);
@@ -1949,11 +1912,11 @@ mod tests {
                 Some("trade-1".into()),
                 Side::Sell,
                 60_000.0,
-                PositionQty::new(30.0).unwrap(),
+                TrackPnlQuantity::contracts(PositionQty::new(30.0).unwrap(), amount(100.0, "USD"))
+                    .unwrap(),
                 amount(0.001, "BTC"),
                 Some(amount(0.00001, "BTC")),
             ),
-            &instrument_spec,
         )
         .await
         .unwrap();
@@ -2002,11 +1965,13 @@ mod tests {
                 Some("1001".into()),
                 Side::Sell,
                 1900.0,
-                PositionQty::new(0.4).unwrap(),
+                TrackPnlQuantity::base_asset(
+                    PositionQty::new(0.4).unwrap(),
+                    Asset::try_new("BTC").unwrap(),
+                ),
                 amount(120.0, "USDT"),
                 Some(amount(3.0, "USDT")),
             ),
-            &test_instrument_spec("BTCUSDT"),
         )
         .await
         .unwrap();
@@ -2020,7 +1985,6 @@ mod tests {
                 Some("binance:btcusdt:funding:2026-04-07T08:00:00Z".into()),
                 amount(-1.5, "USDT"),
             ),
-            &test_instrument_spec("BTCUSDT"),
         )
         .await
         .unwrap();
@@ -2092,7 +2056,6 @@ mod tests {
                 amount(10.0, "USDT"),
                 Some(amount(0.001, "BNB")),
             ),
-            &test_instrument_spec("BTCUSDT"),
         )
         .await
         .unwrap();
@@ -2147,7 +2110,6 @@ mod tests {
                 amount(10.0, "USDT"),
                 None,
             ),
-            &test_instrument_spec("BTCUSDT"),
         )
         .await
         .unwrap();
@@ -2201,7 +2163,6 @@ mod tests {
                 amount(1.0, "USDT"),
                 Some(amount(0.1, "USDT")),
             ),
-            &test_instrument_spec("BTCUSDT"),
         )
         .await
         .unwrap();
@@ -2217,7 +2178,6 @@ mod tests {
                 amount(1.0, "USDT"),
                 Some(amount(0.1, "USDT")),
             ),
-            &test_instrument_spec("ETHUSDT"),
         )
         .await
         .unwrap();
@@ -2255,7 +2215,6 @@ mod tests {
                 amount(1.0, "USDT"),
                 Some(amount(0.0, "USDT")),
             ),
-            &test_instrument_spec("BTCUSDT"),
         )
         .await
         .unwrap();
@@ -2271,7 +2230,6 @@ mod tests {
                 amount(0.001, "BTC"),
                 Some(amount(0.0, "BTC")),
             ),
-            &test_instrument_spec("BTCUSDT"),
         )
         .await
         .unwrap();
@@ -2314,7 +2272,6 @@ mod tests {
                 amount(1.0, "USDT"),
                 Some(amount(0.0, "USDT")),
             ),
-            &test_instrument_spec("ETHUSDT"),
         )
         .await
         .unwrap();

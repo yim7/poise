@@ -529,10 +529,10 @@ mod tests {
     use std::time::Duration;
 
     use futures_util::{SinkExt, StreamExt};
-    use poise_application::exchange::TrackPnlRecord;
     use poise_application::exchange::{
         ExchangeOrder, ExecutionQuote, MarketDataTick, OrderStatus, UserDataPayload,
     };
+    use poise_application::exchange::{TrackPnlQuantity, TrackPnlRecord};
     use poise_core::instrument::{Amount, Asset, PositionQty};
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
@@ -696,7 +696,10 @@ mod tests {
                 Some("999".to_string()),
                 Side::Buy,
                 65000.5,
-                PositionQty::new(0.02).unwrap(),
+                TrackPnlQuantity::base_asset(
+                    PositionQty::new(0.02).unwrap(),
+                    Asset::try_new("BTC").unwrap(),
+                ),
                 amount(3.25, "USDC"),
                 Some(amount(0.12, "USDC")),
             ))
@@ -732,7 +735,10 @@ mod tests {
                 Some("321706137923647".to_string()),
                 Side::Buy,
                 2376.0,
-                PositionQty::new(0.0064).unwrap(),
+                TrackPnlQuantity::base_asset(
+                    PositionQty::new(0.0064).unwrap(),
+                    Asset::try_new("BTC").unwrap(),
+                ),
                 amount(-0.100416, "USDC"),
                 Some(amount(0.002189, "USDC")),
             ))

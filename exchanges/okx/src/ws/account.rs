@@ -16,7 +16,7 @@ use poise_core::instrument::{Amount, Asset};
 use crate::Credentials;
 use crate::instrument::{OkxInstrumentMetadata, OkxInstrumentRegistry};
 use crate::mapper::{
-    open_order_from_snapshot_with_metadata, position_from_snapshot_with_metadata,
+    open_order_from_snapshot_with_metadata, pnl_quantity, position_from_snapshot_with_metadata,
     position_qty_from_okx_contracts,
 };
 use crate::rest::auth::sign_okx_payload;
@@ -204,7 +204,7 @@ fn parse_orders(
                     trade_id,
                     order.side,
                     fill_price,
-                    fill_size,
+                    pnl_quantity(fill_size, &metadata)?,
                     cash_amount(realized_pnl, settlement_asset)?,
                     trading_fee,
                 )),

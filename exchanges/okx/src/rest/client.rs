@@ -1358,7 +1358,13 @@ mod tests {
             Some("okx:orders:btc-usd-swap:460607985")
         );
         assert_eq!(record.realized_pnl().unwrap().asset().as_str(), "BTC");
-        assert_eq!(record.qty.map(PositionQty::value), Some(0.2));
+        assert_eq!(
+            record
+                .quantity
+                .as_ref()
+                .map(|quantity| quantity.qty().value()),
+            Some(0.2)
+        );
         assert_eq!(record.realized_pnl().unwrap().value(), 0.0);
         assert_eq!(record.trading_fee().unwrap().value(), 0.0000001610386348);
 

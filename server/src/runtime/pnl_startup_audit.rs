@@ -193,7 +193,10 @@ mod tests {
                     Some("missing".to_string()),
                     Side::Sell,
                     62_000.0,
-                    poise_core::instrument::PositionQty::new(0.2).unwrap(),
+                    poise_engine::ledger::TrackPnlQuantity::base_asset(
+                        poise_core::instrument::PositionQty::new(0.2).unwrap(),
+                        poise_core::instrument::Asset::try_new("BTC").unwrap(),
+                    ),
                     amount(0.0001, "USDT"),
                     Some(amount(0.00001, "USDT")),
                 )]),

@@ -21,7 +21,10 @@ use super::{
     models::{AccountUpdateEnvelope, OrderTradeUpdateEnvelope, UserEventTypeEnvelope},
     parse_decimal, parse_side, quote_asset_for_symbol,
 };
-use crate::{mapper::parse_order_status, rest::BinanceRestClient};
+use crate::{
+    mapper::{linear_pnl_quantity, parse_order_status},
+    rest::BinanceRestClient,
+};
 
 #[derive(Debug, PartialEq)]
 pub(super) enum UserStreamMessage {
@@ -264,7 +267,11 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                         trade_id,
                         side,
                         price,
-                        PositionQty::new(trade_qty).map_err(anyhow::Error::msg)?,
+                        linear_pnl_quantity(
+                            &order.symbol,
+                            quote_asset,
+                            PositionQty::new(trade_qty).map_err(anyhow::Error::msg)?,
+                        )?,
                         cash_amount(realized_pnl, quote_asset)?,
                         trading_fee,
                     )),
@@ -367,7 +374,7 @@ mod tests {
     };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-    use poise_application::exchange::{OrderStatus, Position, UserDataPayload};
+    use poise_application::exchange::{OrderStatus, Position, TrackPnlQuantity, UserDataPayload};
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
 
@@ -423,7 +430,10 @@ mod tests {
                         None,
                         Side::Sell,
                         65000.5,
-                        PositionQty::new(0.02).unwrap(),
+                        TrackPnlQuantity::base_asset(
+                            PositionQty::new(0.02).unwrap(),
+                            Asset::try_new("BTC").unwrap(),
+                        ),
                         cash_amount(12.34, "USDT").unwrap(),
                         None,
                     )),
@@ -484,7 +494,10 @@ mod tests {
                         Some("67890".into()),
                         Side::Sell,
                         65000.5,
-                        PositionQty::new(0.02).unwrap(),
+                        TrackPnlQuantity::base_asset(
+                            PositionQty::new(0.02).unwrap(),
+                            Asset::try_new("BTC").unwrap(),
+                        ),
                         cash_amount(12.34, "USDT").unwrap(),
                         Some(cash_amount(3.2, "USDT").unwrap()),
                     )),
@@ -641,7 +654,10 @@ mod tests {
                         None,
                         Side::Sell,
                         65000.5,
-                        PositionQty::new(0.02).unwrap(),
+                        TrackPnlQuantity::base_asset(
+                            PositionQty::new(0.02).unwrap(),
+                            Asset::try_new("BTC").unwrap(),
+                        ),
                         cash_amount(12.34, "USDT").unwrap(),
                         Some(cash_amount(0.01, "BNB").unwrap()),
                     )),

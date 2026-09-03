@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{TimeZone, Utc};
 
-use poise_application::exchange::TrackPnlRecord;
 use poise_application::exchange::{AccountSummarySnapshot, ExchangeOrder, OrderStatus, Position};
-use poise_core::instrument::{Amount, Asset, PositionQty};
+use poise_application::exchange::{TrackPnlQuantity, TrackPnlRecord};
+use poise_core::instrument::{Amount, Asset, PositionBasis, PositionQty};
 use poise_core::track::{Instrument, Venue};
 use poise_core::types::Side;
 
@@ -166,7 +166,7 @@ pub(crate) fn track_pnl_record_from_trade_fill_with_metadata(
         trade_id,
         side,
         fill_price,
-        fill_size,
+        pnl_quantity(fill_size, metadata)?,
         cash_amount(realized_pnl, settlement_asset)?,
         trading_fee,
     ))
@@ -240,6 +240,21 @@ pub(crate) fn position_qty_from_okx_contracts(
     metadata: &OkxInstrumentMetadata,
 ) -> Result<PositionQty> {
     metadata.position_qty_from_wire_contracts(okx_contract_qty)
+}
+
+pub(crate) fn pnl_quantity(
+    qty: PositionQty,
+    metadata: &OkxInstrumentMetadata,
+) -> Result<TrackPnlQuantity> {
+    match metadata.instrument_spec().position_basis() {
+        PositionBasis::BaseAsset => Ok(TrackPnlQuantity::base_asset(
+            qty,
+            metadata.instrument_spec().base_asset().clone(),
+        )),
+        PositionBasis::Contracts { contract_value } => {
+            TrackPnlQuantity::contracts(qty, contract_value.clone()).map_err(anyhow::Error::msg)
+        }
+    }
 }
 
 fn parse_decimal(field: &str, value: &str) -> Result<f64> {
@@ -387,7 +402,13 @@ mod tests {
         assert_eq!(record.trade_id.as_deref(), Some("trade-1"));
         assert_eq!(record.side, Some(Side::Sell));
         assert_eq!(record.price, Some(62_147.4));
-        assert_eq!(record.qty.map(PositionQty::value), Some(10.0));
+        assert_eq!(
+            record
+                .quantity
+                .as_ref()
+                .map(|quantity| quantity.qty().value()),
+            Some(10.0)
+        );
         assert_eq!(record.realized_pnl().unwrap().value(), 0.000000154839457);
         assert_eq!(record.trading_fee().unwrap().value(), 0.000000032);
         assert_eq!(record.occurred_at.timestamp_millis(), 1_781_099_765_546);
@@ -425,7 +446,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(record.realized_pnl().unwrap().asset().as_str(), "USDT");
-        assert_eq!(record.qty.map(PositionQty::value), Some(0.03));
+        assert_eq!(
+            record
+                .quantity
+                .as_ref()
+                .map(|quantity| quantity.qty().value()),
+            Some(0.03)
+        );
         assert_eq!(record.realized_pnl().unwrap().value(), 12.34);
         assert_eq!(record.trading_fee().unwrap().value(), 0.5);
     }

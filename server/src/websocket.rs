@@ -1814,7 +1814,6 @@ mod tests {
             &self,
             _track_id: &TrackId,
             _record: &poise_engine::ledger::TrackPnlRecord,
-            _instrument_spec: &poise_core::instrument::InstrumentSpec,
         ) -> Result<bool> {
             Ok(true)
         }

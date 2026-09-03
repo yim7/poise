@@ -33,6 +33,49 @@ pub enum TrackPnlCashflow {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TrackPnlQuantityUnit {
+    BaseAsset { asset: Asset },
+    Contracts { contract_value: Amount },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackPnlQuantity {
+    qty: PositionQty,
+    unit: TrackPnlQuantityUnit,
+}
+
+impl TrackPnlQuantity {
+    pub fn base_asset(qty: PositionQty, asset: Asset) -> Self {
+        Self {
+            qty,
+            unit: TrackPnlQuantityUnit::BaseAsset { asset },
+        }
+    }
+
+    pub fn contracts(qty: PositionQty, contract_value: Amount) -> Result<Self, String> {
+        if contract_value.value() <= f64::EPSILON {
+            return Err(format!(
+                "contract value must be positive, got {}",
+                contract_value.value()
+            ));
+        }
+        Ok(Self {
+            qty,
+            unit: TrackPnlQuantityUnit::Contracts { contract_value },
+        })
+    }
+
+    pub fn qty(&self) -> PositionQty {
+        self.qty
+    }
+
+    pub fn unit(&self) -> &TrackPnlQuantityUnit {
+        &self.unit
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackPnlRecord {
     pub instrument: Instrument,
     pub occurred_at: DateTime<Utc>,
@@ -42,7 +85,7 @@ pub struct TrackPnlRecord {
     pub trade_id: Option<String>,
     pub side: Option<Side>,
     pub price: Option<f64>,
-    pub qty: Option<PositionQty>,
+    pub quantity: Option<TrackPnlQuantity>,
     pub cashflow: TrackPnlCashflow,
 }
 
@@ -57,7 +100,7 @@ impl TrackPnlRecord {
         trade_id: Option<String>,
         side: Side,
         price: f64,
-        qty: PositionQty,
+        quantity: TrackPnlQuantity,
         realized_pnl: Amount,
         trading_fee: Option<Amount>,
     ) -> Self {
@@ -70,7 +113,7 @@ impl TrackPnlRecord {
             trade_id,
             side: Some(side),
             price: Some(price),
-            qty: Some(qty),
+            quantity: Some(quantity),
             cashflow: TrackPnlCashflow::Trade {
                 realized_pnl,
                 trading_fee,
@@ -94,7 +137,7 @@ impl TrackPnlRecord {
             trade_id: None,
             side: None,
             price: None,
-            qty: None,
+            quantity: None,
             cashflow: TrackPnlCashflow::Funding { funding },
         }
     }
@@ -117,7 +160,7 @@ impl TrackPnlRecord {
             trade_id,
             side: None,
             price: None,
-            qty: None,
+            quantity: None,
             cashflow: TrackPnlCashflow::Trade {
                 realized_pnl,
                 trading_fee,
@@ -635,5 +678,32 @@ mod tests {
                 amount: None,
             }]
         );
+    }
+
+    #[test]
+    fn trade_record_owns_occurrence_time_quantity_semantics() {
+        let quantity =
+            TrackPnlQuantity::contracts(PositionQty::new(30.0).unwrap(), amount(100.0, "USD"))
+                .unwrap();
+        let record = TrackPnlRecord::trade(
+            Instrument::new(poise_core::track::Venue::Okx, "BTC-USD-SWAP"),
+            Utc.with_ymd_and_hms(2026, 4, 8, 8, 0, 0).unwrap(),
+            "test".into(),
+            Some("trade:1".into()),
+            Some("order:1".into()),
+            Some("1".into()),
+            Side::Sell,
+            60_000.0,
+            quantity.clone(),
+            amount(0.001, "BTC"),
+            Some(amount(0.00001, "BTC")),
+        );
+
+        assert_eq!(record.quantity, Some(quantity));
+        assert!(matches!(
+            record.quantity.as_ref().unwrap().unit(),
+            TrackPnlQuantityUnit::Contracts { contract_value }
+                if contract_value.value() == 100.0 && contract_value.asset().as_str() == "USD"
+        ));
     }
 }

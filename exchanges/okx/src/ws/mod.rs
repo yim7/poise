@@ -162,7 +162,6 @@ mod tests {
     use poise_application::exchange::{
         ExecutionQuote, MarketDataTick, OrderStatus, UserDataPayload,
     };
-    use poise_core::instrument::PositionQty;
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
     use tokio::{
@@ -272,7 +271,13 @@ mod tests {
             UserDataPayload::TrackPnl(record) => {
                 assert_eq!(record.kind(), TrackPnlRecordKind::Trade);
                 assert_eq!(record.trade_id.as_deref(), Some("trade-1"));
-                assert_eq!(record.qty.map(PositionQty::value), Some(0.05));
+                assert_eq!(
+                    record
+                        .quantity
+                        .as_ref()
+                        .map(|quantity| quantity.qty().value()),
+                    Some(0.05)
+                );
                 assert_eq!(record.realized_pnl().unwrap().value(), 12.34);
                 assert_eq!(record.trading_fee().unwrap().value(), 1.25);
             }
@@ -303,7 +308,13 @@ mod tests {
         match &events[1].payload {
             UserDataPayload::TrackPnl(record) => {
                 assert_eq!(record.realized_pnl().unwrap().asset().as_str(), "BTC");
-                assert_eq!(record.qty.map(PositionQty::value), Some(10.0));
+                assert_eq!(
+                    record
+                        .quantity
+                        .as_ref()
+                        .map(|quantity| quantity.qty().value()),
+                    Some(10.0)
+                );
                 assert_eq!(record.realized_pnl().unwrap().value(), 0.0012);
                 assert_eq!(record.trading_fee().unwrap().value(), 0.00001);
             }

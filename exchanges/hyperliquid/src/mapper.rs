@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{DateTime, Utc};
-use poise_application::exchange::TrackPnlRecord;
 use poise_application::exchange::{
     AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderStatus, Position,
 };
+use poise_application::exchange::{TrackPnlQuantity, TrackPnlRecord};
 use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
 use poise_core::track::{Instrument, Venue};
 use poise_core::types::Side;
@@ -139,8 +139,11 @@ pub(crate) fn track_pnl_record_from_fill(value: &UserFillResponse) -> Result<Tra
         Some(trade_id),
         parse_side(&value.side)?,
         parse_finite_decimal("fill.px", &value.px)?,
-        PositionQty::new(parse_finite_decimal("fill.sz", &value.sz)?)
-            .map_err(anyhow::Error::msg)?,
+        TrackPnlQuantity::base_asset(
+            PositionQty::new(parse_finite_decimal("fill.sz", &value.sz)?)
+                .map_err(anyhow::Error::msg)?,
+            Asset::try_new(&value.coin).map_err(anyhow::Error::msg)?,
+        ),
         cash_amount(
             parse_finite_decimal("fill.closedPnl", &value.closed_pnl)?,
             "USDC",

@@ -7,11 +7,11 @@ use crate::rest::models::{
     BinanceIncomeRecord, BinanceOpenOrder, BinanceOrderResponse, BinancePositionRisk,
     BinanceSymbolConfiguration,
 };
-use poise_application::exchange::TrackPnlRecord;
 use poise_application::exchange::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderStatus, Position,
 };
+use poise_application::exchange::{TrackPnlQuantity, TrackPnlRecord};
 use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
 use poise_core::track::{Instrument, Venue};
 
@@ -153,7 +153,11 @@ pub(crate) fn track_pnl_record_from_trade(value: BinanceAccountTrade) -> Result<
         Some(trade_id),
         parse_side(&value.side)?,
         parse_decimal("price", &value.price)?,
-        parse_position_qty("qty", &value.qty)?,
+        linear_pnl_quantity(
+            &value.symbol,
+            settlement_asset.as_str(),
+            parse_position_qty("qty", &value.qty)?,
+        )?,
         cash_amount(
             parse_decimal("realizedPnl", &value.realized_pnl)?,
             settlement_asset,
@@ -269,6 +273,23 @@ fn parse_decimal(field: &str, value: &str) -> Result<f64> {
 
 fn parse_position_qty(field: &str, value: &str) -> Result<PositionQty> {
     PositionQty::new(parse_decimal(field, value)?).map_err(anyhow::Error::msg)
+}
+
+pub(crate) fn linear_pnl_quantity(
+    symbol: &str,
+    quote_asset: &str,
+    qty: PositionQty,
+) -> Result<TrackPnlQuantity> {
+    let base_asset = symbol
+        .strip_suffix(quote_asset)
+        .filter(|asset| !asset.is_empty())
+        .with_context(|| {
+            format!("cannot determine Binance base asset from symbol `{symbol}` and quote `{quote_asset}`")
+        })?;
+    Ok(TrackPnlQuantity::base_asset(
+        qty,
+        Asset::try_new(base_asset).map_err(anyhow::Error::msg)?,
+    ))
 }
 
 fn millis_to_utc(field: &str, value: i64) -> Result<chrono::DateTime<Utc>> {

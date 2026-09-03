@@ -11,7 +11,9 @@ use tokio::sync::mpsc;
 pub use poise_engine::exchange::{
     ExchangeOrder, ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus,
 };
-pub use poise_engine::ledger::{TrackPnlRecord, TrackPnlRecordKind};
+pub use poise_engine::ledger::{
+    TrackPnlQuantity, TrackPnlQuantityUnit, TrackPnlRecord, TrackPnlRecordKind,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
