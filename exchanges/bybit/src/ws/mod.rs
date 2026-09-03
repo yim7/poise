@@ -14,6 +14,8 @@ use tokio_tungstenite::{
 use poise_application::exchange::{MarketDataTick, UserDataEvent};
 use poise_core::track::Instrument;
 
+use crate::instrument::BybitInstrumentRegistry;
+
 type WebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub struct BybitWsClient {
@@ -23,6 +25,7 @@ pub struct BybitWsClient {
     api_secret: String,
     reconnect_delay: Duration,
     timestamp_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    instrument_registry: Arc<BybitInstrumentRegistry>,
 }
 
 impl BybitWsClient {
@@ -39,6 +42,7 @@ impl BybitWsClient {
             api_secret: api_secret.into(),
             reconnect_delay: Duration::from_millis(250),
             timestamp_provider: Arc::new(|| chrono::Utc::now().timestamp_millis()),
+            instrument_registry: Arc::new(BybitInstrumentRegistry::default()),
         }
     }
 
@@ -58,7 +62,12 @@ impl BybitWsClient {
             api_secret: api_secret.into(),
             reconnect_delay,
             timestamp_provider,
+            instrument_registry: Arc::new(BybitInstrumentRegistry::default()),
         }
+    }
+
+    pub(crate) fn instrument_registry(&self) -> Arc<BybitInstrumentRegistry> {
+        Arc::clone(&self.instrument_registry)
     }
 
     pub async fn subscribe_prices(
@@ -83,6 +92,7 @@ impl BybitWsClient {
         let api_key = self.api_key.clone();
         let api_secret = self.api_secret.clone();
         let timestamp_provider = Arc::clone(&self.timestamp_provider);
+        let instrument_registry = Arc::clone(&self.instrument_registry);
         let reconnect_delay = self.reconnect_delay;
 
         tokio::spawn(async move {
@@ -91,6 +101,7 @@ impl BybitWsClient {
                 api_key,
                 api_secret,
                 timestamp_provider,
+                instrument_registry,
                 sender,
                 reconnect_delay,
             )

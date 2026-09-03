@@ -9,9 +9,9 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::Message;
 
-use poise_application::exchange::TrackPnlRecord;
 use poise_application::exchange::{ExchangeOrder, Position, UserDataEvent, UserDataPayload};
-use poise_core::instrument::{Amount, Asset};
+use poise_application::exchange::{TrackPnlQuantity, TrackPnlRecord};
+use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionBasis, PositionQty};
 use poise_core::track::{Instrument, Venue};
 
 use super::{
@@ -21,6 +21,7 @@ use super::{
         PositionTopicMessage, PositionUpdate,
     },
 };
+use crate::instrument::BybitInstrumentRegistry;
 use crate::mapper::{
     BybitActiveOrder, build_bybit_open_order, build_bybit_position, should_track_bybit_order,
 };
@@ -34,6 +35,7 @@ pub(super) async fn run_user_stream(
     api_key: String,
     api_secret: String,
     timestamp_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    instrument_registry: Arc<BybitInstrumentRegistry>,
     sender: mpsc::Sender<UserDataEvent>,
     reconnect_delay: Duration,
 ) {
@@ -55,18 +57,22 @@ pub(super) async fn run_user_stream(
                 } else {
                     while let Some(message) = websocket.next().await {
                         match message {
-                            Ok(Message::Text(text)) => match parse_user_data_message(&text) {
-                                Ok(events) => {
-                                    for event in events {
-                                        if sender.send(event).await.is_err() {
-                                            return;
+                            Ok(Message::Text(text)) => {
+                                match parse_user_data_message(&text, &instrument_registry) {
+                                    Ok(events) => {
+                                        for event in events {
+                                            if sender.send(event).await.is_err() {
+                                                return;
+                                            }
                                         }
                                     }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            "failed to parse user data message: {error}"
+                                        );
+                                    }
                                 }
-                                Err(error) => {
-                                    tracing::warn!("failed to parse user data message: {error}");
-                                }
-                            },
+                            }
                             Ok(Message::Close(_)) => break,
                             Ok(_) => {}
                             Err(error) => {
@@ -133,21 +139,27 @@ fn build_auth_payload(api_key: &str, api_secret: &str, expires_ms: i64) -> Strin
     .to_string()
 }
 
-pub(super) fn parse_user_data_message(payload: &str) -> Result<Vec<UserDataEvent>> {
+pub(super) fn parse_user_data_message(
+    payload: &str,
+    instrument_registry: &BybitInstrumentRegistry,
+) -> Result<Vec<UserDataEvent>> {
     let value: serde_json::Value = serde_json::from_str(payload)?;
     let Some(topic) = value.get("topic").and_then(|topic| topic.as_str()) else {
         return Ok(Vec::new());
     };
 
     match topic {
-        PRIVATE_EXECUTION_TOPIC => parse_execution_message(payload),
+        PRIVATE_EXECUTION_TOPIC => parse_execution_message(payload, instrument_registry),
         PRIVATE_ORDER_TOPIC => parse_order_message(payload),
         PRIVATE_POSITION_TOPIC => parse_position_message(payload),
         _ => Ok(Vec::new()),
     }
 }
 
-fn parse_execution_message(payload: &str) -> Result<Vec<UserDataEvent>> {
+fn parse_execution_message(
+    payload: &str,
+    instrument_registry: &BybitInstrumentRegistry,
+) -> Result<Vec<UserDataEvent>> {
     let message: ExecutionTopicMessage = serde_json::from_str(payload)?;
     if message.topic != PRIVATE_EXECUTION_TOPIC {
         return Ok(Vec::new());
@@ -159,7 +171,11 @@ fn parse_execution_message(payload: &str) -> Result<Vec<UserDataEvent>> {
 
     let mut events = Vec::with_capacity(message.data.len());
     for execution in message.data {
-        events.push(parse_execution_update(event_time, execution)?);
+        events.push(parse_execution_update(
+            event_time,
+            execution,
+            instrument_registry,
+        )?);
     }
 
     Ok(events)
@@ -238,30 +254,57 @@ fn parse_position_update(update: PositionUpdate) -> Result<Position> {
 fn parse_execution_update(
     event_time: chrono::DateTime<Utc>,
     update: ExecutionUpdate,
+    instrument_registry: &BybitInstrumentRegistry,
 ) -> Result<UserDataEvent> {
     let symbol = update.symbol;
     let exec_id = update.exec_id;
     let instrument = Instrument::new(Venue::Bybit, symbol.clone());
-    let quote_asset = bybit_settlement_asset_for_symbol(&symbol)
-        .context("cannot determine Bybit settlement asset from execution symbol")?;
-    let fee_asset = normalized_fee_currency(update.fee_currency.as_deref()).unwrap_or(quote_asset);
+    let instrument_spec = instrument_registry.get(&symbol).with_context(|| {
+        format!("missing Bybit instrument metadata for execution symbol `{symbol}`")
+    })?;
+    let occurred_at = Utc
+        .timestamp_millis_opt(update.exec_time)
+        .single()
+        .context("invalid execution trade timestamp")?;
+    let settlement_asset = instrument_spec.settlement_asset().as_str();
+    let fee_asset =
+        normalized_fee_currency(update.fee_currency.as_deref()).unwrap_or(settlement_asset);
 
     Ok(UserDataEvent {
         event_time,
-        payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade_summary(
+        payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade(
             instrument,
-            event_time,
+            occurred_at,
             "bybit:execution".into(),
             Some(format!(
                 "bybit:execution:{}:{}",
                 symbol.to_lowercase(),
                 exec_id
             )),
+            Some(update.order_id),
             Some(exec_id),
-            cash_amount(update.exec_pnl, quote_asset)?,
+            update.side,
+            update.exec_price,
+            pnl_quantity(
+                PositionQty::new(update.exec_qty).map_err(anyhow::Error::msg)?,
+                &instrument_spec,
+            )?,
+            cash_amount(update.exec_pnl, settlement_asset)?,
             Some(cash_amount(update.exec_fee, fee_asset)?),
         )),
     })
+}
+
+fn pnl_quantity(qty: PositionQty, instrument_spec: &InstrumentSpec) -> Result<TrackPnlQuantity> {
+    match instrument_spec.position_basis() {
+        PositionBasis::BaseAsset => Ok(TrackPnlQuantity::base_asset(
+            qty,
+            instrument_spec.base_asset().clone(),
+        )),
+        PositionBasis::Contracts { contract_value } => {
+            TrackPnlQuantity::contracts(qty, contract_value.clone()).map_err(anyhow::Error::msg)
+        }
+    }
 }
 
 fn cash_amount(value: f64, asset: &str) -> Result<Amount> {
@@ -271,12 +314,6 @@ fn cash_amount(value: f64, asset: &str) -> Result<Amount> {
 
 fn normalized_fee_currency(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-fn bybit_settlement_asset_for_symbol(symbol: &str) -> Option<&'static str> {
-    ["USDT", "USDC"]
-        .into_iter()
-        .find(|asset| symbol.ends_with(asset))
 }
 
 #[cfg(test)]
@@ -289,8 +326,29 @@ mod tests {
 
     use super::*;
     use crate::ws::BybitWsClient;
+    use poise_application::exchange::TrackPnlQuantity;
+    use poise_core::instrument::PositionQty;
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
+
+    fn test_registry() -> BybitInstrumentRegistry {
+        let registry = BybitInstrumentRegistry::default();
+        registry.upsert(
+            InstrumentSpec::try_linear(
+                Instrument::new(Venue::Bybit, "BTCUSDT"),
+                Asset::try_new("BTC").unwrap(),
+                Asset::try_new("USDT").unwrap(),
+                Asset::try_new("USDT").unwrap(),
+                Default::default(),
+                0.1,
+                0.001,
+                0.001,
+                Amount::new(5.0, Asset::try_new("USDT").unwrap()).unwrap(),
+            )
+            .unwrap(),
+        );
+        registry
+    }
 
     #[test]
     fn parses_order_update_into_user_data_event() {
@@ -309,7 +367,7 @@ mod tests {
             }]
         }"#;
 
-        let events = parse_user_data_message(payload).unwrap();
+        let events = parse_user_data_message(payload, &test_registry()).unwrap();
         assert_eq!(events.len(), 1);
 
         let event = &events[0];
@@ -343,7 +401,9 @@ mod tests {
             }]
         }"#;
 
-        let error = parse_user_data_message(payload).unwrap_err().to_string();
+        let error = parse_user_data_message(payload, &test_registry())
+            .unwrap_err()
+            .to_string();
 
         assert!(error.contains("one-way"));
     }
@@ -363,7 +423,7 @@ mod tests {
             }]
         }"#;
 
-        let events = parse_user_data_message(payload).unwrap();
+        let events = parse_user_data_message(payload, &test_registry()).unwrap();
         assert_eq!(events.len(), 1);
 
         let event = &events[0];
@@ -399,7 +459,7 @@ mod tests {
             }]
         }"#;
 
-        let events = parse_user_data_message(payload).unwrap();
+        let events = parse_user_data_message(payload, &test_registry()).unwrap();
 
         assert!(events.is_empty());
     }
@@ -412,29 +472,68 @@ mod tests {
             "data": [{
                 "symbol": "BTCUSDT",
                 "execId": "exec-1",
+                "orderId": "order-1",
+                "side": "Sell",
+                "execPrice": "64000.50",
+                "execQty": "0.015",
+                "execTime": "1699999999123",
                 "execPnl": "12.34",
                 "execFee": "3.21",
                 "feeCurrency": "MNT"
             }]
         }"#;
 
-        let events = parse_user_data_message(payload).unwrap();
+        let events = parse_user_data_message(payload, &test_registry()).unwrap();
 
         assert_eq!(
             events,
             vec![UserDataEvent {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-                payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade_summary(
+                payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade(
                     Instrument::new(Venue::Bybit, "BTCUSDT"),
-                    Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                    Utc.timestamp_millis_opt(1_699_999_999_123).unwrap(),
                     "bybit:execution".into(),
                     Some("bybit:execution:btcusdt:exec-1".into()),
+                    Some("order-1".into()),
                     Some("exec-1".into()),
+                    Side::Sell,
+                    64_000.50,
+                    TrackPnlQuantity::base_asset(
+                        PositionQty::new(0.015).unwrap(),
+                        Asset::try_new("BTC").unwrap(),
+                    ),
                     cash_amount(12.34, "USDT").unwrap(),
                     Some(cash_amount(3.21, "MNT").unwrap()),
                 )),
             }]
         );
+    }
+
+    #[test]
+    fn rejects_execution_update_when_instrument_metadata_is_missing() {
+        let payload = r#"{
+            "topic": "execution.linear",
+            "creationTime": 1700000000000,
+            "data": [{
+                "symbol": "BTCUSDT",
+                "execId": "exec-1",
+                "orderId": "order-1",
+                "side": "Sell",
+                "execPrice": "64000.50",
+                "execQty": "0.015",
+                "execTime": "1699999999123",
+                "execPnl": "12.34",
+                "execFee": "3.21",
+                "feeCurrency": "USDT"
+            }]
+        }"#;
+
+        let error = parse_user_data_message(payload, &BybitInstrumentRegistry::default())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("missing Bybit instrument metadata"));
+        assert!(error.contains("BTCUSDT"));
     }
 
     #[test]
@@ -445,24 +544,36 @@ mod tests {
             "data": [{
                 "symbol": "BTCUSDT",
                 "execId": "exec-2",
+                "orderId": "order-2",
+                "side": "Buy",
+                "execPrice": "63000.25",
+                "execQty": "0.020",
+                "execTime": "1699999999456",
                 "execPnl": "0.50",
                 "execFee": "1.25",
                 "feeCurrency": ""
             }]
         }"#;
 
-        let events = parse_user_data_message(payload).unwrap();
+        let events = parse_user_data_message(payload, &test_registry()).unwrap();
 
         assert_eq!(
             events,
             vec![UserDataEvent {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-                payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade_summary(
+                payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade(
                     Instrument::new(Venue::Bybit, "BTCUSDT"),
-                    Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                    Utc.timestamp_millis_opt(1_699_999_999_456).unwrap(),
                     "bybit:execution".into(),
                     Some("bybit:execution:btcusdt:exec-2".into()),
+                    Some("order-2".into()),
                     Some("exec-2".into()),
+                    Side::Buy,
+                    63_000.25,
+                    TrackPnlQuantity::base_asset(
+                        PositionQty::new(0.020).unwrap(),
+                        Asset::try_new("BTC").unwrap(),
+                    ),
                     cash_amount(0.50, "USDT").unwrap(),
                     Some(cash_amount(1.25, "USDT").unwrap()),
                 )),
@@ -498,7 +609,7 @@ mod tests {
                                 .unwrap();
                             websocket
                                 .send(Message::Text(
-                                    r#"{"topic":"execution.linear","creationTime":1700000000000,"data":[{"symbol":"BTCUSDT","execId":"exec-bridge-1","execPnl":"12.34","execFee":"3.21","feeCurrency":"USDT"}]}"#.to_string(),
+                                    r#"{"topic":"execution.linear","creationTime":1700000000000,"data":[{"symbol":"BTCUSDT","execId":"exec-bridge-1","orderId":"order-bridge-1","side":"Sell","execPrice":"64000.50","execQty":"0.015","execTime":"1699999999123","execPnl":"12.34","execFee":"3.21","feeCurrency":"USDT"}]}"#.to_string(),
                                 ))
                                 .await
                                 .unwrap();
@@ -520,6 +631,9 @@ mod tests {
             Duration::from_millis(10),
             Arc::new(|| 1_700_000_000_000),
         );
+        client
+            .instrument_registry()
+            .upsert(test_registry().get("BTCUSDT").unwrap());
 
         let mut receiver = client.subscribe_user_data().await.unwrap();
         let event = timeout(Duration::from_secs(1), receiver.recv())
@@ -531,12 +645,19 @@ mod tests {
             event,
             UserDataEvent {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-                payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade_summary(
+                payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade(
                     Instrument::new(Venue::Bybit, "BTCUSDT"),
-                    Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                    Utc.timestamp_millis_opt(1_699_999_999_123).unwrap(),
                     "bybit:execution".into(),
                     Some("bybit:execution:btcusdt:exec-bridge-1".into()),
+                    Some("order-bridge-1".into()),
                     Some("exec-bridge-1".into()),
+                    Side::Sell,
+                    64_000.50,
+                    TrackPnlQuantity::base_asset(
+                        PositionQty::new(0.015).unwrap(),
+                        Asset::try_new("BTC").unwrap(),
+                    ),
                     cash_amount(12.34, "USDT").unwrap(),
                     Some(cash_amount(3.21, "USDT").unwrap()),
                 )),

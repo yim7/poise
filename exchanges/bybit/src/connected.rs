@@ -14,6 +14,7 @@ use poise_core::track::Instrument;
 
 use crate::{
     Config,
+    instrument::BybitInstrumentRegistry,
     rest::{BybitRestClient, BybitRestError, BybitSubmitOutcomeUnknown},
     ws::BybitWsClient,
 };
@@ -35,7 +36,10 @@ fn ports_from_clients(rest: Arc<BybitRestClient>, ws: Arc<BybitWsClient>) -> Exc
     let execution: Arc<dyn ExecutionPort> = rest.clone();
     let market_data: Arc<dyn MarketDataPort> = ws.clone();
     let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
-    let metadata: Arc<dyn MetadataPort> = rest.clone();
+    let metadata: Arc<dyn MetadataPort> = Arc::new(BybitMetadata {
+        rest: Arc::clone(&rest),
+        instrument_registry: ws.instrument_registry(),
+    });
 
     ExchangePorts::new(
         execution,
@@ -48,6 +52,11 @@ fn ports_from_clients(rest: Arc<BybitRestClient>, ws: Arc<BybitWsClient>) -> Exc
 
 struct BybitAccount {
     ws: Arc<BybitWsClient>,
+}
+
+struct BybitMetadata {
+    rest: Arc<BybitRestClient>,
+    instrument_registry: Arc<BybitInstrumentRegistry>,
 }
 
 fn map_execution_error(error: anyhow::Error) -> ExecutionPortError {
@@ -150,6 +159,20 @@ impl MetadataPort for BybitRestClient {
 
     async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
         self.get_server_time().await
+    }
+}
+
+#[async_trait]
+impl MetadataPort for BybitMetadata {
+    async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
+        let info = self.rest.get_exchange_info(&instrument.symbol).await?;
+        self.instrument_registry
+            .upsert(info.instrument_spec.clone());
+        Ok(info)
+    }
+
+    async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
+        self.rest.get_server_time().await
     }
 }
 
@@ -279,8 +302,18 @@ mod tests {
                 reqwest::Client::new(),
             ),
         );
-        let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
-        let metadata: Arc<dyn MetadataPort> = rest.clone();
+        let ws = Arc::new(BybitWsClient::with_test_params(
+            "ws://127.0.0.1:1",
+            "ws://127.0.0.1:1",
+            "api-key",
+            "secret-key",
+            Duration::from_millis(10),
+            Arc::new(|| 1_700_000_000_000),
+        ));
+        let instrument_registry = ws.instrument_registry();
+        let connected = ports_from_clients(rest, ws);
+        let account_summary = connected.account_summary();
+        let metadata = connected.metadata();
         let instrument = poise_core::track::Instrument::new(Venue::Bybit, "BTCUSDT");
 
         let summary = account_summary.get_account_summary().await.unwrap();
@@ -290,6 +323,10 @@ mod tests {
 
         assert_eq!(summary.available().unwrap().value(), 100.25);
         assert_eq!(info.instrument_spec.instrument(), &instrument);
+        assert_eq!(
+            instrument_registry.get("BTCUSDT").unwrap().instrument(),
+            &instrument
+        );
         assert_eq!(server_time.timestamp(), 1_700_000_000);
         assert_eq!(requests.len(), 3);
         assert!(

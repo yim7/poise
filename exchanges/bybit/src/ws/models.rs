@@ -49,6 +49,15 @@ pub(crate) struct ExecutionTopicMessage {
 pub(crate) struct ExecutionUpdate {
     pub symbol: String,
     pub exec_id: String,
+    pub order_id: String,
+    #[serde(deserialize_with = "deserialize_side")]
+    pub side: Side,
+    #[serde(deserialize_with = "deserialize_f64")]
+    pub exec_price: f64,
+    #[serde(deserialize_with = "deserialize_f64")]
+    pub exec_qty: f64,
+    #[serde(deserialize_with = "deserialize_i64")]
+    pub exec_time: i64,
     #[serde(deserialize_with = "deserialize_f64")]
     pub exec_pnl: f64,
     #[serde(deserialize_with = "deserialize_f64")]
@@ -124,6 +133,11 @@ mod tests {
                 "data": [{
                     "symbol": "BTCUSDT",
                     "execId": "exec-1",
+                    "orderId": "order-1",
+                    "side": "Sell",
+                    "execPrice": "64000.50",
+                    "execQty": "0.015",
+                    "execTime": "1699999999123",
                     "execPnl": "12.34",
                     "execFee": "3.21",
                     "feeCurrency": "USDT"
@@ -135,6 +149,11 @@ mod tests {
         let update = &message.data[0];
         assert_eq!(update.symbol, "BTCUSDT");
         assert_eq!(update.exec_id, "exec-1");
+        assert_eq!(update.order_id, "order-1");
+        assert_eq!(update.side, Side::Sell);
+        assert_eq!(update.exec_price, 64_000.50);
+        assert_eq!(update.exec_qty, 0.015);
+        assert_eq!(update.exec_time, 1_699_999_999_123);
         assert_eq!(update.exec_pnl, 12.34);
         assert_eq!(update.exec_fee, 3.21);
         assert_eq!(update.fee_currency.as_deref(), Some("USDT"));
