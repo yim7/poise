@@ -83,12 +83,12 @@
 
 ### F3 改为单 track 规划并统一时间语义
 
-- [ ] engine 从单个 committed `TrackRuntime` 副本规划候选 transition；PNL 统计也只复制目标 runtime；application 删除所有业务更新中的 `manager.clone()` 候选路径。
-- [ ] 一次 manager 更新只采样一次 `evaluated_at`；行情输入单独保留 `occurred_at`。
-- [ ] Position、Order、Command、Market 和 exchange sync 共用同一 reconcile 规划核心，删除 `reconcile_track` / `reconcile_market_track` 的重复决策逻辑。
-- [ ] 保留 LiveOnly/Commit 差异和 observation revision 的单调失效语义。
-- [ ] 验收：更新一个 track 的规划接口不能读取或修改另一 track；延迟行情不能触发新增风险；manager clock 与 event time 不同时，decision 使用 evaluation time；持久化失败和取消调用方的既有测试继续通过。
-- Commit SHA：待执行
+- [x] engine 从单个 committed `TrackRuntime` 副本规划候选 transition；PNL 统计也只复制目标 runtime；application 删除所有业务更新中的 `manager.clone()` 候选路径。
+- [x] 一次 manager 更新只采样一次 `evaluated_at`；行情输入单独保留 `occurred_at`。
+- [x] Position、Order、Command、Market 和 exchange sync 共用同一 reconcile 规划核心，删除 `reconcile_track` / `reconcile_market_track` 的重复决策逻辑。
+- [x] 保留 LiveOnly/Commit 差异和 observation revision 的单调失效语义。
+- [x] 验收：更新一个 track 的规划接口不能读取或修改另一 track；延迟行情不能触发新增风险；manager clock 与 event time 不同时，decision 使用 evaluation time；持久化失败和取消调用方的既有测试继续通过。
+- Commit SHA：`b327cef`
 
 ### F4 保持 runtime 的 canonical `PositionQty`
 
