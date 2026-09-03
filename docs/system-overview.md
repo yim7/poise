@@ -45,8 +45,8 @@ TrackDefinition + InstrumentSpec
 从零搭建 Poise 时，不按 crate 先后堆半成品，而是按可运行闭环推进。每个闭环都要包含真实输入、核心决策、状态变化、可观察输出和局部测试。
 
 1. 领域和单位内核：先在 `core/` 定义身份、策略、风险、领域事件，以及由 metadata 验证后生成的 `InstrumentSpec`。配置校验、曲线、风险和数量换算都用纯函数测试，不依赖数据库、HTTP 或交易所 I/O。
-2. 单 track transition：在 `engine/` 建 `TrackRuntime`、`reconciler`、executor 和最小 `TrackManager`。从当前状态副本计算候选 `TrackTransition { next_state, events, effects }`，不触碰 application 中的 committed state。
-3. 唯一提交闭环：所有命令、行情、仓位、订单、PNL 和 effect 结果都进入 `TradingRuntime::handle(track_id, TrackInput)`。application 串行规划、持久化、安装下一状态、入队 effects 和发布通知；持久化失败时当前状态未变，不需要 rollback。
+2. 单 track transition：在 `engine/` 建 `TrackRuntime`、`reconciler`、executor 和最小 `TrackManager`。从当前状态副本计算候选 `TrackTransition`，由它同时绑定 `next_state`、durable facts、effects 和 commit intent，不触碰 application 中的 committed state。行情观察和行情健康评估的时间由调用方显式传入，engine 不在 transition 内采样当前时间。
+3. 唯一提交闭环：所有命令、行情、仓位、订单、PNL 和 effect 结果都进入 `TradingRuntime::handle(track_id, TrackInput)`。application 根据 commit intent 串行安装 session-only 状态，或先持久化 durable facts/control、再安装下一状态并入队 effects；持久化失败时当前状态未变，不需要 rollback。
 4. 执行闭环：executor 只接收 risk-approved target、final execution target、盘口、`InstrumentSpec` 和已有 bindings，生成 `TrackEffect` 与执行原因，不直接调用交易所。application queue 拥有 submit/cancel 生命周期，runner 只执行 effect 并把结果送回 `handle`。
 5. storage 闭环：`application/` 定义持久化 port，`storage/` 只实现当前 SQLite schema。SQLite 保存 identity、durable control、events、PNL 明细和 best-effort effect journal；不保存 session state，也不从 journal 恢复派发。
 6. 交易所闭环：每个 `exchanges/<venue>/` 在私有模块完成签名、REST / WebSocket DTO、symbol、账户模式、metadata 和 wire/canonical 转换，通过 `connected.rs` 输出同一组 `ExchangePorts`。
@@ -71,12 +71,13 @@ TrackDefinition + InstrumentSpec
 external fact / command / effect result
   -> TradingRuntime::handle(track_id, TrackInput)
   -> engine 在当前状态副本上计算 TrackTransition
-  -> SQLite transaction 保存 durable facts
-  -> 安装 next_state 并追加 session effects
-  -> 发布 committed notification
+  -> LiveOnly：直接安装 next_state；不写 SQLite，也不产生新 facts/effects
+  -> Commit：SQLite transaction 保存 durable facts/control
+      -> 安装 next_state 并追加 session effects
+      -> 发布 committed notification
 ```
 
-同一个 track 在 application 中串行更新。SQLite 写入期间持有该 track 的 mutation guard；交易所网络 I/O 不持锁。错误语义固定如下：
+同一个 track 在 application 中串行更新。SQLite 写入期间持有该 track 的 mutation guard；交易所网络 I/O 不持锁。`TrackManager` 不按通用 observation 枚举分派：行情、仓位和订单分别进入类型明确的方法，行情方法必须接收 `observed_at`。错误语义固定如下：
 
 - transition 失败：不写数据库、不安装状态、不入队 effect；
 - durable write 失败：committed state、decision revision 和 effect queue 都不变化；
@@ -116,7 +117,7 @@ external fact / command / effect result
 
 - `ExecutionPort`：下单、撤单、cancel all、持仓查询、open orders 查询。
 - `MarketDataPort`：订阅当前 track 需要的价格流。
-- `AccountPort`：账户容量快照、recent track PNL capability 和 user data 订阅。
+- `AccountPort`：recent track PNL capability 和 user data 订阅。
 - `AccountSummaryPort`：账户摘要，用于 account monitor 和部分启动资金策略。
 - `MetadataPort`：交易规则和交易所时间。
 
@@ -125,7 +126,7 @@ port 的共享契约比方法签名更重要：
 - `ExecutionPort` 必须区分确定失败与结果未知。`SubmitOutcomeUnknown` 只表示请求已经越过 dispatch 边界，交易所可能接受了订单，但本地没有权威 receipt；它不能被当成普通失败后直接提交替代订单。当前 session 会保留 submit effect、client order identity 和 binding 所有权，把 exchange freshness 标为需要对账，并通过完整 position/open-orders 快照或后续订单事实裁决。只有权威事实解决这笔 submit 后，队列才能释放它；`track_effects` journal 不参与这条所有权协议。
 - open orders 必须完成全部分页后才能构造完整快照；无法证明完整时应返回错误。cancel ACK 只表示交易所接受撤单请求，terminal 状态仍由权威查询或流确认。
 - recent PNL 请求携带 required window，结果携带 covered window 与 completeness；空记录不等于 `Unsupported`，也不能在覆盖范围未知时伪装成 complete。
-- 启动容量由 server 使用显式 startup leverage、账户余额和 `InstrumentSpec` 计算；insufficient-margin 后会立即激活账户 gate，后续 port snapshot 刷新不负责重新授权新增风险。
+- 启动容量由 server 使用显式 startup leverage、账户余额和 `InstrumentSpec` 计算；insufficient-margin 后立即激活账户 gate。当前进程内不查询运行期“容量快照”来解除该 gate，也不存在 adapter 隐藏倍率；新增风险持续禁止，重启时再按新的启动事实重新计算。
 - metadata 缺少 base、quote、settlement、contract value、tick、lot 或最小量等必要事实时必须失败，不能根据 symbol 猜测。
 
 新增交易所时按下面顺序接入：
@@ -287,7 +288,7 @@ SQLite 文件位于 `<instance-dir>/.data/poise-server.sqlite`。
 
 当前进程事实：
 
-- `TrackTransition` 只是在一次 `handle` 中绑定候选下一状态、events 和 effects 的临时值；持久化成功前不会替换 committed state，也不会进入 persistence 或协议。
+- `TrackTransition` 只是在一次 `handle` 中绑定候选下一状态、durable facts、effects 和 commit intent 的临时值，不进入 persistence 或协议。`LiveOnly` 构造保证 facts/effects 为空，只安装当前 session 状态；`Commit` 在 durable facts/control 持久化成功后才安装候选状态并入队 effects。
 - `ExecutorState`、binding ledger、recovery anomaly、risk exposure gate、fresh acquisition marker、`InventoryDecisionSnapshot`、decision revision、acquisition frontier、release anchor、stale timer 和 live market fields 属于 runtime 当前会话状态。它们不持久化；需要展示时从 live runtime 投影，重启后根据 durable 控制状态、当前配置、交易所快照和新行情重新建立。
 - `SessionEffectQueue` 是当前进程内唯一的 effect 派发事实，随 fresh session 新建；它不从 `track_effects` 恢复。
 - 当前账户摘要、`available_by_asset` 和 hedge-like account asset 数量来自启动后的 `AccountSummaryPort` 刷新或订阅更新，不从 `account_monitor_state` 恢复。
