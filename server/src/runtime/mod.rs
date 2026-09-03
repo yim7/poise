@@ -9,7 +9,7 @@ use crate::test_support::RuntimeTestContext;
 use anyhow::{Result, anyhow};
 use poise_application::TrackMutationError;
 use poise_application::exchange::{ExchangePorts, ExecutionPort, UserDataEvent};
-use poise_core::instrument::InstrumentSpec;
+use poise_core::instrument::{InstrumentSpec, PositionQty};
 use poise_core::track::{Instrument, TrackDefinition, TrackId};
 use poise_core::types::Exposure;
 use poise_engine::clock::ClockPort;
@@ -62,7 +62,7 @@ impl RuntimeStartupDefinition {
 
     pub(crate) fn required_additional_notional(
         &self,
-        position_qty: f64,
+        position_qty: PositionQty,
         instrument_spec: &InstrumentSpec,
     ) -> f64 {
         poise_engine::runtime::required_additional_notional(
@@ -75,7 +75,7 @@ impl RuntimeStartupDefinition {
 
     pub(crate) fn exposure_from_position_qty(
         &self,
-        position_qty: f64,
+        position_qty: PositionQty,
         instrument_spec: &InstrumentSpec,
     ) -> Exposure {
         poise_engine::runtime::exposure_from_position_qty(

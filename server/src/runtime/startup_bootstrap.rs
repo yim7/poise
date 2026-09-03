@@ -6,7 +6,7 @@ use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{DateTime, Utc};
 use poise_application::TrackInput;
 use poise_application::exchange::{AccountCapacitySnapshot, Position, UserDataEvent};
-use poise_core::instrument::{InstrumentSpec, PositionBasis};
+use poise_core::instrument::{InstrumentSpec, PositionBasis, PositionQty};
 use poise_core::track::{Instrument, TrackId};
 use poise_engine::runtime::FreshSessionExternalInputs;
 use tokio::sync::mpsc;
@@ -33,7 +33,7 @@ impl TrackStartupSeed {
 
     fn required_additional_notional(
         &self,
-        position_qty: f64,
+        position_qty: PositionQty,
         instrument_spec: &InstrumentSpec,
     ) -> f64 {
         self.definition
@@ -42,7 +42,7 @@ impl TrackStartupSeed {
 
     fn exposure_from_position_qty(
         &self,
-        position_qty: f64,
+        position_qty: PositionQty,
         instrument_spec: &InstrumentSpec,
     ) -> poise_core::types::Exposure {
         self.definition
@@ -185,8 +185,8 @@ async fn rebuild_fresh_sessions(
     for seed in track_seeds {
         let instrument = seed.instrument().clone();
         let preflight = preflight_track_startup(runtime, seed).await?;
-        let current_exposure = seed
-            .exposure_from_position_qty(preflight.position.qty.value(), &preflight.instrument_spec);
+        let current_exposure =
+            seed.exposure_from_position_qty(preflight.position.qty, &preflight.instrument_spec);
         let applied = runtime
             .state
             .reconcile
@@ -196,7 +196,7 @@ async fn rebuild_fresh_sessions(
                 current_utc_day,
                 FreshSessionExternalInputs {
                     current_exposure,
-                    position_qty: preflight.position.qty.value(),
+                    position_qty: preflight.position.qty,
                     market_data: None,
                     instrument_spec: preflight.instrument_spec.clone(),
                 },
@@ -261,7 +261,7 @@ async fn preflight_track_startup_inner(
         probe_startup_account_capacity(runtime, seed, &position, &exchange_info.instrument_spec)
             .await?;
     let required_additional_notional =
-        seed.required_additional_notional(position.qty.value(), &exchange_info.instrument_spec);
+        seed.required_additional_notional(position.qty, &exchange_info.instrument_spec);
     if required_additional_notional > account_capacity_snapshot.max_increase_notional {
         return Err(anyhow!(
             "insufficient account margin for configured max_notional on track `{}`: required {}, available {}",

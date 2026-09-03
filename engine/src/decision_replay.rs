@@ -264,11 +264,8 @@ impl DecisionReplayRunner {
         manager
             .add_track(input.definition.clone(), instrument_spec.clone())
             .context("add decision replay track")?;
-        let initial_exposure = exposure_from_position_qty(
-            &track_config,
-            &instrument_spec,
-            input.initial_position.qty.value(),
-        );
+        let initial_exposure =
+            exposure_from_position_qty(&track_config, &instrument_spec, input.initial_position.qty);
         manager
             .fresh_start_track(
                 &track_id,
@@ -276,7 +273,7 @@ impl DecisionReplayRunner {
                 TrackPnlStats::default(),
                 FreshSessionExternalInputs {
                     current_exposure: initial_exposure,
-                    position_qty: input.initial_position.qty.value(),
+                    position_qty: input.initial_position.qty,
                     market_data: None,
                     instrument_spec: instrument_spec.clone(),
                 },
@@ -828,7 +825,8 @@ impl DecisionReplayRunner {
             pnl_stats,
             FreshSessionExternalInputs {
                 current_exposure: self.simulated_exposure(),
-                position_qty: self.simulated_position_qty,
+                position_qty: PositionQty::new(self.simulated_position_qty)
+                    .expect("simulated position quantity must remain finite"),
                 market_data: None,
                 instrument_spec: self.instrument_spec.clone(),
             },
@@ -851,7 +849,8 @@ impl DecisionReplayRunner {
         exposure_from_position_qty(
             &self.track_config,
             &self.instrument_spec,
-            self.simulated_position_qty,
+            PositionQty::new(self.simulated_position_qty)
+                .expect("simulated position quantity must remain finite"),
         )
     }
 

@@ -839,8 +839,8 @@ impl TrackManager {
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        track.current_exposure = track.exposure_from_position_qty(observation.qty.value());
-        track.current_position_qty = observation.qty.value();
+        track.current_exposure = track.exposure_from_position_qty(observation.qty);
+        track.current_position_qty = observation.qty;
         track.risk_state.unrealized_pnl = observation.unrealized_pnl;
         track.advance_exchange_observation_revision();
         Ok(())
@@ -1930,7 +1930,7 @@ mod tests {
                 TrackPnlStats::default(),
                 FreshSessionExternalInputs {
                     current_exposure: Exposure(2.0),
-                    position_qty: 2.0,
+                    position_qty: PositionQty::new(2.0).unwrap(),
                     market_data: None,
                     instrument_spec: rules(),
                 },
@@ -2559,7 +2559,7 @@ mod tests {
             .unwrap();
 
         let track = manager.tracks.get(&id).unwrap();
-        assert_eq!(track.current_position_qty, -0.2);
+        assert_eq!(track.current_position_qty, PositionQty::new(-0.2).unwrap());
         assert_eq!(track.current_exposure, Exposure(-0.2));
         assert!((track.risk_state.unrealized_pnl - 5.0).abs() < f64::EPSILON);
         assert!((track.pnl_stats.gross_realized_pnl_today - 20.0).abs() < f64::EPSILON);
@@ -2594,7 +2594,7 @@ mod tests {
             .unwrap();
 
         let track = manager.tracks.get(&id).unwrap();
-        assert_eq!(track.current_position_qty, -30.0);
+        assert_eq!(track.current_position_qty, PositionQty::new(-30.0).unwrap());
         assert_eq!(track.current_exposure, Exposure(-3.0));
     }
 
@@ -2759,7 +2759,7 @@ mod tests {
                 },
                 FreshSessionExternalInputs {
                     current_exposure: Exposure(1.5),
-                    position_qty: 1.5,
+                    position_qty: PositionQty::new(1.5).unwrap(),
                     market_data: Some(CurrentMarketData {
                         strategy_price: 96.0,
                         mark_price: Some(95.9),
@@ -2798,7 +2798,7 @@ mod tests {
                 TrackPnlStats::default(),
                 FreshSessionExternalInputs {
                     current_exposure: Exposure(2.0),
-                    position_qty: 2.0,
+                    position_qty: PositionQty::new(2.0).unwrap(),
                     market_data: None,
                     instrument_spec: rules(),
                 },
@@ -2847,7 +2847,7 @@ mod tests {
                 TrackPnlStats::default(),
                 FreshSessionExternalInputs {
                     current_exposure: Exposure(2.0),
-                    position_qty: 2.0,
+                    position_qty: PositionQty::new(2.0).unwrap(),
                     market_data: None,
                     instrument_spec: rules(),
                 },
@@ -2890,7 +2890,7 @@ mod tests {
                 TrackPnlStats::default(),
                 FreshSessionExternalInputs {
                     current_exposure: Exposure(2.0),
-                    position_qty: 2.0,
+                    position_qty: PositionQty::new(2.0).unwrap(),
                     market_data: None,
                     instrument_spec: rules(),
                 },

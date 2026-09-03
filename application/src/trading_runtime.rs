@@ -3417,7 +3417,7 @@ mod tests {
                     TrackPnlStats::default(),
                     FreshSessionExternalInputs {
                         current_exposure: Exposure(0.0),
-                        position_qty: 0.0,
+                        position_qty: poise_core::instrument::PositionQty::default(),
                         market_data: None,
                         instrument_spec,
                     },

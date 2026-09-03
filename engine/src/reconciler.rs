@@ -713,6 +713,7 @@ mod tests {
         TrackState, TrackStatus,
     };
     use chrono::{TimeZone, Utc};
+    use poise_core::instrument::PositionQty;
     use poise_core::risk::LossLimits;
     use poise_core::strategy::*;
     use poise_core::track::{Instrument, TrackDefinition, Venue};
@@ -883,7 +884,7 @@ mod tests {
             crate::ledger::TrackPnlStats::default(),
             crate::runtime::FreshSessionExternalInputs {
                 current_exposure: Exposure(current_exposure),
-                position_qty: current_exposure,
+                position_qty: PositionQty::new(current_exposure).unwrap(),
                 market_data: None,
                 instrument_spec,
             },

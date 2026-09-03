@@ -191,7 +191,7 @@ pub struct CurrentMarketData {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FreshSessionExternalInputs {
     pub current_exposure: Exposure,
-    pub position_qty: f64,
+    pub position_qty: PositionQty,
     pub market_data: Option<CurrentMarketData>,
     pub instrument_spec: InstrumentSpec,
 }
@@ -460,7 +460,7 @@ pub struct TrackRuntime {
     pub(crate) instrument_spec: InstrumentSpec,
     pub(crate) track_state: TrackState,
     pub(crate) current_exposure: Exposure,
-    pub(crate) current_position_qty: f64,
+    pub(crate) current_position_qty: PositionQty,
     // Reconcile owns desired_exposure; exchange sync/restore own observed order and risk fields.
     pub(crate) desired_exposure: Option<Exposure>,
     pub(crate) inventory_decision: Option<InventoryDecisionSnapshot>,
@@ -501,26 +501,23 @@ pub fn position_qty_per_exposure_unit(
 pub fn exposure_from_position_qty(
     config: &TrackConfig,
     instrument_spec: &InstrumentSpec,
-    position_qty: f64,
+    position_qty: PositionQty,
 ) -> Exposure {
     let unit_qty = position_qty_per_exposure_unit(config, instrument_spec);
     if !unit_qty.is_finite() || unit_qty <= f64::EPSILON {
         Exposure(0.0)
     } else {
-        Exposure(position_qty / unit_qty)
+        Exposure(position_qty.value() / unit_qty)
     }
 }
 
 pub fn position_notional(
     config: &TrackConfig,
     instrument_spec: &InstrumentSpec,
-    position_qty: f64,
+    position_qty: PositionQty,
 ) -> f64 {
     instrument_spec
-        .notional_from_position_qty(
-            PositionQty::new(position_qty).expect("observed position quantity must be finite"),
-            config.band_center(),
-        )
+        .notional_from_position_qty(position_qty, config.band_center())
         .expect("validated track and instrument must define position notional")
         .value()
 }
@@ -529,20 +526,17 @@ pub fn required_additional_notional(
     config: &TrackConfig,
     instrument_spec: &InstrumentSpec,
     max_notional: f64,
-    position_qty: f64,
+    position_qty: PositionQty,
 ) -> f64 {
     (max_notional - position_notional(config, instrument_spec, position_qty)).max(0.0)
 }
 
 fn current_position_values(
     instrument_spec: &InstrumentSpec,
-    position_qty: f64,
+    position_qty: PositionQty,
     mark_price: Option<f64>,
     strategy_price: Option<f64>,
 ) -> (Option<Amount>, Option<Amount>) {
-    let Ok(quantity) = PositionQty::new(position_qty) else {
-        return (None, None);
-    };
     let reference_price = mark_price
         .filter(|price| price.is_finite() && *price > f64::EPSILON)
         .or_else(|| strategy_price.filter(|price| price.is_finite() && *price > f64::EPSILON));
@@ -552,14 +546,14 @@ fn current_position_values(
     };
     let signed_notional = notional_price.and_then(|price| {
         instrument_spec
-            .signed_notional_from_position_qty(quantity, price)
+            .signed_notional_from_position_qty(position_qty, price)
             .ok()
     });
     let contract_base_exposure = match instrument_spec.position_basis() {
         PositionBasis::BaseAsset => None,
         PositionBasis::Contracts { .. } => reference_price.and_then(|price| {
             instrument_spec
-                .base_exposure_from_position_qty(quantity, price)
+                .base_exposure_from_position_qty(position_qty, price)
                 .ok()
         }),
     };
@@ -593,7 +587,7 @@ impl TrackRuntime {
             instrument_spec,
             track_state: TrackState::WaitingMarketData,
             current_exposure: Exposure(0.0),
-            current_position_qty: 0.0,
+            current_position_qty: PositionQty::default(),
             desired_exposure: None,
             inventory_decision: None,
             inventory_decision_revision: 0,
@@ -702,15 +696,15 @@ impl TrackRuntime {
         position_qty_per_exposure_unit(self.config(), &self.instrument_spec)
     }
 
-    pub fn exposure_from_position_qty(&self, position_qty: f64) -> Exposure {
+    pub fn exposure_from_position_qty(&self, position_qty: PositionQty) -> Exposure {
         exposure_from_position_qty(self.config(), &self.instrument_spec, position_qty)
     }
 
-    pub fn position_notional(&self, position_qty: f64) -> f64 {
+    pub fn position_notional(&self, position_qty: PositionQty) -> f64 {
         position_notional(self.config(), &self.instrument_spec, position_qty)
     }
 
-    pub fn required_additional_notional(&self, position_qty: f64) -> f64 {
+    pub fn required_additional_notional(&self, position_qty: PositionQty) -> f64 {
         required_additional_notional(
             self.config(),
             &self.instrument_spec,
@@ -1153,7 +1147,7 @@ impl TrackRuntime {
             status: self.status(),
             instrument_spec: self.instrument_spec.clone(),
             current_exposure: self.current_exposure.clone(),
-            position_qty: self.current_position_qty,
+            position_qty: self.current_position_qty.value(),
             signed_position_notional,
             contract_base_exposure,
             decision: live.decision,
@@ -1304,15 +1298,18 @@ mod tests {
 
         assert_eq!(position_qty_per_exposure_unit(&config, &rules), 10.0);
         assert_eq!(
-            exposure_from_position_qty(&config, &rules, -30.0),
+            exposure_from_position_qty(&config, &rules, PositionQty::new(-30.0).unwrap()),
             Exposure(-3.0)
         );
-        assert_eq!(position_notional(&config, &rules, -30.0), 3_000.0);
+        assert_eq!(
+            position_notional(&config, &rules, PositionQty::new(-30.0).unwrap()),
+            3_000.0
+        );
 
         config.lower_price = 40_000.0;
         config.upper_price = 60_000.0;
         assert_eq!(
-            exposure_from_position_qty(&config, &rules, -30.0),
+            exposure_from_position_qty(&config, &rules, PositionQty::new(-30.0).unwrap()),
             Exposure(-3.0)
         );
     }
@@ -1320,7 +1317,7 @@ mod tests {
     #[test]
     fn runtime_view_values_linear_position_at_mark_price() {
         let mut runtime = test_runtime();
-        runtime.current_position_qty = 2.0;
+        runtime.current_position_qty = PositionQty::new(2.0).unwrap();
         runtime.strategy_price = Some(100.0);
         runtime.mark_price = Some(110.0);
 
@@ -1337,7 +1334,7 @@ mod tests {
     #[test]
     fn runtime_view_values_inverse_contract_notional_and_base_exposure_once() {
         let mut runtime = TrackRuntime::new(test_definition(), inverse_rules(), Utc::now());
-        runtime.current_position_qty = -30.0;
+        runtime.current_position_qty = PositionQty::new(-30.0).unwrap();
         runtime.strategy_price = Some(90_000.0);
         runtime.mark_price = Some(100_000.0);
 
@@ -1545,7 +1542,7 @@ mod tests {
             },
             FreshSessionExternalInputs {
                 current_exposure: Exposure(2.5),
-                position_qty: 2.5,
+                position_qty: PositionQty::new(2.5).unwrap(),
                 market_data: Some(CurrentMarketData {
                     strategy_price: 96.0,
                     mark_price: Some(95.8),
@@ -1610,7 +1607,7 @@ mod tests {
             TrackPnlStats::default(),
             FreshSessionExternalInputs {
                 current_exposure: Exposure(2.0),
-                position_qty: 2.0,
+                position_qty: PositionQty::new(2.0).unwrap(),
                 market_data: None,
                 instrument_spec: test_rules(0.1),
             },
@@ -1660,7 +1657,7 @@ mod tests {
             TrackPnlStats::default(),
             FreshSessionExternalInputs {
                 current_exposure: Exposure(1.0),
-                position_qty: 1.0,
+                position_qty: PositionQty::new(1.0).unwrap(),
                 market_data: None,
                 instrument_spec: test_rules(1.0),
             },
