@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::{
     Arc,
     atomic::{AtomicI64, Ordering},
@@ -31,6 +32,7 @@ use crate::mapper::{
 
 const DEFAULT_RECV_WINDOW_MS: i64 = 5_000;
 const ACTIVE_ORDER_FILTER: &str = "Order";
+const OPEN_ORDER_PAGE_LIMIT: usize = 50;
 const RET_CODE_LEVERAGE_NOT_MODIFIED: i64 = 110_043;
 
 #[derive(Debug, Clone, Copy)]
@@ -231,30 +233,57 @@ impl BybitRestClient {
     }
 
     pub async fn get_open_orders(&self, symbol: &str) -> Result<Vec<ExchangeOrder>> {
-        let response: OpenOrderListResult = self
-            .send_request(
-                Method::GET,
-                "/v5/order/realtime",
-                vec![
-                    ("category", "linear".to_string()),
-                    ("symbol", symbol.to_string()),
-                    ("orderFilter", ACTIVE_ORDER_FILTER.to_string()),
-                ],
-                None,
-                AuthMode::Signed,
-            )
-            .await?;
-        response
-            .list
-            .into_iter()
-            .filter_map(|order| {
-                if should_track_bybit_order(order.order_status, order.stop_order_type.as_deref()) {
-                    Some(order.try_into())
-                } else {
-                    None
-                }
-            })
-            .collect()
+        let mut orders = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen_cursors = HashSet::new();
+
+        loop {
+            let mut params = vec![
+                ("category", "linear".to_string()),
+                ("symbol", symbol.to_string()),
+                ("orderFilter", ACTIVE_ORDER_FILTER.to_string()),
+                ("limit", OPEN_ORDER_PAGE_LIMIT.to_string()),
+            ];
+            if let Some(cursor) = cursor.as_ref() {
+                params.push(("cursor", cursor.clone()));
+            }
+            let response: OpenOrderListResult = self
+                .send_request(
+                    Method::GET,
+                    "/v5/order/realtime",
+                    params,
+                    None,
+                    AuthMode::Signed,
+                )
+                .await?;
+            orders.extend(
+                response
+                    .list
+                    .into_iter()
+                    .filter_map(|order| {
+                        if should_track_bybit_order(
+                            order.order_status,
+                            order.stop_order_type.as_deref(),
+                        ) {
+                            Some(order.try_into())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            );
+
+            let next_cursor = response.next_page_cursor.trim();
+            if next_cursor.is_empty() {
+                return Ok(orders);
+            }
+            if !seen_cursors.insert(next_cursor.to_string()) {
+                return Err(anyhow!(
+                    "Bybit open-orders cursor did not advance for `{symbol}`: `{next_cursor}`"
+                ));
+            }
+            cursor = Some(next_cursor.to_string());
+        }
     }
 
     pub async fn set_leverage(&self, symbol: &str, leverage: u32) -> Result<()> {
@@ -558,7 +587,7 @@ mod tests {
         assert_eq!(requests[3].method, "GET");
         assert_eq!(
             requests[3].path,
-            "/v5/order/realtime?category=linear&symbol=BTCUSDT&orderFilter=Order"
+            "/v5/order/realtime?category=linear&symbol=BTCUSDT&orderFilter=Order&limit=50"
         );
         assert_eq!(
             requests[1].headers.get("x-bapi-api-key"),
@@ -574,6 +603,97 @@ mod tests {
                 "accountType=UNIFIED"
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn open_orders_follow_every_response_cursor_before_returning() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                &open_orders_response("order-1", "client-1", "cursor-2"),
+            ),
+            MockResponse::json(200, &open_orders_response("order-2", "client-2", "")),
+        ])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        let orders = client.get_open_orders("BTCUSDT").await.unwrap();
+
+        assert_eq!(
+            orders
+                .iter()
+                .map(|order| order.order_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["order-1", "order-2"]
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].path,
+            "/v5/order/realtime?category=linear&symbol=BTCUSDT&orderFilter=Order&limit=50"
+        );
+        assert_eq!(
+            requests[1].path,
+            "/v5/order/realtime?category=linear&symbol=BTCUSDT&orderFilter=Order&limit=50&cursor=cursor-2"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_orders_reject_a_cursor_that_does_not_advance() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                &open_orders_response("order-1", "client-1", "cursor-2"),
+            ),
+            MockResponse::json(
+                200,
+                &open_orders_response("order-2", "client-2", "cursor-2"),
+            ),
+        ])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        let error = client.get_open_orders("BTCUSDT").await.unwrap_err();
+
+        assert!(error.to_string().contains("cursor did not advance"));
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn open_orders_do_not_return_a_partial_snapshot_when_a_later_page_fails() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(
+                200,
+                &open_orders_response("order-1", "client-1", "cursor-2"),
+            ),
+            MockResponse::json(
+                500,
+                r#"{"retCode":10000,"retMsg":"server error","result":{}}"#,
+            ),
+        ])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        assert!(client.get_open_orders("BTCUSDT").await.is_err());
+        assert_eq!(server.requests().len(), 2);
     }
 
     #[tokio::test]
@@ -960,6 +1080,29 @@ mod tests {
             ),
             "c12472cfb89cef80a14dcb760f2e33587a62b444a4dcfb6d243342752d34051d"
         );
+    }
+
+    fn open_orders_response(order_id: &str, client_order_id: &str, cursor: &str) -> String {
+        serde_json::json!({
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "nextPageCursor": cursor,
+                "list": [{
+                    "symbol": "BTCUSDT",
+                    "orderId": order_id,
+                    "orderLinkId": client_order_id,
+                    "side": "Buy",
+                    "price": "100",
+                    "qty": "1",
+                    "cumExecQty": "0",
+                    "orderStatus": "New",
+                    "stopOrderType": "",
+                    "positionIdx": 0
+                }]
+            }
+        })
+        .to_string()
     }
 
     #[derive(Debug, Clone)]

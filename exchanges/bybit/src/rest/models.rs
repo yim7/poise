@@ -225,6 +225,8 @@ pub(crate) struct PositionSnapshot {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OpenOrderListResult {
+    #[serde(default)]
+    pub next_page_cursor: String,
     pub list: Vec<OpenOrderSnapshot>,
 }
 

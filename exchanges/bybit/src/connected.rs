@@ -545,7 +545,7 @@ mod tests {
         );
         assert_eq!(
             requests[4].path,
-            "/v5/order/realtime?category=linear&symbol=BTCUSDT&orderFilter=Order"
+            "/v5/order/realtime?category=linear&symbol=BTCUSDT&orderFilter=Order&limit=50"
         );
     }
 

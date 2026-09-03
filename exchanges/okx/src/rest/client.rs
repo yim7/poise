@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
@@ -37,6 +38,7 @@ enum AuthMode {
 
 const MAX_DECIMAL_SCALE: u32 = 16;
 const OKX_NET_POSITION_MODE: &str = "net_mode";
+const OPEN_ORDER_PAGE_LIMIT: usize = 100;
 const RECENT_TRADE_FILL_LIMIT: usize = 100;
 const RECENT_FUNDING_BILL_LIMIT: usize = 100;
 const OKX_FUNDING_BILL_SUBTYPES: [&str; 2] = ["173", "174"];
@@ -216,22 +218,48 @@ impl OkxRestClient {
 
     pub(crate) async fn get_open_orders(&self, symbol: &str) -> Result<Vec<ExchangeOrder>> {
         let metadata = self.get_or_fetch_instrument_metadata(symbol).await?;
-        let response: Vec<PendingOrderSnapshot> = self
-            .send_request(
-                Method::GET,
-                "/api/v5/trade/orders-pending",
-                vec![
-                    ("instType", "SWAP".to_string()),
-                    ("instId", symbol.to_string()),
-                ],
-                None,
-                AuthMode::Signed,
-            )
-            .await?;
-        response
-            .into_iter()
-            .map(|order| open_order_from_snapshot_with_metadata(order, &metadata))
-            .collect::<Result<Vec<_>>>()
+        let mut orders = Vec::new();
+        let mut after: Option<String> = None;
+        let mut seen_cursors = HashSet::new();
+
+        loop {
+            let mut params = vec![
+                ("instType", "SWAP".to_string()),
+                ("instId", symbol.to_string()),
+                ("limit", OPEN_ORDER_PAGE_LIMIT.to_string()),
+            ];
+            if let Some(after) = after.as_ref() {
+                params.push(("after", after.clone()));
+            }
+            let response: Vec<PendingOrderSnapshot> = self
+                .send_request(
+                    Method::GET,
+                    "/api/v5/trade/orders-pending",
+                    params,
+                    None,
+                    AuthMode::Signed,
+                )
+                .await?;
+            let page_len = response.len();
+            let next_cursor = response.last().map(|order| order.order_id.clone());
+            orders.extend(
+                response
+                    .into_iter()
+                    .map(|order| open_order_from_snapshot_with_metadata(order, &metadata))
+                    .collect::<Result<Vec<_>>>()?,
+            );
+            if page_len < OPEN_ORDER_PAGE_LIMIT {
+                return Ok(orders);
+            }
+
+            let next_cursor = next_cursor.expect("a full OKX page has a final order id");
+            if !seen_cursors.insert(next_cursor.clone()) {
+                return Err(anyhow!(
+                    "OKX open-orders cursor did not advance for `{symbol}`: `{next_cursor}`"
+                ));
+            }
+            after = Some(next_cursor);
+        }
     }
 
     pub(crate) async fn get_recent_track_pnl_records(
@@ -1075,7 +1103,7 @@ mod tests {
         assert_eq!(requests[1].method, "GET");
         assert_eq!(
             requests[1].path,
-            "/api/v5/trade/orders-pending?instType=SWAP&instId=BTC-USDT-SWAP"
+            "/api/v5/trade/orders-pending?instType=SWAP&instId=BTC-USDT-SWAP&limit=100"
         );
         assert_eq!(requests[2].method, "POST");
         assert_eq!(requests[2].path, "/api/v5/trade/cancel-batch-orders");
@@ -1083,6 +1111,66 @@ mod tests {
         assert_eq!(body[0]["instId"], "BTC-USDT-SWAP");
         assert_eq!(body[0]["ordId"], "123");
         assert_eq!(body[1]["ordId"], "456");
+    }
+
+    #[tokio::test]
+    async fn open_orders_follow_every_page_before_returning() {
+        let first_page = pending_orders_response(0, 100);
+        let second_page = pending_orders_response(100, 1);
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
+            MockResponse::json(200, &first_page),
+            MockResponse::json(200, &second_page),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        let orders = client.get_open_orders("BTC-USDT-SWAP").await.unwrap();
+
+        assert_eq!(orders.len(), 101);
+        assert_eq!(orders.first().unwrap().order_id, "order-0");
+        assert_eq!(orders.last().unwrap().order_id, "order-100");
+        let requests = server.requests();
+        assert_eq!(
+            requests[1].path,
+            "/api/v5/trade/orders-pending?instType=SWAP&instId=BTC-USDT-SWAP&limit=100"
+        );
+        assert_eq!(
+            requests[2].path,
+            "/api/v5/trade/orders-pending?instType=SWAP&instId=BTC-USDT-SWAP&limit=100&after=order-99"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_orders_reject_a_page_cursor_that_does_not_advance() {
+        let repeated_page = pending_orders_response(0, 100);
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
+            MockResponse::json(200, &repeated_page),
+            MockResponse::json(200, &repeated_page),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        let error = client.get_open_orders("BTC-USDT-SWAP").await.unwrap_err();
+
+        assert!(error.to_string().contains("cursor did not advance"));
+        assert_eq!(server.requests().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn open_orders_do_not_return_a_partial_snapshot_when_a_later_page_fails() {
+        let first_page = pending_orders_response(0, 100);
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, linear_instrument_response()),
+            MockResponse::json(200, &first_page),
+            MockResponse::json(500, r#"{"code":"50000","msg":"server error","data":[]}"#),
+        ])
+        .await;
+        let client = test_client(&server, true);
+
+        assert!(client.get_open_orders("BTC-USDT-SWAP").await.is_err());
+        assert_eq!(server.requests().len(), 3);
     }
 
     #[tokio::test]
@@ -1828,6 +1916,26 @@ mod tests {
 
     fn inverse_instrument_response() -> &'static str {
         r#"{"code":"0","msg":"","data":[{"instId":"BTC-USD-SWAP","ctType":"inverse","tickSz":"0.1","lotSz":"1","minSz":"1","ctVal":"100","ctValCcy":"USD","settleCcy":"BTC"}]}"#
+    }
+
+    fn pending_orders_response(start: usize, count: usize) -> String {
+        serde_json::json!({
+            "code": "0",
+            "msg": "",
+            "data": (start..start + count)
+                .map(|index| serde_json::json!({
+                    "instId": "BTC-USDT-SWAP",
+                    "ordId": format!("order-{index}"),
+                    "clOrdId": format!("client-{index}"),
+                    "side": "buy",
+                    "px": "100",
+                    "sz": "1",
+                    "accFillSz": "0",
+                    "state": "live"
+                }))
+                .collect::<Vec<_>>()
+        })
+        .to_string()
     }
 
     #[derive(Debug, Clone)]
