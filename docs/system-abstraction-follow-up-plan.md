@@ -92,12 +92,12 @@
 
 ### F4 保持 runtime 的 canonical `PositionQty`
 
-- [ ] `FreshSessionExternalInputs.position_qty` 与 `TrackRuntime.current_position_qty` 使用 `PositionQty`。
-- [ ] position notional、exposure 和 required-capacity helper 在业务边界接收 `PositionQty`，只在局部算术内部读取数值。
-- [ ] `PositionObservation -> TrackRuntime -> fresh session` 不再提前 `.value()`。
-- [ ] read model、protocol 和离线统计等明确投影可以继续输出 `f64`，不扩大类型包装范围。
-- [ ] 验收：linear 与 inverse fixture 都证明 canonical quantity 不会和 exposure/contracts 混用，现有投影 JSON 数值结构不变。
-- Commit SHA：待执行
+- [x] `FreshSessionExternalInputs.position_qty` 与 `TrackRuntime.current_position_qty` 使用 `PositionQty`。
+- [x] position notional、exposure 和 required-capacity helper 在业务边界接收 `PositionQty`，只在局部算术内部读取数值。
+- [x] `PositionObservation -> TrackRuntime -> fresh session` 不再提前 `.value()`。
+- [x] read model、protocol 和离线统计等明确投影可以继续输出 `f64`，不扩大类型包装范围。
+- [x] 验收：linear 与 inverse fixture 都证明 canonical quantity 不会和 exposure/contracts 混用，现有投影 JSON 数值结构不变。
+- Commit SHA：`e724271`
 
 ### F5 删除 server-only 类型的公共暴露
 
