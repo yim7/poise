@@ -1525,15 +1525,6 @@ total_loss_limit = 600.0
 
     #[async_trait::async_trait]
     impl AccountPort for FakeExchange {
-        async fn get_account_capacity_snapshot(
-            &self,
-            _instrument: &Instrument,
-        ) -> Result<poise_application::exchange::AccountCapacitySnapshot> {
-            Ok(poise_application::exchange::AccountCapacitySnapshot {
-                max_increase_notional: 1_000_000.0,
-            })
-        }
-
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
@@ -1816,15 +1807,6 @@ total_loss_limit = 600.0
 
     #[async_trait::async_trait]
     impl AccountPort for FakeAccountPort {
-        async fn get_account_capacity_snapshot(
-            &self,
-            _instrument: &Instrument,
-        ) -> Result<poise_application::exchange::AccountCapacitySnapshot> {
-            Ok(poise_application::exchange::AccountCapacitySnapshot {
-                max_increase_notional: 1_000_000.0,
-            })
-        }
-
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,

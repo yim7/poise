@@ -55,7 +55,6 @@ pub(crate) struct PositionSnapshot {
     pub upl: String,
     #[serde(rename = "posSide")]
     pub pos_side: String,
-    pub lever: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

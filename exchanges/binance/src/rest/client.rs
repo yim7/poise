@@ -12,8 +12,8 @@ use tokio::time::{Duration, sleep};
 use url::{Host, Url};
 
 use poise_application::exchange::{
-    AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
-    OrderRequest, PnlHistoryWindow, Position, RecentTrackPnlBatch,
+    AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt, OrderRequest,
+    PnlHistoryWindow, Position, RecentTrackPnlBatch,
 };
 
 use super::auth::{encode_query, sign_query};
@@ -22,11 +22,9 @@ use super::models::{
     BinanceAccountSummaryInformation, BinanceAccountTrade, BinanceErrorResponse,
     BinanceExchangeInfoResponse, BinanceIncomeRecord, BinanceLeverageChangeResponse,
     BinanceOpenOrder, BinanceOrderResponse, BinancePositionMode, BinancePositionRisk,
-    BinanceSymbolConfiguration, ListenKeyResponse, ServerTimeResponse,
+    ListenKeyResponse, ServerTimeResponse,
 };
-use crate::mapper::{
-    build_account_capacity_snapshot, track_pnl_record_from_funding, track_pnl_record_from_trade,
-};
+use crate::mapper::{track_pnl_record_from_funding, track_pnl_record_from_trade};
 
 const DEFAULT_RECV_WINDOW_MS: i64 = 10_000;
 const MAX_RETRIES: usize = 3;
@@ -232,23 +230,6 @@ impl BinanceRestClient {
         })
     }
 
-    pub async fn get_account_capacity_snapshot(
-        &self,
-        symbol: &str,
-    ) -> Result<AccountCapacitySnapshot> {
-        let account: BinanceAccountSummaryInformation = self
-            .send_request(
-                Method::GET,
-                "/fapi/v3/account",
-                Vec::new(),
-                AuthMode::Signed,
-            )
-            .await?;
-        let symbol_config = self.get_symbol_configuration(symbol).await?;
-
-        build_account_capacity_snapshot(account, symbol_config)
-    }
-
     pub async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
         let account: BinanceAccountSummaryInformation = self
             .send_request(
@@ -297,22 +278,6 @@ impl BinanceRestClient {
             ));
         }
         Ok(())
-    }
-
-    async fn get_symbol_configuration(&self, symbol: &str) -> Result<BinanceSymbolConfiguration> {
-        let configs: Vec<BinanceSymbolConfiguration> = self
-            .send_request(
-                Method::GET,
-                "/fapi/v1/symbolConfig",
-                vec![("symbol", symbol.to_string())],
-                AuthMode::Signed,
-            )
-            .await?;
-
-        configs
-            .into_iter()
-            .find(|item| item.symbol == symbol)
-            .with_context(|| format!("symbol config not found for symbol: {symbol}"))
     }
 
     pub async fn new_order(&self, req: &OrderRequest) -> Result<OrderReceipt> {
@@ -1098,64 +1063,6 @@ mod tests {
         assert!(requests[0].path.contains("quantity=0.024"));
         assert!(!requests[0].path.contains("price=0.30000000000000004"));
         assert!(!requests[0].path.contains("quantity=0.024000000000000004"));
-    }
-
-    #[tokio::test]
-    async fn account_capacity_snapshot_reads_account_endpoint_and_maps_capacity() {
-        let server = MockHttpServer::spawn(vec![
-            MockResponse::json(
-                200,
-                r#"{
-                    "totalWalletBalance": "120.75",
-                    "availableBalance": "100.5",
-                    "totalMarginBalance": "125.25",
-                    "totalUnrealizedProfit": "4.5",
-                    "positions": []
-                }"#,
-            ),
-            MockResponse::json(
-                200,
-                r#"[
-                    {
-                        "symbol": "BTCUSDT",
-                        "marginType": "CROSSED",
-                        "isAutoAddMargin": false,
-                        "leverage": 20,
-                        "maxNotionalValue": "1000000"
-                    }
-                ]"#,
-            ),
-        ])
-        .await;
-        let client = BinanceRestClient::with_timestamp_provider(
-            server.base_url(),
-            "api-key",
-            "secret-key",
-            Arc::new(|| 1_700_000_000_000),
-        );
-
-        let snapshot = client
-            .get_account_capacity_snapshot("BTCUSDT")
-            .await
-            .unwrap();
-        let requests = server.requests().await;
-
-        assert!((snapshot.max_increase_notional - 2010.0).abs() < f64::EPSILON);
-        assert_eq!(requests.len(), 2);
-        assert!(requests[0].path.starts_with("/fapi/v3/account?timestamp="));
-        assert!(
-            requests[1]
-                .path
-                .starts_with("/fapi/v1/symbolConfig?symbol=BTCUSDT&timestamp=")
-        );
-        assert_eq!(
-            requests[0].headers.get("x-mbx-apikey"),
-            Some(&"api-key".to_string())
-        );
-        assert_eq!(
-            requests[1].headers.get("x-mbx-apikey"),
-            Some(&"api-key".to_string())
-        );
     }
 
     #[tokio::test]

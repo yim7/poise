@@ -6,7 +6,7 @@ use chrono::Utc;
 use tokio::sync::mpsc;
 
 use poise_application::exchange::{
-    AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
+    AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
     MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, PnlHistoryWindow,
     Position, RecentTrackPnlRecords, UserDataEvent,
@@ -17,8 +17,6 @@ use crate::{
     Config, client_order_id::ClientOrderIdMapper, rest::client::HyperliquidRestClient,
     rest::error::HyperliquidRestError, ws::HyperliquidWsClient,
 };
-
-const DEFAULT_CAPACITY_LEVERAGE: u32 = 10;
 
 pub async fn connect(config: &Config) -> Result<ExchangePorts> {
     let credentials = config.credentials()?;
@@ -136,15 +134,6 @@ impl AccountSummaryPort for HyperliquidRestClient {
 
 #[async_trait]
 impl AccountPort for HyperliquidAccount {
-    async fn get_account_capacity_snapshot(
-        &self,
-        _instrument: &Instrument,
-    ) -> Result<AccountCapacitySnapshot> {
-        self.rest
-            .get_account_capacity_snapshot(DEFAULT_CAPACITY_LEVERAGE)
-            .await
-    }
-
     async fn get_recent_track_pnl_records(
         &self,
         instrument: &Instrument,

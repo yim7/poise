@@ -366,11 +366,6 @@ pub trait ExecutionPort: Send + Sync {
 
 #[async_trait]
 pub trait AccountPort: Send + Sync {
-    async fn get_account_capacity_snapshot(
-        &self,
-        instrument: &Instrument,
-    ) -> Result<AccountCapacitySnapshot>;
-
     async fn get_recent_track_pnl_records(
         &self,
         instrument: &Instrument,

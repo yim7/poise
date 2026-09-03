@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use poise_application::exchange::{
-    AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
+    AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError,
     ExecutionPortErrorKind, ExecutionResult, MarketDataPort, MarketDataTick, MetadataPort,
     OrderReceipt, OrderRequest, PnlHistoryWindow, Position, RecentTrackPnlRecords, UserDataEvent,
@@ -41,16 +41,12 @@ fn ports_from_clients(rest: Arc<BybitRestClient>, ws: Arc<BybitWsClient>) -> Exc
         execution,
         market_data,
         account_summary,
-        Arc::new(BybitAccount {
-            rest: Arc::clone(&rest),
-            ws,
-        }),
+        Arc::new(BybitAccount { ws }),
         metadata,
     )
 }
 
 struct BybitAccount {
-    rest: Arc<BybitRestClient>,
     ws: Arc<BybitWsClient>,
 }
 
@@ -133,15 +129,6 @@ impl AccountSummaryPort for BybitRestClient {
 
 #[async_trait]
 impl AccountPort for BybitAccount {
-    async fn get_account_capacity_snapshot(
-        &self,
-        instrument: &Instrument,
-    ) -> Result<AccountCapacitySnapshot> {
-        self.rest
-            .get_account_capacity_snapshot(&instrument.symbol)
-            .await
-    }
-
     async fn get_recent_track_pnl_records(
         &self,
         _instrument: &Instrument,
@@ -277,14 +264,6 @@ mod tests {
             ),
             MockResponse::json(
                 200,
-                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"accountType":"UNIFIED","totalEquity":"125.5","totalAvailableBalance":"100.25","totalPerpUPL":"-2.75"}]}}"#,
-            ),
-            MockResponse::json(
-                200,
-                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","side":"","size":"0","avgPrice":"","unrealisedPnl":"","positionIdx":0,"leverage":"10"}]}}"#,
-            ),
-            MockResponse::json(
-                200,
                 r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","baseCoin":"BTC","quoteCoin":"USDT","settleCoin":"USDT","priceFilter":{"tickSize":"0.10"},"lotSizeFilter":{"qtyStep":"0.001","minOrderQty":"0.001","minNotionalValue":"5"}}]}}"#,
             ),
             MockResponse::json(200, r#"{"retCode":0,"retMsg":"OK","result":{"timeSecond":1700000000}}"#),
@@ -300,36 +279,19 @@ mod tests {
                 reqwest::Client::new(),
             ),
         );
-        let ws = Arc::new(BybitWsClient::with_test_params(
-            "ws://127.0.0.1:1",
-            "ws://127.0.0.1:1",
-            "api-key",
-            "secret-key",
-            std::time::Duration::from_millis(10),
-            Arc::new(|| 1_700_000_000_000),
-        ));
         let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
-        let account = BybitAccount {
-            rest: Arc::clone(&rest),
-            ws: Arc::clone(&ws),
-        };
         let metadata: Arc<dyn MetadataPort> = rest.clone();
         let instrument = poise_core::track::Instrument::new(Venue::Bybit, "BTCUSDT");
 
         let summary = account_summary.get_account_summary().await.unwrap();
-        let capacity = account
-            .get_account_capacity_snapshot(&instrument)
-            .await
-            .unwrap();
         let info = metadata.get_exchange_info(&instrument).await.unwrap();
         let server_time = metadata.get_server_time().await.unwrap();
         let requests = server.requests();
 
         assert_eq!(summary.available().unwrap().value(), 100.25);
-        assert_eq!(capacity.max_increase_notional, 1002.5);
         assert_eq!(info.instrument_spec.instrument(), &instrument);
         assert_eq!(server_time.timestamp(), 1_700_000_000);
-        assert_eq!(requests.len(), 5);
+        assert_eq!(requests.len(), 3);
         assert!(
             !requests
                 .iter()

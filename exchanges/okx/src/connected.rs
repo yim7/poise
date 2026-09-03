@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use poise_application::exchange::{
-    AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
+    AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
     MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, PnlHistoryWindow,
     Position, RecentTrackPnlRecords, UserDataEvent,
@@ -166,15 +166,6 @@ impl AccountSummaryPort for OkxRestClient {
 
 #[async_trait]
 impl AccountPort for OkxAccount {
-    async fn get_account_capacity_snapshot(
-        &self,
-        instrument: &Instrument,
-    ) -> Result<AccountCapacitySnapshot> {
-        self.rest
-            .get_account_capacity_snapshot(&instrument.symbol)
-            .await
-    }
-
     async fn subscribe_user_data(&self) -> Result<mpsc::Receiver<UserDataEvent>> {
         self.ws.subscribe_user_data().await
     }

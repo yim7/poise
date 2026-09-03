@@ -13,8 +13,8 @@ use url::form_urlencoded::Serializer;
 use url::{Host, Url};
 
 use poise_application::exchange::{
-    AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
-    OrderRequest, OrderStatus, Position,
+    AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt, OrderRequest, OrderStatus,
+    Position,
 };
 
 use super::auth::sign_v5_payload;
@@ -26,9 +26,7 @@ use super::models::{
     WalletBalanceResult,
 };
 use crate::Deployment;
-use crate::mapper::{
-    build_account_capacity_snapshot, build_bybit_position, should_track_bybit_order, side_to_bybit,
-};
+use crate::mapper::{build_bybit_position, should_track_bybit_order, side_to_bybit};
 
 const DEFAULT_RECV_WINDOW_MS: i64 = 5_000;
 const ACTIVE_ORDER_FILTER: &str = "Order";
@@ -198,31 +196,6 @@ impl BybitRestClient {
             )
             .await?;
         response.into_account_summary_snapshot()
-    }
-
-    pub async fn get_account_capacity_snapshot(
-        &self,
-        symbol: &str,
-    ) -> Result<AccountCapacitySnapshot> {
-        let wallet_balance: WalletBalanceResult = self
-            .send_request(
-                Method::GET,
-                "/v5/account/wallet-balance",
-                vec![("accountType", "UNIFIED".to_string())],
-                None,
-                AuthMode::Signed,
-            )
-            .await?;
-        let leverage = self
-            .get_linear_position_snapshot(symbol)
-            .await?
-            .and_then(|position| position.leverage)
-            .ok_or_else(|| {
-                anyhow!(
-                    "Bybit account capacity unavailable for `{symbol}`: position leverage missing (portfolio margin mode or stale position snapshot)"
-                )
-            })?;
-        build_account_capacity_snapshot(&wallet_balance, leverage)
     }
 
     pub async fn get_position(&self, symbol: &str) -> Result<Position> {
@@ -922,67 +895,6 @@ mod tests {
         assert!(message.contains("positionIdx=0"), "{message}");
         assert!(message.contains("positionIdx=1"), "{message}");
         assert!(message.contains("one-way"), "{message}");
-    }
-
-    #[tokio::test]
-    async fn account_capacity_snapshot_scales_available_balance_by_symbol_leverage() {
-        let server = MockHttpServer::spawn(vec![
-            MockResponse::json(
-                200,
-                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"accountType":"UNIFIED","totalEquity":"125.5","totalAvailableBalance":"100.25","totalPerpUPL":"-2.75"}]}}"#,
-            ),
-            MockResponse::json(
-                200,
-                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","side":"","size":"0","avgPrice":"","unrealisedPnl":"","positionIdx":0,"leverage":"10"}]}}"#,
-            ),
-        ])
-        .await;
-        let client = BybitRestClient::with_http_client_and_timestamp_provider(
-            server.base_url(),
-            "api-key",
-            "secret-key",
-            Arc::new(|| 1_700_000_000_000),
-            build_http_client(&server.base_url()),
-        );
-
-        let snapshot = client
-            .get_account_capacity_snapshot("BTCUSDT")
-            .await
-            .unwrap();
-
-        assert_eq!(snapshot.max_increase_notional, 1002.5);
-    }
-
-    #[tokio::test]
-    async fn account_capacity_snapshot_returns_clear_error_when_position_leverage_is_missing() {
-        let server = MockHttpServer::spawn(vec![
-            MockResponse::json(
-                200,
-                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"accountType":"UNIFIED","totalEquity":"125.5","totalAvailableBalance":"100.25","totalPerpUPL":"-2.75"}]}}"#,
-            ),
-            MockResponse::json(
-                200,
-                r#"{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","side":"","size":"0","avgPrice":"","unrealisedPnl":"","positionIdx":0,"leverage":""}]}}"#,
-            ),
-        ])
-        .await;
-        let client = BybitRestClient::with_http_client_and_timestamp_provider(
-            server.base_url(),
-            "api-key",
-            "secret-key",
-            Arc::new(|| 1_700_000_000_000),
-            build_http_client(&server.base_url()),
-        );
-
-        let error = client
-            .get_account_capacity_snapshot("BTCUSDT")
-            .await
-            .unwrap_err();
-
-        assert_eq!(
-            error.to_string(),
-            "Bybit account capacity unavailable for `BTCUSDT`: position leverage missing (portfolio margin mode or stale position snapshot)"
-        );
     }
 
     #[tokio::test]

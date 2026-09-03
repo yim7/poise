@@ -2,8 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{TimeZone, Utc};
 
 use poise_application::exchange::{
-    AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
-    OrderStatus, Position,
+    AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt, OrderStatus, Position,
 };
 use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
 use poise_core::track::{Instrument, Venue};
@@ -24,17 +23,6 @@ pub(crate) struct BybitActiveOrder {
     pub filled_qty: f64,
     pub order_status: BybitOrderStatus,
     pub position_idx: i64,
-}
-
-pub(crate) fn build_account_capacity_snapshot(
-    wallet_balance: &WalletBalanceResult,
-    leverage: f64,
-) -> Result<AccountCapacitySnapshot> {
-    let balance = first_wallet_balance(wallet_balance)?;
-    let available = required_value("totalAvailableBalance", balance.total_available_balance)?;
-    Ok(AccountCapacitySnapshot {
-        max_increase_notional: available * leverage,
-    })
 }
 
 impl TryFrom<InstrumentInfoResult> for ExchangeInfo {
@@ -445,22 +433,6 @@ mod tests {
     }
 
     #[test]
-    fn builds_account_capacity_snapshot_from_available_balance_and_leverage() {
-        let balances = WalletBalanceResult {
-            list: vec![UnifiedWalletBalance {
-                account_type: Some("UNIFIED".to_string()),
-                total_equity: Some(125.5),
-                total_available_balance: Some(100.25),
-                total_perp_upl: Some(-2.75),
-            }],
-        };
-
-        let snapshot = build_account_capacity_snapshot(&balances, 10.0).unwrap();
-
-        assert_eq!(snapshot.max_increase_notional, 1002.5);
-    }
-
-    #[test]
     fn parses_bybit_server_time() {
         let response = ServerTimeResult {
             time_second: 1_700_000_000,
@@ -496,7 +468,6 @@ mod tests {
             symbol: "BTCUSDT".to_string(),
             side: Some(Side::Sell),
             size: 0.25,
-            leverage: None,
             avg_price: Some(65000.5),
             unrealised_pnl: Some(-12.5),
             position_idx: 0,
@@ -521,7 +492,6 @@ mod tests {
             symbol: "BTCUSDT".to_string(),
             side: None,
             size: 0.0,
-            leverage: None,
             avg_price: None,
             unrealised_pnl: None,
             position_idx: 0,
@@ -546,7 +516,6 @@ mod tests {
             symbol: "BTCUSDT".to_string(),
             side: Some(Side::Buy),
             size: 0.25,
-            leverage: None,
             avg_price: Some(65000.5),
             unrealised_pnl: Some(-12.5),
             position_idx: 1,

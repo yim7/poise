@@ -323,7 +323,6 @@ impl ServerRuntime {
         EffectWorker::with_shutdown_rx(
             self.effect_worker_state.clone(),
             self.exchange.execution(),
-            self.exchange.account(),
             Duration::from_millis(10),
             shutdown_rx,
         )

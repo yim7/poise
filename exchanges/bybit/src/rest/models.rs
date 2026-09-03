@@ -204,8 +204,6 @@ pub(crate) struct PositionSnapshot {
     pub side: Option<Side>,
     #[serde(deserialize_with = "deserialize_f64")]
     pub size: f64,
-    #[serde(default, deserialize_with = "deserialize_optional_f64")]
-    pub leverage: Option<f64>,
     #[serde(
         default,
         rename = "avgPrice",
@@ -322,7 +320,6 @@ mod tests {
         assert_eq!(snapshot.symbol, "BTCUSDT");
         assert_eq!(snapshot.side, None);
         assert_eq!(snapshot.size, 0.0);
-        assert_eq!(snapshot.leverage, Some(10.0));
         assert_eq!(snapshot.avg_price, None);
         assert_eq!(snapshot.unrealised_pnl, None);
         assert_eq!(snapshot.position_idx, 0);

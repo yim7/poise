@@ -225,9 +225,9 @@ mod tests {
     use anyhow::{Result, anyhow};
     use chrono::{TimeZone, Utc};
     use poise_application::exchange::{
-        AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot,
-        ExchangeInfo, ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, MarketDataPort,
-        MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, Position, RecentTrackPnlRecords,
+        AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
+        ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, MarketDataPort, MarketDataTick,
+        MetadataPort, OrderReceipt, OrderRequest, Position, RecentTrackPnlRecords,
     };
     use poise_core::instrument::{Amount, Asset, InstrumentSpec};
     use poise_core::track::{Instrument, Venue};
@@ -492,13 +492,6 @@ total_loss_limit = 0.03
 
     #[async_trait::async_trait]
     impl AccountPort for RecordingDryRunExchange {
-        async fn get_account_capacity_snapshot(
-            &self,
-            _instrument: &Instrument,
-        ) -> Result<AccountCapacitySnapshot> {
-            panic!("dry-run capacity estimation is introduced in task 3.3")
-        }
-
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,

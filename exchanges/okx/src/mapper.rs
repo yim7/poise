@@ -645,7 +645,6 @@ mod tests {
                 mark_px: Some("65100.5".to_string()),
                 upl: "123.45".to_string(),
                 pos_side: "net".to_string(),
-                lever: "20".to_string(),
             },
             &metadata,
         )
@@ -674,7 +673,6 @@ mod tests {
                 mark_px: None,
                 upl: "123.45".to_string(),
                 pos_side: "net".to_string(),
-                lever: "20".to_string(),
             },
             &metadata,
         )
@@ -694,7 +692,6 @@ mod tests {
                 mark_px: Some("65100.5".to_string()),
                 upl: "0.0012".to_string(),
                 pos_side: "net".to_string(),
-                lever: "20".to_string(),
             },
             &metadata,
         )
@@ -714,7 +711,6 @@ mod tests {
                 mark_px: None,
                 upl: "".to_string(),
                 pos_side: "net".to_string(),
-                lever: "".to_string(),
             },
             &metadata,
         )
@@ -743,7 +739,6 @@ mod tests {
                 mark_px: None,
                 upl: "".to_string(),
                 pos_side: "net".to_string(),
-                lever: "".to_string(),
             },
             &metadata,
         )
@@ -763,7 +758,6 @@ mod tests {
                 mark_px: None,
                 upl: "12.3".to_string(),
                 pos_side: "net".to_string(),
-                lever: "".to_string(),
             },
             &metadata,
         )
@@ -783,7 +777,6 @@ mod tests {
                 mark_px: None,
                 upl: "".to_string(),
                 pos_side: "net".to_string(),
-                lever: "".to_string(),
             },
             &metadata,
         )
@@ -803,7 +796,6 @@ mod tests {
                 mark_px: None,
                 upl: "123.45".to_string(),
                 pos_side: "long".to_string(),
-                lever: "20".to_string(),
             },
             &metadata,
         )

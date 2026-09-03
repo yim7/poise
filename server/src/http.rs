@@ -448,8 +448,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use chrono::{TimeZone, Utc};
     use poise_application::exchange::{
-        AccountCapacitySnapshot, AccountPort, AccountSummarySnapshot, RecentTrackPnlRecords,
-        UserDataEvent,
+        AccountPort, AccountSummarySnapshot, RecentTrackPnlRecords, UserDataEvent,
     };
     use poise_application::{
         CommittedTrackWrite, EffectJournalEntry, EffectStatusUpdate, PersistedTrackEffect,
@@ -1953,15 +1952,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AccountPort for FakeRecentFillsAccount {
-        async fn get_account_capacity_snapshot(
-            &self,
-            _instrument: &Instrument,
-        ) -> anyhow::Result<AccountCapacitySnapshot> {
-            Ok(AccountCapacitySnapshot {
-                max_increase_notional: 1_000_000.0,
-            })
-        }
-
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,

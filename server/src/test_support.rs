@@ -3,9 +3,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use poise_application::exchange::{
-    AccountCapacitySnapshot, AccountPort, AccountSummarySnapshot, ExchangeOpenOrderSnapshot,
-    ExecutionPort, ExecutionQuote, OrderReceipt, OrderRequest, OrderStatus, Position,
-    RecentTrackPnlRecords, UserDataEvent,
+    AccountPort, AccountSummarySnapshot, ExchangeOpenOrderSnapshot, ExecutionPort, ExecutionQuote,
+    OrderReceipt, OrderRequest, OrderStatus, Position, RecentTrackPnlRecords, UserDataEvent,
 };
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
@@ -483,15 +482,6 @@ pub(crate) struct NoopAccountPort;
 
 #[async_trait::async_trait]
 impl AccountPort for NoopAccountPort {
-    async fn get_account_capacity_snapshot(
-        &self,
-        _instrument: &poise_core::track::Instrument,
-    ) -> Result<AccountCapacitySnapshot> {
-        Ok(AccountCapacitySnapshot {
-            max_increase_notional: 1_000_000.0,
-        })
-    }
-
     async fn get_recent_track_pnl_records(
         &self,
         _instrument: &poise_core::track::Instrument,

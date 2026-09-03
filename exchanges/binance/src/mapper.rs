@@ -5,11 +5,9 @@ use anyhow::{Context, Result, anyhow, ensure};
 use crate::rest::models::{
     BinanceAccountSummaryInformation, BinanceAccountTrade, BinanceExchangeInfo,
     BinanceIncomeRecord, BinanceOpenOrder, BinanceOrderResponse, BinancePositionRisk,
-    BinanceSymbolConfiguration,
 };
 use poise_application::exchange::{
-    AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
-    OrderStatus, Position,
+    AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt, OrderStatus, Position,
 };
 use poise_application::exchange::{TrackPnlQuantity, TrackPnlRecord};
 use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
@@ -96,17 +94,6 @@ impl BinanceAccountSummaryInformation {
         )
         .map_err(anyhow::Error::msg)
     }
-}
-
-pub(crate) fn build_account_capacity_snapshot(
-    account: BinanceAccountSummaryInformation,
-    symbol_config: BinanceSymbolConfiguration,
-) -> Result<AccountCapacitySnapshot> {
-    let available_balance = parse_decimal("availableBalance", &account.available_balance)?;
-
-    Ok(AccountCapacitySnapshot {
-        max_increase_notional: available_balance * symbol_config.leverage as f64,
-    })
 }
 
 impl TryFrom<BinanceOpenOrder> for ExchangeOrder {
@@ -401,31 +388,6 @@ mod tests {
         assert_eq!(snapshot.available().unwrap().value(), 19_000.0);
         assert_eq!(snapshot.available_for_asset("BTC"), Some(0.1));
         assert_eq!(snapshot.available_for_asset("USDT"), Some(5_000.0));
-    }
-
-    #[test]
-    fn builds_account_capacity_snapshot_from_account_summary_and_symbol_config() {
-        let account_payload = r#"
-        {
-            "availableBalance": "100.5",
-            "totalMarginBalance": "125.25",
-            "totalUnrealizedProfit": "4.5"
-        }
-        "#;
-        let symbol_config_payload = r#"
-        {
-            "symbol": "BTCUSDT",
-            "leverage": 20
-        }
-        "#;
-
-        let account: BinanceAccountSummaryInformation =
-            serde_json::from_str(account_payload).unwrap();
-        let symbol_config: BinanceSymbolConfiguration =
-            serde_json::from_str(symbol_config_payload).unwrap();
-        let snapshot = build_account_capacity_snapshot(account, symbol_config).unwrap();
-
-        assert_eq!(snapshot.max_increase_notional, 2010.0);
     }
 
     #[test]

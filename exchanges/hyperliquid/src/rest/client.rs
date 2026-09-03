@@ -9,7 +9,7 @@ use tokio::sync::{Mutex as AsyncMutex, OnceCell};
 
 use poise_application::exchange::TrackPnlRecord;
 use poise_application::exchange::{
-    AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
+    AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderRequest as PortOrderRequest, OrderStatus, PnlHistoryWindow, Position, RecentTrackPnlBatch,
 };
 use poise_core::types::PriceRounding;
@@ -171,28 +171,6 @@ impl HyperliquidRestClient {
                 .map_err(anyhow::Error::msg);
         }
         Ok(summary)
-    }
-
-    pub(crate) async fn get_account_capacity_snapshot(
-        &self,
-        leverage: u32,
-    ) -> Result<AccountCapacitySnapshot> {
-        if self.uses_spot_margin_balance().await? {
-            let spot_state = self.spot_user_state().await?;
-            return Ok(AccountCapacitySnapshot {
-                max_increase_notional: usdc_available_after_maintenance(&spot_state)?
-                    * leverage as f64,
-            });
-        }
-
-        let state = self.account_state().await?;
-        let withdrawable = state
-            .withdrawable
-            .parse::<f64>()
-            .context("invalid Hyperliquid withdrawable")?;
-        Ok(AccountCapacitySnapshot {
-            max_increase_notional: withdrawable * leverage as f64,
-        })
     }
 
     pub(crate) async fn get_position(&self, symbol: &str) -> Result<Position> {
@@ -1521,10 +1499,6 @@ mod tests {
             ),
             MockResponse::json(
                 200,
-                r#"{"marginSummary":{"accountValue":"125.5"},"withdrawable":"100.25","assetPositions":[{"position":{"coin":"BTC","szi":"0.02","entryPx":"65000.5","unrealizedPnl":"3.25"}}]}"#,
-            ),
-            MockResponse::json(
-                200,
                 r#"[{"coin":"BTC","oid":12345,"cloid":"0x11111111111111111111111111111111","side":"B","limitPx":"65000.5","sz":"0.02"}]"#,
             ),
         ])
@@ -1539,7 +1513,6 @@ mod tests {
         let info = client.get_exchange_info("BTC").await.unwrap();
         let summary = client.get_account_summary().await.unwrap();
         let position = client.get_position("BTC").await.unwrap();
-        let capacity = client.get_account_capacity_snapshot(10).await.unwrap();
         let open_orders = client.get_open_orders("BTC").await.unwrap();
 
         assert_eq!(
@@ -1548,7 +1521,6 @@ mod tests {
         );
         assert_eq!(summary.equity().value(), 125.5);
         assert_eq!(position.qty.value(), 0.02);
-        assert_eq!(capacity.max_increase_notional, 1002.5);
         assert_eq!(open_orders.len(), 1);
         let requests = server.requests().await;
         assert_eq!(requests[0].path, "/info");
@@ -1560,8 +1532,7 @@ mod tests {
             "0x2222222222222222222222222222222222222222"
         );
         assert_eq!(requests[3].json_body()["type"], "clearinghouseState");
-        assert_eq!(requests[4].json_body()["type"], "clearinghouseState");
-        assert_eq!(requests[5].json_body()["type"], "openOrders");
+        assert_eq!(requests[4].json_body()["type"], "openOrders");
     }
 
     #[tokio::test]
@@ -1595,31 +1566,6 @@ mod tests {
         assert_eq!(requests[0].json_body()["type"], "userAbstraction");
         assert_eq!(requests[1].json_body()["type"], "clearinghouseState");
         assert_eq!(requests[2].json_body()["type"], "spotClearinghouseState");
-    }
-
-    #[tokio::test]
-    async fn unified_account_capacity_uses_spot_usdc_available_after_maintenance() {
-        let server = MockHttpServer::spawn(vec![
-            MockResponse::json(200, r#""unifiedAccount""#),
-            MockResponse::json(
-                200,
-                r#"{"balances":[{"coin":"USDC","token":0,"total":"891.55684101","hold":"314.896004","entryNtl":"0.0"}],"tokenToAvailableAfterMaintenance":[[0,"871.15175301"]]}"#,
-            ),
-        ])
-        .await;
-        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
-            server.base_url(),
-            credentials(),
-            Arc::new(|| 1_700_000_000_000),
-            reqwest::Client::builder().no_proxy().build().unwrap(),
-        );
-
-        let capacity = client.get_account_capacity_snapshot(20).await.unwrap();
-
-        assert_eq!(capacity.max_increase_notional, 17_423.0350602);
-        let requests = server.requests().await;
-        assert_eq!(requests[0].json_body()["type"], "userAbstraction");
-        assert_eq!(requests[1].json_body()["type"], "spotClearinghouseState");
     }
 
     #[tokio::test]
@@ -1883,7 +1829,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hip3_state_queries_use_dex_but_account_capacity_uses_account_scope() {
+    async fn hip3_state_queries_use_dex_scope() {
         let server = MockHttpServer::spawn(vec![
             MockResponse::json(
                 200,
@@ -1892,11 +1838,6 @@ mod tests {
             MockResponse::json(
                 200,
                 r#"[{"coin":"xyz:CBRS","oid":12345,"side":"B","limitPx":"100.5","sz":"2"}]"#,
-            ),
-            MockResponse::json(200, r#""disabled""#),
-            MockResponse::json(
-                200,
-                r#"{"marginSummary":{"accountValue":"125.5"},"withdrawable":"100.25","assetPositions":[]}"#,
             ),
         ])
         .await;
@@ -1909,7 +1850,6 @@ mod tests {
 
         let position = client.get_position("xyz:CBRS").await.unwrap();
         let open_orders = client.get_open_orders("xyz:CBRS").await.unwrap();
-        let capacity = client.get_account_capacity_snapshot(3).await.unwrap();
 
         assert_eq!(
             position.instrument,
@@ -1917,16 +1857,11 @@ mod tests {
         );
         assert_eq!(position.qty.value(), 2.0);
         assert_eq!(open_orders.len(), 1);
-        assert_eq!(capacity.max_increase_notional, 300.75);
         let requests = server.requests().await;
         assert_eq!(requests[0].json_body()["type"], "clearinghouseState");
         assert_eq!(requests[0].json_body()["dex"], "xyz");
         assert_eq!(requests[1].json_body()["type"], "openOrders");
         assert_eq!(requests[1].json_body()["dex"], "xyz");
-        assert_eq!(requests[2].json_body()["type"], "userAbstraction");
-        assert!(requests[2].json_body().get("dex").is_none());
-        assert_eq!(requests[3].json_body()["type"], "clearinghouseState");
-        assert!(requests[3].json_body().get("dex").is_none());
     }
 
     #[tokio::test]

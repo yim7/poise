@@ -103,25 +103,6 @@ pub(super) async fn execute_submit(
                         "insufficient_margin",
                         Utc::now(),
                     );
-                match worker
-                    .account
-                    .get_account_capacity_snapshot(&request.instrument)
-                    .await
-                {
-                    Ok(snapshot) => {
-                        worker
-                            .state
-                            .account_margin_guard
-                            .update_snapshot(request.instrument.clone(), snapshot);
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            instrument = %request.instrument.symbol,
-                            venue = %request.instrument.venue.as_str(),
-                            "failed to refresh account capacity snapshot after insufficient margin: {error}"
-                        );
-                    }
-                }
             }
             let failure_message = error.to_string();
             match completion.record_failure(&failure_message).await {

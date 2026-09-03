@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use poise_application::exchange::{
-    AccountCapacitySnapshot, AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
+    AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError,
     ExecutionPortErrorKind, ExecutionResult, MarketDataPort, MarketDataTick, MetadataPort,
     OrderReceipt, OrderRequest, PnlHistoryWindow, Position, RecentTrackPnlRecords, UserDataEvent,
@@ -139,15 +139,6 @@ impl ExecutionPort for BinanceRestClient {
 
 #[async_trait]
 impl AccountPort for BinanceAccount {
-    async fn get_account_capacity_snapshot(
-        &self,
-        instrument: &Instrument,
-    ) -> Result<AccountCapacitySnapshot> {
-        self.rest
-            .get_account_capacity_snapshot(&instrument.symbol)
-            .await
-    }
-
     async fn get_recent_track_pnl_records(
         &self,
         instrument: &Instrument,
@@ -271,13 +262,6 @@ mod tests {
 
     #[async_trait]
     impl AccountPort for FakeAccountPort {
-        async fn get_account_capacity_snapshot(
-            &self,
-            _instrument: &Instrument,
-        ) -> Result<AccountCapacitySnapshot> {
-            unreachable!("not used in test")
-        }
-
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,
@@ -902,54 +886,6 @@ mod tests {
         assert_eq!(position.instrument.symbol, "BTCUSDT");
         assert_eq!(position.qty.value(), 0.25);
         assert_eq!(position.avg_price, 65000.5);
-    }
-
-    #[tokio::test]
-    async fn account_capacity_snapshot_calls_rest_and_converts_payload() {
-        let server = MockHttpServer::spawn(vec![
-            MockResponse::json(
-                200,
-                r#"{
-                    "totalWalletBalance": "120.75",
-                    "availableBalance": "100.5",
-                    "totalMarginBalance": "125.25",
-                    "totalUnrealizedProfit": "4.5",
-                    "positions": []
-                }"#,
-            ),
-            MockResponse::json(
-                200,
-                r#"[
-                    {
-                        "symbol": "BTCUSDT",
-                        "marginType": "CROSSED",
-                        "isAutoAddMargin": false,
-                        "leverage": 20,
-                        "maxNotionalValue": "1000000"
-                    }
-                ]"#,
-            ),
-        ])
-        .await;
-        let account =
-            build_test_connected_with_urls(server.base_url(), "ws://127.0.0.1:1").account();
-
-        let snapshot = account
-            .get_account_capacity_snapshot(&Instrument::new(Venue::Binance, "BTCUSDT"))
-            .await
-            .unwrap();
-        let requests = server.requests().await;
-
-        assert!((snapshot.max_increase_notional - 2010.0).abs() < f64::EPSILON);
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].method, "GET");
-        assert_eq!(requests[1].method, "GET");
-        assert!(requests[0].path.starts_with("/fapi/v3/account?"));
-        assert!(
-            requests[1]
-                .path
-                .starts_with("/fapi/v1/symbolConfig?symbol=BTCUSDT&")
-        );
     }
 
     #[tokio::test]

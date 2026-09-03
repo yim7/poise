@@ -583,7 +583,6 @@ mod tests {
         assert_eq!(constraint.max_increase_notional, Some(5_000.0));
         assert_eq!(exchange.available_balance_calls.load(Ordering::SeqCst), 1);
         assert_eq!(exchange.account_summary_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(exchange.account_capacity_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -662,7 +661,6 @@ mod tests {
         assert_eq!(constraint.max_increase_notional, Some(100_000.0));
         assert_eq!(exchange.available_balance_calls.load(Ordering::SeqCst), 0);
         assert_eq!(exchange.account_summary_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(exchange.account_capacity_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1368,7 +1366,6 @@ mod tests {
         get_open_orders_calls: AtomicUsize,
         available_balance_calls: AtomicUsize,
         account_summary_calls: AtomicUsize,
-        account_capacity_calls: AtomicUsize,
         available_balance: std::sync::Mutex<f64>,
         available_by_asset: std::sync::Mutex<BTreeMap<String, f64>>,
         position_mark_price: std::sync::Mutex<Option<f64>>,
@@ -1392,7 +1389,6 @@ mod tests {
                 get_open_orders_calls: AtomicUsize::new(0),
                 available_balance_calls: AtomicUsize::new(0),
                 account_summary_calls: AtomicUsize::new(0),
-                account_capacity_calls: AtomicUsize::new(0),
                 available_balance: std::sync::Mutex::new(1_000_000.0),
                 available_by_asset: std::sync::Mutex::new(BTreeMap::new()),
                 position_mark_price: std::sync::Mutex::new(None),
@@ -1549,17 +1545,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AccountPort for StartupExchange {
-        async fn get_account_capacity_snapshot(
-            &self,
-            instrument: &Instrument,
-        ) -> Result<poise_application::exchange::AccountCapacitySnapshot> {
-            assert_eq!(instrument, &self.instrument);
-            self.account_capacity_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(poise_application::exchange::AccountCapacitySnapshot {
-                max_increase_notional: 1_000_000.0,
-            })
-        }
-
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &Instrument,

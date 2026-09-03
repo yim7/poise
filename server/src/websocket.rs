@@ -2022,15 +2022,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl poise_application::exchange::AccountPort for NoopExchange {
-        async fn get_account_capacity_snapshot(
-            &self,
-            _instrument: &poise_core::track::Instrument,
-        ) -> Result<poise_application::exchange::AccountCapacitySnapshot> {
-            Ok(poise_application::exchange::AccountCapacitySnapshot {
-                max_increase_notional: 1_000_000.0,
-            })
-        }
-
         async fn get_recent_track_pnl_records(
             &self,
             _instrument: &poise_core::track::Instrument,

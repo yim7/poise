@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use poise_application::exchange::{
-    AccountPort, ExecutionPort, ExecutionPortError, ExecutionPortErrorKind, OrderRequest,
+    ExecutionPort, ExecutionPortError, ExecutionPortErrorKind, OrderRequest,
 };
 use poise_application::{SessionEffectOutcome, SessionTrackEffect};
 use poise_core::track::Instrument;
@@ -26,7 +26,6 @@ const DEFAULT_ERROR_BACKOFF_INTERVAL: Duration = Duration::from_secs(1);
 pub struct EffectWorker {
     state: EffectWorkerState,
     execution: Arc<dyn ExecutionPort>,
-    account: Arc<dyn AccountPort>,
     poll_interval: Duration,
     error_backoff_interval: Duration,
     shutdown_rx: watch::Receiver<bool>,
@@ -37,24 +36,21 @@ impl EffectWorker {
     pub fn new(
         state: impl Into<EffectWorkerState>,
         execution: Arc<dyn ExecutionPort>,
-        account: Arc<dyn AccountPort>,
         poll_interval: Duration,
     ) -> Self {
         let (_, shutdown_rx) = watch::channel(false);
-        Self::with_shutdown_rx(state, execution, account, poll_interval, shutdown_rx)
+        Self::with_shutdown_rx(state, execution, poll_interval, shutdown_rx)
     }
 
     pub fn with_shutdown_rx(
         state: impl Into<EffectWorkerState>,
         execution: Arc<dyn ExecutionPort>,
-        account: Arc<dyn AccountPort>,
         poll_interval: Duration,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         Self::with_shutdown_rx_and_error_backoff(
             state,
             execution,
-            account,
             poll_interval,
             DEFAULT_ERROR_BACKOFF_INTERVAL,
             shutdown_rx,
@@ -64,7 +60,6 @@ impl EffectWorker {
     fn with_shutdown_rx_and_error_backoff(
         state: impl Into<EffectWorkerState>,
         execution: Arc<dyn ExecutionPort>,
-        account: Arc<dyn AccountPort>,
         poll_interval: Duration,
         error_backoff_interval: Duration,
         shutdown_rx: watch::Receiver<bool>,
@@ -72,7 +67,6 @@ impl EffectWorker {
         Self {
             state: state.into(),
             execution,
-            account,
             poll_interval,
             error_backoff_interval,
             shutdown_rx,
@@ -235,7 +229,7 @@ mod tests {
     use tokio::time::timeout;
 
     use crate::effect_worker::EffectWorker;
-    use crate::test_support::{NoopAccountPort, build_effect_worker_context_for_repository};
+    use crate::test_support::build_effect_worker_context_for_repository;
 
     #[test]
     fn insufficient_margin_detection_uses_execution_error_kind_not_message_text() {
@@ -248,6 +242,32 @@ mod tests {
 
         assert!(super::is_insufficient_margin_failure(&typed_error));
         assert!(!super::is_insufficient_margin_failure(&string_only_error));
+    }
+
+    #[tokio::test]
+    async fn insufficient_margin_blocks_increases_without_querying_runtime_capacity() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let effect_worker_context = build_effect_worker_context_for_repository(repository);
+        let effect = claim_planned_submit(&effect_worker_context).await;
+        let worker = EffectWorker::new(
+            effect_worker_context.clone(),
+            Arc::new(InsufficientMarginExecution),
+            Duration::from_millis(1),
+        );
+
+        let result = worker.process_effect(effect).await.unwrap();
+
+        assert!(matches!(
+            result,
+            super::dispatch::SessionDispatchResult::Outcome(SessionEffectOutcome::Blocked { .. })
+        ));
+        assert!(
+            effect_worker_context
+                .effect_worker_state
+                .account_margin_guard
+                .block_snapshot()
+                .increase_blocked
+        );
     }
 
     #[tokio::test]
@@ -272,7 +292,6 @@ mod tests {
         let worker = EffectWorker::new(
             effect_worker_context.clone(),
             execution.clone(),
-            Arc::new(NoopAccountPort),
             Duration::from_millis(1),
         );
         let worker_task = tokio::spawn(async move { worker.run_once().await });
@@ -324,7 +343,6 @@ mod tests {
         let worker = EffectWorker::new(
             effect_worker_context.clone(),
             execution.clone(),
-            Arc::new(NoopAccountPort),
             Duration::from_millis(1),
         );
 
@@ -424,7 +442,6 @@ mod tests {
         let worker = EffectWorker::new(
             effect_worker_context.clone(),
             execution.clone(),
-            Arc::new(NoopAccountPort),
             Duration::from_millis(1),
         );
         let worker_task = {
@@ -495,7 +512,6 @@ mod tests {
         let worker = EffectWorker::new(
             effect_worker_context.clone(),
             execution.clone(),
-            Arc::new(NoopAccountPort),
             Duration::from_millis(1),
         );
 
@@ -552,7 +568,6 @@ mod tests {
         let worker = EffectWorker::new(
             effect_worker_context.clone(),
             execution,
-            Arc::new(NoopAccountPort),
             Duration::from_millis(1),
         );
 
@@ -652,7 +667,6 @@ mod tests {
         let worker = EffectWorker::new(
             effect_worker_context.clone(),
             execution.clone(),
-            Arc::new(NoopAccountPort),
             Duration::from_millis(1),
         );
 
@@ -730,7 +744,6 @@ mod tests {
         let worker = EffectWorker::new(
             effect_worker_context.clone(),
             execution,
-            Arc::new(NoopAccountPort),
             Duration::from_millis(1),
         );
 
@@ -812,7 +825,6 @@ mod tests {
         let worker = EffectWorker::new(
             effect_worker_context.clone(),
             execution.clone(),
-            Arc::new(NoopAccountPort),
             Duration::from_millis(1),
         );
 
@@ -872,12 +884,10 @@ mod tests {
             );
 
         let execution = Arc::new(ReconcileFailThenRecordExecution::default());
-        let account = Arc::new(NoopAccountPort);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let worker = EffectWorker::with_shutdown_rx_and_error_backoff(
             effect_worker_context.clone(),
             execution.clone(),
-            account,
             Duration::from_millis(1),
             Duration::from_millis(10),
             shutdown_rx,
@@ -924,12 +934,10 @@ mod tests {
             );
 
         let execution = Arc::new(ReconcileFailThenRecordExecution::default());
-        let account = Arc::new(NoopAccountPort);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let worker = EffectWorker::with_shutdown_rx_and_error_backoff(
             effect_worker_context.clone(),
             execution.clone(),
-            account,
             Duration::from_millis(1),
             Duration::from_millis(75),
             shutdown_rx,
@@ -973,6 +981,50 @@ mod tests {
         submit_started: Notify,
         submit_release: Semaphore,
         cancelled_order_ids: Mutex<Vec<String>>,
+    }
+
+    struct InsufficientMarginExecution;
+
+    #[async_trait::async_trait]
+    impl ExecutionPort for InsufficientMarginExecution {
+        async fn submit_order(
+            &self,
+            _request: OrderRequest,
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
+            Err(ExecutionPortError::new(
+                ExecutionPortErrorKind::InsufficientMargin,
+                anyhow::anyhow!("insufficient margin"),
+            ))
+        }
+
+        async fn cancel_order(
+            &self,
+            _instrument: &Instrument,
+            _order_id: &str,
+        ) -> poise_application::exchange::ExecutionResult<OrderReceipt> {
+            unreachable!()
+        }
+
+        async fn cancel_all(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_application::exchange::ExecutionResult<()> {
+            unreachable!()
+        }
+
+        async fn get_position(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_application::exchange::ExecutionResult<Position> {
+            unreachable!()
+        }
+
+        async fn get_open_orders(
+            &self,
+            _instrument: &Instrument,
+        ) -> poise_application::exchange::ExecutionResult<ExchangeOpenOrderSnapshot> {
+            unreachable!()
+        }
     }
 
     struct SubmitOutcomeUnknownExecution {

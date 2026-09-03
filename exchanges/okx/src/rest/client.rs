@@ -10,8 +10,8 @@ use url::form_urlencoded::Serializer;
 
 use poise_application::exchange::TrackPnlRecord;
 use poise_application::exchange::{
-    AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
-    OrderRequest, OrderStatus, PnlHistoryWindow, Position, RecentTrackPnlBatch,
+    AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt, OrderRequest, OrderStatus,
+    PnlHistoryWindow, Position, RecentTrackPnlBatch,
 };
 use poise_core::track::{Instrument, Venue};
 
@@ -152,54 +152,6 @@ impl OkxRestClient {
         let metadata = self.get_or_fetch_instrument_metadata(symbol).await?;
         let balance = self.get_balance_snapshot().await?;
         available_balance_from_balance(&balance, metadata.settlement_asset())
-    }
-
-    pub(crate) async fn get_account_capacity_snapshot(
-        &self,
-        symbol: &str,
-    ) -> Result<AccountCapacitySnapshot> {
-        let metadata = self.get_or_fetch_instrument_metadata(symbol).await?;
-        let summary = self.get_account_summary().await?;
-        let position = self.get_position_snapshot(symbol).await?.ok_or_else(|| {
-            anyhow!("OKX account capacity unavailable for `{symbol}`: position missing")
-        })?;
-        let leverage = parse_decimal("lever", &position.lever)?;
-        if metadata.is_inverse() {
-            let mark_price = self
-                .mark_price_for_capacity(symbol, position.mark_px.as_deref())
-                .await?;
-            let contract_notional = metadata
-                .contract_notional()
-                .context("OKX inverse account capacity requires contract notional")?;
-            let available = summary
-                .available_for_asset(metadata.settlement_asset())
-                .with_context(|| {
-                    format!(
-                        "missing OKX balance detail for settlement asset `{}`",
-                        metadata.settlement_asset()
-                    )
-                })?;
-            return Ok(AccountCapacitySnapshot {
-                max_increase_notional: capacity_notional_from_inverse_available(
-                    available,
-                    mark_price,
-                    leverage,
-                    contract_notional,
-                ),
-            });
-        }
-
-        let available = summary
-            .available_for_asset(metadata.settlement_asset())
-            .with_context(|| {
-                format!(
-                    "missing OKX balance detail for settlement asset `{}`",
-                    metadata.settlement_asset()
-                )
-            })?;
-        Ok(AccountCapacitySnapshot {
-            max_increase_notional: available * leverage,
-        })
     }
 
     pub(crate) async fn get_position(&self, symbol: &str) -> Result<Position> {
@@ -468,17 +420,6 @@ impl OkxRestClient {
             .context("missing OKX balance snapshot")
     }
 
-    async fn mark_price_for_capacity(
-        &self,
-        symbol: &str,
-        position_mark_price: Option<&str>,
-    ) -> Result<f64> {
-        match position_mark_price {
-            Some(mark_price) => parse_decimal("markPx", mark_price),
-            None => self.get_mark_price(symbol).await,
-        }
-    }
-
     async fn get_or_fetch_instrument_metadata(
         &self,
         symbol: &str,
@@ -731,16 +672,6 @@ fn build_http_client(_base_url: &str) -> reqwest::Client {
 
 fn format_okx_timestamp(timestamp: chrono::DateTime<Utc>) -> String {
     timestamp.to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-fn capacity_notional_from_inverse_available(
-    available: f64,
-    mark_price: f64,
-    leverage: f64,
-    contract_notional: f64,
-) -> f64 {
-    let estimated_contracts = available * mark_price * leverage / contract_notional;
-    estimated_contracts * contract_notional
 }
 
 fn parse_decimal(field: &str, value: &str) -> Result<f64> {
@@ -1191,113 +1122,6 @@ mod tests {
         assert_eq!(body["instId"], "BTC-USDT-SWAP");
         assert_eq!(body["lever"], "10");
         assert_eq!(body["mgnMode"], "cross");
-    }
-
-    #[tokio::test]
-    async fn account_capacity_scales_available_balance_by_position_leverage() {
-        let server = MockHttpServer::spawn(vec![
-            MockResponse::json(200, linear_instrument_response()),
-            MockResponse::json(
-                200,
-                r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[
-                    {"ccy":"USDT","availBal":"100.25","availEq":"100.25","upl":"0"},
-                    {"ccy":"BTC","availBal":"9.0","availEq":"9.0","upl":"0"}
-                ]}]}"#,
-            ),
-            MockResponse::json(
-                200,
-                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","pos":"0","avgPx":"0","upl":"0","posSide":"net","lever":"10"}]}"#,
-            ),
-        ])
-        .await;
-        let client = test_client(&server, true);
-
-        let snapshot = client
-            .get_account_capacity_snapshot("BTC-USDT-SWAP")
-            .await
-            .unwrap();
-
-        assert_eq!(snapshot.max_increase_notional, 1002.5);
-    }
-
-    #[tokio::test]
-    async fn inverse_account_capacity_uses_settlement_asset_mark_price_and_leverage() {
-        let server = MockHttpServer::spawn(vec![
-            MockResponse::json(200, inverse_instrument_response()),
-            MockResponse::json(
-                200,
-                r#"{"code":"0","msg":"","data":[{"totalEq":"50000","details":[{"ccy":"BTC","availBal":"0.5","availEq":"0.5","upl":"0"}]}]}"#,
-            ),
-            MockResponse::json(
-                200,
-                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USD-SWAP","pos":"0","avgPx":"0","markPx":"100000","upl":"0","posSide":"net","lever":"2"}]}"#,
-            ),
-        ])
-        .await;
-        let client = test_client(&server, true);
-
-        let snapshot = client
-            .get_account_capacity_snapshot("BTC-USD-SWAP")
-            .await
-            .unwrap();
-
-        assert_eq!(snapshot.max_increase_notional, 100_000.0);
-    }
-
-    #[tokio::test]
-    async fn inverse_account_capacity_declines_with_mark_price() {
-        let server = MockHttpServer::spawn(vec![
-            MockResponse::json(200, inverse_instrument_response()),
-            MockResponse::json(
-                200,
-                r#"{"code":"0","msg":"","data":[{"totalEq":"25000","details":[{"ccy":"BTC","availBal":"0.5","availEq":"0.5","upl":"0"}]}]}"#,
-            ),
-            MockResponse::json(
-                200,
-                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USD-SWAP","pos":"0","avgPx":"0","markPx":"50000","upl":"0","posSide":"net","lever":"2"}]}"#,
-            ),
-        ])
-        .await;
-        let client = test_client(&server, true);
-
-        let snapshot = client
-            .get_account_capacity_snapshot("BTC-USD-SWAP")
-            .await
-            .unwrap();
-
-        assert_eq!(snapshot.max_increase_notional, 50_000.0);
-    }
-
-    #[tokio::test]
-    async fn inverse_account_capacity_fetches_public_mark_price_when_position_mark_missing() {
-        let server = MockHttpServer::spawn(vec![
-            MockResponse::json(200, inverse_instrument_response()),
-            MockResponse::json(
-                200,
-                r#"{"code":"0","msg":"","data":[{"totalEq":"37500","details":[{"ccy":"BTC","availBal":"0.5","availEq":"0.5","upl":"0"}]}]}"#,
-            ),
-            MockResponse::json(
-                200,
-                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USD-SWAP","pos":"0","avgPx":"0","upl":"0","posSide":"net","lever":"2"}]}"#,
-            ),
-            MockResponse::json(
-                200,
-                r#"{"code":"0","msg":"","data":[{"instId":"BTC-USD-SWAP","instType":"SWAP","markPx":"75000","ts":"1781068207856"}]}"#,
-            ),
-        ])
-        .await;
-        let client = test_client(&server, true);
-
-        let snapshot = client
-            .get_account_capacity_snapshot("BTC-USD-SWAP")
-            .await
-            .unwrap();
-
-        assert_eq!(snapshot.max_increase_notional, 75_000.0);
-        assert_eq!(
-            server.requests()[3].path,
-            "/api/v5/public/mark-price?instType=SWAP&instId=BTC-USD-SWAP"
-        );
     }
 
     #[tokio::test]

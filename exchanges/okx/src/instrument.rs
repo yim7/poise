@@ -144,17 +144,6 @@ impl OkxInstrumentMetadata {
         &self.instrument_spec
     }
 
-    pub(crate) fn is_inverse(&self) -> bool {
-        matches!(self.contract_kind, OkxContractKind::Inverse)
-    }
-
-    pub(crate) fn contract_notional(&self) -> Option<f64> {
-        match self.contract_kind {
-            OkxContractKind::Inverse => Some(self.ct_val),
-            OkxContractKind::Linear => None,
-        }
-    }
-
     pub(crate) fn exchange_info(&self) -> ExchangeInfo {
         ExchangeInfo {
             instrument_spec: self.instrument_spec().clone(),

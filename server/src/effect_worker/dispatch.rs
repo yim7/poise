@@ -236,7 +236,7 @@ mod tests {
 
     use crate::effect_worker::EffectWorker;
     use crate::test_support::{
-        NoopAccountPort, RecordingExecutionPort, build_effect_worker_context_for_repository,
+        RecordingExecutionPort, build_effect_worker_context_for_repository,
         seed_persisted_pending_submit_effect,
     };
 
@@ -249,11 +249,9 @@ mod tests {
 
         let effect_worker_context = build_effect_worker_context_for_repository(repository);
         let execution = Arc::new(RecordingExecutionPort::default());
-        let account = Arc::new(NoopAccountPort);
         let worker = EffectWorker::new(
             effect_worker_context,
             execution.clone(),
-            account,
             Duration::from_millis(1),
         );
 
@@ -283,11 +281,9 @@ mod tests {
             );
 
         let execution = Arc::new(RecordingExecutionPort::default());
-        let account = Arc::new(NoopAccountPort);
         let worker = EffectWorker::new(
             effect_worker_context,
             execution.clone(),
-            account,
             Duration::from_millis(1),
         );
 
@@ -317,13 +313,7 @@ mod tests {
             );
 
         let execution = Arc::new(UnknownCancelExecutionPort);
-        let account = Arc::new(NoopAccountPort);
-        let worker = EffectWorker::new(
-            effect_worker_context,
-            execution,
-            account,
-            Duration::from_millis(1),
-        );
+        let worker = EffectWorker::new(effect_worker_context, execution, Duration::from_millis(1));
 
         worker.run_once().await.unwrap();
 
@@ -342,13 +332,7 @@ mod tests {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let effect_worker_context = build_effect_worker_context_for_repository(repository);
         let execution = Arc::new(RecordingExecutionPort::default());
-        let account = Arc::new(NoopAccountPort);
-        let worker = EffectWorker::new(
-            effect_worker_context,
-            execution,
-            account,
-            Duration::from_millis(1),
-        );
+        let worker = EffectWorker::new(effect_worker_context, execution, Duration::from_millis(1));
 
         let result = super::handle_cancel_queue_action(
             &worker,

@@ -35,17 +35,6 @@ impl AccountMarginGuardStore {
         stored_snapshots.extend(snapshots);
     }
 
-    pub(crate) fn update_snapshot(
-        &self,
-        instrument: Instrument,
-        snapshot: AccountCapacitySnapshot,
-    ) {
-        self.snapshots_by_instrument
-            .lock()
-            .unwrap()
-            .insert(instrument, snapshot);
-    }
-
     pub(crate) fn activate_insufficient_margin(
         &self,
         _instrument: &Instrument,
