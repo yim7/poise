@@ -21,7 +21,7 @@
 
 - [x] F1：Bybit 与 OKX open orders 完成全部分页；覆盖多页、结束页和游标不前进/请求失败场景。Commit：`1f67dd2`
 - [x] F2：PNL 异资产记录通过 `TradingRuntime::handle` 原子进入 SQLite 和 committed state，并保持 `Incomplete` 聚合。Commit：`a689d25`
-- [ ] F3：共享 order、position、observation 与 PNL quantity 边界统一使用 `PositionQty`，adapter wire 转换保持私有。Commit：待完成
+- [x] F3：共享 order、position、observation 与 PNL quantity 边界统一使用 `PositionQty`，adapter wire 转换保持私有。Commit：`3efb2e7`
 - [ ] F4：PNL fact 保存发生时 quantity 语义，storage 不读取当前 metadata 补写历史字段。Commit：待完成
 - [ ] F5：时间成为 engine 输入，market transition 删除字段排除 diff 和手工状态恢复。Commit：待完成
 - [ ] F6：删除 Hyperliquid 隐藏 `10x` 及无效的运行期 capacity port 查询。Commit：待完成
