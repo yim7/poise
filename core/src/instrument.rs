@@ -51,7 +51,7 @@ impl Amount {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct PositionQty(f64);
 
 impl PositionQty {

@@ -27,7 +27,7 @@ pub(super) fn describe_open_orders(open_orders: &ExchangeOpenOrderSnapshot) -> V
                 } else {
                     "decrease_or_ask"
                 },
-                order.qty,
+                order.qty.value(),
                 order.price,
                 order.status,
                 order.order_id,
@@ -122,8 +122,8 @@ mod tests {
                 client_order_id: "client-4670".to_string(),
                 side: Side::Buy,
                 price: 4670.0,
-                qty: 0.066,
-                filled_qty: 0.0,
+                qty: poise_core::instrument::PositionQty::new(0.066).unwrap(),
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: OrderStatus::New,
             },
             ExchangeOrder {
@@ -132,8 +132,8 @@ mod tests {
                 client_order_id: "client-4640".to_string(),
                 side: Side::Buy,
                 price: 4640.0,
-                qty: 0.066,
-                filled_qty: 0.0,
+                qty: poise_core::instrument::PositionQty::new(0.066).unwrap(),
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: OrderStatus::New,
             },
         ]);

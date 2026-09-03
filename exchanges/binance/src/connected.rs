@@ -199,6 +199,7 @@ mod tests {
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use poise_application::exchange::ExecutionPortErrorKind;
+    use poise_core::instrument::PositionQty;
     use poise_core::{
         track::{Instrument, Venue},
         types::Side,
@@ -329,7 +330,7 @@ mod tests {
             instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
             side: Side::Buy,
             price: 65_000.0,
-            quantity: 0.1,
+            quantity: PositionQty::new(0.1).unwrap(),
             client_order_id: client_order_id.to_string(),
             reduce_only: false,
         }
@@ -507,7 +508,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: Side::Buy,
                 price: 64000.5,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "grid-order-005".to_string(),
                 reduce_only: false,
             })
@@ -543,7 +544,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: Side::Sell,
                 price: 64000.5,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "grid-order-006".to_string(),
                 reduce_only: true,
             })
@@ -573,7 +574,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: Side::Buy,
                 price: 64000.5,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "grid-order-007".to_string(),
                 reduce_only: false,
             })
@@ -646,7 +647,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: Side::Buy,
                 price: 65000.0,
-                quantity: 0.1,
+                quantity: PositionQty::new(0.1).unwrap(),
                 client_order_id: "client-margin".to_string(),
                 reduce_only: false,
             })
@@ -899,7 +900,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(position.instrument.symbol, "BTCUSDT");
-        assert_eq!(position.qty, 0.25);
+        assert_eq!(position.qty.value(), 0.25);
         assert_eq!(position.avg_price, 65000.5);
     }
 

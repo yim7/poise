@@ -777,7 +777,7 @@ mod tests {
             .expect("catch-up submit effect should exist");
         assert_eq!(request.side, Side::Buy);
         assert_eq!(request.price, 100.1);
-        assert!((request.quantity - 1.0).abs() < 1e-9);
+        assert!((request.quantity.value() - 1.0).abs() < 1e-9);
         assert_eq!(catch_up_binding.allocations.len(), 1);
         assert_eq!(plan.reason, Some(DecisionReason::SubmitPlanned));
     }
@@ -837,7 +837,7 @@ mod tests {
             .iter()
             .find(|binding| binding.proposal_key.policy == PolicyKind::CatchUp)
             .expect("catch-up binding should be submitted");
-        assert!((catch_up_binding.request.quantity - 10.0).abs() < 1e-9);
+        assert!((catch_up_binding.request.quantity.value() - 10.0).abs() < 1e-9);
     }
 
     #[test]
@@ -855,7 +855,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(catch_up_bindings.len(), 1);
         assert_eq!(catch_up_bindings[0].allocations.len(), 1);
-        assert!((catch_up_bindings[0].request.quantity - 1.0).abs() < 1e-9);
+        assert!((catch_up_bindings[0].request.quantity.value() - 1.0).abs() < 1e-9);
         assert_eq!(
             plan.effects
                 .iter()
@@ -888,7 +888,7 @@ mod tests {
         assert_eq!(catch_up_binding.request.side, Side::Sell);
         assert!(!catch_up_binding.request.reduce_only);
         assert_eq!(catch_up_binding.desired_exposure, Exposure(-2.0));
-        assert!((catch_up_binding.request.quantity - 1.0).abs() < 1e-9);
+        assert!((catch_up_binding.request.quantity.value() - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -963,7 +963,7 @@ mod tests {
         assert_eq!(catch_up_binding.request.side, Side::Buy);
         assert!(catch_up_binding.request.reduce_only);
         assert_eq!(catch_up_binding.desired_exposure, Exposure(-4.0));
-        assert!((catch_up_binding.request.quantity - 1.0).abs() < 1e-9);
+        assert!((catch_up_binding.request.quantity.value() - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -989,7 +989,7 @@ mod tests {
         assert_eq!(catch_up_binding.request.side, Side::Buy);
         assert!(!catch_up_binding.request.reduce_only);
         assert_eq!(catch_up_binding.desired_exposure, Exposure(1.0));
-        assert!((catch_up_binding.request.quantity - 1.25).abs() < 1e-9);
+        assert!((catch_up_binding.request.quantity.value() - 1.25).abs() < 1e-9);
     }
 
     #[test]
@@ -1016,9 +1016,9 @@ mod tests {
         assert!(!catch_up_binding.request.reduce_only);
         assert_eq!(catch_up_binding.desired_exposure, Exposure(0.5));
         assert!(
-            (catch_up_binding.request.quantity - 1.5).abs() < 1e-9,
+            (catch_up_binding.request.quantity.value() - 1.5).abs() < 1e-9,
             "quantity was {}",
-            catch_up_binding.request.quantity
+            catch_up_binding.request.quantity.value()
         );
     }
 
@@ -1062,7 +1062,7 @@ mod tests {
         assert_eq!(catch_up_binding.request.side, Side::Buy);
         assert!(catch_up_binding.request.reduce_only);
         assert_eq!(catch_up_binding.desired_exposure, Exposure(0.0));
-        assert!((catch_up_binding.request.quantity - 0.00032).abs() < 1e-9);
+        assert!((catch_up_binding.request.quantity.value() - 0.00032).abs() < 1e-9);
     }
 
     #[test]
@@ -1080,7 +1080,7 @@ mod tests {
 
         assert_eq!(catch_up_binding.request.side, Side::Buy);
         assert!(catch_up_binding.request.reduce_only);
-        assert!((catch_up_binding.request.quantity - 5.0).abs() < 1e-9);
+        assert!((catch_up_binding.request.quantity.value() - 5.0).abs() < 1e-9);
         assert_eq!(catch_up_binding.allocations.len(), 5);
     }
 
@@ -1115,7 +1115,7 @@ mod tests {
 
         assert_eq!(catch_up_binding.request.side, Side::Sell);
         assert!(catch_up_binding.request.reduce_only);
-        assert!((catch_up_binding.request.quantity - 0.07).abs() < 1e-9);
+        assert!((catch_up_binding.request.quantity.value() - 0.07).abs() < 1e-9);
         assert_eq!(catch_up_binding.allocations.len(), 11);
         let allocated_exposure = catch_up_binding
             .allocations
@@ -1124,7 +1124,9 @@ mod tests {
             .sum::<f64>();
         let position_qty_per_unit = crate::runtime::position_qty_per_exposure_unit(&config, &rules);
         assert!(
-            (allocated_exposure - catch_up_binding.request.quantity / position_qty_per_unit).abs()
+            (allocated_exposure
+                - catch_up_binding.request.quantity.value() / position_qty_per_unit)
+                .abs()
                 < 1e-9
         );
     }
@@ -1160,7 +1162,7 @@ mod tests {
 
         assert_eq!(catch_up_binding.request.side, Side::Buy);
         assert!(!catch_up_binding.request.reduce_only);
-        assert!((catch_up_binding.request.quantity - 0.01).abs() < 1e-9);
+        assert!((catch_up_binding.request.quantity.value() - 0.01).abs() < 1e-9);
         let allocated_exposure = catch_up_binding
             .allocations
             .iter()

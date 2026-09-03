@@ -11,7 +11,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use poise_application::exchange::TrackPnlRecord;
 use poise_application::exchange::{ExchangeOrder, Position, UserDataEvent, UserDataPayload};
-use poise_core::instrument::{Amount, Asset};
+use poise_core::instrument::{Amount, Asset, PositionQty};
 use poise_core::track::{Instrument, Venue};
 
 use super::{
@@ -202,8 +202,8 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                     client_order_id: order.client_order_id.clone(),
                     side,
                     price,
-                    qty: quantity,
-                    filled_qty,
+                    qty: PositionQty::new(quantity).map_err(anyhow::Error::msg)?,
+                    filled_qty: PositionQty::new(filled_qty).map_err(anyhow::Error::msg)?,
                     status: parse_order_status(&order.status)?,
                 }),
             }];
@@ -264,7 +264,7 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                         trade_id,
                         side,
                         price,
-                        trade_qty,
+                        PositionQty::new(trade_qty).map_err(anyhow::Error::msg)?,
                         cash_amount(realized_pnl, quote_asset)?,
                         trading_fee,
                     )),
@@ -325,7 +325,8 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                         event_time,
                         payload: UserDataPayload::PositionUpdate(Position {
                             instrument: Instrument::new(Venue::Binance, position.symbol),
-                            qty: parse_decimal("a.P.pa", &position.position_amt)?,
+                            qty: PositionQty::new(parse_decimal("a.P.pa", &position.position_amt)?)
+                                .map_err(anyhow::Error::msg)?,
                             avg_price: parse_decimal("a.P.ep", &position.entry_price)?,
                             unrealized_pnl: parse_decimal("a.P.up", &position.unrealized_profit)?,
                             mark_price: None,
@@ -406,8 +407,8 @@ mod tests {
                         client_order_id: "grid-order-004".into(),
                         side: Side::Sell,
                         price: 65000.5,
-                        qty: 0.02,
-                        filled_qty: 0.02,
+                        qty: PositionQty::new(0.02).unwrap(),
+                        filled_qty: PositionQty::new(0.02).unwrap(),
                         status: OrderStatus::Filled,
                     }),
                 },
@@ -422,7 +423,7 @@ mod tests {
                         None,
                         Side::Sell,
                         65000.5,
-                        0.02,
+                        PositionQty::new(0.02).unwrap(),
                         cash_amount(12.34, "USDT").unwrap(),
                         None,
                     )),
@@ -467,8 +468,8 @@ mod tests {
                         client_order_id: "grid-order-004".into(),
                         side: Side::Sell,
                         price: 65000.5,
-                        qty: 0.02,
-                        filled_qty: 0.02,
+                        qty: PositionQty::new(0.02).unwrap(),
+                        filled_qty: PositionQty::new(0.02).unwrap(),
                         status: OrderStatus::Filled,
                     }),
                 },
@@ -483,7 +484,7 @@ mod tests {
                         Some("67890".into()),
                         Side::Sell,
                         65000.5,
-                        0.02,
+                        PositionQty::new(0.02).unwrap(),
                         cash_amount(12.34, "USDT").unwrap(),
                         Some(cash_amount(3.2, "USDT").unwrap()),
                     )),
@@ -581,8 +582,8 @@ mod tests {
                     client_order_id: "grid-order-004".into(),
                     side: Side::Sell,
                     price: 65000.5,
-                    qty: 0.02,
-                    filled_qty: 0.0,
+                    qty: PositionQty::new(0.02).unwrap(),
+                    filled_qty: PositionQty::default(),
                     status: OrderStatus::New,
                 }),
             }])
@@ -624,8 +625,8 @@ mod tests {
                         client_order_id: "grid-order-004".into(),
                         side: Side::Sell,
                         price: 65000.5,
-                        qty: 0.02,
-                        filled_qty: 0.02,
+                        qty: PositionQty::new(0.02).unwrap(),
+                        filled_qty: PositionQty::new(0.02).unwrap(),
                         status: OrderStatus::Filled,
                     }),
                 },
@@ -640,7 +641,7 @@ mod tests {
                         None,
                         Side::Sell,
                         65000.5,
-                        0.02,
+                        PositionQty::new(0.02).unwrap(),
                         cash_amount(12.34, "USDT").unwrap(),
                         Some(cash_amount(0.01, "BNB").unwrap()),
                     )),
@@ -674,7 +675,7 @@ mod tests {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
                 payload: UserDataPayload::PositionUpdate(Position {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    qty: 0.015,
+                    qty: PositionQty::new(0.015).unwrap(),
                     avg_price: 64200.0,
                     unrealized_pnl: 12.3,
                     mark_price: None,
@@ -827,7 +828,7 @@ mod tests {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
                 payload: UserDataPayload::PositionUpdate(Position {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    qty: 0.015,
+                    qty: PositionQty::new(0.015).unwrap(),
                     avg_price: 64200.0,
                     unrealized_pnl: 12.3,
                     mark_price: None,
@@ -896,7 +897,7 @@ mod tests {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
                 payload: UserDataPayload::PositionUpdate(Position {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    qty: 0.015,
+                    qty: PositionQty::new(0.015).unwrap(),
                     avg_price: 64200.0,
                     unrealized_pnl: 12.3,
                     mark_price: None,
@@ -977,7 +978,7 @@ mod tests {
                 event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
                 payload: UserDataPayload::PositionUpdate(Position {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    qty: 0.015,
+                    qty: PositionQty::new(0.015).unwrap(),
                     avg_price: 64200.0,
                     unrealized_pnl: 12.3,
                     mark_price: None,

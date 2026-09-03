@@ -825,7 +825,7 @@ impl SqliteStorage {
                     record.trade_id,
                     record.side.map(side_as_str),
                     record.price,
-                    record.qty,
+                    record.qty.map(poise_core::instrument::PositionQty::value),
                     position_unit,
                     base_asset,
                     contract_value,
@@ -1250,7 +1250,7 @@ mod tests {
         EffectStatus, TrackEffectJournal, TrackIdentityStore, TrackMutationStore, TrackQueryStore,
     };
     use poise_core::events::DomainEvent;
-    use poise_core::instrument::InstrumentSpec;
+    use poise_core::instrument::{InstrumentSpec, PositionQty};
     use poise_core::strategy::BandBoundary;
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, PricePrecision, Side};
@@ -1392,7 +1392,7 @@ mod tests {
             instrument: Instrument::new(Venue::Binance, symbol),
             side: Side::Buy,
             price: 95.0,
-            quantity: 0.25,
+            quantity: PositionQty::new(0.25).unwrap(),
             client_order_id: "client-2".into(),
             reduce_only: false,
         }
@@ -1949,7 +1949,7 @@ mod tests {
                 Some("trade-1".into()),
                 Side::Sell,
                 60_000.0,
-                30.0,
+                PositionQty::new(30.0).unwrap(),
                 amount(0.001, "BTC"),
                 Some(amount(0.00001, "BTC")),
             ),
@@ -2002,7 +2002,7 @@ mod tests {
                 Some("1001".into()),
                 Side::Sell,
                 1900.0,
-                0.4,
+                PositionQty::new(0.4).unwrap(),
                 amount(120.0, "USDT"),
                 Some(amount(3.0, "USDT")),
             ),

@@ -872,8 +872,8 @@ impl TrackManager {
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        track.current_exposure = track.exposure_from_position_qty(observation.qty);
-        track.current_position_qty = observation.qty;
+        track.current_exposure = track.exposure_from_position_qty(observation.qty.value());
+        track.current_position_qty = observation.qty.value();
         track.risk_state.unrealized_pnl = observation.unrealized_pnl;
         track.advance_exchange_observation_revision();
         Ok(())
@@ -1442,7 +1442,7 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use poise_core::events::ExecutionGateReason;
-    use poise_core::instrument::{Amount, Asset, InstrumentSpec};
+    use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{
         BandProtectionPolicy, RiskAcquisitionConfig, ShapeFamily, TrackConfig,
@@ -1561,7 +1561,7 @@ mod tests {
             .expect("catch-up submit effect should exist");
         assert_eq!(request.side, Side::Buy);
         assert!((request.price - 95.1).abs() < 1e-9);
-        assert!((request.quantity - 1.0).abs() < 1e-9);
+        assert!((request.quantity.value() - 1.0).abs() < 1e-9);
         assert_eq!(catch_up_binding.allocations.len(), 1);
     }
 
@@ -1817,7 +1817,7 @@ mod tests {
                     instrument: track.instrument().clone(),
                     side: Side::Buy,
                     price: 100.1,
-                    quantity: 1.0,
+                    quantity: PositionQty::new(1.0).unwrap(),
                     client_order_id: "queued-increase-client".to_string(),
                     reduce_only: false,
                 },
@@ -2094,7 +2094,7 @@ mod tests {
                     instrument: track.instrument().clone(),
                     side: Side::Buy,
                     price: 85.1,
-                    quantity: 1.0,
+                    quantity: PositionQty::new(1.0).unwrap(),
                     client_order_id: "protected-increase-client".to_string(),
                     reduce_only: false,
                 },
@@ -2116,7 +2116,7 @@ mod tests {
                     instrument: track.instrument().clone(),
                     side: Side::Sell,
                     price: 94.9,
-                    quantity: 0.5,
+                    quantity: PositionQty::new(0.5).unwrap(),
                     client_order_id: "protected-reduce-only-client".to_string(),
                     reduce_only: true,
                 },
@@ -2289,7 +2289,7 @@ mod tests {
                     instrument: track.instrument().clone(),
                     side: Side::Buy,
                     price: 99.9,
-                    quantity: 1.0,
+                    quantity: PositionQty::new(1.0).unwrap(),
                     client_order_id: "at-target-increase-client".to_string(),
                     reduce_only: false,
                 },
@@ -2376,7 +2376,7 @@ mod tests {
             .observe(
                 &id,
                 TrackObservation::Position(PositionObservation {
-                    qty: -0.2,
+                    qty: PositionQty::new(-0.2).unwrap(),
                     unrealized_pnl: 5.0,
                 }),
             )
@@ -2411,7 +2411,7 @@ mod tests {
             .observe(
                 &id,
                 TrackObservation::Position(PositionObservation {
-                    qty: -30.0,
+                    qty: PositionQty::new(-30.0).unwrap(),
                     unrealized_pnl: 0.25,
                 }),
             )
@@ -2553,7 +2553,7 @@ mod tests {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                     side: Side::Buy,
                     price: 100.0,
-                    quantity: 1.0,
+                    quantity: PositionQty::new(1.0).unwrap(),
                     client_order_id: "client-1".into(),
                     reduce_only: false,
                 },
@@ -2684,7 +2684,7 @@ mod tests {
             .sync_exchange_state(
                 &id,
                 PositionObservation {
-                    qty: 2.0,
+                    qty: PositionQty::new(2.0).unwrap(),
                     unrealized_pnl: 0.0,
                 },
                 CompleteOpenOrderSnapshot::from_complete_exchange_query(vec![]),

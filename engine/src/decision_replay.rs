@@ -266,8 +266,11 @@ impl DecisionReplayRunner {
         manager
             .add_track(input.definition.clone(), instrument_spec.clone())
             .context("add decision replay track")?;
-        let initial_exposure =
-            exposure_from_position_qty(&track_config, &instrument_spec, input.initial_position.qty);
+        let initial_exposure = exposure_from_position_qty(
+            &track_config,
+            &instrument_spec,
+            input.initial_position.qty.value(),
+        );
         manager
             .fresh_start_track(
                 &track_id,
@@ -275,7 +278,7 @@ impl DecisionReplayRunner {
                 TrackPnlStats::default(),
                 FreshSessionExternalInputs {
                     current_exposure: initial_exposure,
-                    position_qty: input.initial_position.qty,
+                    position_qty: input.initial_position.qty.value(),
                     market_data: None,
                     instrument_spec: instrument_spec.clone(),
                 },
@@ -301,7 +304,7 @@ impl DecisionReplayRunner {
             fee_rates: input.fee_rates,
             fill_model: input.fill_model,
             last_observed_at: input.started_at,
-            simulated_position_qty: input.initial_position.qty,
+            simulated_position_qty: input.initial_position.qty.value(),
             simulated_unrealized_pnl: input.initial_position.unrealized_pnl,
             total_estimated_taker_fee: 0.0,
             execution_quote: None,
@@ -360,7 +363,7 @@ impl DecisionReplayRunner {
             }
             DecisionScenarioAction::Position(observation) => {
                 validate_position(observation)?;
-                self.simulated_position_qty = observation.qty;
+                self.simulated_position_qty = observation.qty.value();
                 self.simulated_unrealized_pnl = observation.unrealized_pnl;
                 let transition = self.manager.observe(
                     &self.track_id,
@@ -528,7 +531,7 @@ impl DecisionReplayRunner {
             DecisionReplayFillModel::ImmediateFullAtOrderPrice
                 if self.order_is_marketable(&request) =>
             {
-                (request.quantity, OrderStatus::Filled)
+                (request.quantity.value(), OrderStatus::Filled)
             }
             DecisionReplayFillModel::ImmediateFullAtOrderPrice
             | DecisionReplayFillModel::NeverFill => (0.0, OrderStatus::New),
@@ -536,7 +539,7 @@ impl DecisionReplayRunner {
         let receipt = OrderReceipt {
             order_id: exchange_order_id.clone(),
             client_order_id: request.client_order_id.clone(),
-            filled_qty,
+            filled_qty: PositionQty::new(filled_qty).map_err(anyhow::Error::msg)?,
             status,
         };
 
@@ -544,7 +547,7 @@ impl DecisionReplayRunner {
             order_ref: order_ref.clone(),
             side: request.side,
             price: request.price,
-            quantity: request.quantity,
+            quantity: request.quantity.value(),
             reduce_only: request.reduce_only,
             desired_exposure: desired_exposure.clone(),
             submit_purpose,
@@ -571,14 +574,15 @@ impl DecisionReplayRunner {
             self.apply_simulated_fill(
                 &order_ref,
                 request.side,
-                request.quantity,
+                request.quantity.value(),
                 request.price,
                 accumulator,
             )?;
             let position_transition = self.manager.observe(
                 &self.track_id,
                 TrackObservation::Position(PositionObservation {
-                    qty: self.simulated_position_qty,
+                    qty: PositionQty::new(self.simulated_position_qty)
+                        .map_err(anyhow::Error::msg)?,
                     unrealized_pnl: self.simulated_unrealized_pnl,
                 }),
             )?;
@@ -614,7 +618,7 @@ impl DecisionReplayRunner {
         accumulator: &mut StepAccumulator,
     ) -> Result<Vec<TrackEffect>> {
         let order = &self.orders[index];
-        let fill_delta = (order.request.quantity - order.filled_qty).max(0.0);
+        let fill_delta = (order.request.quantity.value() - order.filled_qty).max(0.0);
         let order_ref = order.order_ref.clone();
         let side = order.request.side;
         let price = order.request.price;
@@ -627,7 +631,7 @@ impl DecisionReplayRunner {
             filled_qty: order.request.quantity,
             status: OrderStatus::Filled,
         };
-        self.orders[index].filled_qty = self.orders[index].request.quantity;
+        self.orders[index].filled_qty = self.orders[index].request.quantity.value();
         self.orders[index].status = OrderStatus::Filled;
 
         let order_transition = self
@@ -640,7 +644,7 @@ impl DecisionReplayRunner {
         let position_transition = self.manager.observe(
             &self.track_id,
             TrackObservation::Position(PositionObservation {
-                qty: self.simulated_position_qty,
+                qty: PositionQty::new(self.simulated_position_qty).map_err(anyhow::Error::msg)?,
                 unrealized_pnl: self.simulated_unrealized_pnl,
             }),
         )?;
@@ -672,7 +676,8 @@ impl DecisionReplayRunner {
         let receipt = OrderReceipt {
             order_id: exchange_order_id.to_string(),
             client_order_id: self.orders[index].request.client_order_id.clone(),
-            filled_qty: self.orders[index].filled_qty,
+            filled_qty: PositionQty::new(self.orders[index].filled_qty)
+                .map_err(anyhow::Error::msg)?,
             status: OrderStatus::Canceled,
         };
         self.manager
@@ -712,7 +717,11 @@ impl DecisionReplayRunner {
         let order = &self.orders[index];
         let effective_filled_qty = observation
             .status
-            .effective_cumulative_filled_qty(observation.filled_qty, order.request.quantity);
+            .effective_cumulative_filled_qty(
+                PositionQty::new(observation.filled_qty).map_err(anyhow::Error::msg)?,
+                order.request.quantity,
+            )
+            .value();
         ensure!(
             effective_filled_qty + f64::EPSILON >= order.filled_qty,
             "filled_qty for `{}` must not move backwards from {} to {}",
@@ -721,10 +730,10 @@ impl DecisionReplayRunner {
             effective_filled_qty
         );
         ensure!(
-            effective_filled_qty <= order.request.quantity + f64::EPSILON,
+            effective_filled_qty <= order.request.quantity.value() + f64::EPSILON,
             "filled_qty for `{}` exceeds order quantity {}",
             observation.order_ref,
-            order.request.quantity
+            order.request.quantity.value()
         );
         let previous_filled_qty = order.filled_qty;
         let previous_status = order.status;
@@ -736,7 +745,7 @@ impl DecisionReplayRunner {
             side,
             price,
             quantity: order.request.quantity,
-            filled_qty: observation.filled_qty,
+            filled_qty: PositionQty::new(observation.filled_qty).map_err(anyhow::Error::msg)?,
             status: observation.status,
         };
         let (transition, _absorb_result) = self
@@ -832,7 +841,7 @@ impl DecisionReplayRunner {
         let transition = self.manager.observe(
             &self.track_id,
             TrackObservation::Position(PositionObservation {
-                qty: self.simulated_position_qty,
+                qty: PositionQty::new(self.simulated_position_qty).map_err(anyhow::Error::msg)?,
                 unrealized_pnl: self.simulated_unrealized_pnl,
             }),
         )?;
@@ -863,7 +872,10 @@ impl DecisionReplayRunner {
 }
 
 fn validate_position(position: &PositionObservation) -> Result<()> {
-    ensure!(position.qty.is_finite(), "position qty must be finite");
+    ensure!(
+        position.qty.value().is_finite(),
+        "position qty must be finite"
+    );
     ensure!(
         position.unrealized_pnl.is_finite(),
         "position unrealized_pnl must be finite"
@@ -1025,7 +1037,7 @@ mod tests {
             DecisionScenarioStep {
                 observed_at: started_at,
                 action: DecisionScenarioAction::Position(PositionObservation {
-                    qty: 0.0,
+                    qty: PositionQty::new(0.0).unwrap(),
                     unrealized_pnl: 0.0,
                 }),
             },
@@ -1173,7 +1185,7 @@ mod tests {
             DecisionScenarioStep {
                 observed_at: input.started_at + Duration::seconds(65),
                 action: DecisionScenarioAction::Position(PositionObservation {
-                    qty: 0.8,
+                    qty: PositionQty::new(0.8).unwrap(),
                     unrealized_pnl: 0.0,
                 }),
             },
@@ -1328,7 +1340,7 @@ mod tests {
             DecisionScenarioStep {
                 observed_at: started_at + Duration::seconds(31),
                 action: DecisionScenarioAction::Position(PositionObservation {
-                    qty: 0.0,
+                    qty: PositionQty::new(0.0).unwrap(),
                     unrealized_pnl: 0.0,
                 }),
             },
@@ -1498,7 +1510,7 @@ mod tests {
             },
             started_at,
             initial_position: PositionObservation {
-                qty: initial_qty,
+                qty: PositionQty::new(initial_qty).unwrap(),
                 unrealized_pnl: 0.0,
             },
             steps: vec![

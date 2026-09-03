@@ -653,7 +653,7 @@ mod tests {
                     event_time: chrono::Utc::now(),
                     payload: UserDataPayload::PositionUpdate(Position {
                         instrument: instrument.clone(),
-                        qty: 0.75,
+                        qty: poise_core::instrument::PositionQty::new(0.75).unwrap(),
                         avg_price: 100.0,
                         unrealized_pnl: 9.0,
                         mark_price: Some(101.0),
@@ -759,7 +759,8 @@ mod tests {
                     event_time: chrono::Utc::now(),
                     payload: UserDataPayload::PositionUpdate(Position {
                         instrument: instrument.clone(),
-                        qty: 0.25 * (attempt + 1) as f64,
+                        qty: poise_core::instrument::PositionQty::new(0.25 * (attempt + 1) as f64)
+                            .unwrap(),
                         avg_price: 100.0,
                         unrealized_pnl: 10.0 + attempt as f64,
                         mark_price: Some(101.0),
@@ -849,7 +850,7 @@ mod tests {
             side: tracked_request.side,
             price: tracked_request.price,
             qty: tracked_request.quantity,
-            filled_qty: 0.0,
+            filled_qty: poise_core::instrument::PositionQty::default(),
             status: OrderStatus::New,
         };
         let exchange = Arc::new(BlockingOpenOrdersSnapshotExchange::new(
@@ -1031,7 +1032,7 @@ mod tests {
                     self.release_first_position.notified().await;
                     Ok(Position {
                         instrument: instrument.clone(),
-                        qty: 0.0,
+                        qty: poise_core::instrument::PositionQty::default(),
                         avg_price: 0.0,
                         unrealized_pnl: 0.0,
                         mark_price: None,
@@ -1042,7 +1043,7 @@ mod tests {
                     self.release_second_position.notified().await;
                     Ok(Position {
                         instrument: instrument.clone(),
-                        qty: 0.75,
+                        qty: poise_core::instrument::PositionQty::new(0.75).unwrap(),
                         avg_price: 100.0,
                         unrealized_pnl: 9.0,
                         mark_price: Some(101.0),
@@ -1106,7 +1107,7 @@ mod tests {
             release.notified().await;
             Ok(Position {
                 instrument: instrument.clone(),
-                qty: 0.0,
+                qty: poise_core::instrument::PositionQty::default(),
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,
@@ -1157,7 +1158,7 @@ mod tests {
             self.get_position_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Position {
                 instrument: instrument.clone(),
-                qty: 0.0,
+                qty: poise_core::instrument::PositionQty::default(),
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,
@@ -1204,7 +1205,7 @@ mod tests {
                         side: tracked_request.side,
                         price: tracked_request.price,
                         qty: tracked_request.quantity,
-                        filled_qty: 0.0,
+                        filled_qty: poise_core::instrument::PositionQty::default(),
                         status: OrderStatus::New,
                     },
                     ExchangeOrder {
@@ -1214,7 +1215,7 @@ mod tests {
                         side: poise_core::types::Side::Sell,
                         price: tracked_request.price - 1.0,
                         qty: tracked_request.quantity,
-                        filled_qty: 0.0,
+                        filled_qty: poise_core::instrument::PositionQty::default(),
                         status: OrderStatus::New,
                     },
                 ]
@@ -1236,7 +1237,7 @@ mod tests {
                         side: tracked_request.side,
                         price: tracked_request.price,
                         qty: tracked_request.quantity,
-                        filled_qty: 0.0,
+                        filled_qty: poise_core::instrument::PositionQty::default(),
                         status: OrderStatus::New,
                     },
                     ExchangeOrder {
@@ -1246,7 +1247,7 @@ mod tests {
                         side: tracked_request.side,
                         price: tracked_request.price,
                         qty: tracked_request.quantity,
-                        filled_qty: 0.0,
+                        filled_qty: poise_core::instrument::PositionQty::default(),
                         status: OrderStatus::New,
                     },
                 ]
@@ -1268,7 +1269,7 @@ mod tests {
                         side: tracked_request.side,
                         price: tracked_request.price,
                         qty: tracked_request.quantity,
-                        filled_qty: 0.0,
+                        filled_qty: poise_core::instrument::PositionQty::default(),
                         status: OrderStatus::New,
                     },
                     ExchangeOrder {
@@ -1278,7 +1279,7 @@ mod tests {
                         side: tracked_request.side,
                         price: tracked_request.price,
                         qty: tracked_request.quantity,
-                        filled_qty: 0.0,
+                        filled_qty: poise_core::instrument::PositionQty::default(),
                         status: OrderStatus::New,
                     },
                 ]
@@ -1431,7 +1432,7 @@ mod tests {
             self.get_position_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Position {
                 instrument: instrument.clone(),
-                qty: 0.0,
+                qty: poise_core::instrument::PositionQty::default(),
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,

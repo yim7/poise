@@ -172,6 +172,8 @@ impl LiveOrderBinding {
 
 #[cfg(test)]
 mod tests {
+    use poise_core::instrument::PositionQty;
+
     use super::*;
     use crate::executor::boundary::{
         BoundaryDirection, BoundaryId, BoundaryOperation, ProfileRevision,
@@ -217,7 +219,7 @@ mod tests {
                 ),
                 side: poise_core::types::Side::Buy,
                 price: 100.0,
-                quantity: 1.0,
+                quantity: PositionQty::new(1.0).unwrap(),
                 client_order_id: "client-1".to_string(),
                 reduce_only: false,
             },
@@ -253,7 +255,7 @@ mod tests {
                 ),
                 side: poise_core::types::Side::Buy,
                 price: 100.0,
-                quantity: 1.0,
+                quantity: PositionQty::new(1.0).unwrap(),
                 client_order_id: client_order_id.to_string(),
                 reduce_only: false,
             },
@@ -295,7 +297,7 @@ mod tests {
                 ),
                 side: poise_core::types::Side::Buy,
                 price: 100.0,
-                quantity: 1.0,
+                quantity: PositionQty::new(1.0).unwrap(),
                 client_order_id: "submit-1".to_string(),
                 reduce_only: true,
             },
@@ -329,7 +331,7 @@ mod tests {
                 ),
                 side: poise_core::types::Side::Buy,
                 price: 100.0,
-                quantity: 1.0,
+                quantity: PositionQty::new(1.0).unwrap(),
                 client_order_id: "submit-1".to_string(),
                 reduce_only: false,
             },

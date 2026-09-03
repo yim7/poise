@@ -5,7 +5,7 @@ use poise_application::exchange::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderStatus, Position,
 };
-use poise_core::instrument::{Amount, Asset, InstrumentSpec};
+use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
 use poise_core::track::{Instrument, Venue};
 
 use crate::protocol::BybitOrderStatus;
@@ -122,7 +122,7 @@ impl TryFrom<CreateOrderResult> for OrderReceipt {
         Ok(Self {
             order_id: value.order_id,
             client_order_id: value.order_link_id.unwrap_or_default(),
-            filled_qty: 0.0,
+            filled_qty: PositionQty::default(),
             status: OrderStatus::Submitting,
         })
     }
@@ -229,7 +229,7 @@ pub(crate) fn build_bybit_position(
 
     Ok(Position {
         instrument: Instrument::new(Venue::Bybit, symbol),
-        qty: signed_qty,
+        qty: PositionQty::new(signed_qty).map_err(anyhow::Error::msg)?,
         avg_price: value_or_zero("avgPrice", avg_price, allow_blank_numeric)?,
         unrealized_pnl: value_or_zero("unrealisedPnl", unrealised_pnl, allow_blank_numeric)?,
         mark_price: None,
@@ -261,8 +261,8 @@ pub(crate) fn build_bybit_open_order(order: BybitActiveOrder) -> Result<Exchange
         client_order_id: client_order_id.unwrap_or_default(),
         side,
         price,
-        qty,
-        filled_qty,
+        qty: PositionQty::new(qty).map_err(anyhow::Error::msg)?,
+        filled_qty: PositionQty::new(filled_qty).map_err(anyhow::Error::msg)?,
         status: order_status
             .into_order_status()
             .ok_or_else(|| anyhow!("unsupported Bybit order status: {order_status:?}"))?,
@@ -484,7 +484,7 @@ mod tests {
             OrderReceipt {
                 order_id: "12345".to_string(),
                 client_order_id: "client-1".to_string(),
-                filled_qty: 0.0,
+                filled_qty: PositionQty::default(),
                 status: OrderStatus::Submitting,
             }
         );
@@ -507,7 +507,7 @@ mod tests {
             position,
             Position {
                 instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
-                qty: -0.25,
+                qty: PositionQty::new(-0.25).unwrap(),
                 avg_price: 65000.5,
                 unrealized_pnl: -12.5,
                 mark_price: None,
@@ -532,7 +532,7 @@ mod tests {
             position,
             Position {
                 instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
-                qty: 0.0,
+                qty: PositionQty::default(),
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,
@@ -577,8 +577,8 @@ mod tests {
         assert_eq!(order.client_order_id, "client-1");
         assert_eq!(order.side, Side::Buy);
         assert_eq!(order.price, 65000.5);
-        assert_eq!(order.qty, 0.25);
-        assert_eq!(order.filled_qty, 0.1);
+        assert_eq!(order.qty.value(), 0.25);
+        assert_eq!(order.filled_qty.value(), 0.1);
         assert_eq!(order.status, OrderStatus::PartiallyFilled);
     }
 

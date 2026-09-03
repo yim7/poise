@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use poise_core::instrument::{Amount, Asset};
+use poise_core::instrument::{Amount, Asset, PositionQty};
 use poise_core::track::Instrument;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -73,7 +73,7 @@ pub type ExecutionResult<T> = std::result::Result<T, ExecutionPortError>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Position {
     pub instrument: Instrument,
-    pub qty: f64,
+    pub qty: PositionQty,
     pub avg_price: f64,
     pub unrealized_pnl: f64,
     pub mark_price: Option<f64>,

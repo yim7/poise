@@ -283,7 +283,7 @@ fn cross_zero_flattens_before_releasing_new_short_risk() {
         started_at + Duration::minutes(2),
         DecisionReplayFillModel::ImmediateFullAtOrderPrice,
     );
-    input.replay.initial_position.qty = 2.0;
+    input.replay.initial_position.qty = PositionQty::new(2.0).unwrap();
 
     let report = run_decision_evaluation(&input).unwrap();
     let delayed = &report.delayed_decision_replay;
@@ -364,7 +364,7 @@ fn late_fill_crossing_zero_counts_only_post_zero_risk_but_full_turnover() {
             DecisionScenarioStep {
                 observed_at: started_at + Duration::minutes(2),
                 action: DecisionScenarioAction::Position(PositionObservation {
-                    qty: 0.25,
+                    qty: PositionQty::new(0.25).unwrap(),
                     unrealized_pnl: 0.0,
                 }),
             },
@@ -610,7 +610,7 @@ fn pre_live_position_observation_does_not_inflate_delayed_max_notional() {
             DecisionScenarioStep {
                 observed_at: started_at,
                 action: DecisionScenarioAction::Position(PositionObservation {
-                    qty: 0.0,
+                    qty: PositionQty::new(0.0).unwrap(),
                     unrealized_pnl: 0.0,
                 }),
             },
@@ -645,7 +645,7 @@ fn partial_fill_and_position_observation_make_exchange_and_manager_facts_converg
             DecisionScenarioStep {
                 observed_at: started_at + Duration::seconds(3),
                 action: DecisionScenarioAction::Position(PositionObservation {
-                    qty: 0.5,
+                    qty: PositionQty::new(0.5).unwrap(),
                     unrealized_pnl: 0.0,
                 }),
             },
@@ -837,7 +837,7 @@ fn evaluation_input_with(
             },
             started_at,
             initial_position: PositionObservation {
-                qty: initial_position_qty,
+                qty: PositionQty::new(initial_position_qty).unwrap(),
                 unrealized_pnl: 0.0,
             },
             steps,

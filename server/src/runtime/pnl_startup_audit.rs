@@ -193,7 +193,7 @@ mod tests {
                     Some("missing".to_string()),
                     Side::Sell,
                     62_000.0,
-                    0.2,
+                    poise_core::instrument::PositionQty::new(0.2).unwrap(),
                     amount(0.0001, "USDT"),
                     Some(amount(0.00001, "USDT")),
                 )]),

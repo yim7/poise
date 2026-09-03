@@ -340,7 +340,7 @@ pub(crate) fn test_submit_effect(track_id: &str) -> TrackEffect {
             ),
             side: Side::Buy,
             price: 100.0,
-            quantity: 0.1,
+            quantity: poise_core::instrument::PositionQty::new(0.1).unwrap(),
             client_order_id: format!("{track_id}-old-session-submit"),
             reduce_only: false,
         },
@@ -428,7 +428,7 @@ impl ExecutionPort for RecordingExecutionPort {
         Ok(OrderReceipt {
             order_id: "test-order".into(),
             client_order_id: req.client_order_id,
-            filled_qty: 0.0,
+            filled_qty: poise_core::instrument::PositionQty::default(),
             status: OrderStatus::New,
         })
     }
@@ -441,7 +441,7 @@ impl ExecutionPort for RecordingExecutionPort {
         Ok(OrderReceipt {
             order_id: order_id.to_string(),
             client_order_id: String::new(),
-            filled_qty: 0.0,
+            filled_qty: poise_core::instrument::PositionQty::default(),
             status: OrderStatus::Canceled,
         })
     }
@@ -461,7 +461,7 @@ impl ExecutionPort for RecordingExecutionPort {
     ) -> poise_application::exchange::ExecutionResult<Position> {
         Ok(Position {
             instrument: instrument.clone(),
-            qty: 0.0,
+            qty: poise_core::instrument::PositionQty::default(),
             avg_price: 0.0,
             unrealized_pnl: 0.0,
             mark_price: None,

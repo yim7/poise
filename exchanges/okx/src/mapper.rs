@@ -5,7 +5,7 @@ use chrono::{TimeZone, Utc};
 
 use poise_application::exchange::TrackPnlRecord;
 use poise_application::exchange::{AccountSummarySnapshot, ExchangeOrder, OrderStatus, Position};
-use poise_core::instrument::{Amount, Asset};
+use poise_core::instrument::{Amount, Asset, PositionQty};
 use poise_core::track::{Instrument, Venue};
 use poise_core::types::Side;
 
@@ -79,10 +79,10 @@ pub(crate) fn position_from_snapshot_with_metadata(
     }
     let qty = position_qty_from_okx_contracts(parse_decimal("pos", &value.pos)?, metadata)?;
     let mark_price = parse_optional_decimal("markPx", value.mark_px.as_deref())?;
-    if qty == 0.0 {
+    if qty.value() == 0.0 {
         return Ok(Position {
             instrument: Instrument::new(Venue::Okx, value.inst_id),
-            qty: 0.0,
+            qty: PositionQty::default(),
             avg_price: 0.0,
             unrealized_pnl: 0.0,
             mark_price,
@@ -238,10 +238,8 @@ pub(crate) fn side_to_okx(side: Side) -> &'static str {
 pub(crate) fn position_qty_from_okx_contracts(
     okx_contract_qty: f64,
     metadata: &OkxInstrumentMetadata,
-) -> Result<f64> {
-    Ok(metadata
-        .position_qty_from_wire_contracts(okx_contract_qty)?
-        .value())
+) -> Result<PositionQty> {
+    metadata.position_qty_from_wire_contracts(okx_contract_qty)
 }
 
 fn parse_decimal(field: &str, value: &str) -> Result<f64> {
@@ -389,7 +387,7 @@ mod tests {
         assert_eq!(record.trade_id.as_deref(), Some("trade-1"));
         assert_eq!(record.side, Some(Side::Sell));
         assert_eq!(record.price, Some(62_147.4));
-        assert_eq!(record.qty, Some(10.0));
+        assert_eq!(record.qty.map(PositionQty::value), Some(10.0));
         assert_eq!(record.realized_pnl().unwrap().value(), 0.000000154839457);
         assert_eq!(record.trading_fee().unwrap().value(), 0.000000032);
         assert_eq!(record.occurred_at.timestamp_millis(), 1_781_099_765_546);
@@ -427,7 +425,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(record.realized_pnl().unwrap().asset().as_str(), "USDT");
-        assert_eq!(record.qty, Some(0.03));
+        assert_eq!(record.qty.map(PositionQty::value), Some(0.03));
         assert_eq!(record.realized_pnl().unwrap().value(), 12.34);
         assert_eq!(record.trading_fee().unwrap().value(), 0.5);
     }
@@ -630,7 +628,7 @@ mod tests {
             position,
             Position {
                 instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
-                qty: -0.25,
+                qty: PositionQty::new(-0.25).unwrap(),
                 avg_price: 65000.5,
                 unrealized_pnl: 123.45,
                 mark_price: Some(65100.5),
@@ -655,7 +653,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(position.qty, -0.3);
+        assert_eq!(position.qty.value(), -0.3);
     }
 
     #[test]
@@ -675,7 +673,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(position.qty, -30.0);
+        assert_eq!(position.qty.value(), -30.0);
     }
 
     #[test]
@@ -699,7 +697,7 @@ mod tests {
             position,
             Position {
                 instrument: Instrument::new(Venue::Okx, "MU-USDT-SWAP"),
-                qty: 0.0,
+                qty: PositionQty::default(),
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,
@@ -814,8 +812,8 @@ mod tests {
                 client_order_id: "client-123".to_string(),
                 side: Side::Buy,
                 price: 65000.1,
-                qty: 0.2,
-                filled_qty: 0.05,
+                qty: PositionQty::new(0.2).unwrap(),
+                filled_qty: PositionQty::new(0.05).unwrap(),
                 status: OrderStatus::PartiallyFilled,
             }
         );
@@ -840,8 +838,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(order.qty, 0.3);
-        assert_eq!(order.filled_qty, 0.1);
+        assert_eq!(order.qty.value(), 0.3);
+        assert_eq!(order.filled_qty.value(), 0.1);
     }
 
     #[test]
@@ -863,8 +861,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(order.qty, 30.0);
-        assert_eq!(order.filled_qty, 10.0);
+        assert_eq!(order.qty.value(), 30.0);
+        assert_eq!(order.filled_qty.value(), 10.0);
     }
 
     #[test]

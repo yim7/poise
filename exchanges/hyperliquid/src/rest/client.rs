@@ -386,7 +386,7 @@ impl HyperliquidRestClient {
                 asset: asset.id,
                 is_buy: matches!(request.side, poise_core::types::Side::Buy),
                 limit_px: format_price_decimal(request.price, asset.sz_decimals),
-                sz: format_size_decimal(request.quantity, asset.sz_decimals),
+                sz: format_size_decimal(request.quantity.value(), asset.sz_decimals),
                 reduce_only: request.reduce_only,
                 order_type: OrderType::Limit(LimitOrderType {
                     tif: "Gtc".to_string(),
@@ -418,7 +418,7 @@ impl HyperliquidRestClient {
         Ok(OrderReceipt {
             order_id: order_id.to_string(),
             client_order_id: order_id.to_string(),
-            filled_qty: 0.0,
+            filled_qty: poise_core::instrument::PositionQty::default(),
             status: OrderStatus::Canceled,
         })
     }
@@ -787,7 +787,7 @@ fn order_receipt_from_response(
         return Ok(OrderReceipt {
             order_id: required_u64(resting, "oid")?.to_string(),
             client_order_id: client_order_id.to_string(),
-            filled_qty: 0.0,
+            filled_qty: poise_core::instrument::PositionQty::default(),
             status: OrderStatus::New,
         });
     }
@@ -795,12 +795,15 @@ fn order_receipt_from_response(
         return Ok(OrderReceipt {
             order_id: required_u64(filled, "oid")?.to_string(),
             client_order_id: client_order_id.to_string(),
-            filled_qty: filled
-                .get("totalSz")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("0")
-                .parse()
-                .context("invalid Hyperliquid filled totalSz")?,
+            filled_qty: poise_core::instrument::PositionQty::new(
+                filled
+                    .get("totalSz")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("0")
+                    .parse()
+                    .context("invalid Hyperliquid filled totalSz")?,
+            )
+            .map_err(anyhow::Error::msg)?,
             status: OrderStatus::Filled,
         });
     }
@@ -894,6 +897,7 @@ mod tests {
     use poise_application::exchange::{
         OrderRequest as PortOrderRequest, OrderStatus, PnlHistoryWindow,
     };
+    use poise_core::instrument::PositionQty;
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
     use tokio::{
@@ -1543,7 +1547,7 @@ mod tests {
             &Instrument::new(Venue::Hyperliquid, "BTC")
         );
         assert_eq!(summary.equity().value(), 125.5);
-        assert_eq!(position.qty, 0.02);
+        assert_eq!(position.qty.value(), 0.02);
         assert_eq!(capacity.max_increase_notional, 1002.5);
         assert_eq!(open_orders.len(), 1);
         let requests = server.requests().await;
@@ -1667,7 +1671,7 @@ mod tests {
                     instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
                     side: Side::Buy,
                     price: 2000.0,
-                    quantity: 3.5,
+                    quantity: PositionQty::new(3.5).unwrap(),
                     client_order_id: client_order_id.to_string(),
                     reduce_only: false,
                 })
@@ -1857,7 +1861,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "xyz:CBRS"),
                 side: Side::Buy,
                 price: 100.5,
-                quantity: 2.0,
+                quantity: PositionQty::new(2.0).unwrap(),
                 client_order_id: "bc-hip3-submit".to_string(),
                 reduce_only: false,
             })
@@ -1911,7 +1915,7 @@ mod tests {
             position.instrument,
             Instrument::new(Venue::Hyperliquid, "xyz:CBRS")
         );
-        assert_eq!(position.qty, 2.0);
+        assert_eq!(position.qty.value(), 2.0);
         assert_eq!(open_orders.len(), 1);
         assert_eq!(capacity.max_increase_notional, 300.75);
         let requests = server.requests().await;
@@ -1950,7 +1954,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
                 side: Side::Buy,
                 price: 2000.0,
-                quantity: 3.5,
+                quantity: PositionQty::new(3.5).unwrap(),
                 client_order_id: "0x1e60610f0b3d420597c88c1fed2ad5ee".to_string(),
                 reduce_only: false,
             })
@@ -2002,7 +2006,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
                 side: Side::Buy,
                 price: 2000.0,
-                quantity: 3.5,
+                quantity: PositionQty::new(3.5).unwrap(),
                 client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
                 reduce_only: false,
             },
@@ -2043,7 +2047,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "ETH"),
                 side: Side::Sell,
                 price: 2356.4,
-                quantity: 0.13140000000000002,
+                quantity: PositionQty::new(0.13140000000000002).unwrap(),
                 client_order_id: "bc-67ceddd7d1a94ebb8bbe0ffb8e1f5f0f".to_string(),
                 reduce_only: false,
             })
@@ -2081,7 +2085,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "ETH"),
                 side: Side::Buy,
                 price: 2359.19,
-                quantity: 0.0063,
+                quantity: PositionQty::new(0.0063).unwrap(),
                 client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
                 reduce_only: true,
             })
@@ -2121,7 +2125,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
                 side: Side::Buy,
                 price: 2000.0,
-                quantity: 3.5,
+                quantity: PositionQty::new(3.5).unwrap(),
                 client_order_id: internal_client_order_id.to_string(),
                 reduce_only: false,
             })
@@ -2171,7 +2175,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
                 side: Side::Buy,
                 price: 2000.0,
-                quantity: 3.5,
+                quantity: PositionQty::new(3.5).unwrap(),
                 client_order_id: internal_client_order_id.to_string(),
                 reduce_only: false,
             })
@@ -2254,7 +2258,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
                 side: Side::Buy,
                 price: 2000.01,
-                quantity: 3.5,
+                quantity: PositionQty::new(3.5).unwrap(),
                 client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
                 reduce_only: false,
             },
@@ -2292,7 +2296,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
                 side: Side::Buy,
                 price: 2000.0,
-                quantity: 3.5,
+                quantity: PositionQty::new(3.5).unwrap(),
                 client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
                 reduce_only: false,
             },
@@ -2329,7 +2333,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
                 side: Side::Buy,
                 price: 2000.0,
-                quantity: 3.5,
+                quantity: PositionQty::new(3.5).unwrap(),
                 client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
                 reduce_only: false,
             },
@@ -2369,7 +2373,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
                 side: Side::Buy,
                 price: 2000.0,
-                quantity: 3.5,
+                quantity: PositionQty::new(3.5).unwrap(),
                 client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
                 reduce_only: false,
             },
@@ -2406,7 +2410,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
                 side: Side::Buy,
                 price: 2000.0,
-                quantity: 3.5,
+                quantity: PositionQty::new(3.5).unwrap(),
                 client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
                 reduce_only: false,
             },
@@ -2437,7 +2441,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
                 side: Side::Buy,
                 price: 2000.0,
-                quantity: 3.5,
+                quantity: PositionQty::new(3.5).unwrap(),
                 client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
                 reduce_only: false,
             },
@@ -2473,7 +2477,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
                 side: Side::Buy,
                 price: 2000.0,
-                quantity: 3.5,
+                quantity: PositionQty::new(3.5).unwrap(),
                 client_order_id: "bk-f254f5816fca4a7faa0455d6f14c0872".to_string(),
                 reduce_only: false,
             },

@@ -115,7 +115,7 @@ impl BybitRestClient {
             symbol: req.instrument.symbol.clone(),
             side: side_to_bybit(req.side).to_string(),
             order_type: "Limit",
-            qty: format_decimal(req.quantity),
+            qty: format_decimal(req.quantity.value()),
             price: format_decimal(req.price),
             time_in_force: "GTC",
             position_idx: 0,
@@ -159,7 +159,7 @@ impl BybitRestClient {
         Ok(OrderReceipt {
             order_id: response.order_id,
             client_order_id: response.order_link_id.unwrap_or_default(),
-            filled_qty: 0.0,
+            filled_qty: poise_core::instrument::PositionQty::default(),
             status: OrderStatus::Canceled,
         })
     }
@@ -523,6 +523,7 @@ fn format_decimal(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use poise_core::instrument::PositionQty;
     use std::collections::{HashMap, VecDeque};
     use std::sync::Mutex;
 
@@ -719,7 +720,7 @@ mod tests {
                 ),
                 side: poise_core::types::Side::Buy,
                 price: 64000.10,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "client-1".to_string(),
                 reduce_only: false,
             })
@@ -769,7 +770,7 @@ mod tests {
                 ),
                 side: poise_core::types::Side::Buy,
                 price: 64000.10,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "client-redirect".to_string(),
                 reduce_only: false,
             },
@@ -806,7 +807,7 @@ mod tests {
                 ),
                 side: poise_core::types::Side::Sell,
                 price: 12.900000000000002,
-                quantity: 0.30000000000000004,
+                quantity: PositionQty::new(0.30000000000000004).unwrap(),
                 client_order_id: "client-1".to_string(),
                 reduce_only: false,
             })
@@ -1053,7 +1054,7 @@ mod tests {
                 ),
                 side: poise_core::types::Side::Buy,
                 price: 64000.10,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "client-1".to_string(),
                 reduce_only: false,
             },

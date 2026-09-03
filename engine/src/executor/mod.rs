@@ -27,7 +27,7 @@ pub(crate) use recovery::{
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
-    use poise_core::instrument::InstrumentSpec;
+    use poise_core::instrument::{InstrumentSpec, PositionQty};
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::{Exposure, Side};
 
@@ -288,7 +288,10 @@ mod tests {
                 instrument: instrument(),
                 side: Side::Buy,
                 price: 98.75,
-                quantity: crate::runtime::position_qty_per_exposure_unit(config, rules),
+                quantity: PositionQty::new(crate::runtime::position_qty_per_exposure_unit(
+                    config, rules,
+                ))
+                .unwrap(),
                 client_order_id: "maker-client".to_string(),
                 reduce_only: false,
             },
@@ -323,7 +326,10 @@ mod tests {
                 instrument: instrument(),
                 side: Side::Buy,
                 price: 100.1,
-                quantity: crate::runtime::position_qty_per_exposure_unit(config, rules),
+                quantity: PositionQty::new(crate::runtime::position_qty_per_exposure_unit(
+                    config, rules,
+                ))
+                .unwrap(),
                 client_order_id: "catch-up-client".to_string(),
                 reduce_only: false,
             },
@@ -485,7 +491,7 @@ mod tests {
         assert!(plan.state.bindings.iter().any(|binding| {
             binding.proposal_key.policy == PolicyKind::ManualOverride
                 && binding.request.side == Side::Buy
-                && (binding.request.quantity - 2.0).abs() < 1e-9
+                && (binding.request.quantity.value() - 2.0).abs() < 1e-9
         }));
         assert!(!plan.state.bindings.iter().any(|binding| {
             matches!(
@@ -515,7 +521,7 @@ mod tests {
             binding.proposal_key.policy == PolicyKind::ReduceOnly
                 && binding.request.side == Side::Sell
                 && binding.request.reduce_only
-                && (binding.request.quantity - 2.0).abs() < 1e-9
+                && (binding.request.quantity.value() - 2.0).abs() < 1e-9
         }));
         assert!(!plan.state.bindings.iter().any(|binding| {
             matches!(

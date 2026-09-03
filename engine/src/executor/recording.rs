@@ -2,6 +2,7 @@ use crate::exchange::{OrderReceipt, OrderRequest, OrderStatus};
 use crate::execution_plan::TrackEffect;
 use crate::observation::OrderObservation;
 use crate::runtime::{ExecutorState, RecentTerminalOrder};
+use poise_core::instrument::PositionQty;
 use poise_core::types::Exposure;
 
 use super::binding::{BindingStatus, LiveOrderBinding, SubmitRecoveryToken};
@@ -252,19 +253,22 @@ fn binding_matches_observation(binding: &LiveOrderBinding, observation: &OrderOb
 fn absorb_binding_fill_progress(
     state: &mut ExecutorState,
     binding_index: usize,
-    reported_filled_qty: f64,
+    reported_filled_qty: PositionQty,
     status: OrderStatus,
 ) {
     let binding = state.bindings[binding_index].clone();
     let total_allocated_exposure_qty = binding.total_allocated_exposure_qty();
-    if total_allocated_exposure_qty <= f64::EPSILON || binding.request.quantity <= f64::EPSILON {
+    if total_allocated_exposure_qty <= f64::EPSILON
+        || binding.request.quantity.value() <= f64::EPSILON
+    {
         return;
     }
 
-    let normalized_filled_qty =
-        status.effective_cumulative_filled_qty(reported_filled_qty, binding.request.quantity);
+    let normalized_filled_qty = status
+        .effective_cumulative_filled_qty(reported_filled_qty, binding.request.quantity)
+        .value();
     let target_absorbed_exposure_qty =
-        normalized_filled_qty / binding.request.quantity * total_allocated_exposure_qty;
+        normalized_filled_qty / binding.request.quantity.value() * total_allocated_exposure_qty;
     let delta_exposure_qty =
         target_absorbed_exposure_qty - state.bindings[binding_index].absorbed_exposure_qty;
     if delta_exposure_qty <= f64::EPSILON {
@@ -452,7 +456,7 @@ mod tests {
             side: binding.request.side,
             price: binding.request.price,
             quantity: binding.request.quantity,
-            filled_qty: 0.0,
+            filled_qty: PositionQty::default(),
             status: OrderStatus::New,
         };
 
@@ -491,7 +495,7 @@ mod tests {
             &OrderReceipt {
                 order_id: "protected-order".to_string(),
                 client_order_id: binding.request.client_order_id.clone(),
-                filled_qty: 0.0,
+                filled_qty: PositionQty::default(),
                 status: OrderStatus::New,
             },
         )
@@ -539,7 +543,7 @@ mod tests {
                 side: binding.request.side,
                 price: binding.request.price,
                 quantity: binding.request.quantity,
-                filled_qty: 0.0,
+                filled_qty: PositionQty::default(),
                 status: OrderStatus::New,
             },
         );
@@ -589,7 +593,7 @@ mod tests {
         );
 
         let stale_working = OrderObservation {
-            filled_qty: 0.0,
+            filled_qty: PositionQty::default(),
             status: OrderStatus::New,
             ..terminal.clone()
         };
@@ -613,7 +617,7 @@ mod tests {
             &OrderReceipt {
                 order_id: terminal.order_id,
                 client_order_id: binding.request.client_order_id.clone(),
-                filled_qty: 0.0,
+                filled_qty: PositionQty::default(),
                 status: OrderStatus::New,
             },
         )
@@ -723,7 +727,7 @@ mod tests {
             side: binding.request.side,
             price: binding.request.price,
             quantity: binding.request.quantity,
-            filled_qty: binding.request.quantity * 0.4,
+            filled_qty: PositionQty::new(binding.request.quantity.value() * 0.4).unwrap(),
             status: OrderStatus::PartiallyFilled,
         };
 
@@ -785,7 +789,7 @@ mod tests {
             side: binding.request.side,
             price: binding.request.price,
             quantity: binding.request.quantity,
-            filled_qty: binding.request.quantity * 0.25,
+            filled_qty: PositionQty::new(binding.request.quantity.value() * 0.25).unwrap(),
             status: OrderStatus::Canceled,
         };
 
@@ -841,7 +845,7 @@ mod tests {
             side: binding.request.side,
             price: binding.request.price,
             quantity: binding.request.quantity,
-            filled_qty: binding.request.quantity * 0.4,
+            filled_qty: PositionQty::new(binding.request.quantity.value() * 0.4).unwrap(),
             status: OrderStatus::Canceled,
         };
         let applied = apply_order_observation_with_result(&planned.state, &canceled);
@@ -919,7 +923,8 @@ mod tests {
         let receipt = OrderReceipt {
             order_id: "order-1".to_string(),
             client_order_id: state.bindings[0].request.client_order_id.clone(),
-            filled_qty: state.bindings[0].request.quantity * 0.25,
+            filled_qty: PositionQty::new(state.bindings[0].request.quantity.value() * 0.25)
+                .unwrap(),
             status: OrderStatus::Canceled,
         };
 

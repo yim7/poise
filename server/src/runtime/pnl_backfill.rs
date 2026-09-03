@@ -393,7 +393,7 @@ mod tests {
             Some("460607985".to_string()),
             Side::Sell,
             62_096.9,
-            0.2,
+            poise_core::instrument::PositionQty::new(0.2).unwrap(),
             amount(0.0, "BTC"),
             Some(amount(0.0000001610386348, "BTC")),
         )]);

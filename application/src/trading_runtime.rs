@@ -1905,7 +1905,7 @@ fn classify_cancel_receipt_resolution(
     cancel_progressed: bool,
     receipt: &OrderReceipt,
 ) -> CancelReceiptResolution {
-    if cancel_progressed || receipt.filled_qty > f64::EPSILON {
+    if cancel_progressed || receipt.filled_qty.value() > f64::EPSILON {
         return CancelReceiptResolution::ClosedWithFill {
             filled_qty: receipt.filled_qty,
         };
@@ -1931,6 +1931,7 @@ pub(crate) mod test_support {
     use async_trait::async_trait;
     use chrono::{NaiveDate, Utc};
     use poise_core::events::DomainEvent;
+    use poise_core::instrument::PositionQty;
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
@@ -2026,7 +2027,7 @@ pub(crate) mod test_support {
                         instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                         side: Side::Buy,
                         price: 100.0,
-                        quantity: 0.1,
+                        quantity: PositionQty::new(0.1).unwrap(),
                         client_order_id: "client-1".into(),
                         reduce_only: false,
                     },
@@ -2057,7 +2058,7 @@ pub(crate) mod test_support {
                             instrument: instrument.clone(),
                             side: Side::Buy,
                             price: 100.0,
-                            quantity: 0.1,
+                            quantity: PositionQty::new(0.1).unwrap(),
                             client_order_id: "client-1".into(),
                             reduce_only: false,
                         },
@@ -2410,7 +2411,7 @@ mod tests {
     };
     use async_trait::async_trait;
     use chrono::Utc;
-    use poise_core::instrument::{Amount, Asset};
+    use poise_core::instrument::{Amount, Asset, PositionQty};
     use poise_core::risk::RiskTerminationCause;
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
@@ -2555,8 +2556,8 @@ mod tests {
                     client_order_id: format!("{order_id}-client"),
                     side: Side::Buy,
                     price: 100.0,
-                    quantity: 0.1,
-                    filled_qty: 0.0,
+                    quantity: PositionQty::new(0.1).unwrap(),
+                    filled_qty: PositionQty::default(),
                     status: OrderStatus::New,
                 })
                 .collect(),
@@ -2795,7 +2796,7 @@ mod tests {
             .sync_exchange_state_without_reconcile(
                 token.clone(),
                 PositionObservation {
-                    qty: 0.75,
+                    qty: PositionQty::new(0.75).unwrap(),
                     unrealized_pnl: 12.0,
                 },
                 CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
@@ -2818,7 +2819,7 @@ mod tests {
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
-                    qty: 0.0,
+                    qty: PositionQty::default(),
                     unrealized_pnl: 0.0,
                 },
                 CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
@@ -2904,7 +2905,7 @@ mod tests {
                 side: request.side,
                 price: request.price,
                 quantity: request.quantity,
-                filled_qty: 0.0,
+                filled_qty: PositionQty::default(),
                 status: OrderStatus::New,
             },
             OrderObservation {
@@ -2912,8 +2913,8 @@ mod tests {
                 client_order_id: "unknown-client".to_string(),
                 side: Side::Sell,
                 price: 80.0,
-                quantity: 3.0,
-                filled_qty: 0.0,
+                quantity: PositionQty::new(3.0).unwrap(),
+                filled_qty: PositionQty::default(),
                 status: OrderStatus::New,
             },
         ]);
@@ -2923,7 +2924,7 @@ mod tests {
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
-                    qty: 0.0,
+                    qty: PositionQty::default(),
                     unrealized_pnl: 0.0,
                 },
                 open_orders,
@@ -3036,8 +3037,8 @@ mod tests {
                     client_order_id: "other-client".to_string(),
                     side: Side::Sell,
                     price: 80.0,
-                    quantity: 1.0,
-                    filled_qty: 0.0,
+                    quantity: PositionQty::new(1.0).unwrap(),
+                    filled_qty: PositionQty::default(),
                     status: OrderStatus::New,
                 },
             )
@@ -3063,7 +3064,7 @@ mod tests {
                     side: request.side,
                     price: request.price,
                     quantity: request.quantity,
-                    filled_qty: 0.0,
+                    filled_qty: PositionQty::default(),
                     status: OrderStatus::New,
                 },
             )
@@ -3105,7 +3106,7 @@ mod tests {
             .observe_position(
                 "btc-core",
                 PositionObservation {
-                    qty: 0.0,
+                    qty: PositionQty::default(),
                     unrealized_pnl: 0.0,
                 },
             )
@@ -3116,7 +3117,7 @@ mod tests {
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
-                    qty: 1.0,
+                    qty: PositionQty::new(1.0).unwrap(),
                     unrealized_pnl: -25.0,
                 },
                 CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
@@ -3159,8 +3160,8 @@ mod tests {
                     client_order_id: "unknown-client".to_string(),
                     side: Side::Buy,
                     price: 100.0,
-                    quantity: 0.1,
-                    filled_qty: 0.0,
+                    quantity: PositionQty::new(0.1).unwrap(),
+                    filled_qty: PositionQty::default(),
                     status: OrderStatus::New,
                 },
             )
@@ -3175,7 +3176,7 @@ mod tests {
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
-                    qty: 0.0,
+                    qty: PositionQty::default(),
                     unrealized_pnl: 0.0,
                 },
                 CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
@@ -3203,7 +3204,7 @@ mod tests {
                 &OrderReceipt {
                     order_id: "already-absent-order".to_string(),
                     client_order_id: "already-terminal-client".to_string(),
-                    filled_qty: 0.0,
+                    filled_qty: PositionQty::default(),
                     status: OrderStatus::Canceled,
                 },
             )
@@ -3214,7 +3215,7 @@ mod tests {
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
-                    qty: 1.0,
+                    qty: PositionQty::new(1.0).unwrap(),
                     unrealized_pnl: -10.0,
                 },
                 CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
@@ -3265,7 +3266,7 @@ mod tests {
             .sync_exchange_state_without_reconcile(
                 after_unqueried,
                 PositionObservation {
-                    qty: 0.0,
+                    qty: PositionQty::default(),
                     unrealized_pnl: 0.0,
                 },
                 CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
@@ -3309,7 +3310,7 @@ mod tests {
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
-                    qty: 0.0,
+                    qty: PositionQty::default(),
                     unrealized_pnl: 0.0,
                 },
                 CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
@@ -3344,7 +3345,7 @@ mod tests {
                 let _ = manager.observe(
                     &TrackId::new("btc-core"),
                     poise_engine::observation::TrackObservation::Position(PositionObservation {
-                        qty: 0.0,
+                        qty: PositionQty::default(),
                         unrealized_pnl: 0.0,
                     }),
                 )?;
@@ -3357,7 +3358,7 @@ mod tests {
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
-                    qty: 1.0,
+                    qty: PositionQty::new(1.0).unwrap(),
                     unrealized_pnl: -10.0,
                 },
                 CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
@@ -3406,7 +3407,7 @@ mod tests {
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
-                    qty: 1.0,
+                    qty: PositionQty::new(1.0).unwrap(),
                     unrealized_pnl: -10.0,
                 },
                 CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
@@ -4251,7 +4252,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: Side::Buy,
                 price: 95.0,
-                quantity: 0.1,
+                quantity: PositionQty::new(0.1).unwrap(),
                 client_order_id: "effect-only-submit".into(),
                 reduce_only: false,
             },
@@ -4306,7 +4307,7 @@ mod tests {
                         instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                         side: Side::Buy,
                         price: 95.0,
-                        quantity: 0.1,
+                        quantity: PositionQty::new(0.1).unwrap(),
                         client_order_id: "downstream-submit".into(),
                         reduce_only: false,
                     },
@@ -4340,7 +4341,7 @@ mod tests {
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
-                    qty: 0.0,
+                    qty: PositionQty::default(),
                     unrealized_pnl: 0.0,
                 },
                 CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
@@ -4373,7 +4374,7 @@ mod tests {
                         instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                         side: Side::Buy,
                         price: 95.0,
-                        quantity: 0.1,
+                        quantity: PositionQty::new(0.1).unwrap(),
                         client_order_id: "downstream-submit".into(),
                         reduce_only: false,
                     },
@@ -4467,7 +4468,7 @@ mod tests {
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
-                    qty: 0.0,
+                    qty: PositionQty::default(),
                     unrealized_pnl: 0.0,
                 },
                 CompleteOpenOrderSnapshot::from_complete_exchange_query(Vec::new()),
@@ -4518,7 +4519,7 @@ mod tests {
                         instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                         side: Side::Buy,
                         price: 95.0,
-                        quantity: 0.1,
+                        quantity: PositionQty::new(0.1).unwrap(),
                         client_order_id: "downstream-submit".into(),
                         reduce_only: false,
                     },
@@ -4556,7 +4557,7 @@ mod tests {
             .sync_exchange_state_without_reconcile(
                 token,
                 PositionObservation {
-                    qty: 0.0,
+                    qty: PositionQty::default(),
                     unrealized_pnl: 0.0,
                 },
                 complete_open_orders(&["open-order"]),
@@ -4730,7 +4731,7 @@ mod tests {
                 &OrderReceipt {
                     order_id: "closed-order".to_string(),
                     client_order_id: blocked_client_order_id.clone(),
-                    filled_qty: 0.0,
+                    filled_qty: PositionQty::default(),
                     status: crate::exchange::OrderStatus::Canceled,
                 },
             )
@@ -4835,7 +4836,7 @@ mod tests {
                 &OrderReceipt {
                     order_id: "closed-order".to_string(),
                     client_order_id: blocked_client_order_id.clone(),
-                    filled_qty: 0.05,
+                    filled_qty: PositionQty::new(0.05).unwrap(),
                     status: crate::exchange::OrderStatus::Canceled,
                 },
             )
@@ -4843,7 +4844,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             resolution,
-            CancelReceiptResolution::ClosedWithFill { filled_qty: 0.05 },
+            CancelReceiptResolution::ClosedWithFill {
+                filled_qty: PositionQty::new(0.05).unwrap(),
+            },
             "cancel with fill should let the session queue retire downstream submits"
         );
 

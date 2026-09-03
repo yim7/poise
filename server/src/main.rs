@@ -854,7 +854,7 @@ total_loss_limit = 600.0
             Ok(OrderReceipt {
                 order_id: "order-1".into(),
                 client_order_id: "client-1".into(),
-                filled_qty: 0.0,
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: OrderStatus::New,
             })
         }
@@ -867,7 +867,7 @@ total_loss_limit = 600.0
             Ok(OrderReceipt {
                 order_id: order_id.to_string(),
                 client_order_id: String::new(),
-                filled_qty: 0.0,
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: OrderStatus::Canceled,
             })
         }
@@ -885,7 +885,7 @@ total_loss_limit = 600.0
         ) -> poise_application::exchange::ExecutionResult<Position> {
             Ok(Position {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                qty: 0.0,
+                qty: poise_core::instrument::PositionQty::default(),
                 avg_price: 100.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,

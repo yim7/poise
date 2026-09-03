@@ -42,6 +42,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
+    use poise_core::instrument::PositionQty;
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
@@ -226,7 +227,7 @@ mod tests {
                                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                                 side: Side::Buy,
                                 price: 100.5,
-                                quantity: 0.1,
+                                quantity: PositionQty::new(0.1).unwrap(),
                                 client_order_id: "client-1".into(),
                                 reduce_only: false,
                             },

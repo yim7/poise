@@ -360,7 +360,7 @@ fn plan_target_binding(
         instrument: input.instrument.clone(),
         side: side_for_direction(direction),
         price,
-        quantity,
+        quantity: PositionQty::new(quantity).expect("planned position quantity must be finite"),
         client_order_id: next_client_order_id(policy),
         reduce_only,
     };
@@ -692,8 +692,8 @@ fn binding_request_matches_desired(
         && binding.request.side == desired.request.side
         && instrument_spec.prices_match(binding.request.price, desired.request.price)
         && values_match(
-            binding.request.quantity,
-            desired.request.quantity,
+            binding.request.quantity.value(),
+            desired.request.quantity.value(),
             instrument_spec.position_qty_step().value(),
         )
         && binding.request.reduce_only == desired.request.reduce_only
@@ -719,14 +719,13 @@ fn plan_curve_maker_binding(
         .operations
         .iter()
         .find(|candidate| candidate.operation == operation)?;
-    let quantity = input
-        .instrument_spec
-        .normalize_position_qty(
-            PositionQty::new(operation_view.remaining * input.position_qty_per_unit)
-                .expect("planned position quantity must be finite"),
-        )
-        .value();
-    if quantity <= f64::EPSILON || !is_meetable_minimum(price, quantity, input.instrument_spec) {
+    let quantity = input.instrument_spec.normalize_position_qty(
+        PositionQty::new(operation_view.remaining * input.position_qty_per_unit)
+            .expect("planned position quantity must be finite"),
+    );
+    if quantity.value() <= f64::EPSILON
+        || !is_meetable_minimum(price, quantity.value(), input.instrument_spec)
+    {
         return None;
     }
 

@@ -180,6 +180,7 @@ mod tests {
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use poise_application::exchange::{ExecutionPortErrorKind, OrderRequest, OrderStatus};
+    use poise_core::instrument::PositionQty;
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
 
@@ -190,7 +191,7 @@ mod tests {
             instrument: Instrument::new(Venue::Bybit, "BTCUSDT"),
             side: Side::Buy,
             price: 65_000.0,
-            quantity: 0.1,
+            quantity: PositionQty::new(0.1).unwrap(),
             client_order_id: client_order_id.to_string(),
             reduce_only: false,
         }
@@ -505,7 +506,7 @@ mod tests {
                 instrument: instrument.clone(),
                 side: Side::Buy,
                 price: 64000.10,
-                quantity: 0.010,
+                quantity: PositionQty::new(0.010).unwrap(),
                 client_order_id: "client-1".to_string(),
                 reduce_only: false,
             })
@@ -530,7 +531,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(receipt.status, OrderStatus::Submitting);
-        assert_eq!(position.qty, 0.010);
+        assert_eq!(position.qty.value(), 0.010);
         assert_eq!(open_orders.orders().len(), 1);
         assert_eq!(open_orders.orders()[0].client_order_id, "client-1");
 

@@ -1506,7 +1506,7 @@ total_loss_limit = 600.0
         ) -> poise_application::exchange::ExecutionResult<Position> {
             Ok(Position {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                qty: 0.0,
+                qty: poise_core::instrument::PositionQty::default(),
                 avg_price: 100.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,
@@ -1782,7 +1782,7 @@ total_loss_limit = 600.0
         ) -> poise_application::exchange::ExecutionResult<Position> {
             Ok(Position {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                qty: 0.0,
+                qty: poise_core::instrument::PositionQty::default(),
                 avg_price: 100.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,

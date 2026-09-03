@@ -239,7 +239,7 @@ fn run_curve_immediate_benchmark(
         .collect::<Result<Vec<_>>>()?;
     run_replay(&ReplayInput {
         prices,
-        initial_position_qty: input.replay.initial_position.qty,
+        initial_position_qty: input.replay.initial_position.qty.value(),
         leverage: input.leverage,
         track_config: input.replay.definition.track_config().clone(),
         instrument_spec: input.replay.instrument_spec.clone(),
@@ -275,8 +275,8 @@ fn align_steps(
     let unit_qty = position_qty_per_exposure_unit(input)?;
     let mut curve_samples = curve.samples.iter();
     let mut curve_target = None;
-    let mut curve_position_qty = input.replay.initial_position.qty;
-    let mut delayed_position_qty = input.replay.initial_position.qty;
+    let mut curve_position_qty = input.replay.initial_position.qty.value();
+    let mut delayed_position_qty = input.replay.initial_position.qty.value();
     let mut aligned = Vec::with_capacity(input.replay.steps.len());
 
     for (scenario, report) in input.replay.steps.iter().zip(&delayed.steps) {
@@ -438,7 +438,7 @@ struct FillStream {
 
 fn curve_fill_stream(input: &DecisionEvaluationInput, report: &ReplayReport) -> FillStream {
     let mut stream = FillStream::default();
-    let mut position_qty = input.replay.initial_position.qty;
+    let mut position_qty = input.replay.initial_position.qty.value();
     for sample in &report.samples {
         if sample.trade_position_qty.abs() <= f64::EPSILON {
             continue;

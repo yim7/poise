@@ -1,7 +1,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
-use poise_core::instrument::{Amount, Asset};
+use poise_core::instrument::{Amount, Asset, PositionQty};
 use poise_core::track::Instrument;
 use poise_core::types::Side;
 
@@ -42,7 +42,7 @@ pub struct TrackPnlRecord {
     pub trade_id: Option<String>,
     pub side: Option<Side>,
     pub price: Option<f64>,
-    pub qty: Option<f64>,
+    pub qty: Option<PositionQty>,
     pub cashflow: TrackPnlCashflow,
 }
 
@@ -57,7 +57,7 @@ impl TrackPnlRecord {
         trade_id: Option<String>,
         side: Side,
         price: f64,
-        qty: f64,
+        qty: PositionQty,
         realized_pnl: Amount,
         trading_fee: Option<Amount>,
     ) -> Self {

@@ -393,7 +393,7 @@ impl ExecutorState {
                     status: binding.status,
                     side: binding.request.side,
                     price: binding.request.price,
-                    quantity: binding.request.quantity,
+                    quantity: binding.request.quantity.value(),
                     increases_inventory: binding.increases_inventory(),
                 })
                 .collect(),
@@ -1803,7 +1803,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: poise_core::types::Side::Buy,
                 price: 100.0,
-                quantity: 1.0,
+                quantity: PositionQty::new(1.0).unwrap(),
                 client_order_id: "client-1".to_string(),
                 reduce_only: false,
             },

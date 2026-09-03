@@ -447,7 +447,7 @@ mod tests {
                     side: request.side,
                     price: request.price,
                     quantity: request.quantity,
-                    filled_qty: 0.0,
+                    filled_qty: poise_core::instrument::PositionQty::default(),
                     status: OrderStatus::New,
                 }),
             )
@@ -1144,7 +1144,7 @@ mod tests {
             Ok(OrderReceipt {
                 order_id: "accepted-before-protection".to_string(),
                 client_order_id: request.client_order_id,
-                filled_qty: 0.0,
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: OrderStatus::New,
             })
         }
@@ -1161,7 +1161,7 @@ mod tests {
             Ok(OrderReceipt {
                 order_id: order_id.to_string(),
                 client_order_id: String::new(),
-                filled_qty: 0.0,
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: OrderStatus::Canceled,
             })
         }
@@ -1179,7 +1179,7 @@ mod tests {
         ) -> poise_application::exchange::ExecutionResult<Position> {
             Ok(Position {
                 instrument: instrument.clone(),
-                qty: 0.0,
+                qty: poise_core::instrument::PositionQty::default(),
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,
@@ -1217,7 +1217,7 @@ mod tests {
             Ok(OrderReceipt {
                 order_id: order_id.to_string(),
                 client_order_id: String::new(),
-                filled_qty: 0.0,
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: OrderStatus::Canceled,
             })
         }
@@ -1242,7 +1242,7 @@ mod tests {
             }
             Ok(Position {
                 instrument: instrument.clone(),
-                qty: 0.0,
+                qty: poise_core::instrument::PositionQty::default(),
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,
@@ -1292,7 +1292,7 @@ mod tests {
             Ok(OrderReceipt {
                 order_id: order_id.to_string(),
                 client_order_id: String::new(),
-                filled_qty: 0.0,
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: OrderStatus::Canceled,
             })
         }
@@ -1316,12 +1316,12 @@ mod tests {
                     .expect("submit request should be captured before reconciliation")
                     .quantity
             } else {
-                0.0
+                poise_core::instrument::PositionQty::default()
             };
             Ok(Position {
                 instrument: instrument.clone(),
                 qty,
-                avg_price: if qty > 0.0 { 95.0 } else { 0.0 },
+                avg_price: if qty.value() > 0.0 { 95.0 } else { 0.0 },
                 unrealized_pnl: 0.0,
                 mark_price: None,
             })
@@ -1372,7 +1372,7 @@ mod tests {
                     .expect("submit request should exist")
                     .client_order_id
                     .clone(),
-                filled_qty: 0.0,
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: OrderStatus::Canceled,
             })
         }
@@ -1397,7 +1397,7 @@ mod tests {
             }
             Ok(Position {
                 instrument: instrument.clone(),
-                qty: 0.0,
+                qty: poise_core::instrument::PositionQty::default(),
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,
@@ -1427,7 +1427,7 @@ mod tests {
                     side: request.side,
                     price: request.price,
                     qty: request.quantity,
-                    filled_qty: 0.0,
+                    filled_qty: poise_core::instrument::PositionQty::default(),
                     status: OrderStatus::New,
                 }],
             ))
@@ -1455,7 +1455,7 @@ mod tests {
             Ok(OrderReceipt {
                 order_id: order_id.to_string(),
                 client_order_id: String::new(),
-                filled_qty: 0.0,
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: OrderStatus::Canceled,
             })
         }
@@ -1473,7 +1473,7 @@ mod tests {
         ) -> poise_application::exchange::ExecutionResult<Position> {
             Ok(Position {
                 instrument: instrument.clone(),
-                qty: 0.0,
+                qty: poise_core::instrument::PositionQty::default(),
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,
@@ -1505,8 +1505,9 @@ mod tests {
                         poise_core::types::Side::Sell => poise_core::types::Side::Buy,
                     },
                     price: request.price * 2.0,
-                    qty: request.quantity * 2.0,
-                    filled_qty: 0.0,
+                    qty: poise_core::instrument::PositionQty::new(request.quantity.value() * 2.0)
+                        .unwrap(),
+                    filled_qty: poise_core::instrument::PositionQty::default(),
                     status: OrderStatus::New,
                 }],
             ))
@@ -1540,7 +1541,7 @@ mod tests {
             Ok(OrderReceipt {
                 order_id: order_id.to_string(),
                 client_order_id: String::new(),
-                filled_qty: 0.0,
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: OrderStatus::Canceled,
             })
         }
@@ -1600,7 +1601,7 @@ mod tests {
             Ok(OrderReceipt {
                 order_id: "test-order".into(),
                 client_order_id: req.client_order_id,
-                filled_qty: 0.0,
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: OrderStatus::New,
             })
         }

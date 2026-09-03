@@ -208,7 +208,7 @@ impl OkxRestClient {
             Some(position) => position_from_snapshot_with_metadata(position, &metadata),
             None => Ok(Position {
                 instrument: Instrument::new(Venue::Okx, symbol),
-                qty: 0.0,
+                qty: poise_core::instrument::PositionQty::default(),
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,
@@ -347,8 +347,7 @@ impl OkxRestClient {
         let metadata = self
             .get_or_fetch_instrument_metadata(&req.instrument.symbol)
             .await?;
-        let position_qty =
-            poise_core::instrument::PositionQty::new(req.quantity).map_err(anyhow::Error::msg)?;
+        let position_qty = req.quantity;
         let order_size = metadata.wire_contracts_from_position_qty(position_qty)?;
         let body = serde_json::to_string(&PlaceOrderBody {
             inst_id: req.instrument.symbol,
@@ -697,7 +696,7 @@ fn ack_to_receipt(ack: OrderAck, status: OrderStatus) -> Result<OrderReceipt> {
     Ok(OrderReceipt {
         order_id: ack.order_id,
         client_order_id: ack.client_order_id,
-        filled_qty: 0.0,
+        filled_qty: poise_core::instrument::PositionQty::default(),
         status,
     })
 }
@@ -793,6 +792,7 @@ mod tests {
 
     use chrono::{DateTime, Utc};
     use poise_application::exchange::{OrderRequest, OrderStatus};
+    use poise_core::instrument::PositionQty;
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
     use tokio::{
@@ -944,7 +944,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
                 side: Side::Buy,
                 price: 64000.10,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "client-1".to_string(),
                 reduce_only: false,
             })
@@ -1003,7 +1003,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
                 side: Side::Buy,
                 price: 64000.10,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "client-redirect".to_string(),
                 reduce_only: false,
             },
@@ -1036,7 +1036,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Okx, "BTC-USD-SWAP"),
                 side: Side::Sell,
                 price: 64000.10,
-                quantity: 30.0,
+                quantity: PositionQty::new(30.0).unwrap(),
                 client_order_id: "client-1".to_string(),
                 reduce_only: false,
             })
@@ -1358,7 +1358,7 @@ mod tests {
             Some("okx:orders:btc-usd-swap:460607985")
         );
         assert_eq!(record.realized_pnl().unwrap().asset().as_str(), "BTC");
-        assert_eq!(record.qty, Some(0.2));
+        assert_eq!(record.qty.map(PositionQty::value), Some(0.2));
         assert_eq!(record.realized_pnl().unwrap().value(), 0.0);
         assert_eq!(record.trading_fee().unwrap().value(), 0.0000001610386348);
 
@@ -1530,7 +1530,7 @@ mod tests {
         let position = client.get_position("BTC-USDT-SWAP").await.unwrap();
         let server_time = client.get_server_time().await.unwrap();
 
-        assert_eq!(position.qty, -0.25);
+        assert_eq!(position.qty.value(), -0.25);
         assert_eq!(position.avg_price, 65000.5);
         assert_eq!(position.mark_price, Some(65100.5));
         assert_eq!(server_time.timestamp_millis(), 1_704_876_947_123);
@@ -1570,7 +1570,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
                 side: Side::Buy,
                 price: 64000.10,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "client-1".to_string(),
                 reduce_only: false,
             },
@@ -1603,7 +1603,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
                 side: Side::Buy,
                 price: 64000.10,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "client-envelope-timeout".to_string(),
                 reduce_only: false,
             },
@@ -1635,7 +1635,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
                 side: Side::Buy,
                 price: 64000.10,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "client-item-timeout".to_string(),
                 reduce_only: false,
             },
@@ -1667,7 +1667,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
                 side: Side::Buy,
                 price: 64000.10,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "client-rate-limit".to_string(),
                 reduce_only: false,
             },
@@ -1697,7 +1697,7 @@ mod tests {
                     instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
                     side: Side::Buy,
                     price: 64000.10,
-                    quantity: 0.01,
+                    quantity: PositionQty::new(0.01).unwrap(),
                     client_order_id: "client-1".to_string(),
                     reduce_only: false,
                 },
@@ -1727,7 +1727,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
                 side: Side::Buy,
                 price: 64000.10,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "client-1".to_string(),
                 reduce_only: false,
             },
@@ -1753,7 +1753,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
                 side: Side::Buy,
                 price: 64000.10,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "client-1".to_string(),
                 reduce_only: false,
             },
@@ -1785,7 +1785,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
                 side: Side::Buy,
                 price: 64000.10,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "client-1".to_string(),
                 reduce_only: false,
             },
@@ -1817,7 +1817,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
                 side: Side::Buy,
                 price: 64000.10,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "client-1".to_string(),
                 reduce_only: false,
             },
@@ -1848,7 +1848,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Okx, "BTC-USDT-SWAP"),
                 side: Side::Buy,
                 price: 64000.10,
-                quantity: 0.01,
+                quantity: PositionQty::new(0.01).unwrap(),
                 client_order_id: "client-1".to_string(),
                 reduce_only: false,
             })

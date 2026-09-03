@@ -1,3 +1,4 @@
+use poise_core::instrument::PositionQty;
 use poise_core::track::Instrument;
 use poise_core::types::Side;
 use serde::{Deserialize, Serialize};
@@ -7,7 +8,7 @@ pub struct OrderRequest {
     pub instrument: Instrument,
     pub side: Side,
     pub price: f64,
-    pub quantity: f64,
+    pub quantity: PositionQty,
     pub client_order_id: String,
     #[serde(default)]
     pub reduce_only: bool,
@@ -18,7 +19,7 @@ pub struct OrderReceipt {
     pub order_id: String,
     pub client_order_id: String,
     #[serde(default)]
-    pub filled_qty: f64,
+    pub filled_qty: PositionQty,
     pub status: OrderStatus,
 }
 
@@ -29,9 +30,9 @@ pub struct ExchangeOrder {
     pub client_order_id: String,
     pub side: Side,
     pub price: f64,
-    pub qty: f64,
+    pub qty: PositionQty,
     #[serde(default)]
-    pub filled_qty: f64,
+    pub filled_qty: PositionQty,
     pub status: OrderStatus,
 }
 
@@ -51,13 +52,14 @@ pub enum OrderStatus {
 impl OrderStatus {
     pub(crate) fn effective_cumulative_filled_qty(
         self,
-        reported_filled_qty: f64,
-        order_quantity: f64,
-    ) -> f64 {
-        if self == Self::Filled && reported_filled_qty <= f64::EPSILON {
+        reported_filled_qty: PositionQty,
+        order_quantity: PositionQty,
+    ) -> PositionQty {
+        if self == Self::Filled && reported_filled_qty.value() <= f64::EPSILON {
             return order_quantity;
         }
-        reported_filled_qty.max(0.0)
+        PositionQty::new(reported_filled_qty.value().max(0.0))
+            .expect("non-negative finite position quantity")
     }
 
     pub fn keeps_working_order(self) -> bool {
@@ -87,17 +89,25 @@ pub struct ExecutionQuote {
 
 #[cfg(test)]
 mod tests {
+    use poise_core::instrument::PositionQty;
+
     use super::OrderStatus;
 
     #[test]
     fn filled_status_without_reported_quantity_means_full_order_quantity() {
         assert_eq!(
-            OrderStatus::Filled.effective_cumulative_filled_qty(0.0, 1.25),
-            1.25
+            OrderStatus::Filled.effective_cumulative_filled_qty(
+                PositionQty::new(0.0).unwrap(),
+                PositionQty::new(1.25).unwrap()
+            ),
+            PositionQty::new(1.25).unwrap()
         );
         assert_eq!(
-            OrderStatus::PartiallyFilled.effective_cumulative_filled_qty(0.5, 1.25),
-            0.5
+            OrderStatus::PartiallyFilled.effective_cumulative_filled_qty(
+                PositionQty::new(0.5).unwrap(),
+                PositionQty::new(1.25).unwrap()
+            ),
+            PositionQty::new(0.5).unwrap()
         );
     }
 }

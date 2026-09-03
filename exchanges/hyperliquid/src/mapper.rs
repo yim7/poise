@@ -4,7 +4,7 @@ use poise_application::exchange::TrackPnlRecord;
 use poise_application::exchange::{
     AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderStatus, Position,
 };
-use poise_core::instrument::{Amount, Asset, InstrumentSpec};
+use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
 use poise_core::track::{Instrument, Venue};
 use poise_core::types::Side;
 
@@ -91,7 +91,7 @@ pub(crate) fn position_from_state(
     else {
         return Ok(Position {
             instrument: Instrument::new(Venue::Hyperliquid, symbol),
-            qty: 0.0,
+            qty: PositionQty::default(),
             avg_price: 0.0,
             unrealized_pnl: 0.0,
             mark_price: None,
@@ -100,7 +100,7 @@ pub(crate) fn position_from_state(
     let position = &asset_position.position;
     Ok(Position {
         instrument: Instrument::new(Venue::Hyperliquid, &position.coin),
-        qty: parse_decimal("position.szi", &position.szi)?,
+        qty: parse_position_qty("position.szi", &position.szi)?,
         avg_price: position
             .entry_px
             .as_deref()
@@ -120,8 +120,8 @@ pub(crate) fn open_order_from_response(value: OpenOrderResponse) -> Result<Excha
         client_order_id: value.cloid.unwrap_or(order_id),
         side: parse_side(&value.side)?,
         price: parse_decimal("limitPx", &value.limit_px)?,
-        qty: parse_decimal("sz", &value.sz)?,
-        filled_qty: 0.0,
+        qty: parse_position_qty("sz", &value.sz)?,
+        filled_qty: PositionQty::default(),
         status: OrderStatus::New,
     })
 }
@@ -139,7 +139,8 @@ pub(crate) fn track_pnl_record_from_fill(value: &UserFillResponse) -> Result<Tra
         Some(trade_id),
         parse_side(&value.side)?,
         parse_finite_decimal("fill.px", &value.px)?,
-        parse_finite_decimal("fill.sz", &value.sz)?,
+        PositionQty::new(parse_finite_decimal("fill.sz", &value.sz)?)
+            .map_err(anyhow::Error::msg)?,
         cash_amount(
             parse_finite_decimal("fill.closedPnl", &value.closed_pnl)?,
             "USDC",
@@ -180,6 +181,10 @@ fn funding_record(coin: &str, time: i64, usdc: &str) -> Result<TrackPnlRecord> {
 fn cash_amount(value: f64, asset: &str) -> Result<Amount> {
     let asset = Asset::try_new(asset).map_err(anyhow::Error::msg)?;
     Amount::new(value, asset).map_err(anyhow::Error::msg)
+}
+
+fn parse_position_qty(field: &str, value: &str) -> Result<PositionQty> {
+    PositionQty::new(parse_decimal(field, value)?).map_err(anyhow::Error::msg)
 }
 
 fn decimal_step(decimals: i32) -> f64 {
@@ -362,7 +367,7 @@ mod tests {
             position,
             Position {
                 instrument: Instrument::new(Venue::Hyperliquid, "BTC"),
-                qty: -0.02,
+                qty: PositionQty::new(-0.02).unwrap(),
                 avg_price: 65000.5,
                 unrealized_pnl: -3.25,
                 mark_price: None,
@@ -372,7 +377,7 @@ mod tests {
             flat_position,
             Position {
                 instrument: Instrument::new(Venue::Hyperliquid, "ETH"),
-                qty: 0.0,
+                qty: PositionQty::default(),
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,
@@ -400,8 +405,8 @@ mod tests {
                 client_order_id: "0x11111111111111111111111111111111".to_string(),
                 side: Side::Buy,
                 price: 65000.5,
-                qty: 0.02,
-                filled_qty: 0.0,
+                qty: PositionQty::new(0.02).unwrap(),
+                filled_qty: PositionQty::default(),
                 status: OrderStatus::New,
             }
         );

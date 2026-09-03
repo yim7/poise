@@ -157,7 +157,7 @@ mod tests {
                 instrument: test_instrument(),
                 side: Side::Buy,
                 price: 100_000.0,
-                quantity: 0.1,
+                quantity: poise_core::instrument::PositionQty::new(0.1).unwrap(),
                 client_order_id: "freshness-test-submit".to_string(),
                 reduce_only: false,
             },

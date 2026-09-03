@@ -310,6 +310,7 @@ mod tests {
         MemoryRepository, manager_with_pending_submit, seeded_manager, track_write_services,
     };
     use crate::{ApplicationNotification, EffectStatus};
+    use poise_core::instrument::PositionQty;
     use poise_core::track::{TrackId, Venue};
     use poise_core::types::Exposure;
     use poise_engine::execution_plan::TrackEffect;
@@ -353,7 +354,7 @@ mod tests {
                 instrument: poise_core::track::Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: poise_core::types::Side::Buy,
                 price: 100.0,
-                quantity: 0.1,
+                quantity: PositionQty::new(0.1).unwrap(),
                 client_order_id: "client-1".into(),
                 reduce_only: false,
             },
@@ -378,7 +379,7 @@ mod tests {
             instrument: poise_core::track::Instrument::new(Venue::Binance, "BTCUSDT"),
             side: poise_core::types::Side::Buy,
             price: 100.0,
-            quantity: 0.1,
+            quantity: PositionQty::new(0.1).unwrap(),
             client_order_id: "client-1".into(),
             reduce_only: false,
         };
@@ -412,7 +413,7 @@ mod tests {
             dispatch.record_receipt(&OrderReceipt {
                 order_id: "order-1".into(),
                 client_order_id: "client-1".into(),
-                filled_qty: 0.0,
+                filled_qty: PositionQty::default(),
                 status: OrderStatus::New,
             }),
         )
@@ -440,7 +441,7 @@ mod tests {
             instrument: poise_core::track::Instrument::new(Venue::Binance, "BTCUSDT"),
             side: poise_core::types::Side::Sell,
             price: 105.0,
-            quantity: 0.2,
+            quantity: PositionQty::new(0.2).unwrap(),
             client_order_id: "current-client".into(),
             reduce_only: true,
         };
@@ -503,7 +504,7 @@ mod tests {
             side: target.request.side,
             price: target.request.price,
             qty: target.request.quantity,
-            filled_qty: 0.0,
+            filled_qty: PositionQty::default(),
             status: OrderStatus::New,
         };
 
@@ -611,7 +612,7 @@ mod tests {
             .record_receipt(&OrderReceipt {
                 order_id: "accepted-before-protection".into(),
                 client_order_id: target.request.client_order_id.clone(),
-                filled_qty: 0.0,
+                filled_qty: PositionQty::default(),
                 status: OrderStatus::New,
             })
             .await;

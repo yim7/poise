@@ -162,6 +162,7 @@ mod tests {
     use poise_application::exchange::{
         ExecutionQuote, MarketDataTick, OrderStatus, UserDataPayload,
     };
+    use poise_core::instrument::PositionQty;
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
     use tokio::{
@@ -261,8 +262,8 @@ mod tests {
                     Instrument::new(Venue::Okx, "BTC-USDT-SWAP")
                 );
                 assert_eq!(order.side, Side::Buy);
-                assert_eq!(order.qty, 0.2);
-                assert_eq!(order.filled_qty, 0.05);
+                assert_eq!(order.qty.value(), 0.2);
+                assert_eq!(order.filled_qty.value(), 0.05);
                 assert_eq!(order.status, OrderStatus::PartiallyFilled);
             }
             other => panic!("expected order update, got {other:?}"),
@@ -271,7 +272,7 @@ mod tests {
             UserDataPayload::TrackPnl(record) => {
                 assert_eq!(record.kind(), TrackPnlRecordKind::Trade);
                 assert_eq!(record.trade_id.as_deref(), Some("trade-1"));
-                assert_eq!(record.qty, Some(0.05));
+                assert_eq!(record.qty.map(PositionQty::value), Some(0.05));
                 assert_eq!(record.realized_pnl().unwrap().value(), 12.34);
                 assert_eq!(record.trading_fee().unwrap().value(), 1.25);
             }
@@ -294,15 +295,15 @@ mod tests {
                     order.instrument,
                     Instrument::new(Venue::Okx, "BTC-USD-SWAP")
                 );
-                assert_eq!(order.qty, 30.0);
-                assert_eq!(order.filled_qty, 10.0);
+                assert_eq!(order.qty.value(), 30.0);
+                assert_eq!(order.filled_qty.value(), 10.0);
             }
             other => panic!("expected order update, got {other:?}"),
         }
         match &events[1].payload {
             UserDataPayload::TrackPnl(record) => {
                 assert_eq!(record.realized_pnl().unwrap().asset().as_str(), "BTC");
-                assert_eq!(record.qty, Some(10.0));
+                assert_eq!(record.qty.map(PositionQty::value), Some(10.0));
                 assert_eq!(record.realized_pnl().unwrap().value(), 0.0012);
                 assert_eq!(record.trading_fee().unwrap().value(), 0.00001);
             }
@@ -412,7 +413,7 @@ mod tests {
                     position.instrument,
                     Instrument::new(Venue::Okx, "BTC-USDT-SWAP")
                 );
-                assert_eq!(position.qty, -0.25);
+                assert_eq!(position.qty.value(), -0.25);
             }
             other => panic!("expected position update, got {other:?}"),
         }
@@ -534,11 +535,11 @@ mod tests {
         assert!(messages[2].contains("\"op\":\"login\""));
         assert!(messages[3].contains("\"op\":\"subscribe\""));
         match first.payload {
-            UserDataPayload::PositionUpdate(position) => assert_eq!(position.qty, 0.1),
+            UserDataPayload::PositionUpdate(position) => assert_eq!(position.qty.value(), 0.1),
             _ => panic!("expected position"),
         }
         match second.payload {
-            UserDataPayload::PositionUpdate(position) => assert_eq!(position.qty, 0.2),
+            UserDataPayload::PositionUpdate(position) => assert_eq!(position.qty.value(), 0.2),
             _ => panic!("expected position"),
         }
     }

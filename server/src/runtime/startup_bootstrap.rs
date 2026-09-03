@@ -185,8 +185,8 @@ async fn rebuild_fresh_sessions(
     for seed in track_seeds {
         let instrument = seed.instrument().clone();
         let preflight = preflight_track_startup(runtime, seed).await?;
-        let current_exposure =
-            seed.exposure_from_position_qty(preflight.position.qty, &preflight.instrument_spec);
+        let current_exposure = seed
+            .exposure_from_position_qty(preflight.position.qty.value(), &preflight.instrument_spec);
         let applied = runtime
             .state
             .reconcile
@@ -196,7 +196,7 @@ async fn rebuild_fresh_sessions(
                 current_utc_day,
                 FreshSessionExternalInputs {
                     current_exposure,
-                    position_qty: preflight.position.qty,
+                    position_qty: preflight.position.qty.value(),
                     market_data: None,
                     instrument_spec: preflight.instrument_spec.clone(),
                 },
@@ -261,7 +261,7 @@ async fn preflight_track_startup_inner(
         probe_startup_account_capacity(runtime, seed, &position, &exchange_info.instrument_spec)
             .await?;
     let required_additional_notional =
-        seed.required_additional_notional(position.qty, &exchange_info.instrument_spec);
+        seed.required_additional_notional(position.qty.value(), &exchange_info.instrument_spec);
     if required_additional_notional > account_capacity_snapshot.max_increase_notional {
         return Err(anyhow!(
             "insufficient account margin for configured max_notional on track `{}`: required {}, available {}",
@@ -1046,7 +1046,7 @@ mod tests {
                 event_time: startup_replay_floor + chrono::TimeDelta::seconds(2),
                 payload: UserDataPayload::PositionUpdate(Position {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    qty: 1.25,
+                    qty: poise_core::instrument::PositionQty::new(1.25).unwrap(),
                     avg_price: 100.0,
                     unrealized_pnl: 12.0,
                     mark_price: None,
@@ -1181,7 +1181,7 @@ mod tests {
                 event_time: startup_replay_floor - chrono::TimeDelta::milliseconds(1),
                 payload: UserDataPayload::PositionUpdate(Position {
                     instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                    qty: 1.25,
+                    qty: poise_core::instrument::PositionQty::new(1.25).unwrap(),
                     avg_price: 100.0,
                     unrealized_pnl: 12.0,
                     mark_price: None,
@@ -1355,8 +1355,8 @@ mod tests {
                 client_order_id: "inherited-client-order".into(),
                 side: Side::Buy,
                 price: 99.0,
-                qty: 0.1,
-                filled_qty: 0.0,
+                qty: poise_core::instrument::PositionQty::new(0.1).unwrap(),
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: OrderStatus::Canceled,
             }),
         }
@@ -1472,7 +1472,7 @@ mod tests {
             self.get_position_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Position {
                 instrument: instrument.clone(),
-                qty: 0.0,
+                qty: poise_core::instrument::PositionQty::default(),
                 avg_price: 100.0,
                 unrealized_pnl: 0.0,
                 mark_price: *self.position_mark_price.lock().unwrap(),
@@ -1503,8 +1503,8 @@ mod tests {
                         client_order_id: "inherited-client-order".into(),
                         side: Side::Buy,
                         price: 99.0,
-                        qty: 0.1,
-                        filled_qty: 0.0,
+                        qty: poise_core::instrument::PositionQty::new(0.1).unwrap(),
+                        filled_qty: poise_core::instrument::PositionQty::default(),
                         status: OrderStatus::New,
                     },
                 ]),

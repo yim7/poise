@@ -12,7 +12,7 @@ use poise_application::exchange::{
     AccountCapacitySnapshot, AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
     OrderStatus, Position,
 };
-use poise_core::instrument::{Amount, Asset, InstrumentSpec};
+use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
 use poise_core::track::{Instrument, Venue};
 
 impl TryFrom<BinanceOrderResponse> for OrderReceipt {
@@ -22,12 +22,15 @@ impl TryFrom<BinanceOrderResponse> for OrderReceipt {
         Ok(Self {
             order_id: value.order_id.to_string(),
             client_order_id: value.client_order_id,
-            filled_qty: value
-                .executed_qty
-                .as_deref()
-                .map(|qty| parse_decimal("executedQty", qty))
-                .transpose()?
-                .unwrap_or(0.0),
+            filled_qty: PositionQty::new(
+                value
+                    .executed_qty
+                    .as_deref()
+                    .map(|qty| parse_decimal("executedQty", qty))
+                    .transpose()?
+                    .unwrap_or(0.0),
+            )
+            .map_err(anyhow::Error::msg)?,
             status: parse_order_status(&value.status)?,
         })
     }
@@ -39,7 +42,7 @@ impl TryFrom<BinancePositionRisk> for Position {
     fn try_from(value: BinancePositionRisk) -> Result<Self, Self::Error> {
         Ok(Self {
             instrument: Instrument::new(Venue::Binance, value.symbol),
-            qty: parse_decimal("positionAmt", &value.position_amt)?,
+            qty: parse_position_qty("positionAmt", &value.position_amt)?,
             avg_price: parse_decimal("entryPrice", &value.entry_price)?,
             unrealized_pnl: parse_decimal("unRealizedProfit", &value.unrealized_profit)?,
             mark_price: None,
@@ -116,13 +119,16 @@ impl TryFrom<BinanceOpenOrder> for ExchangeOrder {
             client_order_id: value.client_order_id,
             side: parse_side(&value.side)?,
             price: parse_decimal("price", &value.price)?,
-            qty: parse_decimal("origQty", &value.orig_qty)?,
-            filled_qty: value
-                .executed_qty
-                .as_deref()
-                .map(|qty| parse_decimal("executedQty", qty))
-                .transpose()?
-                .unwrap_or(0.0),
+            qty: parse_position_qty("origQty", &value.orig_qty)?,
+            filled_qty: PositionQty::new(
+                value
+                    .executed_qty
+                    .as_deref()
+                    .map(|qty| parse_decimal("executedQty", qty))
+                    .transpose()?
+                    .unwrap_or(0.0),
+            )
+            .map_err(anyhow::Error::msg)?,
             status: parse_order_status(&value.status)?,
         })
     }
@@ -147,7 +153,7 @@ pub(crate) fn track_pnl_record_from_trade(value: BinanceAccountTrade) -> Result<
         Some(trade_id),
         parse_side(&value.side)?,
         parse_decimal("price", &value.price)?,
-        parse_decimal("qty", &value.qty)?,
+        parse_position_qty("qty", &value.qty)?,
         cash_amount(
             parse_decimal("realizedPnl", &value.realized_pnl)?,
             settlement_asset,
@@ -261,6 +267,10 @@ fn parse_decimal(field: &str, value: &str) -> Result<f64> {
         .with_context(|| format!("invalid decimal for {field}: {value}"))
 }
 
+fn parse_position_qty(field: &str, value: &str) -> Result<PositionQty> {
+    PositionQty::new(parse_decimal(field, value)?).map_err(anyhow::Error::msg)
+}
+
 fn millis_to_utc(field: &str, value: i64) -> Result<chrono::DateTime<Utc>> {
     Utc.timestamp_millis_opt(value)
         .single()
@@ -292,7 +302,7 @@ mod tests {
             OrderReceipt {
                 order_id: "20072994037".to_string(),
                 client_order_id: "grid-order-001".to_string(),
-                filled_qty: 0.0,
+                filled_qty: PositionQty::default(),
                 status: OrderStatus::New,
             }
         );
@@ -316,7 +326,7 @@ mod tests {
             converted,
             Position {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
-                qty: 0.25,
+                qty: PositionQty::new(0.25).unwrap(),
                 avg_price: 65000.5,
                 unrealized_pnl: 123.45,
                 mark_price: None,
@@ -423,8 +433,8 @@ mod tests {
                 client_order_id: "grid-open-002".to_string(),
                 side: Side::Sell,
                 price: 65123.4,
-                qty: 0.01,
-                filled_qty: 0.004,
+                qty: PositionQty::new(0.01).unwrap(),
+                filled_qty: PositionQty::new(0.004).unwrap(),
                 status: OrderStatus::PartiallyFilled,
             }
         );

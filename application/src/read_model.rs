@@ -804,7 +804,7 @@ mod tests {
     use crate::exchange::OrderRequest;
     use chrono::{TimeZone, Utc};
     use poise_core::events::DomainEvent;
-    use poise_core::instrument::{Amount, Asset, InstrumentSpec};
+    use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
@@ -1280,7 +1280,7 @@ mod tests {
                         instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                         side: Side::Buy,
                         price: 100.5,
-                        quantity: 0.1,
+                        quantity: PositionQty::new(0.1).unwrap(),
                         client_order_id: "client-1".into(),
                         reduce_only: false,
                     },

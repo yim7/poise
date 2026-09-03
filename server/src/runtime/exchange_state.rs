@@ -60,8 +60,8 @@ pub(super) async fn apply_user_data_event(
                     status = ?order.status,
                     side = ?order.side,
                     price = order.price,
-                    qty = order.qty,
-                    filled_qty = order.filled_qty,
+                    qty = order.qty.value(),
+                    filled_qty = order.filled_qty.value(),
                     local_bindings = ?describe_runtime_bindings(runtime.as_ref()),
                     "unabsorbed order update encountered before reconcile"
                 );
@@ -115,7 +115,7 @@ pub(super) fn order_observation(order: &ExchangeOrder) -> OrderObservation {
 fn is_terminal_no_fill_unknown_order(order: &ExchangeOrder) -> bool {
     !order.status.keeps_working_order()
         && order.status != OrderStatus::Filled
-        && order.filled_qty.abs() <= f64::EPSILON
+        && order.filled_qty.value().abs() <= f64::EPSILON
 }
 
 #[cfg(test)]

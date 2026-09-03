@@ -7,6 +7,7 @@ use poise_application::exchange::{
     ExchangeOrder, ExecutionQuote, ExecutionQuoteTick, MarkPriceTick, MarketDataTick, OrderStatus,
     UserDataEvent, UserDataPayload,
 };
+use poise_core::instrument::PositionQty;
 use poise_core::track::{Instrument, Venue};
 use poise_core::types::Side;
 use tokio::{
@@ -392,8 +393,12 @@ fn parse_order_update(
             client_order_id: client_order_ids.local_id_for_exchange(exchange_client_order_id),
             side: parse_side(required_str(order, "side")?)?,
             price: parse_decimal("order.limitPx", required_str(order, "limitPx")?)?,
-            qty: parse_decimal("order.origSz", required_str(order, "origSz")?)?,
-            filled_qty: 0.0,
+            qty: PositionQty::new(parse_decimal(
+                "order.origSz",
+                required_str(order, "origSz")?,
+            )?)
+            .map_err(anyhow::Error::msg)?,
+            filled_qty: PositionQty::default(),
             status: parse_order_status(required_str(value, "status")?)?,
         }),
     })
@@ -528,7 +533,7 @@ mod tests {
     use poise_application::exchange::{
         ExchangeOrder, ExecutionQuote, MarketDataTick, OrderStatus, UserDataPayload,
     };
-    use poise_core::instrument::{Amount, Asset};
+    use poise_core::instrument::{Amount, Asset, PositionQty};
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
     use tokio::net::TcpListener;
@@ -611,8 +616,8 @@ mod tests {
                 client_order_id: "12345".to_string(),
                 side: Side::Buy,
                 price: 100.5,
-                qty: 2.0,
-                filled_qty: 0.0,
+                qty: PositionQty::new(2.0).unwrap(),
+                filled_qty: PositionQty::default(),
                 status: OrderStatus::New,
             })
         );
@@ -634,8 +639,8 @@ mod tests {
                 client_order_id: "0x11111111111111111111111111111111".to_string(),
                 side: Side::Buy,
                 price: 65000.5,
-                qty: 0.02,
-                filled_qty: 0.0,
+                qty: PositionQty::new(0.02).unwrap(),
+                filled_qty: PositionQty::default(),
                 status: OrderStatus::New,
             })
         );
@@ -662,8 +667,8 @@ mod tests {
                 client_order_id: internal_client_order_id.to_string(),
                 side: Side::Buy,
                 price: 65000.5,
-                qty: 0.02,
-                filled_qty: 0.0,
+                qty: PositionQty::new(0.02).unwrap(),
+                filled_qty: PositionQty::default(),
                 status: OrderStatus::New,
             })
         );
@@ -691,7 +696,7 @@ mod tests {
                 Some("999".to_string()),
                 Side::Buy,
                 65000.5,
-                0.02,
+                PositionQty::new(0.02).unwrap(),
                 amount(3.25, "USDC"),
                 Some(amount(0.12, "USDC")),
             ))
@@ -727,7 +732,7 @@ mod tests {
                 Some("321706137923647".to_string()),
                 Side::Buy,
                 2376.0,
-                0.0064,
+                PositionQty::new(0.0064).unwrap(),
                 amount(-0.100416, "USDC"),
                 Some(amount(0.002189, "USDC")),
             ))

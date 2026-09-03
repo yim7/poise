@@ -372,7 +372,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: Side::Buy,
                 price: 100.0,
-                quantity: 0.1,
+                quantity: poise_core::instrument::PositionQty::new(0.1).unwrap(),
                 client_order_id: format!("{effect_id}-client"),
                 reduce_only: false,
             },
@@ -393,7 +393,7 @@ mod tests {
             Ok(OrderReceipt {
                 order_id: "test-order".into(),
                 client_order_id: req.client_order_id,
-                filled_qty: 0.0,
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: poise_application::exchange::OrderStatus::New,
             })
         }
@@ -422,7 +422,7 @@ mod tests {
         ) -> poise_application::exchange::ExecutionResult<Position> {
             Ok(Position {
                 instrument: instrument.clone(),
-                qty: 0.0,
+                qty: poise_core::instrument::PositionQty::default(),
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,

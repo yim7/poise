@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use poise_core::{
-    instrument::{Amount, Asset, InstrumentSpec, PositionBasis},
+    instrument::{Amount, Asset, InstrumentSpec, PositionBasis, PositionQty},
     replay::ReplayFeeRates,
     risk::LossLimits,
     strategy::{ShapeFamily, TrackConfig, desired_exposure},
@@ -546,7 +546,7 @@ fn build_scenario_input(
             fee_rates: fixture.fee_rates,
             started_at,
             initial_position: PositionObservation {
-                qty: 0.0,
+                qty: PositionQty::new(0.0).expect("zero position quantity is valid"),
                 unrealized_pnl: 0.0,
             },
             steps,

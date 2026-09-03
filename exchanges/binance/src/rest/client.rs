@@ -321,7 +321,7 @@ impl BinanceRestClient {
             ("side", side_to_binance(req.side).to_string()),
             ("type", "LIMIT".to_string()),
             ("timeInForce", "GTC".to_string()),
-            ("quantity", format_decimal(req.quantity)),
+            ("quantity", format_decimal(req.quantity.value())),
             ("price", format_decimal(req.price)),
             ("newClientOrderId", req.client_order_id.clone()),
         ];
@@ -738,6 +738,7 @@ mod tests {
         },
     };
 
+    use poise_core::instrument::PositionQty;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -1084,7 +1085,7 @@ mod tests {
             ),
             side: poise_core::types::Side::Buy,
             price: 0.1 + 0.2,
-            quantity: 0.024000000000000004,
+            quantity: PositionQty::new(0.024000000000000004).unwrap(),
             client_order_id: "grid-open-006".to_string(),
             reduce_only: false,
         };

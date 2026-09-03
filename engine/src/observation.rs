@@ -1,3 +1,4 @@
+use poise_core::instrument::PositionQty;
 use serde::{Deserialize, Serialize};
 
 use crate::exchange::{ExecutionQuote, OrderStatus};
@@ -26,7 +27,7 @@ mod tests {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PositionObservation {
-    pub qty: f64,
+    pub qty: PositionQty,
     pub unrealized_pnl: f64,
 }
 
@@ -36,9 +37,9 @@ pub struct OrderObservation {
     pub client_order_id: String,
     pub side: poise_core::types::Side,
     pub price: f64,
-    pub quantity: f64,
+    pub quantity: PositionQty,
     #[serde(default)]
-    pub filled_qty: f64,
+    pub filled_qty: PositionQty,
     pub status: OrderStatus,
 }
 

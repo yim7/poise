@@ -321,7 +321,7 @@ mod tests {
                 assert_eq!(order.client_order_id, "client-1");
                 assert_eq!(order.side, Side::Buy);
                 assert_eq!(order.price, 64000.10);
-                assert_eq!(order.qty, 0.010);
+                assert_eq!(order.qty.value(), 0.010);
                 assert_eq!(order.status, poise_application::exchange::OrderStatus::New);
             }
             other => panic!("expected order update, got {other:?}"),
@@ -373,7 +373,7 @@ mod tests {
                     position.instrument,
                     Instrument::new(Venue::Bybit, "BTCUSDT")
                 );
-                assert_eq!(position.qty, 0.010);
+                assert_eq!(position.qty.value(), 0.010);
                 assert_eq!(position.avg_price, 64000.10);
                 assert_eq!(position.unrealized_pnl, 1.25);
             }

@@ -385,8 +385,8 @@ fn structural_matches_for_live_order(
         .filter(|candidate| {
             let binding = candidate.binding(state);
             values_match(
-                binding.request.quantity,
-                live_order.quantity,
+                binding.request.quantity.value(),
+                live_order.quantity.value(),
                 rules.position_qty_step().value(),
             )
         })
@@ -406,7 +406,7 @@ fn recovery_anomaly(mut state: ExecutorState, anomaly: RecoveryAnomaly) -> Recov
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use poise_core::instrument::InstrumentSpec;
+    use poise_core::instrument::{InstrumentSpec, PositionQty};
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::types::Side;
     use std::sync::LazyLock;
@@ -473,7 +473,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 side,
                 price,
-                quantity,
+                quantity: PositionQty::new(quantity).unwrap(),
                 client_order_id: client_order_id.to_string(),
                 reduce_only: false,
             },
@@ -498,8 +498,8 @@ mod tests {
             client_order_id: client_order_id.to_string(),
             side,
             price,
-            quantity,
-            filled_qty: 0.0,
+            quantity: PositionQty::new(quantity).unwrap(),
+            filled_qty: PositionQty::default(),
             status: OrderStatus::New,
         }
     }
@@ -707,7 +707,7 @@ mod tests {
         previous_state.bindings.push(previous_binding);
         let mut live_order = live_order("expected-client", Side::Buy, 100.0, 1.0);
         live_order.status = OrderStatus::PartiallyFilled;
-        live_order.filled_qty = 0.4;
+        live_order.filled_qty = PositionQty::new(0.4).unwrap();
         let open_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(vec![live_order]);
 
         let recovery = recover_working_orders(RecoveryInput {
@@ -1126,8 +1126,8 @@ mod tests {
             client_order_id: "unknown-client".to_string(),
             side: Side::Sell,
             price: 80.0,
-            quantity: 3.0,
-            filled_qty: 0.0,
+            quantity: PositionQty::new(3.0).unwrap(),
+            filled_qty: PositionQty::default(),
             status: OrderStatus::New,
         };
         let live_orders = CompleteOpenOrderSnapshot::from_complete_exchange_query(vec![

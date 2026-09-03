@@ -1967,7 +1967,7 @@ mod tests {
             Ok(poise_application::exchange::OrderReceipt {
                 order_id: "noop-order".into(),
                 client_order_id: req.client_order_id,
-                filled_qty: 0.0,
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: poise_application::exchange::OrderStatus::New,
             })
         }
@@ -1981,7 +1981,7 @@ mod tests {
             Ok(poise_application::exchange::OrderReceipt {
                 order_id: order_id.to_string(),
                 client_order_id: String::new(),
-                filled_qty: 0.0,
+                filled_qty: poise_core::instrument::PositionQty::default(),
                 status: poise_application::exchange::OrderStatus::Canceled,
             })
         }
@@ -2000,7 +2000,7 @@ mod tests {
         {
             Ok(poise_application::exchange::Position {
                 instrument: instrument.clone(),
-                qty: 0.0,
+                qty: poise_core::instrument::PositionQty::default(),
                 avg_price: 0.0,
                 unrealized_pnl: 0.0,
                 mark_price: None,

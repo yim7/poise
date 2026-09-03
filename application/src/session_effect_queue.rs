@@ -149,9 +149,14 @@ pub enum WakeSignal {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CancelReceiptResolution {
     ClosedWithoutFill,
-    ClosedWithFill { filled_qty: f64 },
+    ClosedWithFill {
+        filled_qty: poise_core::instrument::PositionQty,
+    },
     StillWorking,
-    Unknown { order_id: String, reason: String },
+    Unknown {
+        order_id: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1428,6 +1433,7 @@ impl SessionTrackEffectExt for TrackEffect {
 mod tests {
     use crate::exchange::{OrderRequest, OrderStatus};
     use chrono::Utc;
+    use poise_core::instrument::PositionQty;
     use poise_core::track::{Instrument, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
     use poise_engine::execution_plan::TrackEffect;
@@ -1471,7 +1477,7 @@ mod tests {
                 instrument: Instrument::new(Venue::Binance, "BTCUSDT"),
                 side: Side::Buy,
                 price: 100.0,
-                quantity: 0.1,
+                quantity: PositionQty::new(0.1).unwrap(),
                 client_order_id: client_order_id.into(),
                 reduce_only: false,
             },
@@ -1490,8 +1496,8 @@ mod tests {
                     client_order_id: format!("{order_id}-client"),
                     side: Side::Buy,
                     price: 100.0,
-                    quantity: 0.1,
-                    filled_qty: 0.0,
+                    quantity: PositionQty::new(0.1).unwrap(),
+                    filled_qty: PositionQty::default(),
                     status: OrderStatus::New,
                 })
                 .collect(),
@@ -1988,7 +1994,9 @@ mod tests {
 
         let action = queue.record_cancel_resolution(
             &enqueued[0],
-            CancelReceiptResolution::ClosedWithFill { filled_qty: 0.4 },
+            CancelReceiptResolution::ClosedWithFill {
+                filled_qty: PositionQty::new(0.4).unwrap(),
+            },
         );
 
         assert_eq!(
