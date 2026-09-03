@@ -65,12 +65,12 @@
 
 ### F1 修正 Bybit execution PNL 事实
 
-- [ ] 在 Bybit adapter 内建立 REST/WS 共享的私有 instrument metadata registry，并由 `get_exchange_info` 填充。
-- [ ] 解析 `side`、`orderId`、`execPrice`、`execQty`、`execTime`；使用 `execTime` 作为 `TrackPnlRecord.occurred_at`。
-- [ ] 使用 registry 中的 `InstrumentSpec` 构造完整 `TrackPnlQuantity`，删除 settlement suffix 推断和 `trade_summary` 路径。
-- [ ] registry 缺项、字段缺失或单位不匹配时显式失败。
-- [ ] 验收：mapper 测试证明 `creationTime != execTime` 时保存 `execTime`，并校验 side、price、quantity、base asset、order/trade identity 和 fee asset。
-- Commit SHA：待执行
+- [x] 在 Bybit adapter 内建立 REST/WS 共享的私有 instrument metadata registry，并由 `get_exchange_info` 填充。
+- [x] 解析 `side`、`orderId`、`execPrice`、`execQty`、`execTime`；使用 `execTime` 作为 `TrackPnlRecord.occurred_at`。
+- [x] 使用 registry 中的 `InstrumentSpec` 构造完整 `TrackPnlQuantity`，删除 settlement suffix 推断和 `trade_summary` 路径。
+- [x] registry 缺项、字段缺失或单位不匹配时显式失败。
+- [x] 验收：mapper 测试证明 `creationTime != execTime` 时保存 `execTime`，并校验 side、price、quantity、base asset、order/trade identity 和 fee asset。
+- Commit SHA：`6d05285`
 
 ### F2 修正 Binance PNL metadata ownership
 
