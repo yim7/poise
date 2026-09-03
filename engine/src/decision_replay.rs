@@ -23,9 +23,7 @@ use crate::execution_plan::TrackEffect;
 use crate::executor::SubmitRecoveryResolution;
 use crate::ledger::TrackPnlStats;
 use crate::manager::{SubmitRecoveryOrderLookup, TrackManager};
-use crate::observation::{
-    MarketObservation, OrderObservation, PositionObservation, TrackObservation,
-};
+use crate::observation::{MarketObservation, OrderObservation, PositionObservation};
 use crate::price_gate::SubmitPurpose;
 use crate::risk_exposure_gate::AppliedRiskAcquisitionReleaseTrigger;
 use crate::runtime::{
@@ -285,10 +283,7 @@ impl DecisionReplayRunner {
             )
             .context("fresh-start decision replay track")?;
         let initial_transition = manager
-            .observe(
-                &track_id,
-                TrackObservation::Position(input.initial_position.clone()),
-            )
+            .observe_position_update(&track_id, input.initial_position.clone())
             .context("observe initial decision replay position")?;
         ensure!(
             initial_transition.effects.is_empty(),
@@ -354,9 +349,10 @@ impl DecisionReplayRunner {
                 if let MarketObservation::ExecutionQuote { execution_quote } = observation {
                     self.execution_quote = Some(*execution_quote);
                 }
-                let transition = self.manager.observe(
+                let transition = self.manager.observe_market_mutation(
                     &self.track_id,
-                    TrackObservation::Market(observation.clone()),
+                    observation.clone(),
+                    step.observed_at,
                 )?;
                 self.collect_transition_release(&transition, &mut accumulator);
                 transition.effects
@@ -365,10 +361,9 @@ impl DecisionReplayRunner {
                 validate_position(observation)?;
                 self.simulated_position_qty = observation.qty.value();
                 self.simulated_unrealized_pnl = observation.unrealized_pnl;
-                let transition = self.manager.observe(
-                    &self.track_id,
-                    TrackObservation::Position(observation.clone()),
-                )?;
+                let transition = self
+                    .manager
+                    .observe_position_update(&self.track_id, observation.clone())?;
                 self.collect_transition_release(&transition, &mut accumulator);
                 transition.effects
             }
@@ -578,13 +573,13 @@ impl DecisionReplayRunner {
                 request.price,
                 accumulator,
             )?;
-            let position_transition = self.manager.observe(
+            let position_transition = self.manager.observe_position_update(
                 &self.track_id,
-                TrackObservation::Position(PositionObservation {
+                PositionObservation {
                     qty: PositionQty::new(self.simulated_position_qty)
                         .map_err(anyhow::Error::msg)?,
                     unrealized_pnl: self.simulated_unrealized_pnl,
-                }),
+                },
             )?;
             self.collect_transition_release(&position_transition, accumulator);
             queue.extend(position_transition.effects);
@@ -634,19 +629,19 @@ impl DecisionReplayRunner {
         self.orders[index].filled_qty = self.orders[index].request.quantity.value();
         self.orders[index].status = OrderStatus::Filled;
 
-        let order_transition = self
+        let (order_transition, _) = self
             .manager
-            .observe(&self.track_id, TrackObservation::Order(order_observation))?;
+            .observe_order_update(&self.track_id, order_observation)?;
         self.collect_transition_release(&order_transition, accumulator);
         if fill_delta > f64::EPSILON {
             self.apply_simulated_fill(&order_ref, side, fill_delta, price, accumulator)?;
         }
-        let position_transition = self.manager.observe(
+        let position_transition = self.manager.observe_position_update(
             &self.track_id,
-            TrackObservation::Position(PositionObservation {
+            PositionObservation {
                 qty: PositionQty::new(self.simulated_position_qty).map_err(anyhow::Error::msg)?,
                 unrealized_pnl: self.simulated_unrealized_pnl,
-            }),
+            },
         )?;
         self.collect_transition_release(&position_transition, accumulator);
         let mut effects = order_transition.effects;
@@ -838,12 +833,12 @@ impl DecisionReplayRunner {
                 instrument_spec: self.instrument_spec.clone(),
             },
         )?;
-        let transition = self.manager.observe(
+        let transition = self.manager.observe_position_update(
             &self.track_id,
-            TrackObservation::Position(PositionObservation {
+            PositionObservation {
                 qty: PositionQty::new(self.simulated_position_qty).map_err(anyhow::Error::msg)?,
                 unrealized_pnl: self.simulated_unrealized_pnl,
-            }),
+            },
         )?;
         ensure!(
             transition.effects.is_empty(),
@@ -949,6 +944,20 @@ mod tests {
         );
         assert_eq!(first.fill_model, input.fill_model);
         assert_eq!(first.steps[0].strategy_price, Some(95.0));
+    }
+
+    #[test]
+    fn market_step_uses_step_time_instead_of_manager_clock() {
+        let input = replay_input(0.0, DecisionReplayFillModel::NeverFill);
+        let mut runner = DecisionReplayRunner::new(&input).unwrap();
+        let step_time = input.started_at + Duration::minutes(1);
+        runner.clock.set(step_time + Duration::days(1));
+
+        let report = runner.apply_step(&market_step(step_time, 95.0)).unwrap();
+        let observed = runner.manager.track_runtime_view(&runner.track_id).unwrap();
+
+        assert_eq!(observed.last_tick_at, Some(step_time));
+        assert_eq!(report.committed_decision.unwrap().observed_at, step_time);
     }
 
     #[test]

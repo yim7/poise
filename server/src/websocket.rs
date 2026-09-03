@@ -1666,16 +1666,15 @@ mod tests {
             )
             .unwrap();
         manager
-            .observe(
+            .observe_market_mutation(
                 &TrackId::new("btc-core"),
-                poise_engine::observation::TrackObservation::Market(
-                    poise_engine::observation::MarketObservation::ExecutionQuote {
-                        execution_quote: poise_application::exchange::ExecutionQuote {
-                            best_bid: 95.0,
-                            best_ask: 95.0,
-                        },
+                poise_engine::observation::MarketObservation::ExecutionQuote {
+                    execution_quote: poise_application::exchange::ExecutionQuote {
+                        best_bid: 95.0,
+                        best_ask: 95.0,
                     },
-                ),
+                },
+                chrono::Utc::now(),
             )
             .unwrap();
         manager

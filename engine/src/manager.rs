@@ -15,7 +15,6 @@ use crate::executor;
 use crate::ledger::{TrackPnlRecord, TrackPnlStats};
 use crate::observation::{
     CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
-    TrackObservation,
 };
 use crate::price_gate::{SubmitPurpose, evaluate_price_execution_gate};
 use crate::reconciler;
@@ -145,37 +144,6 @@ impl TrackManager {
         Ok(())
     }
 
-    pub fn observe(
-        &mut self,
-        id: &TrackId,
-        observation: TrackObservation,
-    ) -> Result<TrackTransition> {
-        if let TrackObservation::Market(observation) = observation {
-            return self.observe_market_mutation(id, observation, self.clock.now());
-        }
-
-        if let TrackObservation::Order(observation) = observation {
-            return self
-                .observe_order_update(id, observation)
-                .map(|(transition, _)| transition);
-        }
-
-        let (events, effects) = match observation {
-            TrackObservation::Position(observation) => {
-                self.observe_position(id, observation)?;
-                match self.live_strategy_price(id)? {
-                    Some(strategy_price) => self.reconcile_track(id, strategy_price)?,
-                    None => (vec![], vec![]),
-                }
-            }
-            TrackObservation::Market(_) | TrackObservation::Order(_) => {
-                unreachable!("market/order observation handled above")
-            }
-        };
-
-        self.transition_for(id, events, effects)
-    }
-
     pub fn observe_market_mutation(
         &mut self,
         id: &TrackId,
@@ -192,6 +160,19 @@ impl TrackManager {
             CommitIntent::LiveOnly => TrackTransition::live_only(next_state),
             CommitIntent::Commit => TrackTransition::commit(next_state, facts, effects),
         })
+    }
+
+    pub fn observe_position_update(
+        &mut self,
+        id: &TrackId,
+        observation: PositionObservation,
+    ) -> Result<TrackTransition> {
+        self.observe_position(id, observation)?;
+        let (facts, effects) = match self.live_strategy_price(id)? {
+            Some(strategy_price) => self.reconcile_track(id, strategy_price)?,
+            None => (vec![], vec![]),
+        };
+        self.transition_for(id, facts, effects)
     }
 
     pub fn observe_order_update(
@@ -1484,20 +1465,28 @@ mod tests {
         crate::test_instrument::inverse_spec(0.1, 1.0, 1.0, 0.0, 100.0)
     }
 
-    fn market(price: f64) -> TrackObservation {
-        TrackObservation::Market(MarketObservation::ExecutionQuote {
-            execution_quote: ExecutionQuote {
-                best_bid: price - 0.1,
-                best_ask: price + 0.1,
+    fn observe_market(
+        manager: &mut TrackManager,
+        id: &TrackId,
+        price: f64,
+    ) -> Result<TrackTransition> {
+        manager.observe_market_mutation(
+            id,
+            MarketObservation::ExecutionQuote {
+                execution_quote: ExecutionQuote {
+                    best_bid: price - 0.1,
+                    best_ask: price + 0.1,
+                },
             },
-        })
+            Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
+        )
     }
 
     #[test]
     fn reconcile_track_submits_catch_up_action_from_due_boundary_operation() {
         let (mut manager, id) = manager();
 
-        let transition = manager.observe(&id, market(95.0)).unwrap();
+        let transition = observe_market(&mut manager, &id, 95.0).unwrap();
         let track = manager.tracks.get(&id).unwrap();
         let catch_up_binding = track
             .executor_state
@@ -1533,7 +1522,7 @@ mod tests {
     fn manager_passes_reconciled_final_target_to_executor() {
         let (mut manager, id) = manager();
 
-        manager.observe(&id, market(93.75)).unwrap();
+        observe_market(&mut manager, &id, 93.75).unwrap();
         let track = manager.tracks.get(&id).unwrap();
         let catch_up_binding = track
             .executor_state
@@ -1549,7 +1538,7 @@ mod tests {
     #[test]
     fn runtime_view_projects_the_committed_inventory_decision() {
         let (mut manager, id) = manager();
-        manager.observe(&id, market(95.0)).unwrap();
+        observe_market(&mut manager, &id, 95.0).unwrap();
 
         let committed = manager.track_runtime_view(&id).unwrap().decision;
         assert_eq!(committed.revision, Some(1));
@@ -1574,7 +1563,7 @@ mod tests {
             track.replace_definition_for_test(config(), 400.0, loss_limits());
         }
 
-        manager.observe(&id, market(90.0)).unwrap();
+        observe_market(&mut manager, &id, 90.0).unwrap();
         let decision = manager
             .get_track(id.as_str())
             .unwrap()
@@ -1595,7 +1584,7 @@ mod tests {
     #[test]
     fn decision_revision_remains_monotonic_across_pause_and_resume() {
         let (mut manager, id) = manager();
-        manager.observe(&id, market(95.0)).unwrap();
+        observe_market(&mut manager, &id, 95.0).unwrap();
         let first_revision = manager
             .get_track(id.as_str())
             .unwrap()
@@ -1634,7 +1623,7 @@ mod tests {
                 .is_none(),
             "resume must wait for the next fully owned reconcile"
         );
-        let transition = manager.observe(&id, market(95.0)).unwrap();
+        let transition = observe_market(&mut manager, &id, 95.0).unwrap();
 
         assert_eq!(
             manager
@@ -1675,7 +1664,7 @@ mod tests {
                 .is_none()
         );
 
-        manager.observe(&id, market(100.0)).unwrap();
+        observe_market(&mut manager, &id, 100.0).unwrap();
         assert_eq!(
             manager
                 .get_track(id.as_str())
@@ -1690,7 +1679,7 @@ mod tests {
     #[test]
     fn live_only_market_mutation_commits_snapshot_without_durable_transition() {
         let (mut manager, id) = manager();
-        manager.observe(&id, market(95.0)).unwrap();
+        observe_market(&mut manager, &id, 95.0).unwrap();
         let previous = manager
             .get_track(id.as_str())
             .unwrap()
@@ -1725,7 +1714,7 @@ mod tests {
     #[test]
     fn market_transition_uses_explicit_observation_time_and_commit_intent() {
         let (mut manager, id) = manager();
-        manager.observe(&id, market(95.0)).unwrap();
+        observe_market(&mut manager, &id, 95.0).unwrap();
         let observed_at = Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 1).unwrap();
 
         let transition = manager
@@ -1807,7 +1796,7 @@ mod tests {
     #[test]
     fn live_only_market_mutation_keeps_executor_maintenance_state() {
         let (mut manager, id) = manager();
-        manager.observe(&id, market(100.0)).unwrap();
+        observe_market(&mut manager, &id, 100.0).unwrap();
         {
             let track = manager.tracks.get_mut(&id).unwrap();
             track.executor_state.bindings.push(LiveOrderBinding {
@@ -1896,7 +1885,7 @@ mod tests {
     #[test]
     fn live_only_target_change_keeps_operational_target_in_sync_with_snapshot() {
         let (mut manager, id) = manager();
-        manager.observe(&id, market(95.0)).unwrap();
+        observe_market(&mut manager, &id, 95.0).unwrap();
         let previous = manager
             .get_track(id.as_str())
             .unwrap()
@@ -1931,7 +1920,7 @@ mod tests {
     #[test]
     fn installing_a_previous_candidate_restores_its_inventory_decision() {
         let (mut manager, id) = manager();
-        manager.observe(&id, market(95.0)).unwrap();
+        observe_market(&mut manager, &id, 95.0).unwrap();
         let previous_state = manager.get_track(id.as_str()).cloned().unwrap();
         let previous_decision = manager
             .get_track(id.as_str())
@@ -1939,7 +1928,7 @@ mod tests {
             .inventory_decision()
             .cloned();
 
-        manager.observe(&id, market(105.0)).unwrap();
+        observe_market(&mut manager, &id, 105.0).unwrap();
         assert_ne!(
             manager.get_track(id.as_str()).unwrap().inventory_decision(),
             previous_decision.as_ref()
@@ -1981,7 +1970,7 @@ mod tests {
                     .ensure_revision(track.config(), track.current_exposure.clone());
         }
 
-        let transition = manager.observe(&id, market(93.75)).unwrap();
+        let transition = observe_market(&mut manager, &id, 93.75).unwrap();
 
         assert!(!transition.effects.iter().any(|effect| matches!(
             effect,
@@ -2013,7 +2002,7 @@ mod tests {
                 }));
         }
 
-        let transition = manager.observe(&id, market(105.625)).unwrap();
+        let transition = observe_market(&mut manager, &id, 105.625).unwrap();
         let track = manager.tracks.get(&id).unwrap();
 
         assert!(transition.effects.iter().any(|effect| matches!(
@@ -2057,7 +2046,7 @@ mod tests {
                     .ensure_revision(track.config(), track.current_exposure.clone());
         }
 
-        let transition = manager.observe(&id, market(93.75)).unwrap();
+        let transition = observe_market(&mut manager, &id, 93.75).unwrap();
 
         assert!(transition.facts.iter().any(|event| matches!(
             event,
@@ -2140,7 +2129,7 @@ mod tests {
             });
         }
 
-        let transition = manager.observe(&id, market(85.0)).unwrap();
+        let transition = observe_market(&mut manager, &id, 85.0).unwrap();
         let track = manager.tracks.get(&id).unwrap();
 
         assert!(matches!(
@@ -2174,7 +2163,7 @@ mod tests {
     #[test]
     fn reconcile_track_reopens_boundary_ledger_when_profile_revision_changes() {
         let (mut manager, id) = manager();
-        manager.observe(&id, market(95.0)).unwrap();
+        observe_market(&mut manager, &id, 95.0).unwrap();
         let old_revision = manager
             .tracks
             .get(&id)
@@ -2195,7 +2184,7 @@ mod tests {
             );
         }
 
-        manager.observe(&id, market(100.0)).unwrap();
+        observe_market(&mut manager, &id, 100.0).unwrap();
 
         let track = manager.tracks.get(&id).unwrap();
         assert_ne!(
@@ -2281,7 +2270,7 @@ mod tests {
     #[test]
     fn price_gate_still_cancels_increasing_binding_at_execution_target() {
         let (mut manager, id) = manager();
-        manager.observe(&id, market(100.0)).unwrap();
+        observe_market(&mut manager, &id, 100.0).unwrap();
         {
             let track = manager.tracks.get_mut(&id).unwrap();
             track.price_execution_gate = PriceExecutionGate::NoSubmit {
@@ -2332,7 +2321,7 @@ mod tests {
     #[test]
     fn terminated_track_at_zero_reports_at_execution_target() {
         let (mut manager, id) = manager();
-        manager.observe(&id, market(100.0)).unwrap();
+        observe_market(&mut manager, &id, 100.0).unwrap();
 
         let transition = manager.command(&id, TrackCommand::Terminate).unwrap();
 
@@ -2383,12 +2372,12 @@ mod tests {
         }
 
         manager
-            .observe(
+            .observe_position_update(
                 &id,
-                TrackObservation::Position(PositionObservation {
+                PositionObservation {
                     qty: PositionQty::new(-0.2).unwrap(),
                     unrealized_pnl: 5.0,
-                }),
+                },
             )
             .unwrap();
 
@@ -2418,12 +2407,12 @@ mod tests {
         }
 
         manager
-            .observe(
+            .observe_position_update(
                 &id,
-                TrackObservation::Position(PositionObservation {
+                PositionObservation {
                     qty: PositionQty::new(-30.0).unwrap(),
                     unrealized_pnl: 0.25,
-                }),
+                },
             )
             .unwrap();
 
@@ -2639,7 +2628,7 @@ mod tests {
             )
             .unwrap();
 
-        manager.observe(&id, market(92.5)).unwrap();
+        observe_market(&mut manager, &id, 92.5).unwrap();
 
         let track = manager.get_track(id.as_str()).unwrap();
         let decision = track.inventory_decision().unwrap();
@@ -2656,7 +2645,7 @@ mod tests {
             })
         );
 
-        manager.observe(&id, market(92.5)).unwrap();
+        observe_market(&mut manager, &id, 92.5).unwrap();
 
         let track = manager.get_track(id.as_str()).unwrap();
         assert_eq!(
@@ -2687,7 +2676,7 @@ mod tests {
                 },
             )
             .unwrap();
-        manager.observe(&id, market(92.5)).unwrap();
+        observe_market(&mut manager, &id, 92.5).unwrap();
         manager.resume_track(id.as_str()).unwrap();
 
         manager
@@ -2732,7 +2721,7 @@ mod tests {
             .unwrap();
         let pending_state = manager.get_track(id.as_str()).cloned().unwrap();
 
-        manager.observe(&id, market(92.5)).unwrap();
+        observe_market(&mut manager, &id, 92.5).unwrap();
         assert!(
             !manager
                 .get_track(id.as_str())

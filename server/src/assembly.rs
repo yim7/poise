@@ -533,7 +533,7 @@ mod tests {
     use poise_core::events::DomainEvent as EngineDomainEvent;
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_engine::manager::TrackManager;
-    use poise_engine::observation::{MarketObservation, TrackObservation};
+    use poise_engine::observation::MarketObservation;
     use poise_protocol::StreamEvent;
     use poise_storage::sqlite::SqliteStorage;
     use tokio::net::TcpListener;
@@ -1167,11 +1167,12 @@ total_loss_limit = 600.0
                 },
                 timestamp: chrono::Utc::now(),
             };
-            let _ = manager.observe(
+            let _ = manager.observe_market_mutation(
                 &TrackId::new("btc-core"),
-                TrackObservation::Market(MarketObservation::ExecutionQuote {
+                MarketObservation::ExecutionQuote {
                     execution_quote: tick.execution_quote,
-                }),
+                },
+                tick.timestamp,
             );
             manager.pause_track("btc-core").unwrap();
         }

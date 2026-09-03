@@ -63,10 +63,3 @@ impl CompleteOpenOrderSnapshot {
         self.orders.is_empty()
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum TrackObservation {
-    Market(MarketObservation),
-    Position(PositionObservation),
-    Order(OrderObservation),
-}

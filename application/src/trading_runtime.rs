@@ -22,7 +22,6 @@ use poise_engine::ledger::{TrackPnlRecord, TrackPnlStats};
 use poise_engine::manager::{ExchangeSyncMode, SubmitRecoveryOrderLookup, TrackManager};
 use poise_engine::observation::{
     CompleteOpenOrderSnapshot, MarketObservation, OrderObservation, PositionObservation,
-    TrackObservation,
 };
 use poise_engine::runtime::{
     ExchangeObservationRevision, FreshSessionExternalInputs, QuoteHealthView, StrategyTargetView,
@@ -916,10 +915,7 @@ impl TradingRuntime {
         observation: PositionObservation,
     ) -> Result<TrackTransition> {
         self.mutate_track(id, |manager| {
-            manager.observe(
-                &TrackId::new(id),
-                TrackObservation::Position(observation.clone()),
-            )
+            manager.observe_position_update(&TrackId::new(id), observation.clone())
         })
         .await
         .map_err(anyhow::Error::new)
@@ -2616,16 +2612,15 @@ mod tests {
     ) {
         let mut manager = seeded_manager();
         manager
-            .observe(
+            .observe_market_mutation(
                 &TrackId::new("btc-core"),
-                poise_engine::observation::TrackObservation::Market(
-                    MarketObservation::ExecutionQuote {
-                        execution_quote: ExecutionQuote {
-                            best_bid: 94.9,
-                            best_ask: 95.1,
-                        },
+                MarketObservation::ExecutionQuote {
+                    execution_quote: ExecutionQuote {
+                        best_bid: 94.9,
+                        best_ask: 95.1,
                     },
-                ),
+                },
+                chrono::Utc::now(),
             )
             .unwrap();
         let decision = manager
@@ -3372,12 +3367,12 @@ mod tests {
 
         let mutation: std::result::Result<TrackTransition, super::TrackMutationError> = executor
             .mutate_track("btc-core", |manager| {
-                let _ = manager.observe(
+                let _ = manager.observe_position_update(
                     &TrackId::new("btc-core"),
-                    poise_engine::observation::TrackObservation::Position(PositionObservation {
+                    PositionObservation {
                         qty: PositionQty::default(),
                         unrealized_pnl: 0.0,
-                    }),
+                    },
                 )?;
                 anyhow::bail!("forced candidate rejection")
             })
