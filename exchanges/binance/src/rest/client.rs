@@ -24,6 +24,7 @@ use super::models::{
     BinanceOpenOrder, BinanceOrderResponse, BinancePositionMode, BinancePositionRisk,
     ListenKeyResponse, ServerTimeResponse,
 };
+use crate::instrument::BinanceInstrumentRegistry;
 use crate::mapper::{track_pnl_record_from_funding, track_pnl_record_from_trade};
 
 const DEFAULT_RECV_WINDOW_MS: i64 = 10_000;
@@ -46,6 +47,7 @@ pub struct BinanceRestClient {
     timestamp_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
     timestamp_offset_ms: AtomicI64,
     last_time_sync_at_ms: AtomicI64,
+    instrument_registry: Arc<BinanceInstrumentRegistry>,
 }
 
 impl BinanceRestClient {
@@ -63,6 +65,7 @@ impl BinanceRestClient {
             timestamp_provider: Arc::new(|| chrono::Utc::now().timestamp_millis()),
             timestamp_offset_ms: AtomicI64::new(0),
             last_time_sync_at_ms: AtomicI64::new(0),
+            instrument_registry: Arc::new(BinanceInstrumentRegistry::default()),
         }
     }
 
@@ -82,6 +85,7 @@ impl BinanceRestClient {
             timestamp_provider,
             timestamp_offset_ms: AtomicI64::new(0),
             last_time_sync_at_ms: AtomicI64::new(0),
+            instrument_registry: Arc::new(BinanceInstrumentRegistry::default()),
         }
     }
 
@@ -102,6 +106,7 @@ impl BinanceRestClient {
             timestamp_provider,
             timestamp_offset_ms: AtomicI64::new(0),
             last_time_sync_at_ms: AtomicI64::new(0),
+            instrument_registry: Arc::new(BinanceInstrumentRegistry::default()),
         }
     }
 
@@ -125,7 +130,14 @@ impl BinanceRestClient {
             .find(|item| item.symbol == symbol)
             .with_context(|| format!("symbol not found in exchange info: {symbol}"))?;
 
-        symbol_info.try_into()
+        let info: ExchangeInfo = symbol_info.try_into()?;
+        self.instrument_registry
+            .upsert(info.instrument_spec.clone());
+        Ok(info)
+    }
+
+    pub(crate) fn instrument_registry(&self) -> Arc<BinanceInstrumentRegistry> {
+        Arc::clone(&self.instrument_registry)
     }
 
     pub async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
@@ -172,6 +184,9 @@ impl BinanceRestClient {
         required_window: &PnlHistoryWindow,
     ) -> Result<RecentTrackPnlBatch> {
         const QUERY_LIMIT: usize = 1_000;
+        let instrument_spec = self.instrument_registry.get(symbol).with_context(|| {
+            format!("missing Binance instrument metadata for PNL symbol `{symbol}`")
+        })?;
         let trades: Vec<BinanceAccountTrade> = self
             .send_request(
                 Method::GET,
@@ -215,12 +230,12 @@ impl BinanceRestClient {
         let complete = trades.len() < QUERY_LIMIT && funding.len() < QUERY_LIMIT;
         let mut records = trades
             .into_iter()
-            .map(track_pnl_record_from_trade)
+            .map(|trade| track_pnl_record_from_trade(trade, &instrument_spec))
             .collect::<Result<Vec<_>>>()?;
         records.extend(
             funding
                 .into_iter()
-                .map(track_pnl_record_from_funding)
+                .map(|funding| track_pnl_record_from_funding(funding, &instrument_spec))
                 .collect::<Result<Vec<_>>>()?,
         );
         Ok(if complete {
@@ -736,6 +751,66 @@ mod tests {
         assert_eq!(format_decimal(0.024000000000000004), "0.024");
         assert_eq!(format_decimal(65_853.7 + 0.1), "65853.8");
         assert_eq!(format_decimal(1.23456789), "1.23456789");
+    }
+
+    #[tokio::test]
+    async fn exchange_info_populates_the_shared_instrument_registry() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{
+                "symbols": [{
+                    "symbol": "PERPETUAL-42",
+                    "baseAsset": "BTC",
+                    "quoteAsset": "USD",
+                    "marginAsset": "USDC",
+                    "filters": [
+                        {"filterType":"PRICE_FILTER","tickSize":"0.10"},
+                        {"filterType":"LOT_SIZE","minQty":"0.001","stepSize":"0.001"},
+                        {"filterType":"MIN_NOTIONAL","notional":"100"}
+                    ]
+                }]
+            }"#,
+        )])
+        .await;
+        let client = BinanceRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let info = client.get_exchange_info("PERPETUAL-42").await.unwrap();
+        let registered = client.instrument_registry().get("PERPETUAL-42").unwrap();
+
+        assert_eq!(registered, info.instrument_spec);
+        assert_eq!(registered.base_asset().as_str(), "BTC");
+        assert_eq!(registered.settlement_asset().as_str(), "USDC");
+    }
+
+    #[tokio::test]
+    async fn recent_pnl_rejects_missing_instrument_metadata_before_querying() {
+        let client = BinanceRestClient::with_http_client_and_timestamp_provider(
+            "http://127.0.0.1:1",
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+        let required_window = PnlHistoryWindow::try_new(
+            chrono::DateTime::from_timestamp_millis(1_699_999_000_000).unwrap(),
+            chrono::DateTime::from_timestamp_millis(1_700_001_000_000).unwrap(),
+        )
+        .unwrap();
+
+        let error = client
+            .get_recent_track_pnl_records("BTCUSDT", &required_window)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("missing Binance instrument metadata"));
+        assert!(error.contains("BTCUSDT"));
     }
 
     #[tokio::test]

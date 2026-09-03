@@ -190,7 +190,7 @@ mod tests {
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use poise_application::exchange::ExecutionPortErrorKind;
-    use poise_core::instrument::PositionQty;
+    use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
     use poise_core::{
         track::{Instrument, Venue},
         types::Side,
@@ -299,6 +299,20 @@ mod tests {
             "api-key",
             "secret-key",
         ));
+        rest.instrument_registry().upsert(
+            InstrumentSpec::try_linear(
+                Instrument::new(Venue::Binance, "BTCUSDT"),
+                Asset::try_new("BTC").unwrap(),
+                Asset::try_new("USDT").unwrap(),
+                Asset::try_new("USDT").unwrap(),
+                Default::default(),
+                0.1,
+                0.001,
+                0.001,
+                Amount::new(5.0, Asset::try_new("USDT").unwrap()).unwrap(),
+            )
+            .unwrap(),
+        );
         let ws_base_url = ws_base_url.into();
         let ws = Arc::new(BinanceWsClient::with_ws_routes(
             Arc::clone(&rest),

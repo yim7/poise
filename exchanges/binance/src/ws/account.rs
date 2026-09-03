@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use chrono::{TimeZone, Utc};
 use futures_util::StreamExt;
 use tokio::{
@@ -19,10 +19,11 @@ use super::{
     UserStreamDiagnostics, UserWebSocket, backoff_delay, connect_user_stream,
     log_user_stream_disconnect, log_user_stream_error,
     models::{AccountUpdateEnvelope, OrderTradeUpdateEnvelope, UserEventTypeEnvelope},
-    parse_decimal, parse_side, quote_asset_for_symbol,
+    parse_decimal, parse_side,
 };
 use crate::{
-    mapper::{linear_pnl_quantity, parse_order_status},
+    instrument::BinanceInstrumentRegistry,
+    mapper::{parse_order_status, pnl_quantity},
     rest::BinanceRestClient,
 };
 
@@ -43,6 +44,7 @@ pub(super) async fn run_user_stream(
 ) {
     let mut attempt = 0_u32;
     let mut listen_key = initial_listen_key;
+    let instrument_registry = rest.instrument_registry();
 
     loop {
         let connection = match initial_websocket.take() {
@@ -65,7 +67,7 @@ pub(super) async fn run_user_stream(
                             match message {
                                 Some(Ok(Message::Text(text))) => {
                                     diagnostics.record_message(Instant::now());
-                                    match parse_user_data_message(&text) {
+                                    match parse_user_data_message(&text, &instrument_registry) {
                                         Ok(UserStreamMessage::Events(events)) => {
                                             for event in events {
                                                 let send_started = Instant::now();
@@ -175,7 +177,10 @@ pub(super) async fn run_user_stream(
     }
 }
 
-pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage> {
+pub(super) fn parse_user_data_message(
+    payload: &str,
+    instrument_registry: &BinanceInstrumentRegistry,
+) -> Result<UserStreamMessage> {
     let event_type = serde_json::from_str::<UserEventTypeEnvelope>(payload)
         .context("failed to parse user data event type")?
         .event_type;
@@ -211,14 +216,46 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                 }),
             }];
 
-            let trade_qty = order
-                .last_filled_quantity
-                .as_deref()
-                .map(|value| parse_decimal("o.l", value))
-                .transpose()?
-                .unwrap_or(filled_qty);
-            if order.execution_type.as_deref() == Some("TRADE") && trade_qty.abs() > f64::EPSILON {
+            if order.execution_type.as_deref() == Some("TRADE") {
+                let trade_qty = order
+                    .last_filled_quantity
+                    .as_deref()
+                    .context("missing o.l for Binance trade")
+                    .and_then(|value| parse_decimal("o.l", value))?;
+                if trade_qty.abs() <= f64::EPSILON {
+                    return Ok(UserStreamMessage::Events(events));
+                }
+                let instrument_spec =
+                    instrument_registry.get(&order.symbol).with_context(|| {
+                        format!(
+                            "missing Binance instrument metadata for trade symbol `{}`",
+                            order.symbol
+                        )
+                    })?;
                 let realized_pnl = parse_decimal("o.rp", &order.realized_pnl)?;
+                let trade_price = order
+                    .last_filled_price
+                    .as_deref()
+                    .context("missing o.L for Binance trade")
+                    .and_then(|value| parse_decimal("o.L", value))?;
+                let occurred_at = parse_user_event_time(
+                    &event_type,
+                    order
+                        .order_trade_time
+                        .context("missing o.T for Binance trade")?,
+                )?;
+                let margin_asset = order
+                    .margin_asset
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|asset| !asset.is_empty())
+                    .context("missing o.ma for Binance trade")?;
+                ensure!(
+                    margin_asset == instrument_spec.settlement_asset().as_str(),
+                    "Binance trade margin asset `{margin_asset}` does not match settlement asset `{}` for `{}`",
+                    instrument_spec.settlement_asset().as_str(),
+                    order.symbol
+                );
                 let commission_amount = if let Some(commission_amount) = order
                     .commission_amount
                     .as_deref()
@@ -228,8 +265,6 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                 } else {
                     None
                 };
-                let quote_asset = quote_asset_for_symbol(&order.symbol)
-                    .context("cannot determine Binance settlement asset from order symbol")?;
                 let trading_fee = match (
                     commission_amount,
                     order
@@ -252,7 +287,7 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                         "binance:order_trade_update:{}:{}:{}",
                         order.symbol.to_lowercase(),
                         order.order_id,
-                        event_time.timestamp_millis()
+                        occurred_at.timestamp_millis()
                     ),
                 });
 
@@ -260,19 +295,18 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                     event_time,
                     payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade(
                         instrument,
-                        event_time,
+                        occurred_at,
                         "binance:order_trade_update".into(),
                         source_key,
                         Some(order.order_id.to_string()),
                         trade_id,
                         side,
-                        price,
-                        linear_pnl_quantity(
-                            &order.symbol,
-                            quote_asset,
+                        trade_price,
+                        pnl_quantity(
                             PositionQty::new(trade_qty).map_err(anyhow::Error::msg)?,
+                            &instrument_spec,
                         )?,
-                        cash_amount(realized_pnl, quote_asset)?,
+                        cash_amount(realized_pnl, margin_asset)?,
                         trading_fee,
                     )),
                 });
@@ -301,15 +335,18 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                     return Ok(UserStreamMessage::Events(Vec::new()));
                 };
                 let balance_change = parse_decimal("a.B.bc", &balance.balance_change)?;
-                let Some(quote_asset) = quote_asset_for_symbol(symbol) else {
-                    return Ok(UserStreamMessage::Events(Vec::new()));
-                };
-                if quote_asset != balance.asset {
-                    return Ok(UserStreamMessage::Events(Vec::new()));
-                }
+                let instrument_spec = instrument_registry.get(symbol).with_context(|| {
+                    format!("missing Binance instrument metadata for funding symbol `{symbol}`")
+                })?;
+                ensure!(
+                    balance.asset == instrument_spec.settlement_asset().as_str(),
+                    "Binance funding asset `{}` does not match settlement asset `{}` for `{symbol}`",
+                    balance.asset,
+                    instrument_spec.settlement_asset().as_str()
+                );
 
                 return Ok(UserStreamMessage::Events(vec![UserDataEvent {
-                    event_time: transaction_time,
+                    event_time,
                     payload: UserDataPayload::TrackPnl(TrackPnlRecord::funding(
                         Instrument::new(Venue::Binance, symbol.to_string()),
                         transaction_time,
@@ -319,7 +356,7 @@ pub(super) fn parse_user_data_message(payload: &str) -> Result<UserStreamMessage
                             symbol.to_lowercase(),
                             transaction_time.timestamp_millis()
                         )),
-                        cash_amount(balance_change, quote_asset)?,
+                        cash_amount(balance_change, &balance.asset)?,
                     )),
                 }]));
             }
@@ -375,11 +412,45 @@ mod tests {
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     use poise_application::exchange::{OrderStatus, Position, TrackPnlQuantity, UserDataPayload};
+    use poise_core::instrument::InstrumentSpec;
     use poise_core::track::{Instrument, Venue};
     use poise_core::types::Side;
 
     use super::*;
     use crate::ws::BinanceWsClient;
+
+    fn test_registry() -> BinanceInstrumentRegistry {
+        let registry = BinanceInstrumentRegistry::default();
+        registry.upsert(
+            InstrumentSpec::try_linear(
+                Instrument::new(Venue::Binance, "BTCUSDT"),
+                Asset::try_new("BTC").unwrap(),
+                Asset::try_new("USDT").unwrap(),
+                Asset::try_new("USDT").unwrap(),
+                Default::default(),
+                0.1,
+                0.001,
+                0.001,
+                Amount::new(5.0, Asset::try_new("USDT").unwrap()).unwrap(),
+            )
+            .unwrap(),
+        );
+        registry.upsert(
+            InstrumentSpec::try_linear(
+                Instrument::new(Venue::Binance, "PERPETUAL-42"),
+                Asset::try_new("BTC").unwrap(),
+                Asset::try_new("USD").unwrap(),
+                Asset::try_new("USDC").unwrap(),
+                Default::default(),
+                0.1,
+                0.001,
+                0.001,
+                Amount::new(5.0, Asset::try_new("USD").unwrap()).unwrap(),
+            )
+            .unwrap(),
+        );
+        registry
+    }
 
     #[test]
     fn parses_order_trade_update_message() {
@@ -396,12 +467,16 @@ mod tests {
                 "q": "0.020",
                 "z": "0.020",
                 "l": "0.020",
+                "L": "65000.5",
+                "T": 1700000000000,
                 "rp": "12.34",
+                "ma": "USDT",
                 "X": "FILLED"
             }
         }"#;
 
-        let events = parse_user_data_message(payload).unwrap();
+        let registry = test_registry();
+        let events = parse_user_data_message(payload, &registry).unwrap();
 
         assert_eq!(
             events,
@@ -457,15 +532,18 @@ mod tests {
                 "q": "0.020",
                 "z": "0.020",
                 "l": "0.020",
+                "L": "65001.5",
+                "T": 1699999999123,
                 "t": 67890,
                 "rp": "12.34",
                 "n": "3.2",
                 "N": "USDT",
+                "ma": "USDT",
                 "X": "FILLED"
             }
         }"#;
 
-        let events = parse_user_data_message(payload).unwrap();
+        let events = parse_user_data_message(payload, &test_registry()).unwrap();
 
         assert_eq!(
             events,
@@ -487,13 +565,13 @@ mod tests {
                     event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
                     payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade(
                         Instrument::new(Venue::Binance, "BTCUSDT"),
-                        Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+                        Utc.timestamp_millis_opt(1_699_999_999_123).unwrap(),
                         "binance:order_trade_update".into(),
                         Some("binance:order_trade_update:btcusdt:67890".into()),
                         Some("12345".into()),
                         Some("67890".into()),
                         Side::Sell,
-                        65000.5,
+                        65001.5,
                         TrackPnlQuantity::base_asset(
                             PositionQty::new(0.02).unwrap(),
                             Asset::try_new("BTC").unwrap(),
@@ -504,6 +582,128 @@ mod tests {
                 },
             ])
         );
+    }
+
+    #[test]
+    fn ws_and_rest_trades_share_metadata_quantity_for_nonstandard_symbol() {
+        let payload = r#"{
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 1700000000000,
+            "o": {
+                "s": "PERPETUAL-42",
+                "i": 12345,
+                "c": "grid-order-004",
+                "S": "SELL",
+                "x": "TRADE",
+                "p": "0",
+                "q": "0.020",
+                "z": "0.020",
+                "l": "0.020",
+                "L": "65001.5",
+                "T": 1699999999123,
+                "t": 67890,
+                "rp": "12.34",
+                "n": "0.01",
+                "N": "BNB",
+                "ma": "USDC",
+                "X": "FILLED"
+            }
+        }"#;
+        let registry = test_registry();
+
+        let UserStreamMessage::Events(events) =
+            parse_user_data_message(payload, &registry).unwrap()
+        else {
+            panic!("trade update must emit events");
+        };
+        let UserDataPayload::TrackPnl(streamed) = &events[1].payload else {
+            panic!("trade update must emit PNL");
+        };
+        let backfilled = crate::mapper::track_pnl_record_from_trade(
+            crate::rest::models::BinanceAccountTrade {
+                commission: "0.01".into(),
+                commission_asset: "BNB".into(),
+                id: 67890,
+                order_id: 12345,
+                price: "65001.5".into(),
+                qty: "0.020".into(),
+                margin_asset: "USDC".into(),
+                realized_pnl: "12.34".into(),
+                side: "SELL".into(),
+                symbol: "PERPETUAL-42".into(),
+                time: 1_699_999_999_123,
+            },
+            &registry.get("PERPETUAL-42").unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(streamed.occurred_at, backfilled.occurred_at);
+        assert_eq!(streamed.price, Some(65_001.5));
+        assert_eq!(streamed.quantity, backfilled.quantity);
+        assert_eq!(streamed.realized_pnl().unwrap().asset().as_str(), "USDC");
+        assert_eq!(streamed.trading_fee().unwrap().asset().as_str(), "BNB");
+    }
+
+    #[test]
+    fn rejects_trade_when_instrument_metadata_is_missing() {
+        let payload = r#"{
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 1700000000000,
+            "o": {
+                "s": "BTCUSDT",
+                "i": 12345,
+                "c": "grid-order-004",
+                "S": "SELL",
+                "x": "TRADE",
+                "p": "65000.5",
+                "q": "0.020",
+                "z": "0.020",
+                "l": "0.020",
+                "L": "65000.5",
+                "T": 1700000000000,
+                "t": 67890,
+                "rp": "12.34",
+                "ma": "USDT",
+                "X": "FILLED"
+            }
+        }"#;
+
+        let error = parse_user_data_message(payload, &BinanceInstrumentRegistry::default())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("missing Binance instrument metadata"));
+        assert!(error.contains("BTCUSDT"));
+    }
+
+    #[test]
+    fn rejects_funding_fee_when_balance_asset_does_not_match_instrument() {
+        let payload = r#"{
+            "e": "ACCOUNT_UPDATE",
+            "E": 1700000000000,
+            "T": 1699999999000,
+            "a": {
+                "m": "FUNDING_FEE",
+                "B": [{
+                    "a": "BNB",
+                    "bc": "-1.5"
+                }],
+                "P": [{
+                    "s": "BTCUSDT",
+                    "pa": "0.015",
+                    "ep": "64200.0",
+                    "up": "12.3"
+                }]
+            }
+        }"#;
+
+        let error = parse_user_data_message(payload, &test_registry())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("funding asset"));
+        assert!(error.contains("BNB"));
+        assert!(error.contains("BTCUSDT"));
     }
 
     #[test]
@@ -527,12 +727,13 @@ mod tests {
             }
         }"#;
 
-        let events = parse_user_data_message(payload).unwrap();
+        let registry = test_registry();
+        let events = parse_user_data_message(payload, &registry).unwrap();
 
         assert_eq!(
             events,
             UserStreamMessage::Events(vec![UserDataEvent {
-                event_time: Utc.timestamp_millis_opt(1_699_999_999_000).unwrap(),
+                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
                 payload: UserDataPayload::TrackPnl(TrackPnlRecord::funding(
                     Instrument::new(Venue::Binance, "BTCUSDT"),
                     Utc.timestamp_millis_opt(1_699_999_999_000).unwrap(),
@@ -551,6 +752,7 @@ mod tests {
                 asset: "USDT".into(),
                 time: 1_699_999_999_000,
             },
+            &registry.get("BTCUSDT").unwrap(),
         )
         .unwrap();
         let UserStreamMessage::Events(events) = events else {
@@ -583,7 +785,7 @@ mod tests {
             }
         }"#;
 
-        let events = parse_user_data_message(payload).unwrap();
+        let events = parse_user_data_message(payload, &test_registry()).unwrap();
 
         assert_eq!(
             events,
@@ -618,14 +820,17 @@ mod tests {
                 "q": "0.020",
                 "z": "0.020",
                 "l": "0.020",
+                "L": "65000.5",
+                "T": 1700000000000,
                 "rp": "12.34",
                 "n": "0.01",
                 "N": "BNB",
+                "ma": "USDT",
                 "X": "FILLED"
             }
         }"#;
 
-        let events = parse_user_data_message(payload).unwrap();
+        let events = parse_user_data_message(payload, &test_registry()).unwrap();
 
         assert_eq!(
             events,
@@ -683,7 +888,7 @@ mod tests {
             }
         }"#;
 
-        let events = parse_user_data_message(payload).unwrap();
+        let events = parse_user_data_message(payload, &test_registry()).unwrap();
 
         assert_eq!(
             events,
@@ -708,7 +913,7 @@ mod tests {
             "listenKey": "listen-key-1"
         }"#;
 
-        let event = parse_user_data_message(payload).unwrap();
+        let event = parse_user_data_message(payload, &test_registry()).unwrap();
 
         assert_eq!(event, UserStreamMessage::ListenKeyExpired);
     }
@@ -748,7 +953,7 @@ mod tests {
             }
         }"#;
 
-        let event = parse_user_data_message(payload).unwrap();
+        let event = parse_user_data_message(payload, &test_registry()).unwrap();
 
         assert_eq!(
             event,
@@ -774,7 +979,7 @@ mod tests {
             }
         }"#;
 
-        let error = parse_user_data_message(payload).unwrap_err();
+        let error = parse_user_data_message(payload, &test_registry()).unwrap_err();
         let error_text = format!("{error:#}");
 
         assert!(error_text.contains("ORDER_TRADE_UPDATE"));

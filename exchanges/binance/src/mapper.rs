@@ -10,7 +10,7 @@ use poise_application::exchange::{
     AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt, OrderStatus, Position,
 };
 use poise_application::exchange::{TrackPnlQuantity, TrackPnlRecord};
-use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionQty};
+use poise_core::instrument::{Amount, Asset, InstrumentSpec, PositionBasis, PositionQty};
 use poise_core::track::{Instrument, Venue};
 
 impl TryFrom<BinanceOrderResponse> for OrderReceipt {
@@ -121,9 +121,20 @@ impl TryFrom<BinanceOpenOrder> for ExchangeOrder {
     }
 }
 
-pub(crate) fn track_pnl_record_from_trade(value: BinanceAccountTrade) -> Result<TrackPnlRecord> {
+pub(crate) fn track_pnl_record_from_trade(
+    value: BinanceAccountTrade,
+    instrument_spec: &InstrumentSpec,
+) -> Result<TrackPnlRecord> {
     let instrument = Instrument::new(Venue::Binance, &value.symbol);
+    ensure_instrument_matches(instrument_spec, &instrument)?;
     let settlement_asset = Asset::try_new(value.margin_asset).map_err(anyhow::Error::msg)?;
+    ensure!(
+        &settlement_asset == instrument_spec.settlement_asset(),
+        "Binance trade margin asset `{}` does not match settlement asset `{}` for `{}`",
+        settlement_asset.as_str(),
+        instrument_spec.settlement_asset().as_str(),
+        value.symbol
+    );
     let occurred_at = millis_to_utc("trade.time", value.time)?;
     let trade_id = value.id.to_string();
     let commission_asset = Asset::try_new(value.commission_asset).map_err(anyhow::Error::msg)?;
@@ -140,11 +151,7 @@ pub(crate) fn track_pnl_record_from_trade(value: BinanceAccountTrade) -> Result<
         Some(trade_id),
         parse_side(&value.side)?,
         parse_decimal("price", &value.price)?,
-        linear_pnl_quantity(
-            &value.symbol,
-            settlement_asset.as_str(),
-            parse_position_qty("qty", &value.qty)?,
-        )?,
+        pnl_quantity(parse_position_qty("qty", &value.qty)?, instrument_spec)?,
         cash_amount(
             parse_decimal("realizedPnl", &value.realized_pnl)?,
             settlement_asset,
@@ -156,16 +163,29 @@ pub(crate) fn track_pnl_record_from_trade(value: BinanceAccountTrade) -> Result<
     ))
 }
 
-pub(crate) fn track_pnl_record_from_funding(value: BinanceIncomeRecord) -> Result<TrackPnlRecord> {
+pub(crate) fn track_pnl_record_from_funding(
+    value: BinanceIncomeRecord,
+    instrument_spec: &InstrumentSpec,
+) -> Result<TrackPnlRecord> {
     ensure!(
         value.income_type == "FUNDING_FEE",
         "unsupported Binance income type `{}`",
         value.income_type
     );
+    let instrument = Instrument::new(Venue::Binance, &value.symbol);
+    ensure_instrument_matches(instrument_spec, &instrument)?;
+    let funding_asset = Asset::try_new(value.asset).map_err(anyhow::Error::msg)?;
+    ensure!(
+        &funding_asset == instrument_spec.settlement_asset(),
+        "Binance funding asset `{}` does not match settlement asset `{}` for `{}`",
+        funding_asset.as_str(),
+        instrument_spec.settlement_asset().as_str(),
+        value.symbol
+    );
     let occurred_at = millis_to_utc("income.time", value.time)?;
 
     Ok(TrackPnlRecord::funding(
-        Instrument::new(Venue::Binance, &value.symbol),
+        instrument,
         occurred_at,
         "binance:funding_fee".to_string(),
         Some(format!(
@@ -173,10 +193,7 @@ pub(crate) fn track_pnl_record_from_funding(value: BinanceIncomeRecord) -> Resul
             value.symbol.to_lowercase(),
             value.time
         )),
-        cash_amount(
-            parse_decimal("income", &value.income)?,
-            Asset::try_new(value.asset).map_err(anyhow::Error::msg)?,
-        )?,
+        cash_amount(parse_decimal("income", &value.income)?, funding_asset)?,
     ))
 }
 
@@ -262,21 +279,32 @@ fn parse_position_qty(field: &str, value: &str) -> Result<PositionQty> {
     PositionQty::new(parse_decimal(field, value)?).map_err(anyhow::Error::msg)
 }
 
-pub(crate) fn linear_pnl_quantity(
-    symbol: &str,
-    quote_asset: &str,
+pub(crate) fn pnl_quantity(
     qty: PositionQty,
+    instrument_spec: &InstrumentSpec,
 ) -> Result<TrackPnlQuantity> {
-    let base_asset = symbol
-        .strip_suffix(quote_asset)
-        .filter(|asset| !asset.is_empty())
-        .with_context(|| {
-            format!("cannot determine Binance base asset from symbol `{symbol}` and quote `{quote_asset}`")
-        })?;
-    Ok(TrackPnlQuantity::base_asset(
-        qty,
-        Asset::try_new(base_asset).map_err(anyhow::Error::msg)?,
-    ))
+    match instrument_spec.position_basis() {
+        PositionBasis::BaseAsset => Ok(TrackPnlQuantity::base_asset(
+            qty,
+            instrument_spec.base_asset().clone(),
+        )),
+        PositionBasis::Contracts { contract_value } => {
+            TrackPnlQuantity::contracts(qty, contract_value.clone()).map_err(anyhow::Error::msg)
+        }
+    }
+}
+
+fn ensure_instrument_matches(
+    instrument_spec: &InstrumentSpec,
+    instrument: &Instrument,
+) -> Result<()> {
+    ensure!(
+        instrument_spec.instrument() == instrument,
+        "Binance instrument metadata for `{}` cannot map PNL for `{}`",
+        instrument_spec.instrument().symbol,
+        instrument.symbol
+    );
+    Ok(())
 }
 
 fn millis_to_utc(field: &str, value: i64) -> Result<chrono::DateTime<Utc>> {

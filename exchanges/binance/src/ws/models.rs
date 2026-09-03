@@ -82,6 +82,10 @@ pub(super) struct OrderTradeUpdate {
     pub(super) cumulative_filled_quantity: Option<String>,
     #[serde(rename = "l")]
     pub(super) last_filled_quantity: Option<String>,
+    #[serde(rename = "L")]
+    pub(super) last_filled_price: Option<String>,
+    #[serde(rename = "T")]
+    pub(super) order_trade_time: Option<i64>,
     #[serde(rename = "t")]
     pub(super) trade_id: Option<u64>,
     #[serde(rename = "rp")]
@@ -90,6 +94,8 @@ pub(super) struct OrderTradeUpdate {
     pub(super) commission_amount: Option<String>,
     #[serde(rename = "N")]
     pub(super) commission_asset: Option<String>,
+    #[serde(rename = "ma")]
+    pub(super) margin_asset: Option<String>,
     #[serde(rename = "X")]
     pub(super) status: String,
 }

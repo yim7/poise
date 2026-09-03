@@ -1,5 +1,6 @@
 mod config;
 mod connected;
+mod instrument;
 mod mapper;
 mod rest;
 mod startup_control;
