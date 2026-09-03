@@ -983,13 +983,20 @@ impl TradingRuntime {
     async fn record_track_pnl(&self, id: &str, record: TrackPnlRecord) -> Result<bool> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let track_id = TrackId::new(id);
-        let instrument_spec = {
+        let (instrument_spec, next_state) = {
             let manager = self.manager.read().await;
-            manager
+            let instrument_spec = manager
                 .get_track(id)
                 .ok_or_else(|| anyhow!("track `{id}` not found"))?
                 .instrument_spec()
-                .clone()
+                .clone();
+            let mut candidate = manager.clone();
+            candidate.apply_pnl_record(&track_id, &record)?;
+            let next_state = candidate
+                .get_track(id)
+                .cloned()
+                .ok_or_else(|| anyhow!("track `{id}` not found after applying pnl record"))?;
+            (instrument_spec, next_state)
         };
 
         let inserted = self
@@ -999,7 +1006,7 @@ impl TradingRuntime {
         if inserted {
             {
                 let mut manager = self.manager.write().await;
-                manager.apply_pnl_record(&track_id, &record)?;
+                manager.install_planned_runtime(next_state);
             }
             self.emit_internal_notification(ApplicationNotification::TrackChanged { track_id });
         }
@@ -1974,6 +1981,7 @@ pub(crate) mod test_support {
     pub(crate) struct MemoryRepository {
         control_states: Mutex<HashMap<String, TrackControlState>>,
         pnl_records: Mutex<HashMap<String, Vec<TrackPnlRecord>>>,
+        next_pnl_insert_error: Mutex<Option<String>>,
         events: Mutex<HashMap<String, Vec<DomainEvent>>>,
         effects: Mutex<Vec<PersistedTrackEffect>>,
         business_write_calls: Mutex<usize>,
@@ -2001,6 +2009,10 @@ pub(crate) mod test_support {
 
         pub(crate) fn fail_next_effect_journal_outcome(&self, error: impl Into<String>) {
             *self.effect_journal_outcome_error.lock().unwrap() = Some(error.into());
+        }
+
+        pub(crate) fn fail_next_pnl_insert(&self, error: impl Into<String>) {
+            *self.next_pnl_insert_error.lock().unwrap() = Some(error.into());
         }
 
         pub(crate) fn seed_pending_submit_effect(&self) {
@@ -2263,12 +2275,21 @@ pub(crate) mod test_support {
             record: &TrackPnlRecord,
             _instrument_spec: &poise_core::instrument::InstrumentSpec,
         ) -> Result<bool> {
-            self.pnl_records
-                .lock()
-                .unwrap()
+            if let Some(error) = self.next_pnl_insert_error.lock().unwrap().take() {
+                anyhow::bail!(error);
+            }
+            let mut pnl_records = self.pnl_records.lock().unwrap();
+            let records = pnl_records
                 .entry(track_id.as_str().to_string())
-                .or_default()
-                .push(record.clone());
+                .or_default();
+            if record.source_key.as_ref().is_some_and(|source_key| {
+                records
+                    .iter()
+                    .any(|existing| existing.source_key.as_ref() == Some(source_key))
+            }) {
+                return Ok(false);
+            }
+            records.push(record.clone());
             Ok(true)
         }
     }
@@ -2413,8 +2434,8 @@ mod tests {
 
     use super::test_support::{MemoryRepository, NoopGuard, seeded_manager, track_write_services};
     use super::{
-        AccountCapacityGuard, ExchangeStateSyncOutcome, RecoveryAnomalyObserver, TradingRuntime,
-        effect_journal_entries_from_enqueued,
+        AccountCapacityGuard, ExchangeStateSyncOutcome, RecoveryAnomalyObserver, TrackInput,
+        TrackUpdateReceipt, TradingRuntime, effect_journal_entries_from_enqueued,
     };
     use crate::{CommittedTrackWrite, TrackControlState, TrackMutationStore, TrackQueryStore};
 
@@ -3450,6 +3471,136 @@ mod tests {
             .unwrap();
 
         assert_ne!(after_pnl_and_mark, after_binding_change);
+    }
+
+    #[tokio::test]
+    async fn handle_track_pnl_commits_mixed_assets_consistently_and_deduplicates_retry() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let runtime = test_executor(repository.clone(), observer);
+        let track_id = TrackId::new("btc-core");
+        let occurred_at = Utc::now();
+
+        let usdt_record = TrackPnlRecord::trade_summary(
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            occurred_at,
+            "test:usdt".to_string(),
+            Some("trade:usdt:1".to_string()),
+            None,
+            amount(5.0, "USDT"),
+            Some(amount(0.5, "USDT")),
+        );
+        let btc_record = TrackPnlRecord::funding(
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            occurred_at,
+            "test:btc".to_string(),
+            Some("trade:btc:1".to_string()),
+            amount(0.001, "BTC"),
+        );
+
+        assert!(matches!(
+            runtime
+                .handle(&track_id, TrackInput::TrackPnl(usdt_record))
+                .await
+                .unwrap(),
+            TrackUpdateReceipt::PnlRecorded { inserted: true }
+        ));
+        assert!(matches!(
+            runtime
+                .handle(&track_id, TrackInput::TrackPnl(btc_record.clone()))
+                .await
+                .unwrap(),
+            TrackUpdateReceipt::PnlRecorded { inserted: true }
+        ));
+        assert!(matches!(
+            runtime
+                .handle(&track_id, TrackInput::TrackPnl(btc_record))
+                .await
+                .unwrap(),
+            TrackUpdateReceipt::PnlRecorded { inserted: false }
+        ));
+
+        let committed = runtime
+            .committed_track_snapshot(&track_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .runtime
+            .pnl_stats;
+        let persisted = repository
+            .load_track_pnl_stats(&track_id, occurred_at.date_naive())
+            .await
+            .unwrap();
+        assert_eq!(committed, persisted);
+        assert_eq!(committed.pnl_asset.as_ref().unwrap().as_str(), "USDT");
+        assert_eq!(committed.gross_realized_pnl_cumulative, 5.0);
+        assert_eq!(committed.unvalued_cashflows_cumulative.len(), 1);
+        assert!(
+            committed
+                .net_realized_pnl_cumulative()
+                .complete_value()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_track_pnl_keeps_committed_state_when_persistence_fails() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let runtime = test_executor(repository.clone(), observer);
+        let track_id = TrackId::new("btc-core");
+        let occurred_at = Utc::now();
+
+        runtime
+            .handle(
+                &track_id,
+                TrackInput::TrackPnl(TrackPnlRecord::funding(
+                    Instrument::new(Venue::Binance, "BTCUSDT"),
+                    occurred_at,
+                    "test:funding".to_string(),
+                    Some("funding:1".to_string()),
+                    amount(-0.25, "USDT"),
+                )),
+            )
+            .await
+            .unwrap();
+        let before = runtime
+            .committed_track_snapshot(&track_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .runtime
+            .pnl_stats;
+
+        repository.fail_next_pnl_insert("pnl write failed");
+        let error = runtime
+            .handle(
+                &track_id,
+                TrackInput::TrackPnl(TrackPnlRecord::funding(
+                    Instrument::new(Venue::Binance, "BTCUSDT"),
+                    occurred_at,
+                    "test:funding".to_string(),
+                    Some("funding:2".to_string()),
+                    amount(-0.5, "USDT"),
+                )),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("pnl write failed"));
+
+        let after = runtime
+            .committed_track_snapshot(&track_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .runtime
+            .pnl_stats;
+        let persisted = repository
+            .load_track_pnl_stats(&track_id, occurred_at.date_naive())
+            .await
+            .unwrap();
+        assert_eq!(after, before);
+        assert_eq!(persisted, before);
     }
 
     #[tokio::test]

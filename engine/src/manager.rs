@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, bail};
 use poise_core::events::DomainEvent;
 use poise_core::instrument::InstrumentSpec;
 use poise_core::types::Exposure;
@@ -294,13 +294,6 @@ impl TrackManager {
             .tracks
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
-        ensure!(
-            record.primary_asset() == track.instrument_spec.settlement_asset(),
-            "pnl asset `{}` does not match settlement asset `{}` for track `{}`",
-            record.primary_asset().as_str(),
-            track.instrument_spec.settlement_asset().as_str(),
-            id.as_str()
-        );
         track.pnl_stats.normalize_utc_day(pnl_utc_day);
         track.pnl_stats.apply_record(record);
         Ok(())
@@ -2468,28 +2461,53 @@ mod tests {
     }
 
     #[test]
-    fn applying_pnl_record_rejects_mismatched_settlement_asset() {
+    fn applying_pnl_record_preserves_mismatched_asset_as_unvalued_cashflow() {
         let (mut manager, id) = manager();
 
-        let error = manager
+        manager
             .apply_pnl_record(
                 &id,
                 &TrackPnlRecord::trade_summary(
                     Instrument::new(Venue::Binance, "BTCUSDT"),
                     Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
-                    "test".into(),
+                    "test:usdt".into(),
                     None,
                     None,
-                    amount(0.001, "BTC"),
-                    Some(amount(0.0, "BTC")),
+                    amount(5.0, "USDT"),
+                    Some(amount(0.5, "USDT")),
                 ),
             )
-            .unwrap_err();
+            .unwrap();
+        manager
+            .apply_pnl_record(
+                &id,
+                &TrackPnlRecord::funding(
+                    Instrument::new(Venue::Binance, "BTCUSDT"),
+                    Utc.with_ymd_and_hms(2026, 4, 22, 10, 0, 0).unwrap(),
+                    "test:btc".into(),
+                    Some("test:btc:1".into()),
+                    amount(0.001, "BTC"),
+                ),
+            )
+            .unwrap();
 
-        assert!(error.to_string().contains("settlement asset"));
         let stats = &manager.tracks.get(&id).unwrap().pnl_stats;
-        assert!(stats.pnl_asset.is_none());
-        assert_eq!(stats.gross_realized_pnl_cumulative, 0.0);
+        assert_eq!(stats.pnl_asset.as_ref().unwrap().as_str(), "USDT");
+        assert_eq!(stats.gross_realized_pnl_cumulative, 5.0);
+        assert_eq!(stats.trading_fee_cumulative, 0.5);
+        let aggregate = stats.net_realized_pnl_cumulative();
+        assert_eq!(aggregate.valued_amount, 4.5);
+        assert!(aggregate.complete_value().is_none());
+        assert_eq!(stats.unvalued_cashflows_cumulative.len(), 1);
+        assert_eq!(
+            stats.unvalued_cashflows_cumulative[0]
+                .amount
+                .as_ref()
+                .unwrap()
+                .asset()
+                .as_str(),
+            "BTC"
+        );
     }
 
     #[test]
