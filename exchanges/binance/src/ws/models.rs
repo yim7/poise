@@ -104,6 +104,8 @@ pub(super) struct OrderTradeUpdate {
 pub(super) struct AccountUpdate {
     #[serde(rename = "m")]
     pub(super) reason: Option<String>,
+    #[serde(rename = "S")]
+    pub(super) funding_symbol: Option<String>,
     #[serde(rename = "B", default)]
     pub(super) balances: Vec<AccountBalanceUpdate>,
     #[serde(rename = "P")]

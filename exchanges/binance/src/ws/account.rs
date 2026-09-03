@@ -256,26 +256,19 @@ pub(super) fn parse_user_data_message(
                     instrument_spec.settlement_asset().as_str(),
                     order.symbol
                 );
-                let commission_amount = if let Some(commission_amount) = order
+                let commission_amount = order
                     .commission_amount
                     .as_deref()
                     .filter(|value| !value.is_empty())
-                {
-                    Some(parse_decimal("o.n", commission_amount)?)
-                } else {
-                    None
-                };
-                let trading_fee = match (
-                    commission_amount,
-                    order
-                        .commission_asset
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|asset| !asset.is_empty()),
-                ) {
-                    (Some(value), Some(asset)) => Some(cash_amount(value, asset)?),
-                    _ => None,
-                };
+                    .context("missing o.n for Binance trade")
+                    .and_then(|value| parse_decimal("o.n", value))?;
+                let commission_asset = order
+                    .commission_asset
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|asset| !asset.is_empty())
+                    .context("missing o.N for Binance trade")?;
+                let trading_fee = Some(cash_amount(commission_amount, commission_asset)?);
                 let trade_id = order.trade_id.map(|value| value.to_string());
                 let source_key = Some(match trade_id.as_deref() {
                     Some(trade_id) => format!(
@@ -321,19 +314,24 @@ pub(super) fn parse_user_data_message(
             let transaction_time = parse_user_event_time(&event_type, envelope.transaction_time)?;
             let account = envelope.account;
             if account.reason.as_deref() == Some("FUNDING_FEE") {
-                let Some(symbol) = account
-                    .positions
-                    .iter()
-                    .map(|position| position.symbol.as_str())
-                    .find(|symbol| !symbol.is_empty())
-                else {
-                    return Ok(UserStreamMessage::Events(Vec::new()));
-                };
                 let Some(balance) = account.balances.iter().find(|balance| {
                     balance.balance_change != "0" && balance.balance_change != "0.0"
                 }) else {
                     return Ok(UserStreamMessage::Events(Vec::new()));
                 };
+                let symbol = account
+                    .funding_symbol
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|symbol| !symbol.is_empty())
+                    .or_else(|| {
+                        account
+                            .positions
+                            .iter()
+                            .map(|position| position.symbol.as_str())
+                            .find(|symbol| !symbol.is_empty())
+                    })
+                    .context("missing symbol for Binance funding fee")?;
                 let balance_change = parse_decimal("a.B.bc", &balance.balance_change)?;
                 let instrument_spec = instrument_registry.get(symbol).with_context(|| {
                     format!("missing Binance instrument metadata for funding symbol `{symbol}`")
@@ -470,6 +468,8 @@ mod tests {
                 "L": "65000.5",
                 "T": 1700000000000,
                 "rp": "12.34",
+                "n": "0",
+                "N": "USDT",
                 "ma": "USDT",
                 "X": "FILLED"
             }
@@ -510,7 +510,7 @@ mod tests {
                             Asset::try_new("BTC").unwrap(),
                         ),
                         cash_amount(12.34, "USDT").unwrap(),
-                        None,
+                        Some(cash_amount(0.0, "USDT").unwrap()),
                     )),
                 },
             ])
@@ -674,6 +674,91 @@ mod tests {
 
         assert!(error.contains("missing Binance instrument metadata"));
         assert!(error.contains("BTCUSDT"));
+    }
+
+    #[test]
+    fn rejects_trade_when_commission_asset_is_missing() {
+        let payload = r#"{
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 1700000000000,
+            "o": {
+                "s": "BTCUSDT",
+                "i": 12345,
+                "c": "grid-order-004",
+                "S": "SELL",
+                "x": "TRADE",
+                "p": "65000.5",
+                "q": "0.020",
+                "z": "0.020",
+                "l": "0.020",
+                "L": "65000.5",
+                "T": 1700000000000,
+                "t": 67890,
+                "rp": "12.34",
+                "n": "0.01",
+                "ma": "USDT",
+                "X": "FILLED"
+            }
+        }"#;
+
+        let error = parse_user_data_message(payload, &test_registry())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("missing o.N"));
+    }
+
+    #[test]
+    fn rejects_nonzero_funding_fee_without_symbol() {
+        let payload = r#"{
+            "e": "ACCOUNT_UPDATE",
+            "E": 1700000000000,
+            "T": 1699999999000,
+            "a": {
+                "m": "FUNDING_FEE",
+                "B": [{
+                    "a": "USDT",
+                    "bc": "-1.5"
+                }],
+                "P": []
+            }
+        }"#;
+
+        let error = parse_user_data_message(payload, &test_registry())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("missing symbol for Binance funding fee"));
+    }
+
+    #[test]
+    fn funding_symbol_field_attributes_fee_without_position() {
+        let payload = r#"{
+            "e": "ACCOUNT_UPDATE",
+            "E": 1700000000000,
+            "T": 1699999999000,
+            "a": {
+                "m": "FUNDING_FEE",
+                "S": "BTCUSDT",
+                "B": [{
+                    "a": "USDT",
+                    "bc": "-1.5"
+                }],
+                "P": []
+            }
+        }"#;
+
+        let UserStreamMessage::Events(events) =
+            parse_user_data_message(payload, &test_registry()).unwrap()
+        else {
+            panic!("funding update must emit events");
+        };
+        let UserDataPayload::TrackPnl(record) = &events[0].payload else {
+            panic!("funding update must emit PNL");
+        };
+
+        assert_eq!(record.instrument.symbol, "BTCUSDT");
+        assert_eq!(record.funding_amount().unwrap().asset().as_str(), "USDT");
     }
 
     #[test]

@@ -813,34 +813,14 @@ impl TradingRuntime {
 
     async fn command(&self, id: &str, command: TrackCommand) -> Result<TrackTransition> {
         let mutation_guard = self.lock_track_mutation(id).await;
-        let (previous_state, transition, next_state, control_state_override) = {
-            let (previous_state, mut candidate_manager) = {
-                let manager = self.manager.read().await;
-                let previous_state = manager.get_track(id).cloned().ok_or_else(|| {
-                    TrackMutationError::Mutation(anyhow!("track `{id}` not found"))
-                })?;
-                (
-                    previous_state,
-                    manager
-                        .candidate_for_track(&TrackId::new(id))
-                        .map_err(TrackMutationError::Mutation)?,
-                )
-            };
-            self.sync_account_capacity_gate_state(&mut candidate_manager, id)
-                .map_err(TrackMutationError::Mutation)?;
-            let control_state_override =
-                persisted_control_state_after_command(previous_state.runtime_state(), &command);
-            let transition = candidate_manager
-                .command(&TrackId::new(id), command)
-                .map_err(TrackMutationError::Mutation)?;
-            let next_state = transition.next_state().clone();
-            (
-                previous_state,
-                transition,
-                next_state,
-                control_state_override,
-            )
-        };
+        let (previous_state, transition, next_state) = self
+            .plan_manager_mutation(id, |candidate_manager| {
+                candidate_manager.command(&TrackId::new(id), command.clone())
+            })
+            .await
+            .map_err(anyhow::Error::new)?;
+        let control_state_override =
+            persisted_control_state_after_command(previous_state.runtime_state(), &command);
 
         let _mutation_guard = self
             .commit_planned_track_mutation(
@@ -1007,18 +987,12 @@ impl TradingRuntime {
     async fn record_track_pnl(&self, id: &str, record: TrackPnlRecord) -> Result<bool> {
         let _mutation_guard = self.lock_track_mutation(id).await;
         let track_id = TrackId::new(id);
-        let next_state = {
-            let manager = self.manager.read().await;
-            manager
-                .get_track(id)
-                .ok_or_else(|| anyhow!("track `{id}` not found"))?;
-            let mut candidate = manager.candidate_for_track(&track_id)?;
-            candidate.apply_pnl_record(&track_id, &record)?;
-            candidate
-                .get_track(id)
-                .cloned()
-                .ok_or_else(|| anyhow!("track `{id}` not found after applying pnl record"))?
-        };
+        let (_, (), next_state) = self
+            .plan_manager_mutation(id, |candidate| {
+                candidate.apply_pnl_record(&track_id, &record)
+            })
+            .await
+            .map_err(anyhow::Error::new)?;
 
         let inserted = self
             .mutation_store
@@ -1114,78 +1088,90 @@ impl TradingRuntime {
             submit_awaiting_resolution_effect_ids,
             exchange_state_wake_token,
         ) = {
-            let mut candidate_manager = {
+            let (previous_state, planned_update) = {
                 let manager = self.manager.read().await;
                 if manager.exchange_observation_revision(&token.track_id)?
                     != token.observation_revision
                 {
                     return Ok(ExchangeStateSyncOutcome::RevisionChanged);
                 }
-                manager.candidate_for_track(&token.track_id)?
+                let previous_state = manager
+                    .get_track(id)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("track `{id}` not found"))?;
+                let planned_update =
+                    manager.plan_track_update(&token.track_id, |candidate_manager| {
+                        self.sync_account_capacity_gate_state(candidate_manager, id)?;
+                        Ok(self
+                            .session_effect_queue
+                            .with_exchange_snapshot_context_if_current(
+                                &token.track_id,
+                                token.queue_revision,
+                                &open_orders,
+                                |queue_context| {
+                                    let follow_up_plan = queue_context.follow_up_plan;
+                                    let effective_mode = if follow_up_plan.requires_reconcile() {
+                                        ExchangeSyncMode::RecoverAndReconcile
+                                    } else {
+                                        mode
+                                    };
+                                    let transition = if effective_mode.allows_follow_up_reconcile()
+                                    {
+                                        candidate_manager
+                                            .sync_exchange_state(
+                                                &token.track_id,
+                                                position,
+                                                open_orders.clone(),
+                                                queue_context.pending_submit_hints,
+                                            )
+                                            .map_err(TrackMutationError::Mutation)?
+                                    } else {
+                                        candidate_manager
+                                            .sync_exchange_state_without_reconcile(
+                                                &token.track_id,
+                                                position,
+                                                open_orders.clone(),
+                                                queue_context.pending_submit_hints,
+                                            )
+                                            .map_err(TrackMutationError::Mutation)?
+                                    };
+                                    Ok::<_, TrackMutationError>((
+                                        transition,
+                                        follow_up_plan,
+                                        queue_context.submit_awaiting_initial_snapshot_effect_ids,
+                                        queue_context.submit_awaiting_resolution_effect_ids,
+                                        queue_context.exchange_state_wake_token,
+                                    ))
+                                },
+                            ))
+                    })?;
+                (previous_state, planned_update)
             };
-            let Some(result) = self
-                .session_effect_queue
-                .with_exchange_snapshot_context_if_current(
-                    &token.track_id,
-                    token.queue_revision,
-                    &open_orders,
-                    |queue_context| {
-                        let follow_up_plan = queue_context.follow_up_plan;
-                        let effective_mode = if follow_up_plan.requires_reconcile() {
-                            ExchangeSyncMode::RecoverAndReconcile
-                        } else {
-                            mode
-                        };
-                        let previous_state =
-                            candidate_manager.get_track(id).cloned().ok_or_else(|| {
-                                TrackMutationError::Mutation(anyhow!("track `{id}` not found"))
-                            })?;
-                        self.sync_account_capacity_gate_state(&mut candidate_manager, id)
-                            .map_err(TrackMutationError::Mutation)?;
-                        let transition = if effective_mode.allows_follow_up_reconcile() {
-                            candidate_manager
-                                .sync_exchange_state(
-                                    &token.track_id,
-                                    position,
-                                    open_orders.clone(),
-                                    queue_context.pending_submit_hints,
-                                )
-                                .map_err(TrackMutationError::Mutation)?
-                        } else {
-                            candidate_manager
-                                .sync_exchange_state_without_reconcile(
-                                    &token.track_id,
-                                    position,
-                                    open_orders.clone(),
-                                    queue_context.pending_submit_hints,
-                                )
-                                .map_err(TrackMutationError::Mutation)?
-                        };
-                        let next_state = candidate_manager
-                            .get_track(id)
-                            .cloned()
-                            .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-                        Ok::<_, TrackMutationError>((
-                            previous_state,
-                            transition,
-                            next_state,
-                            follow_up_plan,
-                            queue_context.submit_awaiting_initial_snapshot_effect_ids,
-                            queue_context.submit_awaiting_resolution_effect_ids,
-                            queue_context.exchange_state_wake_token,
-                        ))
-                    },
-                )
-            else {
+            let (planned_result, next_state) = planned_update.into_parts();
+            let Some(result) = planned_result? else {
                 return Ok(ExchangeStateSyncOutcome::RevisionChanged);
             };
-            let candidate_revision =
-                candidate_manager.exchange_observation_revision(&token.track_id)?;
+            let candidate_revision = next_state.exchange_observation_revision();
             self.manager
                 .write()
                 .await
                 .retain_exchange_observation_revision(&token.track_id, candidate_revision)?;
-            result.map_err(anyhow::Error::new)?
+            let (
+                transition,
+                follow_up_plan,
+                submit_awaiting_initial_snapshot_effect_ids,
+                submit_awaiting_resolution_effect_ids,
+                exchange_state_wake_token,
+            ) = result.map_err(anyhow::Error::new)?;
+            (
+                previous_state,
+                transition,
+                next_state,
+                follow_up_plan,
+                submit_awaiting_initial_snapshot_effect_ids,
+                submit_awaiting_resolution_effect_ids,
+                exchange_state_wake_token,
+            )
         };
 
         let _mutation_guard = self
@@ -1635,37 +1621,29 @@ impl TradingRuntime {
     where
         F: FnOnce(&mut TrackManager) -> Result<R>,
     {
-        let (previous_state, mut candidate_manager) = {
+        let (previous_state, planned_update) = {
             let manager = self.manager.read().await;
             let previous_state = manager
                 .get_track(id)
                 .cloned()
                 .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
-            (
-                previous_state,
-                manager
-                    .candidate_for_track(&TrackId::new(id))
-                    .map_err(TrackMutationError::Mutation)?,
-            )
+            let planned_update = manager
+                .plan_track_update(&TrackId::new(id), |candidate_manager| {
+                    self.sync_account_capacity_gate_state(candidate_manager, id)?;
+                    mutate(candidate_manager)
+                })
+                .map_err(TrackMutationError::Mutation)?;
+            (previous_state, planned_update)
         };
-
-        self.sync_account_capacity_gate_state(&mut candidate_manager, id)
-            .map_err(TrackMutationError::Mutation)?;
-        let result = mutate(&mut candidate_manager);
         let track_id = TrackId::new(id);
-        let candidate_revision = candidate_manager
-            .exchange_observation_revision(&track_id)
-            .map_err(TrackMutationError::Mutation)?;
+        let (result, next_state) = planned_update.into_parts();
+        let candidate_revision = next_state.exchange_observation_revision();
         self.manager
             .write()
             .await
             .retain_exchange_observation_revision(&track_id, candidate_revision)
             .map_err(TrackMutationError::Mutation)?;
         let result = result.map_err(TrackMutationError::Mutation)?;
-        let next_state = candidate_manager
-            .get_track(id)
-            .cloned()
-            .ok_or_else(|| TrackMutationError::loaded_track_invariant(id))?;
         Ok((previous_state, result, next_state))
     }
 

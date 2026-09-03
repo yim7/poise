@@ -40,6 +40,23 @@ pub enum SubmitRecoveryOrderLookup {
     Complete(Option<ExchangeOrder>),
 }
 
+pub struct TrackUpdatePlan<R> {
+    result: Result<R>,
+    next_state: TrackRuntime,
+}
+
+impl<R> TrackUpdatePlan<R> {
+    pub fn into_parts(self) -> (Result<R>, TrackRuntime) {
+        (self.result, self.next_state)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconcileCommitPolicy {
+    AlwaysCommit,
+    DeriveFromPlan,
+}
+
 impl SubmitRecoveryOrderLookup {
     fn live_order(&self) -> Option<&ExchangeOrder> {
         match self {
@@ -173,8 +190,12 @@ impl TrackManager {
         self.observe_position(id, observation)?;
         let (facts, effects) = match self.live_strategy_price(id)? {
             Some(strategy_price) => {
-                let (facts, effects, _) =
-                    self.reconcile_track(id, strategy_price, evaluated_at, false)?;
+                let (facts, effects, _) = self.reconcile_track(
+                    id,
+                    strategy_price,
+                    evaluated_at,
+                    ReconcileCommitPolicy::AlwaysCommit,
+                )?;
                 (facts, effects)
             }
             None => (vec![], vec![]),
@@ -192,8 +213,12 @@ impl TrackManager {
         let (absorb_result, mut effects) = self.observe_order(id, observation)?;
         let (events, reconcile_effects) = match (should_reconcile, self.live_strategy_price(id)?) {
             (true, Some(strategy_price)) => {
-                let (events, effects, _) =
-                    self.reconcile_track(id, strategy_price, evaluated_at, false)?;
+                let (events, effects, _) = self.reconcile_track(
+                    id,
+                    strategy_price,
+                    evaluated_at,
+                    ReconcileCommitPolicy::AlwaysCommit,
+                )?;
                 (events, effects)
             }
             _ => (vec![], vec![]),
@@ -264,8 +289,12 @@ impl TrackManager {
                 let Some(strategy_price) = self.live_strategy_price(id)? else {
                     return self.transition_for(id, vec![], vec![]);
                 };
-                let (events, effects, _) =
-                    self.reconcile_track(id, strategy_price, evaluated_at, false)?;
+                let (events, effects, _) = self.reconcile_track(
+                    id,
+                    strategy_price,
+                    evaluated_at,
+                    ReconcileCommitPolicy::AlwaysCommit,
+                )?;
                 (events, effects)
             }
             TrackCommand::Terminate => self.terminate_track(id, evaluated_at)?,
@@ -392,8 +421,12 @@ impl TrackManager {
 
             return match strategy_price {
                 Some(strategy_price) => {
-                    let (events, effects, _) =
-                        self.reconcile_track(&track_id, strategy_price, evaluated_at, false)?;
+                    let (events, effects, _) = self.reconcile_track(
+                        &track_id,
+                        strategy_price,
+                        evaluated_at,
+                        ReconcileCommitPolicy::AlwaysCommit,
+                    )?;
                     Ok((events, effects))
                 }
                 None => Ok((vec![], vec![])),
@@ -465,8 +498,12 @@ impl TrackManager {
 
         match strategy_price {
             Some(strategy_price) => {
-                let (events, effects, _) =
-                    self.reconcile_track(id, strategy_price, evaluated_at, false)?;
+                let (events, effects, _) = self.reconcile_track(
+                    id,
+                    strategy_price,
+                    evaluated_at,
+                    ReconcileCommitPolicy::AlwaysCommit,
+                )?;
                 Ok((events, effects))
             }
             None => Ok((vec![], vec![])),
@@ -495,8 +532,12 @@ impl TrackManager {
 
         match strategy_price {
             Some(strategy_price) => {
-                let (events, effects, _) =
-                    self.reconcile_track(id, strategy_price, evaluated_at, false)?;
+                let (events, effects, _) = self.reconcile_track(
+                    id,
+                    strategy_price,
+                    evaluated_at,
+                    ReconcileCommitPolicy::AlwaysCommit,
+                )?;
                 Ok((events, effects))
             }
             None => Ok((vec![], vec![])),
@@ -706,18 +747,28 @@ impl TrackManager {
         self.tracks.get(&TrackId::from(id))
     }
 
-    pub fn candidate_for_track(&self, id: &TrackId) -> Result<Self> {
+    pub fn plan_track_update<R>(
+        &self,
+        id: &TrackId,
+        update: impl FnOnce(&mut Self) -> Result<R>,
+    ) -> Result<TrackUpdatePlan<R>> {
         let runtime = self
             .tracks
             .get(id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         let instrument = runtime.instrument().clone();
-        Ok(Self {
+        let mut candidate = Self {
             tracks: HashMap::from([(id.clone(), runtime)]),
             instruments: HashMap::from([(instrument, id.clone())]),
             clock: Arc::clone(&self.clock),
-        })
+        };
+        let result = update(&mut candidate);
+        let next_state = candidate
+            .tracks
+            .remove(id)
+            .expect("planned track must remain loaded");
+        Ok(TrackUpdatePlan { result, next_state })
     }
 
     pub fn install_planned_runtime(&mut self, runtime: TrackRuntime) {
@@ -829,7 +880,12 @@ impl TrackManager {
         };
 
         match strategy_price {
-            Some(strategy_price) => self.reconcile_track(id, strategy_price, evaluated_at, true),
+            Some(strategy_price) => self.reconcile_track(
+                id,
+                strategy_price,
+                evaluated_at,
+                ReconcileCommitPolicy::DeriveFromPlan,
+            ),
             None => Ok((vec![], vec![], CommitIntent::LiveOnly)),
         }
     }
@@ -988,12 +1044,11 @@ impl TrackManager {
         id: &TrackId,
         strategy_price: f64,
         evaluated_at: chrono::DateTime<chrono::Utc>,
-        market_driven: bool,
+        commit_policy: ReconcileCommitPolicy,
     ) -> Result<(Vec<DomainEvent>, Vec<TrackEffect>, CommitIntent)> {
-        let no_work_intent = if market_driven {
-            CommitIntent::LiveOnly
-        } else {
-            CommitIntent::Commit
+        let no_work_intent = match commit_policy {
+            ReconcileCommitPolicy::AlwaysCommit => CommitIntent::Commit,
+            ReconcileCommitPolicy::DeriveFromPlan => CommitIntent::LiveOnly,
         };
         if self.guard_market_data_freshness(id, evaluated_at)? {
             return Ok((vec![], vec![], no_work_intent));
@@ -1011,10 +1066,9 @@ impl TrackManager {
             .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
         let planned =
             self.plan_inventory_execution_for_track(track, strategy_price, evaluated_at)?;
-        let commit_intent = if market_driven {
-            market_commit_intent(track, &planned)
-        } else {
-            CommitIntent::Commit
+        let commit_intent = match commit_policy {
+            ReconcileCommitPolicy::AlwaysCommit => CommitIntent::Commit,
+            ReconcileCommitPolicy::DeriveFromPlan => market_commit_intent(track, &planned),
         };
 
         let track = self.tracks.get_mut(id).unwrap();
@@ -1482,7 +1536,7 @@ mod tests {
     }
 
     #[test]
-    fn track_candidate_contains_only_the_requested_runtime() {
+    fn track_update_plan_uses_only_the_requested_committed_runtime() {
         let (mut manager, id) = manager();
         let other_id = TrackId::from("other");
         let other_instrument = Instrument::new(Venue::Binance, "PERPETUAL-42");
@@ -1509,11 +1563,16 @@ mod tests {
         .unwrap();
         manager.add_track(other_definition, other_spec).unwrap();
 
-        let mut candidate = manager.candidate_for_track(&id).unwrap();
-        candidate.pause_track(id.as_str()).unwrap();
+        let planned = manager
+            .plan_track_update(&id, |candidate| {
+                assert!(candidate.get_track(other_id.as_str()).is_none());
+                assert!(candidate.resolve_track_id(&other_instrument).is_none());
+                candidate.pause_track(id.as_str())
+            })
+            .unwrap();
+        let (result, next_state) = planned.into_parts();
+        result.unwrap();
 
-        assert!(candidate.get_track(other_id.as_str()).is_none());
-        assert!(candidate.resolve_track_id(&other_instrument).is_none());
         assert!(
             !manager
                 .get_track(id.as_str())
@@ -1521,13 +1580,7 @@ mod tests {
                 .runtime_state()
                 .is_paused()
         );
-        assert!(
-            candidate
-                .get_track(id.as_str())
-                .unwrap()
-                .runtime_state()
-                .is_paused()
-        );
+        assert!(next_state.runtime_state().is_paused());
     }
 
     #[derive(Debug)]
@@ -2475,7 +2528,7 @@ mod tests {
                 &id,
                 100.0,
                 Utc.with_ymd_and_hms(2026, 4, 22, 9, 0, 0).unwrap(),
-                false,
+                ReconcileCommitPolicy::AlwaysCommit,
             )
             .unwrap();
 

@@ -152,17 +152,6 @@ impl AccountPort for BybitAccount {
 }
 
 #[async_trait]
-impl MetadataPort for BybitRestClient {
-    async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
-        self.get_exchange_info(&instrument.symbol).await
-    }
-
-    async fn get_server_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
-        self.get_server_time().await
-    }
-}
-
-#[async_trait]
 impl MetadataPort for BybitMetadata {
     async fn get_exchange_info(&self, instrument: &Instrument) -> Result<ExchangeInfo> {
         let info = self.rest.get_exchange_info(&instrument.symbol).await?;

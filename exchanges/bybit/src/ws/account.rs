@@ -267,8 +267,8 @@ fn parse_execution_update(
         .single()
         .context("invalid execution trade timestamp")?;
     let settlement_asset = instrument_spec.settlement_asset().as_str();
-    let fee_asset =
-        normalized_fee_currency(update.fee_currency.as_deref()).unwrap_or(settlement_asset);
+    let fee_asset = normalized_fee_currency(update.fee_currency.as_deref())
+        .context("missing feeCurrency for Bybit execution")?;
 
     Ok(UserDataEvent {
         event_time,
@@ -537,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_execution_update_with_empty_fee_currency_into_trading_fee() {
+    fn rejects_execution_update_with_empty_fee_currency() {
         let payload = r#"{
             "topic": "execution.linear",
             "creationTime": 1700000000000,
@@ -555,30 +555,11 @@ mod tests {
             }]
         }"#;
 
-        let events = parse_user_data_message(payload, &test_registry()).unwrap();
+        let error = parse_user_data_message(payload, &test_registry())
+            .unwrap_err()
+            .to_string();
 
-        assert_eq!(
-            events,
-            vec![UserDataEvent {
-                event_time: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
-                payload: UserDataPayload::TrackPnl(TrackPnlRecord::trade(
-                    Instrument::new(Venue::Bybit, "BTCUSDT"),
-                    Utc.timestamp_millis_opt(1_699_999_999_456).unwrap(),
-                    "bybit:execution".into(),
-                    Some("bybit:execution:btcusdt:exec-2".into()),
-                    Some("order-2".into()),
-                    Some("exec-2".into()),
-                    Side::Buy,
-                    63_000.25,
-                    TrackPnlQuantity::base_asset(
-                        PositionQty::new(0.020).unwrap(),
-                        Asset::try_new("BTC").unwrap(),
-                    ),
-                    cash_amount(0.50, "USDT").unwrap(),
-                    Some(cash_amount(1.25, "USDT").unwrap()),
-                )),
-            }]
-        );
+        assert!(error.contains("missing feeCurrency"));
     }
 
     #[tokio::test]
