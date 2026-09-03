@@ -101,10 +101,10 @@
 
 ### F5 删除 server-only 类型的公共暴露
 
-- [ ] 将 `AccountCapacitySnapshot` 移到 server 启动/guard 私有模块，或直接用现有 server 私有结构表达。
-- [ ] application exchange port 不再导出该类型，不新增等价 wrapper。
-- [ ] 验收：startup capacity 与 insufficient-margin gate 测试保持通过。
-- Commit SHA：待执行
+- [x] 将 `AccountCapacitySnapshot` 移到 server 启动/guard 私有模块，或直接用现有 server 私有结构表达。
+- [x] application exchange port 不再导出该类型，不新增等价 wrapper。
+- [x] 验收：startup capacity 与 insufficient-margin gate 测试保持通过。
+- Commit SHA：`b69afee`
 
 ### F6 最终验收并更新唯一依据
 
