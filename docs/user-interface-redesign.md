@@ -395,10 +395,10 @@ failed
 ### 旧订单所有权
 
 - 接受配置应用后立即禁止基于旧定义创建新 submit。
-- 已有 submit pending、working、cancel pending 和 outcome unknown 都必须沿用现有身份和裁决协议。
+- `SubmitPending`、`SubmitAuthorized`、`CancelAfterSubmit`、`Working`、`CancelPending` 和 outcome unknown 都视为 active binding，必须沿用现有身份和裁决协议。
 - 只有所有旧 bindings 已经由权威事实解决，才能安装会重建 executor ledger 的新定义。
 - 不能通过清空本地 bindings、换 client order ID 或直接调用 exchange `cancel all` 后相信 ACK 来跳过该过程。
-- cancel ACK 仍不等于订单 terminal。
+- cancel ACK 仍不等于订单 terminal；当前 `CancelAllSucceeded` 会清除本地 working orders，因此配置应用流程不能把它当作完成条件，必须等待 `CompleteOpenOrderSnapshot` 与订单终态事实。
 
 ### 当前仓位与单位重算
 
@@ -433,8 +433,9 @@ failed
 
 - 新定义继续使用当前 session 的权威 `InstrumentSpec`，不能从 symbol 推断 tick、lot、contract value 或资产。
 - `notional_per_unit`、最大 exposure 或 `max_notional` 增加时，必须通过当前 account capacity guard。
-- 无法证明新增风险容量时拒绝应用，不以 USDT、USDC 或 USD 等值作为默认假设。
-- 新配置换算出的最小 order quantity 或 notional 不满足 venue 规则时拒绝应用。
+- 容量校验必须取得与当前 `InstrumentSpec`、结算资产和观测时间对应的显式证明；现有返回 `Option<f64>` 且 `None` 放行的 gate 不能直接作为配置应用的安全依据。
+- 无法证明新增风险容量时必须失败关闭并拒绝应用，不以 USDT、USDC 或 USD 等值作为默认假设。
+- core/engine 提供基于当前 `InstrumentSpec` 的纯校验：由候选配置换算最大目标 quantity 和最小调整 quantity，并验证 quantity step、min quantity 与 min notional；不能等到执行规划时才发现不满足 venue 规则。
 - 预览通过不保证应用时仍通过；应用使用最新 committed facts 再验证。
 
 ## 失败与进程退出
@@ -461,6 +462,8 @@ failed
 - UI 重连后从配置快照确认当前 active version。
 
 配置应用在开始任何订单或文件副作用前先记录 accepted audit。进程重启后不恢复中断的工作流，而是比较 audit 中的请求内容 hash 与当前配置：当前配置已经等于候选时把结果解释为已应用；仍是旧配置时把旧申请标记为中断，允许用户使用同一个 application ID 明确重试。系统不能仅凭“曾经 accepted”推断配置已经生效。
+
+accepted audit 是第一版应用接口的前置能力，不是后续可选增强。存储层必须持久记录 `application_id`、请求内容 hash、旧/候选 configuration version 与结果；相同 ID、相同 hash 返回原结果，相同 ID、不同 hash 明确冲突。
 
 ### 无法解决的订单状态
 
@@ -578,9 +581,9 @@ failed
 
 ## 实施任务清单
 
-- [ ] **U1 只读运行总览**：server 同源托管最小前端；展示 readiness、Track 摘要和新的运行页。Commit：待完成。
-- [ ] **U2 配置读取与预览**：从 server 读取安全配置投影，编辑一个现有 Track，并由 core/engine 计算当前事实下的影响预览；不写文件、不改仓位。Commit：待完成。
-- [ ] **U3 无 active binding 的保存并应用**：完成 version 检查、原子 TOML 更新、定义替换、position quantity 重算、新 acquisition 起点和自动重新决策。Commit：待完成。
+- [x] **U1 只读运行总览**：server 同源托管最小前端；展示 readiness、Track 摘要和新的运行页。Commit：`f1d882e`。
+- [ ] **U2 配置读取与预览**：从 server 读取安全配置投影，编辑一个现有 Track，并由 core/engine 使用当前 `InstrumentSpec`、真实 `PositionQty`、最新有效行情、venue minimum 与显式容量证明计算影响预览；证明缺失时失败关闭，不写文件、不改仓位。Commit：待完成。
+- [ ] **U3 无 active binding 的保存并应用**：先拒绝全部 active binding 状态、未解决的 submit outcome、recovery anomaly 与 terminated Track，再完成 version/application ID 审计、原子 TOML patch、定义替换、position quantity 重算、新 acquisition 起点和自动重新决策。Commit：待完成。
 - [ ] **U4 有订单的完整应用**：关闭新 submit，处理 pending/working/cancel/outcome unknown，等待权威快照后激活。Commit：待完成。
 - [ ] **U5 失败恢复与幂等**：覆盖外部文件变化、写入失败、断线、进程退出和 application ID 重试。Commit：待完成。
 - [ ] **U6 人工控制与系统页**：迁移 pause/resume/flatten/terminate、health、tasks、diagnostics 和 activity。Commit：待完成。
