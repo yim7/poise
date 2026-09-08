@@ -138,7 +138,7 @@ describe('Poise read-only console', () => {
     }))
     render(<App />)
     expect(await screen.findByText('交易所 hyperliquid')).toBeVisible()
-    expect(screen.getByText('数据通道异常')).toBeVisible()
+    expect(screen.getByText('数据任务异常')).toBeVisible()
     expect(screen.getByText('浏览器实时流正在连接')).toBeVisible()
     expect(screen.getByText('环境 TESTNET 测试网')).toBeVisible()
     expect(screen.getByText('行情恢复中')).toBeVisible(); expect(screen.getByText('账户状态更新中')).toBeVisible(); expect(screen.getByText('最近一次对账延迟')).toBeVisible()
@@ -454,6 +454,23 @@ describe('Poise read-only console', () => {
     expect(JSON.parse(bodies[0]).application_id).toBe(JSON.parse(bodies[1]).application_id)
   })
 
+  it('shows a deterministic 400 error, invalidates the preview, and uses a new application id after re-preview', async () => {
+    const valid = { previewed_at: '2026-09-09T00:00:00Z', valid: true, field_errors: [], blockers: [], impact: null, capacity_proof: null }
+    const bodies: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: string, init?: RequestInit) => {
+      if (input === '/tracks/btc-core/configuration/preview') return Promise.resolve(response(valid))
+      if (input === '/tracks/btc-core/configuration' && init?.method === 'PUT') { bodies.push(String(init.body)); return Promise.resolve(response({ error: '下限价格必须小于上限价格' }, 400)) }
+      return Promise.resolve(response(input === '/tracks/btc-core/configuration' ? configuration : api(input)))
+    }))
+    render(<App />); await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    fireEvent.click(screen.getByRole('tab', { name: '配置' })); await screen.findByText('当前生效值'); fireEvent.change(screen.getByLabelText('下限价格'), { target: { value: '71000' } })
+    fireEvent.click(screen.getByRole('button', { name: '重新预览' })); await screen.findByText('预览结果'); fireEvent.click(screen.getByRole('button', { name: '保存并应用' })); fireEvent.click(screen.getByRole('button', { name: '确认保存并应用' }))
+    expect(await screen.findByText('配置未被接受')).toBeVisible(); expect(screen.getByText('下限价格必须小于上限价格')).toBeVisible(); expect(screen.queryByText('预览结果')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '重新预览' })); await screen.findByText('预览结果'); fireEvent.click(screen.getByRole('button', { name: '保存并应用' })); fireEvent.click(screen.getByRole('button', { name: '确认保存并应用' }))
+    await waitFor(() => expect(bodies).toHaveLength(2))
+    expect(JSON.parse(bodies[0]).application_id).not.toBe(JSON.parse(bodies[1]).application_id)
+  })
+
   it('keeps an accepted application with old orders visibly in progress and prevents another edit or apply', async () => {
     const waiting = {
       ...configuration,
@@ -533,6 +550,22 @@ describe('Poise read-only console', () => {
     expect(JSON.parse(appliedBody).application_id).toBe('interrupted-apply')
   })
 
+  it('polls configuration only while an accepted application can still change asynchronously', async () => {
+    let applicationPoll!: () => void
+    vi.stubGlobal('setInterval', vi.fn((callback: TimerHandler, delay?: number) => { if (delay === 2_000) applicationPoll = callback as () => void; return delay ?? 0 }))
+    vi.stubGlobal('clearInterval', vi.fn())
+    const waiting = { ...configuration, application_status: 'waiting_for_orders', application: { application_id: 'apply-poll', status: 'waiting_for_orders', accepted: true, message: null, active_version: null } }
+    const activating = { ...configuration, application_status: 'activating', application: { application_id: 'apply-poll', status: 'activating', accepted: true, message: null, active_version: null } }
+    let reads = 0
+    vi.stubGlobal('fetch', vi.fn((input: string) => Promise.resolve(response(input === '/tracks/btc-core/configuration' ? [waiting, activating][reads++] ?? activating : api(input)))))
+    render(<App />)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    fireEvent.click(screen.getByRole('tab', { name: '配置' })); expect(await screen.findByText('配置应用状态 · 等待订单完成')).toBeVisible()
+    await act(async () => { applicationPoll(); await Promise.resolve(); await Promise.resolve() })
+    expect(screen.getByText('配置应用状态 · 正在启用')).toBeVisible()
+    expect(reads).toBe(2)
+  })
+
   it('reloads the configuration application status from GET when the stream reconnects', async () => {
     let reconnected = false
     const waiting = { ...configuration, application_status: 'activating', application: { application_id: 'apply-2', status: 'activating', accepted: true, message: null, active_version: null } }
@@ -550,23 +583,54 @@ describe('Poise read-only console', () => {
     expect(screen.getByText(/正在安装已经验证的配置/)).toBeVisible()
   })
 
-  it('reloads a selected Track configuration status after TrackChanged stream updates without leaving the configuration tab', async () => {
-    const waiting = { ...configuration, application_status: 'waiting_for_orders', application: { application_id: 'apply-3', status: 'waiting_for_orders', accepted: true, message: null, active_version: null } }
-    const activating = { ...configuration, application_status: 'activating', application: { application_id: 'apply-3', status: 'activating', accepted: true, message: null, active_version: null } }
-    const active = { ...configuration, application_status: 'active', application: { application_id: 'apply-3', status: 'active', accepted: true, message: null, active_version: 'config-next' } }
+  it('ignores ordinary Track stream updates and preserves a dirty draft across a same-version reconnect refresh', async () => {
+    const valid = { previewed_at: '2026-09-09T00:00:00Z', valid: true, field_errors: [], blockers: [], impact: null, capacity_proof: null }
     let configurationReads = 0
     vi.stubGlobal('fetch', vi.fn((input: string) => {
-      if (input === '/tracks/btc-core/configuration') return Promise.resolve(response([waiting, activating, active][configurationReads++] ?? active))
+      if (input === '/tracks/btc-core/configuration') { configurationReads += 1; return Promise.resolve(response(configuration)) }
+      if (input === '/tracks/btc-core/configuration/preview') return Promise.resolve(response(valid))
       return Promise.resolve(response(api(input)))
     }))
     render(<App />)
     await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
-    fireEvent.click(screen.getByRole('tab', { name: '配置' })); expect(await screen.findByText('配置应用状态 · 等待订单完成')).toBeVisible()
+    fireEvent.click(screen.getByRole('tab', { name: '配置' })); await screen.findByText('配置应用状态 · 空闲')
+    fireEvent.change(screen.getByLabelText('下限价格'), { target: { value: '71000' } })
+    fireEvent.click(screen.getByRole('button', { name: '重新预览' })); await screen.findByText('预览结果')
+    act(() => BrowserStream.instances[0].emit({ type: 'track_list_item_changed', track_id: 'btc-core', item: { id: 'btc-core', instrument: track.identity.instrument, lifecycle: track.status.lifecycle, exposure: { current: 0 }, decision: track.decision, execution: track.execution, pnl: track.pnl } }))
     act(() => BrowserStream.instances[0].emit({ type: 'track_detail_changed', track_id: 'btc-core', detail: track }))
-    expect(await screen.findByText('配置应用状态 · 正在启用')).toBeVisible()
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
     expect(screen.getByRole('tab', { name: '配置' })).toHaveAttribute('aria-selected', 'true')
-    act(() => BrowserStream.instances[0].emit({ type: 'track_detail_changed', track_id: 'btc-core', detail: track }))
-    expect(await screen.findByText('配置应用状态 · 已生效')).toBeVisible()
-    expect(configurationReads).toBe(3)
+    expect(screen.getByLabelText('下限价格')).toHaveValue(71000)
+    expect(screen.getByText('有未保存修改')).toBeVisible()
+    expect(configurationReads).toBe(1)
+    act(() => BrowserStream.instances[0].open())
+    await waitFor(() => expect(configurationReads).toBe(2))
+    expect(screen.getByLabelText('下限价格')).toHaveValue(71000)
+    expect(screen.queryByText('预览结果')).not.toBeInTheDocument()
+  })
+
+  it('keeps a dirty draft but blocks it when a reconnect reveals a new active configuration version', async () => {
+    const valid = { previewed_at: '2026-09-09T00:00:00Z', valid: true, field_errors: [], blockers: [], impact: null, capacity_proof: null }
+    const updated = { ...configuration, version: 'config-new', active: { ...configuration.active, lower_price: 72000 } }
+    let reconnecting = false
+    vi.stubGlobal('fetch', vi.fn((input: string) => {
+      if (input === '/tracks/btc-core/configuration') return Promise.resolve(response(reconnecting ? updated : configuration))
+      if (input === '/tracks/btc-core/configuration/preview') return Promise.resolve(response(valid))
+      return Promise.resolve(response(api(input)))
+    }))
+    render(<App />)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    fireEvent.click(screen.getByRole('tab', { name: '配置' })); await screen.findByText('配置应用状态 · 空闲')
+    fireEvent.change(screen.getByLabelText('下限价格'), { target: { value: '71000' } })
+    fireEvent.click(screen.getByRole('button', { name: '重新预览' })); await screen.findByText('预览结果')
+    reconnecting = true
+    act(() => BrowserStream.instances[0].open())
+    expect(await screen.findByText('生效配置已变化')).toBeVisible()
+    expect(screen.getByLabelText('下限价格')).toHaveValue(71000)
+    expect(screen.queryByText('预览结果')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新预览' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: '使用最新配置重置草稿' }))
+    expect(screen.getByLabelText('下限价格')).toHaveValue(72000)
+    expect(screen.queryByText('生效配置已变化')).not.toBeInTheDocument()
   })
 })

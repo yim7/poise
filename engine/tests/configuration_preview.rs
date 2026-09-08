@@ -286,7 +286,7 @@ fn insufficient_capacity_is_a_structured_blocker() {
 }
 
 #[test]
-fn unchanged_or_lower_risk_limits_do_not_require_new_capacity() {
+fn unchanged_or_lower_risk_limits_do_not_require_new_capacity_when_the_target_does_not_add_risk() {
     for candidate_max_notional in [800.0, 400.0] {
         let preview = preview_configuration(input(
             definition(100.0, 800.0),
@@ -305,6 +305,27 @@ fn unchanged_or_lower_risk_limits_do_not_require_new_capacity() {
                 .contains(&ConfigurationPreviewBlocker::InsufficientIncreaseNotional)
         );
     }
+}
+
+#[test]
+fn unchanged_risk_limit_still_requires_capacity_for_a_larger_candidate_target() {
+    let preview = preview_configuration(input(
+        definition(100.0, 800.0),
+        definition(100.0, 800.0),
+        linear_spec(0.1, 0.1, 0.0),
+        1.0,
+        95.0,
+        0.0,
+    ))
+    .unwrap();
+
+    assert_eq!(preview.candidate_risk_approved_target.0, 4.0);
+    assert_eq!(preview.required_increase_notional, 285.0);
+    assert!(
+        preview
+            .blockers
+            .contains(&ConfigurationPreviewBlocker::InsufficientIncreaseNotional)
+    );
 }
 
 #[test]

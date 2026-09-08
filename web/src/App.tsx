@@ -46,9 +46,21 @@ function policy(value: string | Record<string, unknown>) {
   return typeof value === 'string' ? title(value) : JSON.stringify(value)
 }
 
+class HttpResponseError extends Error {
+  constructor(readonly status: number, message: string) { super(message) }
+}
+
 async function requestJson<T>(path: string, init?: RequestInit) {
   const response = init ? await fetch(path, init) : await fetch(path)
-  if (!response.ok) throw new Error(`${path} ${response.status}`)
+  if (!response.ok) {
+    let message = `${path} ${response.status}`
+    try {
+      const body = await response.json() as { error?: unknown; message?: unknown }
+      const detail = typeof body.error === 'string' ? body.error : typeof body.message === 'string' ? body.message : null
+      if (detail) message = detail
+    } catch { /* Keep the HTTP status as the deterministic error signal. */ }
+    throw new HttpResponseError(response.status, message)
+  }
   return response.json() as Promise<T>
 }
 
@@ -62,13 +74,13 @@ function websocketUrl() {
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
 }
 
-function exchangeDataChannelLabel(health: HealthResponse | null) {
+function exchangeDataTaskLabel(health: HealthResponse | null) {
   const tasks = new Map((health?.tasks ?? []).map(task => [task.component, task.status]))
   const marketData = tasks.get('market_data')
   const userData = tasks.get('user_data')
-  if (marketData === 'degraded' || userData === 'degraded') return '数据通道异常'
-  if (marketData === 'ok' && userData === 'ok') return '数据通道正常'
-  return '数据通道初始化中'
+  if (marketData === 'degraded' || userData === 'degraded') return '数据任务异常'
+  if (marketData === 'ok' && userData === 'ok') return '数据任务正常'
+  return '数据任务初始化中'
 }
 
 export function App() {
@@ -158,11 +170,9 @@ export function App() {
           const update = JSON.parse(event.data) as StreamEvent
           if (update.type === 'track_list_item_changed') {
             setTracks(previous => previous.map(item => item.id === update.track_id ? update.item : item))
-            if (selectedIdRef.current === update.track_id) setConfigurationRefreshVersion(version => version + 1)
           }
           if (update.type === 'track_detail_changed') {
             setDetail(current => current?.identity.id === update.track_id ? update.detail : current)
-            if (selectedIdRef.current === update.track_id) setConfigurationRefreshVersion(version => version + 1)
           }
           if (update.type === 'track_live_view_changed') {
             setTracks(previous => previous.map(item => item.id === update.track_id ? {
@@ -231,11 +241,11 @@ export function App() {
 
   const status = readiness === null ? '交易条件载入中' : readiness.ready_to_trade ? '可以交易' : '暂不可交易'
   const connectionLabel = connection === 'connecting' ? '浏览器实时流正在连接' : connection === 'connected' ? '浏览器实时流已连接' : '浏览器实时流已断开'
-  const exchangeChannel = exchangeDataChannelLabel(health)
+  const exchangeTasks = exchangeDataTaskLabel(health)
   const lastUpdated = useMemo(() => updatedAt ? updatedAt.toLocaleTimeString('zh-CN') : '—', [updatedAt])
 
   return <main>
-    <header className="topbar"><div><strong>Poise</strong><span>交易所 {system?.exchange ?? '载入中'}</span><span>{exchangeChannel}</span><span>{status}</span><span className={system?.deployment === 'mainnet' ? 'deployment-mainnet' : 'deployment'}>环境 {deploymentLabel(system?.deployment)}</span></div><div><span className={connection === 'connected' ? 'connection online' : 'connection'}>{connectionLabel}</span><span>运行状态更新于 {lastUpdated}</span></div></header>
+    <header className="topbar"><div><strong>Poise</strong><span>交易所 {system?.exchange ?? '载入中'}</span><span>{exchangeTasks}</span><span>{status}</span><span className={system?.deployment === 'mainnet' ? 'deployment-mainnet' : 'deployment'}>环境 {deploymentLabel(system?.deployment)}</span></div><div><span className={connection === 'connected' ? 'connection online' : 'connection'}>{connectionLabel}</span><span>运行状态更新于 {lastUpdated}</span></div></header>
     {(error || readinessPollError) && <div role="alert" className="alert"><strong>无法读取运行状态</strong><span>请确认本地 server 正在运行后重试。</span><button onClick={retry}>重试</button></div>}
     <div className="layout"><aside><button className={!selectedId && !systemOpen ? 'nav active' : 'nav'} onClick={() => selectTrack(null)}>总览</button><p>Tracks</p>{tracks.map(track => <button key={track.id} className={selectedId === track.id ? 'track active' : 'track'} onClick={() => selectTrack(track.id)}><strong>{track.id}</strong><small>{track.instrument?.symbol} · {title(track.lifecycle?.status)}</small></button>)}<button className={systemOpen ? 'nav active' : 'nav'} onClick={() => { selectedIdRef.current = null; setSelectedId(null); setSystemOpen(true) }}>系统</button></aside>
     <section className="content">{systemOpen ? <SystemPanel readiness={readiness} health={health} system={system} /> : selectedId ? detail ? <TrackPage key={detail.identity.id} detail={detail} configurationRefreshVersion={configurationRefreshVersion} onDetail={setDetail} /> : <h1>Track 载入中</h1> : <Overview readiness={readiness} health={health} account={account} tracks={tracks} onSelect={selectTrack} onSystem={() => setSystemOpen(true)} />}</section></div>
@@ -345,13 +355,15 @@ function ConfigurationApplicationNotice({ application, status }: { application: 
 function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refreshVersion: number }) {
   const [configuration, setConfiguration] = useState<TrackConfigurationResponse | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
+  const [draftVersionConflict, setDraftVersionConflict] = useState(false)
   const [loadError, setLoadError] = useState(false)
   const [preview, setPreview] = useState<TrackConfigurationPreviewResponse | null>(null)
   const [previewError, setPreviewError] = useState(false)
   const [previewing, setPreviewing] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [applicationId, setApplicationId] = useState<string | null>(null)
-  const [applyError, setApplyError] = useState<'network' | 'conflict' | null>(null)
+  const [applyError, setApplyError] = useState<'network' | 'conflict' | 'invalid' | null>(null)
+  const [applyErrorMessage, setApplyErrorMessage] = useState<string | null>(null)
   const [applying, setApplying] = useState(false)
   const [cancellationRequested, setCancellationRequested] = useState(false)
   const [cancellationError, setCancellationError] = useState(false)
@@ -361,32 +373,53 @@ function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refr
   const applicationSequence = useRef(0)
   const configurationController = useRef<AbortController | null>(null)
   const configurationSequence = useRef(0)
+  const configurationRef = useRef<TrackConfigurationResponse | null>(null)
+  const draftRef = useRef<Draft | null>(null)
 
   const invalidatePreview = () => { previewSequence.current += 1; previewController.current?.abort(); previewController.current = null; setPreview(null); setPreviewError(false); setPreviewing(false) }
-  const invalidateApplication = (keepApplicationId = false) => { applicationSequence.current += 1; applicationController.current?.abort(); applicationController.current = null; setConfirming(false); setApplying(false); setApplyError(null); if (!keepApplicationId) setApplicationId(null); setCancellationRequested(false); setCancellationError(false) }
+  const invalidateApplication = (keepApplicationId = false) => { applicationSequence.current += 1; applicationController.current?.abort(); applicationController.current = null; setConfirming(false); setApplying(false); setApplyError(null); setApplyErrorMessage(null); if (!keepApplicationId) setApplicationId(null); setCancellationRequested(false); setCancellationError(false) }
 
-  const load = () => {
+  const load = (resetDraft = false) => {
     configurationController.current?.abort()
     const controller = new AbortController()
     configurationController.current = controller
     const request = configurationSequence.current + 1; configurationSequence.current = request
     setLoadError(false)
     requestJson<TrackConfigurationResponse>(`/tracks/${encodeURIComponent(trackId)}/configuration`, { signal: controller.signal })
-      .then(value => { if (!controller.signal.aborted && request === configurationSequence.current) { setConfiguration(value); setDraft(cloneDraft(value.active)); setPreview(null); if (value.application_status === 'failed' && value.application?.retryable) setApplicationId(value.application.application_id); else if (value.application_status === 'idle' || value.application_status === 'active' || value.application_status === 'failed') setApplicationId(null); if (value.application_status === 'idle' || value.application_status === 'active' || value.application_status === 'failed') setCancellationRequested(false) } })
+      .then(value => {
+        if (controller.signal.aborted || request !== configurationSequence.current) return
+        const previousConfiguration = configurationRef.current
+        const previousDraft = draftRef.current
+        const dirty = previousConfiguration !== null && previousDraft !== null && JSON.stringify(previousConfiguration.active) !== JSON.stringify(previousDraft)
+        const versionChanged = previousConfiguration !== null && previousConfiguration.version !== value.version
+        configurationRef.current = value
+        setConfiguration(value)
+        invalidatePreview()
+        if (resetDraft || !dirty) {
+          const nextDraft = cloneDraft(value.active)
+          draftRef.current = nextDraft
+          setDraft(nextDraft)
+          setDraftVersionConflict(false)
+        } else if (versionChanged) {
+          setDraftVersionConflict(true)
+        }
+        if (value.application_status === 'failed' && value.application?.retryable) setApplicationId(value.application.application_id); else if (value.application_status === 'idle' || value.application_status === 'active' || value.application_status === 'failed') setApplicationId(null)
+        if (value.application_status === 'idle' || value.application_status === 'active' || value.application_status === 'failed') setCancellationRequested(false)
+      })
       .catch(() => { if (!controller.signal.aborted && request === configurationSequence.current) setLoadError(true) })
     return controller
   }
   useEffect(() => { const controller = load(); return () => { controller.abort(); configurationSequence.current += 1; invalidatePreview(); invalidateApplication() } }, [trackId, refreshVersion])
   const changed = configuration !== null && draft !== null && JSON.stringify(configuration.active) !== JSON.stringify(draft)
-  const update = <K extends keyof Draft>(field: K, value: Draft[K]) => { setDraft(current => current ? { ...current, [field]: value } : current); invalidatePreview(); invalidateApplication(configuration?.application?.status === 'failed' && configuration.application.retryable === true) }
-  const updateRisk = (field: keyof Draft['risk_acquisition'], value: number) => { setDraft(current => current ? { ...current, risk_acquisition: { ...current.risk_acquisition, [field]: value } } : current); invalidatePreview(); invalidateApplication(configuration?.application?.status === 'failed' && configuration.application.retryable === true) }
-  const discard = () => { if (configuration) { setDraft(cloneDraft(configuration.active)); invalidatePreview(); invalidateApplication() } }
+  const update = <K extends keyof Draft>(field: K, value: Draft[K]) => { setDraft(current => { const next = current ? { ...current, [field]: value } : current; draftRef.current = next; return next }); invalidatePreview(); invalidateApplication(configuration?.application?.status === 'failed' && configuration.application.retryable === true) }
+  const updateRisk = (field: keyof Draft['risk_acquisition'], value: number) => { setDraft(current => { const next = current ? { ...current, risk_acquisition: { ...current.risk_acquisition, [field]: value } } : current; draftRef.current = next; return next }); invalidatePreview(); invalidateApplication(configuration?.application?.status === 'failed' && configuration.application.retryable === true) }
+  const discard = () => { if (configuration) { const nextDraft = cloneDraft(configuration.active); draftRef.current = nextDraft; setDraft(nextDraft); setDraftVersionConflict(false); invalidatePreview(); invalidateApplication() } }
   const submitPreview = async () => {
     if (!draft) return
     previewController.current?.abort()
     const controller = new AbortController(); previewController.current = controller
     const request = previewSequence.current + 1; previewSequence.current = request
-    setPreviewing(true); setPreviewError(false); setPreview(null)
+    setPreviewing(true); setPreviewError(false); setPreview(null); setApplyError(null); setApplyErrorMessage(null)
     try {
       const value = await requestJson<TrackConfigurationPreviewResponse>(`/tracks/${encodeURIComponent(trackId)}/configuration/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidate: draft }), signal: controller.signal })
       if (!controller.signal.aborted && request === previewSequence.current) setPreview(value)
@@ -394,7 +427,12 @@ function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refr
   }
   const applicationStatus: TrackConfigurationApplicationStatus = configuration?.application?.status ?? configuration?.application_status ?? 'idle'
   const applicationInProgress = applicationStatus === 'preparing' || applicationStatus === 'waiting_for_orders' || applicationStatus === 'activating'
-  const editorLocked = applicationInProgress || cancellationRequested
+  const editorLocked = applicationInProgress || cancellationRequested || draftVersionConflict
+  useEffect(() => {
+    if (!applicationInProgress) return
+    const timer = window.setInterval(() => { load() }, 2_000)
+    return () => window.clearInterval(timer)
+  }, [applicationInProgress, configuration?.application?.application_id])
   const apply = async () => {
     if (!draft || !changed || !preview?.valid || applicationInProgress) return
     const id = applicationId ?? crypto.randomUUID()
@@ -405,12 +443,18 @@ function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refr
     setApplying(true); setApplyError(null)
     try {
       await requestJson(`/tracks/${encodeURIComponent(trackId)}/configuration`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ application_id: id, expected_version: configuration!.version, candidate: draft }), signal: controller.signal })
-      if (!controller.signal.aborted && request === applicationSequence.current) { invalidatePreview(); setConfirming(false); setApplicationId(null); load() }
+      if (!controller.signal.aborted && request === applicationSequence.current) { invalidatePreview(); setConfirming(false); setApplicationId(null); load(true) }
     } catch (error) {
       if (!controller.signal.aborted && request === applicationSequence.current) {
-        const conflict = error instanceof Error && error.message.includes(' 409')
-        if (conflict) setApplicationId(null)
-        setApplyError(conflict ? 'conflict' : 'network')
+        if (error instanceof HttpResponseError && (error.status === 400 || error.status === 409)) {
+          setApplicationId(null)
+          invalidatePreview()
+          setConfirming(false)
+          setApplyError(error.status === 400 ? 'invalid' : 'conflict')
+          setApplyErrorMessage(error.message)
+        } else {
+          setApplyError('network')
+        }
       }
     } finally { if (request === applicationSequence.current) setApplying(false) }
   }
@@ -440,13 +484,14 @@ function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refr
     <ConfigurationApplicationNotice application={configuration.application} status={applicationStatus} />
     {applicationStatus === 'failed' && configuration.application?.retryable && <p className="unsaved">使用同一申请 ID 重新预览并重试；页面不会自动提交。</p>}
     {changed && <p className="unsaved">有未保存修改</p>}
+    {draftVersionConflict && <div role="alert" className="alert"><strong>生效配置已变化</strong><span>当前草稿基于旧版本，不能继续预览或应用。请检查最新生效值后重置草稿。</span><button onClick={discard}>使用最新配置重置草稿</button></div>}
     <div className="two-column"><article><h2>当前生效值</h2><dl><div><dt>价格区间</dt><dd>{format(active.lower_price, 2)} – {format(active.upper_price, 2)}</dd></div><div><dt>多/空 exposure</dt><dd>{format(active.long_exposure_units)} / {format(active.short_exposure_units)}</dd></div><div><dt>每单位名义金额</dt><dd>{format(active.notional_per_unit)}</dd></div><div><dt>区间外策略</dt><dd>{policy(active.out_of_band_policy)}</dd></div><div><dt>最大名义金额</dt><dd>{format(active.max_notional)}</dd></div></dl></article><article><h2>只读身份与重启字段</h2><dl><div><dt>Track ID</dt><dd>{configuration.identity.id}</dd></div><div><dt>Venue</dt><dd>{configuration.identity.instrument.venue}</dd></div><div><dt>Symbol</dt><dd>{configuration.identity.instrument.symbol}</dd></div><div><dt>杠杆</dt><dd>{configuration.restart_required.leverage}</dd></div><div><dt>Tick 超时（秒）</dt><dd>{configuration.restart_required.tick_timeout_secs}</dd></div></dl></article></div>
     {cancellationRequested && <div role="status" className="alert"><strong>取消请求已发送</strong><span>这不代表旧订单已经解决；server 仍会等待权威订单状态，期间不能编辑或提交。</span></div>}
     {cancellationError && <div role="alert" className="alert"><strong>无法取消申请</strong><span>请重新载入确认当前状态后再试。</span></div>}
     {(applicationStatus === 'preparing' || applicationStatus === 'waiting_for_orders') && configuration.application && <button onClick={() => void cancelApplication()} disabled={cancellationRequested}>取消本次申请</button>}
     <article><h2>可编辑草稿</h2><fieldset className="configuration-editor" disabled={editorLocked}><div className="config-fields">{numberInput('下限价格', 'lower_price')}{numberInput('上限价格', 'upper_price')}{numberInput('多头 exposure', 'long_exposure_units')}{numberInput('空头 exposure', 'short_exposure_units')}{numberInput('每单位名义金额', 'notional_per_unit')}{numberInput('最小再平衡单位', 'min_rebalance_units')}<label>形状族<select aria-label="形状族" value={draft.shape_family} onChange={event => update('shape_family', event.target.value as Draft['shape_family'])}><option value="linear">linear</option><option value="inertial">inertial</option><option value="responsive">responsive</option></select></label><label>区间外策略<select aria-label="区间外策略" value={policyKind} onChange={event => setPolicy(event.target.value)}><option value="freeze">freeze</option><option value="terminate">terminate</option><option value="flatten">flatten</option></select></label>{flatten && <><label>Flatten 触发<select aria-label="Flatten 触发" value={triggerKind(flatten.trigger)} onChange={event => setFlattenTrigger(event.target.value)}><option value="immediate">immediate</option><option value="flatten_confirm">flatten_confirm</option></select></label>{typeof flatten.trigger !== 'string' && <label>Flatten 确认 bps<input aria-label="Flatten 确认 bps" type="number" value={inputValue(flatten.trigger.flatten_confirm.bps)} onChange={event => setFlattenBps('trigger', Number(event.target.value))} /></label>}<label>恢复策略<select aria-label="恢复策略" value={recoverKind(flatten.recover)} onChange={event => setFlattenRecover(event.target.value)}><option value="back_in_band">back_in_band</option><option value="reentry_confirm">reentry_confirm</option></select></label>{typeof flatten.recover !== 'string' && <label>重新进入确认 bps<input aria-label="重新进入确认 bps" type="number" value={inputValue(flatten.recover.reentry_confirm.bps)} onChange={event => setFlattenBps('recover', Number(event.target.value))} /></label>}</>}{numberInput('最大名义金额', 'max_notional')}{numberInput('每日损失限额', 'daily_loss_limit')}{numberInput('总损失限额', 'total_loss_limit')}{riskInput('初始比例', 'initial_ratio')}{riskInput('有利步数', 'advantage_steps')}{riskInput('最小释放步数', 'min_release_steps')}{riskInput('最大释放步数', 'max_release_steps')}{riskInput('追赶比例', 'catchup_ratio')}{riskInput('过期释放分钟', 'stale_release_minutes')}</div><div className="config-actions"><button onClick={discard} disabled={!changed}>放弃修改</button><button onClick={() => void submitPreview()} disabled={previewing || editorLocked}>{previewing ? '预览中' : applicationStatus === 'failed' && configuration.application?.retryable ? '使用同一申请 ID 重新预览' : '重新预览'}</button><button onClick={() => setConfirming(true)} disabled={!changed || !preview?.valid || applying || editorLocked}>保存并应用</button></div></fieldset></article>
     {confirming && <div role="dialog" aria-modal="true" aria-label="确认保存并应用" className="confirmation"><h2>确认保存并应用</h2><p>这会更新实例配置，并可能产生真实订单。</p><dl>{changes.map(change => <div key={change.label}><dt>{change.label}</dt><dd>{change.from} → {change.to}</dd></div>)}</dl><button onClick={() => setConfirming(false)} disabled={applying}>取消</button><button onClick={() => void apply()} disabled={applying}>{applying ? '正在提交' : '确认保存并应用'}</button></div>}
-    {applyError === 'conflict' && <div role="alert" className="alert"><strong>配置版本冲突</strong><span>配置已变化，请重新加载后再试。</span><button onClick={() => load()}>重新加载</button></div>}{applyError === 'network' && <div role="alert" className="alert"><strong>提交结果未确认</strong><span>可使用同一申请 ID 重试。</span><button onClick={() => void apply()}>重试提交</button></div>}
+    {applyError === 'invalid' && <div role="alert" className="alert"><strong>配置未被接受</strong><span>{applyErrorMessage ?? '请修改草稿并重新预览。'}</span><span>请修改草稿并重新预览后再提交。</span></div>}{applyError === 'conflict' && <div role="alert" className="alert"><strong>配置版本冲突</strong><span>配置已变化，请重新加载后再试。</span><button onClick={() => load()}>重新加载</button></div>}{applyError === 'network' && <div role="alert" className="alert"><strong>提交结果未确认</strong><span>可使用同一申请 ID 重试。</span><button onClick={() => void apply()}>重试提交</button></div>}
     {previewError && <div role="alert" className="alert"><strong>预览失败</strong><button onClick={() => void submitPreview()}>重试预览</button></div>}{preview && <PreviewResult preview={preview} symbol={configuration.identity.instrument.symbol} />}
   </div>
 }

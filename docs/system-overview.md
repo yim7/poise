@@ -117,6 +117,8 @@ Track 配置接口把字段分成两类：价格带、exposure、`notional_per_u
 
 保存并应用请求同时携带 active 配置版本和 `application_id`。server 拒绝 stale version、外部文件变更、不同 application 的并发请求、terminated Track 与 recovery anomaly；同一 `application_id` 且请求内容相同可安全重试，避免 HTTP 响应不确定时重复应用。应用状态是 durable audit：`preparing`、`waiting_for_orders`、`activating`、`active` 或 `failed`，控制台通过 HTTP 和 WebSocket 重新取得它，不把浏览器状态当事实源。
 
+进程运行期间，`config.toml` 唯一受支持的写入者是 server。版本与写前二次内容检查可以拒绝已经观测到的外部修改，但普通文件系统不能对不协作的外部写入者提供严格的跨进程 compare-and-swap 保证；因此运行期不得由外部编辑器并发写入 `config.toml`，外部编辑必须在停服后进行。
+
 接受应用后，server 先关闭该 Track 的新 submit，并取消或等待旧 active、pending 和 outcome-unknown order 的所有权。只有完整的交易所 orders/position 权威快照证明旧 bindings、未知 submit 和 recovery anomaly 已解决，才原子 patch `config.toml` 并安装新定义；随后按新定义重新解释 quantity/exposure，走正常决策与执行路径。暂停、人工 flatten/控制和 terminated 状态不会因配置应用被隐式恢复自动交易。文件替换前失败时，旧配置与旧定义保持或恢复；文件已替换后的安装或审计失败保留 `activating` blocker 与 submit gate，等待重启从新配置 fresh-start，不回滚旧文件。
 
 重启以 `config.toml` 和 durable application audit 判断已经 active 或在文件替换前中断的应用；随后从交易所权威事实 fresh-start，不恢复旧 application session、旧 bindings 或 effect queue。文件已替换时以新配置启动，未替换时继续使用旧配置。

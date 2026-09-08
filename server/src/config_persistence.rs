@@ -676,6 +676,7 @@ pub(crate) fn patch_file_atomically(
     temporary.write_all(patched.as_bytes())?;
     temporary.as_file_mut().sync_all()?;
     temporary.persist(path).map_err(|error| error.error)?;
+    sync_parent_directory(parent)?;
     Ok(())
 }
 
@@ -722,7 +723,15 @@ fn patch_file_atomically_if_unchanged_with_hook(
         anyhow::bail!("configuration changed externally");
     }
     temporary.persist(path).map_err(|error| error.error)?;
+    sync_parent_directory(parent)?;
     Ok(())
+}
+
+fn sync_parent_directory(parent: &Path) -> Result<()> {
+    fs::File::open(parent)
+        .with_context(|| format!("open configuration directory {}", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("sync configuration directory {}", parent.display()))
 }
 
 #[cfg(test)]

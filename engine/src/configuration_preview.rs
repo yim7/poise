@@ -9,6 +9,7 @@ use poise_core::strategy::{BandFlattenTrigger, BandProtectionPolicy, BandStatus,
 use poise_core::track::TrackDefinition;
 use poise_core::types::Exposure;
 
+use crate::execution_gate::added_risk_units;
 use crate::risk_exposure_gate::{
     RiskExposureGateInput, execution_target_exposure, initialize_fresh_session,
 };
@@ -153,6 +154,10 @@ pub fn preview_configuration(
         candidate_policy_target.clone(),
         candidate_position_qty_per_unit,
     );
+    let candidate_risk_approved_target_position_qty = quantity_for_exposure(
+        candidate_risk_approved_target.clone(),
+        candidate_position_qty_per_unit,
+    );
     let target_position_qty_delta = active_policy_target_position_qty.map(|active_quantity| {
         position_qty(candidate_policy_target_position_qty.value() - active_quantity.value())
     });
@@ -216,9 +221,19 @@ pub fn preview_configuration(
     .value();
     let candidate_increases_risk_limit = input.candidate.effective_max_notional()
         > input.active.effective_max_notional() + f64::EPSILON;
-    let required_increase_notional = candidate_increases_risk_limit
+    let risk_limit_increase_notional = candidate_increases_risk_limit
         .then(|| (input.candidate.effective_max_notional() - current_absolute_notional).max(0.0))
         .unwrap_or(0.0);
+    let target_increase_notional = unsigned_notional(
+        &input.instrument_spec,
+        position_qty(added_risk_units(
+            input.current_position_qty.value(),
+            candidate_risk_approved_target_position_qty.value(),
+        )),
+        input.strategy_price,
+    )
+    .value();
+    let required_increase_notional = risk_limit_increase_notional.max(target_increase_notional);
 
     let gate_input = RiskExposureGateInput {
         config: candidate_config.risk_acquisition,

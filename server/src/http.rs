@@ -454,7 +454,13 @@ async fn apply_track_configuration(
     let candidate =
         configuration_definition(&source, &request.candidate, metadata.tick_timeout_secs)
             .map_err(|message| bad_request(message))?;
-    if let Some(existing) = existing {
+    if let Some(existing) = existing.filter(|existing| {
+        matches!(
+            existing.result,
+            poise_storage::sqlite::ConfigurationApplicationAuditStatus::Preparing
+                | poise_storage::sqlite::ConfigurationApplicationAuditStatus::Activating
+        )
+    }) {
         // A persisted preparing/activating application is retried without
         // consulting volatile price/capacity facts. The runtime determines
         // whether the definition was already installed and completes its audit.
@@ -2455,6 +2461,91 @@ mod tests {
                 .unwrap();
         assert_eq!(body["valid"], false);
         assert_eq!(body["blockers"][0]["code"], "capacity_proof_unavailable");
+    }
+
+    #[tokio::test]
+    async fn failed_same_id_retry_rechecks_latest_capacity_before_runtime_side_effects() {
+        let (state, audit, path, _directory) = with_configuration_store(app_state().await);
+        let runtime = state.http_state.runtime.clone();
+        let store = state.http_state.configuration_store.clone().unwrap();
+        let app = router(state);
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let current: serde_json::Value =
+            serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let mut candidate = current["active"].clone();
+        candidate["notional_per_unit"] = serde_json::json!(300.0);
+        let candidate_view: TrackConfigurationView =
+            serde_json::from_value(candidate.clone()).unwrap();
+        let application_id = "apply-failed-capacity";
+        let request_hash = super::configuration_request_hash(
+            "btc-core",
+            current["version"].as_str().unwrap(),
+            &candidate_view,
+        );
+        audit
+            .record_configuration_application(
+                &poise_storage::sqlite::ConfigurationApplicationAuditRow {
+                    application_id: application_id.to_string(),
+                    request_hash,
+                    track_id: "btc-core".to_string(),
+                    old_version: current["version"].as_str().unwrap().to_string(),
+                    candidate_version: store
+                        .candidate_version("btc-core", &candidate_view)
+                        .unwrap(),
+                    result: poise_storage::sqlite::ConfigurationApplicationAuditStatus::Failed,
+                    change_fields: None,
+                    failure_reason: Some("runtime_rejected".to_string()),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+            )
+            .unwrap();
+        let before_file = std::fs::read_to_string(&path).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/tracks/btc-core/configuration")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "application_id": application_id,
+                            "expected_version": current["version"],
+                            "candidate": candidate,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before_file);
+        assert_eq!(
+            runtime.committed_track_definitions().await[0]
+                .track_config()
+                .notional_per_unit,
+            375.0
+        );
+        assert_eq!(
+            audit
+                .load_configuration_application(application_id)
+                .unwrap()
+                .unwrap()
+                .result,
+            poise_storage::sqlite::ConfigurationApplicationAuditStatus::Failed
+        );
     }
 
     #[tokio::test]
