@@ -1,15 +1,10 @@
 layout {
-    pane split_direction="vertical" {
-        pane size="72%" command="bash" {
-            args "-lc" "exec \"$POISE_REPO_ROOT/scripts/run-instance-tui.sh\""
+    pane split_direction="horizontal" {
+        pane size="68%" command="bash" {
+            args "-lc" "exec \"$POISE_REPO_ROOT/scripts/run-instance-server.sh\""
         }
-        pane split_direction="horizontal" size="28%" {
-            pane size="68%" command="bash" {
-                args "-lc" "exec \"$POISE_REPO_ROOT/scripts/run-instance-server.sh\""
-            }
-            pane size="32%" command="bash" {
-                args "-lc" "exec \"$POISE_REPO_ROOT/scripts/probe-health.sh\" --check readiness"
-            }
+        pane size="32%" command="bash" {
+            args "-lc" "exec \"$POISE_REPO_ROOT/scripts/probe-health.sh\" --check readiness"
         }
     }
 }

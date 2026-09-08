@@ -345,7 +345,6 @@ mod tests {
     fn instance_zellij_layout_quotes_repo_root_script_paths() {
         let layout = fs::read_to_string(instance_zellij_layout_path()).unwrap();
 
-        assert!(layout.contains("exec \\\"$POISE_REPO_ROOT/scripts/run-instance-tui.sh\\\""));
         assert!(layout.contains("exec \\\"$POISE_REPO_ROOT/scripts/run-instance-server.sh\\\""));
         assert!(
             layout.contains(
@@ -660,12 +659,42 @@ total_loss_limit = 600.0
         .await
         .unwrap();
         let runtime_handles = platform.runtime.start().await.unwrap();
-        let app = crate::http::router(platform.http_state(), platform.websocket_state());
+        let web_root = temp_dir.path().join("web");
+        fs::create_dir(&web_root).unwrap();
+        fs::write(
+            web_root.join("index.html"),
+            "<main>Poise control console</main>",
+        )
+        .unwrap();
+        let app = crate::http::router_with_web_root(
+            platform.http_state(),
+            platform.websocket_state(),
+            web_root,
+        );
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
 
         let client = reqwest::Client::new();
+        let console = client
+            .get(format!("http://{bind_address}/"))
+            .send()
+            .await
+            .unwrap();
+        assert!(console.status().is_success());
+        assert_eq!(console.text().await.unwrap(), "<main>Poise control console</main>");
+
+        let system = client
+            .get(format!("http://{bind_address}/system"))
+            .send()
+            .await
+            .unwrap();
+        assert!(system.status().is_success());
+        let system: poise_protocol::SystemInfoResponse = system.json().await.unwrap();
+        assert_eq!(system.exchange, "binance");
+        assert_eq!(system.bind_address, bind_address.to_string());
+        assert!(system.credentials_configured);
+
         let tracks = client
             .get(format!("http://{bind_address}/tracks"))
             .send()

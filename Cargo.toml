@@ -10,8 +10,6 @@ members = [
     "exchanges/hyperliquid",
     "exchanges/okx",
     "server",
-    "tui",
-    "tools/track-tuning-workbench/src-tauri",
 ]
 default-members = [
     "application",
@@ -24,7 +22,6 @@ default-members = [
     "exchanges/hyperliquid",
     "exchanges/okx",
     "server",
-    "tui",
 ]
 resolver = "3"
 

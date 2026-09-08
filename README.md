@@ -21,14 +21,13 @@ Poise 是个人策略运行实验项目。源码公开主要为了透明记录�
 - [engine/](engine/)：track 运行时、状态机、目标计算、决策回放、执行规划和恢复。
 - [application/](application/)：`TradingRuntime`、提交协议、session effect queue、交易所与持久化 port、查询和读模型。
 - [storage/](storage/)：SQLite 持久化适配。
-- [protocol/](protocol/)：`server` 与 `tui` 共享的 HTTP / WebSocket DTO。
+- [protocol/](protocol/)：server-owned 本地 Web 控制台的 HTTP / WebSocket DTO。
 - [exchanges/binance/](exchanges/binance/)：Binance USDⓈ-M Futures 适配。
 - [exchanges/bybit/](exchanges/bybit/)：Bybit USDⓈ-M Futures 适配。
 - [exchanges/hyperliquid/](exchanges/hyperliquid/)：Hyperliquid Perps 适配。
 - [exchanges/okx/](exchanges/okx/)：OKX SWAP 永续合约适配。
-- [server/](server/)：配置、装配、HTTP / WebSocket、runtime task 和交易所接入。
-- [tui/](tui/)：本地值守和操作界面。
-- [tools/track-tuning-workbench/](tools/track-tuning-workbench/)：由 Rust decision evaluator 驱动的 Tauri 调参工具，TypeScript 只负责交互和展示。
+- [server/](server/)：配置、装配、HTTP / WebSocket、runtime task、同源本地 Web 控制台和交易所接入。
+- [web/](web/)：由 server 以同源静态资源提供的本地控制台前端；只展示和提交 server DTO，不重算策略、风险、数量、名义价值或 PNL。
 
 ## 当前约束
 
@@ -260,23 +259,11 @@ cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet"
 
 启动后服务端会读取配置、初始化 SQLite、连接交易所、执行 startup-only 杠杆设置并加载可跨进程恢复的控制状态和 PNL 明细。启动交易 runtime task 前会验证 recent PNL 恢复能力，再以交易所当前仓位、订单和新行情建立 fresh-session。旧 effect journal 只作为诊断历史，不会被恢复或重放。随后服务端启动 HTTP / WebSocket 控制面。
 
-### 5. 启动 TUI
+### 5. 使用本地 Web 控制台
 
-```bash
-cargo run -p poise-tui
-```
+启动 server 后，在同一台机器打开 `http://127.0.0.1:8000/`。控制台是唯一用户界面，server 同源提供静态资源、HTTP API 和 WebSocket；不配置远程 Base URL，也不应把 `bind_address` 暴露到不受信任网络。
 
-默认连接：
-
-- HTTP：`http://127.0.0.1:8000`
-- WebSocket：`ws://127.0.0.1:8000/ws`
-
-如果要改地址：
-
-```bash
-export POISE_BASE_URL=http://127.0.0.1:9000
-cargo run -p poise-tui
-```
+控制台分为总览、Track 和系统：总览展示 readiness、账户和 Track 摘要；Track 展示运行状态、配置、活动与人工命令；系统展示实例诊断。配置编辑以 server 当前 active 配置为起点，先请求预览，再以版本号保存并应用；应用会保留可见状态，必要时可恢复或放弃中断的应用。人工命令、配置预览和应用都由 server 验证、持久化并进入既有 runtime 路径，前端不直接访问交易所或写入实例文件。
 
 ### 6. HTTP 快速确认
 
@@ -301,13 +288,15 @@ curl http://127.0.0.1:8000/debug/tracks/btc-core/recent-fills-audit
 - `GET /debug/tracks/:id/recent-fills-audit`
 - `GET /ws`
 
+控制台还使用 `GET` / `POST` / `PUT` / `DELETE` 的 `/tracks/:id/configuration`、`/tracks/:id/configuration/preview` 与配置应用状态入口；路由和 DTO 的精确形状以 [server/src/http.rs](server/src/http.rs) 与 [protocol/src/lib.rs](protocol/src/lib.rs) 为准。
+
 协议 DTO 以 [protocol/src/lib.rs](protocol/src/lib.rs) 和序列化测试为准，不再维护单独协议文档。
 
 `/health` 用于查看进程、track 和 runtime task 的观测状态；`/readiness` 判断当前实例是否具备交易条件，并明确返回 blockers 与 warnings。两者语义不同，HTTP 200 不能互相替代。
 
 ## zellij 值守
 
-本地连续跑测试网实例时，可以用仓库里的 zellij 脚本托管 server、TUI 和 trading readiness probe。
+本地连续跑测试网实例时，可以用仓库里的 zellij 脚本托管 server 和 trading readiness probe；控制台由 server 同源提供。
 
 ```bash
 export POISE_INSTANCE_DIR="$HOME/poise-instances/testnet"
@@ -321,7 +310,6 @@ export POISE_INSTANCE_DIR="$HOME/poise-instances/testnet"
 export POISE_BASE_URL=http://127.0.0.1:8000
 export POISE_LOG_DIR="$HOME/poise-instances/testnet/.logs"
 export POISE_HEALTH_FAILURE_THRESHOLD=3
-export POISE_TUI_LOG="$HOME/poise-instances/testnet/.logs/poise-tui.log"
 export POISE_ZELLIJ_SESSION_NAME=poise-testnet
 ./scripts/start-instance-zellij.sh
 ```
@@ -337,7 +325,6 @@ POISE_ZELLIJ_ATTACH=1 ./scripts/start-instance-zellij.sh
 日志默认写到 `<instance-dir>/.logs/`：
 
 - `poise-server.log`
-- `poise-tui.log`
 - `health-probe.log`
 
 只看脚本参数，不启动：
@@ -345,7 +332,6 @@ POISE_ZELLIJ_ATTACH=1 ./scripts/start-instance-zellij.sh
 ```bash
 POISE_INSTANCE_DIR="$HOME/poise-instances/testnet" ./scripts/start-instance-zellij.sh --dry-run
 POISE_INSTANCE_DIR="$HOME/poise-instances/testnet" ./scripts/run-instance-server.sh --dry-run
-POISE_INSTANCE_DIR="$HOME/poise-instances/testnet" ./scripts/run-instance-tui.sh --dry-run
 POISE_BASE_URL=http://127.0.0.1:8000 ./scripts/probe-health.sh --check health --dry-run
 POISE_BASE_URL=http://127.0.0.1:8000 ./scripts/probe-health.sh --check readiness --dry-run
 ```
@@ -360,10 +346,4 @@ cargo test -p poise-engine
 cargo test -p poise-application
 cargo test -p poise-hyperliquid
 cargo test -p poise-server
-cargo test -p poise-tui
-cargo test -p poise-track-tuning-workbench
-(cd tools/track-tuning-workbench && pnpm test)
-(cd tools/track-tuning-workbench && pnpm build)
 ```
-
-Workbench 把 core 的 curve-immediate benchmark 与 engine 的 delayed decision replay 并列展示。前者在曲线目标变化达到 `min_rebalance_units` 后按简化 taker 假设立即跟到目标，是理论基准，不是完整策略、决策或撮合回放。

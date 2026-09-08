@@ -23,8 +23,8 @@ Poise 目前按知识边界分层，而不是按启动步骤分层。
 - `storage/` 是 SQLite 适配层，只实现 application 定义的持久化 port。
 - `exchanges/binance/`、`exchanges/bybit/`、`exchanges/hyperliquid/` 和 `exchanges/okx/` 各自封装交易所协议、鉴权、REST / WebSocket 映射和窄控制 helper。
 - `server/` 拥有配置解析、启动装配、交易所选择、HTTP / WebSocket、runtime task 和进程级状态。
-- `protocol/` 拥有 `server` 与 `tui` 共享的 wire DTO。
-- `tui/` 是本地值守界面，只依赖 HTTP / WebSocket 协议。
+- `protocol/` 拥有 server 对同源本地 Web 控制台公开的 HTTP / WebSocket wire DTO。
+- `web/` 是唯一用户界面的静态前端；由 server 在 loopback 地址同源提供，只展示和提交 server-owned DTO。
 
 当前静态 track 定义链路是：
 
@@ -51,8 +51,8 @@ TrackDefinition + InstrumentSpec
 5. storage 闭环：`application/` 定义持久化 port，`storage/` 只实现当前 SQLite schema。SQLite 保存 identity、durable control、events、PNL 明细和 best-effort effect journal；不保存 session state，也不从 journal 恢复派发。
 6. 交易所闭环：每个 `exchanges/<venue>/` 在私有模块完成签名、REST / WebSocket DTO、symbol、账户模式、metadata 和 wire/canonical 转换，通过 `connected.rs` 输出同一组 `ExchangePorts`。
 7. server 装配闭环：`server::assembly` 在唯一一个 `ExchangeConfig` 分支中得到匹配的 ports 与 startup control，加载并验证每个 `InstrumentSpec`，建立 `TradingRuntime`，再启动 runtime task 和 HTTP / WebSocket。
-8. 查询和协议闭环：`TradingQueries` 只组合 committed runtime snapshot 与持久历史；`server` projector 只做协议映射；`protocol/` 和 `tui/` 不重算目标、名义价值或 PNL。
-9. 工具闭环：`engine::decision_evaluation` 是两条 lane 比较和评估指标的唯一 owner，内部组合 `core` benchmark 与真实 manager decision replay。Workbench 的 Tauri Rust 层只构造明确的 `InstrumentSpec` fixture、场景和时间窗口，调用 evaluator 并投影工具 DTO；TypeScript 只负责交互和展示，不保留计算 fallback。
+8. 查询、协议和控制台闭环：`TradingQueries` 只组合 committed runtime snapshot 与持久历史；`server` projector 只做协议映射；`protocol/` 和 `web/` 不重算目标、名义价值或 PNL。server 同源提供控制台、HTTP API 与 WebSocket；控制台不直接访问交易所、写实例配置或另行拥有运行状态。
+9. 在线配置闭环：server 从当前 active 配置构造候选定义，使用 committed runtime、instrument 与账户事实预览影响；通过版本化请求持久化并应用，随后由既有 runtime 调整仓位。配置应用状态是 server-owned durable 事实，前端只显示进度、恢复或放弃可恢复的中断应用。
 
 这个顺序把最难变的领域语义先固定，再逐步接入可替换的外部世界。它避免两个常见问题：按技术层拆出一批不可验证的半成品；或者让交易所、UI、配置层反向决定 engine 的运行语义。
 
@@ -108,6 +108,18 @@ external fact / command / effect result
 当前交易所接入只覆盖 Poise 运行需要的合约能力。Hyperliquid 适配器只接入 perpetuals，不提供 spot、提现、划转、TWAP 或 vault 运维功能；可选 `vault_address` 只作为 Hyperliquid action 签名上下文进入适配器内部。Hyperliquid 默认 perpetuals 和 HIP-3 perpetuals 可以在同一实例中混配，适配器按 symbol 解析默认 dex 或 `{dex}:{coin}` HIP-3 dex 上下文；账户资产按 Hyperliquid 账户级共享余额处理。Hyperliquid standard mode 使用账户级 perps `clearinghouseState.withdrawable` 作为可用保证金口径；unified account / portfolio margin 使用 `spotClearinghouseState` 的 USDC 可用余额作为启动容量口径。OKX 适配器只接入 `SWAP` 永续合约，REST 覆盖规则查询、账户摘要、持仓、open orders、下单、撤单、cancel all 和启动期杠杆设置；WebSocket 覆盖 ticker、mark price、订单更新、成交 PNL、持仓更新、断线重连和重订阅。OKX 当前只支持 `cross` 保证金模式和 `net` 持仓模式，不提供 spot、期权、划转、提现或资金账户操作。
 
 `TrackSpec::to_track_definition(venue)` 负责把配置字段投影为 `TrackDefinition`，并触发 core 层策略、风险和默认值校验。
+
+## 本地 Web 控制台与在线配置应用
+
+server 在 loopback 地址同源提供唯一的本地 Web 控制台、HTTP API 和 WebSocket。控制台包含总览、Track 与系统页；它只显示 committed DTO 并提交命令或候选配置，不计算策略、风险、数量、名义价值或 PNL，不直接访问交易所、写入实例文件或拥有另一套运行状态。`bind_address` 不是远程控制面，不应暴露到不受信任网络。
+
+Track 配置接口把字段分成两类：价格带、exposure、`notional_per_unit`、风险限制、曲线、带外策略和 acquisition 参数可在线编辑；identity、instrument、交易所凭证、`leverage` 与 `tick_timeout_secs` 是 restart-required 事实。在线编辑先从 active 定义生成候选，使用当前 committed position、有效行情、`InstrumentSpec` 和账户容量预览策略、风险、quantity、notional 与阻塞原因。预览纯只读，缺少必要事实、配置非法、资产不匹配、venue minimum 或容量不足时失败关闭。
+
+保存并应用请求同时携带 active 配置版本和 `application_id`。server 拒绝 stale version、外部文件变更、不同 application 的并发请求、terminated Track 与 recovery anomaly；同一 `application_id` 且请求内容相同可安全重试，避免 HTTP 响应不确定时重复应用。应用状态是 durable audit：`preparing`、`waiting_for_orders`、`activating`、`active` 或 `failed`，控制台通过 HTTP 和 WebSocket 重新取得它，不把浏览器状态当事实源。
+
+接受应用后，server 先关闭该 Track 的新 submit，并取消或等待旧 active、pending 和 outcome-unknown order 的所有权。只有完整的交易所 orders/position 权威快照证明旧 bindings、未知 submit 和 recovery anomaly 已解决，才原子 patch `config.toml` 并安装新定义；随后按新定义重新解释 quantity/exposure，走正常决策与执行路径。暂停、人工 flatten/控制和 terminated 状态不会因配置应用被隐式恢复自动交易。文件替换前失败时，旧配置与旧定义保持或恢复；文件已替换后的安装或审计失败保留 `activating` blocker 与 submit gate，等待重启从新配置 fresh-start，不回滚旧文件。
+
+重启以 `config.toml` 和 durable application audit 判断已经 active 或在文件替换前中断的应用；随后从交易所权威事实 fresh-start，不恢复旧 application session、旧 bindings 或 effect queue。文件已替换时以新配置启动，未替换时继续使用旧配置。
 
 ## 交易所接入边界
 
@@ -169,7 +181,7 @@ dry-run 对每个 track 解释 canonical position quantity：`PositionBasis::Bas
 
 `engine::decision_replay` 才是 delayed decision path 的确定性 runner。它把带时间戳的行情、仓位、订单事实和 restart action 输入真实 `TrackManager -> reconciler -> executor` 路径，再用小型确定性交换所解释公开 effects。每个 step 报告 manager 真正 committed 的 `InventoryDecisionSnapshot`、submit/cancel/fill、实际 release trigger 和模拟仓位；稳定 order reference 只属于报告语义。`ImmediateFullAtOrderPrice` 只会在订单已经 marketable 时合成全成，`NeverFill` 只保留 working order；两者都不是对排队、滑点或成交概率的预测。
 
-`engine::decision_evaluation` 用同一份 `TrackDefinition`、`InstrumentSpec`、初始仓位和时间窗口组合 curve-immediate benchmark 与 delayed decision replay，统一计算 tracking error、backlog、authorized-but-unfilled gap、release、成交价格、换手、费用、最大名义、保证金和 restart sensitivity。Workbench 的 Rust 后端负责构造明确的 spec fixture 与场景、调用 evaluator 并投影 DTO；TypeScript 不提供计算 fallback。工具结果是离线评估，不反向写入 runtime 或 persistence。
+`engine::configuration_preview` 使用当前 committed runtime、`InstrumentSpec`、账户容量和候选 `TrackDefinition` 计算在线配置预览。它返回候选策略与风险结果、数量和名义影响以及阻塞原因；预览不写入 runtime 或 persistence，也不能代替版本化配置应用。应用请求由 server 验证、持久化并进入既有 runtime 路径，前端不提供计算 fallback。
 
 ### 在线决策链
 
@@ -194,7 +206,7 @@ ownership 固定如下：
 - `core::strategy` 拥有曲线公式；`engine::reconciler` 是四层目标和 risk acquisition 的唯一计算 owner。
 - executor 只接收 `risk_approved_target` 与 `execution_target`，结合当前仓位、盘口、`InstrumentSpec` 和已有 bindings 生成 order plan 与执行原因；它不读取 acquisition frontier，也不重算 backlog。
 - manager 把 reconciler 结果和 executor 结果组合成一次 `InventoryDecisionSnapshot`，选择一个主 `DecisionReason`，并在提交该次 runtime/executor 变化时让 decision revision 严格递增一次。
-- `TrackRuntimeView`、application read model、server projector、protocol、TUI 和 Server live inspector 只投影 committed snapshot。它们不能从其他零散字段、risk acquisition 诊断或 binding 状态重新运行决策链。等待行情、行情 stale 或暂停时，对外目标不可用，并通过 `DecisionReason` 显式说明。
+- `TrackRuntimeView`、application read model、server projector、protocol 和 Web 控制台只投影 committed snapshot。它们不能从其他零散字段、risk acquisition 诊断或 binding 状态重新运行决策链。等待行情、行情 stale 或暂停时，对外目标不可用，并通过 `DecisionReason` 显式说明。
 
 策略价格：
 

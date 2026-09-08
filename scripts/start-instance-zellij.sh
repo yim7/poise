@@ -83,7 +83,6 @@ export POISE_LOG_DIR="$LOG_DIR"
 export POISE_REPO_ROOT="$REPO_ROOT"
 export POISE_SERVER_LOG="${POISE_SERVER_LOG:-${LOG_DIR}/poise-server.log}"
 export POISE_HEALTH_LOG="${POISE_HEALTH_LOG:-${LOG_DIR}/health-probe.log}"
-export POISE_TUI_LOG="${POISE_TUI_LOG:-${LOG_DIR}/poise-tui.log}"
 
 zellij_session_is_active() {
   local candidate
