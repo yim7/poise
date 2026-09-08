@@ -36,8 +36,8 @@ use crate::runtime::{
     RuntimeHandles, RuntimeHealth, RuntimeStartupDefinition, ServerRuntime, TrackReconcileGuards,
 };
 use crate::server_context::{
-    EffectWorkerState, HttpState, ReconcileState, RuntimeState, TrackConfigurationMetadata,
-    WebSocketState,
+    EffectWorkerState, HttpState, ReconcileState, RuntimeState, SystemInfo,
+    TrackConfigurationMetadata, WebSocketState,
 };
 use crate::startup_preparation::{
     ExchangeStartupControl, TrackLeverageIndex, apply_exchange_startup_controls,
@@ -292,6 +292,7 @@ async fn assemble_with_state_store(
         reconcile_guards.clone(),
         recovery_dirty_state.clone(),
     );
+    let system_info = system_info(config, configuration_path.as_deref());
     let configuration_store = match (configuration_path, repositories.configuration_storage()) {
         (Some(path), Some(storage)) => Some(Arc::new(
             crate::config_persistence::ConfigurationApplicationStoreAdapter::new(path, storage)?,
@@ -331,6 +332,7 @@ async fn assemble_with_state_store(
         recent_fills_auditor.clone(),
         configuration_metadata,
         configuration_store,
+        system_info,
     );
     let websocket_state = build_websocket_state(
         notifications.clone(),
@@ -455,6 +457,7 @@ pub(crate) fn build_http_state(
     configuration_store: Option<
         Arc<crate::config_persistence::ConfigurationApplicationStoreAdapter>,
     >,
+    system_info: SystemInfo,
 ) -> HttpState {
     HttpState {
         runtime,
@@ -471,7 +474,70 @@ pub(crate) fn build_http_state(
         recent_fills_auditor,
         configuration_metadata,
         configuration_store,
+        system_info,
     }
+}
+
+fn system_info(config: &Config, configuration_path: Option<&std::path::Path>) -> SystemInfo {
+    let (exchange, deployment, credentials_configured) = match &config.exchange {
+        ExchangeConfig::Binance(exchange) => (
+            "binance",
+            match exchange.deployment {
+                poise_binance::Deployment::Mainnet => "mainnet",
+                poise_binance::Deployment::Testnet => "testnet",
+                poise_binance::Deployment::Custom { .. } => "custom",
+            },
+            configured(&[exchange.api_key.as_deref(), exchange.api_secret.as_deref()]),
+        ),
+        ExchangeConfig::Bybit(exchange) => (
+            "bybit",
+            match exchange.deployment {
+                poise_bybit::Deployment::Mainnet => "mainnet",
+                poise_bybit::Deployment::Testnet => "testnet",
+            },
+            configured(&[exchange.api_key.as_deref(), exchange.api_secret.as_deref()]),
+        ),
+        ExchangeConfig::Hyperliquid(exchange) => (
+            "hyperliquid",
+            match exchange.deployment {
+                poise_hyperliquid::Deployment::Mainnet => "mainnet",
+                poise_hyperliquid::Deployment::Testnet => "testnet",
+            },
+            configured(&[
+                exchange.private_key.as_deref(),
+                exchange.wallet_address.as_deref(),
+            ]),
+        ),
+        ExchangeConfig::Okx(exchange) => (
+            "okx",
+            match exchange.deployment {
+                poise_okx::Deployment::Mainnet => "mainnet",
+                poise_okx::Deployment::Demo => "demo",
+            },
+            configured(&[
+                exchange.api_key.as_deref(),
+                exchange.api_secret.as_deref(),
+                exchange.passphrase.as_deref(),
+            ]),
+        ),
+    };
+    SystemInfo {
+        exchange: exchange.to_string(),
+        deployment: deployment.to_string(),
+        instance_directory: configuration_path
+            .and_then(std::path::Path::parent)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "test-instance".to_string()),
+        server_version: env!("CARGO_PKG_VERSION").to_string(),
+        bind_address: config.bind_address.clone(),
+        credentials_configured,
+    }
+}
+
+fn configured(values: &[Option<&str>]) -> bool {
+    values
+        .iter()
+        .all(|value| value.is_some_and(|value| !value.trim().is_empty()))
 }
 
 pub(crate) fn build_websocket_state(

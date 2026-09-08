@@ -107,6 +107,17 @@ pub struct TradingReadinessResponse {
     pub warnings: Vec<ReadinessIssueView>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SystemInfoResponse {
+    pub exchange: String,
+    pub deployment: String,
+    pub instance_directory: String,
+    pub server_version: String,
+    pub bind_address: String,
+    pub credentials_configured: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecentFillCoverageView {
@@ -1138,11 +1149,11 @@ mod tests {
         PriceExecutionBlockReasonView, ReadinessIssueView, RecentFillsAuditResponse,
         RecentPnlAvailabilityView, RiskAcquisitionConfigView, RiskAcquisitionDirectionView,
         RiskAcquisitionView, RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView,
-        StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
-        TrackConfigurationApplicationStatusView, TrackConfigurationApplicationView,
-        TrackConfigurationPreviewResponse, TrackDetailView, TrackDiagnosticsView,
-        TrackExecutionView, TrackListItemView, TrackListResponse, TrackLiveView, TrackStatus,
-        TradingReadinessResponse,
+        StreamEvent, SystemInfoResponse, TrackCommandAccepted, TrackCommandRequest,
+        TrackCommandType, TrackConfigurationApplicationStatusView,
+        TrackConfigurationApplicationView, TrackConfigurationPreviewResponse, TrackDetailView,
+        TrackDiagnosticsView, TrackExecutionView, TrackListItemView, TrackListResponse,
+        TrackLiveView, TrackStatus, TradingReadinessResponse,
     };
 
     #[test]
@@ -1979,6 +1990,22 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&application).unwrap(),
             r#"{"application_id":"apply-restart","status":"failed","accepted":false,"retryable":true,"message":"retry with the same application ID","active_version":null}"#
+        );
+    }
+
+    #[test]
+    fn system_info_wire_has_only_safe_environment_metadata() {
+        let response = SystemInfoResponse {
+            exchange: "binance".to_string(),
+            deployment: "testnet".to_string(),
+            instance_directory: "/var/lib/poise/demo".to_string(),
+            server_version: "0.1.0".to_string(),
+            bind_address: "127.0.0.1:8000".to_string(),
+            credentials_configured: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&response).unwrap(),
+            r#"{"exchange":"binance","deployment":"testnet","instance_directory":"/var/lib/poise/demo","server_version":"0.1.0","bind_address":"127.0.0.1:8000","credentials_configured":true}"#
         );
     }
 }

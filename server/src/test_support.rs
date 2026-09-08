@@ -534,6 +534,14 @@ pub(crate) fn build_http_state(
             },
         )])),
         None,
+        crate::server_context::SystemInfo {
+            exchange: "binance".to_string(),
+            deployment: "testnet".to_string(),
+            instance_directory: "test-instance".to_string(),
+            server_version: env!("CARGO_PKG_VERSION").to_string(),
+            bind_address: "127.0.0.1:0".to_string(),
+            credentials_configured: true,
+        },
     )
 }
 

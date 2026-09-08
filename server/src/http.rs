@@ -17,7 +17,7 @@ use poise_protocol::{
     InstrumentView, PnlBackfillStatusView, PnlHistoryWindowView, ReadinessIssueView,
     RecentFillAuditItemView, RecentFillCoverageView, RecentFillsAuditResponse,
     RecentPnlAvailabilityView, RecentPnlCompletenessView, RiskAcquisitionConfigView, ShapeFamily,
-    TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
+    SystemInfoResponse, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
     TrackConfigurationApplicationStatusView, TrackConfigurationApplyRequest,
     TrackConfigurationBlockerView, TrackConfigurationCapacityProofView,
     TrackConfigurationFieldErrorView, TrackConfigurationIdentityView, TrackConfigurationImpactView,
@@ -60,6 +60,7 @@ pub(crate) fn router_with_web_root(
     Router::new()
         .route("/health", get(health))
         .route("/readiness", get(readiness))
+        .route("/system", get(get_system))
         .route("/account", get(get_account))
         .route("/tracks", get(list_tracks))
         .route("/tracks/:id", get(get_track_detail))
@@ -127,6 +128,17 @@ async fn readiness(
         StatusCode::SERVICE_UNAVAILABLE
     };
     Ok((status, Json(response)))
+}
+
+async fn get_system(State(state): State<HttpState>) -> Json<SystemInfoResponse> {
+    Json(SystemInfoResponse {
+        exchange: state.system_info.exchange.clone(),
+        deployment: state.system_info.deployment.clone(),
+        instance_directory: state.system_info.instance_directory.clone(),
+        server_version: state.system_info.server_version.clone(),
+        bind_address: state.system_info.bind_address.clone(),
+        credentials_configured: state.system_info.credentials_configured,
+    })
 }
 
 async fn list_tracks(
@@ -1603,6 +1615,14 @@ mod tests {
                 Arc::new(RecentFillsAuditor::new(account, query_store.clone())),
                 Arc::new(std::collections::HashMap::new()),
                 None,
+                crate::server_context::SystemInfo {
+                    exchange: "binance".to_string(),
+                    deployment: "testnet".to_string(),
+                    instance_directory: "test-instance".to_string(),
+                    server_version: env!("CARGO_PKG_VERSION").to_string(),
+                    bind_address: "127.0.0.1:0".to_string(),
+                    credentials_configured: true,
+                },
             ),
             websocket_state: build_websocket_state(
                 &services,
@@ -1878,6 +1898,30 @@ mod tests {
         assert_eq!(first["active"]["notional_per_unit"], 375.0);
         assert!(first.get("exchange").is_none());
         assert!(first.get("secret").is_none());
+    }
+
+    #[tokio::test]
+    async fn system_returns_safe_instance_metadata_without_credentials() {
+        let response = router(app_state().await)
+            .oneshot(
+                Request::builder()
+                    .uri("/system")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["exchange"], "binance");
+        assert_eq!(value["deployment"], "testnet");
+        assert_eq!(value["credentials_configured"], true);
+        let serialized = String::from_utf8(body.to_vec()).unwrap();
+        for sensitive in ["test-key", "test-secret", "api_key", "api_secret"] {
+            assert!(!serialized.contains(sensitive), "leaked {sensitive}");
+        }
     }
 
     #[tokio::test]

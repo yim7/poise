@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { AccountSummaryView, BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy, ExecutionBindingView, StreamEvent, TrackActivityItemView, TrackConfigurationActiveView, TrackConfigurationApplicationStatus, TrackConfigurationApplicationView, TrackConfigurationPreviewResponse, TrackConfigurationResponse, TrackDetailView, TrackListItemView, TrackListResponse, TradingReadinessResponse } from './types'
+import type { AccountSummaryView, BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy, ExecutionBindingView, HealthResponse, StreamEvent, SystemResponse, TrackActivityItemView, TrackCommandType, TrackConfigurationActiveView, TrackConfigurationApplicationStatus, TrackConfigurationApplicationView, TrackConfigurationPreviewResponse, TrackConfigurationResponse, TrackDetailView, TrackDiagnosticsView, TrackListItemView, TrackListResponse, TradingReadinessResponse } from './types'
 
 const chineseReason: Record<string, { title: string; detail: string }> = {
   waiting_risk_release: { title: '等待风险释放', detail: '策略希望建立目标仓位。风险目标已经批准，但当前 session 尚未释放新增风险，因此暂不下单。' },
@@ -29,6 +29,12 @@ function title(value: unknown) {
 function applicationStatusLabel(value: TrackConfigurationResponse['application_status']) {
   return ({ idle: '空闲', preparing: '准备中', waiting_for_orders: '等待订单完成', activating: '正在启用', active: '已生效', failed: '失败' } as const)[value]
 }
+function deploymentLabel(value: string | null | undefined) {
+  if (value === 'mainnet') return 'MAINNET 主网'
+  if (value === 'testnet') return 'TESTNET 测试网'
+  if (value === 'demo') return 'DEMO'
+  return value ?? '环境未知'
+}
 function policyStateLabel(value: 'in_band' | 'frozen' | 'flattening' | 'flatten_pending' | 'terminated') {
   return ({ in_band: '区间内', frozen: '已冻结', flattening: '正在平仓', flatten_pending: '等待平仓', terminated: '已终止' } as const)[value]
 }
@@ -46,6 +52,12 @@ async function get<T>(path: string, init?: RequestInit) {
   return response.json() as Promise<T>
 }
 
+async function getStatus<T>(path: string) {
+  const response = await fetch(path)
+  if (response.status !== 200 && response.status !== 503) throw new Error(`${path} ${response.status}`)
+  return response.json() as Promise<T>
+}
+
 function websocketUrl() {
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
 }
@@ -55,6 +67,7 @@ export function App() {
   const [account, setAccount] = useState<AccountSummaryView | null>(null)
   const [tracks, setTracks] = useState<TrackListItemView[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [systemOpen, setSystemOpen] = useState(false)
   const [detail, setDetail] = useState<TrackDetailView | null>(null)
   const [detailRequestVersion, setDetailRequestVersion] = useState(0)
   const selectedIdRef = useRef<string | null>(null)
@@ -63,11 +76,16 @@ export function App() {
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
   const [configurationRefreshVersion, setConfigurationRefreshVersion] = useState(0)
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
+  const [deployment, setDeployment] = useState<string | null>(null)
+
+  const refreshSystem = () => {
+    void get<SystemResponse>('/system').then(value => setDeployment(value.deployment)).catch(() => setDeployment(null))
+  }
 
   const refresh = async () => {
     try {
       const [nextReadiness, nextAccount, trackList] = await Promise.all([
-        get<TradingReadinessResponse>('/readiness'),
+        getStatus<TradingReadinessResponse>('/readiness'),
         get<AccountSummaryView>('/account'),
         get<TrackListResponse>('/tracks'),
       ])
@@ -76,6 +94,7 @@ export function App() {
   }
 
   useEffect(() => { void refresh() }, [])
+  useEffect(() => { refreshSystem() }, [])
   useEffect(() => {
     let stopped = false
     let attempts = 0
@@ -109,6 +128,7 @@ export function App() {
         reconnectTimer = null
         setConnection('connected')
         void refresh()
+        refreshSystem()
         setConfigurationRefreshVersion(version => version + 1)
         if (selectedIdRef.current) {
           setDetailRequestVersion(version => version + 1)
@@ -158,7 +178,7 @@ export function App() {
   }, [])
   useEffect(() => {
     const timer = window.setInterval(() => {
-      void get<TradingReadinessResponse>('/readiness').then(value => { setReadiness(value); setReadinessPollError(false); setUpdatedAt(new Date()) }).catch(() => setReadinessPollError(true))
+    void getStatus<TradingReadinessResponse>('/readiness').then(value => { setReadiness(value); setReadinessPollError(false); setUpdatedAt(new Date()) }).catch(() => setReadinessPollError(true))
     }, 10_000)
     return () => window.clearInterval(timer)
   }, [])
@@ -178,6 +198,7 @@ export function App() {
     selectedIdRef.current = id
     setDetail(null)
     setError(false)
+    setSystemOpen(false)
     setSelectedId(id)
   }
   const retry = () => {
@@ -196,10 +217,10 @@ export function App() {
   const lastUpdated = useMemo(() => updatedAt ? updatedAt.toLocaleTimeString('zh-CN') : '—', [updatedAt])
 
   return <main>
-    <header className="topbar"><div><strong>Poise</strong><span>{status}</span></div><div><span className={connection === 'connected' ? 'connection online' : 'connection'}>{connectionLabel}</span><span>更新于 {lastUpdated}</span></div></header>
+    <header className="topbar"><div><strong>Poise</strong><span>{status}</span><span className={deployment === 'mainnet' ? 'deployment-mainnet' : 'deployment'}>环境 {deploymentLabel(deployment)}</span></div><div><span className={connection === 'connected' ? 'connection online' : 'connection'}>{connectionLabel}</span><span>更新于 {lastUpdated}</span></div></header>
     {(error || readinessPollError) && <div role="alert" className="alert"><strong>无法读取运行状态</strong><span>请确认本地 server 正在运行后重试。</span><button onClick={retry}>重试</button></div>}
-    <div className="layout"><aside><button className={!selectedId ? 'nav active' : 'nav'} onClick={() => selectTrack(null)}>总览</button><p>Tracks</p>{tracks.map(track => <button key={track.id} className={selectedId === track.id ? 'track active' : 'track'} onClick={() => selectTrack(track.id)}><strong>{track.id}</strong><small>{track.instrument?.symbol} · {title(track.lifecycle?.status)}</small></button>)}</aside>
-    <section className="content">{selectedId ? detail ? <TrackPage key={detail.identity.id} detail={detail} configurationRefreshVersion={configurationRefreshVersion} /> : <h1>Track 载入中</h1> : <Overview readiness={readiness} account={account} tracks={tracks} onSelect={selectTrack} />}</section></div>
+    <div className="layout"><aside><button className={!selectedId && !systemOpen ? 'nav active' : 'nav'} onClick={() => selectTrack(null)}>总览</button><p>Tracks</p>{tracks.map(track => <button key={track.id} className={selectedId === track.id ? 'track active' : 'track'} onClick={() => selectTrack(track.id)}><strong>{track.id}</strong><small>{track.instrument?.symbol} · {title(track.lifecycle?.status)}</small></button>)}<button className={systemOpen ? 'nav active' : 'nav'} onClick={() => { selectedIdRef.current = null; setSelectedId(null); setSystemOpen(true) }}>系统</button></aside>
+    <section className="content">{systemOpen ? <SystemPanel readiness={readiness} /> : selectedId ? detail ? <TrackPage key={detail.identity.id} detail={detail} configurationRefreshVersion={configurationRefreshVersion} onDetail={setDetail} /> : <h1>Track 载入中</h1> : <Overview readiness={readiness} account={account} tracks={tracks} onSelect={selectTrack} />}</section></div>
   </main>
 }
 
@@ -212,18 +233,26 @@ function Overview({ readiness, account, tracks, onSelect }: { readiness: Trading
   </>
 }
 
-function TrackPage({ detail, configurationRefreshVersion }: { detail: TrackDetailView; configurationRefreshVersion: number }) {
+function SystemPanel({ readiness }: { readiness: TradingReadinessResponse | null }) {
+  const [health, setHealth] = useState<HealthResponse | null>(null)
+  const [system, setSystem] = useState<SystemResponse | null>(null)
+  const [error, setError] = useState(false)
+  useEffect(() => { let alive = true; void Promise.all([getStatus<HealthResponse>('/health'), get<SystemResponse>('/system')]).then(([nextHealth, nextSystem]) => { if (alive) { setHealth(nextHealth); setSystem(nextSystem) } }).catch(() => { if (alive) setError(true) }); return () => { alive = false } }, [])
+  return <><h1>系统</h1><p className="explanation">Health 反映运行任务是否健康；trading readiness 反映当前是否具备交易条件，两者并不等价。</p>{error && <div role="alert" className="alert">无法读取系统状态。</div>}<div className="two-column"><article><h2>Health</h2><p>{health?.status ?? '载入中'}</p><p>需要关注 Track：{health?.attention_required_count ?? '—'}</p></article><article><h2>Trading readiness</h2><p>{readiness?.ready_to_trade ? '可以交易' : '暂不可交易'}</p>{readiness?.blockers[0] && <p>{readiness.blockers[0].reason}</p>}</article></div><article><h2>运行任务</h2>{health?.tasks ? <ul>{health.tasks.map(task => <li key={task.component}><strong>{task.component} · {title(task.status)}</strong>{task.last_error && <span>{task.last_error}</span>}</li>)}</ul> : <p>载入中。</p>}</article><article><h2>实例信息</h2>{system ? <dl><div><dt>交易所</dt><dd>{system.exchange}</dd></div><div><dt>环境</dt><dd>{deploymentLabel(system.deployment)}</dd></div><div><dt>实例目录</dt><dd>{system.instance_directory}</dd></div><div><dt>Server 版本</dt><dd>{system.server_version}</dd></div><div><dt>监听地址</dt><dd>{system.bind_address}</dd></div><div><dt>凭证</dt><dd>{system.credentials_configured ? '已配置' : '缺失'}</dd></div></dl> : <p>载入中。</p>}</article></>
+}
+
+function TrackPage({ detail, configurationRefreshVersion, onDetail }: { detail: TrackDetailView; configurationRefreshVersion: number; onDetail: (detail: TrackDetailView) => void }) {
   const [tab, setTab] = useState<'运行' | '配置' | '活动'>('运行')
   return <><div className="track-tabs" role="tablist" aria-label="Track 工作区">
     {(['运行', '配置', '活动'] as const).map(item => <button key={item} role="tab" aria-selected={tab === item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>{item}</button>)}
   </div>
-  {tab === '运行' && <TrackRunPanel detail={detail} />}
+  {tab === '运行' && <TrackRunPanel detail={detail} onDetail={onDetail} />}
   {tab === '配置' && <ConfigurationPanel key={detail.identity.id} trackId={detail.identity.id} refreshVersion={configurationRefreshVersion} />}
-  {tab === '活动' && <ActivityPanel activity={detail.activity} />}
+  {tab === '活动' && <ActivityPanel trackId={detail.identity.id} activity={detail.activity} />}
   </>
 }
 
-function TrackRunPanel({ detail }: { detail: TrackDetailView }) {
+function TrackRunPanel({ detail, onDetail }: { detail: TrackDetailView; onDetail: (detail: TrackDetailView) => void }) {
   const decision = detail.decision ?? {}; const reason = chineseReason[decision.reason] ?? { title: title(decision.reason), detail: '请在诊断详情中查看原始状态。' }
   const targets = [['实际仓位', detail.position?.current_exposure], ['策略目标', decision.policy_target], ['风险批准目标', decision.risk_approved_target], ['风险释放边界', decision.acquisition_frontier], ['当前可执行目标', decision.execution_target]]
   return <><p className="eyebrow">{detail.identity?.instrument?.venue} · {detail.identity?.instrument?.symbol} · {title(detail.status?.lifecycle?.status)}</p><h1>{reason.title}</h1><p className="explanation">{reason.detail}</p>
@@ -232,12 +261,33 @@ function TrackRunPanel({ detail }: { detail: TrackDetailView }) {
     <article className="config-summary"><h2>配置摘要</h2><dl><div><dt>价格区间</dt><dd>{format(detail.strategy.lower_price, 2)} – {format(detail.strategy.upper_price, 2)}</dd></div><div><dt>最大多空 exposure</dt><dd>多 {format(detail.strategy.long_exposure_units)} / 空 {format(detail.strategy.short_exposure_units)}</dd></div><div><dt>每单位名义金额</dt><dd>{format(detail.strategy.notional_per_unit)}</dd></div><div><dt>区间外策略</dt><dd>{policy(detail.strategy.out_of_band_policy)}</dd></div><div><dt>最大名义金额</dt><dd>{format(detail.max_notional)}</dd></div></dl></article>
     <div className="two-column"><article><h2>Active bindings</h2>{detail.execution.bindings.length ? <ul>{detail.execution.bindings.map((binding: ExecutionBindingView) => <li key={binding.id}><strong>{binding.label}</strong><span>{title(binding.status)} · {title(binding.intent)}</span>{binding.order && <span>{title(binding.order.side)} {format(binding.order.quantity)} @ {format(binding.order.price, 2)}</span>}</li>)}</ul> : <p>当前没有 active binding。</p>}</article>
     <article><h2>PNL 摘要</h2><dl><div><dt>总 PNL</dt><dd>{format(detail.pnl?.total_pnl)} {detail.pnl?.pnl_asset ?? ''}</dd></div><div><dt>完整性</dt><dd>{title(detail.pnl?.completeness)}</dd></div>{(detail.pnl?.unvalued_cashflows ?? []).length > 0 && <div><dt>未估值 cashflow</dt><dd>{detail.pnl.unvalued_cashflows.length}</dd></div>}</dl></article></div>
+    <ManualCommands detail={detail} onDetail={onDetail} />
     <details><summary>诊断详情</summary><dl><div><dt>Decision reason</dt><dd>{title(decision.reason)}</dd></div><div><dt>Decision revision</dt><dd>{decision.revision ?? '—'}</dd></div><div><dt>生命周期更新时间</dt><dd>{detail.status?.lifecycle?.updated_at ?? '—'}</dd></div></dl></details>
   </>
 }
 
-function ActivityPanel({ activity }: { activity: TrackActivityItemView[] }) {
-  return <article><h2>活动</h2>{activity.length ? <ul>{activity.map(item => <li key={`${item.ts}:${item.message}`}><strong>{title(item.level)}</strong><span>{item.ts} · {item.message}</span></li>)}</ul> : <p>当前没有活动记录。</p>}</article>
+function ManualCommands({ detail, onDetail }: { detail: TrackDetailView; onDetail: (detail: TrackDetailView) => void }) {
+  const [confirming, setConfirming] = useState<TrackCommandType | null>(null)
+  const [sending, setSending] = useState(false)
+  const [error, setError] = useState(false)
+  const command = async (value: TrackCommandType) => {
+    setSending(true); setError(false)
+    try {
+      await get(`/tracks/${encodeURIComponent(detail.identity.id)}/commands`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: value }) })
+      setConfirming(null)
+      const next = await get<TrackDetailView>(`/tracks/${encodeURIComponent(detail.identity.id)}`)
+      onDetail(next)
+    } catch { setError(true) } finally { setSending(false) }
+  }
+  const labels: Record<TrackCommandType, string> = { pause: '暂停', resume: '恢复', flatten: '平仓', terminate: '终止' }
+  const quantityUnit = detail.position.quantity_unit === 'base_asset' ? `基础资产（${detail.identity.instrument.symbol}）` : detail.position.quantity_unit === 'contracts' ? '合约' : '—'
+  return <article><h2>人工操作</h2><p>可用性和禁用原因由 server 当前状态决定。</p><div className="config-actions">{detail.available_commands.map(item => <span key={item.command}><button disabled={!item.enabled || sending} onClick={() => item.command === 'flatten' || item.command === 'terminate' ? setConfirming(item.command) : void command(item.command)}>{labels[item.command]}</button>{!item.enabled && item.disabled_reason && <small>{item.disabled_reason}</small>}</span>)}</div>{error && <div role="alert" className="alert">命令未被确认；请等待 server 推送或重新载入。</div>}{confirming && <div role="dialog" aria-label={`确认${labels[confirming]}`} className="confirmation"><h2>确认{labels[confirming]}</h2><p>当前真实仓位 {format(detail.position.quantity)} {quantityUnit}，active binding {detail.execution.active_binding_count} 个。</p><p>{confirming === 'flatten' ? '将请求 server 把目标设为零；订单终态仍以 server 状态为准。' : '终止不可逆，Track 不会因更新配置而恢复。'}</p><button onClick={() => setConfirming(null)} disabled={sending}>取消</button><button onClick={() => void command(confirming)} disabled={sending}>确认{labels[confirming]}</button></div>}</article>
+}
+
+function ActivityPanel({ trackId, activity }: { trackId: string; activity: TrackActivityItemView[] }) {
+  const [diagnostics, setDiagnostics] = useState<TrackActivityItemView[] | null>(null)
+  useEffect(() => { let alive = true; void get<TrackDiagnosticsView>(`/debug/tracks/${encodeURIComponent(trackId)}/diagnostics`).then(value => { if (alive) setDiagnostics(value.items) }).catch(() => { if (alive) setDiagnostics([]) }); return () => { alive = false } }, [trackId])
+  return <><article><h2>活动</h2>{activity.length ? <ul>{activity.map(item => <li key={`${item.ts}:${item.message}`}><strong>{title(item.level)}</strong><span>{item.ts} · {item.message}</span></li>)}</ul> : <p>当前没有活动记录。</p>}</article><article><h2>诊断</h2>{diagnostics === null ? <p>诊断载入中。</p> : diagnostics.length ? <ul>{diagnostics.map(item => <li key={`${item.ts}:${item.message}`}><strong>{title(item.level)}</strong><span>{item.message}</span></li>)}</ul> : <p>当前没有诊断项。</p>}</article></>
 }
 
 type Draft = TrackConfigurationActiveView

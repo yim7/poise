@@ -34,6 +34,17 @@ pub struct HttpState {
     pub recent_fills_auditor: Arc<RecentFillsAuditor>,
     pub configuration_metadata: Arc<HashMap<String, TrackConfigurationMetadata>>,
     pub configuration_store: Option<Arc<ConfigurationApplicationStoreAdapter>>,
+    pub system_info: SystemInfo,
+}
+
+#[derive(Clone)]
+pub struct SystemInfo {
+    pub exchange: String,
+    pub deployment: String,
+    pub instance_directory: String,
+    pub server_version: String,
+    pub bind_address: String,
+    pub credentials_configured: bool,
 }
 
 #[derive(Clone, Copy)]

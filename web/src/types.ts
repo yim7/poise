@@ -114,7 +114,15 @@ export interface TrackDetailView {
   pnl: TrackPnlView
   execution: TrackExecutionView
   activity: TrackActivityItemView[]
+  available_commands: TrackCommandView[]
 }
+
+export type TrackCommandType = 'pause' | 'resume' | 'flatten' | 'terminate'
+export interface TrackCommandView { command: TrackCommandType; enabled: boolean; disabled_reason: string | null }
+export interface TrackDiagnosticsView { items: TrackActivityItemView[] }
+export interface HealthTaskView { component: string; status: string; last_success_at: string | null; last_error_at: string | null; last_error: string | null }
+export interface HealthResponse { status: string; track_count: number; attention_required_count: number; tasks: HealthTaskView[] }
+export interface SystemResponse { exchange: string; deployment: string; instance_directory: string; server_version: string; bind_address: string; credentials_configured: boolean }
 
 export interface RiskAcquisitionConfigurationView {
   initial_ratio: number
