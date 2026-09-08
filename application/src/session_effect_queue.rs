@@ -1048,6 +1048,35 @@ impl SessionEffectQueue {
             .retain(|_, pointer| &pointer.track_id != track_id);
         inner.advance_exchange_state_revision(track_id);
     }
+
+    /// Withdraws submit effects which have not received dispatch authority.
+    /// Their matching `SubmitPending` bindings can then be terminalized without
+    /// losing exchange ownership; authorized/in-flight submits are retained by
+    /// the engine as `CancelAfterSubmit`.
+    pub(crate) fn supersede_queued_submit_effects_for_track(
+        &self,
+        track_id: &TrackId,
+    ) -> Vec<String> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(track) = inner.tracks.get_mut(track_id) else {
+            return Vec::new();
+        };
+        let effect_ids = track
+            .batches
+            .iter()
+            .flat_map(|batch| batch.effects.iter())
+            .filter(|effect| {
+                matches!(effect.effect.effect, TrackEffect::SubmitOrder { .. })
+                    && matches!(effect.dispatch_state, QueuedEffectState::Queued)
+            })
+            .map(|effect| effect.effect.effect_id.clone())
+            .collect::<Vec<_>>();
+        for effect_id in &effect_ids {
+            inner.remove_effect(track_id, effect_id);
+        }
+        inner.mark_track_ready(track_id);
+        effect_ids
+    }
 }
 
 impl SessionEffectQueueInner {

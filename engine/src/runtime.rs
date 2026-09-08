@@ -499,6 +499,10 @@ pub struct TrackRuntime {
     pub(crate) last_tick_at: Option<DateTime<Utc>>,
     pub(crate) market_data_stale_since: Option<DateTime<Utc>>,
     pub(crate) tick_timeout_secs: u64,
+    // An accepted configuration application owns the old executor until its
+    // bindings have been authoritatively resolved.  This is deliberately
+    // runtime-only: an interrupted process starts a fresh exchange session.
+    pub(crate) configuration_application_pending: bool,
 }
 
 /// Reasons a configuration activation cannot safely replace the current session.
@@ -644,6 +648,7 @@ impl TrackRuntime {
             last_tick_at: None,
             market_data_stale_since: None,
             tick_timeout_secs,
+            configuration_application_pending: false,
         }
     }
 
@@ -704,6 +709,7 @@ impl TrackRuntime {
         next.executor_state = ExecutorState::empty(started_at)
             .ensure_revision(next.config(), next.current_exposure.clone());
         next.execution_gate_state = ExecutionGateState::open();
+        next.configuration_application_pending = false;
         next.out_of_band_since = None;
         next.advance_exchange_observation_revision();
         Ok(next)
@@ -711,6 +717,17 @@ impl TrackRuntime {
 
     pub fn config(&self) -> &TrackConfig {
         self.definition.track_config()
+    }
+
+    pub fn configuration_application_pending(&self) -> bool {
+        self.configuration_application_pending
+    }
+
+    pub fn has_active_executor_bindings(&self) -> bool {
+        self.executor_state
+            .bindings
+            .iter()
+            .any(LiveOrderBinding::is_active)
     }
 
     pub fn status(&self) -> TrackStatus {
@@ -1037,6 +1054,20 @@ impl TrackRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn has_executor_bindings(&self) -> bool {
         !self.executor_state.bindings.is_empty()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn executor_binding_statuses_for_test(&self) -> Vec<BindingStatus> {
+        self.executor_state
+            .bindings
+            .iter()
+            .map(|binding| binding.status)
+            .collect()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn configuration_application_pending_for_test(&self) -> bool {
+        self.configuration_application_pending
     }
 
     #[cfg(any(test, feature = "test-support"))]

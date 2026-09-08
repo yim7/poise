@@ -437,6 +437,42 @@ fn cancel_inventory_increasing_bindings(state: &mut ExecutorState) -> Vec<TrackE
     effects
 }
 
+/// Stops an entire executor session without discarding any ownership records.
+///
+/// Configuration replacement is stricter than a risk gate: both reducing and
+/// increasing orders belong to the old definition.  A submit which has not yet
+/// received an exchange identity is retained as `CancelAfterSubmit`; when its
+/// receipt arrives the normal recording path issues the cancel exactly once.
+pub(crate) fn cancel_all_bindings(state: &mut ExecutorState) -> Vec<TrackEffect> {
+    let mut effects = Vec::new();
+    for binding in &mut state.bindings {
+        match binding.status {
+            BindingStatus::SubmitPending => {
+                // Application has first superseded the still-queued effect.
+                binding.status = BindingStatus::Terminal;
+            }
+            BindingStatus::SubmitAuthorized => {
+                binding.status = BindingStatus::CancelAfterSubmit;
+            }
+            BindingStatus::Working => {
+                if let Some(order_id) = binding.order_id.clone() {
+                    binding.status = BindingStatus::CancelPending;
+                    effects.push(TrackEffect::CancelOrder {
+                        instrument: binding.request.instrument.clone(),
+                        order_id,
+                    });
+                } else {
+                    binding.status = BindingStatus::CancelAfterSubmit;
+                }
+            }
+            BindingStatus::CancelAfterSubmit
+            | BindingStatus::CancelPending
+            | BindingStatus::Terminal => {}
+        }
+    }
+    effects
+}
+
 fn order_role_for_binding(binding: &LiveOrderBinding) -> OrderRole {
     if binding.request.reduce_only {
         OrderRole::DecreaseInventory
@@ -748,6 +784,77 @@ mod tests {
         input.submit_intent.execution_gate_decision = execution_gate_decision;
         input.executor_state = Some(previous_state);
         input
+    }
+
+    #[test]
+    fn cancel_all_bindings_applies_each_lifecycle_transition_once() {
+        let config = config();
+        let rules = rules();
+        let template = plan(input(&config, &rules, Exposure(0.0), Exposure(2.0)))
+            .state
+            .bindings[0]
+            .clone();
+        let cases = [
+            (
+                BindingStatus::SubmitPending,
+                None,
+                BindingStatus::Terminal,
+                0,
+            ),
+            (
+                BindingStatus::SubmitAuthorized,
+                None,
+                BindingStatus::CancelAfterSubmit,
+                0,
+            ),
+            (
+                BindingStatus::CancelAfterSubmit,
+                None,
+                BindingStatus::CancelAfterSubmit,
+                0,
+            ),
+            (
+                BindingStatus::Working,
+                Some("working-order"),
+                BindingStatus::CancelPending,
+                1,
+            ),
+            (
+                BindingStatus::CancelPending,
+                Some("pending-cancel"),
+                BindingStatus::CancelPending,
+                0,
+            ),
+            (BindingStatus::Terminal, None, BindingStatus::Terminal, 0),
+        ];
+
+        for (initial_status, order_id, expected_status, expected_cancel_count) in cases {
+            let mut binding = template.clone();
+            binding.status = initial_status;
+            binding.order_id = order_id.map(str::to_string);
+            let mut state = ExecutorState {
+                bindings: vec![binding],
+                ..ExecutorState::empty(Utc::now())
+            };
+
+            let effects = cancel_all_bindings(&mut state);
+
+            assert_eq!(
+                state.bindings[0].status, expected_status,
+                "{initial_status:?}"
+            );
+            assert_eq!(effects.len(), expected_cancel_count, "{initial_status:?}");
+            if initial_status == BindingStatus::Working {
+                assert!(matches!(
+                    effects.as_slice(),
+                    [TrackEffect::CancelOrder { order_id, .. }] if order_id == "working-order"
+                ));
+            }
+            assert!(
+                cancel_all_bindings(&mut state).is_empty(),
+                "second cancellation must be a no-op for {initial_status:?}"
+            );
+        }
     }
 
     #[test]

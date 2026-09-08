@@ -860,6 +860,24 @@ impl TrackManager {
             .map_err(|_| crate::runtime::ConfigurationActivationBlocker::TrackIdentityMismatch)
     }
 
+    /// Starts replacement of a definition while preserving every existing
+    /// binding.  The returned effects only cancel old bindings; it never plans
+    /// a replacement submit.
+    pub fn configuration_application_wait_transition(
+        &mut self,
+        id: &TrackId,
+    ) -> Result<TrackTransition> {
+        let effects = {
+            let track = self
+                .tracks
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+            track.configuration_application_pending = true;
+            crate::executor::cancel_all_bindings(&mut track.executor_state)
+        };
+        self.transition_for(id, vec![], effects)
+    }
+
     pub fn clock(&self) -> &dyn ClockPort {
         self.clock.as_ref()
     }
@@ -1321,6 +1339,27 @@ impl TrackManager {
         let applied_risk_acquisition_release = reconciliation.applied_risk_acquisition_release;
         let target = reconciliation.result;
         let fresh_acquisition_initialization = target.fresh_acquisition_initialization.clone();
+        if track.configuration_application_pending() {
+            let mut executor_state = track.executor_state.clone();
+            let effects = executor::cancel_all_bindings(&mut executor_state);
+            let inventory_decision = Self::inventory_decision_snapshot(
+                track,
+                &target,
+                strategy_price,
+                observed_at,
+                target.reason.unwrap_or(DecisionReason::WaitingCancel),
+            );
+            return Ok(PlannedInventoryExecution {
+                events: target.events,
+                effects,
+                inventory_decision,
+                new_runtime_state: target.new_runtime_state,
+                execution_gate_decision: target.execution_gate_decision,
+                executor_state,
+                fresh_acquisition_initialization,
+                applied_risk_acquisition_release,
+            });
+        }
         if track.executor_state.recovery_anomaly.is_some() {
             let reason = Self::select_primary_decision_reason(
                 target.reason,

@@ -8,7 +8,8 @@ mod recovery;
 
 pub use binding::{BindingStatus, SubmitRecoveryToken};
 pub(crate) use planning::{
-    ExecutorInput, SubmitIntentInput, maintain_protected_bindings, plan, refresh_state,
+    ExecutorInput, SubmitIntentInput, cancel_all_bindings, maintain_protected_bindings, plan,
+    refresh_state,
 };
 pub use planning::{OrderRole, PendingSubmitHint, PendingSubmitPhase};
 pub use policy::{PolicyContext, PolicyKind};

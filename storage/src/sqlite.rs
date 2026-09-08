@@ -97,6 +97,27 @@ impl SqliteStorage {
             }),
         ).optional().map_err(Into::into)
     }
+
+    /// Returns the single configuration application that is still executing.
+    /// Terminal audit rows remain durable history and do not reserve the
+    /// instance for a new application.
+    pub fn load_active_configuration_application(
+        &self,
+    ) -> Result<Option<ConfigurationApplicationAuditRow>> {
+        let conn = Self::lock_connection(&self.conn)?;
+        conn.query_row(
+            "SELECT application_id, request_hash, track_id, old_version, candidate_version, result, created_at, updated_at
+             FROM configuration_applications
+             WHERE result IN ('preparing', 'waiting_for_orders', 'activating')
+             ORDER BY updated_at ASC LIMIT 1",
+            [],
+            |row| Ok(ConfigurationApplicationAuditRow {
+                application_id: row.get(0)?, request_hash: row.get(1)?, track_id: row.get(2)?, old_version: row.get(3)?, candidate_version: row.get(4)?, result: row.get(5)?,
+                created_at: row.get::<_, String>(6)?.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error)))?,
+                updated_at: row.get::<_, String>(7)?.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(error)))?,
+            }),
+        ).optional().map_err(Into::into)
+    }
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path).context("failed to open sqlite database")?;
         Self::from_connection(conn)
@@ -1364,9 +1385,23 @@ mod tests {
                 .result,
             "preparing"
         );
+        assert_eq!(
+            storage
+                .load_active_configuration_application()
+                .unwrap()
+                .unwrap()
+                .application_id,
+            "apply-1"
+        );
         storage
             .update_configuration_application_result("apply-1", "failed", Utc::now())
             .unwrap();
+        assert!(
+            storage
+                .load_active_configuration_application()
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             storage
                 .load_latest_configuration_application_for_track("btc")

@@ -375,4 +375,64 @@ describe('Poise read-only console', () => {
     expect(await screen.findByText('配置版本冲突')).toBeVisible()
     expect(JSON.parse(bodies[0]).application_id).toBe(JSON.parse(bodies[1]).application_id)
   })
+
+  it('keeps an accepted application with old orders visibly in progress and prevents another edit or apply', async () => {
+    const waiting = {
+      ...configuration,
+      application_status: 'waiting_for_orders',
+      application: {
+        application_id: 'apply-with-orders', status: 'waiting_for_orders', accepted: true,
+        message: '正在等待 2 个旧订单的终态和权威订单快照。', active_version: null,
+      },
+    }
+    vi.stubGlobal('fetch', vi.fn((input: string) => Promise.resolve(response(input === '/tracks/btc-core/configuration' ? waiting : api(input)))))
+    render(<App />)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    fireEvent.click(screen.getByRole('tab', { name: '配置' }))
+    expect(await screen.findByText('配置应用状态 · 等待订单完成 · 正在等待 2 个旧订单的终态和权威订单快照。')).toBeVisible()
+    expect(screen.getByRole('heading', { name: '配置应用正在进行' })).toBeVisible()
+    expect(screen.getByText(/申请已被 server 接受，但尚未生效/)).toBeVisible()
+    expect(screen.getByText(/不会重复提交/)).toBeVisible()
+    expect(screen.getByLabelText('下限价格')).toBeDisabled()
+    expect(screen.getByRole('button', { name: '重新预览' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '保存并应用' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: /暂停|撤单|恢复/ })).not.toBeInTheDocument()
+  })
+
+  it('reloads the configuration application status from GET when the stream reconnects', async () => {
+    let reconnected = false
+    const waiting = { ...configuration, application_status: 'activating', application: { application_id: 'apply-2', status: 'activating', accepted: true, message: null, active_version: null } }
+    vi.stubGlobal('fetch', vi.fn((input: string) => Promise.resolve(response(input === '/tracks/btc-core/configuration' && reconnected ? waiting : input === '/tracks/btc-core/configuration' ? configuration : api(input)))))
+    render(<App />)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    fireEvent.click(screen.getByRole('tab', { name: '配置' })); expect(await screen.findByText('配置应用状态 · 空闲')).toBeVisible()
+    act(() => BrowserStream.instances[0].open())
+    vi.useFakeTimers(); reconnected = true
+    act(() => BrowserStream.instances[0].serverClose())
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+    act(() => BrowserStream.instances[1].open())
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(screen.getByText('配置应用状态 · 正在启用')).toBeVisible()
+    expect(screen.getByText(/正在安装已经验证的配置/)).toBeVisible()
+  })
+
+  it('reloads a selected Track configuration status after TrackChanged stream updates without leaving the configuration tab', async () => {
+    const waiting = { ...configuration, application_status: 'waiting_for_orders', application: { application_id: 'apply-3', status: 'waiting_for_orders', accepted: true, message: null, active_version: null } }
+    const activating = { ...configuration, application_status: 'activating', application: { application_id: 'apply-3', status: 'activating', accepted: true, message: null, active_version: null } }
+    const active = { ...configuration, application_status: 'active', application: { application_id: 'apply-3', status: 'active', accepted: true, message: null, active_version: 'config-next' } }
+    let configurationReads = 0
+    vi.stubGlobal('fetch', vi.fn((input: string) => {
+      if (input === '/tracks/btc-core/configuration') return Promise.resolve(response([waiting, activating, active][configurationReads++] ?? active))
+      return Promise.resolve(response(api(input)))
+    }))
+    render(<App />)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    fireEvent.click(screen.getByRole('tab', { name: '配置' })); expect(await screen.findByText('配置应用状态 · 等待订单完成')).toBeVisible()
+    act(() => BrowserStream.instances[0].emit({ type: 'track_detail_changed', track_id: 'btc-core', detail: track }))
+    expect(await screen.findByText('配置应用状态 · 正在启用')).toBeVisible()
+    expect(screen.getByRole('tab', { name: '配置' })).toHaveAttribute('aria-selected', 'true')
+    act(() => BrowserStream.instances[0].emit({ type: 'track_detail_changed', track_id: 'btc-core', detail: track }))
+    expect(await screen.findByText('配置应用状态 · 已生效')).toBeVisible()
+    expect(configurationReads).toBe(3)
+  })
 })

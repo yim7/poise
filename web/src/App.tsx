@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { AccountSummaryView, BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy, ExecutionBindingView, StreamEvent, TrackActivityItemView, TrackConfigurationActiveView, TrackConfigurationPreviewResponse, TrackConfigurationResponse, TrackDetailView, TrackListItemView, TrackListResponse, TradingReadinessResponse } from './types'
+import type { AccountSummaryView, BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy, ExecutionBindingView, StreamEvent, TrackActivityItemView, TrackConfigurationActiveView, TrackConfigurationApplicationStatus, TrackConfigurationApplicationView, TrackConfigurationPreviewResponse, TrackConfigurationResponse, TrackDetailView, TrackListItemView, TrackListResponse, TradingReadinessResponse } from './types'
 
 const chineseReason: Record<string, { title: string; detail: string }> = {
   waiting_risk_release: { title: '等待风险释放', detail: '策略希望建立目标仓位。风险目标已经批准，但当前 session 尚未释放新增风险，因此暂不下单。' },
@@ -61,6 +61,7 @@ export function App() {
   const [error, setError] = useState(false)
   const [readinessPollError, setReadinessPollError] = useState(false)
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
+  const [configurationRefreshVersion, setConfigurationRefreshVersion] = useState(0)
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
 
   const refresh = async () => {
@@ -108,8 +109,8 @@ export function App() {
         reconnectTimer = null
         setConnection('connected')
         void refresh()
+        setConfigurationRefreshVersion(version => version + 1)
         if (selectedIdRef.current) {
-          setDetail(null)
           setDetailRequestVersion(version => version + 1)
         }
       }
@@ -118,8 +119,14 @@ export function App() {
       current.onmessage = (event) => {
         try {
           const update = JSON.parse(event.data) as StreamEvent
-          if (update.type === 'track_list_item_changed') setTracks(previous => previous.map(item => item.id === update.track_id ? update.item : item))
-          if (update.type === 'track_detail_changed') setDetail(current => current?.identity.id === update.track_id ? update.detail : current)
+          if (update.type === 'track_list_item_changed') {
+            setTracks(previous => previous.map(item => item.id === update.track_id ? update.item : item))
+            if (selectedIdRef.current === update.track_id) setConfigurationRefreshVersion(version => version + 1)
+          }
+          if (update.type === 'track_detail_changed') {
+            setDetail(current => current?.identity.id === update.track_id ? update.detail : current)
+            if (selectedIdRef.current === update.track_id) setConfigurationRefreshVersion(version => version + 1)
+          }
           if (update.type === 'track_live_view_changed') {
             setTracks(previous => previous.map(item => item.id === update.track_id ? {
               ...item,
@@ -192,7 +199,7 @@ export function App() {
     <header className="topbar"><div><strong>Poise</strong><span>{status}</span></div><div><span className={connection === 'connected' ? 'connection online' : 'connection'}>{connectionLabel}</span><span>更新于 {lastUpdated}</span></div></header>
     {(error || readinessPollError) && <div role="alert" className="alert"><strong>无法读取运行状态</strong><span>请确认本地 server 正在运行后重试。</span><button onClick={retry}>重试</button></div>}
     <div className="layout"><aside><button className={!selectedId ? 'nav active' : 'nav'} onClick={() => selectTrack(null)}>总览</button><p>Tracks</p>{tracks.map(track => <button key={track.id} className={selectedId === track.id ? 'track active' : 'track'} onClick={() => selectTrack(track.id)}><strong>{track.id}</strong><small>{track.instrument?.symbol} · {title(track.lifecycle?.status)}</small></button>)}</aside>
-    <section className="content">{selectedId ? detail ? <TrackPage key={detail.identity.id} detail={detail} /> : <h1>Track 载入中</h1> : <Overview readiness={readiness} account={account} tracks={tracks} onSelect={selectTrack} />}</section></div>
+    <section className="content">{selectedId ? detail ? <TrackPage key={detail.identity.id} detail={detail} configurationRefreshVersion={configurationRefreshVersion} /> : <h1>Track 载入中</h1> : <Overview readiness={readiness} account={account} tracks={tracks} onSelect={selectTrack} />}</section></div>
   </main>
 }
 
@@ -205,13 +212,13 @@ function Overview({ readiness, account, tracks, onSelect }: { readiness: Trading
   </>
 }
 
-function TrackPage({ detail }: { detail: TrackDetailView }) {
+function TrackPage({ detail, configurationRefreshVersion }: { detail: TrackDetailView; configurationRefreshVersion: number }) {
   const [tab, setTab] = useState<'运行' | '配置' | '活动'>('运行')
   return <><div className="track-tabs" role="tablist" aria-label="Track 工作区">
     {(['运行', '配置', '活动'] as const).map(item => <button key={item} role="tab" aria-selected={tab === item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>{item}</button>)}
   </div>
   {tab === '运行' && <TrackRunPanel detail={detail} />}
-  {tab === '配置' && <ConfigurationPanel key={detail.identity.id} trackId={detail.identity.id} />}
+  {tab === '配置' && <ConfigurationPanel key={detail.identity.id} trackId={detail.identity.id} refreshVersion={configurationRefreshVersion} />}
   {tab === '活动' && <ActivityPanel activity={detail.activity} />}
   </>
 }
@@ -258,7 +265,16 @@ function configurationChanges(active: Record<string, unknown>, draft: Record<str
   })
 }
 
-function ConfigurationPanel({ trackId }: { trackId: string }) {
+function ConfigurationApplicationNotice({ application, status }: { application: TrackConfigurationApplicationView | null; status: TrackConfigurationApplicationStatus }) {
+  if (status === 'idle') return null
+  if (status === 'preparing') return <article className="application-notice"><h2>配置应用正在进行</h2><p>申请已被 server 接受，正在使用最新事实重新验证；配置尚未生效，不能再次编辑或提交。</p></article>
+  if (status === 'waiting_for_orders') return <article className="application-notice"><h2>配置应用正在进行</h2><p>申请已被 server 接受，但尚未生效。正在等待旧订单终态和权威订单快照；页面不会重复提交、暂停、撤单或恢复执行。</p></article>
+  if (status === 'activating') return <article className="application-notice"><h2>配置应用正在进行</h2><p>旧订单已经解决，正在安装已经验证的配置；配置尚未生效，不能再次编辑或提交。</p></article>
+  if (status === 'active') return <article className="application-notice"><h2>配置已生效</h2><p>{application?.active_version ? `申请 ${application.application_id} 已完成。` : '当前配置已生效。'}</p></article>
+  return <article className="application-notice failed"><h2>配置应用失败</h2><p>{application?.message ?? 'server 未能完成本次配置应用。当前生效值仍以 server 返回的配置快照为准；请重新载入、修改并预览后再提交。'}</p></article>
+}
+
+function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refreshVersion: number }) {
   const [configuration, setConfiguration] = useState<TrackConfigurationResponse | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
   const [loadError, setLoadError] = useState(false)
@@ -290,7 +306,7 @@ function ConfigurationPanel({ trackId }: { trackId: string }) {
       .catch(() => { if (!controller.signal.aborted && request === configurationSequence.current) setLoadError(true) })
     return controller
   }
-  useEffect(() => { const controller = load(); return () => { controller.abort(); configurationSequence.current += 1; invalidatePreview(); invalidateApplication() } }, [trackId])
+  useEffect(() => { const controller = load(); return () => { controller.abort(); configurationSequence.current += 1; invalidatePreview(); invalidateApplication() } }, [trackId, refreshVersion])
   const changed = configuration !== null && draft !== null && JSON.stringify(configuration.active) !== JSON.stringify(draft)
   const update = <K extends keyof Draft>(field: K, value: Draft[K]) => { setDraft(current => current ? { ...current, [field]: value } : current); invalidatePreview(); invalidateApplication() }
   const updateRisk = (field: keyof Draft['risk_acquisition'], value: number) => { setDraft(current => current ? { ...current, risk_acquisition: { ...current.risk_acquisition, [field]: value } } : current); invalidatePreview(); invalidateApplication() }
@@ -306,8 +322,10 @@ function ConfigurationPanel({ trackId }: { trackId: string }) {
       if (!controller.signal.aborted && request === previewSequence.current) setPreview(value)
     } catch { if (!controller.signal.aborted && request === previewSequence.current) setPreviewError(true) } finally { if (request === previewSequence.current) setPreviewing(false) }
   }
+  const applicationStatus: TrackConfigurationApplicationStatus = configuration?.application?.status ?? configuration?.application_status ?? 'idle'
+  const applicationInProgress = applicationStatus === 'preparing' || applicationStatus === 'waiting_for_orders' || applicationStatus === 'activating'
   const apply = async () => {
-    if (!draft || !changed || !preview?.valid) return
+    if (!draft || !changed || !preview?.valid || applicationInProgress) return
     const id = applicationId ?? crypto.randomUUID()
     if (!applicationId) setApplicationId(id)
     applicationController.current?.abort()
@@ -332,12 +350,12 @@ function ConfigurationPanel({ trackId }: { trackId: string }) {
   const numberInput = (label: string, field: Exclude<keyof Draft, 'risk_acquisition' | 'out_of_band_policy' | 'shape_family'>) => <label>{label}<input aria-label={label} type="number" value={inputValue(draft[field] as number)} onChange={event => update(field, Number(event.target.value))} /></label>
   const riskInput = (label: string, field: keyof Draft['risk_acquisition']) => <label>{label}<input aria-label={label} type="number" value={inputValue(draft.risk_acquisition[field])} onChange={event => updateRisk(field, Number(event.target.value))} /></label>
   const flatten = policyKind === 'flatten' ? flattenPolicy(draft.out_of_band_policy).flatten : null
-  const applicationStatus = configuration.application?.status ?? configuration.application_status
   const changes = configurationChanges(active as unknown as Record<string, unknown>, draft as unknown as Record<string, unknown>)
   return <div className="configuration"><p className="eyebrow">配置应用状态 · {applicationStatusLabel(applicationStatus)}{configuration.application?.message ? ` · ${configuration.application.message}` : ''}</p>
+    <ConfigurationApplicationNotice application={configuration.application} status={applicationStatus} />
     {changed && <p className="unsaved">有未保存修改</p>}
     <div className="two-column"><article><h2>当前生效值</h2><dl><div><dt>价格区间</dt><dd>{format(active.lower_price, 2)} – {format(active.upper_price, 2)}</dd></div><div><dt>多/空 exposure</dt><dd>{format(active.long_exposure_units)} / {format(active.short_exposure_units)}</dd></div><div><dt>每单位名义金额</dt><dd>{format(active.notional_per_unit)}</dd></div><div><dt>区间外策略</dt><dd>{policy(active.out_of_band_policy)}</dd></div><div><dt>最大名义金额</dt><dd>{format(active.max_notional)}</dd></div></dl></article><article><h2>只读身份与重启字段</h2><dl><div><dt>Track ID</dt><dd>{configuration.identity.id}</dd></div><div><dt>Venue</dt><dd>{configuration.identity.instrument.venue}</dd></div><div><dt>Symbol</dt><dd>{configuration.identity.instrument.symbol}</dd></div><div><dt>杠杆</dt><dd>{configuration.restart_required.leverage}</dd></div><div><dt>Tick 超时（秒）</dt><dd>{configuration.restart_required.tick_timeout_secs}</dd></div></dl></article></div>
-    <article><h2>可编辑草稿</h2><div className="config-fields">{numberInput('下限价格', 'lower_price')}{numberInput('上限价格', 'upper_price')}{numberInput('多头 exposure', 'long_exposure_units')}{numberInput('空头 exposure', 'short_exposure_units')}{numberInput('每单位名义金额', 'notional_per_unit')}{numberInput('最小再平衡单位', 'min_rebalance_units')}<label>形状族<select aria-label="形状族" value={draft.shape_family} onChange={event => update('shape_family', event.target.value as Draft['shape_family'])}><option value="linear">linear</option><option value="inertial">inertial</option><option value="responsive">responsive</option></select></label><label>区间外策略<select aria-label="区间外策略" value={policyKind} onChange={event => setPolicy(event.target.value)}><option value="freeze">freeze</option><option value="terminate">terminate</option><option value="flatten">flatten</option></select></label>{flatten && <><label>Flatten 触发<select aria-label="Flatten 触发" value={triggerKind(flatten.trigger)} onChange={event => setFlattenTrigger(event.target.value)}><option value="immediate">immediate</option><option value="flatten_confirm">flatten_confirm</option></select></label>{typeof flatten.trigger !== 'string' && <label>Flatten 确认 bps<input aria-label="Flatten 确认 bps" type="number" value={inputValue(flatten.trigger.flatten_confirm.bps)} onChange={event => setFlattenBps('trigger', Number(event.target.value))} /></label>}<label>恢复策略<select aria-label="恢复策略" value={recoverKind(flatten.recover)} onChange={event => setFlattenRecover(event.target.value)}><option value="back_in_band">back_in_band</option><option value="reentry_confirm">reentry_confirm</option></select></label>{typeof flatten.recover !== 'string' && <label>重新进入确认 bps<input aria-label="重新进入确认 bps" type="number" value={inputValue(flatten.recover.reentry_confirm.bps)} onChange={event => setFlattenBps('recover', Number(event.target.value))} /></label>}</>}{numberInput('最大名义金额', 'max_notional')}{numberInput('每日损失限额', 'daily_loss_limit')}{numberInput('总损失限额', 'total_loss_limit')}{riskInput('初始比例', 'initial_ratio')}{riskInput('有利步数', 'advantage_steps')}{riskInput('最小释放步数', 'min_release_steps')}{riskInput('最大释放步数', 'max_release_steps')}{riskInput('追赶比例', 'catchup_ratio')}{riskInput('过期释放分钟', 'stale_release_minutes')}</div><div className="config-actions"><button onClick={discard} disabled={!changed}>放弃修改</button><button onClick={() => void submitPreview()} disabled={previewing}>{previewing ? '预览中' : '重新预览'}</button><button onClick={() => setConfirming(true)} disabled={!changed || !preview?.valid || applying}>保存并应用</button></div></article>
+    <article><h2>可编辑草稿</h2><fieldset className="configuration-editor" disabled={applicationInProgress}><div className="config-fields">{numberInput('下限价格', 'lower_price')}{numberInput('上限价格', 'upper_price')}{numberInput('多头 exposure', 'long_exposure_units')}{numberInput('空头 exposure', 'short_exposure_units')}{numberInput('每单位名义金额', 'notional_per_unit')}{numberInput('最小再平衡单位', 'min_rebalance_units')}<label>形状族<select aria-label="形状族" value={draft.shape_family} onChange={event => update('shape_family', event.target.value as Draft['shape_family'])}><option value="linear">linear</option><option value="inertial">inertial</option><option value="responsive">responsive</option></select></label><label>区间外策略<select aria-label="区间外策略" value={policyKind} onChange={event => setPolicy(event.target.value)}><option value="freeze">freeze</option><option value="terminate">terminate</option><option value="flatten">flatten</option></select></label>{flatten && <><label>Flatten 触发<select aria-label="Flatten 触发" value={triggerKind(flatten.trigger)} onChange={event => setFlattenTrigger(event.target.value)}><option value="immediate">immediate</option><option value="flatten_confirm">flatten_confirm</option></select></label>{typeof flatten.trigger !== 'string' && <label>Flatten 确认 bps<input aria-label="Flatten 确认 bps" type="number" value={inputValue(flatten.trigger.flatten_confirm.bps)} onChange={event => setFlattenBps('trigger', Number(event.target.value))} /></label>}<label>恢复策略<select aria-label="恢复策略" value={recoverKind(flatten.recover)} onChange={event => setFlattenRecover(event.target.value)}><option value="back_in_band">back_in_band</option><option value="reentry_confirm">reentry_confirm</option></select></label>{typeof flatten.recover !== 'string' && <label>重新进入确认 bps<input aria-label="重新进入确认 bps" type="number" value={inputValue(flatten.recover.reentry_confirm.bps)} onChange={event => setFlattenBps('recover', Number(event.target.value))} /></label>}</>}{numberInput('最大名义金额', 'max_notional')}{numberInput('每日损失限额', 'daily_loss_limit')}{numberInput('总损失限额', 'total_loss_limit')}{riskInput('初始比例', 'initial_ratio')}{riskInput('有利步数', 'advantage_steps')}{riskInput('最小释放步数', 'min_release_steps')}{riskInput('最大释放步数', 'max_release_steps')}{riskInput('追赶比例', 'catchup_ratio')}{riskInput('过期释放分钟', 'stale_release_minutes')}</div><div className="config-actions"><button onClick={discard} disabled={!changed}>放弃修改</button><button onClick={() => void submitPreview()} disabled={previewing}>{previewing ? '预览中' : '重新预览'}</button><button onClick={() => setConfirming(true)} disabled={!changed || !preview?.valid || applying}>保存并应用</button></div></fieldset></article>
     {confirming && <div role="dialog" aria-modal="true" aria-label="确认保存并应用" className="confirmation"><h2>确认保存并应用</h2><p>这会更新实例配置，并可能产生真实订单。</p><dl>{changes.map(change => <div key={change.label}><dt>{change.label}</dt><dd>{change.from} → {change.to}</dd></div>)}</dl><button onClick={() => setConfirming(false)} disabled={applying}>取消</button><button onClick={() => void apply()} disabled={applying}>{applying ? '正在提交' : '确认保存并应用'}</button></div>}
     {applyError === 'conflict' && <div role="alert" className="alert"><strong>配置版本冲突</strong><span>配置已变化，请重新加载后再试。</span><button onClick={() => load()}>重新加载</button></div>}{applyError === 'network' && <div role="alert" className="alert"><strong>提交结果未确认</strong><span>可使用同一申请 ID 重试。</span><button onClick={() => void apply()}>重试提交</button></div>}
     {previewError && <div role="alert" className="alert"><strong>预览失败</strong><button onClick={() => void submitPreview()}>重试预览</button></div>}{preview && <PreviewResult preview={preview} symbol={configuration.identity.instrument.symbol} />}

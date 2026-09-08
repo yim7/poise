@@ -362,6 +362,15 @@ async fn apply_track_configuration(
             }));
         }
     }
+    if let Some(active) = store
+        .active_application()
+        .map_err(map_configuration_store_error)?
+        && active.application_id != request.application_id
+    {
+        return Err(map_configuration_store_error(
+            poise_application::ConfigurationApplicationStoreError::ApplicationIdConflict,
+        ));
+    }
     let source = state
         .query_service
         .load_track_detail_source(&TrackId::new(id.clone()))
@@ -387,7 +396,7 @@ async fn apply_track_configuration(
         };
         let receipt = state
             .runtime
-            .apply_configuration_application(&TrackId::new(id), application_request, store.as_ref())
+            .apply_configuration_application(&TrackId::new(id), application_request, store.clone())
             .await
             .map_err(map_configuration_application_error)?;
         return Ok(Json(poise_protocol::TrackConfigurationApplicationView {
@@ -402,7 +411,8 @@ async fn apply_track_configuration(
             }),
             accepted: true,
             message: None,
-            active_version: Some(existing.candidate_version),
+            active_version: (receipt.status == ConfigurationApplicationStatus::Active)
+                .then_some(existing.candidate_version),
         }));
     }
     // PUT repeats the preview's fail-closed evaluation using the current facts.
@@ -435,7 +445,7 @@ async fn apply_track_configuration(
         .apply_configuration_application(
             &TrackId::new(id.clone()),
             application_request,
-            store.as_ref(),
+            store.clone(),
         )
         .await
         .map_err(map_configuration_application_error)?;
@@ -451,7 +461,8 @@ async fn apply_track_configuration(
         }),
         accepted: true,
         message: None,
-        active_version: Some(active_version),
+        active_version: (receipt.status == ConfigurationApplicationStatus::Active)
+            .then_some(active_version),
     }))
 }
 
@@ -496,8 +507,6 @@ fn map_configuration_application_error(
 ) -> (StatusCode, Json<ErrorResponse>) {
     match error {
         ConfigurationApplicationError::Terminated
-        | ConfigurationApplicationError::ActiveBinding
-        | ConfigurationApplicationError::SubmitOutcomeUnknown
         | ConfigurationApplicationError::RecoveryAnomaly => (
             StatusCode::CONFLICT,
             Json(ErrorResponse {
@@ -1981,7 +1990,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configuration_put_rejects_active_binding_before_audit_or_file_write() {
+    async fn configuration_put_accepts_active_binding_and_reports_waiting_for_orders() {
         let (state, audit, path, _directory) =
             with_configuration_store(app_state_with_usdt_account_summary().await);
         let before_file = std::fs::read_to_string(&path).unwrap();
@@ -1999,14 +2008,84 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
         let response = app.oneshot(Request::builder().method("PUT").uri("/tracks/btc-core/configuration").header("content-type", "application/json").body(Body::from(serde_json::json!({"application_id":"apply-bound", "expected_version":value["version"], "candidate":value["active"]}).to_string())).unwrap()).await.unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert!(
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let accepted: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(accepted["application_id"], "apply-bound");
+        assert_eq!(accepted["status"], "waiting_for_orders");
+        assert_eq!(accepted["accepted"], true);
+        assert!(accepted["active_version"].is_null());
+        assert_eq!(
             audit
                 .load_configuration_application("apply-bound")
                 .unwrap()
-                .is_none()
+                .unwrap()
+                .result,
+            "waiting_for_orders"
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), before_file);
+    }
+
+    #[tokio::test]
+    async fn configuration_put_rejects_another_track_while_an_application_is_waiting() {
+        let (state, audit, _path, _directory) =
+            with_configuration_store(app_state_with_usdt_account_summary().await);
+        let now = Utc::now();
+        audit
+            .record_configuration_application(
+                &poise_storage::sqlite::ConfigurationApplicationAuditRow {
+                    application_id: "apply-btc".to_string(),
+                    request_hash: "hash-btc".to_string(),
+                    track_id: "btc-core".to_string(),
+                    old_version: "old".to_string(),
+                    candidate_version: "next".to_string(),
+                    result: "waiting_for_orders".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                },
+            )
+            .unwrap();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/tracks/eth-core/configuration")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "application_id": "apply-eth",
+                            "expected_version": "old",
+                            "candidate": serde_json::json!({
+                                "lower_price": 90.0,
+                                "upper_price": 110.0,
+                                "long_exposure_units": 8.0,
+                                "short_exposure_units": 8.0,
+                                "notional_per_unit": 375.0,
+                                "min_rebalance_units": 0.5,
+                                "shape_family": "linear",
+                                "out_of_band_policy": "freeze",
+                                "max_notional": 3000.0,
+                                "daily_loss_limit": 100.0,
+                                "total_loss_limit": 300.0,
+                                "risk_acquisition": {
+                                    "initial_ratio": 0.0,
+                                    "advantage_steps": 0.0,
+                                    "min_release_steps": 0.0,
+                                    "max_release_steps": 0.0,
+                                    "catchup_ratio": 0.0,
+                                    "stale_release_minutes": 0
+                                }
+                            })
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]

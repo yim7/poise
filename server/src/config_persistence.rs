@@ -51,6 +51,17 @@ impl ConfigurationApplicationStoreAdapter {
             .map_err(|error| ConfigurationApplicationStoreError::Internal(error.to_string()))
     }
 
+    pub(crate) fn active_application(
+        &self,
+    ) -> std::result::Result<
+        Option<ConfigurationApplicationAuditRow>,
+        ConfigurationApplicationStoreError,
+    > {
+        self.storage
+            .load_active_configuration_application()
+            .map_err(|error| ConfigurationApplicationStoreError::Internal(error.to_string()))
+    }
+
     pub(crate) fn application_by_id(
         &self,
         application_id: &str,
@@ -111,7 +122,7 @@ fn status_text(status: ConfigurationApplicationStatus) -> &'static str {
 
 #[async_trait]
 impl ConfigurationApplicationStore for ConfigurationApplicationStoreAdapter {
-    async fn persist_configuration_application(
+    async fn accept_configuration_application(
         &self,
         track_id: &TrackId,
         request: &ConfigurationApplicationRequest,
@@ -144,13 +155,13 @@ impl ConfigurationApplicationStore for ConfigurationApplicationStoreAdapter {
         if canonical_version(&original)? != request.expected_version {
             return Err(ConfigurationApplicationStoreError::VersionConflict);
         }
-        let candidate = configuration_view_from_definition(&request.candidate);
-        let patched = patch_track_configuration(&original, track_id.as_str(), &candidate)
-            .map_err(|error| ConfigurationApplicationStoreError::WriteFailed(error.to_string()))?;
-        if canonical_version(&patched)? != request.candidate_version {
-            return Err(ConfigurationApplicationStoreError::Internal(
-                "candidate configuration version mismatch".to_string(),
-            ));
+        if let Some(active) = self
+            .storage
+            .load_active_configuration_application()
+            .map_err(|error| ConfigurationApplicationStoreError::Internal(error.to_string()))?
+            && active.application_id != request.application_id
+        {
+            return Err(ConfigurationApplicationStoreError::ApplicationIdConflict);
         }
         let now = Utc::now();
         self.storage
@@ -165,6 +176,50 @@ impl ConfigurationApplicationStore for ConfigurationApplicationStoreAdapter {
                 updated_at: now,
             })
             .map_err(|error| ConfigurationApplicationStoreError::Internal(error.to_string()))?;
+        Ok(ConfigurationApplicationPersistence::Persisted)
+    }
+
+    async fn persist_accepted_configuration(
+        &self,
+        track_id: &TrackId,
+        request: &ConfigurationApplicationRequest,
+    ) -> std::result::Result<ConfigurationApplicationPersistence, ConfigurationApplicationStoreError>
+    {
+        let _guard = self.lock.lock().await;
+        let existing = self
+            .storage
+            .load_configuration_application(&request.application_id)
+            .map_err(|error| ConfigurationApplicationStoreError::Internal(error.to_string()))?
+            .ok_or_else(|| {
+                ConfigurationApplicationStoreError::Internal(
+                    "configuration application was not accepted".to_string(),
+                )
+            })?;
+        if existing.track_id != track_id.as_str() || existing.request_hash != request.request_hash {
+            return Err(ConfigurationApplicationStoreError::ApplicationIdConflict);
+        }
+        let original = fs::read_to_string(&self.path)
+            .map_err(|error| ConfigurationApplicationStoreError::WriteFailed(error.to_string()))?;
+        if original
+            != *self.committed_raw.lock().map_err(|_| {
+                ConfigurationApplicationStoreError::Internal(
+                    "configuration baseline lock poisoned".to_string(),
+                )
+            })?
+        {
+            return Err(ConfigurationApplicationStoreError::ExternalChange);
+        }
+        if canonical_version(&original)? != request.expected_version {
+            return Err(ConfigurationApplicationStoreError::VersionConflict);
+        }
+        let candidate = configuration_view_from_definition(&request.candidate);
+        let patched = patch_track_configuration(&original, track_id.as_str(), &candidate)
+            .map_err(|error| ConfigurationApplicationStoreError::WriteFailed(error.to_string()))?;
+        if canonical_version(&patched)? != request.candidate_version {
+            return Err(ConfigurationApplicationStoreError::Internal(
+                "candidate configuration version mismatch".to_string(),
+            ));
+        }
         if let Err(error) =
             patch_file_atomically_if_unchanged(&self.path, &original, track_id.as_str(), &candidate)
         {
@@ -207,7 +262,7 @@ impl ConfigurationApplicationStore for ConfigurationApplicationStoreAdapter {
             .unwrap_or(ConfigurationApplicationStatus::Idle))
     }
 
-    async fn complete_configuration_application(
+    async fn update_configuration_application_status(
         &self,
         _track_id: &TrackId,
         request: &ConfigurationApplicationRequest,

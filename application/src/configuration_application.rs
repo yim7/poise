@@ -47,7 +47,16 @@ impl std::error::Error for ConfigurationApplicationStoreError {}
 /// Server owns the durable configuration file and idempotency record.
 #[async_trait]
 pub trait ConfigurationApplicationStore: Send + Sync {
-    async fn persist_configuration_application(
+    /// Durably accepts an idempotent request without replacing the config file.
+    async fn accept_configuration_application(
+        &self,
+        track_id: &TrackId,
+        request: &ConfigurationApplicationRequest,
+    ) -> std::result::Result<ConfigurationApplicationPersistence, ConfigurationApplicationStoreError>;
+
+    /// Atomically writes the already-accepted candidate after the runtime has
+    /// observed the terminal-order snapshot barrier.
+    async fn persist_accepted_configuration(
         &self,
         track_id: &TrackId,
         request: &ConfigurationApplicationRequest,
@@ -60,7 +69,7 @@ pub trait ConfigurationApplicationStore: Send + Sync {
 
     /// Records the terminal result after the runtime has either installed the
     /// already-persisted definition or rejected the installation.
-    async fn complete_configuration_application(
+    async fn update_configuration_application_status(
         &self,
         track_id: &TrackId,
         request: &ConfigurationApplicationRequest,
