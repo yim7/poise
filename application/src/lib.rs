@@ -61,7 +61,7 @@ pub use track_identity_store::TrackIdentityStore;
 pub use track_mutation_store::TrackMutationStore;
 pub use track_persistence::{
     CommittedTrackWrite, EffectJournalEntry, EffectStatus, EffectStatusUpdate,
-    PersistedTrackEffect, StoredTrackEvent,
+    PersistedTrackEffect, StoredTrackActivity, StoredTrackEvent, TrackActivityKind,
 };
 pub use track_query_store::TrackQueryStore;
 pub use trading_runtime::{

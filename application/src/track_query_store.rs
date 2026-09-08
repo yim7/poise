@@ -5,7 +5,7 @@ use poise_core::track::TrackId;
 use poise_engine::ledger::TrackPnlStats;
 
 use crate::TrackControlState;
-use crate::track_persistence::{PersistedTrackEffect, StoredTrackEvent};
+use crate::track_persistence::{PersistedTrackEffect, StoredTrackActivity, StoredTrackEvent};
 
 #[async_trait]
 pub trait TrackQueryStore: Send + Sync {
@@ -19,6 +19,11 @@ pub trait TrackQueryStore: Send + Sync {
         track_id: &TrackId,
         limit: usize,
     ) -> Result<Vec<PersistedTrackEffect>>;
+    async fn list_recent_track_activity(
+        &self,
+        track_id: &TrackId,
+        limit: usize,
+    ) -> Result<Vec<StoredTrackActivity>>;
     async fn load_track_control_state(
         &self,
         track_id: &TrackId,

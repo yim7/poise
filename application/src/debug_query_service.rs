@@ -235,6 +235,14 @@ mod tests {
 
     #[async_trait]
     impl TrackQueryStore for FakeReadRepository {
+        async fn list_recent_track_activity(
+            &self,
+            _track_id: &TrackId,
+            _limit: usize,
+        ) -> anyhow::Result<Vec<crate::StoredTrackActivity>> {
+            Ok(Vec::new())
+        }
+
         async fn list_recent_track_events(
             &self,
             track_id: &TrackId,

@@ -46,13 +46,13 @@ function policy(value: string | Record<string, unknown>) {
   return typeof value === 'string' ? title(value) : JSON.stringify(value)
 }
 
-async function get<T>(path: string, init?: RequestInit) {
+async function requestJson<T>(path: string, init?: RequestInit) {
   const response = init ? await fetch(path, init) : await fetch(path)
   if (!response.ok) throw new Error(`${path} ${response.status}`)
   return response.json() as Promise<T>
 }
 
-async function getStatus<T>(path: string) {
+async function requestOperationalStatusJson<T>(path: string) {
   const response = await fetch(path)
   if (response.status !== 200 && response.status !== 503) throw new Error(`${path} ${response.status}`)
   return response.json() as Promise<T>
@@ -60,6 +60,15 @@ async function getStatus<T>(path: string) {
 
 function websocketUrl() {
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
+}
+
+function exchangeDataChannelLabel(health: HealthResponse | null) {
+  const tasks = new Map((health?.tasks ?? []).map(task => [task.component, task.status]))
+  const marketData = tasks.get('market_data')
+  const userData = tasks.get('user_data')
+  if (marketData === 'degraded' || userData === 'degraded') return '数据通道异常'
+  if (marketData === 'ok' && userData === 'ok') return '数据通道正常'
+  return '数据通道初始化中'
 }
 
 export function App() {
@@ -76,25 +85,34 @@ export function App() {
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
   const [configurationRefreshVersion, setConfigurationRefreshVersion] = useState(0)
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
-  const [deployment, setDeployment] = useState<string | null>(null)
-
-  const refreshSystem = () => {
-    void get<SystemResponse>('/system').then(value => setDeployment(value.deployment)).catch(() => setDeployment(null))
-  }
+  const [health, setHealth] = useState<HealthResponse | null>(null)
+  const [system, setSystem] = useState<SystemResponse | null>(null)
 
   const refresh = async () => {
     try {
-      const [nextReadiness, nextAccount, trackList] = await Promise.all([
-        getStatus<TradingReadinessResponse>('/readiness'),
-        get<AccountSummaryView>('/account'),
-        get<TrackListResponse>('/tracks'),
+      const [nextReadiness, nextHealth, nextSystem, nextAccount, trackList] = await Promise.all([
+        requestOperationalStatusJson<TradingReadinessResponse>('/readiness'),
+        requestOperationalStatusJson<HealthResponse>('/health'),
+        requestJson<SystemResponse>('/system'),
+        requestJson<AccountSummaryView>('/account'),
+        requestJson<TrackListResponse>('/tracks'),
       ])
-      setReadiness(nextReadiness); setAccount(nextAccount); setTracks(trackList.items ?? []); setError(false); setUpdatedAt(new Date())
+      setReadiness(nextReadiness); setHealth(nextHealth); setSystem(nextSystem); setAccount(nextAccount); setTracks(trackList.items ?? []); setError(false); setReadinessPollError(false); setUpdatedAt(new Date())
     } catch { setError(true) }
   }
 
+  const refreshOperationalState = async () => {
+    try {
+      const [nextReadiness, nextHealth, nextSystem] = await Promise.all([
+        requestOperationalStatusJson<TradingReadinessResponse>('/readiness'),
+        requestOperationalStatusJson<HealthResponse>('/health'),
+        requestJson<SystemResponse>('/system'),
+      ])
+      setReadiness(nextReadiness); setHealth(nextHealth); setSystem(nextSystem); setReadinessPollError(false); setUpdatedAt(new Date())
+    } catch { setReadinessPollError(true) }
+  }
+
   useEffect(() => { void refresh() }, [])
-  useEffect(() => { refreshSystem() }, [])
   useEffect(() => {
     let stopped = false
     let attempts = 0
@@ -128,7 +146,6 @@ export function App() {
         reconnectTimer = null
         setConnection('connected')
         void refresh()
-        refreshSystem()
         setConfigurationRefreshVersion(version => version + 1)
         if (selectedIdRef.current) {
           setDetailRequestVersion(version => version + 1)
@@ -178,14 +195,14 @@ export function App() {
   }, [])
   useEffect(() => {
     const timer = window.setInterval(() => {
-    void getStatus<TradingReadinessResponse>('/readiness').then(value => { setReadiness(value); setReadinessPollError(false); setUpdatedAt(new Date()) }).catch(() => setReadinessPollError(true))
+      void refreshOperationalState()
     }, 10_000)
     return () => window.clearInterval(timer)
   }, [])
   useEffect(() => {
     if (!selectedId) { setDetail(null); return }
     const controller = new AbortController()
-    get<TrackDetailView>(`/tracks/${encodeURIComponent(selectedId)}`, { signal: controller.signal })
+    requestJson<TrackDetailView>(`/tracks/${encodeURIComponent(selectedId)}`, { signal: controller.signal })
       .then(value => {
         if (controller.signal.aborted) return
         setDetail(value); setError(false); setUpdatedAt(new Date())
@@ -214,31 +231,32 @@ export function App() {
 
   const status = readiness === null ? '交易条件载入中' : readiness.ready_to_trade ? '可以交易' : '暂不可交易'
   const connectionLabel = connection === 'connecting' ? '浏览器实时流正在连接' : connection === 'connected' ? '浏览器实时流已连接' : '浏览器实时流已断开'
+  const exchangeChannel = exchangeDataChannelLabel(health)
   const lastUpdated = useMemo(() => updatedAt ? updatedAt.toLocaleTimeString('zh-CN') : '—', [updatedAt])
 
   return <main>
-    <header className="topbar"><div><strong>Poise</strong><span>{status}</span><span className={deployment === 'mainnet' ? 'deployment-mainnet' : 'deployment'}>环境 {deploymentLabel(deployment)}</span></div><div><span className={connection === 'connected' ? 'connection online' : 'connection'}>{connectionLabel}</span><span>更新于 {lastUpdated}</span></div></header>
+    <header className="topbar"><div><strong>Poise</strong><span>交易所 {system?.exchange ?? '载入中'}</span><span>{exchangeChannel}</span><span>{status}</span><span className={system?.deployment === 'mainnet' ? 'deployment-mainnet' : 'deployment'}>环境 {deploymentLabel(system?.deployment)}</span></div><div><span className={connection === 'connected' ? 'connection online' : 'connection'}>{connectionLabel}</span><span>运行状态更新于 {lastUpdated}</span></div></header>
     {(error || readinessPollError) && <div role="alert" className="alert"><strong>无法读取运行状态</strong><span>请确认本地 server 正在运行后重试。</span><button onClick={retry}>重试</button></div>}
     <div className="layout"><aside><button className={!selectedId && !systemOpen ? 'nav active' : 'nav'} onClick={() => selectTrack(null)}>总览</button><p>Tracks</p>{tracks.map(track => <button key={track.id} className={selectedId === track.id ? 'track active' : 'track'} onClick={() => selectTrack(track.id)}><strong>{track.id}</strong><small>{track.instrument?.symbol} · {title(track.lifecycle?.status)}</small></button>)}<button className={systemOpen ? 'nav active' : 'nav'} onClick={() => { selectedIdRef.current = null; setSelectedId(null); setSystemOpen(true) }}>系统</button></aside>
-    <section className="content">{systemOpen ? <SystemPanel readiness={readiness} /> : selectedId ? detail ? <TrackPage key={detail.identity.id} detail={detail} configurationRefreshVersion={configurationRefreshVersion} onDetail={setDetail} /> : <h1>Track 载入中</h1> : <Overview readiness={readiness} account={account} tracks={tracks} onSelect={selectTrack} />}</section></div>
+    <section className="content">{systemOpen ? <SystemPanel readiness={readiness} health={health} system={system} /> : selectedId ? detail ? <TrackPage key={detail.identity.id} detail={detail} configurationRefreshVersion={configurationRefreshVersion} onDetail={setDetail} /> : <h1>Track 载入中</h1> : <Overview readiness={readiness} health={health} account={account} tracks={tracks} onSelect={selectTrack} onSystem={() => setSystemOpen(true)} />}</section></div>
   </main>
 }
 
-function Overview({ readiness, account, tracks, onSelect }: { readiness: TradingReadinessResponse | null; account: AccountSummaryView | null; tracks: TrackListItemView[]; onSelect: (id: string) => void }) {
+function Overview({ readiness, health, account, tracks, onSelect, onSystem }: { readiness: TradingReadinessResponse | null; health: HealthResponse | null; account: AccountSummaryView | null; tracks: TrackListItemView[]; onSelect: (id: string) => void; onSystem: () => void }) {
   const blockers = readiness?.blockers ?? []
+  const warnings = readiness?.warnings ?? []
+  const unhealthyTasks = (health?.tasks ?? []).filter(task => task.status !== 'ok')
   const status = readiness === null ? '交易条件载入中' : readiness.ready_to_trade ? '可以交易' : '暂不可交易'
-  return <><h1>{status}</h1>{readiness !== null && !readiness.ready_to_trade && blockers[0] && <p className="explanation">{blockers[0].reason}</p>}
+  return <><h1>{status}</h1><p className="explanation">Trading readiness 表示当前是否可交易；Health 表示运行任务是否健康。</p>{readiness !== null && !readiness.ready_to_trade && blockers.length > 0 && <article><h2>交易阻断项</h2><ul>{blockers.map(blocker => <li key={`${blocker.component}:${blocker.reason}`}><strong>{blocker.component}</strong><span>{blocker.reason}</span></li>)}</ul></article>}{warnings.length > 0 && <article><h2>交易警告</h2><ul>{warnings.map(warning => <li key={`${warning.component}:${warning.reason}`}><strong>{warning.component}</strong><span>{warning.reason}</span></li>)}</ul></article>}{unhealthyTasks.length > 0 && <article><h2>异常或降级运行任务</h2><ul>{unhealthyTasks.map(task => <li key={task.component}><strong>{task.component} · {title(task.status)}</strong>{task.last_error && <span>{task.last_error}</span>}</li>)}</ul></article>}{(blockers.length > 0 || warnings.length > 0 || unhealthyTasks.length > 0) && <button onClick={onSystem}>查看系统状态</button>}
     <div className="cards"><article><h2>账户权益</h2><strong>{format(account?.equity)} {account?.valuation_asset ?? ''}</strong></article><article><h2>可用保证金</h2><strong>{format(account?.available)} {account?.valuation_asset ?? ''}</strong></article><article><h2>风险信号</h2><strong>{title(account?.risk_signal)}</strong></article></div>
     <h2>Track</h2><div className="track-grid">{tracks.map(track => <button className="summary" key={track.id} onClick={() => onSelect(track.id)}><strong>{track.id} · {title(track.lifecycle?.status)}</strong><span>当前仓位 {format(track.exposure?.current)}</span><span>可执行目标 {format(track.decision?.execution_target)}</span><small>{chineseReason[track.decision?.reason]?.title ?? title(track.decision?.reason)}</small></button>)}</div>
   </>
 }
 
-function SystemPanel({ readiness }: { readiness: TradingReadinessResponse | null }) {
-  const [health, setHealth] = useState<HealthResponse | null>(null)
-  const [system, setSystem] = useState<SystemResponse | null>(null)
-  const [error, setError] = useState(false)
-  useEffect(() => { let alive = true; void Promise.all([getStatus<HealthResponse>('/health'), get<SystemResponse>('/system')]).then(([nextHealth, nextSystem]) => { if (alive) { setHealth(nextHealth); setSystem(nextSystem) } }).catch(() => { if (alive) setError(true) }); return () => { alive = false } }, [])
-  return <><h1>系统</h1><p className="explanation">Health 反映运行任务是否健康；trading readiness 反映当前是否具备交易条件，两者并不等价。</p>{error && <div role="alert" className="alert">无法读取系统状态。</div>}<div className="two-column"><article><h2>Health</h2><p>{health?.status ?? '载入中'}</p><p>需要关注 Track：{health?.attention_required_count ?? '—'}</p></article><article><h2>Trading readiness</h2><p>{readiness?.ready_to_trade ? '可以交易' : '暂不可交易'}</p>{readiness?.blockers[0] && <p>{readiness.blockers[0].reason}</p>}</article></div><article><h2>运行任务</h2>{health?.tasks ? <ul>{health.tasks.map(task => <li key={task.component}><strong>{task.component} · {title(task.status)}</strong>{task.last_error && <span>{task.last_error}</span>}</li>)}</ul> : <p>载入中。</p>}</article><article><h2>实例信息</h2>{system ? <dl><div><dt>交易所</dt><dd>{system.exchange}</dd></div><div><dt>环境</dt><dd>{deploymentLabel(system.deployment)}</dd></div><div><dt>实例目录</dt><dd>{system.instance_directory}</dd></div><div><dt>Server 版本</dt><dd>{system.server_version}</dd></div><div><dt>监听地址</dt><dd>{system.bind_address}</dd></div><div><dt>凭证</dt><dd>{system.credentials_configured ? '已配置' : '缺失'}</dd></div></dl> : <p>载入中。</p>}</article></>
+function SystemPanel({ readiness, health, system }: { readiness: TradingReadinessResponse | null; health: HealthResponse | null; system: SystemResponse | null }) {
+  const blockers = readiness?.blockers ?? []
+  const warnings = readiness?.warnings ?? []
+  return <><h1>系统</h1><p className="explanation">Health 反映运行任务是否健康；trading readiness 反映当前是否具备交易条件，两者并不等价。</p><div className="two-column"><article><h2>Health</h2><p>{health?.status ?? '载入中'}</p><p>需要关注 Track：{health?.attention_required_count ?? '—'}</p></article><article><h2>Trading readiness</h2><p>{readiness?.ready_to_trade ? '可以交易' : '暂不可交易'}</p>{blockers.length > 0 && <ul>{blockers.map(blocker => <li key={`${blocker.component}:${blocker.reason}`}><strong>{blocker.component}</strong><span>{blocker.reason}</span></li>)}</ul>}{warnings.length > 0 && <><h3>警告</h3><ul>{warnings.map(warning => <li key={`${warning.component}:${warning.reason}`}><strong>{warning.component}</strong><span>{warning.reason}</span></li>)}</ul></>}</article></div><article><h2>运行任务</h2>{health?.tasks ? <ul>{health.tasks.map(task => <li key={task.component}><strong>{task.component} · {title(task.status)}</strong>{task.last_error_at && <span>最近错误时间：{task.last_error_at}</span>}{task.last_error && <span>{task.last_error}</span>}</li>)}</ul> : <p>载入中。</p>}</article><article><h2>最近外部配置冲突</h2>{system ? system.recent_configuration_conflict ? <><dl><div><dt>Track</dt><dd>{system.recent_configuration_conflict.track_id}</dd></div><div><dt>申请 ID</dt><dd>{system.recent_configuration_conflict.application_id}</dd></div><div><dt>观测时间</dt><dd>{system.recent_configuration_conflict.observed_at}</dd></div></dl><p>请重新载入并检查配置。</p></> : <p>无。</p> : <p>载入中。</p>}</article><article><h2>实例信息</h2>{system ? <dl><div><dt>交易所</dt><dd>{system.exchange}</dd></div><div><dt>环境</dt><dd>{deploymentLabel(system.deployment)}</dd></div><div><dt>实例目录</dt><dd>{system.instance_directory}</dd></div><div><dt>Server 版本</dt><dd>{system.server_version}</dd></div><div><dt>监听地址</dt><dd>{system.bind_address}</dd></div><div><dt>凭证</dt><dd>{system.credentials_configured ? '已配置' : '缺失'}</dd></div></dl> : <p>载入中。</p>}</article></>
 }
 
 function TrackPage({ detail, configurationRefreshVersion, onDetail }: { detail: TrackDetailView; configurationRefreshVersion: number; onDetail: (detail: TrackDetailView) => void }) {
@@ -273,20 +291,20 @@ function ManualCommands({ detail, onDetail }: { detail: TrackDetailView; onDetai
   const command = async (value: TrackCommandType) => {
     setSending(true); setError(false)
     try {
-      await get(`/tracks/${encodeURIComponent(detail.identity.id)}/commands`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: value }) })
+      await requestJson(`/tracks/${encodeURIComponent(detail.identity.id)}/commands`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: value }) })
       setConfirming(null)
-      const next = await get<TrackDetailView>(`/tracks/${encodeURIComponent(detail.identity.id)}`)
+      const next = await requestJson<TrackDetailView>(`/tracks/${encodeURIComponent(detail.identity.id)}`)
       onDetail(next)
     } catch { setError(true) } finally { setSending(false) }
   }
   const labels: Record<TrackCommandType, string> = { pause: '暂停', resume: '恢复', flatten: '平仓', terminate: '终止' }
   const quantityUnit = detail.position.quantity_unit === 'base_asset' ? `基础资产（${detail.identity.instrument.symbol}）` : detail.position.quantity_unit === 'contracts' ? '合约' : '—'
-  return <article><h2>人工操作</h2><p>可用性和禁用原因由 server 当前状态决定。</p><div className="config-actions">{detail.available_commands.map(item => <span key={item.command}><button disabled={!item.enabled || sending} onClick={() => item.command === 'flatten' || item.command === 'terminate' ? setConfirming(item.command) : void command(item.command)}>{labels[item.command]}</button>{!item.enabled && item.disabled_reason && <small>{item.disabled_reason}</small>}</span>)}</div>{error && <div role="alert" className="alert">命令未被确认；请等待 server 推送或重新载入。</div>}{confirming && <div role="dialog" aria-label={`确认${labels[confirming]}`} className="confirmation"><h2>确认{labels[confirming]}</h2><p>当前真实仓位 {format(detail.position.quantity)} {quantityUnit}，active binding {detail.execution.active_binding_count} 个。</p><p>{confirming === 'flatten' ? '将请求 server 把目标设为零；订单终态仍以 server 状态为准。' : '终止不可逆，Track 不会因更新配置而恢复。'}</p><button onClick={() => setConfirming(null)} disabled={sending}>取消</button><button onClick={() => void command(confirming)} disabled={sending}>确认{labels[confirming]}</button></div>}</article>
+  return <article><h2>人工操作</h2><p>可用性和禁用原因由 server 当前状态决定。</p><div className="config-actions">{detail.available_commands.map(item => <span key={item.command}><button disabled={!item.enabled || sending} onClick={() => item.command === 'flatten' || item.command === 'terminate' ? setConfirming(item.command) : void command(item.command)}>{labels[item.command]}</button>{!item.enabled && item.disabled_reason && <small>{item.disabled_reason}</small>}</span>)}</div>{error && <div role="alert" className="alert">命令未被确认；请等待 server 推送或重新载入。</div>}{confirming && <div role="dialog" aria-label={`确认${labels[confirming]}`} className="confirmation"><h2>确认{labels[confirming]}</h2><p>当前真实仓位 {format(detail.position.quantity)} {quantityUnit}，active binding {detail.execution.active_binding_count} 个。</p><p>{confirming === 'flatten' ? '将请求 server 把目标设为零；订单终态仍以 server 状态为准。确认后进入人工平仓/覆盖状态；需要恢复后才会回到自动执行。' : '终止不可逆；终止后无法从此页面恢复，也不会因更新配置而恢复。'}</p><button onClick={() => setConfirming(null)} disabled={sending}>取消</button><button onClick={() => void command(confirming)} disabled={sending}>确认{labels[confirming]}</button></div>}</article>
 }
 
 function ActivityPanel({ trackId, activity }: { trackId: string; activity: TrackActivityItemView[] }) {
   const [diagnostics, setDiagnostics] = useState<TrackActivityItemView[] | null>(null)
-  useEffect(() => { let alive = true; void get<TrackDiagnosticsView>(`/debug/tracks/${encodeURIComponent(trackId)}/diagnostics`).then(value => { if (alive) setDiagnostics(value.items) }).catch(() => { if (alive) setDiagnostics([]) }); return () => { alive = false } }, [trackId])
+  useEffect(() => { let alive = true; void requestJson<TrackDiagnosticsView>(`/debug/tracks/${encodeURIComponent(trackId)}/diagnostics`).then(value => { if (alive) setDiagnostics(value.items) }).catch(() => { if (alive) setDiagnostics([]) }); return () => { alive = false } }, [trackId])
   return <><article><h2>活动</h2>{activity.length ? <ul>{activity.map(item => <li key={`${item.ts}:${item.message}`}><strong>{title(item.level)}</strong><span>{item.ts} · {item.message}</span></li>)}</ul> : <p>当前没有活动记录。</p>}</article><article><h2>诊断</h2>{diagnostics === null ? <p>诊断载入中。</p> : diagnostics.length ? <ul>{diagnostics.map(item => <li key={`${item.ts}:${item.message}`}><strong>{title(item.level)}</strong><span>{item.message}</span></li>)}</ul> : <p>当前没有诊断项。</p>}</article></>
 }
 
@@ -353,7 +371,7 @@ function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refr
     configurationController.current = controller
     const request = configurationSequence.current + 1; configurationSequence.current = request
     setLoadError(false)
-    get<TrackConfigurationResponse>(`/tracks/${encodeURIComponent(trackId)}/configuration`, { signal: controller.signal })
+    requestJson<TrackConfigurationResponse>(`/tracks/${encodeURIComponent(trackId)}/configuration`, { signal: controller.signal })
       .then(value => { if (!controller.signal.aborted && request === configurationSequence.current) { setConfiguration(value); setDraft(cloneDraft(value.active)); setPreview(null); if (value.application_status === 'failed' && value.application?.retryable) setApplicationId(value.application.application_id); else if (value.application_status === 'idle' || value.application_status === 'active' || value.application_status === 'failed') setApplicationId(null); if (value.application_status === 'idle' || value.application_status === 'active' || value.application_status === 'failed') setCancellationRequested(false) } })
       .catch(() => { if (!controller.signal.aborted && request === configurationSequence.current) setLoadError(true) })
     return controller
@@ -370,7 +388,7 @@ function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refr
     const request = previewSequence.current + 1; previewSequence.current = request
     setPreviewing(true); setPreviewError(false); setPreview(null)
     try {
-      const value = await get<TrackConfigurationPreviewResponse>(`/tracks/${encodeURIComponent(trackId)}/configuration/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidate: draft }), signal: controller.signal })
+      const value = await requestJson<TrackConfigurationPreviewResponse>(`/tracks/${encodeURIComponent(trackId)}/configuration/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidate: draft }), signal: controller.signal })
       if (!controller.signal.aborted && request === previewSequence.current) setPreview(value)
     } catch { if (!controller.signal.aborted && request === previewSequence.current) setPreviewError(true) } finally { if (request === previewSequence.current) setPreviewing(false) }
   }
@@ -386,7 +404,7 @@ function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refr
     const request = applicationSequence.current + 1; applicationSequence.current = request
     setApplying(true); setApplyError(null)
     try {
-      await get(`/tracks/${encodeURIComponent(trackId)}/configuration`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ application_id: id, expected_version: configuration!.version, candidate: draft }), signal: controller.signal })
+      await requestJson(`/tracks/${encodeURIComponent(trackId)}/configuration`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ application_id: id, expected_version: configuration!.version, candidate: draft }), signal: controller.signal })
       if (!controller.signal.aborted && request === applicationSequence.current) { invalidatePreview(); setConfirming(false); setApplicationId(null); load() }
     } catch (error) {
       if (!controller.signal.aborted && request === applicationSequence.current) {

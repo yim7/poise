@@ -728,17 +728,6 @@ impl TradingRuntime {
         })
     }
 
-    pub async fn configuration_application_status(
-        &self,
-        track_id: &TrackId,
-        store: &dyn ConfigurationApplicationStore,
-    ) -> Result<ConfigurationApplicationStatus> {
-        store
-            .configuration_application_status(track_id)
-            .await
-            .map_err(anyhow::Error::new)
-    }
-
     /// Discards an accepted application only while its candidate has not been
     /// written.  The existing closed submit gate remains in force until a
     /// complete exchange snapshot proves that the old order ownership is
@@ -1034,7 +1023,37 @@ impl TradingRuntime {
         let id = track_id.as_str();
         match input {
             TrackInput::Command(command) => {
-                self.command(id, command).await?;
+                self.command(id, command.clone()).await?;
+                let kind = match command {
+                    poise_engine::command::TrackCommand::Pause => {
+                        Some(crate::TrackActivityKind::CommandPause)
+                    }
+                    poise_engine::command::TrackCommand::Resume => {
+                        Some(crate::TrackActivityKind::CommandResume)
+                    }
+                    poise_engine::command::TrackCommand::Terminate => {
+                        Some(crate::TrackActivityKind::CommandTerminate)
+                    }
+                    poise_engine::command::TrackCommand::Flatten => {
+                        Some(crate::TrackActivityKind::CommandFlatten)
+                    }
+                    poise_engine::command::TrackCommand::Reconcile => None,
+                };
+                if let Some(kind) = kind
+                    && let Err(error) = self
+                        .mutation_store
+                        .record_track_activity(&crate::StoredTrackActivity {
+                            id: 0,
+                            track_id: track_id.clone(),
+                            kind,
+                            reference_id: None,
+                            change_fields: Vec::new(),
+                            created_at: chrono::Utc::now(),
+                        })
+                        .await
+                {
+                    tracing::warn!(track_id = %track_id.as_str(), ?error, "failed to record accepted track command activity");
+                }
                 self.committed_receipt(id).await
             }
             TrackInput::Market {
@@ -2593,6 +2612,7 @@ pub(crate) mod test_support {
         next_pnl_insert_error: Mutex<Option<String>>,
         events: Mutex<HashMap<String, Vec<DomainEvent>>>,
         effects: Mutex<Vec<PersistedTrackEffect>>,
+        activities: Mutex<Vec<crate::StoredTrackActivity>>,
         business_write_calls: Mutex<usize>,
         effect_outcome_write_calls: Mutex<usize>,
         effect_journal_append_error: Mutex<Option<String>>,
@@ -2610,6 +2630,10 @@ pub(crate) mod test_support {
 
         pub(crate) fn business_write_call_count(&self) -> usize {
             *self.business_write_calls.lock().unwrap()
+        }
+
+        pub(crate) fn activities(&self) -> Vec<crate::StoredTrackActivity> {
+            self.activities.lock().unwrap().clone()
         }
 
         pub(crate) fn fail_effect_journal_appends(&self, error: impl Into<String>) {
@@ -2719,6 +2743,23 @@ pub(crate) mod test_support {
 
     #[async_trait]
     impl crate::TrackQueryStore for MemoryRepository {
+        async fn list_recent_track_activity(
+            &self,
+            track_id: &TrackId,
+            limit: usize,
+        ) -> Result<Vec<crate::StoredTrackActivity>> {
+            Ok(self
+                .activities
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|activity| activity.track_id == *track_id)
+                .rev()
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
         async fn list_recent_track_events(
             &self,
             track_id: &TrackId,
@@ -2825,6 +2866,11 @@ pub(crate) mod test_support {
 
     #[async_trait]
     impl TrackMutationStore for MemoryRepository {
+        async fn record_track_activity(&self, activity: &crate::StoredTrackActivity) -> Result<()> {
+            self.activities.lock().unwrap().push(activity.clone());
+            Ok(())
+        }
+
         async fn commit_track_transition(
             &self,
             id: &str,
@@ -3321,6 +3367,13 @@ mod tests {
 
     #[async_trait]
     impl TrackMutationStore for BlockingFailingMutationStore {
+        async fn record_track_activity(
+            &self,
+            _activity: &crate::StoredTrackActivity,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         async fn commit_track_transition(
             &self,
             _id: &str,
@@ -4110,6 +4163,10 @@ mod tests {
             .handle(&track_id, TrackInput::Command(TrackCommand::Pause))
             .await
             .unwrap();
+        assert_eq!(
+            repository.activities()[0].kind,
+            crate::TrackActivityKind::CommandPause
+        );
         let before = runtime
             .committed_track_snapshot(&track_id)
             .await

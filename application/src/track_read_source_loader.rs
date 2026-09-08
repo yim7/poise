@@ -12,6 +12,7 @@ use crate::{
 
 pub(crate) const DETAIL_EVENTS_LIMIT: usize = 20;
 pub(crate) const DETAIL_EFFECTS_LIMIT: usize = 20;
+pub(crate) const DETAIL_ACTIVITY_LIMIT: usize = 20;
 
 #[derive(Clone)]
 pub(crate) struct TrackReadSourceLoader {
@@ -73,6 +74,10 @@ impl TrackReadSourceLoader {
             .repository
             .list_recent_track_effects(track_id, DETAIL_EFFECTS_LIMIT)
             .await?;
+        let recent_track_activity = self
+            .repository
+            .list_recent_track_activity(track_id, DETAIL_ACTIVITY_LIMIT)
+            .await?;
         let updated_at = self
             .repository
             .load_track_updated_at(track_id)
@@ -84,6 +89,7 @@ impl TrackReadSourceLoader {
             updated_at,
             recent_track_events,
             recent_effects,
+            recent_track_activity,
         )))
     }
 
@@ -93,6 +99,7 @@ impl TrackReadSourceLoader {
         updated_at: DateTime<Utc>,
         recent_track_events: Vec<crate::StoredTrackEvent>,
         recent_effects: Vec<crate::PersistedTrackEffect>,
+        recent_track_activity: Vec<crate::StoredTrackActivity>,
     ) -> TrackReadSource {
         TrackReadSource {
             definition: snapshot.definition,
@@ -100,6 +107,7 @@ impl TrackReadSourceLoader {
             updated_at,
             recent_track_events,
             recent_effects,
+            recent_track_activity,
         }
     }
 }

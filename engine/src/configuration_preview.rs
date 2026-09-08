@@ -193,16 +193,20 @@ pub fn preview_configuration(
         minimum_rebalance_quantity,
         input.strategy_price,
     );
-    let maximum_target_position_qty = input
-        .instrument_spec
-        .position_qty_for_notional(
-            amount(
-                input.candidate.effective_max_notional(),
-                &input.instrument_spec,
+    let maximum_target_position_qty = input.instrument_spec.normalize_position_qty(
+        input
+            .instrument_spec
+            .position_qty_for_notional(
+                amount(
+                    input.candidate.effective_max_notional(),
+                    &input.instrument_spec,
+                ),
+                candidate_config.band_center(),
+            )
+            .expect(
+                "validated candidate definition and instrument spec must convert maximum notional",
             ),
-            candidate_config.band_center(),
-        )
-        .expect("validated candidate definition and instrument spec must convert maximum notional");
+    );
 
     let current_absolute_notional = unsigned_notional(
         &input.instrument_spec,
@@ -243,7 +247,12 @@ pub fn preview_configuration(
             .instrument_spec
             .meets_minimum(minimum_rebalance_quantity, input.strategy_price)
             .expect("validated instrument spec and strategy price must evaluate venue minimum");
-    if !meets_venue_minimum {
+    let maximum_target_is_executable = maximum_target_position_qty.value() > f64::EPSILON
+        && input
+            .instrument_spec
+            .meets_minimum(maximum_target_position_qty, input.strategy_price)
+            .expect("validated instrument spec and strategy price must evaluate venue minimum");
+    if !meets_venue_minimum || !maximum_target_is_executable {
         blockers.push(ConfigurationPreviewBlocker::VenueMinimum);
     }
     if required_increase_notional > input.max_increase_notional + f64::EPSILON {

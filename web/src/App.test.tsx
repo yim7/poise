@@ -110,6 +110,7 @@ describe('Poise read-only console', () => {
     const dialog = screen.getByRole('dialog', { name: '确认平仓' })
     expect(within(dialog).getByText(/当前真实仓位 3.0000 合约/)).toBeVisible()
     expect(within(dialog).getByText(/active binding 2 个/)).toBeVisible()
+    expect(within(dialog).getByText(/进入人工平仓\/覆盖状态；需要恢复后才会回到自动执行/)).toBeVisible()
     fireEvent.click(within(dialog).getByRole('button', { name: '确认平仓' }))
     await waitFor(() => expect(commandBody).toBe(JSON.stringify({ command: 'flatten' })))
   })
@@ -117,7 +118,7 @@ describe('Poise read-only console', () => {
   it('shows health, readiness, task errors, and non-sensitive system information', async () => {
     vi.stubGlobal('fetch', vi.fn((input: string) => {
       if (input === '/health') return Promise.resolve(response({ status: 'attention_required', track_count: 1, attention_required_count: 1, tasks: [{ component: 'reconcile', status: 'degraded', last_success_at: null, last_error_at: '2026-09-09T00:00:00Z', last_error: 'timeout' }] }))
-      if (input === '/system') return Promise.resolve(response({ exchange: 'hyperliquid', deployment: 'testnet', instance_directory: '/tmp/poise', server_version: '0.1.0', bind_address: '127.0.0.1:3000', credentials_configured: true }))
+      if (input === '/system') return Promise.resolve(response({ exchange: 'hyperliquid', deployment: 'testnet', instance_directory: '/tmp/poise', server_version: '0.1.0', bind_address: '127.0.0.1:3000', credentials_configured: true, recent_configuration_conflict: null }))
       return Promise.resolve(response(api(input)))
     }))
     render(<App />); await screen.findByText('btc-core'); fireEvent.click(screen.getByRole('button', { name: '系统' }))
@@ -126,6 +127,29 @@ describe('Poise read-only console', () => {
     expect(screen.getByText('Health')).toBeVisible(); expect(screen.getByText('Trading readiness')).toBeVisible()
     expect(screen.getByText(/reconcile · degraded/)).toBeVisible(); expect(screen.getByText('timeout')).toBeVisible()
     expect(screen.getByText('TESTNET 测试网')).toBeVisible(); expect(screen.getByText('已配置')).toBeVisible()
+  })
+
+  it('keeps server identity in the top bar and exposes every blocker and degraded task from refreshed operational state', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: string) => {
+      if (input === '/readiness') return Promise.resolve(response({ ready_to_trade: false, blockers: [{ component: 'market_data', reason: '行情恢复中' }, { component: 'account', reason: '账户状态更新中' }], warnings: [{ component: 'reconcile', reason: '最近一次对账延迟' }] }, 503))
+      if (input === '/health') return Promise.resolve(response({ status: 'attention_required', track_count: 1, attention_required_count: 1, tasks: [{ component: 'reconcile', status: 'degraded', last_success_at: null, last_error_at: '2026-09-09T00:00:00Z', last_error: 'timeout' }, { component: 'market_data', status: 'ok', last_success_at: '2026-09-09T00:00:01Z', last_error_at: null, last_error: null }, { component: 'user_data', status: 'degraded', last_success_at: null, last_error_at: '2026-09-09T00:00:02Z', last_error: 'user stream timeout' }] }, 503))
+      if (input === '/system') return Promise.resolve(response({ exchange: 'hyperliquid', deployment: 'testnet', instance_directory: '/tmp/poise', server_version: '0.1.0', bind_address: '127.0.0.1:3000', credentials_configured: true, recent_configuration_conflict: { application_id: 'apply-42', track_id: 'btc-core', observed_at: '2026-09-09T00:00:03Z' } }))
+      return Promise.resolve(response(api(input)))
+    }))
+    render(<App />)
+    expect(await screen.findByText('交易所 hyperliquid')).toBeVisible()
+    expect(screen.getByText('数据通道异常')).toBeVisible()
+    expect(screen.getByText('浏览器实时流正在连接')).toBeVisible()
+    expect(screen.getByText('环境 TESTNET 测试网')).toBeVisible()
+    expect(screen.getByText('行情恢复中')).toBeVisible(); expect(screen.getByText('账户状态更新中')).toBeVisible(); expect(screen.getByText('最近一次对账延迟')).toBeVisible()
+    expect(screen.getByText(/reconcile · degraded/)).toBeVisible()
+    fireEvent.click(screen.getAllByRole('button', { name: '查看系统状态' })[0])
+    expect(await screen.findByRole('heading', { name: '系统' })).toBeVisible()
+    const conflict = screen.getByRole('heading', { name: '最近外部配置冲突' }).parentElement!
+    expect(within(conflict).getByText('btc-core')).toBeVisible(); expect(within(conflict).getByText('apply-42')).toBeVisible(); expect(within(conflict).getByText('2026-09-09T00:00:03Z')).toBeVisible()
+    expect(within(conflict).getByText(/请重新载入并检查配置/)).toBeVisible()
+    expect(screen.getByText('行情恢复中')).toBeVisible(); expect(screen.getByText('账户状态更新中')).toBeVisible()
+    expect(screen.getByText('timeout')).toBeVisible()
   })
 
   it('renders readiness and health 503 bodies as operational status rather than read failures', async () => {
@@ -167,7 +191,7 @@ describe('Poise read-only console', () => {
     await screen.findByRole('heading', { name: '可以交易' })
     expect(await screen.findByText('环境 TESTNET 测试网')).toBeVisible()
     act(() => BrowserStream.instances[0].open())
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(8))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(10))
     vi.useFakeTimers()
     reconnected = true
     act(() => BrowserStream.instances[0].serverClose())

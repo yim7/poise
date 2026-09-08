@@ -4,6 +4,65 @@ use poise_core::track::TrackId;
 use poise_engine::execution_plan::TrackEffect;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackActivityKind {
+    ConfigurationPreparing,
+    ConfigurationWaitingForOrders,
+    ConfigurationActivating,
+    ConfigurationActive,
+    ConfigurationFailed,
+    ConfigurationInterrupted,
+    CommandPause,
+    CommandResume,
+    CommandTerminate,
+    CommandFlatten,
+}
+
+impl TrackActivityKind {
+    pub fn level(self) -> crate::TrackActivityLevel {
+        match self {
+            Self::ConfigurationFailed | Self::ConfigurationInterrupted => {
+                crate::TrackActivityLevel::Error
+            }
+            _ => crate::TrackActivityLevel::Info,
+        }
+    }
+
+    pub fn message(self, reference_id: Option<&str>, change_fields: &[String]) -> String {
+        let base = match self {
+            Self::ConfigurationPreparing => "configuration application accepted",
+            Self::ConfigurationWaitingForOrders => "configuration application waiting for orders",
+            Self::ConfigurationActivating => "configuration application activating",
+            Self::ConfigurationActive => "configuration application active",
+            Self::ConfigurationFailed => "configuration application failed",
+            Self::ConfigurationInterrupted => "configuration application interrupted",
+            Self::CommandPause => "manual pause submitted",
+            Self::CommandResume => "manual resume submitted",
+            Self::CommandTerminate => "manual terminate submitted",
+            Self::CommandFlatten => "manual flatten submitted",
+        };
+        let base = reference_id
+            .map(|reference_id| format!("{base} (application {reference_id})"))
+            .unwrap_or_else(|| base.to_string());
+        if change_fields.is_empty() {
+            base
+        } else {
+            format!("{base}: {}", change_fields.join(", "))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredTrackActivity {
+    pub id: i64,
+    pub track_id: TrackId,
+    pub kind: TrackActivityKind,
+    pub reference_id: Option<String>,
+    pub change_fields: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredTrackEvent {
     pub id: i64,

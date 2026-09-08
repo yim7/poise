@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use poise_application::{
     self as app, CommittedTrackWrite, EffectJournalEntry, EffectStatus, EffectStatusUpdate,
-    PersistedTrackEffect, StoredTrackEvent, TrackControlState, TrackEffectJournal,
-    TrackIdentityStore, TrackMutationStore, TrackQueryStore,
+    PersistedTrackEffect, StoredTrackActivity, StoredTrackEvent, TrackActivityKind,
+    TrackControlState, TrackEffectJournal, TrackIdentityStore, TrackMutationStore, TrackQueryStore,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -40,18 +40,170 @@ pub struct ConfigurationApplicationAuditRow {
     pub track_id: String,
     pub old_version: String,
     pub candidate_version: String,
-    pub result: String,
+    pub result: ConfigurationApplicationAuditStatus,
+    pub change_fields: Option<Vec<String>>,
+    pub failure_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigurationApplicationAuditStatus {
+    Preparing,
+    WaitingForOrders,
+    Activating,
+    Active,
+    Failed,
+    Interrupted,
+}
+
+impl ConfigurationApplicationAuditStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing",
+            Self::WaitingForOrders => "waiting_for_orders",
+            Self::Activating => "activating",
+            Self::Active => "active",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
+impl std::fmt::Display for ConfigurationApplicationAuditStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ConfigurationApplicationAuditStatus {
+    type Err = std::io::Error;
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "preparing" => Ok(Self::Preparing),
+            "waiting_for_orders" => Ok(Self::WaitingForOrders),
+            "activating" => Ok(Self::Activating),
+            "active" => Ok(Self::Active),
+            "failed" => Ok(Self::Failed),
+            "interrupted" => Ok(Self::Interrupted),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown configuration application status `{value}`"),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigurationApplicationExternalConflictRow {
+    pub application_id: String,
+    pub track_id: String,
+    pub observed_at: DateTime<Utc>,
+}
+
 impl SqliteStorage {
+    fn decode_configuration_application_row(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<ConfigurationApplicationAuditRow> {
+        let change_fields = row
+            .get::<_, Option<String>>(6)?
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+        Ok(ConfigurationApplicationAuditRow {
+            application_id: row.get(0)?,
+            request_hash: row.get(1)?,
+            track_id: row.get(2)?,
+            old_version: row.get(3)?,
+            candidate_version: row.get(4)?,
+            result: row.get::<_, String>(5)?.parse().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+            change_fields,
+            failure_reason: row.get(7)?,
+            created_at: row.get::<_, String>(8)?.parse().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    8,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+            updated_at: row.get::<_, String>(9)?.parse().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    9,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        })
+    }
+    pub fn record_track_activity(&self, activity: &StoredTrackActivity) -> Result<()> {
+        let conn = Self::lock_connection(&self.conn)?;
+        conn.execute(
+            "INSERT INTO track_activity (track_id, kind, reference_id, change_fields_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![activity.track_id.as_str(), serde_json::to_string(&activity.kind)?, activity.reference_id, serde_json::to_string(&activity.change_fields)?, activity.created_at.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    fn list_recent_track_activity_blocking(
+        conn: Arc<Mutex<Connection>>,
+        track_id: TrackId,
+        limit: usize,
+    ) -> Result<Vec<StoredTrackActivity>> {
+        let conn = Self::lock_connection(&conn)?;
+        let mut statement = conn.prepare("SELECT id, kind, reference_id, change_fields_json, created_at FROM track_activity WHERE track_id=?1 ORDER BY created_at DESC, id DESC LIMIT ?2")?;
+        let rows = statement.query_map(params![track_id.as_str(), limit as i64], |row| {
+            let kind: TrackActivityKind =
+                serde_json::from_str(&row.get::<_, String>(1)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+            let change_fields: Vec<String> = serde_json::from_str(&row.get::<_, String>(3)?)
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+            Ok(StoredTrackActivity {
+                id: row.get(0)?,
+                track_id: track_id.clone(),
+                kind,
+                reference_id: row.get(2)?,
+                change_fields,
+                created_at: row.get::<_, String>(4)?.parse().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
     pub fn record_configuration_application(
         &self,
         row: &ConfigurationApplicationAuditRow,
     ) -> Result<()> {
         let conn = Self::lock_connection(&self.conn)?;
-        conn.execute("INSERT INTO configuration_applications (application_id, request_hash, track_id, old_version, candidate_version, result, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![row.application_id, row.request_hash, row.track_id, row.old_version, row.candidate_version, row.result, row.created_at.to_rfc3339(), row.updated_at.to_rfc3339()])?;
+        conn.execute("INSERT INTO configuration_applications (application_id, request_hash, track_id, old_version, candidate_version, result, change_fields_json, failure_reason, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![row.application_id, row.request_hash, row.track_id, row.old_version, row.candidate_version, row.result.as_str(), row.change_fields.as_ref().map(serde_json::to_string).transpose()?, row.failure_reason, row.created_at.to_rfc3339(), row.updated_at.to_rfc3339()])?;
         Ok(())
     }
 
@@ -60,19 +212,52 @@ impl SqliteStorage {
         application_id: &str,
     ) -> Result<Option<ConfigurationApplicationAuditRow>> {
         let conn = Self::lock_connection(&self.conn)?;
-        conn.query_row("SELECT application_id, request_hash, track_id, old_version, candidate_version, result, created_at, updated_at FROM configuration_applications WHERE application_id=?1", params![application_id], |row| Ok(ConfigurationApplicationAuditRow { application_id: row.get(0)?, request_hash: row.get(1)?, track_id: row.get(2)?, old_version: row.get(3)?, candidate_version: row.get(4)?, result: row.get(5)?, created_at: row.get::<_, String>(6)?.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error)))?, updated_at: row.get::<_, String>(7)?.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(error)))? })).optional().map_err(Into::into)
+        conn.query_row("SELECT application_id, request_hash, track_id, old_version, candidate_version, result, change_fields_json, failure_reason, created_at, updated_at FROM configuration_applications WHERE application_id=?1", params![application_id], Self::decode_configuration_application_row).optional().map_err(Into::into)
+    }
+
+    pub fn load_latest_external_configuration_conflict(
+        &self,
+    ) -> Result<Option<ConfigurationApplicationExternalConflictRow>> {
+        let conn = Self::lock_connection(&self.conn)?;
+        conn.query_row(
+            "SELECT application_id, track_id, updated_at FROM configuration_applications WHERE failure_reason='external_change' ORDER BY updated_at DESC LIMIT 1",
+            [],
+            |row| Ok(ConfigurationApplicationExternalConflictRow {
+                application_id: row.get(0)?,
+                track_id: row.get(1)?,
+                observed_at: row.get::<_, String>(2)?.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(error)))?,
+            }),
+        ).optional().map_err(Into::into)
     }
 
     pub fn update_configuration_application_result(
         &self,
         application_id: &str,
-        result: &str,
+        result: ConfigurationApplicationAuditStatus,
         updated_at: DateTime<Utc>,
     ) -> Result<()> {
         let conn = Self::lock_connection(&self.conn)?;
         let changed = conn.execute(
-            "UPDATE configuration_applications SET result=?2, updated_at=?3 WHERE application_id=?1",
-            params![application_id, result, updated_at.to_rfc3339()],
+            "UPDATE configuration_applications SET result=?2, failure_reason=CASE WHEN ?2 <> 'failed' THEN NULL ELSE failure_reason END, updated_at=?3 WHERE application_id=?1",
+            params![application_id, result.as_str(), updated_at.to_rfc3339()],
+        )?;
+        ensure!(
+            changed == 1,
+            "configuration application `{application_id}` not found"
+        );
+        Ok(())
+    }
+
+    pub fn record_configuration_application_failure(
+        &self,
+        application_id: &str,
+        failure_reason: &str,
+        updated_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = Self::lock_connection(&self.conn)?;
+        let changed = conn.execute(
+            "UPDATE configuration_applications SET result='failed', failure_reason=?2, updated_at=?3 WHERE application_id=?1",
+            params![application_id, failure_reason, updated_at.to_rfc3339()],
         )?;
         ensure!(
             changed == 1,
@@ -87,14 +272,10 @@ impl SqliteStorage {
     ) -> Result<Option<ConfigurationApplicationAuditRow>> {
         let conn = Self::lock_connection(&self.conn)?;
         conn.query_row(
-            "SELECT application_id, request_hash, track_id, old_version, candidate_version, result, created_at, updated_at
+            "SELECT application_id, request_hash, track_id, old_version, candidate_version, result, change_fields_json, failure_reason, created_at, updated_at
              FROM configuration_applications WHERE track_id=?1 ORDER BY updated_at DESC LIMIT 1",
             params![track_id],
-            |row| Ok(ConfigurationApplicationAuditRow {
-                application_id: row.get(0)?, request_hash: row.get(1)?, track_id: row.get(2)?, old_version: row.get(3)?, candidate_version: row.get(4)?, result: row.get(5)?,
-                created_at: row.get::<_, String>(6)?.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error)))?,
-                updated_at: row.get::<_, String>(7)?.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(error)))?,
-            }),
+            Self::decode_configuration_application_row,
         ).optional().map_err(Into::into)
     }
 
@@ -106,16 +287,12 @@ impl SqliteStorage {
     ) -> Result<Option<ConfigurationApplicationAuditRow>> {
         let conn = Self::lock_connection(&self.conn)?;
         conn.query_row(
-            "SELECT application_id, request_hash, track_id, old_version, candidate_version, result, created_at, updated_at
+            "SELECT application_id, request_hash, track_id, old_version, candidate_version, result, change_fields_json, failure_reason, created_at, updated_at
              FROM configuration_applications
              WHERE result IN ('preparing', 'waiting_for_orders', 'activating')
              ORDER BY updated_at ASC LIMIT 1",
             [],
-            |row| Ok(ConfigurationApplicationAuditRow {
-                application_id: row.get(0)?, request_hash: row.get(1)?, track_id: row.get(2)?, old_version: row.get(3)?, candidate_version: row.get(4)?, result: row.get(5)?,
-                created_at: row.get::<_, String>(6)?.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error)))?,
-                updated_at: row.get::<_, String>(7)?.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(error)))?,
-            }),
+            Self::decode_configuration_application_row,
         ).optional().map_err(Into::into)
     }
 
@@ -127,35 +304,12 @@ impl SqliteStorage {
     ) -> Result<Vec<ConfigurationApplicationAuditRow>> {
         let conn = Self::lock_connection(&self.conn)?;
         let mut statement = conn.prepare(
-            "SELECT application_id, request_hash, track_id, old_version, candidate_version, result, created_at, updated_at
+            "SELECT application_id, request_hash, track_id, old_version, candidate_version, result, change_fields_json, failure_reason, created_at, updated_at
              FROM configuration_applications
              WHERE result IN ('preparing', 'waiting_for_orders', 'activating')
              ORDER BY updated_at ASC",
         )?;
-        let rows = statement.query_map([], |row| {
-            Ok(ConfigurationApplicationAuditRow {
-                application_id: row.get(0)?,
-                request_hash: row.get(1)?,
-                track_id: row.get(2)?,
-                old_version: row.get(3)?,
-                candidate_version: row.get(4)?,
-                result: row.get(5)?,
-                created_at: row.get::<_, String>(6)?.parse().map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        6,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?,
-                updated_at: row.get::<_, String>(7)?.parse().map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        7,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?,
-            })
-        })?;
+        let rows = statement.query_map([], Self::decode_configuration_application_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -1152,6 +1306,17 @@ impl TrackIdentityStore for SqliteStorage {
 
 #[async_trait]
 impl TrackMutationStore for SqliteStorage {
+    async fn record_track_activity(&self, activity: &StoredTrackActivity) -> Result<()> {
+        let conn = Arc::clone(&self.conn);
+        let activity = activity.clone();
+        tokio::task::spawn_blocking(move || {
+            let storage = Self { conn };
+            storage.record_track_activity(&activity)
+        })
+        .await
+        .context("failed to join record_track_activity blocking task")?
+    }
+
     async fn commit_track_transition(
         &self,
         id: &str,
@@ -1266,6 +1431,20 @@ impl TrackQueryStore for SqliteStorage {
         })
         .await
         .context("failed to join list_recent_track_effects blocking task")?
+    }
+
+    async fn list_recent_track_activity(
+        &self,
+        track_id: &TrackId,
+        limit: usize,
+    ) -> Result<Vec<StoredTrackActivity>> {
+        let conn = Arc::clone(&self.conn);
+        let track_id = track_id.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::list_recent_track_activity_blocking(conn, track_id, limit)
+        })
+        .await
+        .context("failed to join list_recent_track_activity blocking task")?
     }
 
     async fn load_track_control_state(
@@ -1413,7 +1592,9 @@ mod tests {
                 track_id: "btc".to_string(),
                 old_version: "old".to_string(),
                 candidate_version: "new".to_string(),
-                result: "preparing".to_string(),
+                result: ConfigurationApplicationAuditStatus::Preparing,
+                change_fields: Some(vec!["upper_price".to_string()]),
+                failure_reason: Some("external_change".to_string()),
                 created_at: now,
                 updated_at: now,
             })
@@ -1424,7 +1605,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .result,
-            "preparing"
+            ConfigurationApplicationAuditStatus::Preparing
         );
         assert_eq!(
             storage
@@ -1434,8 +1615,23 @@ mod tests {
                 .application_id,
             "apply-1"
         );
+        let latest = storage
+            .load_latest_configuration_application_for_track("btc")
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.change_fields, Some(vec!["upper_price".to_string()]));
+        assert_eq!(latest.failure_reason.as_deref(), Some("external_change"));
+        let active = storage.load_active_configuration_applications().unwrap();
+        assert_eq!(
+            active[0].change_fields,
+            Some(vec!["upper_price".to_string()])
+        );
         storage
-            .update_configuration_application_result("apply-1", "failed", Utc::now())
+            .update_configuration_application_result(
+                "apply-1",
+                ConfigurationApplicationAuditStatus::Failed,
+                Utc::now(),
+            )
             .unwrap();
         assert!(
             storage
@@ -1449,8 +1645,88 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .result,
-            "failed"
+            ConfigurationApplicationAuditStatus::Failed
         );
+        storage
+            .update_configuration_application_result(
+                "apply-1",
+                ConfigurationApplicationAuditStatus::Preparing,
+                Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(
+            storage
+                .load_configuration_application("apply-1")
+                .unwrap()
+                .unwrap()
+                .failure_reason,
+            None
+        );
+        storage
+            .record_configuration_application_failure("apply-1", "external_change", Utc::now())
+            .unwrap();
+        storage
+            .update_configuration_application_result(
+                "apply-1",
+                ConfigurationApplicationAuditStatus::Failed,
+                Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(
+            storage
+                .load_configuration_application("apply-1")
+                .unwrap()
+                .unwrap()
+                .failure_reason
+                .as_deref(),
+            Some("external_change")
+        );
+    }
+
+    #[test]
+    fn configuration_application_rejects_unknown_durable_status() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let now = Utc::now().to_rfc3339();
+        let conn = SqliteStorage::lock_connection(&storage.conn).unwrap();
+        conn.execute(
+            "INSERT INTO configuration_applications (application_id, request_hash, track_id, old_version, candidate_version, result, created_at, updated_at) VALUES ('bad', 'hash', 'btc', 'old', 'new', 'unknown', ?1, ?1)",
+            params![now],
+        ).unwrap();
+        drop(conn);
+        assert!(storage.load_configuration_application("bad").is_err());
+    }
+
+    #[tokio::test]
+    async fn track_activity_is_durable_and_returns_newest_first() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let track_id = TrackId::new("btc");
+        let earlier = Utc.with_ymd_and_hms(2026, 9, 9, 1, 0, 0).unwrap();
+        storage
+            .record_track_activity(&StoredTrackActivity {
+                id: 0,
+                track_id: track_id.clone(),
+                kind: TrackActivityKind::CommandPause,
+                reference_id: None,
+                change_fields: vec![],
+                created_at: earlier,
+            })
+            .unwrap();
+        storage
+            .record_track_activity(&StoredTrackActivity {
+                id: 0,
+                track_id: track_id.clone(),
+                kind: TrackActivityKind::ConfigurationPreparing,
+                reference_id: Some("apply-1".to_string()),
+                change_fields: vec!["upper_price".into()],
+                created_at: earlier + chrono::Duration::seconds(1),
+            })
+            .unwrap();
+        let activity = TrackQueryStore::list_recent_track_activity(&storage, &track_id, 1)
+            .await
+            .unwrap();
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].kind, TrackActivityKind::ConfigurationPreparing);
+        assert_eq!(activity[0].change_fields, vec!["upper_price"]);
     }
 
     fn amount(value: f64, asset: &str) -> Amount {

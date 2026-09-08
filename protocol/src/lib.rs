@@ -116,6 +116,15 @@ pub struct SystemInfoResponse {
     pub server_version: String,
     pub bind_address: String,
     pub credentials_configured: bool,
+    pub recent_configuration_conflict: Option<RecentConfigurationConflictView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecentConfigurationConflictView {
+    pub application_id: String,
+    pub track_id: String,
+    pub observed_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2002,10 +2011,11 @@ mod tests {
             server_version: "0.1.0".to_string(),
             bind_address: "127.0.0.1:8000".to_string(),
             credentials_configured: true,
+            recent_configuration_conflict: None,
         };
         assert_eq!(
             serde_json::to_string(&response).unwrap(),
-            r#"{"exchange":"binance","deployment":"testnet","instance_directory":"/var/lib/poise/demo","server_version":"0.1.0","bind_address":"127.0.0.1:8000","credentials_configured":true}"#
+            r#"{"exchange":"binance","deployment":"testnet","instance_directory":"/var/lib/poise/demo","server_version":"0.1.0","bind_address":"127.0.0.1:8000","credentials_configured":true,"recent_configuration_conflict":null}"#
         );
     }
 }

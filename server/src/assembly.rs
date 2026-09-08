@@ -1710,6 +1710,13 @@ total_loss_limit = 600.0
 
     #[async_trait::async_trait]
     impl TrackMutationStore for BlockingPersistence {
+        async fn record_track_activity(
+            &self,
+            _activity: &poise_application::StoredTrackActivity,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         async fn commit_track_transition(
             &self,
             id: &str,
@@ -1770,6 +1777,14 @@ total_loss_limit = 600.0
 
     #[async_trait::async_trait]
     impl TrackQueryStore for BlockingPersistence {
+        async fn list_recent_track_activity(
+            &self,
+            _track_id: &TrackId,
+            _limit: usize,
+        ) -> anyhow::Result<Vec<poise_application::StoredTrackActivity>> {
+            Ok(Vec::new())
+        }
+
         async fn load_track_updated_at(
             &self,
             _track_id: &TrackId,

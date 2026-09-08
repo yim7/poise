@@ -4,6 +4,7 @@ mod assembly;
 mod config;
 mod config_explain;
 mod config_persistence;
+mod config_projection;
 mod dry_run;
 mod effect_worker;
 mod exchange_freshness;

@@ -15,8 +15,8 @@ use poise_protocol::{
     AccountSummaryView, ActivityLevelView, BandFlattenTrigger, BandProtectionPolicy,
     BandRecoverPolicy, HealthResponse, HealthStatusView, HealthTaskStatusView, HealthTaskView,
     InstrumentView, PnlBackfillStatusView, PnlHistoryWindowView, ReadinessIssueView,
-    RecentFillAuditItemView, RecentFillCoverageView, RecentFillsAuditResponse,
-    RecentPnlAvailabilityView, RecentPnlCompletenessView, RiskAcquisitionConfigView, ShapeFamily,
+    RecentConfigurationConflictView, RecentFillAuditItemView, RecentFillCoverageView,
+    RecentFillsAuditResponse, RecentPnlAvailabilityView, RecentPnlCompletenessView, ShapeFamily,
     SystemInfoResponse, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
     TrackConfigurationApplicationStatusView, TrackConfigurationApplyRequest,
     TrackConfigurationBlockerView, TrackConfigurationCapacityProofView,
@@ -31,6 +31,10 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tower_http::services::{ServeDir, ServeFile};
 
+use crate::config_projection::{
+    configuration_view_from_definition, project_out_of_band_policy, project_risk_acquisition,
+    project_shape_family,
+};
 use crate::runtime::{
     RuntimeHealthSnapshot, RuntimeHealthStatus, RuntimeTaskHealthSnapshot, assess_trading_readiness,
 };
@@ -130,15 +134,35 @@ async fn readiness(
     Ok((status, Json(response)))
 }
 
-async fn get_system(State(state): State<HttpState>) -> Json<SystemInfoResponse> {
-    Json(SystemInfoResponse {
+async fn get_system(
+    State(state): State<HttpState>,
+) -> Result<Json<SystemInfoResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let recent_configuration_conflict = state
+        .configuration_store
+        .as_ref()
+        .map(|store| {
+            store
+                .latest_external_configuration_conflict()
+                .map(|conflict| {
+                    conflict.map(|conflict| RecentConfigurationConflictView {
+                        application_id: conflict.application_id,
+                        track_id: conflict.track_id,
+                        observed_at: conflict.observed_at.to_rfc3339(),
+                    })
+                })
+        })
+        .transpose()
+        .map_err(|error| internal_error(error.to_string()))?
+        .flatten();
+    Ok(Json(SystemInfoResponse {
         exchange: state.system_info.exchange.clone(),
         deployment: state.system_info.deployment.clone(),
         instance_directory: state.system_info.instance_directory.clone(),
         server_version: state.system_info.server_version.clone(),
         bind_address: state.system_info.bind_address.clone(),
         credentials_configured: state.system_info.credentials_configured,
-    })
+        recent_configuration_conflict,
+    }))
 }
 
 async fn list_tracks(
@@ -369,14 +393,7 @@ async fn abandon_track_configuration_application(
         .map_err(map_configuration_application_error)?;
     Ok(Json(poise_protocol::TrackConfigurationApplicationView {
         application_id,
-        status: project_application_status(match receipt.status {
-            ConfigurationApplicationStatus::Idle => "idle",
-            ConfigurationApplicationStatus::Preparing => "preparing",
-            ConfigurationApplicationStatus::WaitingForOrders => "waiting_for_orders",
-            ConfigurationApplicationStatus::Activating => "activating",
-            ConfigurationApplicationStatus::Active => "active",
-            ConfigurationApplicationStatus::Failed => "failed",
-        }),
+        status: project_runtime_application_status(receipt.status),
         accepted: false,
         retryable: false,
         message: Some(
@@ -408,7 +425,11 @@ async fn apply_track_configuration(
                 poise_application::ConfigurationApplicationStoreError::ApplicationIdConflict,
             ));
         }
-        if matches!(existing.result.as_str(), "active" | "waiting_for_orders") {
+        if matches!(
+            existing.result,
+            poise_storage::sqlite::ConfigurationApplicationAuditStatus::Active
+                | poise_storage::sqlite::ConfigurationApplicationAuditStatus::WaitingForOrders
+        ) {
             return Ok(Json(project_application_view(existing.clone())));
         }
     }
@@ -451,14 +472,7 @@ async fn apply_track_configuration(
             .map_err(map_configuration_application_error)?;
         return Ok(Json(poise_protocol::TrackConfigurationApplicationView {
             application_id: request.application_id,
-            status: project_application_status(match receipt.status {
-                ConfigurationApplicationStatus::Idle => "idle",
-                ConfigurationApplicationStatus::Preparing => "preparing",
-                ConfigurationApplicationStatus::WaitingForOrders => "waiting_for_orders",
-                ConfigurationApplicationStatus::Activating => "activating",
-                ConfigurationApplicationStatus::Active => "active",
-                ConfigurationApplicationStatus::Failed => "failed",
-            }),
+            status: project_runtime_application_status(receipt.status),
             accepted: true,
             retryable: false,
             message: None,
@@ -502,14 +516,7 @@ async fn apply_track_configuration(
         .map_err(map_configuration_application_error)?;
     Ok(Json(poise_protocol::TrackConfigurationApplicationView {
         application_id: request.application_id,
-        status: project_application_status(match receipt.status {
-            ConfigurationApplicationStatus::Idle => "idle",
-            ConfigurationApplicationStatus::Preparing => "preparing",
-            ConfigurationApplicationStatus::WaitingForOrders => "waiting_for_orders",
-            ConfigurationApplicationStatus::Activating => "activating",
-            ConfigurationApplicationStatus::Active => "active",
-            ConfigurationApplicationStatus::Failed => "failed",
-        }),
+        status: project_runtime_application_status(receipt.status),
         accepted: true,
         retryable: false,
         message: None,
@@ -528,26 +535,59 @@ fn configuration_request_hash(
     format!("{:x}", Sha256::digest(payload))
 }
 
-fn project_application_status(value: &str) -> TrackConfigurationApplicationStatusView {
+fn project_application_status(
+    value: &poise_storage::sqlite::ConfigurationApplicationAuditStatus,
+) -> TrackConfigurationApplicationStatusView {
     match value {
-        "preparing" => TrackConfigurationApplicationStatusView::Preparing,
-        "waiting_for_orders" => TrackConfigurationApplicationStatusView::WaitingForOrders,
-        "activating" => TrackConfigurationApplicationStatusView::Activating,
-        "active" => TrackConfigurationApplicationStatusView::Active,
-        "failed" | "interrupted" => TrackConfigurationApplicationStatusView::Failed,
-        _ => TrackConfigurationApplicationStatusView::Idle,
+        poise_storage::sqlite::ConfigurationApplicationAuditStatus::Preparing => {
+            TrackConfigurationApplicationStatusView::Preparing
+        }
+        poise_storage::sqlite::ConfigurationApplicationAuditStatus::WaitingForOrders => {
+            TrackConfigurationApplicationStatusView::WaitingForOrders
+        }
+        poise_storage::sqlite::ConfigurationApplicationAuditStatus::Activating => {
+            TrackConfigurationApplicationStatusView::Activating
+        }
+        poise_storage::sqlite::ConfigurationApplicationAuditStatus::Active => {
+            TrackConfigurationApplicationStatusView::Active
+        }
+        poise_storage::sqlite::ConfigurationApplicationAuditStatus::Failed
+        | poise_storage::sqlite::ConfigurationApplicationAuditStatus::Interrupted => {
+            TrackConfigurationApplicationStatusView::Failed
+        }
+    }
+}
+
+fn project_runtime_application_status(
+    value: ConfigurationApplicationStatus,
+) -> TrackConfigurationApplicationStatusView {
+    match value {
+        ConfigurationApplicationStatus::Idle => TrackConfigurationApplicationStatusView::Idle,
+        ConfigurationApplicationStatus::Preparing => {
+            TrackConfigurationApplicationStatusView::Preparing
+        }
+        ConfigurationApplicationStatus::WaitingForOrders => {
+            TrackConfigurationApplicationStatusView::WaitingForOrders
+        }
+        ConfigurationApplicationStatus::Activating => {
+            TrackConfigurationApplicationStatusView::Activating
+        }
+        ConfigurationApplicationStatus::Active => TrackConfigurationApplicationStatusView::Active,
+        ConfigurationApplicationStatus::Failed => TrackConfigurationApplicationStatusView::Failed,
     }
 }
 
 fn project_application_view(
     row: poise_storage::sqlite::ConfigurationApplicationAuditRow,
 ) -> poise_protocol::TrackConfigurationApplicationView {
-    let message = match row.result.as_str() {
-        "interrupted" => Some(
+    let message = match row.result {
+        poise_storage::sqlite::ConfigurationApplicationAuditStatus::Interrupted => Some(
             "configuration application was interrupted before the candidate configuration was persisted; retry with the same application ID".to_string(),
         ),
-        "failed" => Some("configuration application failed".to_string()),
-        "waiting_for_orders" => Some(
+        poise_storage::sqlite::ConfigurationApplicationAuditStatus::Failed => {
+            Some("configuration application failed".to_string())
+        }
+        poise_storage::sqlite::ConfigurationApplicationAuditStatus::WaitingForOrders => Some(
             "configuration application is waiting for old orders to reach a confirmed terminal state".to_string(),
         ),
         _ => None,
@@ -555,10 +595,17 @@ fn project_application_view(
     poise_protocol::TrackConfigurationApplicationView {
         application_id: row.application_id,
         status: project_application_status(&row.result),
-        accepted: !matches!(row.result.as_str(), "failed" | "interrupted"),
-        retryable: row.result == "interrupted",
+        accepted: !matches!(
+            row.result,
+            poise_storage::sqlite::ConfigurationApplicationAuditStatus::Failed
+                | poise_storage::sqlite::ConfigurationApplicationAuditStatus::Interrupted
+        ),
+        retryable: row.result
+            == poise_storage::sqlite::ConfigurationApplicationAuditStatus::Interrupted,
         message,
-        active_version: (row.result == "active").then_some(row.candidate_version),
+        active_version: (row.result
+            == poise_storage::sqlite::ConfigurationApplicationAuditStatus::Active)
+            .then_some(row.candidate_version),
     }
 }
 
@@ -610,76 +657,6 @@ fn configuration_view(source: &poise_application::TrackReadModel) -> TrackConfig
         daily_loss_limit: source.loss_limits.daily_loss_limit,
         total_loss_limit: source.loss_limits.total_loss_limit,
         risk_acquisition: project_risk_acquisition(source.risk_acquisition_config),
-    }
-}
-
-fn configuration_view_from_definition(
-    definition: &poise_core::track::TrackDefinition,
-) -> TrackConfigurationView {
-    let config = definition.track_config();
-    TrackConfigurationView {
-        lower_price: config.lower_price,
-        upper_price: config.upper_price,
-        long_exposure_units: config.long_exposure_units,
-        short_exposure_units: config.short_exposure_units,
-        notional_per_unit: config.notional_per_unit,
-        min_rebalance_units: config.min_rebalance_units,
-        shape_family: project_shape_family(config.shape_family),
-        out_of_band_policy: project_out_of_band_policy(config.out_of_band_policy),
-        max_notional: definition.max_notional(),
-        daily_loss_limit: definition.loss_limits().daily_loss_limit,
-        total_loss_limit: definition.loss_limits().total_loss_limit,
-        risk_acquisition: project_risk_acquisition(config.risk_acquisition),
-    }
-}
-
-fn project_shape_family(value: poise_core::strategy::ShapeFamily) -> ShapeFamily {
-    match value {
-        poise_core::strategy::ShapeFamily::Linear => ShapeFamily::Linear,
-        poise_core::strategy::ShapeFamily::Inertial => ShapeFamily::Inertial,
-        poise_core::strategy::ShapeFamily::Responsive => ShapeFamily::Responsive,
-    }
-}
-
-fn project_out_of_band_policy(
-    value: poise_core::strategy::BandProtectionPolicy,
-) -> BandProtectionPolicy {
-    match value {
-        poise_core::strategy::BandProtectionPolicy::Freeze => BandProtectionPolicy::Freeze,
-        poise_core::strategy::BandProtectionPolicy::Terminate => BandProtectionPolicy::Terminate,
-        poise_core::strategy::BandProtectionPolicy::Flatten { trigger, recover } => {
-            BandProtectionPolicy::Flatten {
-                trigger: match trigger {
-                    poise_core::strategy::BandFlattenTrigger::Immediate => {
-                        BandFlattenTrigger::Immediate
-                    }
-                    poise_core::strategy::BandFlattenTrigger::FlattenConfirm { bps } => {
-                        BandFlattenTrigger::FlattenConfirm { bps }
-                    }
-                },
-                recover: match recover {
-                    poise_core::strategy::BandRecoverPolicy::BackInBand => {
-                        BandRecoverPolicy::BackInBand
-                    }
-                    poise_core::strategy::BandRecoverPolicy::ReentryConfirm { bps } => {
-                        BandRecoverPolicy::ReentryConfirm { bps }
-                    }
-                },
-            }
-        }
-    }
-}
-
-fn project_risk_acquisition(
-    value: poise_core::strategy::RiskAcquisitionConfig,
-) -> RiskAcquisitionConfigView {
-    RiskAcquisitionConfigView {
-        initial_ratio: value.initial_ratio,
-        advantage_steps: value.advantage_steps,
-        min_release_steps: value.min_release_steps,
-        max_release_steps: value.max_release_steps,
-        catchup_ratio: value.catchup_ratio,
-        stale_release_minutes: value.stale_release_minutes,
     }
 }
 
@@ -1418,6 +1395,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackQueryStore for FailingQueryStore {
+        async fn list_recent_track_activity(
+            &self,
+            _track_id: &TrackId,
+            _limit: usize,
+        ) -> anyhow::Result<Vec<poise_application::StoredTrackActivity>> {
+            Ok(Vec::new())
+        }
+
         async fn list_recent_track_events(
             &self,
             _track_id: &TrackId,
@@ -1918,10 +1903,66 @@ mod tests {
         assert_eq!(value["exchange"], "binance");
         assert_eq!(value["deployment"], "testnet");
         assert_eq!(value["credentials_configured"], true);
+        assert!(value["recent_configuration_conflict"].is_null());
         let serialized = String::from_utf8(body.to_vec()).unwrap();
         for sensitive in ["test-key", "test-secret", "api_key", "api_secret"] {
             assert!(!serialized.contains(sensitive), "leaked {sensitive}");
         }
+    }
+
+    #[tokio::test]
+    async fn system_reports_the_most_recent_external_configuration_conflict() {
+        let (state, audit, _path, _directory) = with_configuration_store(app_state().await);
+        let observed_at = Utc::now();
+        audit
+            .record_configuration_application(
+                &poise_storage::sqlite::ConfigurationApplicationAuditRow {
+                    application_id: "apply-external-change".to_string(),
+                    request_hash: "hash".to_string(),
+                    track_id: "btc-core".to_string(),
+                    old_version: "old".to_string(),
+                    candidate_version: "candidate".to_string(),
+                    result: poise_storage::sqlite::ConfigurationApplicationAuditStatus::Preparing,
+                    change_fields: Some(vec!["upper_price".to_string()]),
+                    failure_reason: None,
+                    created_at: observed_at,
+                    updated_at: observed_at,
+                },
+            )
+            .unwrap();
+        audit
+            .record_configuration_application_failure(
+                "apply-external-change",
+                "external_change",
+                observed_at,
+            )
+            .unwrap();
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/system")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value["recent_configuration_conflict"]["application_id"],
+            "apply-external-change"
+        );
+        assert_eq!(
+            value["recent_configuration_conflict"]["track_id"],
+            "btc-core"
+        );
+        assert_eq!(
+            value["recent_configuration_conflict"]["observed_at"],
+            observed_at.to_rfc3339()
+        );
     }
 
     #[tokio::test]
@@ -1950,7 +1991,9 @@ mod tests {
                     track_id: "btc-core".to_string(),
                     old_version: "old".to_string(),
                     candidate_version: "candidate".to_string(),
-                    result: "interrupted".to_string(),
+                    result: poise_storage::sqlite::ConfigurationApplicationAuditStatus::Interrupted,
+                    change_fields: None,
+                    failure_reason: None,
                     created_at: now,
                     updated_at: now,
                 },
@@ -2067,7 +2110,11 @@ mod tests {
         assert_eq!(after["application"]["application_id"], "apply-http-1");
         assert_eq!(after["application_status"], "active");
         audit
-            .update_configuration_application_result("apply-http-1", "preparing", Utc::now())
+            .update_configuration_application_result(
+                "apply-http-1",
+                poise_storage::sqlite::ConfigurationApplicationAuditStatus::Preparing,
+                Utc::now(),
+            )
             .unwrap();
         // The stored request must win over newly unavailable capacity facts.
         let retry = retry_app.clone().oneshot(apply()).await.unwrap();
@@ -2078,7 +2125,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .result,
-            "active"
+            poise_storage::sqlite::ConfigurationApplicationAuditStatus::Active
         );
         let mut conflicting = request.clone();
         conflicting["candidate"]["notional_per_unit"] = serde_json::json!(250.0);
@@ -2176,7 +2223,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .result,
-            "waiting_for_orders"
+            poise_storage::sqlite::ConfigurationApplicationAuditStatus::WaitingForOrders
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), before_file);
     }
@@ -2243,7 +2290,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .result,
-            "waiting_for_orders"
+            poise_storage::sqlite::ConfigurationApplicationAuditStatus::WaitingForOrders
         );
     }
 
@@ -2260,7 +2307,9 @@ mod tests {
                     track_id: "btc-core".to_string(),
                     old_version: "old".to_string(),
                     candidate_version: "next".to_string(),
-                    result: "waiting_for_orders".to_string(),
+                    result: poise_storage::sqlite::ConfigurationApplicationAuditStatus::WaitingForOrders,
+                    change_fields: None,
+                    failure_reason: None,
                     created_at: now,
                     updated_at: now,
                 },
@@ -2352,7 +2401,9 @@ mod tests {
                     track_id: "btc-core".to_string(),
                     old_version: current["version"].as_str().unwrap().to_string(),
                     candidate_version,
-                    result: "preparing".to_string(),
+                    result: poise_storage::sqlite::ConfigurationApplicationAuditStatus::Preparing,
+                    change_fields: None,
+                    failure_reason: None,
                     created_at: now,
                     updated_at: now,
                 },
@@ -2366,7 +2417,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .result,
-            "failed"
+            poise_storage::sqlite::ConfigurationApplicationAuditStatus::Failed
         );
     }
 
@@ -2766,7 +2817,9 @@ mod tests {
                     track_id: "btc-core".to_string(),
                     old_version: "old".to_string(),
                     candidate_version: "candidate".to_string(),
-                    result: "waiting_for_orders".to_string(),
+                    result: poise_storage::sqlite::ConfigurationApplicationAuditStatus::WaitingForOrders,
+                    change_fields: None,
+                    failure_reason: None,
                     created_at: now,
                     updated_at: now,
                 },
@@ -3776,6 +3829,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackMutationStore for FailingRepository {
+        async fn record_track_activity(
+            &self,
+            _activity: &poise_application::StoredTrackActivity,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         async fn commit_track_transition(
             &self,
             _id: &str,
@@ -3825,6 +3885,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TrackQueryStore for FailingRepository {
+        async fn list_recent_track_activity(
+            &self,
+            _track_id: &TrackId,
+            _limit: usize,
+        ) -> anyhow::Result<Vec<poise_application::StoredTrackActivity>> {
+            Ok(Vec::new())
+        }
+
         async fn load_track_updated_at(
             &self,
             track_id: &TrackId,

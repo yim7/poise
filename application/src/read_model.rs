@@ -19,7 +19,9 @@ use poise_engine::runtime::{
 use serde::{Deserialize, Serialize};
 
 use crate::account_read_model::AccountReadModel;
-use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
+use crate::track_persistence::{
+    EffectStatus, PersistedTrackEffect, StoredTrackActivity, StoredTrackEvent,
+};
 use crate::track_read_source::TrackReadSource;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -436,10 +438,12 @@ impl TrackReadModel {
             updated_at,
             recent_track_events,
             recent_effects,
+            recent_track_activity,
         } = source;
         let list_view = TrackListReadModel::from_parts(&definition, &runtime, updated_at);
         let track_config = definition.track_config();
-        let recent_activity = project_recent_activity(recent_track_events, recent_effects);
+        let recent_activity =
+            project_recent_activity(recent_track_events, recent_effects, recent_track_activity);
 
         let bindings = project_bindings(&runtime);
 
@@ -611,6 +615,7 @@ impl From<RiskAcquisitionDirection> for TrackRiskAcquisitionDirection {
 fn project_recent_activity(
     recent_track_events: Vec<StoredTrackEvent>,
     recent_effects: Vec<PersistedTrackEffect>,
+    recent_track_activity: Vec<StoredTrackActivity>,
 ) -> Vec<TrackActivityEntry> {
     let mut items = Vec::new();
 
@@ -634,7 +639,21 @@ fn project_recent_activity(
         });
     }
 
+    for activity in recent_track_activity {
+        items.push(TrackActivityEntry {
+            ts: activity.created_at,
+            message: activity
+                .kind
+                .message(activity.reference_id.as_deref(), &activity.change_fields),
+            level: activity.kind.level(),
+        });
+    }
+
     items.sort_by_key(|item| item.ts);
+    const RECENT_ACTIVITY_WINDOW: usize = 30;
+    if items.len() > RECENT_ACTIVITY_WINDOW {
+        items.drain(0..items.len() - RECENT_ACTIVITY_WINDOW);
+    }
     items
 }
 
@@ -824,9 +843,11 @@ mod tests {
         TrackListReadModel, TrackPriceExecutionBlockReason, TrackReadBindingIntent,
         TrackReadBindingStatus, TrackReadModel, TrackReadStatus, TrackRecoveryIssue,
         TrackRiskAcquisitionDirection, TrackRiskAcquisitionReadModel, TrackStrategyPriceStatus,
-        project_binding_status,
+        project_binding_status, project_recent_activity,
     };
-    use crate::track_persistence::{EffectStatus, PersistedTrackEffect, StoredTrackEvent};
+    use crate::track_persistence::{
+        EffectStatus, PersistedTrackEffect, StoredTrackActivity, StoredTrackEvent,
+    };
     use crate::track_read_source::TrackReadSource;
     use crate::{AccountReadModel, AccountRiskSignal};
 
@@ -1110,6 +1131,7 @@ mod tests {
             updated_at,
             recent_track_events: Vec::new(),
             recent_effects: Vec::new(),
+            recent_track_activity: Vec::new(),
         });
 
         assert_eq!(list.decision, detail.decision);
@@ -1141,6 +1163,7 @@ mod tests {
             updated_at,
             recent_track_events: Vec::new(),
             recent_effects: Vec::new(),
+            recent_track_activity: Vec::new(),
         });
 
         assert_eq!(list.acquisition_session, detail.acquisition_session);
@@ -1211,6 +1234,7 @@ mod tests {
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             recent_track_events: Vec::new(),
             recent_effects: Vec::new(),
+            recent_track_activity: Vec::new(),
         });
         let TrackRiskAcquisitionReadModel {
             direction,
@@ -1294,6 +1318,7 @@ mod tests {
                 created_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
                 updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             }],
+            recent_track_activity: Vec::new(),
         });
 
         assert_eq!(read_model.track_id, "btc-core");
@@ -1338,6 +1363,7 @@ mod tests {
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             recent_track_events: Vec::new(),
             recent_effects: Vec::new(),
+            recent_track_activity: Vec::new(),
         });
 
         assert_eq!(read_model.strategy_price, Some(101.25));
@@ -1374,6 +1400,7 @@ mod tests {
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             recent_track_events: Vec::new(),
             recent_effects: Vec::new(),
+            recent_track_activity: Vec::new(),
         });
 
         assert_eq!(read_model.strategy_price, Some(101.25));
@@ -1430,6 +1457,7 @@ mod tests {
             updated_at: Utc.with_ymd_and_hms(2026, 3, 26, 10, 1, 30).unwrap(),
             recent_track_events: Vec::new(),
             recent_effects: Vec::new(),
+            recent_track_activity: Vec::new(),
         });
 
         let risk_acquisition = read_model
@@ -1446,6 +1474,29 @@ mod tests {
         );
         assert!((risk_acquisition.backlog_units - 2.8).abs() < 1e-9);
         assert_eq!(risk_acquisition.next_advantage_price, Some(92.5));
+    }
+
+    #[test]
+    fn recent_activity_merges_durable_operator_facts_in_time_order() {
+        let ts = Utc.with_ymd_and_hms(2026, 9, 9, 1, 0, 0).unwrap();
+        let activity = project_recent_activity(
+            Vec::new(),
+            Vec::new(),
+            vec![StoredTrackActivity {
+                id: 1,
+                track_id: TrackId::new("btc-core"),
+                kind: crate::TrackActivityKind::ConfigurationPreparing,
+                reference_id: Some("apply-1".to_string()),
+                change_fields: vec!["upper_price".into()],
+                created_at: ts,
+            }],
+        );
+        assert_eq!(activity.len(), 1);
+        assert_eq!(
+            activity[0].message,
+            "configuration application accepted (application apply-1): upper_price"
+        );
+        assert_eq!(activity[0].level, TrackActivityLevel::Info);
     }
 
     #[test]

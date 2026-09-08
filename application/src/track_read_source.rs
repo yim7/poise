@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use poise_core::track::TrackDefinition;
 use poise_engine::runtime::TrackRuntimeView;
 
-use crate::track_persistence::{PersistedTrackEffect, StoredTrackEvent};
+use crate::track_persistence::{PersistedTrackEffect, StoredTrackActivity, StoredTrackEvent};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackReadSource {
@@ -11,4 +11,5 @@ pub struct TrackReadSource {
     pub updated_at: DateTime<Utc>,
     pub recent_track_events: Vec<StoredTrackEvent>,
     pub recent_effects: Vec<PersistedTrackEffect>,
+    pub recent_track_activity: Vec<StoredTrackActivity>,
 }

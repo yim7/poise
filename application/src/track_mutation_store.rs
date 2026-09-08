@@ -5,7 +5,7 @@ use poise_core::track::TrackId;
 use poise_engine::ledger::TrackPnlRecord;
 
 use crate::TrackControlState;
-use crate::track_persistence::CommittedTrackWrite;
+use crate::track_persistence::{CommittedTrackWrite, StoredTrackActivity};
 
 #[async_trait]
 pub trait TrackMutationStore: Send + Sync {
@@ -32,4 +32,7 @@ pub trait TrackMutationStore: Send + Sync {
         track_id: &TrackId,
         record: &TrackPnlRecord,
     ) -> Result<bool>;
+
+    /// Durable operator-facing facts that supplement transition events.
+    async fn record_track_activity(&self, activity: &StoredTrackActivity) -> Result<()>;
 }

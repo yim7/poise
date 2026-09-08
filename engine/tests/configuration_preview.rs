@@ -226,6 +226,46 @@ fn normalized_rebalance_must_meet_venue_minimum_after_step_rounding() {
 }
 
 #[test]
+fn maximum_target_must_be_an_executable_venue_quantity() {
+    let preview = preview_configuration(input(
+        definition(100.0, 800.0),
+        definition(100.0, 5.0),
+        linear_spec(0.1, 0.1, 10.0),
+        0.0,
+        100.0,
+        0.0,
+    ))
+    .unwrap();
+
+    assert_eq!(preview.maximum_target_position_qty.value(), 0.0);
+    assert!(
+        preview
+            .blockers
+            .contains(&ConfigurationPreviewBlocker::VenueMinimum)
+    );
+}
+
+#[test]
+fn maximum_target_must_meet_the_venue_minimum_notional() {
+    let preview = preview_configuration(input(
+        definition(100.0, 800.0),
+        definition(100.0, 15.0),
+        linear_spec(0.1, 0.1, 20.0),
+        0.0,
+        100.0,
+        0.0,
+    ))
+    .unwrap();
+
+    assert_eq!(preview.maximum_target_position_qty.value(), 0.1);
+    assert!(
+        preview
+            .blockers
+            .contains(&ConfigurationPreviewBlocker::VenueMinimum)
+    );
+}
+
+#[test]
 fn insufficient_capacity_is_a_structured_blocker() {
     let preview = preview_configuration(input(
         definition(100.0, 800.0),

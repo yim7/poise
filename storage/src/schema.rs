@@ -120,12 +120,25 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             old_version TEXT NOT NULL,
             candidate_version TEXT NOT NULL,
             result TEXT NOT NULL,
+            change_fields_json TEXT,
+            failure_reason TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS configuration_applications_track_id ON configuration_applications(track_id);",
     )?;
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS track_activity (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            reference_id TEXT,
+            change_fields_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS track_activity_track_created ON track_activity(track_id, created_at DESC);",
+    )?;
     ensure_table_schema(
         conn,
         "track_events",
@@ -149,6 +162,44 @@ pub fn initialize(conn: &Connection) -> Result<()> {
         "track_control_state",
         &["track_id", "control_state_json", "updated_at"],
         &["control_state_json", "updated_at"],
+    )?;
+    ensure_table_schema(
+        conn,
+        "configuration_applications",
+        &[
+            "application_id",
+            "request_hash",
+            "track_id",
+            "old_version",
+            "candidate_version",
+            "result",
+            "change_fields_json",
+            "failure_reason",
+            "created_at",
+            "updated_at",
+        ],
+        &[
+            "request_hash",
+            "track_id",
+            "old_version",
+            "candidate_version",
+            "result",
+            "created_at",
+            "updated_at",
+        ],
+    )?;
+    ensure_table_schema(
+        conn,
+        "track_activity",
+        &[
+            "id",
+            "track_id",
+            "kind",
+            "reference_id",
+            "change_fields_json",
+            "created_at",
+        ],
+        &["track_id", "kind", "change_fields_json", "created_at"],
     )?;
     ensure_table_schema(
         conn,
