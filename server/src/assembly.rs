@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 #[cfg(test)]
 use std::path::Path;
 use std::sync::Arc;
@@ -35,7 +36,8 @@ use crate::runtime::{
     RuntimeHandles, RuntimeHealth, RuntimeStartupDefinition, ServerRuntime, TrackReconcileGuards,
 };
 use crate::server_context::{
-    EffectWorkerState, HttpState, ReconcileState, RuntimeState, WebSocketState,
+    EffectWorkerState, HttpState, ReconcileState, RuntimeState, TrackConfigurationMetadata,
+    WebSocketState,
 };
 use crate::startup_preparation::{
     ExchangeStartupControl, TrackLeverageIndex, apply_exchange_startup_controls,
@@ -286,6 +288,24 @@ async fn assemble_with_state_store(
         reconcile_guards.clone(),
         recovery_dirty_state.clone(),
     );
+    let configuration_metadata = Arc::new(
+        track_definitions
+            .iter()
+            .map(|definition| {
+                let track_id = definition.track_id().as_str().to_string();
+                let leverage = *track_leverage_index
+                    .get(definition.track_id())
+                    .expect("validated startup leverage");
+                (
+                    track_id,
+                    TrackConfigurationMetadata {
+                        leverage,
+                        tick_timeout_secs: definition.tick_timeout_secs(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>(),
+    );
     let http_state = build_http_state(
         trading_runtime.clone(),
         query_service.clone(),
@@ -299,6 +319,7 @@ async fn assemble_with_state_store(
         exchange_freshness.clone(),
         account_margin_guard.clone(),
         recent_fills_auditor.clone(),
+        configuration_metadata,
     );
     let websocket_state = build_websocket_state(
         notifications.clone(),
@@ -419,6 +440,7 @@ pub(crate) fn build_http_state(
     exchange_freshness: Arc<ExchangeFreshness>,
     account_margin_guard: Arc<AccountMarginGuardStore>,
     recent_fills_auditor: Arc<RecentFillsAuditor>,
+    configuration_metadata: Arc<HashMap<String, TrackConfigurationMetadata>>,
 ) -> HttpState {
     HttpState {
         runtime,

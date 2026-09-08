@@ -694,6 +694,18 @@ impl TradingRuntime {
             .collect()
     }
 
+    /// A single committed manager snapshot for read-only configuration versioning.
+    pub async fn committed_track_definitions(&self) -> Vec<poise_core::track::TrackDefinition> {
+        let manager = self.manager.read().await;
+        let mut definitions = manager
+            .list_tracks()
+            .into_iter()
+            .map(|track| track.definition().clone())
+            .collect::<Vec<_>>();
+        definitions.sort_by(|left, right| left.track_id().as_str().cmp(right.track_id().as_str()));
+        definitions
+    }
+
     pub(crate) async fn committed_track_snapshots(&self) -> Result<Vec<CommittedTrackSnapshot>> {
         let manager = self.manager.read().await;
         manager

@@ -1,3 +1,4 @@
+mod account_capacity;
 mod account_projector;
 mod assembly;
 mod config;

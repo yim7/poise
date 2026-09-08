@@ -5,11 +5,18 @@ import { App } from './App'
 const track = {
   identity: { id: 'btc-core', instrument: { venue: 'hyperliquid', symbol: 'BTC' } },
   status: { lifecycle: { status: 'active', updated_at: '2026-09-08T00:00:00Z' }, strategy_price: 80000, strategy_price_status: 'live' },
-  strategy: { lower_price: 70_000, upper_price: 90_000, long_exposure_units: 2, short_exposure_units: -3, notional_per_unit: 125, out_of_band_policy: 'freeze' }, max_notional: 1000, loss_limits: {}, market: {},
+  strategy: { lower_price: 70_000, upper_price: 90_000, long_exposure_units: 2, short_exposure_units: 3, notional_per_unit: 125, out_of_band_policy: 'freeze' }, max_notional: 1000, loss_limits: {}, market: {},
   position: { current_exposure: 0, quantity_unit: 'base_asset', quantity: 0, notional: null, notional_asset: 'USD' }, position_to_execution_gap: 0,
   decision: { revision: 42, policy_target: -1.6612, risk_approved_target: -1.6612, acquisition_frontier: 0, execution_target: 0, reason: 'waiting_risk_release' },
   pnl: { pnl_asset: 'USD', gross_realized_pnl: 2, net_realized_pnl: 1.5, unrealized_pnl: -0.5, total_pnl: 1, trading_fee_cumulative: 0.2, funding_fee_cumulative: 0.1, completeness: 'complete', unvalued_cashflows: [] },
   execution: { state: 'open', execution_status: 'normal', active_binding_count: 2, attention_reasons: [], bindings: [{ id: 'a', label: 'maker', policy: 'curve_maker', status: 'working', intent: 'increase_inventory', order: { side: 'sell', price: 80100, quantity: 0.1 } }] }, activity: [], available_commands: []
+}
+
+const configuration = {
+  version: 'config-7a0f',
+  identity: { id: 'btc-core', instrument: { venue: 'hyperliquid', symbol: 'BTC' } },
+  active: { lower_price: 70000, upper_price: 90000, long_exposure_units: 2, short_exposure_units: 3, notional_per_unit: 125, min_rebalance_units: 0.25, shape_family: 'linear', out_of_band_policy: 'freeze', max_notional: 1000, daily_loss_limit: 50, total_loss_limit: 150, risk_acquisition: { initial_ratio: 0.2, advantage_steps: 2, min_release_steps: 1, max_release_steps: 3, catchup_ratio: 0.5, stale_release_minutes: 60 } },
+  restart_required: { leverage: 5, tick_timeout_secs: 15 }, application_status: 'idle',
 }
 
 class BrowserStream {
@@ -83,7 +90,7 @@ describe('Poise read-only console', () => {
     expect(screen.getByText('下一次释放').nextElementSibling).toHaveTextContent('0.2500')
     expect(screen.getByText('释放后的执行目标').nextElementSibling).toHaveTextContent('-1.5000')
     expect(screen.getByText('价格区间').nextElementSibling).toHaveTextContent('70,000.00 – 90,000.00')
-    expect(screen.getByText('最大多空 exposure').nextElementSibling).toHaveTextContent('多 2.0000 / 空 -3.0000')
+    expect(screen.getByText('最大多空 exposure').nextElementSibling).toHaveTextContent('多 2.0000 / 空 3.0000')
     expect(screen.getByText('每单位名义金额').nextElementSibling).toHaveTextContent('125.0000')
     expect(screen.getByText('区间外策略').nextElementSibling).toHaveTextContent('freeze')
   })
@@ -208,5 +215,126 @@ describe('Poise read-only console', () => {
     render(<App />)
     expect(await screen.findByText('无法读取运行状态')).toBeVisible()
     expect(screen.getByText('浏览器实时流已断开')).toBeVisible()
+  })
+
+  it('loads configuration only after entering the tab, keeps a complete editable draft, and previews it', async () => {
+    const preview = { previewed_at: '2026-09-08T12:00:00Z', valid: true, field_errors: [], blockers: [], impact: { strategy_price: 80000, position_quantity: 0.1, position_quantity_unit: 'base_asset', current_exposure: 0, candidate_current_exposure: 0, active_policy_target: 1, candidate_curve_target: 2, candidate_policy_target: 2, candidate_policy_state: 'in_band', candidate_risk_approved_target: 2, candidate_risk_outcome: 'allowed', active_policy_target_position_qty: 0.1, candidate_policy_target_position_qty: 0.2, target_position_qty_delta: 0.1, active_policy_target_signed_notional: 125, candidate_policy_target_signed_notional: 250, target_signed_notional_delta: 125, candidate_target_delta_from_current_exposure: 2, candidate_position_qty_delta_from_current: 0.2, initial_frontier: 0.2, initial_execution_target: 0.2, position_qty_per_unit: 0.1, minimum_rebalance_position_qty: 0.01, normalized_minimum_rebalance_position_qty: 0.01, minimum_rebalance_notional: 10, maximum_target_position_qty: 1, notional_asset: 'USD' }, capacity_proof: { available_increase_notional: 800, required_increase_notional: 125, asset: 'USD', observed_at: '2026-09-08T12:00:00Z' } }
+    let previewBody = ''
+    vi.stubGlobal('fetch', vi.fn((input: string, init?: RequestInit) => {
+      if (input === '/tracks/btc-core/configuration/preview') {
+        previewBody = String(init?.body); return Promise.resolve(response(preview))
+      }
+      if (input === '/tracks/btc-core/configuration') {
+        return Promise.resolve(response(configuration))
+      }
+      return Promise.resolve(response(api(input)))
+    }))
+    render(<App />)
+    await screen.findByText('btc-core')
+    fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0])
+    await screen.findByText(/hyperliquid · BTC/)
+    expect(fetch).not.toHaveBeenCalledWith('/tracks/btc-core/configuration', expect.anything())
+    fireEvent.click(screen.getByRole('tab', { name: '配置' }))
+    expect(await screen.findByText('当前生效值')).toBeVisible()
+    expect(screen.getByText('配置应用状态 · 空闲')).toBeVisible()
+    const lower = screen.getByLabelText('下限价格') as HTMLInputElement
+    fireEvent.change(lower, { target: { value: '71000' } })
+    expect(screen.getByText('有未保存修改')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: '重新预览' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith('/tracks/btc-core/configuration/preview', expect.objectContaining({ method: 'POST', body: expect.stringContaining('71000') })))
+    expect(JSON.parse(previewBody)).toEqual({ candidate: { ...configuration.active, lower_price: 71000 } })
+    expect(await screen.findByText('预览结果')).toBeVisible()
+    expect(screen.getByText('实际数量不变')).toBeVisible()
+    expect(screen.getByText(/候选 exposure/)).toBeVisible()
+    expect(screen.getByText('容量证明')).toBeVisible()
+    expect(screen.getByText('每 exposure 单位对应数量')).toBeVisible()
+    expect(screen.getByText('场所最小调整数量')).toBeVisible()
+    expect(screen.getByText('归一化最小调整数量')).toBeVisible()
+    expect(screen.getByText('最小调整名义金额')).toBeVisible()
+    expect(screen.getByText('最大目标数量')).toBeVisible()
+    expect(screen.getByText('观测时间').nextElementSibling).toHaveTextContent('2026-09-08T12:00:00Z')
+    expect(screen.getByText('候选策略目标 / 状态').nextElementSibling).toHaveTextContent('区间内')
+    expect(screen.getByText('候选风险批准目标 / 结果').nextElementSibling).toHaveTextContent('允许')
+    expect(screen.getByRole('button', { name: '保存并应用' })).toBeDisabled()
+    expect(screen.getByText(/将在下一实施阶段开放/)).toBeVisible()
+  })
+
+  it('shows preview errors, invalidates the old preview on edits, and discards back to active values', async () => {
+    const failedPreview = { previewed_at: '2026-09-08T12:00:00Z', valid: false, field_errors: [{ field: 'upper_price', message: '必须大于下限价格' }], blockers: [{ code: 'risk_limit', message: '超过风险限制' }] }
+    vi.stubGlobal('fetch', vi.fn((input: string) => input === '/tracks/btc-core/configuration/preview'
+      ? Promise.resolve(response(failedPreview)) : input === '/tracks/btc-core/configuration' ? Promise.resolve(response(configuration)) : Promise.resolve(response(api(input)))))
+    render(<App />)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    fireEvent.click(screen.getByRole('tab', { name: '配置' })); await screen.findByText('当前生效值')
+    fireEvent.click(screen.getByRole('button', { name: '重新预览' }))
+    expect(await screen.findByText('必须大于下限价格')).toBeVisible(); expect(screen.getByText('超过风险限制')).toBeVisible()
+    fireEvent.change(screen.getByLabelText('上限价格'), { target: { value: '91000' } })
+    expect(screen.queryByText('必须大于下限价格')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '放弃修改' }))
+    expect((screen.getByLabelText('上限价格') as HTMLInputElement).value).toBe('90000')
+    expect(screen.queryByText('有未保存修改')).not.toBeInTheDocument()
+  })
+
+  it('ignores a stale configuration response after switching Tracks', async () => {
+    let resolveBtc!: (value: Response) => void
+    const delayed = new Promise<Response>(resolve => { resolveBtc = resolve })
+    const eth = { ...track, identity: { id: 'eth-core', instrument: { venue: 'hyperliquid', symbol: 'ETH' } } }
+    vi.stubGlobal('fetch', vi.fn((input: string) => {
+      if (input === '/tracks') return Promise.resolve(response({ items: [
+        { id: 'btc-core', instrument: track.identity.instrument, lifecycle: track.status.lifecycle, exposure: { current: 0 }, decision: track.decision, execution: track.execution, pnl: track.pnl },
+        { id: 'eth-core', instrument: eth.identity.instrument, lifecycle: eth.status.lifecycle, exposure: { current: 0 }, decision: eth.decision, execution: eth.execution, pnl: eth.pnl },
+      ] }))
+      if (input === '/tracks/btc-core/configuration') return delayed
+      return Promise.resolve(response(input === '/tracks/eth-core' ? eth : api(input)))
+    }))
+    render(<App />); await screen.findByRole('button', { name: /btc-core BTC/ }); fireEvent.click(screen.getByRole('button', { name: /btc-core BTC/ })); await screen.findByText(/hyperliquid · BTC/)
+    fireEvent.click(screen.getByRole('tab', { name: '配置' })); expect(screen.getByText('配置载入中')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: /eth-core ETH/ })); await screen.findByText(/hyperliquid · ETH/)
+    await act(async () => resolveBtc(response(configuration)))
+    expect(screen.queryByText('当前生效值')).not.toBeInTheDocument()
+  })
+
+  it('serializes the protocol flatten object from structured controls', async () => {
+    let previewBody = ''
+    vi.stubGlobal('fetch', vi.fn((input: string, init?: RequestInit) => {
+      if (input === '/tracks/btc-core/configuration/preview') { previewBody = String(init?.body); return Promise.resolve(response({ previewed_at: '2026-09-09T00:00:00Z', valid: false, field_errors: [], blockers: [], impact: null, capacity_proof: null })) }
+      return Promise.resolve(response(input === '/tracks/btc-core/configuration' ? configuration : api(input)))
+    }))
+    render(<App />); await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    fireEvent.click(screen.getByRole('tab', { name: '配置' })); await screen.findByText('当前生效值')
+    fireEvent.change(screen.getByLabelText('区间外策略'), { target: { value: 'flatten' } })
+    expect((screen.getByLabelText('Flatten 确认 bps') as HTMLInputElement).value).toBe('500')
+    expect((screen.getByLabelText('重新进入确认 bps') as HTMLInputElement).value).toBe('500')
+    fireEvent.click(screen.getByRole('button', { name: '重新预览' }))
+    await waitFor(() => expect(previewBody).not.toBe(''))
+    expect(JSON.parse(previewBody).candidate.out_of_band_policy).toEqual({ flatten: { trigger: { flatten_confirm: { bps: 500 } }, recover: { reentry_confirm: { bps: 500 } } } })
+  })
+
+  it('ignores a delayed preview after an edit or Track switch', async () => {
+    let resolveFirst!: (value: Response) => void
+    let resolveSecond!: (value: Response) => void
+    const first = new Promise<Response>(resolve => { resolveFirst = resolve })
+    const second = new Promise<Response>(resolve => { resolveSecond = resolve })
+    let previewCalls = 0
+    const eth = { ...track, identity: { id: 'eth-core', instrument: { venue: 'hyperliquid', symbol: 'ETH' } } }
+    const delayedPreview = { previewed_at: '2026-09-09T00:00:00Z', valid: true, field_errors: [], blockers: [], impact: null, capacity_proof: null }
+    vi.stubGlobal('fetch', vi.fn((input: string) => {
+      if (input === '/tracks') return Promise.resolve(response({ items: [
+        { id: 'btc-core', instrument: track.identity.instrument, lifecycle: track.status.lifecycle, exposure: { current: 0 }, decision: track.decision, execution: track.execution, pnl: track.pnl },
+        { id: 'eth-core', instrument: eth.identity.instrument, lifecycle: eth.status.lifecycle, exposure: { current: 0 }, decision: eth.decision, execution: eth.execution, pnl: eth.pnl },
+      ] }))
+      if (input === '/tracks/btc-core/configuration') return Promise.resolve(response(configuration))
+      if (input === '/tracks/btc-core/configuration/preview') return ++previewCalls === 1 ? first : second
+      if (input === '/tracks/eth-core') return Promise.resolve(response(eth))
+      return Promise.resolve(response(api(input)))
+    }))
+    render(<App />); await screen.findByRole('button', { name: /btc-core BTC/ }); fireEvent.click(screen.getByRole('button', { name: /btc-core BTC/ })); await screen.findByText(/hyperliquid · BTC/)
+    fireEvent.click(screen.getByRole('tab', { name: '配置' })); await screen.findByText('当前生效值')
+    fireEvent.click(screen.getByRole('button', { name: '重新预览' })); fireEvent.change(screen.getByLabelText('下限价格'), { target: { value: '71000' } })
+    await act(async () => resolveFirst(response(delayedPreview)))
+    expect(screen.queryByText('预览结果')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '重新预览' })); fireEvent.click(screen.getByRole('button', { name: /eth-core ETH/ })); await screen.findByText(/hyperliquid · ETH/)
+    await act(async () => resolveSecond(response(delayedPreview)))
+    expect(screen.queryByText('预览结果')).not.toBeInTheDocument()
   })
 })

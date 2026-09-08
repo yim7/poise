@@ -11,14 +11,22 @@ use poise_application::{
 use poise_core::track::TrackId;
 use poise_engine::command::TrackCommand;
 use poise_protocol::{
-    AccountSummaryView, ActivityLevelView, HealthResponse, HealthStatusView, HealthTaskStatusView,
-    HealthTaskView, InstrumentView, PnlBackfillStatusView, PnlHistoryWindowView,
-    RecentFillAuditItemView, RecentFillCoverageView, RecentFillsAuditResponse,
-    RecentPnlAvailabilityView, RecentPnlCompletenessView, TrackCommandAccepted,
-    TrackCommandRequest, TrackCommandType, TrackDetailView, TrackDiagnosticItemView,
-    TrackDiagnosticsView, TrackListResponse, TradingReadinessResponse,
+    AccountSummaryView, ActivityLevelView, BandFlattenTrigger, BandProtectionPolicy,
+    BandRecoverPolicy, HealthResponse, HealthStatusView, HealthTaskStatusView, HealthTaskView,
+    InstrumentView, PnlBackfillStatusView, PnlHistoryWindowView, RecentFillAuditItemView,
+    RecentFillCoverageView, RecentFillsAuditResponse, RecentPnlAvailabilityView,
+    RecentPnlCompletenessView, RiskAcquisitionConfigView, ShapeFamily, TrackCommandAccepted,
+    TrackCommandRequest, TrackCommandType, TrackConfigurationApplicationStatusView,
+    TrackConfigurationBlockerView, TrackConfigurationCapacityProofView,
+    TrackConfigurationFieldErrorView, TrackConfigurationIdentityView, TrackConfigurationImpactView,
+    TrackConfigurationPolicyStateView, TrackConfigurationPreviewRequest,
+    TrackConfigurationPreviewResponse, TrackConfigurationResponse,
+    TrackConfigurationRestartRequiredView, TrackConfigurationRiskOutcomeView,
+    TrackConfigurationView, TrackDetailView, TrackDiagnosticItemView, TrackDiagnosticsView,
+    TrackListResponse, TrackPositionQuantityUnitView, TradingReadinessResponse,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::runtime::{
@@ -53,6 +61,11 @@ pub(crate) fn router_with_web_root(
         .route("/account", get(get_account))
         .route("/tracks", get(list_tracks))
         .route("/tracks/:id", get(get_track_detail))
+        .route("/tracks/:id/configuration", get(get_track_configuration))
+        .route(
+            "/tracks/:id/configuration/preview",
+            post(preview_track_configuration),
+        )
         .route("/debug/tracks/:id/diagnostics", get(get_track_diagnostics))
         .route(
             "/debug/tracks/:id/recent-fills-audit",
@@ -247,6 +260,516 @@ async fn get_track_detail(
         .map_err(map_query_error)?
         .ok_or_else(|| not_found(format!("track `{id}` not found")))?;
     Ok(Json(state.projector.project_detail(&source)))
+}
+
+async fn get_track_configuration(
+    Path(id): Path<String>,
+    State(state): State<HttpState>,
+) -> Result<Json<TrackConfigurationResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let definitions = state.runtime.committed_track_definitions().await;
+    let definition = definitions
+        .iter()
+        .find(|definition| definition.track_id().as_str() == id)
+        .cloned()
+        .ok_or_else(|| not_found(format!("track `{id}` not found")))?;
+    let configurations = definitions
+        .into_iter()
+        .map(|definition| {
+            (
+                definition.track_id().as_str().to_string(),
+                configuration_view_from_definition(&definition),
+            )
+        })
+        .collect();
+    let metadata = state.configuration_metadata.get(&id).ok_or_else(|| {
+        internal_error(format!("missing configuration metadata for track `{id}`"))
+    })?;
+    Ok(Json(TrackConfigurationResponse {
+        version: configuration_version(configurations),
+        identity: TrackConfigurationIdentityView {
+            id: definition.track_id().as_str().to_string(),
+            instrument: InstrumentView {
+                venue: definition.instrument().venue.as_str().to_string(),
+                symbol: definition.instrument().symbol.clone(),
+            },
+        },
+        active: configuration_view_from_definition(&definition),
+        restart_required: TrackConfigurationRestartRequiredView {
+            leverage: metadata.leverage,
+            tick_timeout_secs: metadata.tick_timeout_secs,
+        },
+        application_status: TrackConfigurationApplicationStatusView::Idle,
+    }))
+}
+
+fn configuration_view(source: &poise_application::TrackReadModel) -> TrackConfigurationView {
+    TrackConfigurationView {
+        lower_price: source.lower_price,
+        upper_price: source.upper_price,
+        long_exposure_units: source.long_exposure_units,
+        short_exposure_units: source.short_exposure_units,
+        notional_per_unit: source.notional_per_unit,
+        min_rebalance_units: source.min_rebalance_units,
+        shape_family: project_shape_family(source.shape_family),
+        out_of_band_policy: project_out_of_band_policy(source.out_of_band_policy),
+        max_notional: source.max_notional,
+        daily_loss_limit: source.loss_limits.daily_loss_limit,
+        total_loss_limit: source.loss_limits.total_loss_limit,
+        risk_acquisition: project_risk_acquisition(source.risk_acquisition_config),
+    }
+}
+
+fn configuration_view_from_definition(
+    definition: &poise_core::track::TrackDefinition,
+) -> TrackConfigurationView {
+    let config = definition.track_config();
+    TrackConfigurationView {
+        lower_price: config.lower_price,
+        upper_price: config.upper_price,
+        long_exposure_units: config.long_exposure_units,
+        short_exposure_units: config.short_exposure_units,
+        notional_per_unit: config.notional_per_unit,
+        min_rebalance_units: config.min_rebalance_units,
+        shape_family: project_shape_family(config.shape_family),
+        out_of_band_policy: project_out_of_band_policy(config.out_of_band_policy),
+        max_notional: definition.max_notional(),
+        daily_loss_limit: definition.loss_limits().daily_loss_limit,
+        total_loss_limit: definition.loss_limits().total_loss_limit,
+        risk_acquisition: project_risk_acquisition(config.risk_acquisition),
+    }
+}
+
+fn project_shape_family(value: poise_core::strategy::ShapeFamily) -> ShapeFamily {
+    match value {
+        poise_core::strategy::ShapeFamily::Linear => ShapeFamily::Linear,
+        poise_core::strategy::ShapeFamily::Inertial => ShapeFamily::Inertial,
+        poise_core::strategy::ShapeFamily::Responsive => ShapeFamily::Responsive,
+    }
+}
+
+fn project_out_of_band_policy(
+    value: poise_core::strategy::BandProtectionPolicy,
+) -> BandProtectionPolicy {
+    match value {
+        poise_core::strategy::BandProtectionPolicy::Freeze => BandProtectionPolicy::Freeze,
+        poise_core::strategy::BandProtectionPolicy::Terminate => BandProtectionPolicy::Terminate,
+        poise_core::strategy::BandProtectionPolicy::Flatten { trigger, recover } => {
+            BandProtectionPolicy::Flatten {
+                trigger: match trigger {
+                    poise_core::strategy::BandFlattenTrigger::Immediate => {
+                        BandFlattenTrigger::Immediate
+                    }
+                    poise_core::strategy::BandFlattenTrigger::FlattenConfirm { bps } => {
+                        BandFlattenTrigger::FlattenConfirm { bps }
+                    }
+                },
+                recover: match recover {
+                    poise_core::strategy::BandRecoverPolicy::BackInBand => {
+                        BandRecoverPolicy::BackInBand
+                    }
+                    poise_core::strategy::BandRecoverPolicy::ReentryConfirm { bps } => {
+                        BandRecoverPolicy::ReentryConfirm { bps }
+                    }
+                },
+            }
+        }
+    }
+}
+
+fn project_risk_acquisition(
+    value: poise_core::strategy::RiskAcquisitionConfig,
+) -> RiskAcquisitionConfigView {
+    RiskAcquisitionConfigView {
+        initial_ratio: value.initial_ratio,
+        advantage_steps: value.advantage_steps,
+        min_release_steps: value.min_release_steps,
+        max_release_steps: value.max_release_steps,
+        catchup_ratio: value.catchup_ratio,
+        stale_release_minutes: value.stale_release_minutes,
+    }
+}
+
+fn configuration_version(mut configurations: Vec<(String, TrackConfigurationView)>) -> String {
+    configurations.sort_by(|left, right| left.0.cmp(&right.0));
+    let payload = serde_json::to_vec(&configurations).expect("configuration projection serializes");
+    format!("{:x}", Sha256::digest(payload))
+}
+
+async fn preview_track_configuration(
+    Path(id): Path<String>,
+    State(state): State<HttpState>,
+    Json(request): Json<TrackConfigurationPreviewRequest>,
+) -> Result<Json<TrackConfigurationPreviewResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let source = state
+        .query_service
+        .load_track_detail_source(&TrackId::new(id.clone()))
+        .await
+        .map_err(map_query_error)?
+        .ok_or_else(|| not_found(format!("track `{id}` not found")))?;
+    let metadata = state.configuration_metadata.get(&id).ok_or_else(|| {
+        internal_error(format!("missing configuration metadata for track `{id}`"))
+    })?;
+    let candidate =
+        match configuration_definition(&source, &request.candidate, metadata.tick_timeout_secs) {
+            Ok(value) => value,
+            Err(message) => {
+                let field = configuration_error_field(&message);
+                return Ok(Json(TrackConfigurationPreviewResponse {
+                    previewed_at: chrono::Utc::now().to_rfc3339(),
+                    valid: false,
+                    field_errors: vec![TrackConfigurationFieldErrorView {
+                        field: field.to_string(),
+                        message,
+                    }],
+                    blockers: vec![],
+                    impact: None,
+                    capacity_proof: None,
+                }));
+            }
+        };
+    let active = configuration_definition(
+        &source,
+        &configuration_view(&source),
+        metadata.tick_timeout_secs,
+    )
+    .map_err(internal_error)?;
+    let strategy_price = match (source.strategy_price_status, source.strategy_price) {
+        (poise_application::TrackStrategyPriceStatus::Live, Some(price))
+            if price.is_finite() && price > 0.0 =>
+        {
+            price
+        }
+        _ => {
+            return Ok(Json(preview_blocked(
+                "market_data_unavailable",
+                "live strategy price is unavailable",
+            )));
+        }
+    };
+    let account = match state.account_monitor.current_summary().await {
+        Some(value) => value,
+        None => {
+            return Ok(Json(preview_blocked(
+                "capacity_proof_unavailable",
+                "account capacity proof is unavailable",
+            )));
+        }
+    };
+    let account_snapshot = poise_application::exchange::AccountSummarySnapshot::try_new(
+        poise_core::instrument::Amount::new(account.equity, account.valuation_asset.clone())
+            .map_err(internal_error)?,
+        account
+            .available
+            .map(|value| {
+                poise_core::instrument::Amount::new(value, account.valuation_asset.clone())
+            })
+            .transpose()
+            .map_err(internal_error)?,
+        account.available_by_asset.clone(),
+        account
+            .unrealized_pnl
+            .map(|value| {
+                poise_core::instrument::Amount::new(value, account.valuation_asset.clone())
+            })
+            .transpose()
+            .map_err(internal_error)?,
+        account.updated_at,
+    )
+    .map_err(internal_error)?;
+    let capacity_mark_price = match source.instrument_spec.position_basis() {
+        poise_core::instrument::PositionBasis::BaseAsset => None,
+        poise_core::instrument::PositionBasis::Contracts { .. } => match source
+            .mark_price
+            .filter(|price| price.is_finite() && *price > 0.0)
+        {
+            Some(price) => Some(price),
+            None => {
+                return Ok(Json(preview_blocked(
+                    "market_data_unavailable",
+                    "live mark price is unavailable for inverse capacity proof",
+                )));
+            }
+        },
+    };
+    let capacity = match crate::account_capacity::estimate_account_capacity(
+        &account_snapshot,
+        &source.instrument_spec,
+        capacity_mark_price,
+        metadata.leverage,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(Json(preview_blocked(
+                "capacity_proof_unavailable",
+                &error.to_string(),
+            )));
+        }
+    };
+    let cumulative = match source.pnl.net_realized_pnl_cumulative.complete_value() {
+        Some(value) => value,
+        None => {
+            return Ok(Json(preview_blocked(
+                "risk_proof_unavailable",
+                "cumulative realized PnL is incomplete",
+            )));
+        }
+    };
+    if source.pnl.asset != *source.instrument_spec.settlement_asset() {
+        return Ok(Json(preview_blocked(
+            "risk_proof_unavailable",
+            "PnL asset does not match settlement asset",
+        )));
+    }
+    let output = poise_engine::configuration_preview::preview_configuration(
+        poise_engine::configuration_preview::ConfigurationPreviewInput {
+            active,
+            candidate,
+            instrument_spec: source.instrument_spec.clone(),
+            current_position_qty: poise_core::instrument::PositionQty::new(source.position_qty)
+                .map_err(internal_error)?,
+            loss_guard: poise_core::risk::LossGuardSnapshot {
+                net_realized_pnl_today: source.pnl.gross_realized_pnl_today
+                    - source.pnl.trading_fee_today
+                    + source.pnl.funding_fee_today,
+                net_realized_pnl_cumulative: cumulative,
+                unrealized_pnl: source.pnl.unrealized_pnl,
+            },
+            strategy_price,
+            active_policy_target: source
+                .decision
+                .policy_target
+                .map(poise_core::types::Exposure),
+            observed_at: chrono::Utc::now(),
+            max_increase_notional: capacity.max_increase_notional,
+        },
+    )
+    .map_err(|error| {
+        internal_error(format!(
+            "configuration preview rejected committed facts: {error:?}"
+        ))
+    })?;
+    let blockers = output
+        .blockers
+        .iter()
+        .map(project_preview_blocker)
+        .collect::<Vec<_>>();
+    let proof = TrackConfigurationCapacityProofView {
+        available_increase_notional: output.available_increase_notional,
+        required_increase_notional: output.required_increase_notional,
+        asset: capacity.available.asset().as_str().to_string(),
+        observed_at: account.updated_at.to_rfc3339(),
+    };
+    let position_quantity_unit = match source.instrument_spec.position_basis() {
+        poise_core::instrument::PositionBasis::BaseAsset => {
+            TrackPositionQuantityUnitView::BaseAsset
+        }
+        poise_core::instrument::PositionBasis::Contracts { .. } => {
+            TrackPositionQuantityUnitView::Contracts
+        }
+    };
+    Ok(Json(TrackConfigurationPreviewResponse {
+        previewed_at: chrono::Utc::now().to_rfc3339(),
+        valid: blockers.is_empty(),
+        field_errors: vec![],
+        blockers,
+        impact: Some(TrackConfigurationImpactView {
+            strategy_price,
+            active_policy_target: output.active_policy_target.map(|value| value.0),
+            candidate_curve_target: output.candidate_curve_target.0,
+            candidate_policy_target: output.candidate_policy_target.0,
+            candidate_policy_state: project_policy_state(output.candidate_policy_state),
+            candidate_risk_approved_target: output.candidate_risk_approved_target.0,
+            candidate_risk_outcome: project_risk_outcome(output.candidate_risk_outcome),
+            position_quantity: source.position_qty,
+            position_quantity_unit,
+            current_exposure: output.active_current_exposure.0,
+            candidate_current_exposure: output.candidate_current_exposure.0,
+            active_policy_target_position_qty: output
+                .active_policy_target_position_qty
+                .map(|value| value.value()),
+            candidate_policy_target_position_qty: output
+                .candidate_policy_target_position_qty
+                .value(),
+            target_position_qty_delta: output.target_position_qty_delta.map(|value| value.value()),
+            active_policy_target_signed_notional: output
+                .active_policy_target_signed_notional
+                .map(|value| value.value()),
+            candidate_policy_target_signed_notional: output
+                .candidate_policy_target_signed_notional
+                .value(),
+            target_signed_notional_delta: output
+                .target_signed_notional_delta
+                .map(|value| value.value()),
+            candidate_target_delta_from_current_exposure: output
+                .candidate_target_delta_from_current_exposure
+                .0,
+            candidate_position_qty_delta_from_current: output
+                .candidate_position_qty_delta_from_current
+                .value(),
+            initial_frontier: output.initial_frontier.0,
+            initial_execution_target: output.initial_execution_target.0,
+            position_qty_per_unit: output.candidate_position_qty_per_unit,
+            minimum_rebalance_position_qty: output.minimum_rebalance_raw_quantity.value(),
+            normalized_minimum_rebalance_position_qty: output.minimum_rebalance_quantity.value(),
+            minimum_rebalance_notional: output.minimum_rebalance_notional.value(),
+            maximum_target_position_qty: output.maximum_target_position_qty.value(),
+            notional_asset: source.instrument_spec.notional_asset().as_str().to_string(),
+        }),
+        capacity_proof: Some(proof),
+    }))
+}
+
+fn configuration_error_field(message: &str) -> &'static str {
+    if message.contains("max_release_steps") {
+        return "risk_acquisition.max_release_steps";
+    }
+    [
+        "lower_price",
+        "upper_price",
+        "long_exposure_units",
+        "short_exposure_units",
+        "notional_per_unit",
+        "min_rebalance_units",
+        "max_notional",
+        "daily_loss_limit",
+        "total_loss_limit",
+        "initial_ratio",
+        "advantage_steps",
+        "min_release_steps",
+        "max_release_steps",
+        "catchup_ratio",
+        "stale_release_minutes",
+    ]
+    .into_iter()
+    .find(|field| message.contains(field))
+    .map(|field| {
+        if field.ends_with("ratio") || field.ends_with("steps") || field == "stale_release_minutes"
+        {
+            match field {
+                "initial_ratio" => "risk_acquisition.initial_ratio",
+                "advantage_steps" => "risk_acquisition.advantage_steps",
+                "min_release_steps" => "risk_acquisition.min_release_steps",
+                "max_release_steps" => "risk_acquisition.max_release_steps",
+                "catchup_ratio" => "risk_acquisition.catchup_ratio",
+                _ => "risk_acquisition.stale_release_minutes",
+            }
+        } else {
+            field
+        }
+    })
+    .unwrap_or("candidate")
+}
+
+fn project_preview_blocker(
+    blocker: &poise_engine::configuration_preview::ConfigurationPreviewBlocker,
+) -> TrackConfigurationBlockerView {
+    match blocker {
+        poise_engine::configuration_preview::ConfigurationPreviewBlocker::InstrumentMismatch => TrackConfigurationBlockerView { code: "instrument_mismatch".to_string(), message: "candidate instrument does not match the committed track".to_string() },
+        poise_engine::configuration_preview::ConfigurationPreviewBlocker::VenueMinimum => TrackConfigurationBlockerView { code: "venue_minimum".to_string(), message: "candidate target cannot satisfy the venue minimum".to_string() },
+        poise_engine::configuration_preview::ConfigurationPreviewBlocker::InsufficientIncreaseNotional => TrackConfigurationBlockerView { code: "insufficient_increase_notional".to_string(), message: "available account capacity cannot cover the required increase".to_string() },
+    }
+}
+
+fn project_policy_state(
+    value: poise_engine::configuration_preview::ConfigurationPolicyState,
+) -> TrackConfigurationPolicyStateView {
+    use poise_engine::configuration_preview::ConfigurationPolicyState as State;
+    match value {
+        State::InBand => TrackConfigurationPolicyStateView::InBand,
+        State::Frozen => TrackConfigurationPolicyStateView::Frozen,
+        State::Flattening => TrackConfigurationPolicyStateView::Flattening,
+        State::FlattenPending => TrackConfigurationPolicyStateView::FlattenPending,
+        State::Terminated => TrackConfigurationPolicyStateView::Terminated,
+    }
+}
+
+fn project_risk_outcome(
+    value: poise_engine::configuration_preview::ConfigurationRiskOutcome,
+) -> TrackConfigurationRiskOutcomeView {
+    use poise_engine::configuration_preview::ConfigurationRiskOutcome as Outcome;
+    match value {
+        Outcome::Allowed => TrackConfigurationRiskOutcomeView::Allowed,
+        Outcome::Capped => TrackConfigurationRiskOutcomeView::Capped,
+        Outcome::DailyLossTerminated => TrackConfigurationRiskOutcomeView::DailyLossTerminated,
+        Outcome::TotalLossTerminated => TrackConfigurationRiskOutcomeView::TotalLossTerminated,
+    }
+}
+
+fn preview_blocked(code: &str, message: &str) -> TrackConfigurationPreviewResponse {
+    TrackConfigurationPreviewResponse {
+        previewed_at: chrono::Utc::now().to_rfc3339(),
+        valid: false,
+        field_errors: vec![],
+        blockers: vec![TrackConfigurationBlockerView {
+            code: code.to_string(),
+            message: message.to_string(),
+        }],
+        impact: None,
+        capacity_proof: None,
+    }
+}
+
+fn configuration_definition(
+    source: &poise_application::TrackReadModel,
+    view: &TrackConfigurationView,
+    tick_timeout_secs: u64,
+) -> Result<poise_core::track::TrackDefinition, String> {
+    use poise_core::strategy::{
+        BandFlattenTrigger as CoreTrigger, BandProtectionPolicy as CorePolicy,
+        BandRecoverPolicy as CoreRecover, RiskAcquisitionConfig, ShapeFamily as CoreShape,
+        TrackConfig,
+    };
+    let shape_family = match view.shape_family {
+        ShapeFamily::Linear => CoreShape::Linear,
+        ShapeFamily::Inertial => CoreShape::Inertial,
+        ShapeFamily::Responsive => CoreShape::Responsive,
+    };
+    let out_of_band_policy = match &view.out_of_band_policy {
+        BandProtectionPolicy::Freeze => CorePolicy::Freeze,
+        BandProtectionPolicy::Terminate => CorePolicy::Terminate,
+        BandProtectionPolicy::Flatten { trigger, recover } => CorePolicy::Flatten {
+            trigger: match trigger {
+                BandFlattenTrigger::Immediate => CoreTrigger::Immediate,
+                BandFlattenTrigger::FlattenConfirm { bps } => {
+                    CoreTrigger::FlattenConfirm { bps: *bps }
+                }
+            },
+            recover: match recover {
+                BandRecoverPolicy::BackInBand => CoreRecover::BackInBand,
+                BandRecoverPolicy::ReentryConfirm { bps } => {
+                    CoreRecover::ReentryConfirm { bps: *bps }
+                }
+            },
+        },
+    };
+    poise_core::track::TrackDefinition::try_new(
+        poise_core::track::TrackId::new(source.track_id.clone()),
+        source.instrument.clone(),
+        TrackConfig {
+            lower_price: view.lower_price,
+            upper_price: view.upper_price,
+            long_exposure_units: view.long_exposure_units,
+            short_exposure_units: view.short_exposure_units,
+            notional_per_unit: view.notional_per_unit,
+            min_rebalance_units: view.min_rebalance_units,
+            shape_family,
+            out_of_band_policy,
+            risk_acquisition: RiskAcquisitionConfig {
+                initial_ratio: view.risk_acquisition.initial_ratio,
+                advantage_steps: view.risk_acquisition.advantage_steps,
+                min_release_steps: view.risk_acquisition.min_release_steps,
+                max_release_steps: view.risk_acquisition.max_release_steps,
+                catchup_ratio: view.risk_acquisition.catchup_ratio,
+                stale_release_minutes: view.risk_acquisition.stale_release_minutes,
+            },
+        },
+        Some(view.max_notional),
+        poise_core::risk::LossLimits {
+            daily_loss_limit: view.daily_loss_limit,
+            total_loss_limit: view.total_loss_limit,
+        },
+        Some(tick_timeout_secs),
+    )
 }
 
 async fn get_track_diagnostics(
@@ -473,7 +996,7 @@ mod tests {
         StoredTrackEvent, TrackEffectJournal, TrackIdentityStore, TrackMutationStore,
         TrackQueryStore,
     };
-    use poise_core::instrument::{Amount, Asset};
+    use poise_core::instrument::{Amount, Asset, InstrumentSpec};
     use poise_core::risk::LossLimits;
     use poise_core::strategy::{BandProtectionPolicy, ShapeFamily, TrackConfig};
     use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
@@ -539,6 +1062,8 @@ mod tests {
 
     struct AccountSummaryOnlyExchange;
 
+    struct UsdtAccountSummaryExchange;
+
     #[async_trait::async_trait]
     impl poise_application::exchange::AccountSummaryPort for AccountSummaryOnlyExchange {
         async fn get_account_summary(&self) -> anyhow::Result<AccountSummarySnapshot> {
@@ -549,6 +1074,20 @@ mod tests {
                 &[],
                 Some(-350.0),
                 Utc.with_ymd_and_hms(2026, 4, 4, 1, 23, 45).unwrap(),
+            ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl poise_application::exchange::AccountSummaryPort for UsdtAccountSummaryExchange {
+        async fn get_account_summary(&self) -> anyhow::Result<AccountSummarySnapshot> {
+            Ok(crate::test_support::test_account_summary_snapshot(
+                "USDT",
+                12_500.0,
+                Some(9_000.0),
+                &[],
+                Some(-350.0),
+                Utc::now(),
             ))
         }
     }
@@ -606,7 +1145,12 @@ mod tests {
 
     async fn app_state() -> HttpTestState {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        build_test_state(repository).await
+        build_test_state(repository, true).await
+    }
+
+    async fn app_state_without_market() -> HttpTestState {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        build_test_state(repository, false).await
     }
 
     fn mark_runtime_tasks_healthy(state: &HttpState) {
@@ -622,18 +1166,20 @@ mod tests {
         state.pnl_backfill_status.record_success_now();
     }
 
-    async fn build_test_state<R>(repository: Arc<R>) -> HttpTestState
+    async fn build_test_state<R>(repository: Arc<R>, observe_market: bool) -> HttpTestState
     where
         R: TrackMutationStore + TrackEffectJournal + TrackQueryStore + 'static,
     {
-        let mut manager = test_manager();
+        let mut manager = test_manager_without_market();
         let mut snapshot = manager
             .get_track("btc-core")
             .cloned()
             .expect("seeded manager should expose runtime state");
         seed_runtime_pnl_stats(&mut snapshot);
         manager.install_planned_runtime(snapshot);
-        observe_seed_market(&mut manager);
+        if observe_market {
+            observe_seed_market(&mut manager);
+        }
         repository
             .commit_track_transition(
                 "btc-core",
@@ -744,6 +1290,7 @@ mod tests {
                 Arc::new(crate::exchange_freshness::ExchangeFreshness::default()),
                 services.account_margin_guard.clone(),
                 Arc::new(RecentFillsAuditor::new(account, query_store.clone())),
+                Arc::new(std::collections::HashMap::new()),
             ),
             websocket_state: build_websocket_state(
                 &services,
@@ -756,8 +1303,26 @@ mod tests {
     }
 
     async fn app_state_with_account_summary() -> HttpTestState {
+        app_state_with_account_summary_from_manager(
+            test_manager(),
+            Arc::new(AccountSummaryOnlyExchange),
+        )
+        .await
+    }
+
+    async fn app_state_with_usdt_account_summary() -> HttpTestState {
+        app_state_with_account_summary_from_manager(
+            test_manager(),
+            Arc::new(UsdtAccountSummaryExchange),
+        )
+        .await
+    }
+
+    async fn app_state_with_account_summary_from_manager(
+        mut manager: TrackManager,
+        account_port: Arc<dyn poise_application::exchange::AccountSummaryPort>,
+    ) -> HttpTestState {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
-        let mut manager = test_manager();
         let mut snapshot = manager
             .get_track("btc-core")
             .cloned()
@@ -800,7 +1365,7 @@ mod tests {
             .await
             .unwrap();
         let account_monitor = AccountMonitor::restore(
-            Arc::new(AccountSummaryOnlyExchange),
+            account_port,
             account_store,
             notifications,
             AccountMonitorConfig::default(),
@@ -840,6 +1405,12 @@ mod tests {
     }
 
     fn test_manager() -> TrackManager {
+        let mut manager = test_manager_without_market();
+        observe_seed_market(&mut manager);
+        manager
+    }
+
+    fn test_manager_without_market() -> TrackManager {
         let mut manager = TrackManager::new(Arc::new(FakeClock));
         manager
             .add_track(
@@ -868,6 +1439,48 @@ mod tests {
                 crate::test_support::test_instrument_spec(),
             )
             .unwrap();
+        manager
+    }
+
+    fn inverse_test_manager_without_mark() -> TrackManager {
+        let mut manager = TrackManager::new(Arc::new(FakeClock));
+        let usd = Asset::try_new("USD").unwrap();
+        let definition = TrackDefinition::try_new(
+            TrackId::new("btc-core"),
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            TrackConfig {
+                lower_price: 90.0,
+                upper_price: 110.0,
+                long_exposure_units: 8.0,
+                short_exposure_units: 8.0,
+                notional_per_unit: 375.0,
+                min_rebalance_units: 0.5,
+                shape_family: ShapeFamily::Linear,
+                out_of_band_policy: BandProtectionPolicy::Freeze,
+                risk_acquisition: Default::default(),
+            },
+            Some(3000.0),
+            LossLimits {
+                daily_loss_limit: 100.0,
+                total_loss_limit: 300.0,
+            },
+            None,
+        )
+        .unwrap();
+        let spec = InstrumentSpec::try_inverse(
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            Asset::try_new("BTC").unwrap(),
+            usd.clone(),
+            usd.clone(),
+            Amount::new(100.0, usd.clone()).unwrap(),
+            poise_core::types::PricePrecision::FixedTick,
+            0.1,
+            1.0,
+            1.0,
+            Amount::new(1.0, usd).unwrap(),
+        )
+        .unwrap();
+        manager.add_track(definition, spec).unwrap();
         observe_seed_market(&mut manager);
         manager
     }
@@ -911,6 +1524,246 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn configuration_get_returns_safe_projection_and_stable_version() {
+        let app = router(app_state().await);
+        let request = || {
+            Request::builder()
+                .uri("/tracks/btc-core/configuration")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let first = app.clone().oneshot(request()).await.unwrap();
+        let second = app.oneshot(request()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first: serde_json::Value =
+            serde_json::from_slice(&to_bytes(first.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let second: serde_json::Value =
+            serde_json::from_slice(&to_bytes(second.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(first["version"], second["version"]);
+        assert_eq!(first["active"]["notional_per_unit"], 375.0);
+        assert!(first.get("exchange").is_none());
+        assert!(first.get("secret").is_none());
+    }
+
+    #[tokio::test]
+    async fn configuration_get_returns_404_for_unknown_track() {
+        let response = router(app_state().await)
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/missing/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn configuration_preview_fails_closed_without_account_capacity() {
+        let app = router(app_state().await);
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tracks/btc-core/configuration/preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"candidate": value["active"]}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["valid"], false);
+        assert_eq!(body["blockers"][0]["code"], "capacity_proof_unavailable");
+    }
+
+    #[tokio::test]
+    async fn configuration_preview_reports_specific_invalid_candidate_field() {
+        let app = router(app_state().await);
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
+        value["active"]["notional_per_unit"] = serde_json::json!(0.0);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tracks/btc-core/configuration/preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"candidate": value["active"]}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["field_errors"][0]["field"], "notional_per_unit");
+    }
+
+    #[tokio::test]
+    async fn configuration_preview_success_projects_policy_risk_and_capacity() {
+        let app = router(app_state_with_usdt_account_summary().await);
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tracks/btc-core/configuration/preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"candidate": value["active"]}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["valid"], true, "{body}");
+        assert_eq!(body["impact"]["candidate_policy_state"], "in_band");
+        assert_eq!(body["impact"]["candidate_risk_outcome"], "allowed");
+        assert!(
+            body["capacity_proof"]["available_increase_notional"]
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
+    }
+
+    #[tokio::test]
+    async fn configuration_preview_rejects_non_live_strategy_price() {
+        let state = app_state_without_market().await;
+        let app = router(state);
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tracks/btc-core/configuration/preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"candidate": value["active"]}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["blockers"][0]["code"], "market_data_unavailable");
+    }
+
+    #[tokio::test]
+    async fn configuration_preview_fails_closed_for_inverse_without_mark_price() {
+        let app = router(
+            app_state_with_account_summary_from_manager(
+                inverse_test_manager_without_mark(),
+                Arc::new(UsdtAccountSummaryExchange),
+            )
+            .await,
+        );
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tracks/btc-core/configuration/preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"candidate": value["active"]}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["blockers"][0]["code"], "market_data_unavailable");
+        assert!(
+            body["blockers"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("inverse capacity proof")
+        );
+    }
+
+    #[test]
+    fn configuration_error_field_keeps_cross_release_error_on_max_release_steps() {
+        assert_eq!(
+            super::configuration_error_field("max_release_steps must be >= min_release_steps"),
+            "risk_acquisition.max_release_steps"
+        );
     }
 
     #[tokio::test]

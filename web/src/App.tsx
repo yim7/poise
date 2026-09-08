@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { AccountSummaryView, ExecutionBindingView, StreamEvent, TrackDetailView, TrackListItemView, TrackListResponse, TradingReadinessResponse } from './types'
+import type { AccountSummaryView, BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy, ExecutionBindingView, StreamEvent, TrackActivityItemView, TrackConfigurationActiveView, TrackConfigurationPreviewResponse, TrackConfigurationResponse, TrackDetailView, TrackListItemView, TrackListResponse, TradingReadinessResponse } from './types'
 
 const chineseReason: Record<string, { title: string; detail: string }> = {
   waiting_risk_release: { title: '等待风险释放', detail: '策略希望建立目标仓位。风险目标已经批准，但当前 session 尚未释放新增风险，因此暂不下单。' },
@@ -24,6 +24,14 @@ function format(value: unknown, digits = 4) {
 
 function title(value: unknown) {
   return typeof value === 'string' ? value.replaceAll('_', ' ') : '—'
+}
+
+function applicationStatusLabel(value: 'idle') { return value === 'idle' ? '空闲' : value }
+function policyStateLabel(value: 'in_band' | 'frozen' | 'flattening' | 'flatten_pending' | 'terminated') {
+  return ({ in_band: '区间内', frozen: '已冻结', flattening: '正在平仓', flatten_pending: '等待平仓', terminated: '已终止' } as const)[value]
+}
+function riskOutcomeLabel(value: 'allowed' | 'capped' | 'daily_loss_terminated' | 'total_loss_terminated') {
+  return ({ allowed: '允许', capped: '已限额', daily_loss_terminated: '日损失终止', total_loss_terminated: '总损失终止' } as const)[value]
 }
 
 function policy(value: string | Record<string, unknown>) {
@@ -182,7 +190,7 @@ export function App() {
     <header className="topbar"><div><strong>Poise</strong><span>{status}</span></div><div><span className={connection === 'connected' ? 'connection online' : 'connection'}>{connectionLabel}</span><span>更新于 {lastUpdated}</span></div></header>
     {(error || readinessPollError) && <div role="alert" className="alert"><strong>无法读取运行状态</strong><span>请确认本地 server 正在运行后重试。</span><button onClick={retry}>重试</button></div>}
     <div className="layout"><aside><button className={!selectedId ? 'nav active' : 'nav'} onClick={() => selectTrack(null)}>总览</button><p>Tracks</p>{tracks.map(track => <button key={track.id} className={selectedId === track.id ? 'track active' : 'track'} onClick={() => selectTrack(track.id)}><strong>{track.id}</strong><small>{track.instrument?.symbol} · {title(track.lifecycle?.status)}</small></button>)}</aside>
-    <section className="content">{selectedId ? detail ? <TrackPage detail={detail} /> : <h1>Track 载入中</h1> : <Overview readiness={readiness} account={account} tracks={tracks} onSelect={selectTrack} />}</section></div>
+    <section className="content">{selectedId ? detail ? <TrackPage key={detail.identity.id} detail={detail} /> : <h1>Track 载入中</h1> : <Overview readiness={readiness} account={account} tracks={tracks} onSelect={selectTrack} />}</section></div>
   </main>
 }
 
@@ -196,6 +204,17 @@ function Overview({ readiness, account, tracks, onSelect }: { readiness: Trading
 }
 
 function TrackPage({ detail }: { detail: TrackDetailView }) {
+  const [tab, setTab] = useState<'运行' | '配置' | '活动'>('运行')
+  return <><div className="track-tabs" role="tablist" aria-label="Track 工作区">
+    {(['运行', '配置', '活动'] as const).map(item => <button key={item} role="tab" aria-selected={tab === item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>{item}</button>)}
+  </div>
+  {tab === '运行' && <TrackRunPanel detail={detail} />}
+  {tab === '配置' && <ConfigurationPanel key={detail.identity.id} trackId={detail.identity.id} />}
+  {tab === '活动' && <ActivityPanel activity={detail.activity} />}
+  </>
+}
+
+function TrackRunPanel({ detail }: { detail: TrackDetailView }) {
   const decision = detail.decision ?? {}; const reason = chineseReason[decision.reason] ?? { title: title(decision.reason), detail: '请在诊断详情中查看原始状态。' }
   const targets = [['实际仓位', detail.position?.current_exposure], ['策略目标', decision.policy_target], ['风险批准目标', decision.risk_approved_target], ['风险释放边界', decision.acquisition_frontier], ['当前可执行目标', decision.execution_target]]
   return <><p className="eyebrow">{detail.identity?.instrument?.venue} · {detail.identity?.instrument?.symbol} · {title(detail.status?.lifecycle?.status)}</p><h1>{reason.title}</h1><p className="explanation">{reason.detail}</p>
@@ -207,3 +226,81 @@ function TrackPage({ detail }: { detail: TrackDetailView }) {
     <details><summary>诊断详情</summary><dl><div><dt>Decision reason</dt><dd>{title(decision.reason)}</dd></div><div><dt>Decision revision</dt><dd>{decision.revision ?? '—'}</dd></div><div><dt>生命周期更新时间</dt><dd>{detail.status?.lifecycle?.updated_at ?? '—'}</dd></div></dl></details>
   </>
 }
+
+function ActivityPanel({ activity }: { activity: TrackActivityItemView[] }) {
+  return <article><h2>活动</h2>{activity.length ? <ul>{activity.map(item => <li key={`${item.ts}:${item.message}`}><strong>{title(item.level)}</strong><span>{item.ts} · {item.message}</span></li>)}</ul> : <p>当前没有活动记录。</p>}</article>
+}
+
+type Draft = TrackConfigurationActiveView
+
+function cloneDraft(active: TrackConfigurationActiveView): Draft { return structuredClone(active) }
+function inputValue(value: number) { return Number.isFinite(value) ? String(value) : '' }
+type FlattenPolicy = Extract<BandProtectionPolicy, { flatten: unknown }>
+function defaultFlattenPolicy(): FlattenPolicy { return { flatten: { trigger: { flatten_confirm: { bps: 500 } }, recover: { reentry_confirm: { bps: 500 } } } } }
+function flattenPolicy(value: BandProtectionPolicy): FlattenPolicy { return typeof value === 'string' ? defaultFlattenPolicy() : value }
+function triggerKind(trigger: BandFlattenTrigger) { return typeof trigger === 'string' ? trigger : 'flatten_confirm' }
+function recoverKind(recover: BandRecoverPolicy) { return typeof recover === 'string' ? recover : 'reentry_confirm' }
+
+function ConfigurationPanel({ trackId }: { trackId: string }) {
+  const [configuration, setConfiguration] = useState<TrackConfigurationResponse | null>(null)
+  const [draft, setDraft] = useState<Draft | null>(null)
+  const [loadError, setLoadError] = useState(false)
+  const [preview, setPreview] = useState<TrackConfigurationPreviewResponse | null>(null)
+  const [previewError, setPreviewError] = useState(false)
+  const [previewing, setPreviewing] = useState(false)
+  const previewController = useRef<AbortController | null>(null)
+  const previewSequence = useRef(0)
+
+  const invalidatePreview = () => { previewSequence.current += 1; previewController.current?.abort(); previewController.current = null; setPreview(null); setPreviewError(false); setPreviewing(false) }
+
+  const load = () => {
+    const controller = new AbortController()
+    setLoadError(false)
+    get<TrackConfigurationResponse>(`/tracks/${encodeURIComponent(trackId)}/configuration`, { signal: controller.signal })
+      .then(value => { if (!controller.signal.aborted) { setConfiguration(value); setDraft(cloneDraft(value.active)); setPreview(null) } })
+      .catch(() => { if (!controller.signal.aborted) setLoadError(true) })
+    return controller
+  }
+  useEffect(() => { const controller = load(); return () => { controller.abort(); invalidatePreview() } }, [trackId])
+  const changed = configuration !== null && draft !== null && JSON.stringify(configuration.active) !== JSON.stringify(draft)
+  const update = <K extends keyof Draft>(field: K, value: Draft[K]) => { setDraft(current => current ? { ...current, [field]: value } : current); invalidatePreview() }
+  const updateRisk = (field: keyof Draft['risk_acquisition'], value: number) => { setDraft(current => current ? { ...current, risk_acquisition: { ...current.risk_acquisition, [field]: value } } : current); invalidatePreview() }
+  const discard = () => { if (configuration) { setDraft(cloneDraft(configuration.active)); invalidatePreview() } }
+  const submitPreview = async () => {
+    if (!draft) return
+    previewController.current?.abort()
+    const controller = new AbortController(); previewController.current = controller
+    const request = previewSequence.current + 1; previewSequence.current = request
+    setPreviewing(true); setPreviewError(false); setPreview(null)
+    try {
+      const value = await get<TrackConfigurationPreviewResponse>(`/tracks/${encodeURIComponent(trackId)}/configuration/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidate: draft }), signal: controller.signal })
+      if (!controller.signal.aborted && request === previewSequence.current) setPreview(value)
+    } catch { if (!controller.signal.aborted && request === previewSequence.current) setPreviewError(true) } finally { if (request === previewSequence.current) setPreviewing(false) }
+  }
+  if (loadError) return <article><h2>无法读取配置</h2><button onClick={() => load()}>重试载入配置</button></article>
+  if (!configuration || !draft) return <h1>配置载入中</h1>
+  const active = configuration.active
+  const policyKind = typeof draft.out_of_band_policy === 'string' ? draft.out_of_band_policy : 'flatten'
+  const setPolicy = (value: string) => update('out_of_band_policy', value === 'flatten' ? flattenPolicy(draft.out_of_band_policy) : value as 'freeze' | 'terminate')
+  const setFlattenTrigger = (value: string) => { const policy = flattenPolicy(draft.out_of_band_policy); update('out_of_band_policy', { flatten: { ...policy.flatten, trigger: value === 'immediate' ? 'immediate' : { flatten_confirm: { bps: 500 } } } }) }
+  const setFlattenRecover = (value: string) => { const policy = flattenPolicy(draft.out_of_band_policy); update('out_of_band_policy', { flatten: { ...policy.flatten, recover: value === 'back_in_band' ? 'back_in_band' : { reentry_confirm: { bps: 500 } } } }) }
+  const setFlattenBps = (part: 'trigger' | 'recover', value: number) => { const policy = flattenPolicy(draft.out_of_band_policy); const next = part === 'trigger' ? { ...policy.flatten, trigger: { flatten_confirm: { bps: value } } } : { ...policy.flatten, recover: { reentry_confirm: { bps: value } } }; update('out_of_band_policy', { flatten: next }) }
+  const numberInput = (label: string, field: Exclude<keyof Draft, 'risk_acquisition' | 'out_of_band_policy' | 'shape_family'>) => <label>{label}<input aria-label={label} type="number" value={inputValue(draft[field] as number)} onChange={event => update(field, Number(event.target.value))} /></label>
+  const riskInput = (label: string, field: keyof Draft['risk_acquisition']) => <label>{label}<input aria-label={label} type="number" value={inputValue(draft.risk_acquisition[field])} onChange={event => updateRisk(field, Number(event.target.value))} /></label>
+  const flatten = policyKind === 'flatten' ? flattenPolicy(draft.out_of_band_policy).flatten : null
+  return <div className="configuration"><p className="eyebrow">配置应用状态 · {applicationStatusLabel(configuration.application_status)}</p>
+    {changed && <p className="unsaved">有未保存修改</p>}
+    <div className="two-column"><article><h2>当前生效值</h2><dl><div><dt>价格区间</dt><dd>{format(active.lower_price, 2)} – {format(active.upper_price, 2)}</dd></div><div><dt>多/空 exposure</dt><dd>{format(active.long_exposure_units)} / {format(active.short_exposure_units)}</dd></div><div><dt>每单位名义金额</dt><dd>{format(active.notional_per_unit)}</dd></div><div><dt>区间外策略</dt><dd>{policy(active.out_of_band_policy)}</dd></div><div><dt>最大名义金额</dt><dd>{format(active.max_notional)}</dd></div></dl></article><article><h2>只读身份与重启字段</h2><dl><div><dt>Track ID</dt><dd>{configuration.identity.id}</dd></div><div><dt>Venue</dt><dd>{configuration.identity.instrument.venue}</dd></div><div><dt>Symbol</dt><dd>{configuration.identity.instrument.symbol}</dd></div><div><dt>杠杆</dt><dd>{configuration.restart_required.leverage}</dd></div><div><dt>Tick 超时（秒）</dt><dd>{configuration.restart_required.tick_timeout_secs}</dd></div></dl></article></div>
+    <article><h2>可编辑草稿</h2><div className="config-fields">{numberInput('下限价格', 'lower_price')}{numberInput('上限价格', 'upper_price')}{numberInput('多头 exposure', 'long_exposure_units')}{numberInput('空头 exposure', 'short_exposure_units')}{numberInput('每单位名义金额', 'notional_per_unit')}{numberInput('最小再平衡单位', 'min_rebalance_units')}<label>形状族<select aria-label="形状族" value={draft.shape_family} onChange={event => update('shape_family', event.target.value as Draft['shape_family'])}><option value="linear">linear</option><option value="inertial">inertial</option><option value="responsive">responsive</option></select></label><label>区间外策略<select aria-label="区间外策略" value={policyKind} onChange={event => setPolicy(event.target.value)}><option value="freeze">freeze</option><option value="terminate">terminate</option><option value="flatten">flatten</option></select></label>{flatten && <><label>Flatten 触发<select aria-label="Flatten 触发" value={triggerKind(flatten.trigger)} onChange={event => setFlattenTrigger(event.target.value)}><option value="immediate">immediate</option><option value="flatten_confirm">flatten_confirm</option></select></label>{typeof flatten.trigger !== 'string' && <label>Flatten 确认 bps<input aria-label="Flatten 确认 bps" type="number" value={inputValue(flatten.trigger.flatten_confirm.bps)} onChange={event => setFlattenBps('trigger', Number(event.target.value))} /></label>}<label>恢复策略<select aria-label="恢复策略" value={recoverKind(flatten.recover)} onChange={event => setFlattenRecover(event.target.value)}><option value="back_in_band">back_in_band</option><option value="reentry_confirm">reentry_confirm</option></select></label>{typeof flatten.recover !== 'string' && <label>重新进入确认 bps<input aria-label="重新进入确认 bps" type="number" value={inputValue(flatten.recover.reentry_confirm.bps)} onChange={event => setFlattenBps('recover', Number(event.target.value))} /></label>}</>}{numberInput('最大名义金额', 'max_notional')}{numberInput('每日损失限额', 'daily_loss_limit')}{numberInput('总损失限额', 'total_loss_limit')}{riskInput('初始比例', 'initial_ratio')}{riskInput('有利步数', 'advantage_steps')}{riskInput('最小释放步数', 'min_release_steps')}{riskInput('最大释放步数', 'max_release_steps')}{riskInput('追赶比例', 'catchup_ratio')}{riskInput('过期释放分钟', 'stale_release_minutes')}</div><div className="config-actions"><button onClick={discard} disabled={!changed}>放弃修改</button><button onClick={() => void submitPreview()} disabled={previewing}>{previewing ? '预览中' : '重新预览'}</button><button disabled title="将在下一实施阶段开放">保存并应用</button></div><p>保存并应用将在下一实施阶段开放。</p></article>
+    {previewError && <div role="alert" className="alert"><strong>预览失败</strong><button onClick={() => void submitPreview()}>重试预览</button></div>}{preview && <PreviewResult preview={preview} symbol={configuration.identity.instrument.symbol} />}
+  </div>
+}
+
+function PreviewResult({ preview, symbol }: { preview: TrackConfigurationPreviewResponse; symbol: string }) {
+  const impact = preview.impact
+  if (!impact) return <article className="preview"><h2>预览结果</h2><p>预览时间 {preview.previewed_at} · {preview.valid ? '有效' : '不可应用'}</p><PreviewMessages preview={preview} /></article>
+  const quantityUnit = impact.position_quantity_unit === 'base_asset' ? `基础资产（${symbol}）` : impact.position_quantity_unit === 'contracts' ? '合约' : '—'
+  return <article className="preview"><h2>预览结果</h2><p>预览时间 {preview.previewed_at} · {preview.valid ? '有效' : '不可应用'}</p><dl><div><dt>实际数量不变</dt><dd>{format(impact.position_quantity)} {quantityUnit}</dd></div><div><dt>当前 exposure（旧配置单位）</dt><dd>{format(impact.current_exposure)}</dd></div><div><dt>候选 exposure（候选配置单位）</dt><dd>{format(impact.candidate_current_exposure)}</dd></div><div><dt>当前 committed 策略目标</dt><dd>{format(impact.active_policy_target)}</dd></div><div><dt>候选曲线目标</dt><dd>{format(impact.candidate_curve_target)}</dd></div><div><dt>候选策略目标 / 状态</dt><dd>{format(impact.candidate_policy_target)} / {policyStateLabel(impact.candidate_policy_state)}</dd></div><div><dt>候选风险批准目标 / 结果</dt><dd>{format(impact.candidate_risk_approved_target)} / {riskOutcomeLabel(impact.candidate_risk_outcome)}</dd></div><div><dt>策略目标数量（当前 → 候选）</dt><dd>{format(impact.active_policy_target_position_qty)} → {format(impact.candidate_policy_target_position_qty)}</dd></div><div><dt>目标数量变化</dt><dd>{format(impact.target_position_qty_delta)}</dd></div><div><dt>策略目标 signed notional（当前 → 候选）</dt><dd>{format(impact.active_policy_target_signed_notional)} → {format(impact.candidate_policy_target_signed_notional)}</dd></div><div><dt>目标 signed notional 变化</dt><dd>{format(impact.target_signed_notional_delta)} {impact.notional_asset}</dd></div><div><dt>候选目标相对当前 exposure</dt><dd>{format(impact.candidate_target_delta_from_current_exposure)}</dd></div><div><dt>候选数量相对当前</dt><dd>{format(impact.candidate_position_qty_delta_from_current)}</dd></div><div><dt>每 exposure 单位对应数量</dt><dd>{format(impact.position_qty_per_unit)} {quantityUnit}</dd></div><div><dt>场所最小调整数量</dt><dd>{format(impact.minimum_rebalance_position_qty)} {quantityUnit}</dd></div><div><dt>归一化最小调整数量</dt><dd>{format(impact.normalized_minimum_rebalance_position_qty)} {quantityUnit}</dd></div><div><dt>最小调整名义金额</dt><dd>{format(impact.minimum_rebalance_notional)} {impact.notional_asset}</dd></div><div><dt>最大目标数量</dt><dd>{format(impact.maximum_target_position_qty)} {quantityUnit}</dd></div><div><dt>初始 frontier</dt><dd>{format(impact.initial_frontier)}</dd></div><div><dt>初始执行目标</dt><dd>{format(impact.initial_execution_target)}</dd></div></dl>{preview.capacity_proof && <section><h3>容量证明</h3><dl><div><dt>可增加名义金额</dt><dd>{format(preview.capacity_proof.available_increase_notional)} {preview.capacity_proof.asset}</dd></div><div><dt>所需增加名义金额</dt><dd>{format(preview.capacity_proof.required_increase_notional)} {preview.capacity_proof.asset}</dd></div><div><dt>观测时间</dt><dd>{preview.capacity_proof.observed_at}</dd></div></dl></section>}<PreviewMessages preview={preview} /></article>
+}
+
+function PreviewMessages({ preview }: { preview: TrackConfigurationPreviewResponse }) { return <>{preview.field_errors.length > 0 && <section><h3>字段错误</h3><ul>{preview.field_errors.map(item => <li key={`${item.field}:${item.message}`}><strong>{item.field}</strong><span>{item.message}</span></li>)}</ul></section>}{preview.blockers.length > 0 && <section><h3>阻止项</h3><ul>{preview.blockers.map(item => <li key={`${item.code}:${item.message}`}><strong>{item.code}</strong><span>{item.message}</span></li>)}</ul></section>}</> }

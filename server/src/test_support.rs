@@ -526,6 +526,13 @@ pub(crate) fn build_http_state(
             Arc::new(NoopAccountPort),
             query_store,
         )),
+        Arc::new(std::collections::HashMap::from([(
+            "btc-core".to_string(),
+            crate::server_context::TrackConfigurationMetadata {
+                leverage: 10,
+                tick_timeout_secs: 60,
+            },
+        )])),
     )
 }
 

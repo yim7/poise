@@ -194,6 +194,154 @@ pub struct ConfigDryRunCapacityView {
     pub estimated_max_notional_asset: String,
 }
 
+/// Safe, online-editable projection of a track definition.  This deliberately
+/// excludes identity, exchange credentials, leverage, and other startup-only
+/// values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackConfigurationView {
+    pub lower_price: f64,
+    pub upper_price: f64,
+    pub long_exposure_units: f64,
+    pub short_exposure_units: f64,
+    pub notional_per_unit: f64,
+    pub min_rebalance_units: f64,
+    pub shape_family: ShapeFamily,
+    pub out_of_band_policy: BandProtectionPolicy,
+    pub max_notional: f64,
+    pub daily_loss_limit: f64,
+    pub total_loss_limit: f64,
+    pub risk_acquisition: RiskAcquisitionConfigView,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackConfigurationResponse {
+    pub version: String,
+    pub identity: TrackConfigurationIdentityView,
+    pub active: TrackConfigurationView,
+    pub restart_required: TrackConfigurationRestartRequiredView,
+    pub application_status: TrackConfigurationApplicationStatusView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackConfigurationIdentityView {
+    pub id: String,
+    pub instrument: InstrumentView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackConfigurationRestartRequiredView {
+    pub leverage: u32,
+    pub tick_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackConfigurationApplicationStatusView {
+    Idle,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackConfigurationPreviewRequest {
+    pub candidate: TrackConfigurationView,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackConfigurationPreviewResponse {
+    pub previewed_at: String,
+    pub valid: bool,
+    pub field_errors: Vec<TrackConfigurationFieldErrorView>,
+    pub blockers: Vec<TrackConfigurationBlockerView>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub impact: Option<TrackConfigurationImpactView>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub capacity_proof: Option<TrackConfigurationCapacityProofView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackConfigurationFieldErrorView {
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackConfigurationBlockerView {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackConfigurationImpactView {
+    pub strategy_price: f64,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub active_policy_target: Option<f64>,
+    pub candidate_curve_target: f64,
+    pub candidate_policy_target: f64,
+    pub candidate_policy_state: TrackConfigurationPolicyStateView,
+    pub candidate_risk_approved_target: f64,
+    pub candidate_risk_outcome: TrackConfigurationRiskOutcomeView,
+    pub position_quantity: f64,
+    pub position_quantity_unit: TrackPositionQuantityUnitView,
+    pub current_exposure: f64,
+    pub candidate_current_exposure: f64,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub active_policy_target_position_qty: Option<f64>,
+    pub candidate_policy_target_position_qty: f64,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub target_position_qty_delta: Option<f64>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub active_policy_target_signed_notional: Option<f64>,
+    pub candidate_policy_target_signed_notional: f64,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub target_signed_notional_delta: Option<f64>,
+    pub candidate_target_delta_from_current_exposure: f64,
+    pub candidate_position_qty_delta_from_current: f64,
+    pub initial_frontier: f64,
+    pub initial_execution_target: f64,
+    pub position_qty_per_unit: f64,
+    pub minimum_rebalance_position_qty: f64,
+    pub normalized_minimum_rebalance_position_qty: f64,
+    pub minimum_rebalance_notional: f64,
+    pub maximum_target_position_qty: f64,
+    pub notional_asset: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackConfigurationPolicyStateView {
+    InBand,
+    Frozen,
+    Flattening,
+    FlattenPending,
+    Terminated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackConfigurationRiskOutcomeView {
+    Allowed,
+    Capped,
+    DailyLossTerminated,
+    TotalLossTerminated,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackConfigurationCapacityProofView {
+    pub available_increase_notional: f64,
+    pub required_increase_notional: f64,
+    pub asset: String,
+    pub observed_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrackListItemView {
@@ -962,9 +1110,10 @@ mod tests {
         PriceExecutionBlockReasonView, ReadinessIssueView, RecentFillsAuditResponse,
         RecentPnlAvailabilityView, RiskAcquisitionConfigView, RiskAcquisitionDirectionView,
         RiskAcquisitionView, RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView,
-        StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackCommandType, TrackDetailView,
-        TrackDiagnosticsView, TrackExecutionView, TrackListItemView, TrackListResponse,
-        TrackLiveView, TrackStatus, TradingReadinessResponse,
+        StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
+        TrackConfigurationPreviewResponse, TrackDetailView, TrackDiagnosticsView,
+        TrackExecutionView, TrackListItemView, TrackListResponse, TrackLiveView, TrackStatus,
+        TradingReadinessResponse,
     };
 
     #[test]
@@ -1757,5 +1906,21 @@ mod tests {
             payload.items[0].message,
             "desired exposure -3.9534 -> -3.7500"
         );
+    }
+
+    #[test]
+    fn configuration_preview_keeps_required_option_keys_on_the_wire() {
+        let response = TrackConfigurationPreviewResponse {
+            previewed_at: "2026-09-08T00:00:00Z".to_string(),
+            valid: false,
+            field_errors: vec![],
+            blockers: vec![],
+            impact: None,
+            capacity_proof: None,
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert!(value.get("impact").is_some());
+        assert!(value.get("capacity_proof").is_some());
+        assert!(serde_json::from_value::<TrackConfigurationPreviewResponse>(value).is_ok());
     }
 }

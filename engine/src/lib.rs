@@ -1,5 +1,6 @@
 pub mod clock;
 pub mod command;
+pub mod configuration_preview;
 pub mod decision_evaluation;
 pub mod decision_replay;
 pub mod exchange;

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use poise_application::submit_effect_service::SubmitEffectService;
@@ -30,6 +31,13 @@ pub struct HttpState {
     pub exchange_freshness: Arc<ExchangeFreshness>,
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
     pub recent_fills_auditor: Arc<RecentFillsAuditor>,
+    pub configuration_metadata: Arc<HashMap<String, TrackConfigurationMetadata>>,
+}
+
+#[derive(Clone, Copy)]
+pub struct TrackConfigurationMetadata {
+    pub leverage: u32,
+    pub tick_timeout_secs: u64,
 }
 
 #[derive(Clone)]
