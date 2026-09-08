@@ -583,7 +583,7 @@ accepted audit 是第一版应用接口的前置能力，不是后续可选增�
 
 - [x] **U1 只读运行总览**：server 同源托管最小前端；展示 readiness、Track 摘要和新的运行页。Commit：`f1d882e`。
 - [x] **U2 配置读取与预览**：从 server 读取安全配置投影，编辑一个现有 Track，并由 core/engine 使用当前 `InstrumentSpec`、真实 `PositionQty`、最新有效行情、venue minimum 与显式容量证明计算影响预览；证明缺失时失败关闭，不写文件、不改仓位。Commits：`4e0127f`、`af048c4`。
-- [ ] **U3 无 active binding 的保存并应用**：先拒绝全部 active binding 状态、未解决的 submit outcome、recovery anomaly 与 terminated Track，再完成 version/application ID 审计、原子 TOML patch、定义替换、position quantity 重算、新 acquisition 起点和自动重新决策。Commit：待完成。
+- [x] **U3 无 active binding 的保存并应用**：先拒绝全部 active binding 状态、未解决的 submit outcome、recovery anomaly 与 terminated Track，再完成 version/application ID 审计、原子 TOML patch、定义替换、position quantity 重算、新 acquisition 起点和自动重新决策。Commit：`c515f42`。
 - [ ] **U4 有订单的完整应用**：关闭新 submit，处理 pending/working/cancel/outcome unknown，等待权威快照后激活。Commit：待完成。
 - [ ] **U5 失败恢复与幂等**：覆盖外部文件变化、写入失败、断线、进程退出和 application ID 重试。Commit：待完成。
 - [ ] **U6 人工控制与系统页**：迁移 pause/resume/flatten/terminate、health、tasks、diagnostics 和 activity。Commit：待完成。
