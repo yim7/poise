@@ -31,6 +31,7 @@ impl ConfigurationApplicationStoreAdapter {
     pub(crate) fn new(path: PathBuf, storage: Arc<SqliteStorage>) -> Result<Self> {
         let committed_raw =
             fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        reconcile_interrupted_applications(&storage, &committed_raw)?;
         Ok(Self {
             path,
             storage,
@@ -87,6 +88,23 @@ impl ConfigurationApplicationStoreAdapter {
     }
 }
 
+/// A process never resumes a configuration workflow. Its durable audit is
+/// reconciled with the one durable configuration fact before serving requests.
+fn reconcile_interrupted_applications(storage: &SqliteStorage, current: &str) -> Result<()> {
+    let current_version = canonical_version(current).map_err(anyhow::Error::new)?;
+    for row in storage.load_active_configuration_applications()? {
+        let result = if row.candidate_version == current_version {
+            "active"
+        } else if row.old_version == current_version {
+            "interrupted"
+        } else {
+            "failed"
+        };
+        storage.update_configuration_application_result(&row.application_id, result, Utc::now())?;
+    }
+    Ok(())
+}
+
 fn canonical_version(
     input: &str,
 ) -> std::result::Result<String, ConfigurationApplicationStoreError> {
@@ -131,17 +149,19 @@ impl ConfigurationApplicationStore for ConfigurationApplicationStoreAdapter {
         let _guard = self.lock.lock().await;
         let original = fs::read_to_string(&self.path)
             .map_err(|error| ConfigurationApplicationStoreError::WriteFailed(error.to_string()))?;
-        if let Some(existing) = self
+        let existing = self
             .storage
             .load_configuration_application(&request.application_id)
-            .map_err(|error| ConfigurationApplicationStoreError::Internal(error.to_string()))?
-        {
+            .map_err(|error| ConfigurationApplicationStoreError::Internal(error.to_string()))?;
+        if let Some(existing) = existing.as_ref() {
             if existing.track_id != track_id.as_str()
                 || existing.request_hash != request.request_hash
             {
                 return Err(ConfigurationApplicationStoreError::ApplicationIdConflict);
             }
-            return Ok(ConfigurationApplicationPersistence::AlreadyPersisted);
+            if !matches!(existing.result.as_str(), "interrupted" | "failed") {
+                return Ok(ConfigurationApplicationPersistence::AlreadyPersisted);
+            }
         }
         if original
             != *self.committed_raw.lock().map_err(|_| {
@@ -162,6 +182,16 @@ impl ConfigurationApplicationStore for ConfigurationApplicationStoreAdapter {
             && active.application_id != request.application_id
         {
             return Err(ConfigurationApplicationStoreError::ApplicationIdConflict);
+        }
+        if existing.is_some() {
+            self.storage
+                .update_configuration_application_result(
+                    &request.application_id,
+                    status_text(ConfigurationApplicationStatus::Preparing),
+                    Utc::now(),
+                )
+                .map_err(|error| ConfigurationApplicationStoreError::Internal(error.to_string()))?;
+            return Ok(ConfigurationApplicationPersistence::Persisted);
         }
         let now = Utc::now();
         self.storage
@@ -223,11 +253,6 @@ impl ConfigurationApplicationStore for ConfigurationApplicationStoreAdapter {
         if let Err(error) =
             patch_file_atomically_if_unchanged(&self.path, &original, track_id.as_str(), &candidate)
         {
-            let _ = self.storage.update_configuration_application_result(
-                &request.application_id,
-                status_text(ConfigurationApplicationStatus::Failed),
-                Utc::now(),
-            );
             if error.to_string().contains("changed externally") {
                 return Err(ConfigurationApplicationStoreError::ExternalChange);
             }
@@ -448,13 +473,20 @@ pub(crate) fn patch_file_atomically_if_unchanged(
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_version, patch_file_atomically, patch_file_atomically_if_unchanged,
-        patch_track_configuration,
+        ConfigurationApplicationStoreAdapter, canonical_version, patch_file_atomically,
+        patch_file_atomically_if_unchanged, patch_track_configuration,
+    };
+    use chrono::Utc;
+    use poise_application::{
+        ConfigurationApplicationPersistence, ConfigurationApplicationRequest,
+        ConfigurationApplicationStore,
     };
     use poise_protocol::{
         BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy, RiskAcquisitionConfigView,
         ShapeFamily, TrackConfigurationView,
     };
+    use poise_storage::sqlite::{ConfigurationApplicationAuditRow, SqliteStorage};
+    use std::sync::Arc;
 
     #[test]
     fn canonical_version_ignores_credentials_and_comments() {
@@ -465,6 +497,128 @@ mod tests {
         assert_eq!(
             canonical_version(first).unwrap(),
             canonical_version(&second).unwrap()
+        );
+    }
+
+    #[test]
+    fn reopening_marks_previously_accepted_candidate_as_active() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let current = "[exchange]\nvenue='binance'\n[[tracks]]\ntrack_id='btc'\nsymbol='BTCUSDT'\nlower_price=90.0\nupper_price=110.0\nlong_exposure_units=1.0\nshort_exposure_units=1.0\nnotional_per_unit=1.0\ndaily_loss_limit=1.0\ntotal_loss_limit=1.0\n";
+        std::fs::write(&path, current).unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let now = Utc::now();
+        storage
+            .record_configuration_application(&ConfigurationApplicationAuditRow {
+                application_id: "apply-restart-active".to_string(),
+                request_hash: "hash".to_string(),
+                track_id: "btc".to_string(),
+                old_version: "old".to_string(),
+                candidate_version: canonical_version(current).unwrap(),
+                result: "preparing".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+
+        let _adapter =
+            ConfigurationApplicationStoreAdapter::new(path, Arc::clone(&storage)).unwrap();
+
+        assert_eq!(
+            storage
+                .load_configuration_application("apply-restart-active")
+                .unwrap()
+                .unwrap()
+                .result,
+            "active"
+        );
+    }
+
+    #[test]
+    fn reopening_marks_unpersisted_application_interrupted() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let current = "[exchange]\nvenue='binance'\n[[tracks]]\ntrack_id='btc'\nsymbol='BTCUSDT'\nlower_price=90.0\nupper_price=110.0\nlong_exposure_units=1.0\nshort_exposure_units=1.0\nnotional_per_unit=1.0\ndaily_loss_limit=1.0\ntotal_loss_limit=1.0\n";
+        std::fs::write(&path, current).unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let now = Utc::now();
+        storage
+            .record_configuration_application(&ConfigurationApplicationAuditRow {
+                application_id: "apply-restart-interrupted".to_string(),
+                request_hash: "hash".to_string(),
+                track_id: "btc".to_string(),
+                old_version: canonical_version(current).unwrap(),
+                candidate_version: "candidate".to_string(),
+                result: "waiting_for_orders".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+
+        let _adapter =
+            ConfigurationApplicationStoreAdapter::new(path, Arc::clone(&storage)).unwrap();
+
+        assert_eq!(
+            storage
+                .load_configuration_application("apply-restart-interrupted")
+                .unwrap()
+                .unwrap()
+                .result,
+            "interrupted"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_id_retries_a_pre_file_failure_when_current_configuration_is_still_old() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let current = "[exchange]\nvenue='binance'\n[[tracks]]\ntrack_id='btc'\nsymbol='BTCUSDT'\nlower_price=90.0\nupper_price=110.0\nlong_exposure_units=1.0\nshort_exposure_units=1.0\nnotional_per_unit=1.0\ndaily_loss_limit=1.0\ntotal_loss_limit=1.0\n";
+        std::fs::write(&path, current).unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let version = canonical_version(current).unwrap();
+        let now = Utc::now();
+        storage
+            .record_configuration_application(&ConfigurationApplicationAuditRow {
+                application_id: "apply-retry-failed".to_string(),
+                request_hash: "hash".to_string(),
+                track_id: "btc".to_string(),
+                old_version: version.clone(),
+                candidate_version: version.clone(),
+                result: "failed".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        let adapter =
+            ConfigurationApplicationStoreAdapter::new(path, Arc::clone(&storage)).unwrap();
+        let definition = crate::config::parse_config(current)
+            .unwrap()
+            .track_definitions()
+            .unwrap()
+            .pop()
+            .unwrap();
+        let request = ConfigurationApplicationRequest {
+            application_id: "apply-retry-failed".to_string(),
+            request_hash: "hash".to_string(),
+            expected_version: version.clone(),
+            candidate_version: version,
+            candidate: definition,
+        };
+
+        assert_eq!(
+            adapter
+                .accept_configuration_application(&poise_core::track::TrackId::new("btc"), &request)
+                .await
+                .unwrap(),
+            ConfigurationApplicationPersistence::Persisted
+        );
+        assert_eq!(
+            storage
+                .load_configuration_application("apply-retry-failed")
+                .unwrap()
+                .unwrap()
+                .result,
+            "preparing"
         );
     }
 

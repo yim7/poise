@@ -285,6 +285,8 @@ function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refr
   const [applicationId, setApplicationId] = useState<string | null>(null)
   const [applyError, setApplyError] = useState<'network' | 'conflict' | null>(null)
   const [applying, setApplying] = useState(false)
+  const [cancellationRequested, setCancellationRequested] = useState(false)
+  const [cancellationError, setCancellationError] = useState(false)
   const previewController = useRef<AbortController | null>(null)
   const previewSequence = useRef(0)
   const applicationController = useRef<AbortController | null>(null)
@@ -293,7 +295,7 @@ function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refr
   const configurationSequence = useRef(0)
 
   const invalidatePreview = () => { previewSequence.current += 1; previewController.current?.abort(); previewController.current = null; setPreview(null); setPreviewError(false); setPreviewing(false) }
-  const invalidateApplication = () => { applicationSequence.current += 1; applicationController.current?.abort(); applicationController.current = null; setConfirming(false); setApplying(false); setApplyError(null); setApplicationId(null) }
+  const invalidateApplication = (keepApplicationId = false) => { applicationSequence.current += 1; applicationController.current?.abort(); applicationController.current = null; setConfirming(false); setApplying(false); setApplyError(null); if (!keepApplicationId) setApplicationId(null); setCancellationRequested(false); setCancellationError(false) }
 
   const load = () => {
     configurationController.current?.abort()
@@ -302,14 +304,14 @@ function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refr
     const request = configurationSequence.current + 1; configurationSequence.current = request
     setLoadError(false)
     get<TrackConfigurationResponse>(`/tracks/${encodeURIComponent(trackId)}/configuration`, { signal: controller.signal })
-      .then(value => { if (!controller.signal.aborted && request === configurationSequence.current) { setConfiguration(value); setDraft(cloneDraft(value.active)); setPreview(null) } })
+      .then(value => { if (!controller.signal.aborted && request === configurationSequence.current) { setConfiguration(value); setDraft(cloneDraft(value.active)); setPreview(null); if (value.application_status === 'failed' && value.application?.retryable) setApplicationId(value.application.application_id); else if (value.application_status === 'idle' || value.application_status === 'active' || value.application_status === 'failed') setApplicationId(null); if (value.application_status === 'idle' || value.application_status === 'active' || value.application_status === 'failed') setCancellationRequested(false) } })
       .catch(() => { if (!controller.signal.aborted && request === configurationSequence.current) setLoadError(true) })
     return controller
   }
   useEffect(() => { const controller = load(); return () => { controller.abort(); configurationSequence.current += 1; invalidatePreview(); invalidateApplication() } }, [trackId, refreshVersion])
   const changed = configuration !== null && draft !== null && JSON.stringify(configuration.active) !== JSON.stringify(draft)
-  const update = <K extends keyof Draft>(field: K, value: Draft[K]) => { setDraft(current => current ? { ...current, [field]: value } : current); invalidatePreview(); invalidateApplication() }
-  const updateRisk = (field: keyof Draft['risk_acquisition'], value: number) => { setDraft(current => current ? { ...current, risk_acquisition: { ...current.risk_acquisition, [field]: value } } : current); invalidatePreview(); invalidateApplication() }
+  const update = <K extends keyof Draft>(field: K, value: Draft[K]) => { setDraft(current => current ? { ...current, [field]: value } : current); invalidatePreview(); invalidateApplication(configuration?.application?.status === 'failed' && configuration.application.retryable === true) }
+  const updateRisk = (field: keyof Draft['risk_acquisition'], value: number) => { setDraft(current => current ? { ...current, risk_acquisition: { ...current.risk_acquisition, [field]: value } } : current); invalidatePreview(); invalidateApplication(configuration?.application?.status === 'failed' && configuration.application.retryable === true) }
   const discard = () => { if (configuration) { setDraft(cloneDraft(configuration.active)); invalidatePreview(); invalidateApplication() } }
   const submitPreview = async () => {
     if (!draft) return
@@ -324,6 +326,7 @@ function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refr
   }
   const applicationStatus: TrackConfigurationApplicationStatus = configuration?.application?.status ?? configuration?.application_status ?? 'idle'
   const applicationInProgress = applicationStatus === 'preparing' || applicationStatus === 'waiting_for_orders' || applicationStatus === 'activating'
+  const editorLocked = applicationInProgress || cancellationRequested
   const apply = async () => {
     if (!draft || !changed || !preview?.valid || applicationInProgress) return
     const id = applicationId ?? crypto.randomUUID()
@@ -336,8 +339,22 @@ function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refr
       await get(`/tracks/${encodeURIComponent(trackId)}/configuration`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ application_id: id, expected_version: configuration!.version, candidate: draft }), signal: controller.signal })
       if (!controller.signal.aborted && request === applicationSequence.current) { invalidatePreview(); setConfirming(false); setApplicationId(null); load() }
     } catch (error) {
-      if (!controller.signal.aborted && request === applicationSequence.current) setApplyError(error instanceof Error && error.message.includes(' 409') ? 'conflict' : 'network')
+      if (!controller.signal.aborted && request === applicationSequence.current) {
+        const conflict = error instanceof Error && error.message.includes(' 409')
+        if (conflict) setApplicationId(null)
+        setApplyError(conflict ? 'conflict' : 'network')
+      }
     } finally { if (request === applicationSequence.current) setApplying(false) }
+  }
+  const cancelApplication = async () => {
+    const id = configuration?.application?.application_id
+    if (!id || cancellationRequested) return
+    setCancellationRequested(true); setCancellationError(false)
+    try {
+      const response = await fetch(`/tracks/${encodeURIComponent(trackId)}/configuration/application/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      if (!response.ok) throw new Error(`cancel ${response.status}`)
+      load()
+    } catch { setCancellationError(true); setCancellationRequested(false) }
   }
   if (loadError) return <article><h2>无法读取配置</h2><button onClick={() => load()}>重试载入配置</button></article>
   if (!configuration || !draft) return <h1>配置载入中</h1>
@@ -353,9 +370,13 @@ function ConfigurationPanel({ trackId, refreshVersion }: { trackId: string; refr
   const changes = configurationChanges(active as unknown as Record<string, unknown>, draft as unknown as Record<string, unknown>)
   return <div className="configuration"><p className="eyebrow">配置应用状态 · {applicationStatusLabel(applicationStatus)}{configuration.application?.message ? ` · ${configuration.application.message}` : ''}</p>
     <ConfigurationApplicationNotice application={configuration.application} status={applicationStatus} />
+    {applicationStatus === 'failed' && configuration.application?.retryable && <p className="unsaved">使用同一申请 ID 重新预览并重试；页面不会自动提交。</p>}
     {changed && <p className="unsaved">有未保存修改</p>}
     <div className="two-column"><article><h2>当前生效值</h2><dl><div><dt>价格区间</dt><dd>{format(active.lower_price, 2)} – {format(active.upper_price, 2)}</dd></div><div><dt>多/空 exposure</dt><dd>{format(active.long_exposure_units)} / {format(active.short_exposure_units)}</dd></div><div><dt>每单位名义金额</dt><dd>{format(active.notional_per_unit)}</dd></div><div><dt>区间外策略</dt><dd>{policy(active.out_of_band_policy)}</dd></div><div><dt>最大名义金额</dt><dd>{format(active.max_notional)}</dd></div></dl></article><article><h2>只读身份与重启字段</h2><dl><div><dt>Track ID</dt><dd>{configuration.identity.id}</dd></div><div><dt>Venue</dt><dd>{configuration.identity.instrument.venue}</dd></div><div><dt>Symbol</dt><dd>{configuration.identity.instrument.symbol}</dd></div><div><dt>杠杆</dt><dd>{configuration.restart_required.leverage}</dd></div><div><dt>Tick 超时（秒）</dt><dd>{configuration.restart_required.tick_timeout_secs}</dd></div></dl></article></div>
-    <article><h2>可编辑草稿</h2><fieldset className="configuration-editor" disabled={applicationInProgress}><div className="config-fields">{numberInput('下限价格', 'lower_price')}{numberInput('上限价格', 'upper_price')}{numberInput('多头 exposure', 'long_exposure_units')}{numberInput('空头 exposure', 'short_exposure_units')}{numberInput('每单位名义金额', 'notional_per_unit')}{numberInput('最小再平衡单位', 'min_rebalance_units')}<label>形状族<select aria-label="形状族" value={draft.shape_family} onChange={event => update('shape_family', event.target.value as Draft['shape_family'])}><option value="linear">linear</option><option value="inertial">inertial</option><option value="responsive">responsive</option></select></label><label>区间外策略<select aria-label="区间外策略" value={policyKind} onChange={event => setPolicy(event.target.value)}><option value="freeze">freeze</option><option value="terminate">terminate</option><option value="flatten">flatten</option></select></label>{flatten && <><label>Flatten 触发<select aria-label="Flatten 触发" value={triggerKind(flatten.trigger)} onChange={event => setFlattenTrigger(event.target.value)}><option value="immediate">immediate</option><option value="flatten_confirm">flatten_confirm</option></select></label>{typeof flatten.trigger !== 'string' && <label>Flatten 确认 bps<input aria-label="Flatten 确认 bps" type="number" value={inputValue(flatten.trigger.flatten_confirm.bps)} onChange={event => setFlattenBps('trigger', Number(event.target.value))} /></label>}<label>恢复策略<select aria-label="恢复策略" value={recoverKind(flatten.recover)} onChange={event => setFlattenRecover(event.target.value)}><option value="back_in_band">back_in_band</option><option value="reentry_confirm">reentry_confirm</option></select></label>{typeof flatten.recover !== 'string' && <label>重新进入确认 bps<input aria-label="重新进入确认 bps" type="number" value={inputValue(flatten.recover.reentry_confirm.bps)} onChange={event => setFlattenBps('recover', Number(event.target.value))} /></label>}</>}{numberInput('最大名义金额', 'max_notional')}{numberInput('每日损失限额', 'daily_loss_limit')}{numberInput('总损失限额', 'total_loss_limit')}{riskInput('初始比例', 'initial_ratio')}{riskInput('有利步数', 'advantage_steps')}{riskInput('最小释放步数', 'min_release_steps')}{riskInput('最大释放步数', 'max_release_steps')}{riskInput('追赶比例', 'catchup_ratio')}{riskInput('过期释放分钟', 'stale_release_minutes')}</div><div className="config-actions"><button onClick={discard} disabled={!changed}>放弃修改</button><button onClick={() => void submitPreview()} disabled={previewing}>{previewing ? '预览中' : '重新预览'}</button><button onClick={() => setConfirming(true)} disabled={!changed || !preview?.valid || applying}>保存并应用</button></div></fieldset></article>
+    {cancellationRequested && <div role="status" className="alert"><strong>取消请求已发送</strong><span>这不代表旧订单已经解决；server 仍会等待权威订单状态，期间不能编辑或提交。</span></div>}
+    {cancellationError && <div role="alert" className="alert"><strong>无法取消申请</strong><span>请重新载入确认当前状态后再试。</span></div>}
+    {(applicationStatus === 'preparing' || applicationStatus === 'waiting_for_orders') && configuration.application && <button onClick={() => void cancelApplication()} disabled={cancellationRequested}>取消本次申请</button>}
+    <article><h2>可编辑草稿</h2><fieldset className="configuration-editor" disabled={editorLocked}><div className="config-fields">{numberInput('下限价格', 'lower_price')}{numberInput('上限价格', 'upper_price')}{numberInput('多头 exposure', 'long_exposure_units')}{numberInput('空头 exposure', 'short_exposure_units')}{numberInput('每单位名义金额', 'notional_per_unit')}{numberInput('最小再平衡单位', 'min_rebalance_units')}<label>形状族<select aria-label="形状族" value={draft.shape_family} onChange={event => update('shape_family', event.target.value as Draft['shape_family'])}><option value="linear">linear</option><option value="inertial">inertial</option><option value="responsive">responsive</option></select></label><label>区间外策略<select aria-label="区间外策略" value={policyKind} onChange={event => setPolicy(event.target.value)}><option value="freeze">freeze</option><option value="terminate">terminate</option><option value="flatten">flatten</option></select></label>{flatten && <><label>Flatten 触发<select aria-label="Flatten 触发" value={triggerKind(flatten.trigger)} onChange={event => setFlattenTrigger(event.target.value)}><option value="immediate">immediate</option><option value="flatten_confirm">flatten_confirm</option></select></label>{typeof flatten.trigger !== 'string' && <label>Flatten 确认 bps<input aria-label="Flatten 确认 bps" type="number" value={inputValue(flatten.trigger.flatten_confirm.bps)} onChange={event => setFlattenBps('trigger', Number(event.target.value))} /></label>}<label>恢复策略<select aria-label="恢复策略" value={recoverKind(flatten.recover)} onChange={event => setFlattenRecover(event.target.value)}><option value="back_in_band">back_in_band</option><option value="reentry_confirm">reentry_confirm</option></select></label>{typeof flatten.recover !== 'string' && <label>重新进入确认 bps<input aria-label="重新进入确认 bps" type="number" value={inputValue(flatten.recover.reentry_confirm.bps)} onChange={event => setFlattenBps('recover', Number(event.target.value))} /></label>}</>}{numberInput('最大名义金额', 'max_notional')}{numberInput('每日损失限额', 'daily_loss_limit')}{numberInput('总损失限额', 'total_loss_limit')}{riskInput('初始比例', 'initial_ratio')}{riskInput('有利步数', 'advantage_steps')}{riskInput('最小释放步数', 'min_release_steps')}{riskInput('最大释放步数', 'max_release_steps')}{riskInput('追赶比例', 'catchup_ratio')}{riskInput('过期释放分钟', 'stale_release_minutes')}</div><div className="config-actions"><button onClick={discard} disabled={!changed}>放弃修改</button><button onClick={() => void submitPreview()} disabled={previewing || editorLocked}>{previewing ? '预览中' : applicationStatus === 'failed' && configuration.application?.retryable ? '使用同一申请 ID 重新预览' : '重新预览'}</button><button onClick={() => setConfirming(true)} disabled={!changed || !preview?.valid || applying || editorLocked}>保存并应用</button></div></fieldset></article>
     {confirming && <div role="dialog" aria-modal="true" aria-label="确认保存并应用" className="confirmation"><h2>确认保存并应用</h2><p>这会更新实例配置，并可能产生真实订单。</p><dl>{changes.map(change => <div key={change.label}><dt>{change.label}</dt><dd>{change.from} → {change.to}</dd></div>)}</dl><button onClick={() => setConfirming(false)} disabled={applying}>取消</button><button onClick={() => void apply()} disabled={applying}>{applying ? '正在提交' : '确认保存并应用'}</button></div>}
     {applyError === 'conflict' && <div role="alert" className="alert"><strong>配置版本冲突</strong><span>配置已变化，请重新加载后再试。</span><button onClick={() => load()}>重新加载</button></div>}{applyError === 'network' && <div role="alert" className="alert"><strong>提交结果未确认</strong><span>可使用同一申请 ID 重试。</span><button onClick={() => void apply()}>重试提交</button></div>}
     {previewError && <div role="alert" className="alert"><strong>预览失败</strong><button onClick={() => void submitPreview()}>重试预览</button></div>}{preview && <PreviewResult preview={preview} symbol={configuration.identity.instrument.symbol} />}

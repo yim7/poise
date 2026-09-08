@@ -265,6 +265,7 @@ pub struct TrackConfigurationApplicationView {
     pub application_id: String,
     pub status: TrackConfigurationApplicationStatusView,
     pub accepted: bool,
+    pub retryable: bool,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub message: Option<String>,
     #[serde(deserialize_with = "deserialize_required_option")]
@@ -1138,9 +1139,10 @@ mod tests {
         RecentPnlAvailabilityView, RiskAcquisitionConfigView, RiskAcquisitionDirectionView,
         RiskAcquisitionView, RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView,
         StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
-        TrackConfigurationApplicationStatusView, TrackConfigurationPreviewResponse,
-        TrackDetailView, TrackDiagnosticsView, TrackExecutionView, TrackListItemView,
-        TrackListResponse, TrackLiveView, TrackStatus, TradingReadinessResponse,
+        TrackConfigurationApplicationStatusView, TrackConfigurationApplicationView,
+        TrackConfigurationPreviewResponse, TrackDetailView, TrackDiagnosticsView,
+        TrackExecutionView, TrackListItemView, TrackListResponse, TrackLiveView, TrackStatus,
+        TradingReadinessResponse,
     };
 
     #[test]
@@ -1961,6 +1963,22 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&TrackConfigurationApplicationStatusView::Failed).unwrap(),
             "\"failed\""
+        );
+    }
+
+    #[test]
+    fn configuration_application_exposes_explicit_retry_capability() {
+        let application = TrackConfigurationApplicationView {
+            application_id: "apply-restart".to_string(),
+            status: TrackConfigurationApplicationStatusView::Failed,
+            accepted: false,
+            retryable: true,
+            message: Some("retry with the same application ID".to_string()),
+            active_version: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&application).unwrap(),
+            r#"{"application_id":"apply-restart","status":"failed","accepted":false,"retryable":true,"message":"retry with the same application ID","active_version":null}"#
         );
     }
 }

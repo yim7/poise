@@ -399,6 +399,62 @@ describe('Poise read-only console', () => {
     expect(screen.queryByRole('button', { name: /暂停|撤单|恢复/ })).not.toBeInTheDocument()
   })
 
+  it('cancels a waiting application without assuming old orders are resolved and keeps editing disabled while cancellation is pending', async () => {
+    const waiting = {
+      ...configuration,
+      application_status: 'waiting_for_orders',
+      application: { application_id: 'apply-cancel', status: 'waiting_for_orders', accepted: true, message: null, active_version: null },
+    }
+    let deleteRequested = false
+    vi.stubGlobal('fetch', vi.fn((input: string, init?: RequestInit) => {
+      if (input === '/tracks/btc-core/configuration/application/apply-cancel' && init?.method === 'DELETE') {
+        deleteRequested = true
+        return Promise.resolve(new Response(null, { status: 204 }))
+      }
+      if (input === '/tracks/btc-core/configuration') return Promise.resolve(response(waiting))
+      return Promise.resolve(response(api(input)))
+    }))
+    render(<App />)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    fireEvent.click(screen.getByRole('tab', { name: '配置' }))
+    await screen.findByText(/等待订单完成/)
+    fireEvent.click(screen.getByRole('button', { name: '取消本次申请' }))
+    await waitFor(() => expect(deleteRequested).toBe(true))
+    expect(screen.getByText(/取消请求已发送/)).toBeVisible()
+    expect(screen.getByText(/不代表旧订单已经解决/)).toBeVisible()
+    expect(screen.getByLabelText('下限价格')).toBeDisabled()
+    expect(screen.getByRole('button', { name: '保存并应用' })).toBeDisabled()
+  })
+
+  it('uses the retryable failed application id only after an explicit preview and apply', async () => {
+    const retryable = {
+      ...configuration,
+      application_status: 'failed',
+      application: { application_id: 'interrupted-apply', status: 'failed', accepted: false, message: '进程在写入前中断', active_version: null, retryable: true },
+    }
+    const valid = { previewed_at: '2026-09-09T00:00:00Z', valid: true, field_errors: [], blockers: [], impact: null, capacity_proof: null }
+    let appliedBody = ''
+    vi.stubGlobal('fetch', vi.fn((input: string, init?: RequestInit) => {
+      if (input === '/tracks/btc-core/configuration') {
+        if (init?.method === 'PUT') { appliedBody = String(init.body); return Promise.resolve(response({ accepted: true })) }
+        return Promise.resolve(response(retryable))
+      }
+      if (input === '/tracks/btc-core/configuration/preview') return Promise.resolve(response(valid))
+      return Promise.resolve(response(api(input)))
+    }))
+    render(<App />)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    fireEvent.click(screen.getByRole('tab', { name: '配置' }))
+    expect(await screen.findByText(/使用同一申请 ID 重新预览并重试/)).toBeVisible()
+    fireEvent.change(screen.getByLabelText('下限价格'), { target: { value: '71000' } })
+    fireEvent.click(screen.getByRole('button', { name: '使用同一申请 ID 重新预览' }))
+    await screen.findByText('预览结果')
+    fireEvent.click(screen.getByRole('button', { name: '保存并应用' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认保存并应用' }))
+    await waitFor(() => expect(appliedBody).not.toBe(''))
+    expect(JSON.parse(appliedBody).application_id).toBe('interrupted-apply')
+  })
+
   it('reloads the configuration application status from GET when the stream reconnects', async () => {
     let reconnected = false
     const waiting = { ...configuration, application_status: 'activating', application: { application_id: 'apply-2', status: 'activating', accepted: true, message: null, active_version: null } }

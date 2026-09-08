@@ -118,6 +118,47 @@ impl SqliteStorage {
             }),
         ).optional().map_err(Into::into)
     }
+
+    /// Returns every durable application that was in progress when the
+    /// process last stopped. Startup must reconcile these rows against the
+    /// configuration file before treating any request as active.
+    pub fn load_active_configuration_applications(
+        &self,
+    ) -> Result<Vec<ConfigurationApplicationAuditRow>> {
+        let conn = Self::lock_connection(&self.conn)?;
+        let mut statement = conn.prepare(
+            "SELECT application_id, request_hash, track_id, old_version, candidate_version, result, created_at, updated_at
+             FROM configuration_applications
+             WHERE result IN ('preparing', 'waiting_for_orders', 'activating')
+             ORDER BY updated_at ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(ConfigurationApplicationAuditRow {
+                application_id: row.get(0)?,
+                request_hash: row.get(1)?,
+                track_id: row.get(2)?,
+                old_version: row.get(3)?,
+                candidate_version: row.get(4)?,
+                result: row.get(5)?,
+                created_at: row.get::<_, String>(6)?.parse().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        6,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+                updated_at: row.get::<_, String>(7)?.parse().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path).context("failed to open sqlite database")?;
         Self::from_connection(conn)

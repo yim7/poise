@@ -157,6 +157,7 @@ export interface TrackConfigurationApplicationView {
   accepted: boolean
   message: string | null
   active_version: string | null
+  retryable: boolean
 }
 
 export interface TrackConfigurationImpactView {

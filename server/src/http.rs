@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use poise_application::{
     ConfigurationApplicationError, ConfigurationApplicationRequest, ConfigurationApplicationStatus,
@@ -14,13 +14,13 @@ use poise_engine::command::TrackCommand;
 use poise_protocol::{
     AccountSummaryView, ActivityLevelView, BandFlattenTrigger, BandProtectionPolicy,
     BandRecoverPolicy, HealthResponse, HealthStatusView, HealthTaskStatusView, HealthTaskView,
-    InstrumentView, PnlBackfillStatusView, PnlHistoryWindowView, RecentFillAuditItemView,
-    RecentFillCoverageView, RecentFillsAuditResponse, RecentPnlAvailabilityView,
-    RecentPnlCompletenessView, RiskAcquisitionConfigView, ShapeFamily, TrackCommandAccepted,
-    TrackCommandRequest, TrackCommandType, TrackConfigurationApplicationStatusView,
-    TrackConfigurationApplyRequest, TrackConfigurationBlockerView,
-    TrackConfigurationCapacityProofView, TrackConfigurationFieldErrorView,
-    TrackConfigurationIdentityView, TrackConfigurationImpactView,
+    InstrumentView, PnlBackfillStatusView, PnlHistoryWindowView, ReadinessIssueView,
+    RecentFillAuditItemView, RecentFillCoverageView, RecentFillsAuditResponse,
+    RecentPnlAvailabilityView, RecentPnlCompletenessView, RiskAcquisitionConfigView, ShapeFamily,
+    TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
+    TrackConfigurationApplicationStatusView, TrackConfigurationApplyRequest,
+    TrackConfigurationBlockerView, TrackConfigurationCapacityProofView,
+    TrackConfigurationFieldErrorView, TrackConfigurationIdentityView, TrackConfigurationImpactView,
     TrackConfigurationPolicyStateView, TrackConfigurationPreviewRequest,
     TrackConfigurationPreviewResponse, TrackConfigurationResponse,
     TrackConfigurationRestartRequiredView, TrackConfigurationRiskOutcomeView,
@@ -66,6 +66,10 @@ pub(crate) fn router_with_web_root(
         .route("/tracks/:id/configuration", get(get_track_configuration))
         .route("/tracks/:id/configuration", put(apply_track_configuration))
         .route(
+            "/tracks/:id/configuration/application/:application_id",
+            delete(abandon_track_configuration_application),
+        )
+        .route(
             "/tracks/:id/configuration/preview",
             post(preview_track_configuration),
         )
@@ -93,7 +97,7 @@ async fn readiness(
         .map_err(map_query_error)?;
     let account = state.account_monitor.current_summary().await;
     let stale_exchange_state = state.exchange_freshness.stale_tracks().await;
-    let response = assess_trading_readiness(
+    let mut response = assess_trading_readiness(
         &tracks,
         account.as_ref(),
         &state.runtime_health.snapshot(),
@@ -102,6 +106,21 @@ async fn readiness(
         &state.account_margin_guard.block_snapshot(),
         &stale_exchange_state,
     );
+    if let Some(store) = state.configuration_store.as_ref() {
+        if let Some(application) = store
+            .active_application()
+            .map_err(map_configuration_store_error)?
+        {
+            response.ready_to_trade = false;
+            response.blockers.push(ReadinessIssueView {
+                component: "configuration_application".to_string(),
+                reason: format!(
+                    "configuration application `{}` is {}; old orders must reach a confirmed terminal state",
+                    application.application_id, application.result
+                ),
+            });
+        }
+    }
     let status = if response.ready_to_trade {
         StatusCode::OK
     } else {
@@ -313,14 +332,45 @@ async fn get_track_configuration(
             tick_timeout_secs: metadata.tick_timeout_secs,
         },
         application_status,
-        application: application.map(|row| poise_protocol::TrackConfigurationApplicationView {
-            application_id: row.application_id,
-            status: project_application_status(&row.result),
-            accepted: row.result != "failed",
-            message: (row.result == "failed")
-                .then(|| "configuration application failed".to_string()),
-            active_version: (row.result == "active").then_some(row.candidate_version),
+        application: application.map(project_application_view),
+    }))
+}
+
+async fn abandon_track_configuration_application(
+    Path((id, application_id)): Path<(String, String)>,
+    State(state): State<HttpState>,
+) -> Result<
+    Json<poise_protocol::TrackConfigurationApplicationView>,
+    (StatusCode, Json<ErrorResponse>),
+> {
+    let store = state.configuration_store.as_ref().ok_or_else(|| {
+        internal_error("configuration application store is unavailable".to_string())
+    })?;
+    let receipt = state
+        .runtime
+        .abandon_configuration_application(
+            &TrackId::new(id.clone()),
+            &application_id,
+            store.clone(),
+        )
+        .await
+        .map_err(map_configuration_application_error)?;
+    Ok(Json(poise_protocol::TrackConfigurationApplicationView {
+        application_id,
+        status: project_application_status(match receipt.status {
+            ConfigurationApplicationStatus::Idle => "idle",
+            ConfigurationApplicationStatus::Preparing => "preparing",
+            ConfigurationApplicationStatus::WaitingForOrders => "waiting_for_orders",
+            ConfigurationApplicationStatus::Activating => "activating",
+            ConfigurationApplicationStatus::Active => "active",
+            ConfigurationApplicationStatus::Failed => "failed",
         }),
+        accepted: false,
+        retryable: false,
+        message: Some(
+            "configuration application was abandoned; old orders are still being reconciled before the previous definition can resume".to_string(),
+        ),
+        active_version: None,
     }))
 }
 
@@ -346,20 +396,8 @@ async fn apply_track_configuration(
                 poise_application::ConfigurationApplicationStoreError::ApplicationIdConflict,
             ));
         }
-        if matches!(
-            existing.result.as_str(),
-            "active" | "failed" | "waiting_for_orders"
-        ) {
-            let status = project_application_status(&existing.result);
-            return Ok(Json(poise_protocol::TrackConfigurationApplicationView {
-                application_id: existing.application_id.clone(),
-                status,
-                accepted: existing.result != "failed",
-                message: (existing.result == "failed")
-                    .then(|| "configuration application failed".to_string()),
-                active_version: (existing.result == "active")
-                    .then_some(existing.candidate_version.clone()),
-            }));
+        if matches!(existing.result.as_str(), "active" | "waiting_for_orders") {
+            return Ok(Json(project_application_view(existing.clone())));
         }
     }
     if let Some(active) = store
@@ -410,6 +448,7 @@ async fn apply_track_configuration(
                 ConfigurationApplicationStatus::Failed => "failed",
             }),
             accepted: true,
+            retryable: false,
             message: None,
             active_version: (receipt.status == ConfigurationApplicationStatus::Active)
                 .then_some(existing.candidate_version),
@@ -460,6 +499,7 @@ async fn apply_track_configuration(
             ConfigurationApplicationStatus::Failed => "failed",
         }),
         accepted: true,
+        retryable: false,
         message: None,
         active_version: (receipt.status == ConfigurationApplicationStatus::Active)
             .then_some(active_version),
@@ -482,8 +522,31 @@ fn project_application_status(value: &str) -> TrackConfigurationApplicationStatu
         "waiting_for_orders" => TrackConfigurationApplicationStatusView::WaitingForOrders,
         "activating" => TrackConfigurationApplicationStatusView::Activating,
         "active" => TrackConfigurationApplicationStatusView::Active,
-        "failed" => TrackConfigurationApplicationStatusView::Failed,
+        "failed" | "interrupted" => TrackConfigurationApplicationStatusView::Failed,
         _ => TrackConfigurationApplicationStatusView::Idle,
+    }
+}
+
+fn project_application_view(
+    row: poise_storage::sqlite::ConfigurationApplicationAuditRow,
+) -> poise_protocol::TrackConfigurationApplicationView {
+    let message = match row.result.as_str() {
+        "interrupted" => Some(
+            "configuration application was interrupted before the candidate configuration was persisted; retry with the same application ID".to_string(),
+        ),
+        "failed" => Some("configuration application failed".to_string()),
+        "waiting_for_orders" => Some(
+            "configuration application is waiting for old orders to reach a confirmed terminal state".to_string(),
+        ),
+        _ => None,
+    };
+    poise_protocol::TrackConfigurationApplicationView {
+        application_id: row.application_id,
+        status: project_application_status(&row.result),
+        accepted: !matches!(row.result.as_str(), "failed" | "interrupted"),
+        retryable: row.result == "interrupted",
+        message,
+        active_version: (row.result == "active").then_some(row.candidate_version),
     }
 }
 
@@ -507,7 +570,10 @@ fn map_configuration_application_error(
 ) -> (StatusCode, Json<ErrorResponse>) {
     match error {
         ConfigurationApplicationError::Terminated
-        | ConfigurationApplicationError::RecoveryAnomaly => (
+        | ConfigurationApplicationError::RecoveryAnomaly
+        | ConfigurationApplicationError::PersistedApplicationCannotBeAbandoned
+        | ConfigurationApplicationError::ApplicationIdMismatch
+        | ConfigurationApplicationError::ApplicationInProgress => (
             StatusCode::CONFLICT,
             Json(ErrorResponse {
                 error: error.to_string(),
@@ -1829,6 +1895,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configuration_get_projects_interrupted_audit_as_explicit_same_id_retry() {
+        let (state, audit, _path, _directory) = with_configuration_store(app_state().await);
+        let now = Utc::now();
+        audit
+            .record_configuration_application(
+                &poise_storage::sqlite::ConfigurationApplicationAuditRow {
+                    application_id: "apply-interrupted".to_string(),
+                    request_hash: "hash".to_string(),
+                    track_id: "btc-core".to_string(),
+                    old_version: "old".to_string(),
+                    candidate_version: "candidate".to_string(),
+                    result: "interrupted".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                },
+            )
+            .unwrap();
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["application"]["status"], "failed");
+        assert_eq!(body["application"]["accepted"], false);
+        assert_eq!(body["application"]["retryable"], true);
+        assert!(
+            body["application"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("same application ID")
+        );
+    }
+
+    #[tokio::test]
     async fn configuration_put_applies_atomically_and_is_idempotent() {
         let (state, audit, path, _directory) = with_configuration_store(
             app_state_with_account_summary_from_manager(
@@ -2025,6 +2135,72 @@ mod tests {
             "waiting_for_orders"
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), before_file);
+    }
+
+    #[tokio::test]
+    async fn configuration_delete_abandons_pending_application_without_claiming_old_definition_is_ready()
+     {
+        let (state, audit, _path, _directory) =
+            with_configuration_store(app_state_with_usdt_account_summary().await);
+        let app = router(state);
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let accepted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/tracks/btc-core/configuration")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "application_id": "apply-abandon",
+                            "expected_version": value["version"],
+                            "candidate": value["active"],
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/tracks/btc-core/configuration/application/apply-abandon")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["status"], "waiting_for_orders");
+        assert_eq!(body["accepted"], false);
+        assert!(body["message"].as_str().unwrap().contains("old orders"));
+        assert_eq!(
+            audit
+                .load_configuration_application("apply-abandon")
+                .unwrap()
+                .unwrap()
+                .result,
+            "waiting_for_orders"
+        );
     }
 
     #[tokio::test]
@@ -2530,6 +2706,46 @@ mod tests {
         let payload: TradingReadinessResponse = serde_json::from_slice(&body).unwrap();
         assert!(payload.ready_to_trade);
         assert!(payload.blockers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn readiness_blocks_on_durable_configuration_application_not_only_runtime_memory() {
+        let (state, audit, _path, _directory) =
+            with_configuration_store(app_state_with_account_summary().await);
+        mark_runtime_tasks_healthy(&state.http_state);
+        let now = Utc::now();
+        audit
+            .record_configuration_application(
+                &poise_storage::sqlite::ConfigurationApplicationAuditRow {
+                    application_id: "apply-durable-wait".to_string(),
+                    request_hash: "hash".to_string(),
+                    track_id: "btc-core".to_string(),
+                    old_version: "old".to_string(),
+                    candidate_version: "candidate".to_string(),
+                    result: "waiting_for_orders".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                },
+            )
+            .unwrap();
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/readiness")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: TradingReadinessResponse = serde_json::from_slice(&body).unwrap();
+        assert!(payload.blockers.iter().any(|issue| {
+            issue.component == "configuration_application"
+                && issue.reason.contains("apply-durable-wait")
+        }));
     }
 
     #[tokio::test]
