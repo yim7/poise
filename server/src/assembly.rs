@@ -455,6 +455,7 @@ pub(crate) fn build_http_state(
         exchange_freshness,
         account_margin_guard,
         recent_fills_auditor,
+        configuration_metadata,
     }
 }
 
