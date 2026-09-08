@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -90,7 +91,20 @@ pub fn parse_config(input: &str) -> Result<Config> {
     config.track_definitions()?;
     build_track_leverage_index(&config.tracks)?;
     config.account_monitor.validate()?;
+    validate_bind_address(&config.bind_address)?;
     Ok(config)
+}
+
+fn validate_bind_address(bind_address: &str) -> Result<()> {
+    let address: SocketAddr = bind_address.parse().map_err(|error| {
+        anyhow::anyhow!(
+            "invalid bind_address `{bind_address}`: expected an IP address and port: {error}"
+        )
+    })?;
+    if !address.ip().is_loopback() {
+        anyhow::bail!("bind_address `{bind_address}` must use a loopback IP address")
+    }
+    Ok(())
 }
 
 impl Config {
@@ -821,6 +835,38 @@ total_loss_limit = 600.0
             poise_core::strategy::BandProtectionPolicy::Freeze
         );
         assert!((track.track_config().min_rebalance_units - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_config_accepts_loopback_bind_address() {
+        let config = parse_config(
+            r#"
+bind_address = "[::1]:9000"
+tracks = []
+
+[exchange]
+venue = "binance"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.bind_address, "[::1]:9000");
+    }
+
+    #[test]
+    fn parse_config_rejects_non_loopback_bind_address() {
+        let error = parse_config(
+            r#"
+bind_address = "0.0.0.0:9000"
+tracks = []
+
+[exchange]
+venue = "binance"
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("must use a loopback IP address"));
     }
 
     #[test]

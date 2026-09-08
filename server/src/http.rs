@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -17,7 +19,7 @@ use poise_protocol::{
     TrackDiagnosticsView, TrackListResponse, TradingReadinessResponse,
 };
 use serde::Serialize;
-use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::runtime::{
     RuntimeHealthSnapshot, RuntimeHealthStatus, RuntimeTaskHealthSnapshot, assess_trading_readiness,
@@ -30,6 +32,21 @@ struct ErrorResponse {
 }
 
 pub fn router(http_state: HttpState, websocket_state: WebSocketState) -> Router {
+    router_with_web_root(
+        http_state,
+        websocket_state,
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web/dist"),
+    )
+}
+
+pub(crate) fn router_with_web_root(
+    http_state: HttpState,
+    websocket_state: WebSocketState,
+    web_root: impl Into<PathBuf>,
+) -> Router {
+    let web_root = web_root.into();
+    let index = web_root.join("index.html");
+
     Router::new()
         .route("/health", get(health))
         .route("/readiness", get(readiness))
@@ -46,7 +63,7 @@ pub fn router(http_state: HttpState, websocket_state: WebSocketState) -> Router 
             "/ws",
             get(move |ws| crate::websocket::ws_handler(ws, websocket_state.clone())),
         )
-        .layer(CorsLayer::permissive())
+        .fallback_service(ServeDir::new(web_root).fallback(ServeFile::new(index)))
         .with_state(http_state)
 }
 
@@ -441,6 +458,7 @@ fn map_command_error(error: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) 
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::Arc;
 
     use anyhow::anyhow;
@@ -505,6 +523,10 @@ mod tests {
 
     fn router(state: HttpTestState) -> axum::Router {
         super::router(state.http_state, state.websocket_state)
+    }
+
+    fn router_with_web_root(state: HttpTestState, web_root: std::path::PathBuf) -> axum::Router {
+        super::router_with_web_root(state.http_state, state.websocket_state, web_root)
     }
 
     struct FakeClock;
@@ -889,6 +911,65 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn static_web_root_serves_index_and_spa_fallback_without_shadowing_api_routes() {
+        let temporary_web_root = tempfile::tempdir().unwrap();
+        fs::write(
+            temporary_web_root.path().join("index.html"),
+            "<main>Poise control console</main>",
+        )
+        .unwrap();
+        fs::create_dir(temporary_web_root.path().join("assets")).unwrap();
+        fs::write(
+            temporary_web_root.path().join("assets/app.js"),
+            "console.log('poise');",
+        )
+        .unwrap();
+        let app = router_with_web_root(app_state().await, temporary_web_root.path().to_path_buf());
+
+        for uri in ["/", "/tracks/btc-core/overview"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(body.as_ref(), b"<main>Poise control console</main>");
+        }
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), b"console.log('poise');");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: TrackListResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload.items.len(), 1);
     }
 
     #[tokio::test]
@@ -1299,6 +1380,7 @@ mod tests {
 
         assert_eq!(payload.identity.id, "btc-core");
         assert_eq!(payload.identity.instrument.symbol, "BTCUSDT");
+        assert_eq!(payload.position_to_execution_gap, Some(2.0));
         assert_eq!(
             payload_json["strategy"]["long_exposure_units"].as_f64(),
             Some(8.0)
@@ -1656,6 +1738,7 @@ mod tests {
         assert_eq!(payload.status.lifecycle.status, TrackStatus::Paused);
         assert_eq!(payload.decision.revision, None);
         assert_eq!(payload.decision.execution_target, None);
+        assert_eq!(payload.position_to_execution_gap, None);
         assert_eq!(payload.decision.reason, DecisionReasonView::Paused);
     }
 

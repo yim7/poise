@@ -631,6 +631,10 @@ async fn push_live_view_update(
 }
 
 fn project_live_view(live_view: poise_engine::runtime::TrackLiveView) -> ProtocolTrackLiveView {
+    let position_to_execution_gap = live_view
+        .decision
+        .execution_target
+        .map(|target| target - live_view.current_exposure.0);
     ProtocolTrackLiveView {
         strategy_price: live_view.strategy_price,
         strategy_price_status: match live_view.strategy_price_status {
@@ -644,6 +648,7 @@ fn project_live_view(live_view: poise_engine::runtime::TrackLiveView) -> Protoco
         mark_price: live_view.mark_price,
         best_bid: live_view.best_bid,
         best_ask: live_view.best_ask,
+        position_to_execution_gap,
         decision: project_inventory_decision(
             live_view.decision.revision,
             live_view.decision.policy_target,
@@ -848,6 +853,7 @@ mod tests {
     #[test]
     fn projects_live_decision_reason_and_risk_acquisition_observability() {
         let live = super::project_live_view(TrackLiveView {
+            current_exposure: Exposure(0.7),
             strategy_price: Some(95.0),
             strategy_price_status: StrategyPriceStatus::Live,
             mark_price: Some(95.0),
@@ -898,6 +904,7 @@ mod tests {
         assert_eq!(live.decision.risk_approved_target, Some(3.0));
         assert_eq!(live.decision.acquisition_frontier, Some(1.2));
         assert_eq!(live.decision.execution_target, Some(1.2));
+        assert_eq!(live.position_to_execution_gap, Some(0.5));
         assert_eq!(live.decision.reason, DecisionReasonView::WaitingRiskRelease);
         let acquisition_session = live
             .acquisition_session
@@ -924,6 +931,7 @@ mod tests {
         assert_eq!(live.decision.risk_approved_target, None);
         assert_eq!(live.decision.acquisition_frontier, None);
         assert_eq!(live.decision.execution_target, None);
+        assert_eq!(live.position_to_execution_gap, None);
         assert_eq!(live.decision.reason, DecisionReasonView::WaitingMarketData);
         assert!(json.get("desired_exposure").is_none());
         assert!(json.get("execution_target_exposure").is_none());

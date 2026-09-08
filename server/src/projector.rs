@@ -123,6 +123,10 @@ impl TrackProjector {
                 notional: project_position_notional(source),
                 notional_asset: project_position_notional_asset(&source.instrument_spec),
             },
+            position_to_execution_gap: source
+                .decision
+                .execution_target
+                .map(|target| target - source.current_exposure),
             decision: project_read_model_decision(&source.decision),
             pnl: TrackPnlView {
                 pnl_asset: pnl.pnl_asset,
@@ -724,6 +728,7 @@ mod tests {
         assert_eq!(item.decision.risk_approved_target, Some(4.5));
         assert_eq!(item.decision.acquisition_frontier, Some(4.0));
         assert_eq!(item.decision.execution_target, Some(3.75));
+        assert_eq!(detail.position_to_execution_gap, Some(0.25));
         assert_eq!(item.decision.reason, DecisionReasonView::WaitingRiskRelease);
     }
 

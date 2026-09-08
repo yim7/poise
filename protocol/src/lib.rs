@@ -316,6 +316,8 @@ pub struct TrackDetailView {
     pub loss_limits: TrackLossLimitsView,
     pub market: TrackMarketView,
     pub position: TrackPositionView,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub position_to_execution_gap: Option<f64>,
     pub decision: InventoryDecisionView,
     pub pnl: TrackPnlView,
     pub execution: TrackExecutionView,
@@ -422,6 +424,8 @@ pub struct TrackLiveView {
     pub mark_price: Option<f64>,
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub position_to_execution_gap: Option<f64>,
     pub decision: InventoryDecisionView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acquisition_session: Option<AcquisitionSessionView>,
@@ -445,6 +449,14 @@ pub struct TrackPositionView {
 pub enum TrackPositionQuantityUnitView {
     BaseAsset,
     Contracts,
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -1133,7 +1145,7 @@ mod tests {
             "pnl": {"pnl_asset": "USDT", "total_pnl": 1229.0}
         }))
         .unwrap();
-        let detail: TrackDetailView = serde_json::from_value(serde_json::json!({
+        let detail_wire = serde_json::json!({
             "identity": {"id": "btc-core", "instrument": {"venue": "binance_futures", "symbol": "BTCUSDT"}},
             "status": {
                 "lifecycle": {"status": "active", "updated_at": "2026-03-31T12:34:56Z"},
@@ -1145,6 +1157,7 @@ mod tests {
             "loss_limits": {"daily_loss_limit": 100.0, "total_loss_limit": 300.0},
             "market": {"mark_price": 64123.4, "best_bid": 64120.1, "best_ask": 64124.5},
             "position": {"current_exposure": 0.5, "quantity_unit": "base_asset", "quantity": 0.0, "notional": null, "notional_asset": "USDT"},
+            "position_to_execution_gap": 0.25,
             "decision": expected_decision.clone(),
             "pnl": {"pnl_asset": "USDT", "gross_realized_pnl": 0.0, "net_realized_pnl": 0.0, "unrealized_pnl": 0.0, "total_pnl": 0.0, "trading_fee_cumulative": 0.0, "funding_fee_cumulative": 0.0},
             "execution": {
@@ -1162,23 +1175,48 @@ mod tests {
             },
             "activity": [],
             "available_commands": []
-        }))
-        .unwrap();
-        let live: TrackLiveView = serde_json::from_value(serde_json::json!({
+        });
+        let mut detail_without_gap = detail_wire.clone();
+        detail_without_gap
+            .as_object_mut()
+            .unwrap()
+            .remove("position_to_execution_gap");
+        assert!(
+            serde_json::from_value::<TrackDetailView>(detail_without_gap)
+                .unwrap_err()
+                .to_string()
+                .contains("missing field `position_to_execution_gap`")
+        );
+        let detail: TrackDetailView = serde_json::from_value(detail_wire).unwrap();
+        let live_wire = serde_json::json!({
             "strategy_price": 64123.4,
             "strategy_price_status": "live",
             "mark_price": 64123.4,
             "best_bid": 64120.1,
             "best_ask": 64124.5,
+            "position_to_execution_gap": 0.25,
             "decision": expected_decision,
             "risk_acquisition": null,
             "price_execution_block_reason": null
-        }))
-        .unwrap();
+        });
+        let mut live_without_gap = live_wire.clone();
+        live_without_gap
+            .as_object_mut()
+            .unwrap()
+            .remove("position_to_execution_gap");
+        assert!(
+            serde_json::from_value::<TrackLiveView>(live_without_gap)
+                .unwrap_err()
+                .to_string()
+                .contains("missing field `position_to_execution_gap`")
+        );
+        let live: TrackLiveView = serde_json::from_value(live_wire).unwrap();
 
         assert_eq!(item.decision, decision);
         assert_eq!(detail.decision, decision);
         assert_eq!(live.decision, decision);
+        assert_eq!(detail.position_to_execution_gap, Some(0.25));
+        assert_eq!(live.position_to_execution_gap, Some(0.25));
 
         let item_json = serde_json::to_value(item).unwrap();
         let detail_json = serde_json::to_value(detail).unwrap();
@@ -1421,6 +1459,7 @@ mod tests {
                 "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                 "position":{"current_exposure":0.5,"quantity_unit":"base_asset","quantity":0.0029296875,"notional":187.5,"notional_asset":"USDT"},
+                "position_to_execution_gap":0.25,
                 "decision":{"revision":1,"policy_target":0.75,"risk_approved_target":0.75,"acquisition_frontier":null,"execution_target":0.75,"reason":"submit_planned"},
                 "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
                 "execution":{"state":"open","execution_status":"attention_required","attention_reasons":["missing execution quote"],"active_binding_count":0,"bindings":[]},
@@ -1476,6 +1515,7 @@ mod tests {
                 "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                 "position":{"current_exposure":0.5,"quantity_unit":"base_asset","quantity":0.0029296875,"notional":187.5,"notional_asset":"USDT"},
+                "position_to_execution_gap":0.25,
                 "decision":{"revision":1,"policy_target":0.75,"risk_approved_target":0.75,"acquisition_frontier":null,"execution_target":0.75,"reason":"submit_planned"},
                 "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
                 "execution":{"state":"open","execution_status":"normal","attention_reasons":[],"active_binding_count":0,"bindings":[]},
@@ -1525,6 +1565,7 @@ mod tests {
                     "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                     "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                     "position":{"current_exposure":0.5,"quantity_unit":"base_asset","quantity":0.0,"notional":null,"notional_asset":"USDT"},
+                    "position_to_execution_gap":0.25,
                     "decision":{"revision":1,"policy_target":0.75,"risk_approved_target":0.75,"acquisition_frontier":null,"execution_target":0.75,"reason":"submit_planned"},
                     "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
                     "execution":{"state":"open","execution_status":"normal","active_binding_count":0,"bindings":[]},
@@ -1573,6 +1614,7 @@ mod tests {
                 "loss_limits":{"daily_loss_limit":100.0,"total_loss_limit":300.0},
                 "market":{"mark_price":64123.4,"best_bid":64120.1,"best_ask":64124.5},
                 "position":{"current_exposure":0.5,"quantity_unit":"base_asset","quantity":0.0,"notional":null,"notional_asset":"USDT"},
+                "position_to_execution_gap":0.25,
                 "decision":{"revision":1,"policy_target":0.75,"risk_approved_target":0.75,"acquisition_frontier":null,"execution_target":0.75,"reason":"submit_planned"},
                 "pnl":{"pnl_asset":"USDT","gross_realized_pnl":980.1,"net_realized_pnl":963.8,"unrealized_pnl":265.2,"total_pnl":1229.0,"trading_fee_cumulative":12.3,"funding_fee_cumulative":-4.0},
                 "execution":{"state":"open","execution_status":"normal","active_binding_count":0,"bindings":[]},

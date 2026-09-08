@@ -69,5 +69,29 @@ EOF
   exit 0
 fi
 
+if [[ ! -f "$REPO_ROOT/web/package.json" ]]; then
+  echo "web UI package not found: $REPO_ROOT/web/package.json" >&2
+  exit 1
+fi
+
+if [[ ! -x "$REPO_ROOT/web/node_modules/.bin/tsc" || ! -x "$REPO_ROOT/web/node_modules/.bin/vite" ]]; then
+  echo "web UI dependencies are not installed" >&2
+  echo "install them before starting the server:" >&2
+  echo "  pnpm --dir \"$REPO_ROOT/web\" install --frozen-lockfile" >&2
+  exit 1
+fi
+
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo "pnpm is required to build the Poise web UI before starting the server" >&2
+  exit 127
+fi
+
+pnpm --dir "$REPO_ROOT/web" build
+
+if [[ ! -f "$REPO_ROOT/web/dist/index.html" ]]; then
+  echo "web UI build did not produce: $REPO_ROOT/web/dist/index.html" >&2
+  exit 1
+fi
+
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] starting poise-server instance_dir=$INSTANCE_DIR" | tee -a "$LOG_PATH"
 cargo run --manifest-path "$REPO_ROOT/Cargo.toml" -p poise-server -- "${SERVER_ARGS[@]}" 2>&1 | tee -a "$LOG_PATH"

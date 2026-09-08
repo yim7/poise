@@ -49,7 +49,7 @@ sha2 = "0.10"
 hex = "0.4"
 url = "2"
 axum = { version = "0.7", features = ["ws"] }
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.5", features = ["fs"] }
 toml_edit = { version = "0.22", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }

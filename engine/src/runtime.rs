@@ -308,8 +308,9 @@ pub struct QuoteHealthView {
     pub price_execution_gate: PriceExecutionGate,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TrackLiveView {
+    pub current_exposure: Exposure,
     pub strategy_price: Option<f64>,
     pub strategy_price_status: StrategyPriceStatus,
     pub mark_price: Option<f64>,
@@ -319,6 +320,23 @@ pub struct TrackLiveView {
     pub acquisition_session: Option<AcquisitionSessionRuntimeView>,
     pub risk_acquisition: Option<RiskAcquisitionRuntimeView>,
     pub price_execution_block_reason: Option<PriceExecutionBlockReason>,
+}
+
+impl Default for TrackLiveView {
+    fn default() -> Self {
+        Self {
+            current_exposure: Exposure(0.0),
+            strategy_price: None,
+            strategy_price_status: StrategyPriceStatus::default(),
+            mark_price: None,
+            best_bid: None,
+            best_ask: None,
+            decision: InventoryDecisionView::default(),
+            acquisition_session: None,
+            risk_acquisition: None,
+            price_execution_block_reason: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -1115,6 +1133,7 @@ impl TrackRuntime {
         let quote_health = self.quote_health_view();
         let committed = self.publicly_committed_inventory_decision();
         TrackLiveView {
+            current_exposure: self.current_exposure.clone(),
             strategy_price: self.strategy_price,
             strategy_price_status: quote_health.strategy_price_status,
             mark_price: self.mark_price,
@@ -1413,6 +1432,7 @@ mod tests {
         );
 
         let live = runtime.live_view();
+        assert_eq!(live.current_exposure, Exposure(0.0));
         assert!((live.decision.execution_target.unwrap() - 2.0).abs() < 1e-9);
         assert_eq!(live.decision, runtime.runtime_view().decision);
         let risk_acquisition = live
