@@ -682,7 +682,10 @@ total_loss_limit = 600.0
             .await
             .unwrap();
         assert!(console.status().is_success());
-        assert_eq!(console.text().await.unwrap(), "<main>Poise control console</main>");
+        assert_eq!(
+            console.text().await.unwrap(),
+            "<main>Poise control console</main>"
+        );
 
         let system = client
             .get(format!("http://{bind_address}/system"))
