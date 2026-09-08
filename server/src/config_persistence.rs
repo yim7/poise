@@ -21,6 +21,33 @@ use tokio::sync::Mutex;
 
 use crate::config_projection::configuration_view_from_definition;
 
+#[derive(Debug)]
+struct ParentDirectorySyncAfterRenameError(anyhow::Error);
+
+impl std::fmt::Display for ParentDirectorySyncAfterRenameError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "configuration file was replaced but directory sync failed: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ParentDirectorySyncAfterRenameError {}
+
+fn post_rename_durability_error(
+    error: &anyhow::Error,
+) -> Option<ConfigurationApplicationStoreError> {
+    error
+        .downcast_ref::<ParentDirectorySyncAfterRenameError>()
+        .map(|_| {
+            ConfigurationApplicationStoreError::FileReplacedButDurabilityUncertain(
+                error.to_string(),
+            )
+        })
+}
+
 /// The instance-wide lock covers version observation, audit insertion, file
 /// replacement and terminal audit updates. Configuration is one instance fact,
 /// not a per-track file.
@@ -492,6 +519,9 @@ impl ConfigurationApplicationStore for ConfigurationApplicationStoreAdapter {
         if let Err(error) =
             patch_file_atomically_if_unchanged(&self.path, &original, track_id.as_str(), &candidate)
         {
+            if let Some(error) = post_rename_durability_error(&error) {
+                return Err(error);
+            }
             if error.to_string().contains("changed externally") {
                 self.record_external_change(track_id, request, &original, Some(&existing))?;
                 return Err(ConfigurationApplicationStoreError::ExternalChange);
@@ -676,7 +706,8 @@ pub(crate) fn patch_file_atomically(
     temporary.write_all(patched.as_bytes())?;
     temporary.as_file_mut().sync_all()?;
     temporary.persist(path).map_err(|error| error.error)?;
-    sync_parent_directory(parent)?;
+    sync_parent_directory(parent)
+        .map_err(|error| anyhow::Error::new(ParentDirectorySyncAfterRenameError(error)))?;
     Ok(())
 }
 
@@ -723,7 +754,8 @@ fn patch_file_atomically_if_unchanged_with_hook(
         anyhow::bail!("configuration changed externally");
     }
     temporary.persist(path).map_err(|error| error.error)?;
-    sync_parent_directory(parent)?;
+    sync_parent_directory(parent)
+        .map_err(|error| anyhow::Error::new(ParentDirectorySyncAfterRenameError(error)))?;
     Ok(())
 }
 
@@ -737,9 +769,10 @@ fn sync_parent_directory(parent: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigurationApplicationStoreAdapter, canonical_version, external_change_already_recorded,
-        patch_file_atomically, patch_file_atomically_if_unchanged,
-        patch_file_atomically_if_unchanged_with_hook, patch_track_configuration,
+        ConfigurationApplicationStoreAdapter, ParentDirectorySyncAfterRenameError,
+        canonical_version, external_change_already_recorded, patch_file_atomically,
+        patch_file_atomically_if_unchanged, patch_file_atomically_if_unchanged_with_hook,
+        patch_track_configuration, post_rename_durability_error,
     };
     use chrono::Utc;
     use poise_application::{
@@ -765,6 +798,20 @@ mod tests {
             canonical_version(first).unwrap(),
             canonical_version(&second).unwrap()
         );
+    }
+
+    #[test]
+    fn post_rename_directory_sync_failure_maps_to_uncertain_durability() {
+        let error = anyhow::Error::new(ParentDirectorySyncAfterRenameError(anyhow::anyhow!(
+            "sync failed"
+        )));
+
+        assert!(matches!(
+            post_rename_durability_error(&error),
+            Some(
+                poise_application::ConfigurationApplicationStoreError::FileReplacedButDurabilityUncertain(message)
+            ) if message.contains("sync failed")
+        ));
     }
 
     #[test]

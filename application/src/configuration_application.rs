@@ -33,6 +33,9 @@ pub enum ConfigurationApplicationStoreError {
     ApplicationIdConflict,
     ExternalChange,
     WriteFailed(String),
+    /// The replacement rename completed, but syncing its parent directory
+    /// failed. Runtime state must remain fenced until restart reconciliation.
+    FileReplacedButDurabilityUncertain(String),
     Internal(String),
 }
 

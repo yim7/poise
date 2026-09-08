@@ -846,6 +846,17 @@ impl TradingRuntime {
             .await
         {
             Ok(persistence) => persistence,
+            Err(
+                error @ ConfigurationApplicationStoreError::FileReplacedButDurabilityUncertain(_),
+            ) => {
+                self.pending_configuration_applications
+                    .lock()
+                    .await
+                    .get_mut(track_id)
+                    .ok_or_else(|| anyhow!("configuration application disappeared"))?
+                    .file_replaced = true;
+                return Err(anyhow::Error::new(error));
+            }
             Err(error) => {
                 // The complete snapshot barrier above proves that no old
                 // order ownership remains.  Because the file was not
@@ -4697,6 +4708,81 @@ mod tests {
                 ConfigurationApplicationStatus::Failed,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn post_rename_durability_failure_keeps_gate_closed_and_audit_activating() {
+        let runtime = test_executor(
+            Arc::new(MemoryRepository::default()),
+            Arc::new(RecordingRecoveryAnomalyObserver::default()),
+        );
+        let track_id = TrackId::new("btc-core");
+        let previous = runtime
+            .committed_track_snapshot(&track_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .definition;
+        let store = Arc::new(ScriptedConfigurationStore {
+            persist_result: Mutex::new(Err(
+                ConfigurationApplicationStoreError::FileReplacedButDurabilityUncertain(
+                    "directory sync failed".to_string(),
+                ),
+            )),
+            status_outcomes: Mutex::new(vec![Ok(()), Ok(())]),
+            statuses: Mutex::new(Vec::new()),
+            accept_calls: Mutex::new(0),
+            persist_calls: Mutex::new(0),
+        });
+
+        let result = runtime
+            .apply_configuration_application(
+                &track_id,
+                configuration_request(changed_candidate(&previous)),
+                store.clone(),
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(ConfigurationApplicationError::Persistence(
+                ConfigurationApplicationStoreError::FileReplacedButDurabilityUncertain(_)
+            ))
+        ));
+        assert_eq!(
+            runtime
+                .committed_track_snapshot(&track_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .definition,
+            previous
+        );
+        assert_eq!(
+            *store.statuses.lock().unwrap(),
+            vec![
+                ConfigurationApplicationStatus::WaitingForOrders,
+                ConfigurationApplicationStatus::Activating,
+            ]
+        );
+        runtime
+            .handle(
+                &track_id,
+                TrackInput::Market {
+                    observation: MarketObservation::ExecutionQuote {
+                        execution_quote: ExecutionQuote {
+                            best_bid: 94.9,
+                            best_ask: 95.1,
+                        },
+                    },
+                    occurred_at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+        while let Some(effect) = runtime.session_effect_queue().claim_next() {
+            assert!(!matches!(effect.effect, TrackEffect::SubmitOrder { .. }));
+        }
     }
 
     fn manager_with_committed_inventory_decision() -> (
