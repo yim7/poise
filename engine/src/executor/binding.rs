@@ -233,6 +233,56 @@ mod tests {
     }
 
     #[test]
+    fn active_binding_lifecycle_is_explicit() {
+        for status in [
+            BindingStatus::SubmitPending,
+            BindingStatus::SubmitAuthorized,
+            BindingStatus::CancelAfterSubmit,
+            BindingStatus::Working,
+            BindingStatus::CancelPending,
+        ] {
+            let binding = test_binding_with_status(status);
+            assert!(
+                binding.is_active(),
+                "{status:?} must block configuration activation"
+            );
+        }
+
+        assert!(
+            !test_binding_with_status(BindingStatus::Terminal).is_active(),
+            "terminal bindings no longer own a live exchange order"
+        );
+    }
+
+    fn test_binding_with_status(status: BindingStatus) -> LiveOrderBinding {
+        LiveOrderBinding {
+            binding_id: "binding-1".to_string(),
+            proposal_key: BindingProposalKey {
+                policy: PolicyKind::CatchUp,
+                operations: Vec::new(),
+            },
+            allocations: Vec::new(),
+            absorbed_exposure_qty: 0.0,
+            request: OrderRequest {
+                instrument: poise_core::track::Instrument::new(
+                    poise_core::track::Venue::Binance,
+                    "BTCUSDT",
+                ),
+                side: poise_core::types::Side::Buy,
+                price: 100.0,
+                quantity: PositionQty::new(1.0).unwrap(),
+                client_order_id: "client-1".to_string(),
+                reduce_only: false,
+            },
+            desired_exposure: Exposure(1.0),
+            submit_purpose: SubmitPurpose::AutoReconcile,
+            order_id: None,
+            status,
+            policy_state: BindingPolicyState::Stateless,
+        }
+    }
+
+    #[test]
     fn submit_recovery_token_identifies_submit_attempt_not_proposal() {
         let operation = operation(0, 10_000, BoundaryDirection::Up);
         let proposal = BindingProposal {

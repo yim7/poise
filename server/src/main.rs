@@ -3,6 +3,7 @@ mod account_projector;
 mod assembly;
 mod config;
 mod config_explain;
+mod config_persistence;
 mod dry_run;
 mod effect_worker;
 mod exchange_freshness;
@@ -58,7 +59,13 @@ async fn main() -> Result<()> {
         })?;
     let (platform, runtime_handles, listener) = prepared_state
         .run_startup(|repositories, track_definitions| async {
-            let platform = assembly::assemble(&config, track_definitions, repositories).await?;
+            let platform = assembly::assemble(
+                &config,
+                instance_dir.config_path(),
+                track_definitions,
+                repositories,
+            )
+            .await?;
             start_platform(&config, platform).await
         })
         .await?;

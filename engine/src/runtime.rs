@@ -501,6 +501,23 @@ pub struct TrackRuntime {
     pub(crate) tick_timeout_secs: u64,
 }
 
+/// Reasons a configuration activation cannot safely replace the current session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigurationActivationBlocker {
+    Terminated,
+    ActiveBinding,
+    RecoveryAnomaly,
+    TrackIdentityMismatch,
+}
+
+impl std::fmt::Display for ConfigurationActivationBlocker {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for ConfigurationActivationBlocker {}
+
 pub fn position_qty_per_exposure_unit(
     config: &TrackConfig,
     instrument_spec: &InstrumentSpec,
@@ -644,6 +661,52 @@ impl TrackRuntime {
 
     pub fn definition(&self) -> &TrackDefinition {
         &self.definition
+    }
+
+    /// Builds a new configuration-dependent session while retaining exchange facts,
+    /// PNL facts, and control state. Callers must persist the definition before
+    /// installing the returned runtime.
+    pub fn plan_configuration_activation(
+        &self,
+        candidate: TrackDefinition,
+        started_at: DateTime<Utc>,
+    ) -> Result<Self, ConfigurationActivationBlocker> {
+        if self.track_state.is_terminated() {
+            return Err(ConfigurationActivationBlocker::Terminated);
+        }
+        if self
+            .executor_state
+            .bindings
+            .iter()
+            .any(LiveOrderBinding::is_active)
+        {
+            return Err(ConfigurationActivationBlocker::ActiveBinding);
+        }
+        if self.recovery_anomaly_active() {
+            return Err(ConfigurationActivationBlocker::RecoveryAnomaly);
+        }
+        if candidate.track_id() != self.id() || candidate.instrument() != self.instrument() {
+            return Err(ConfigurationActivationBlocker::TrackIdentityMismatch);
+        }
+
+        let mut next = self.clone();
+        next.definition = candidate;
+        next.current_exposure = exposure_from_position_qty(
+            next.config(),
+            &next.instrument_spec,
+            next.current_position_qty,
+        );
+        next.desired_exposure = next.track_state.manual_target_override();
+        next.inventory_decision = None;
+        next.inventory_decision_revision = 0;
+        next.applied_risk_acquisition_release = None;
+        next.fresh_acquisition_session = Some(FreshAcquisitionSession::Pending { started_at });
+        next.executor_state = ExecutorState::empty(started_at)
+            .ensure_revision(next.config(), next.current_exposure.clone());
+        next.execution_gate_state = ExecutionGateState::open();
+        next.out_of_band_since = None;
+        next.advance_exchange_observation_revision();
+        Ok(next)
     }
 
     pub fn config(&self) -> &TrackConfig {
@@ -1713,6 +1776,38 @@ mod tests {
             profile_revision_for_config(&test_config())
         );
         assert_eq!(reset.ledger_state.ledger_anchor_exposure, Exposure(2.5));
+    }
+
+    #[test]
+    fn configuration_activation_rejects_active_bindings_without_clearing_them() {
+        let mut runtime = test_runtime();
+        runtime.executor_state = dirty_executor_state();
+
+        let result = runtime.plan_configuration_activation(test_definition(), Utc::now());
+
+        assert_eq!(result, Err(ConfigurationActivationBlocker::ActiveBinding));
+        assert!(!runtime.executor_state.bindings.is_empty());
+    }
+
+    #[test]
+    fn configuration_activation_rebuilds_config_state_and_revalues_real_position() {
+        let mut runtime = test_runtime();
+        runtime.current_position_qty = PositionQty::new(2.0).unwrap();
+        runtime.current_exposure = Exposure(2.0);
+        runtime.pnl_stats.gross_realized_pnl_cumulative = 77.0;
+        let mut config = test_config();
+        config.notional_per_unit = 200.0;
+        let candidate = test_definition_with_config(config);
+
+        let next = runtime
+            .plan_configuration_activation(candidate, Utc::now())
+            .unwrap();
+
+        assert_eq!(next.current_position_qty, PositionQty::new(2.0).unwrap());
+        assert_eq!(next.current_exposure, Exposure(1.0));
+        assert_eq!(next.pnl_stats.gross_realized_pnl_cumulative, 77.0);
+        assert!(next.executor_state.bindings.is_empty());
+        assert!(next.fresh_acquisition_pending());
     }
 
     fn commit_inventory_decision_for_test(

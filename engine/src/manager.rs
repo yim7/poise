@@ -747,6 +747,30 @@ impl TrackManager {
         self.tracks.get(&TrackId::from(id))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_executor_bindings_for_test(&mut self, id: &TrackId) -> Result<()> {
+        let track = self
+            .tracks
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+        track.clear_executor_bindings();
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_recovery_anomaly_for_test(
+        &mut self,
+        id: &TrackId,
+        anomaly: Option<crate::executor::RecoveryAnomaly>,
+    ) -> Result<()> {
+        let track = self
+            .tracks
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("track `{}` not found", id.as_str()))?;
+        track.set_recovery_anomaly(anomaly);
+        Ok(())
+    }
+
     pub fn plan_track_update<R>(
         &self,
         id: &TrackId,
@@ -783,6 +807,57 @@ impl TrackManager {
             "planned runtime cannot change track identity"
         );
         self.tracks.insert(id, runtime);
+    }
+
+    pub fn plan_configuration_activation(
+        &self,
+        id: &TrackId,
+        candidate: TrackDefinition,
+    ) -> Result<TrackRuntime, crate::runtime::ConfigurationActivationBlocker> {
+        let track = self
+            .tracks
+            .get(id)
+            .ok_or(crate::runtime::ConfigurationActivationBlocker::TrackIdentityMismatch)?;
+        track.plan_configuration_activation(candidate, self.clock.now())
+    }
+
+    pub fn configuration_activation_transition(
+        &mut self,
+        id: &TrackId,
+        candidate: TrackDefinition,
+    ) -> std::result::Result<TrackTransition, crate::runtime::ConfigurationActivationBlocker> {
+        let automatic_before_activation = matches!(
+            self.tracks
+                .get(id)
+                .ok_or(crate::runtime::ConfigurationActivationBlocker::TrackIdentityMismatch)?
+                .runtime_state(),
+            TrackState::WaitingMarketData | TrackState::Running(ControlState::Automatic(_))
+        );
+        let next = self.plan_configuration_activation(id, candidate)?;
+        self.tracks.insert(id.clone(), next);
+
+        if automatic_before_activation
+            && let Some(strategy_price) = self.live_strategy_price(id).map_err(|_| {
+                crate::runtime::ConfigurationActivationBlocker::TrackIdentityMismatch
+            })?
+        {
+            let evaluated_at = self.clock.now();
+            let (events, effects, _) = self
+                .reconcile_track(
+                    id,
+                    strategy_price,
+                    evaluated_at,
+                    ReconcileCommitPolicy::AlwaysCommit,
+                )
+                .map_err(|_| {
+                    crate::runtime::ConfigurationActivationBlocker::TrackIdentityMismatch
+                })?;
+            return self.transition_for(id, events, effects).map_err(|_| {
+                crate::runtime::ConfigurationActivationBlocker::TrackIdentityMismatch
+            });
+        }
+        self.transition_for(id, vec![], vec![])
+            .map_err(|_| crate::runtime::ConfigurationActivationBlocker::TrackIdentityMismatch)
     }
 
     pub fn clock(&self) -> &dyn ClockPort {
@@ -1581,6 +1656,31 @@ mod tests {
                 .is_paused()
         );
         assert!(next_state.runtime_state().is_paused());
+    }
+
+    #[test]
+    fn configuration_activation_reconciles_an_automatic_track_from_retained_live_market_data() {
+        let (mut manager, id) = manager();
+        observe_market(&mut manager, &id, 100.0).unwrap();
+        let mut candidate_config = config();
+        candidate_config.notional_per_unit = 200.0;
+        let candidate = TrackDefinition::try_new(
+            id.clone(),
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+            candidate_config,
+            Some(10_000.0),
+            loss_limits(),
+            None,
+        )
+        .unwrap();
+
+        let transition = manager
+            .configuration_activation_transition(&id, candidate)
+            .unwrap();
+
+        assert!(transition.next_state().inventory_decision().is_some());
+        assert!(!transition.next_state().fresh_acquisition_pending());
+        assert_eq!(transition.next_state().config().notional_per_unit, 200.0);
     }
 
     #[derive(Debug)]

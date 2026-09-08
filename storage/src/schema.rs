@@ -111,7 +111,19 @@ pub fn initialize(conn: &Connection) -> Result<()> {
             baseline_equity REAL NOT NULL,
             baseline_asset TEXT NOT NULL,
             baseline_captured_at TEXT NOT NULL
-        );",
+        );
+
+        CREATE TABLE IF NOT EXISTS configuration_applications (
+            application_id TEXT PRIMARY KEY,
+            request_hash TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            old_version TEXT NOT NULL,
+            candidate_version TEXT NOT NULL,
+            result TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS configuration_applications_track_id ON configuration_applications(track_id);",
     )?;
 
     ensure_table_schema(

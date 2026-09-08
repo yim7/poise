@@ -26,7 +26,9 @@ function title(value: unknown) {
   return typeof value === 'string' ? value.replaceAll('_', ' ') : '—'
 }
 
-function applicationStatusLabel(value: 'idle') { return value === 'idle' ? '空闲' : value }
+function applicationStatusLabel(value: TrackConfigurationResponse['application_status']) {
+  return ({ idle: '空闲', preparing: '准备中', waiting_for_orders: '等待订单完成', activating: '正在启用', active: '已生效', failed: '失败' } as const)[value]
+}
 function policyStateLabel(value: 'in_band' | 'frozen' | 'flattening' | 'flatten_pending' | 'terminated') {
   return ({ in_band: '区间内', frozen: '已冻结', flattening: '正在平仓', flatten_pending: '等待平仓', terminated: '已终止' } as const)[value]
 }
@@ -241,6 +243,21 @@ function flattenPolicy(value: BandProtectionPolicy): FlattenPolicy { return type
 function triggerKind(trigger: BandFlattenTrigger) { return typeof trigger === 'string' ? trigger : 'flatten_confirm' }
 function recoverKind(recover: BandRecoverPolicy) { return typeof recover === 'string' ? recover : 'reentry_confirm' }
 
+const configurationFieldLabels: Record<string, string> = {
+  lower_price: '下限价格', upper_price: '上限价格', long_exposure_units: '多头 exposure', short_exposure_units: '空头 exposure', notional_per_unit: '每单位名义金额', min_rebalance_units: '最小再平衡单位', shape_family: '形状族', max_notional: '最大名义金额', daily_loss_limit: '每日损失限额', total_loss_limit: '总损失限额',
+  'risk_acquisition.initial_ratio': '初始比例', 'risk_acquisition.advantage_steps': '有利步数', 'risk_acquisition.min_release_steps': '最小释放步数', 'risk_acquisition.max_release_steps': '最大释放步数', 'risk_acquisition.catchup_ratio': '追赶比例', 'risk_acquisition.stale_release_minutes': '过期释放分钟',
+  out_of_band_policy: '区间外策略', 'out_of_band_policy.flatten.trigger': 'Flatten 触发', 'out_of_band_policy.flatten.trigger.flatten_confirm.bps': 'Flatten 确认 bps', 'out_of_band_policy.flatten.recover': '恢复策略', 'out_of_band_policy.flatten.recover.reentry_confirm.bps': '重新进入确认 bps',
+}
+function changeValue(value: unknown) { return typeof value === 'number' ? format(value) : typeof value === 'string' ? title(value) : value === undefined ? '—' : String(value) }
+function configurationChanges(active: Record<string, unknown>, draft: Record<string, unknown>, path = ''): { label: string; from: string; to: string }[] {
+  const keys = new Set([...Object.keys(active), ...Object.keys(draft)])
+  return [...keys].flatMap(key => {
+    const nextPath = path ? `${path}.${key}` : key; const before = active[key]; const after = draft[key]
+    if (before && after && typeof before === 'object' && typeof after === 'object' && !Array.isArray(before) && !Array.isArray(after)) return configurationChanges(before as Record<string, unknown>, after as Record<string, unknown>, nextPath)
+    return JSON.stringify(before) === JSON.stringify(after) ? [] : [{ label: configurationFieldLabels[nextPath] ?? nextPath, from: changeValue(before), to: changeValue(after) }]
+  })
+}
+
 function ConfigurationPanel({ trackId }: { trackId: string }) {
   const [configuration, setConfiguration] = useState<TrackConfigurationResponse | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
@@ -248,24 +265,36 @@ function ConfigurationPanel({ trackId }: { trackId: string }) {
   const [preview, setPreview] = useState<TrackConfigurationPreviewResponse | null>(null)
   const [previewError, setPreviewError] = useState(false)
   const [previewing, setPreviewing] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const [applicationId, setApplicationId] = useState<string | null>(null)
+  const [applyError, setApplyError] = useState<'network' | 'conflict' | null>(null)
+  const [applying, setApplying] = useState(false)
   const previewController = useRef<AbortController | null>(null)
   const previewSequence = useRef(0)
+  const applicationController = useRef<AbortController | null>(null)
+  const applicationSequence = useRef(0)
+  const configurationController = useRef<AbortController | null>(null)
+  const configurationSequence = useRef(0)
 
   const invalidatePreview = () => { previewSequence.current += 1; previewController.current?.abort(); previewController.current = null; setPreview(null); setPreviewError(false); setPreviewing(false) }
+  const invalidateApplication = () => { applicationSequence.current += 1; applicationController.current?.abort(); applicationController.current = null; setConfirming(false); setApplying(false); setApplyError(null); setApplicationId(null) }
 
   const load = () => {
+    configurationController.current?.abort()
     const controller = new AbortController()
+    configurationController.current = controller
+    const request = configurationSequence.current + 1; configurationSequence.current = request
     setLoadError(false)
     get<TrackConfigurationResponse>(`/tracks/${encodeURIComponent(trackId)}/configuration`, { signal: controller.signal })
-      .then(value => { if (!controller.signal.aborted) { setConfiguration(value); setDraft(cloneDraft(value.active)); setPreview(null) } })
-      .catch(() => { if (!controller.signal.aborted) setLoadError(true) })
+      .then(value => { if (!controller.signal.aborted && request === configurationSequence.current) { setConfiguration(value); setDraft(cloneDraft(value.active)); setPreview(null) } })
+      .catch(() => { if (!controller.signal.aborted && request === configurationSequence.current) setLoadError(true) })
     return controller
   }
-  useEffect(() => { const controller = load(); return () => { controller.abort(); invalidatePreview() } }, [trackId])
+  useEffect(() => { const controller = load(); return () => { controller.abort(); configurationSequence.current += 1; invalidatePreview(); invalidateApplication() } }, [trackId])
   const changed = configuration !== null && draft !== null && JSON.stringify(configuration.active) !== JSON.stringify(draft)
-  const update = <K extends keyof Draft>(field: K, value: Draft[K]) => { setDraft(current => current ? { ...current, [field]: value } : current); invalidatePreview() }
-  const updateRisk = (field: keyof Draft['risk_acquisition'], value: number) => { setDraft(current => current ? { ...current, risk_acquisition: { ...current.risk_acquisition, [field]: value } } : current); invalidatePreview() }
-  const discard = () => { if (configuration) { setDraft(cloneDraft(configuration.active)); invalidatePreview() } }
+  const update = <K extends keyof Draft>(field: K, value: Draft[K]) => { setDraft(current => current ? { ...current, [field]: value } : current); invalidatePreview(); invalidateApplication() }
+  const updateRisk = (field: keyof Draft['risk_acquisition'], value: number) => { setDraft(current => current ? { ...current, risk_acquisition: { ...current.risk_acquisition, [field]: value } } : current); invalidatePreview(); invalidateApplication() }
+  const discard = () => { if (configuration) { setDraft(cloneDraft(configuration.active)); invalidatePreview(); invalidateApplication() } }
   const submitPreview = async () => {
     if (!draft) return
     previewController.current?.abort()
@@ -276,6 +305,21 @@ function ConfigurationPanel({ trackId }: { trackId: string }) {
       const value = await get<TrackConfigurationPreviewResponse>(`/tracks/${encodeURIComponent(trackId)}/configuration/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidate: draft }), signal: controller.signal })
       if (!controller.signal.aborted && request === previewSequence.current) setPreview(value)
     } catch { if (!controller.signal.aborted && request === previewSequence.current) setPreviewError(true) } finally { if (request === previewSequence.current) setPreviewing(false) }
+  }
+  const apply = async () => {
+    if (!draft || !changed || !preview?.valid) return
+    const id = applicationId ?? crypto.randomUUID()
+    if (!applicationId) setApplicationId(id)
+    applicationController.current?.abort()
+    const controller = new AbortController(); applicationController.current = controller
+    const request = applicationSequence.current + 1; applicationSequence.current = request
+    setApplying(true); setApplyError(null)
+    try {
+      await get(`/tracks/${encodeURIComponent(trackId)}/configuration`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ application_id: id, expected_version: configuration!.version, candidate: draft }), signal: controller.signal })
+      if (!controller.signal.aborted && request === applicationSequence.current) { invalidatePreview(); setConfirming(false); setApplicationId(null); load() }
+    } catch (error) {
+      if (!controller.signal.aborted && request === applicationSequence.current) setApplyError(error instanceof Error && error.message.includes(' 409') ? 'conflict' : 'network')
+    } finally { if (request === applicationSequence.current) setApplying(false) }
   }
   if (loadError) return <article><h2>无法读取配置</h2><button onClick={() => load()}>重试载入配置</button></article>
   if (!configuration || !draft) return <h1>配置载入中</h1>
@@ -288,10 +332,14 @@ function ConfigurationPanel({ trackId }: { trackId: string }) {
   const numberInput = (label: string, field: Exclude<keyof Draft, 'risk_acquisition' | 'out_of_band_policy' | 'shape_family'>) => <label>{label}<input aria-label={label} type="number" value={inputValue(draft[field] as number)} onChange={event => update(field, Number(event.target.value))} /></label>
   const riskInput = (label: string, field: keyof Draft['risk_acquisition']) => <label>{label}<input aria-label={label} type="number" value={inputValue(draft.risk_acquisition[field])} onChange={event => updateRisk(field, Number(event.target.value))} /></label>
   const flatten = policyKind === 'flatten' ? flattenPolicy(draft.out_of_band_policy).flatten : null
-  return <div className="configuration"><p className="eyebrow">配置应用状态 · {applicationStatusLabel(configuration.application_status)}</p>
+  const applicationStatus = configuration.application?.status ?? configuration.application_status
+  const changes = configurationChanges(active as unknown as Record<string, unknown>, draft as unknown as Record<string, unknown>)
+  return <div className="configuration"><p className="eyebrow">配置应用状态 · {applicationStatusLabel(applicationStatus)}{configuration.application?.message ? ` · ${configuration.application.message}` : ''}</p>
     {changed && <p className="unsaved">有未保存修改</p>}
     <div className="two-column"><article><h2>当前生效值</h2><dl><div><dt>价格区间</dt><dd>{format(active.lower_price, 2)} – {format(active.upper_price, 2)}</dd></div><div><dt>多/空 exposure</dt><dd>{format(active.long_exposure_units)} / {format(active.short_exposure_units)}</dd></div><div><dt>每单位名义金额</dt><dd>{format(active.notional_per_unit)}</dd></div><div><dt>区间外策略</dt><dd>{policy(active.out_of_band_policy)}</dd></div><div><dt>最大名义金额</dt><dd>{format(active.max_notional)}</dd></div></dl></article><article><h2>只读身份与重启字段</h2><dl><div><dt>Track ID</dt><dd>{configuration.identity.id}</dd></div><div><dt>Venue</dt><dd>{configuration.identity.instrument.venue}</dd></div><div><dt>Symbol</dt><dd>{configuration.identity.instrument.symbol}</dd></div><div><dt>杠杆</dt><dd>{configuration.restart_required.leverage}</dd></div><div><dt>Tick 超时（秒）</dt><dd>{configuration.restart_required.tick_timeout_secs}</dd></div></dl></article></div>
-    <article><h2>可编辑草稿</h2><div className="config-fields">{numberInput('下限价格', 'lower_price')}{numberInput('上限价格', 'upper_price')}{numberInput('多头 exposure', 'long_exposure_units')}{numberInput('空头 exposure', 'short_exposure_units')}{numberInput('每单位名义金额', 'notional_per_unit')}{numberInput('最小再平衡单位', 'min_rebalance_units')}<label>形状族<select aria-label="形状族" value={draft.shape_family} onChange={event => update('shape_family', event.target.value as Draft['shape_family'])}><option value="linear">linear</option><option value="inertial">inertial</option><option value="responsive">responsive</option></select></label><label>区间外策略<select aria-label="区间外策略" value={policyKind} onChange={event => setPolicy(event.target.value)}><option value="freeze">freeze</option><option value="terminate">terminate</option><option value="flatten">flatten</option></select></label>{flatten && <><label>Flatten 触发<select aria-label="Flatten 触发" value={triggerKind(flatten.trigger)} onChange={event => setFlattenTrigger(event.target.value)}><option value="immediate">immediate</option><option value="flatten_confirm">flatten_confirm</option></select></label>{typeof flatten.trigger !== 'string' && <label>Flatten 确认 bps<input aria-label="Flatten 确认 bps" type="number" value={inputValue(flatten.trigger.flatten_confirm.bps)} onChange={event => setFlattenBps('trigger', Number(event.target.value))} /></label>}<label>恢复策略<select aria-label="恢复策略" value={recoverKind(flatten.recover)} onChange={event => setFlattenRecover(event.target.value)}><option value="back_in_band">back_in_band</option><option value="reentry_confirm">reentry_confirm</option></select></label>{typeof flatten.recover !== 'string' && <label>重新进入确认 bps<input aria-label="重新进入确认 bps" type="number" value={inputValue(flatten.recover.reentry_confirm.bps)} onChange={event => setFlattenBps('recover', Number(event.target.value))} /></label>}</>}{numberInput('最大名义金额', 'max_notional')}{numberInput('每日损失限额', 'daily_loss_limit')}{numberInput('总损失限额', 'total_loss_limit')}{riskInput('初始比例', 'initial_ratio')}{riskInput('有利步数', 'advantage_steps')}{riskInput('最小释放步数', 'min_release_steps')}{riskInput('最大释放步数', 'max_release_steps')}{riskInput('追赶比例', 'catchup_ratio')}{riskInput('过期释放分钟', 'stale_release_minutes')}</div><div className="config-actions"><button onClick={discard} disabled={!changed}>放弃修改</button><button onClick={() => void submitPreview()} disabled={previewing}>{previewing ? '预览中' : '重新预览'}</button><button disabled title="将在下一实施阶段开放">保存并应用</button></div><p>保存并应用将在下一实施阶段开放。</p></article>
+    <article><h2>可编辑草稿</h2><div className="config-fields">{numberInput('下限价格', 'lower_price')}{numberInput('上限价格', 'upper_price')}{numberInput('多头 exposure', 'long_exposure_units')}{numberInput('空头 exposure', 'short_exposure_units')}{numberInput('每单位名义金额', 'notional_per_unit')}{numberInput('最小再平衡单位', 'min_rebalance_units')}<label>形状族<select aria-label="形状族" value={draft.shape_family} onChange={event => update('shape_family', event.target.value as Draft['shape_family'])}><option value="linear">linear</option><option value="inertial">inertial</option><option value="responsive">responsive</option></select></label><label>区间外策略<select aria-label="区间外策略" value={policyKind} onChange={event => setPolicy(event.target.value)}><option value="freeze">freeze</option><option value="terminate">terminate</option><option value="flatten">flatten</option></select></label>{flatten && <><label>Flatten 触发<select aria-label="Flatten 触发" value={triggerKind(flatten.trigger)} onChange={event => setFlattenTrigger(event.target.value)}><option value="immediate">immediate</option><option value="flatten_confirm">flatten_confirm</option></select></label>{typeof flatten.trigger !== 'string' && <label>Flatten 确认 bps<input aria-label="Flatten 确认 bps" type="number" value={inputValue(flatten.trigger.flatten_confirm.bps)} onChange={event => setFlattenBps('trigger', Number(event.target.value))} /></label>}<label>恢复策略<select aria-label="恢复策略" value={recoverKind(flatten.recover)} onChange={event => setFlattenRecover(event.target.value)}><option value="back_in_band">back_in_band</option><option value="reentry_confirm">reentry_confirm</option></select></label>{typeof flatten.recover !== 'string' && <label>重新进入确认 bps<input aria-label="重新进入确认 bps" type="number" value={inputValue(flatten.recover.reentry_confirm.bps)} onChange={event => setFlattenBps('recover', Number(event.target.value))} /></label>}</>}{numberInput('最大名义金额', 'max_notional')}{numberInput('每日损失限额', 'daily_loss_limit')}{numberInput('总损失限额', 'total_loss_limit')}{riskInput('初始比例', 'initial_ratio')}{riskInput('有利步数', 'advantage_steps')}{riskInput('最小释放步数', 'min_release_steps')}{riskInput('最大释放步数', 'max_release_steps')}{riskInput('追赶比例', 'catchup_ratio')}{riskInput('过期释放分钟', 'stale_release_minutes')}</div><div className="config-actions"><button onClick={discard} disabled={!changed}>放弃修改</button><button onClick={() => void submitPreview()} disabled={previewing}>{previewing ? '预览中' : '重新预览'}</button><button onClick={() => setConfirming(true)} disabled={!changed || !preview?.valid || applying}>保存并应用</button></div></article>
+    {confirming && <div role="dialog" aria-modal="true" aria-label="确认保存并应用" className="confirmation"><h2>确认保存并应用</h2><p>这会更新实例配置，并可能产生真实订单。</p><dl>{changes.map(change => <div key={change.label}><dt>{change.label}</dt><dd>{change.from} → {change.to}</dd></div>)}</dl><button onClick={() => setConfirming(false)} disabled={applying}>取消</button><button onClick={() => void apply()} disabled={applying}>{applying ? '正在提交' : '确认保存并应用'}</button></div>}
+    {applyError === 'conflict' && <div role="alert" className="alert"><strong>配置版本冲突</strong><span>配置已变化，请重新加载后再试。</span><button onClick={() => load()}>重新加载</button></div>}{applyError === 'network' && <div role="alert" className="alert"><strong>提交结果未确认</strong><span>可使用同一申请 ID 重试。</span><button onClick={() => void apply()}>重试提交</button></div>}
     {previewError && <div role="alert" className="alert"><strong>预览失败</strong><button onClick={() => void submitPreview()}>重试预览</button></div>}{preview && <PreviewResult preview={preview} symbol={configuration.identity.instrument.symbol} />}
   </div>
 }

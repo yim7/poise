@@ -35,6 +35,7 @@ pub struct StateRepositories {
     mutation_store: Arc<dyn TrackMutationStore>,
     query_store: Arc<dyn TrackQueryStore>,
     effect_store: Arc<dyn TrackEffectJournal>,
+    configuration_storage: Option<Arc<SqliteStorage>>,
 }
 
 pub struct PreparedStateStore {
@@ -84,6 +85,7 @@ impl StateRepositories {
             mutation_store: repository.clone(),
             query_store: repository.clone(),
             effect_store: repository.clone(),
+            configuration_storage: None,
         }
     }
 
@@ -93,6 +95,7 @@ impl StateRepositories {
             mutation_store: repository.clone(),
             query_store: repository.clone(),
             effect_store: repository.clone(),
+            configuration_storage: Some(repository),
         }
     }
 
@@ -110,6 +113,10 @@ impl StateRepositories {
 
     pub fn effect_store(&self) -> Arc<dyn TrackEffectJournal> {
         Arc::clone(&self.effect_store)
+    }
+
+    pub(crate) fn configuration_storage(&self) -> Option<Arc<SqliteStorage>> {
+        self.configuration_storage.clone()
     }
 }
 

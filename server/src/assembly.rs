@@ -135,6 +135,7 @@ pub(crate) async fn build_exchange_ports(config: &ExchangeConfig) -> Result<Exch
 
 pub async fn assemble(
     config: &Config,
+    configuration_path: std::path::PathBuf,
     track_definitions: Vec<TrackDefinition>,
     repositories: StateRepositories,
 ) -> Result<ServerPlatform> {
@@ -150,6 +151,7 @@ pub async fn assemble(
         connected_exchange.venue,
         connected_exchange.ports,
         repositories,
+        Some(configuration_path),
         clock,
         &track_leverage_index,
     )
@@ -186,6 +188,7 @@ pub(crate) async fn assemble_with_exchange_ports(
         config.exchange.venue(),
         exchange_ports,
         repositories,
+        None,
         clock,
         &track_leverage_index,
     )
@@ -198,6 +201,7 @@ async fn assemble_with_state_store(
     exchange_venue: Venue,
     exchange_ports: ExchangePorts,
     repositories: StateRepositories,
+    configuration_path: Option<std::path::PathBuf>,
     clock: Arc<dyn ClockPort>,
     track_leverage_index: &TrackLeverageIndex,
 ) -> Result<ServerPlatform> {
@@ -288,6 +292,12 @@ async fn assemble_with_state_store(
         reconcile_guards.clone(),
         recovery_dirty_state.clone(),
     );
+    let configuration_store = match (configuration_path, repositories.configuration_storage()) {
+        (Some(path), Some(storage)) => Some(Arc::new(
+            crate::config_persistence::ConfigurationApplicationStoreAdapter::new(path, storage)?,
+        )),
+        _ => None,
+    };
     let configuration_metadata = Arc::new(
         track_definitions
             .iter()
@@ -320,6 +330,7 @@ async fn assemble_with_state_store(
         account_margin_guard.clone(),
         recent_fills_auditor.clone(),
         configuration_metadata,
+        configuration_store,
     );
     let websocket_state = build_websocket_state(
         notifications.clone(),
@@ -441,6 +452,9 @@ pub(crate) fn build_http_state(
     account_margin_guard: Arc<AccountMarginGuardStore>,
     recent_fills_auditor: Arc<RecentFillsAuditor>,
     configuration_metadata: Arc<HashMap<String, TrackConfigurationMetadata>>,
+    configuration_store: Option<
+        Arc<crate::config_persistence::ConfigurationApplicationStoreAdapter>,
+    >,
 ) -> HttpState {
     HttpState {
         runtime,
@@ -456,6 +470,7 @@ pub(crate) fn build_http_state(
         account_margin_guard,
         recent_fills_auditor,
         configuration_metadata,
+        configuration_store,
     }
 }
 
@@ -790,10 +805,15 @@ total_loss_limit = 600.0
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let repositories = StateRepositories::new(repository);
 
-        let error = assemble(&config, test_track_definitions(&config), repositories)
-            .await
-            .err()
-            .unwrap();
+        let error = assemble(
+            &config,
+            std::path::PathBuf::from("/tmp/config.toml"),
+            test_track_definitions(&config),
+            repositories,
+        )
+        .await
+        .err()
+        .unwrap();
         assert!(
             error
                 .to_string()
@@ -925,10 +945,15 @@ total_loss_limit = 600.0
 
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let repositories = StateRepositories::new(repository);
-        let error = assemble(&config, test_track_definitions(&config), repositories)
-            .await
-            .err()
-            .unwrap();
+        let error = assemble(
+            &config,
+            std::path::PathBuf::from("/tmp/config.toml"),
+            test_track_definitions(&config),
+            repositories,
+        )
+        .await
+        .err()
+        .unwrap();
         assert!(
             error
                 .to_string()

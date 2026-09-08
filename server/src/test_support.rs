@@ -533,6 +533,7 @@ pub(crate) fn build_http_state(
                 tick_timeout_secs: 60,
             },
         )])),
+        None,
     )
 }
 

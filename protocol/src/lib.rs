@@ -222,6 +222,8 @@ pub struct TrackConfigurationResponse {
     pub active: TrackConfigurationView,
     pub restart_required: TrackConfigurationRestartRequiredView,
     pub application_status: TrackConfigurationApplicationStatusView,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub application: Option<TrackConfigurationApplicationView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +244,31 @@ pub struct TrackConfigurationRestartRequiredView {
 #[serde(rename_all = "snake_case")]
 pub enum TrackConfigurationApplicationStatusView {
     Idle,
+    Preparing,
+    WaitingForOrders,
+    Activating,
+    Active,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackConfigurationApplyRequest {
+    pub application_id: String,
+    pub expected_version: String,
+    pub candidate: TrackConfigurationView,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackConfigurationApplicationView {
+    pub application_id: String,
+    pub status: TrackConfigurationApplicationStatusView,
+    pub accepted: bool,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub message: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub active_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1111,9 +1138,9 @@ mod tests {
         RecentPnlAvailabilityView, RiskAcquisitionConfigView, RiskAcquisitionDirectionView,
         RiskAcquisitionView, RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView,
         StreamEvent, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
-        TrackConfigurationPreviewResponse, TrackDetailView, TrackDiagnosticsView,
-        TrackExecutionView, TrackListItemView, TrackListResponse, TrackLiveView, TrackStatus,
-        TradingReadinessResponse,
+        TrackConfigurationApplicationStatusView, TrackConfigurationPreviewResponse,
+        TrackDetailView, TrackDiagnosticsView, TrackExecutionView, TrackListItemView,
+        TrackListResponse, TrackLiveView, TrackStatus, TradingReadinessResponse,
     };
 
     #[test]
@@ -1922,5 +1949,18 @@ mod tests {
         assert!(value.get("impact").is_some());
         assert!(value.get("capacity_proof").is_some());
         assert!(serde_json::from_value::<TrackConfigurationPreviewResponse>(value).is_ok());
+    }
+
+    #[test]
+    fn configuration_application_status_uses_stable_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&TrackConfigurationApplicationStatusView::WaitingForOrders)
+                .unwrap(),
+            "\"waiting_for_orders\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TrackConfigurationApplicationStatusView::Failed).unwrap(),
+            "\"failed\""
+        );
     }
 }

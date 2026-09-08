@@ -145,7 +145,18 @@ export interface TrackConfigurationResponse {
   identity: { id: string; instrument: InstrumentView }
   active: TrackConfigurationActiveView
   restart_required: { leverage: number; tick_timeout_secs: number }
-  application_status: 'idle'
+  application_status: TrackConfigurationApplicationStatus
+  application: TrackConfigurationApplicationView | null
+}
+
+export type TrackConfigurationApplicationStatus = 'idle' | 'preparing' | 'waiting_for_orders' | 'activating' | 'active' | 'failed'
+
+export interface TrackConfigurationApplicationView {
+  application_id: string
+  status: TrackConfigurationApplicationStatus
+  accepted: boolean
+  message: string | null
+  active_version: string | null
 }
 
 export interface TrackConfigurationImpactView {

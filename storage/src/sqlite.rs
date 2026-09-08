@@ -33,7 +33,70 @@ pub struct AccountMonitorStateRow {
     pub baseline_captured_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigurationApplicationAuditRow {
+    pub application_id: String,
+    pub request_hash: String,
+    pub track_id: String,
+    pub old_version: String,
+    pub candidate_version: String,
+    pub result: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 impl SqliteStorage {
+    pub fn record_configuration_application(
+        &self,
+        row: &ConfigurationApplicationAuditRow,
+    ) -> Result<()> {
+        let conn = Self::lock_connection(&self.conn)?;
+        conn.execute("INSERT INTO configuration_applications (application_id, request_hash, track_id, old_version, candidate_version, result, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![row.application_id, row.request_hash, row.track_id, row.old_version, row.candidate_version, row.result, row.created_at.to_rfc3339(), row.updated_at.to_rfc3339()])?;
+        Ok(())
+    }
+
+    pub fn load_configuration_application(
+        &self,
+        application_id: &str,
+    ) -> Result<Option<ConfigurationApplicationAuditRow>> {
+        let conn = Self::lock_connection(&self.conn)?;
+        conn.query_row("SELECT application_id, request_hash, track_id, old_version, candidate_version, result, created_at, updated_at FROM configuration_applications WHERE application_id=?1", params![application_id], |row| Ok(ConfigurationApplicationAuditRow { application_id: row.get(0)?, request_hash: row.get(1)?, track_id: row.get(2)?, old_version: row.get(3)?, candidate_version: row.get(4)?, result: row.get(5)?, created_at: row.get::<_, String>(6)?.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error)))?, updated_at: row.get::<_, String>(7)?.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(error)))? })).optional().map_err(Into::into)
+    }
+
+    pub fn update_configuration_application_result(
+        &self,
+        application_id: &str,
+        result: &str,
+        updated_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = Self::lock_connection(&self.conn)?;
+        let changed = conn.execute(
+            "UPDATE configuration_applications SET result=?2, updated_at=?3 WHERE application_id=?1",
+            params![application_id, result, updated_at.to_rfc3339()],
+        )?;
+        ensure!(
+            changed == 1,
+            "configuration application `{application_id}` not found"
+        );
+        Ok(())
+    }
+
+    pub fn load_latest_configuration_application_for_track(
+        &self,
+        track_id: &str,
+    ) -> Result<Option<ConfigurationApplicationAuditRow>> {
+        let conn = Self::lock_connection(&self.conn)?;
+        conn.query_row(
+            "SELECT application_id, request_hash, track_id, old_version, candidate_version, result, created_at, updated_at
+             FROM configuration_applications WHERE track_id=?1 ORDER BY updated_at DESC LIMIT 1",
+            params![track_id],
+            |row| Ok(ConfigurationApplicationAuditRow {
+                application_id: row.get(0)?, request_hash: row.get(1)?, track_id: row.get(2)?, old_version: row.get(3)?, candidate_version: row.get(4)?, result: row.get(5)?,
+                created_at: row.get::<_, String>(6)?.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error)))?,
+                updated_at: row.get::<_, String>(7)?.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(error)))?,
+            }),
+        ).optional().map_err(Into::into)
+    }
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path).context("failed to open sqlite database")?;
         Self::from_connection(conn)
@@ -1275,6 +1338,43 @@ mod tests {
             Amount::new(0.0, usd).unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn configuration_application_audit_is_durable_and_updates_result() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let now = Utc::now();
+        storage
+            .record_configuration_application(&ConfigurationApplicationAuditRow {
+                application_id: "apply-1".to_string(),
+                request_hash: "hash".to_string(),
+                track_id: "btc".to_string(),
+                old_version: "old".to_string(),
+                candidate_version: "new".to_string(),
+                result: "preparing".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        assert_eq!(
+            storage
+                .load_configuration_application("apply-1")
+                .unwrap()
+                .unwrap()
+                .result,
+            "preparing"
+        );
+        storage
+            .update_configuration_application_result("apply-1", "failed", Utc::now())
+            .unwrap();
+        assert_eq!(
+            storage
+                .load_latest_configuration_application_for_track("btc")
+                .unwrap()
+                .unwrap()
+                .result,
+            "failed"
+        );
     }
 
     fn amount(value: f64, asset: &str) -> Amount {

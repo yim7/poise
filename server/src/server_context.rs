@@ -9,6 +9,7 @@ use poise_application::{
 use tokio::sync::broadcast;
 
 use crate::account_projector::AccountProjector;
+use crate::config_persistence::ConfigurationApplicationStoreAdapter;
 use crate::exchange_freshness::ExchangeFreshness;
 use crate::pnl_audit::RecentFillsAuditor;
 use crate::projector::TrackProjector;
@@ -32,6 +33,7 @@ pub struct HttpState {
     pub account_margin_guard: Arc<AccountMarginGuardStore>,
     pub recent_fills_auditor: Arc<RecentFillsAuditor>,
     pub configuration_metadata: Arc<HashMap<String, TrackConfigurationMetadata>>,
+    pub configuration_store: Option<Arc<ConfigurationApplicationStoreAdapter>>,
 }
 
 #[derive(Clone, Copy)]

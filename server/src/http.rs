@@ -2,9 +2,10 @@ use std::path::PathBuf;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use poise_application::{
+    ConfigurationApplicationError, ConfigurationApplicationRequest, ConfigurationApplicationStatus,
     DiagnosticSeverity, TrackInput, TrackMutationError,
     build_account_analysis_read_model_with_account,
 };
@@ -17,8 +18,9 @@ use poise_protocol::{
     RecentFillCoverageView, RecentFillsAuditResponse, RecentPnlAvailabilityView,
     RecentPnlCompletenessView, RiskAcquisitionConfigView, ShapeFamily, TrackCommandAccepted,
     TrackCommandRequest, TrackCommandType, TrackConfigurationApplicationStatusView,
-    TrackConfigurationBlockerView, TrackConfigurationCapacityProofView,
-    TrackConfigurationFieldErrorView, TrackConfigurationIdentityView, TrackConfigurationImpactView,
+    TrackConfigurationApplyRequest, TrackConfigurationBlockerView,
+    TrackConfigurationCapacityProofView, TrackConfigurationFieldErrorView,
+    TrackConfigurationIdentityView, TrackConfigurationImpactView,
     TrackConfigurationPolicyStateView, TrackConfigurationPreviewRequest,
     TrackConfigurationPreviewResponse, TrackConfigurationResponse,
     TrackConfigurationRestartRequiredView, TrackConfigurationRiskOutcomeView,
@@ -62,6 +64,7 @@ pub(crate) fn router_with_web_root(
         .route("/tracks", get(list_tracks))
         .route("/tracks/:id", get(get_track_detail))
         .route("/tracks/:id/configuration", get(get_track_configuration))
+        .route("/tracks/:id/configuration", put(apply_track_configuration))
         .route(
             "/tracks/:id/configuration/preview",
             post(preview_track_configuration),
@@ -272,20 +275,31 @@ async fn get_track_configuration(
         .find(|definition| definition.track_id().as_str() == id)
         .cloned()
         .ok_or_else(|| not_found(format!("track `{id}` not found")))?;
-    let configurations = definitions
-        .into_iter()
-        .map(|definition| {
-            (
-                definition.track_id().as_str().to_string(),
-                configuration_view_from_definition(&definition),
-            )
-        })
-        .collect();
     let metadata = state.configuration_metadata.get(&id).ok_or_else(|| {
         internal_error(format!("missing configuration metadata for track `{id}`"))
     })?;
+    let configurations = definitions
+        .iter()
+        .map(|definition| {
+            (
+                definition.track_id().as_str().to_string(),
+                configuration_view_from_definition(definition),
+            )
+        })
+        .collect();
+    let version = configuration_version(configurations);
+    let application = match state.configuration_store.as_ref() {
+        Some(store) => store
+            .latest_for_track(&id)
+            .map_err(map_configuration_store_error)?,
+        None => None,
+    };
+    let application_status = application
+        .as_ref()
+        .map(|row| project_application_status(&row.result))
+        .unwrap_or(TrackConfigurationApplicationStatusView::Idle);
     Ok(Json(TrackConfigurationResponse {
-        version: configuration_version(configurations),
+        version,
         identity: TrackConfigurationIdentityView {
             id: definition.track_id().as_str().to_string(),
             instrument: InstrumentView {
@@ -298,8 +312,201 @@ async fn get_track_configuration(
             leverage: metadata.leverage,
             tick_timeout_secs: metadata.tick_timeout_secs,
         },
-        application_status: TrackConfigurationApplicationStatusView::Idle,
+        application_status,
+        application: application.map(|row| poise_protocol::TrackConfigurationApplicationView {
+            application_id: row.application_id,
+            status: project_application_status(&row.result),
+            accepted: row.result != "failed",
+            message: (row.result == "failed")
+                .then(|| "configuration application failed".to_string()),
+            active_version: (row.result == "active").then_some(row.candidate_version),
+        }),
     }))
+}
+
+async fn apply_track_configuration(
+    Path(id): Path<String>,
+    State(state): State<HttpState>,
+    Json(request): Json<TrackConfigurationApplyRequest>,
+) -> Result<
+    Json<poise_protocol::TrackConfigurationApplicationView>,
+    (StatusCode, Json<ErrorResponse>),
+> {
+    let store = state.configuration_store.as_ref().ok_or_else(|| {
+        internal_error("configuration application store is unavailable".to_string())
+    })?;
+    let request_hash =
+        configuration_request_hash(&id, &request.expected_version, &request.candidate);
+    let existing = store
+        .application_by_id(&request.application_id)
+        .map_err(map_configuration_store_error)?;
+    if let Some(existing) = existing.as_ref() {
+        if existing.track_id != id || existing.request_hash != request_hash {
+            return Err(map_configuration_store_error(
+                poise_application::ConfigurationApplicationStoreError::ApplicationIdConflict,
+            ));
+        }
+        if matches!(
+            existing.result.as_str(),
+            "active" | "failed" | "waiting_for_orders"
+        ) {
+            let status = project_application_status(&existing.result);
+            return Ok(Json(poise_protocol::TrackConfigurationApplicationView {
+                application_id: existing.application_id.clone(),
+                status,
+                accepted: existing.result != "failed",
+                message: (existing.result == "failed")
+                    .then(|| "configuration application failed".to_string()),
+                active_version: (existing.result == "active")
+                    .then_some(existing.candidate_version.clone()),
+            }));
+        }
+    }
+    let source = state
+        .query_service
+        .load_track_detail_source(&TrackId::new(id.clone()))
+        .await
+        .map_err(map_query_error)?
+        .ok_or_else(|| not_found(format!("track `{id}` not found")))?;
+    let metadata = state.configuration_metadata.get(&id).ok_or_else(|| {
+        internal_error(format!("missing configuration metadata for track `{id}`"))
+    })?;
+    let candidate =
+        configuration_definition(&source, &request.candidate, metadata.tick_timeout_secs)
+            .map_err(|message| bad_request(message))?;
+    if let Some(existing) = existing {
+        // A persisted preparing/activating application is retried without
+        // consulting volatile price/capacity facts. The runtime determines
+        // whether the definition was already installed and completes its audit.
+        let application_request = ConfigurationApplicationRequest {
+            application_id: request.application_id.clone(),
+            request_hash,
+            expected_version: request.expected_version,
+            candidate_version: existing.candidate_version.clone(),
+            candidate,
+        };
+        let receipt = state
+            .runtime
+            .apply_configuration_application(&TrackId::new(id), application_request, store.as_ref())
+            .await
+            .map_err(map_configuration_application_error)?;
+        return Ok(Json(poise_protocol::TrackConfigurationApplicationView {
+            application_id: request.application_id,
+            status: project_application_status(match receipt.status {
+                ConfigurationApplicationStatus::Idle => "idle",
+                ConfigurationApplicationStatus::Preparing => "preparing",
+                ConfigurationApplicationStatus::WaitingForOrders => "waiting_for_orders",
+                ConfigurationApplicationStatus::Activating => "activating",
+                ConfigurationApplicationStatus::Active => "active",
+                ConfigurationApplicationStatus::Failed => "failed",
+            }),
+            accepted: true,
+            message: None,
+            active_version: Some(existing.candidate_version),
+        }));
+    }
+    // PUT repeats the preview's fail-closed evaluation using the current facts.
+    let Json(preview) = preview_track_configuration(
+        Path(id.clone()),
+        State(state.clone()),
+        Json(TrackConfigurationPreviewRequest {
+            candidate: request.candidate.clone(),
+        }),
+    )
+    .await?;
+    if !preview.valid {
+        return Err(bad_request(
+            "configuration candidate no longer passes current validation".to_string(),
+        ));
+    }
+    let candidate_version = store
+        .candidate_version(&id, &request.candidate)
+        .map_err(map_configuration_store_error)?;
+    let application_request = ConfigurationApplicationRequest {
+        application_id: request.application_id.clone(),
+        request_hash,
+        expected_version: request.expected_version,
+        candidate_version,
+        candidate,
+    };
+    let active_version = application_request.candidate_version.clone();
+    let receipt = state
+        .runtime
+        .apply_configuration_application(
+            &TrackId::new(id.clone()),
+            application_request,
+            store.as_ref(),
+        )
+        .await
+        .map_err(map_configuration_application_error)?;
+    Ok(Json(poise_protocol::TrackConfigurationApplicationView {
+        application_id: request.application_id,
+        status: project_application_status(match receipt.status {
+            ConfigurationApplicationStatus::Idle => "idle",
+            ConfigurationApplicationStatus::Preparing => "preparing",
+            ConfigurationApplicationStatus::WaitingForOrders => "waiting_for_orders",
+            ConfigurationApplicationStatus::Activating => "activating",
+            ConfigurationApplicationStatus::Active => "active",
+            ConfigurationApplicationStatus::Failed => "failed",
+        }),
+        accepted: true,
+        message: None,
+        active_version: Some(active_version),
+    }))
+}
+
+fn configuration_request_hash(
+    id: &str,
+    expected_version: &str,
+    candidate: &TrackConfigurationView,
+) -> String {
+    let payload = serde_json::to_vec(&(id, expected_version, candidate))
+        .expect("configuration request serializes");
+    format!("{:x}", Sha256::digest(payload))
+}
+
+fn project_application_status(value: &str) -> TrackConfigurationApplicationStatusView {
+    match value {
+        "preparing" => TrackConfigurationApplicationStatusView::Preparing,
+        "waiting_for_orders" => TrackConfigurationApplicationStatusView::WaitingForOrders,
+        "activating" => TrackConfigurationApplicationStatusView::Activating,
+        "active" => TrackConfigurationApplicationStatusView::Active,
+        "failed" => TrackConfigurationApplicationStatusView::Failed,
+        _ => TrackConfigurationApplicationStatusView::Idle,
+    }
+}
+
+fn map_configuration_store_error(
+    error: poise_application::ConfigurationApplicationStoreError,
+) -> (StatusCode, Json<ErrorResponse>) {
+    match error {
+        poise_application::ConfigurationApplicationStoreError::VersionConflict
+        | poise_application::ConfigurationApplicationStoreError::ExternalChange
+        | poise_application::ConfigurationApplicationStoreError::ApplicationIdConflict => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: error.to_string(),
+            }),
+        ),
+        _ => internal_error(error.to_string()),
+    }
+}
+fn map_configuration_application_error(
+    error: ConfigurationApplicationError,
+) -> (StatusCode, Json<ErrorResponse>) {
+    match error {
+        ConfigurationApplicationError::Terminated
+        | ConfigurationApplicationError::ActiveBinding
+        | ConfigurationApplicationError::SubmitOutcomeUnknown
+        | ConfigurationApplicationError::RecoveryAnomaly => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: error.to_string(),
+            }),
+        ),
+        ConfigurationApplicationError::Persistence(error) => map_configuration_store_error(error),
+        _ => internal_error(error.to_string()),
+    }
 }
 
 fn configuration_view(source: &poise_application::TrackReadModel) -> TrackConfigurationView {
@@ -1012,8 +1219,8 @@ mod tests {
         ExecutionBindingStatusView, ExecutionStatusView, RecentFillCoverageView,
         RecentFillsAuditResponse, RecentPnlAvailabilityView, RecentPnlCompletenessView,
         RiskSignalView, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
-        TrackDetailView, TrackDiagnosticsView, TrackListResponse, TrackStatus,
-        TradingReadinessResponse,
+        TrackConfigurationView, TrackDetailView, TrackDiagnosticsView, TrackListResponse,
+        TrackStatus, TradingReadinessResponse,
     };
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
@@ -1042,6 +1249,34 @@ mod tests {
     struct HttpTestState {
         http_state: HttpState,
         websocket_state: WebSocketState,
+        _configuration_dir: Option<Arc<tempfile::TempDir>>,
+    }
+
+    fn configuration_file() -> String {
+        "bind_address = '127.0.0.1:0'\n[exchange]\nvenue = 'binance'\napi_key = 'test-key'\napi_secret = 'test-secret'\n[[tracks]]\ntrack_id = 'btc-core'\nsymbol = 'BTCUSDT'\nlower_price = 90.0\nupper_price = 110.0\nlong_exposure_units = 8.0\nshort_exposure_units = 8.0\nnotional_per_unit = 375.0\nmin_rebalance_units = 0.5\nshape_family = 'linear'\nout_of_band_policy = 'freeze'\nmax_notional = 3000.0\nleverage = 10\ndaily_loss_limit = 100.0\ntotal_loss_limit = 300.0\n".to_string()
+    }
+
+    fn with_configuration_store(
+        mut state: HttpTestState,
+    ) -> (
+        HttpTestState,
+        Arc<SqliteStorage>,
+        std::path::PathBuf,
+        Arc<tempfile::TempDir>,
+    ) {
+        let directory = Arc::new(tempfile::tempdir().unwrap());
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, configuration_file()).unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        state.http_state.configuration_store = Some(Arc::new(
+            crate::config_persistence::ConfigurationApplicationStoreAdapter::new(
+                path.clone(),
+                storage.clone(),
+            )
+            .unwrap(),
+        ));
+        state._configuration_dir = Some(directory.clone());
+        (state, storage, path, directory)
     }
 
     fn router(state: HttpTestState) -> axum::Router {
@@ -1235,6 +1470,7 @@ mod tests {
                 account_monitor,
                 account_projector,
             ),
+            _configuration_dir: None,
         }
     }
 
@@ -1291,6 +1527,7 @@ mod tests {
                 services.account_margin_guard.clone(),
                 Arc::new(RecentFillsAuditor::new(account, query_store.clone())),
                 Arc::new(std::collections::HashMap::new()),
+                None,
             ),
             websocket_state: build_websocket_state(
                 &services,
@@ -1299,6 +1536,7 @@ mod tests {
                 account_monitor,
                 account_projector,
             ),
+            _configuration_dir: None,
         }
     }
 
@@ -1329,7 +1567,6 @@ mod tests {
             .expect("seeded manager should expose runtime state");
         seed_runtime_pnl_stats(&mut snapshot);
         manager.install_planned_runtime(snapshot);
-        observe_seed_market(&mut manager);
         repository
             .commit_track_transition(
                 "btc-core",
@@ -1401,12 +1638,30 @@ mod tests {
                 account_monitor,
                 account_projector,
             ),
+            _configuration_dir: None,
         }
     }
 
     fn test_manager() -> TrackManager {
         let mut manager = test_manager_without_market();
         observe_seed_market(&mut manager);
+        manager
+    }
+
+    fn no_binding_test_manager() -> TrackManager {
+        let mut manager = test_manager_without_market();
+        manager
+            .observe_market_mutation(
+                &TrackId::new("btc-core"),
+                poise_engine::observation::MarketObservation::ExecutionQuote {
+                    execution_quote: poise_application::exchange::ExecutionQuote {
+                        best_bid: 100.0,
+                        best_ask: 100.0,
+                    },
+                },
+                chrono::Utc::now(),
+            )
+            .unwrap();
         manager
     }
 
@@ -1562,6 +1817,258 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn configuration_put_applies_atomically_and_is_idempotent() {
+        let (state, audit, path, _directory) = with_configuration_store(
+            app_state_with_account_summary_from_manager(
+                no_binding_test_manager(),
+                Arc::new(UsdtAccountSummaryExchange),
+            )
+            .await,
+        );
+        let runtime = state.http_state.runtime.clone();
+        let mut unavailable_http_state = state.http_state.clone();
+        let (unavailable_notifications, _) =
+            tokio::sync::broadcast::channel::<ApplicationNotification>(1);
+        unavailable_http_state.account_monitor =
+            unavailable_account_monitor(unavailable_notifications);
+        let retry_app = router(HttpTestState {
+            http_state: unavailable_http_state,
+            websocket_state: state.websocket_state.clone(),
+            _configuration_dir: None,
+        });
+        let app = router(state);
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let initial: serde_json::Value =
+            serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let mut candidate = initial["active"].clone();
+        candidate["notional_per_unit"] = serde_json::json!(300.0);
+        let request = serde_json::json!({ "application_id": "apply-http-1", "expected_version": initial["version"], "candidate": candidate });
+        let apply = || {
+            Request::builder()
+                .method("PUT")
+                .uri("/tracks/btc-core/configuration")
+                .header("content-type", "application/json")
+                .body(Body::from(request.to_string()))
+                .unwrap()
+        };
+        let first = app.clone().oneshot(apply()).await.unwrap();
+        let first_status = first.status();
+        let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            first_status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&first_body)
+        );
+        let accepted: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+        assert_eq!(accepted["application_id"], "apply-http-1");
+        assert_eq!(accepted["status"], "active");
+        assert_eq!(
+            accepted["active_version"].as_str(),
+            Some(accepted["active_version"].as_str().unwrap())
+        );
+        let parsed = crate::config::load_config(&path).unwrap();
+        assert_eq!(parsed.tracks[0].notional_per_unit, 300.0);
+        assert_eq!(
+            runtime.committed_track_definitions().await[0]
+                .track_config()
+                .notional_per_unit,
+            300.0
+        );
+        let after = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let after: serde_json::Value =
+            serde_json::from_slice(&to_bytes(after.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(after["version"], accepted["active_version"]);
+        assert_eq!(after["application"]["application_id"], "apply-http-1");
+        assert_eq!(after["application_status"], "active");
+        audit
+            .update_configuration_application_result("apply-http-1", "preparing", Utc::now())
+            .unwrap();
+        // The stored request must win over newly unavailable capacity facts.
+        let retry = retry_app.clone().oneshot(apply()).await.unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(
+            audit
+                .load_configuration_application("apply-http-1")
+                .unwrap()
+                .unwrap()
+                .result,
+            "active"
+        );
+        let mut conflicting = request.clone();
+        conflicting["candidate"]["notional_per_unit"] = serde_json::json!(250.0);
+        let conflict = retry_app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/tracks/btc-core/configuration")
+                    .header("content-type", "application/json")
+                    .body(Body::from(conflicting.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn configuration_put_rejects_stale_version_without_side_effects() {
+        let (state, audit, path, _directory) = with_configuration_store(
+            app_state_with_account_summary_from_manager(
+                no_binding_test_manager(),
+                Arc::new(UsdtAccountSummaryExchange),
+            )
+            .await,
+        );
+        let runtime = state.http_state.runtime.clone();
+        let before_definition = runtime.committed_track_definitions().await;
+        let before_file = std::fs::read_to_string(&path).unwrap();
+        let app = router(state);
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let response = app.oneshot(Request::builder().method("PUT").uri("/tracks/btc-core/configuration").header("content-type", "application/json").body(Body::from(serde_json::json!({"application_id":"apply-stale", "expected_version":"stale", "candidate":value["active"]}).to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(
+            audit
+                .load_configuration_application("apply-stale")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), before_file);
+        assert_eq!(
+            runtime.committed_track_definitions().await,
+            before_definition
+        );
+    }
+
+    #[tokio::test]
+    async fn configuration_put_rejects_active_binding_before_audit_or_file_write() {
+        let (state, audit, path, _directory) =
+            with_configuration_store(app_state_with_usdt_account_summary().await);
+        let before_file = std::fs::read_to_string(&path).unwrap();
+        let app = router(state);
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let response = app.oneshot(Request::builder().method("PUT").uri("/tracks/btc-core/configuration").header("content-type", "application/json").body(Body::from(serde_json::json!({"application_id":"apply-bound", "expected_version":value["version"], "candidate":value["active"]}).to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(
+            audit
+                .load_configuration_application("apply-bound")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), before_file);
+    }
+
+    #[tokio::test]
+    async fn configuration_put_marks_preparing_audit_failed_when_runtime_has_old_definition() {
+        let (state, audit, _path, _directory) = with_configuration_store(
+            app_state_with_account_summary_from_manager(
+                no_binding_test_manager(),
+                Arc::new(UsdtAccountSummaryExchange),
+            )
+            .await,
+        );
+        let store = state.http_state.configuration_store.clone().unwrap();
+        let app = router(state);
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let current: serde_json::Value =
+            serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let mut candidate = current["active"].clone();
+        candidate["notional_per_unit"] = serde_json::json!(300.0);
+        let candidate_view: TrackConfigurationView =
+            serde_json::from_value(candidate.clone()).unwrap();
+        let request_hash = super::configuration_request_hash(
+            "btc-core",
+            current["version"].as_str().unwrap(),
+            &candidate_view,
+        );
+        let candidate_version = store
+            .candidate_version("btc-core", &candidate_view)
+            .unwrap();
+        let now = Utc::now();
+        audit
+            .record_configuration_application(
+                &poise_storage::sqlite::ConfigurationApplicationAuditRow {
+                    application_id: "apply-preparing-old".to_string(),
+                    request_hash,
+                    track_id: "btc-core".to_string(),
+                    old_version: current["version"].as_str().unwrap().to_string(),
+                    candidate_version,
+                    result: "preparing".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                },
+            )
+            .unwrap();
+        let response = app.oneshot(Request::builder().method("PUT").uri("/tracks/btc-core/configuration").header("content-type", "application/json").body(Body::from(serde_json::json!({"application_id":"apply-preparing-old", "expected_version":current["version"], "candidate":candidate}).to_string())).unwrap()).await.unwrap();
+        assert_ne!(response.status(), StatusCode::OK);
+        assert_eq!(
+            audit
+                .load_configuration_application("apply-preparing-old")
+                .unwrap()
+                .unwrap()
+                .result,
+            "failed"
+        );
     }
 
     #[tokio::test]
@@ -2098,6 +2605,7 @@ mod tests {
                     account_monitor,
                     account_projector,
                 ),
+                _configuration_dir: None,
             }
         };
 
@@ -2517,6 +3025,7 @@ mod tests {
                 account_monitor,
                 account_projector,
             ),
+            _configuration_dir: None,
         });
 
         let pause = app

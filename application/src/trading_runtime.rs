@@ -1,6 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::configuration_application::{
+    ConfigurationApplicationPersistence, ConfigurationApplicationRequest,
+    ConfigurationApplicationStatus, ConfigurationApplicationStore,
+    ConfigurationApplicationStoreError,
+};
 use crate::exchange::{OrderReceipt, OrderRequest};
 use crate::session_effect_queue::{
     EnqueuedEffectJournalEntry, FollowUpQueueAction, SessionExchangeStateRevision, WakeSignal,
@@ -239,6 +244,32 @@ pub enum TrackMutationError {
     Persistence(anyhow::Error),
 }
 
+#[derive(Debug)]
+pub enum ConfigurationApplicationError {
+    TrackNotLoaded { track_id: String },
+    Terminated,
+    ActiveBinding,
+    SubmitOutcomeUnknown,
+    RecoveryAnomaly,
+    TrackIdentityMismatch,
+    AlreadyPersistedNotInstalled,
+    Persistence(ConfigurationApplicationStoreError),
+}
+
+impl std::fmt::Display for ConfigurationApplicationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for ConfigurationApplicationError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigurationApplicationReceipt {
+    pub status: ConfigurationApplicationStatus,
+    pub persistence: ConfigurationApplicationPersistence,
+}
+
 impl std::fmt::Display for TrackMutationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message())
@@ -432,6 +463,140 @@ impl TradingRuntime {
 
     pub fn session_effect_queue(&self) -> SessionEffectQueue {
         self.session_effect_queue.clone()
+    }
+
+    /// Applies the no-binding fast path. It deliberately does not cancel or clear
+    /// bindings: any outstanding ownership must be resolved by the normal flow.
+    pub async fn apply_configuration_application(
+        &self,
+        track_id: &TrackId,
+        request: ConfigurationApplicationRequest,
+        store: &dyn ConfigurationApplicationStore,
+    ) -> std::result::Result<ConfigurationApplicationReceipt, ConfigurationApplicationError> {
+        let _guard = self.lock_track_mutation(track_id.as_str()).await;
+        let (previous_state, transition) = {
+            let manager = self.manager.read().await;
+            let previous_state =
+                manager
+                    .get_track(track_id.as_str())
+                    .cloned()
+                    .ok_or_else(|| ConfigurationApplicationError::TrackNotLoaded {
+                        track_id: track_id.as_str().to_string(),
+                    })?;
+            if self
+                .session_effect_queue
+                .has_unresolved_submit_outcome_for_track(track_id)
+            {
+                return Err(ConfigurationApplicationError::SubmitOutcomeUnknown);
+            }
+            let planned = manager
+                .plan_track_update(track_id, |candidate_manager| {
+                    candidate_manager
+                        .configuration_activation_transition(track_id, request.candidate.clone())
+                        .map_err(anyhow::Error::new)
+                })
+                .map_err(|_| ConfigurationApplicationError::TrackIdentityMismatch)?;
+            let (transition, _) = planned.into_parts();
+            let transition = transition.map_err(|error| {
+                match error
+                .downcast_ref::<poise_engine::runtime::ConfigurationActivationBlocker>()
+            {
+                Some(poise_engine::runtime::ConfigurationActivationBlocker::Terminated) => {
+                    ConfigurationApplicationError::Terminated
+                }
+                Some(poise_engine::runtime::ConfigurationActivationBlocker::ActiveBinding) => {
+                    ConfigurationApplicationError::ActiveBinding
+                }
+                Some(poise_engine::runtime::ConfigurationActivationBlocker::RecoveryAnomaly) => {
+                    ConfigurationApplicationError::RecoveryAnomaly
+                }
+                Some(poise_engine::runtime::ConfigurationActivationBlocker::TrackIdentityMismatch)
+                | None => ConfigurationApplicationError::TrackIdentityMismatch,
+            }
+            })?;
+            (previous_state, transition)
+        };
+        let persistence = store
+            .persist_configuration_application(track_id, &request)
+            .await
+            .map_err(ConfigurationApplicationError::Persistence)?;
+        if persistence == ConfigurationApplicationPersistence::AlreadyPersisted {
+            let installed = self
+                .manager
+                .read()
+                .await
+                .get_track(track_id.as_str())
+                .is_some_and(|track| track.definition() == &request.candidate);
+            if !installed {
+                let _ = store
+                    .complete_configuration_application(
+                        track_id,
+                        &request,
+                        ConfigurationApplicationStatus::Failed,
+                    )
+                    .await;
+                return Err(ConfigurationApplicationError::AlreadyPersistedNotInstalled);
+            }
+            store
+                .complete_configuration_application(
+                    track_id,
+                    &request,
+                    ConfigurationApplicationStatus::Active,
+                )
+                .await
+                .map_err(ConfigurationApplicationError::Persistence)?;
+            return Ok(ConfigurationApplicationReceipt {
+                status: ConfigurationApplicationStatus::Active,
+                persistence,
+            });
+        }
+        let install_result = self
+            .commit_planned_track_mutation(
+                _guard,
+                track_id.as_str(),
+                &previous_state,
+                transition.next_state(),
+                &transition,
+                None,
+                false,
+                None,
+            )
+            .await;
+        if let Err(error) = install_result {
+            let _ = store
+                .complete_configuration_application(
+                    track_id,
+                    &request,
+                    ConfigurationApplicationStatus::Failed,
+                )
+                .await;
+            return Err(ConfigurationApplicationError::Persistence(
+                ConfigurationApplicationStoreError::Internal(error.to_string()),
+            ));
+        }
+        store
+            .complete_configuration_application(
+                track_id,
+                &request,
+                ConfigurationApplicationStatus::Active,
+            )
+            .await
+            .map_err(ConfigurationApplicationError::Persistence)?;
+        Ok(ConfigurationApplicationReceipt {
+            status: ConfigurationApplicationStatus::Active,
+            persistence,
+        })
+    }
+
+    pub async fn configuration_application_status(
+        &self,
+        track_id: &TrackId,
+        store: &dyn ConfigurationApplicationStore,
+    ) -> Result<ConfigurationApplicationStatus> {
+        store
+            .configuration_application_status(track_id)
+            .await
+            .map_err(anyhow::Error::new)
     }
 
     pub fn effect_journal_diagnostics(&self) -> Arc<crate::EffectJournalDiagnostics> {
@@ -2428,8 +2593,9 @@ mod tests {
     use chrono::Utc;
     use poise_core::instrument::{Amount, Asset, PositionQty};
     use poise_core::risk::RiskTerminationCause;
-    use poise_core::track::{Instrument, TrackId, Venue};
+    use poise_core::track::{Instrument, TrackDefinition, TrackId, Venue};
     use poise_core::types::{Exposure, Side};
+    use poise_engine::command::TrackCommand;
     use poise_engine::execution_plan::TrackEffect;
     use poise_engine::executor::{
         BindingStatus, OrderUpdateAbsorbResult, RecoveryAnomaly, SubmitRecoveryToken,
@@ -2450,13 +2616,131 @@ mod tests {
 
     use super::test_support::{MemoryRepository, NoopGuard, seeded_manager, track_write_services};
     use super::{
-        AccountCapacityGuard, ExchangeStateSyncOutcome, RecoveryAnomalyObserver, TrackInput,
-        TrackUpdateReceipt, TradingRuntime, effect_journal_entries_from_enqueued,
+        AccountCapacityGuard, ConfigurationApplicationError, ExchangeStateSyncOutcome,
+        RecoveryAnomalyObserver, TrackInput, TrackUpdateReceipt, TradingRuntime,
+        effect_journal_entries_from_enqueued,
     };
-    use crate::{CommittedTrackWrite, TrackControlState, TrackMutationStore, TrackQueryStore};
+    use crate::{
+        CommittedTrackWrite, ConfigurationApplicationPersistence, ConfigurationApplicationRequest,
+        ConfigurationApplicationStatus, ConfigurationApplicationStore,
+        ConfigurationApplicationStoreError, TrackControlState, TrackMutationStore, TrackQueryStore,
+    };
 
     fn amount(value: f64, asset: &str) -> Amount {
         Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+    }
+
+    struct FakeConfigurationStore {
+        outcome: std::result::Result<
+            ConfigurationApplicationPersistence,
+            ConfigurationApplicationStoreError,
+        >,
+        calls: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl ConfigurationApplicationStore for FakeConfigurationStore {
+        async fn persist_configuration_application(
+            &self,
+            _track_id: &TrackId,
+            _request: &ConfigurationApplicationRequest,
+        ) -> std::result::Result<
+            ConfigurationApplicationPersistence,
+            ConfigurationApplicationStoreError,
+        > {
+            *self.calls.lock().unwrap() += 1;
+            self.outcome.clone()
+        }
+
+        async fn configuration_application_status(
+            &self,
+            _track_id: &TrackId,
+        ) -> std::result::Result<ConfigurationApplicationStatus, ConfigurationApplicationStoreError>
+        {
+            Ok(ConfigurationApplicationStatus::Idle)
+        }
+
+        async fn complete_configuration_application(
+            &self,
+            _track_id: &TrackId,
+            _request: &ConfigurationApplicationRequest,
+            _status: ConfigurationApplicationStatus,
+        ) -> std::result::Result<(), ConfigurationApplicationStoreError> {
+            Ok(())
+        }
+    }
+
+    struct CompletionRecordingConfigurationStore {
+        persist_outcomes: Mutex<Vec<ConfigurationApplicationPersistence>>,
+        complete_outcomes: Mutex<Vec<std::result::Result<(), ConfigurationApplicationStoreError>>>,
+        completed_statuses: Mutex<Vec<ConfigurationApplicationStatus>>,
+        persist_calls: Mutex<usize>,
+        assert_queue_empty: Option<SessionEffectQueue>,
+    }
+
+    #[async_trait]
+    impl ConfigurationApplicationStore for CompletionRecordingConfigurationStore {
+        async fn persist_configuration_application(
+            &self,
+            _track_id: &TrackId,
+            _request: &ConfigurationApplicationRequest,
+        ) -> std::result::Result<
+            ConfigurationApplicationPersistence,
+            ConfigurationApplicationStoreError,
+        > {
+            if let Some(queue) = &self.assert_queue_empty {
+                assert!(
+                    queue.claim_next().is_none(),
+                    "effects must not enter the queue before configuration persistence"
+                );
+            }
+            *self.persist_calls.lock().unwrap() += 1;
+            Ok(self.persist_outcomes.lock().unwrap().remove(0))
+        }
+
+        async fn configuration_application_status(
+            &self,
+            _track_id: &TrackId,
+        ) -> std::result::Result<ConfigurationApplicationStatus, ConfigurationApplicationStoreError>
+        {
+            Ok(ConfigurationApplicationStatus::Idle)
+        }
+
+        async fn complete_configuration_application(
+            &self,
+            _track_id: &TrackId,
+            _request: &ConfigurationApplicationRequest,
+            status: ConfigurationApplicationStatus,
+        ) -> std::result::Result<(), ConfigurationApplicationStoreError> {
+            self.completed_statuses.lock().unwrap().push(status);
+            self.complete_outcomes.lock().unwrap().remove(0)
+        }
+    }
+
+    fn configuration_request(
+        candidate: poise_core::track::TrackDefinition,
+    ) -> ConfigurationApplicationRequest {
+        ConfigurationApplicationRequest {
+            application_id: "application-1".to_string(),
+            request_hash: "hash-1".to_string(),
+            expected_version: "v1".to_string(),
+            candidate_version: "v2".to_string(),
+            candidate,
+        }
+    }
+
+    fn changed_candidate(definition: &TrackDefinition) -> TrackDefinition {
+        let mut config = definition.track_config().clone();
+        config.notional_per_unit *= 2.0;
+        TrackDefinition::try_new(
+            definition.track_id().clone(),
+            definition.instrument().clone(),
+            config,
+            Some(definition.max_notional()),
+            definition.loss_limits().clone(),
+            Some(definition.tick_timeout_secs()),
+        )
+        .unwrap()
     }
 
     #[derive(Default)]
@@ -2592,6 +2876,541 @@ mod tests {
             Arc::new(NoopGuard),
             observer,
         )
+    }
+
+    #[tokio::test]
+    async fn configuration_application_does_not_install_or_enqueue_when_persistence_fails() {
+        let repository = Arc::new(MemoryRepository::default());
+        let observer = Arc::new(RecordingRecoveryAnomalyObserver::default());
+        let runtime = test_executor(repository.clone(), observer);
+        let track_id = TrackId::new("btc-core");
+        let before = runtime
+            .committed_track_snapshot(&track_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let store = FakeConfigurationStore {
+            outcome: Err(ConfigurationApplicationStoreError::WriteFailed(
+                "disk full".to_string(),
+            )),
+            calls: Mutex::new(0),
+        };
+
+        let result = runtime
+            .apply_configuration_application(
+                &track_id,
+                configuration_request(before.definition.clone()),
+                &store,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(ConfigurationApplicationError::Persistence(
+                ConfigurationApplicationStoreError::WriteFailed(_)
+            ))
+        ));
+        assert_eq!(*store.calls.lock().unwrap(), 1);
+        assert_eq!(
+            runtime
+                .committed_track_snapshot(&track_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .runtime,
+            before.runtime
+        );
+        assert!(repository.pending_effects().is_empty());
+    }
+
+    #[tokio::test]
+    async fn already_persisted_application_never_replays_an_installed_definition() {
+        let repository = Arc::new(MemoryRepository::default());
+        let runtime = test_executor(
+            repository.clone(),
+            Arc::new(RecordingRecoveryAnomalyObserver::default()),
+        );
+        let track_id = TrackId::new("btc-core");
+        let before = runtime
+            .committed_track_snapshot(&track_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let store = FakeConfigurationStore {
+            outcome: Ok(ConfigurationApplicationPersistence::AlreadyPersisted),
+            calls: Mutex::new(0),
+        };
+
+        let receipt = runtime
+            .apply_configuration_application(
+                &track_id,
+                configuration_request(before.definition),
+                &store,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            receipt.persistence,
+            ConfigurationApplicationPersistence::AlreadyPersisted
+        );
+        assert_eq!(*store.calls.lock().unwrap(), 1);
+        assert!(repository.pending_effects().is_empty());
+    }
+
+    #[tokio::test]
+    async fn already_persisted_different_definition_blocks_without_mutating_runtime() {
+        let repository = Arc::new(MemoryRepository::default());
+        let runtime = test_executor(
+            repository.clone(),
+            Arc::new(RecordingRecoveryAnomalyObserver::default()),
+        );
+        let track_id = TrackId::new("btc-core");
+        let before = runtime
+            .committed_track_snapshot(&track_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let store = FakeConfigurationStore {
+            outcome: Ok(ConfigurationApplicationPersistence::AlreadyPersisted),
+            calls: Mutex::new(0),
+        };
+
+        let result = runtime
+            .apply_configuration_application(
+                &track_id,
+                configuration_request(changed_candidate(&before.definition)),
+                &store,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(ConfigurationApplicationError::AlreadyPersistedNotInstalled)
+        ));
+        assert_eq!(*store.calls.lock().unwrap(), 1);
+        assert_eq!(
+            runtime
+                .committed_track_snapshot(&track_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .runtime,
+            before.runtime
+        );
+        assert!(repository.pending_effects().is_empty());
+    }
+
+    #[tokio::test]
+    async fn configuration_application_repairs_missing_active_audit_for_already_installed_definition()
+     {
+        let repository = Arc::new(MemoryRepository::default());
+        let runtime = test_executor(
+            repository.clone(),
+            Arc::new(RecordingRecoveryAnomalyObserver::default()),
+        );
+        let track_id = TrackId::new("btc-core");
+        let candidate = runtime
+            .committed_track_snapshot(&track_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .definition;
+        let request = configuration_request(candidate);
+        let store = CompletionRecordingConfigurationStore {
+            persist_outcomes: Mutex::new(vec![
+                ConfigurationApplicationPersistence::Persisted,
+                ConfigurationApplicationPersistence::AlreadyPersisted,
+            ]),
+            complete_outcomes: Mutex::new(vec![
+                Err(ConfigurationApplicationStoreError::WriteFailed(
+                    "audit temporarily unavailable".to_string(),
+                )),
+                Ok(()),
+            ]),
+            completed_statuses: Mutex::new(Vec::new()),
+            persist_calls: Mutex::new(0),
+            assert_queue_empty: None,
+        };
+
+        let first = runtime
+            .apply_configuration_application(&track_id, request.clone(), &store)
+            .await;
+        assert!(matches!(
+            first,
+            Err(ConfigurationApplicationError::Persistence(
+                ConfigurationApplicationStoreError::WriteFailed(_)
+            ))
+        ));
+        assert!(repository.pending_effects().is_empty());
+
+        let second = runtime
+            .apply_configuration_application(&track_id, request, &store)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            second.persistence,
+            ConfigurationApplicationPersistence::AlreadyPersisted
+        );
+        assert_eq!(*store.persist_calls.lock().unwrap(), 2);
+        assert_eq!(
+            *store.completed_statuses.lock().unwrap(),
+            vec![
+                ConfigurationApplicationStatus::Active,
+                ConfigurationApplicationStatus::Active,
+            ]
+        );
+        assert!(repository.pending_effects().is_empty());
+    }
+
+    #[tokio::test]
+    async fn configuration_application_rejects_terminated_and_active_binding_before_calling_port() {
+        let cases = ["terminated", "active_binding"];
+        for case in cases {
+            let repository = Arc::new(MemoryRepository::default());
+            let runtime = test_executor(
+                repository,
+                Arc::new(RecordingRecoveryAnomalyObserver::default()),
+            );
+            let track_id = TrackId::new("btc-core");
+            if case == "terminated" {
+                runtime
+                    .handle(&track_id, TrackInput::Command(TrackCommand::Terminate))
+                    .await
+                    .unwrap();
+            } else {
+                runtime
+                    .handle(
+                        &track_id,
+                        TrackInput::Market {
+                            observation: MarketObservation::ExecutionQuote {
+                                execution_quote: ExecutionQuote {
+                                    best_bid: 94.9,
+                                    best_ask: 95.1,
+                                },
+                            },
+                            occurred_at: Utc::now(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            let candidate = runtime
+                .committed_track_snapshot(&track_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .definition;
+            let store = FakeConfigurationStore {
+                outcome: Ok(ConfigurationApplicationPersistence::Persisted),
+                calls: Mutex::new(0),
+            };
+
+            let result = runtime
+                .apply_configuration_application(
+                    &track_id,
+                    configuration_request(candidate),
+                    &store,
+                )
+                .await;
+
+            assert_eq!(*store.calls.lock().unwrap(), 0, "case {case}");
+            assert!(matches!(
+                result,
+                Err(ConfigurationApplicationError::Terminated)
+                    | Err(ConfigurationApplicationError::ActiveBinding)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn configuration_application_rejects_unresolved_submit_before_calling_port() {
+        let repository = Arc::new(MemoryRepository::default());
+        let runtime = test_executor(
+            repository.clone(),
+            Arc::new(RecordingRecoveryAnomalyObserver::default()),
+        );
+        let track_id = TrackId::new("btc-core");
+        runtime
+            .handle(
+                &track_id,
+                TrackInput::Market {
+                    observation: MarketObservation::MarkPrice { mark_price: 95.0 },
+                    occurred_at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+        runtime
+            .handle(
+                &track_id,
+                TrackInput::Market {
+                    observation: MarketObservation::ExecutionQuote {
+                        execution_quote: ExecutionQuote {
+                            best_bid: 94.9,
+                            best_ask: 95.1,
+                        },
+                    },
+                    occurred_at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+        let queue = runtime.session_effect_queue();
+        let pending = queue
+            .claim_next()
+            .expect("market decision should enqueue a submit effect");
+        let TrackEffect::SubmitOrder { request, .. } = pending.effect else {
+            panic!("expected a submit effect");
+        };
+        runtime
+            .manager
+            .write()
+            .await
+            .clear_executor_bindings_for_test(&track_id)
+            .unwrap();
+        runtime
+            .handle(
+                &track_id,
+                TrackInput::SubmitOutcomeUnknown {
+                    effect_id: pending.effect_id,
+                    client_order_id: request.client_order_id,
+                    initial_snapshot_confirmed: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !runtime
+                .manager
+                .read()
+                .await
+                .get_track(track_id.as_str())
+                .unwrap()
+                .has_executor_bindings()
+        );
+        let candidate = runtime
+            .committed_track_snapshot(&track_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .definition;
+        let store = FakeConfigurationStore {
+            outcome: Ok(ConfigurationApplicationPersistence::Persisted),
+            calls: Mutex::new(0),
+        };
+
+        let result = runtime
+            .apply_configuration_application(&track_id, configuration_request(candidate), &store)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(ConfigurationApplicationError::SubmitOutcomeUnknown)
+        ));
+        assert_eq!(*store.calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn configuration_application_rejects_recovery_anomaly_without_active_binding_before_calling_port()
+     {
+        let repository = Arc::new(MemoryRepository::default());
+        let runtime = test_executor(
+            repository,
+            Arc::new(RecordingRecoveryAnomalyObserver::default()),
+        );
+        let track_id = TrackId::new("btc-core");
+        runtime
+            .manager
+            .write()
+            .await
+            .set_recovery_anomaly_for_test(&track_id, Some(RecoveryAnomaly::UnknownLiveOrder))
+            .unwrap();
+        let candidate = runtime
+            .committed_track_snapshot(&track_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .definition;
+        let store = FakeConfigurationStore {
+            outcome: Ok(ConfigurationApplicationPersistence::Persisted),
+            calls: Mutex::new(0),
+        };
+
+        let result = runtime
+            .apply_configuration_application(&track_id, configuration_request(candidate), &store)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(ConfigurationApplicationError::RecoveryAnomaly)
+        ));
+        assert_eq!(*store.calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn configuration_application_keeps_paused_control_without_creating_submit() {
+        let repository = Arc::new(MemoryRepository::default());
+        let runtime = test_executor(
+            repository.clone(),
+            Arc::new(RecordingRecoveryAnomalyObserver::default()),
+        );
+        let track_id = TrackId::new("btc-core");
+        runtime
+            .handle(&track_id, TrackInput::Command(TrackCommand::Pause))
+            .await
+            .unwrap();
+        let before = runtime
+            .committed_track_snapshot(&track_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let store = FakeConfigurationStore {
+            outcome: Ok(ConfigurationApplicationPersistence::Persisted),
+            calls: Mutex::new(0),
+        };
+
+        runtime
+            .apply_configuration_application(
+                &track_id,
+                configuration_request(changed_candidate(&before.definition)),
+                &store,
+            )
+            .await
+            .unwrap();
+
+        let manager = runtime.manager.read().await;
+        assert!(
+            manager
+                .get_track(track_id.as_str())
+                .unwrap()
+                .runtime_state()
+                .is_paused()
+        );
+        assert_eq!(*store.calls.lock().unwrap(), 1);
+        assert!(repository.pending_effects().is_empty());
+    }
+
+    #[tokio::test]
+    async fn configuration_application_keeps_manual_flatten_without_creating_automatic_submit() {
+        let repository = Arc::new(MemoryRepository::default());
+        let runtime = test_executor(
+            repository.clone(),
+            Arc::new(RecordingRecoveryAnomalyObserver::default()),
+        );
+        let track_id = TrackId::new("btc-core");
+        runtime
+            .handle(&track_id, TrackInput::Command(TrackCommand::Flatten))
+            .await
+            .unwrap();
+        let before = runtime
+            .committed_track_snapshot(&track_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let store = FakeConfigurationStore {
+            outcome: Ok(ConfigurationApplicationPersistence::Persisted),
+            calls: Mutex::new(0),
+        };
+
+        runtime
+            .apply_configuration_application(
+                &track_id,
+                configuration_request(changed_candidate(&before.definition)),
+                &store,
+            )
+            .await
+            .unwrap();
+
+        let manager = runtime.manager.read().await;
+        let track = manager.get_track(track_id.as_str()).unwrap();
+        assert_eq!(track.manual_target_override(), Some(Exposure(0.0)));
+        assert_eq!(*store.calls.lock().unwrap(), 1);
+        assert!(repository.pending_effects().is_empty());
+    }
+
+    #[tokio::test]
+    async fn configuration_application_persists_before_installing_live_automatic_effects() {
+        let repository = Arc::new(MemoryRepository::default());
+        let runtime = test_executor(
+            repository,
+            Arc::new(RecordingRecoveryAnomalyObserver::default()),
+        );
+        let track_id = TrackId::new("btc-core");
+        runtime
+            .handle(
+                &track_id,
+                TrackInput::Position(PositionObservation {
+                    qty: PositionQty::new(2.0).unwrap(),
+                    unrealized_pnl: 0.0,
+                }),
+            )
+            .await
+            .unwrap();
+        runtime
+            .handle(
+                &track_id,
+                TrackInput::Market {
+                    observation: MarketObservation::ExecutionQuote {
+                        execution_quote: ExecutionQuote {
+                            best_bid: 94.9,
+                            best_ask: 95.1,
+                        },
+                    },
+                    occurred_at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+        let before = runtime
+            .committed_track_snapshot(&track_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let queue = runtime.session_effect_queue();
+        queue.clear_track(&track_id);
+        runtime
+            .manager
+            .write()
+            .await
+            .clear_executor_bindings_for_test(&track_id)
+            .unwrap();
+        let candidate = changed_candidate(&before.definition);
+        let store = CompletionRecordingConfigurationStore {
+            persist_outcomes: Mutex::new(vec![ConfigurationApplicationPersistence::Persisted]),
+            complete_outcomes: Mutex::new(vec![Ok(())]),
+            completed_statuses: Mutex::new(Vec::new()),
+            persist_calls: Mutex::new(0),
+            assert_queue_empty: Some(queue.clone()),
+        };
+
+        runtime
+            .apply_configuration_application(
+                &track_id,
+                configuration_request(candidate.clone()),
+                &store,
+            )
+            .await
+            .unwrap();
+
+        let manager = runtime.manager.read().await;
+        let track = manager.get_track(track_id.as_str()).unwrap();
+        assert_eq!(track.definition(), &candidate);
+        // The seeded linear instrument uses a $100 contract multiplier. At a
+        // $750 notional-per-unit candidate, one exposure unit is 7.5 contracts,
+        // so the observed 2-contract position is 2 / 7.5 units.
+        assert_eq!(track.current_exposure(), &Exposure(2.0 / 7.5));
+        assert!(track.inventory_decision().is_some());
+        assert!(
+            track.fresh_acquisition_pending(),
+            "the candidate starts a new risk-acquisition session rather than inheriting the old one"
+        );
+        assert_eq!(*store.persist_calls.lock().unwrap(), 1);
+        assert_eq!(
+            *store.completed_statuses.lock().unwrap(),
+            vec![ConfigurationApplicationStatus::Active]
+        );
     }
 
     fn manager_with_committed_inventory_decision() -> (

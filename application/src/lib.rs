@@ -1,6 +1,7 @@
 pub mod account_monitor;
 pub mod account_monitor_store;
 pub mod account_read_model;
+pub mod configuration_application;
 pub mod debug_query_service;
 pub mod diagnostics;
 pub mod exchange;
@@ -27,6 +28,11 @@ pub(crate) mod test_instrument;
 pub use account_monitor::{AccountMonitor, AccountMonitorConfig};
 pub use account_monitor_store::{AccountMonitorStore, StoredAccountMonitorState};
 pub use account_read_model::{AccountReadModel, AccountRiskSignal};
+pub use configuration_application::{
+    ConfigurationApplicationPersistence, ConfigurationApplicationRequest,
+    ConfigurationApplicationStatus, ConfigurationApplicationStore,
+    ConfigurationApplicationStoreError,
+};
 pub use debug_query_service::TrackDebugQueryService;
 pub use diagnostics::{
     DiagnosticSeverity, EffectJournalDiagnostics, EffectJournalDiagnosticsSnapshot,
@@ -59,7 +65,8 @@ pub use track_persistence::{
 };
 pub use track_query_store::TrackQueryStore;
 pub use trading_runtime::{
-    AccountCapacityGuard, ExchangeStateSyncOutcome, ExchangeStateSyncToken,
-    RecoveryAnomalyObserver, SubmitRecoveryReceipt, TrackInput, TrackInstrument,
-    TrackMutationError, TrackUpdateReceipt, TradingRuntime, is_loaded_track_invariant_violation,
+    AccountCapacityGuard, ConfigurationApplicationError, ConfigurationApplicationReceipt,
+    ExchangeStateSyncOutcome, ExchangeStateSyncToken, RecoveryAnomalyObserver,
+    SubmitRecoveryReceipt, TrackInput, TrackInstrument, TrackMutationError, TrackUpdateReceipt,
+    TradingRuntime, is_loaded_track_invariant_violation,
 };
