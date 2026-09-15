@@ -144,11 +144,12 @@ mod tests {
         .await
         .unwrap_err();
 
-        let message = error.to_string();
+        let message = format!("{error:#}");
         assert!(message.contains("btc-core"));
         assert!(message.contains("BTCUSDT"));
         assert!(message.contains("7"));
         assert!(message.contains("exchange rejected leverage"));
+        assert_eq!(error.chain().count(), 2);
     }
 
     #[tokio::test]

@@ -4,8 +4,8 @@ use std::sync::{
     atomic::{AtomicI64, Ordering},
 };
 
-use anyhow::{Context, Result, anyhow};
-use chrono::Utc;
+use anyhow::{Context, Result, anyhow, ensure};
+use chrono::{TimeZone, Utc};
 use reqwest::Method;
 use serde::de::DeserializeOwned;
 use tokio::time::Duration;
@@ -13,17 +13,17 @@ use url::form_urlencoded::Serializer;
 use url::{Host, Url};
 
 use poise_application::exchange::{
-    AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt, OrderRequest, OrderStatus,
-    Position,
+    AccountSummarySnapshot, CandleInterval, ExchangeInfo, ExchangeOrder, MarketCandle,
+    OrderReceipt, OrderRequest, OrderStatus, Position,
 };
 
 use super::auth::sign_v5_payload;
 use super::error::{BybitRestError, BybitSubmitOutcomeUnknown};
 use super::models::{
     BybitEnvelope, CancelAllRequestBody, CancelAllResult, CancelOrderRequestBody,
-    CreateOrderRequestBody, CreateOrderResult, InstrumentInfoResult, OpenOrderListResult,
-    PositionListResult, PositionSnapshot, ServerTimeResult, SetLeverageRequestBody,
-    WalletBalanceResult,
+    CreateOrderRequestBody, CreateOrderResult, InstrumentInfoResult, MarkPriceKlineResult,
+    OpenOrderListResult, PositionListResult, PositionSnapshot, ServerTimeResult,
+    SetLeverageRequestBody, TickerResult, WalletBalanceResult,
 };
 use crate::Deployment;
 use crate::mapper::{build_bybit_position, should_track_bybit_order, side_to_bybit};
@@ -105,6 +105,59 @@ impl BybitRestClient {
             )
             .await?;
         response.try_into()
+    }
+
+    pub async fn get_mark_price(&self, symbol: &str) -> Result<f64> {
+        let response: TickerResult = self
+            .send_request(
+                Method::GET,
+                "/v5/market/tickers",
+                vec![
+                    ("category", "linear".to_string()),
+                    ("symbol", symbol.to_string()),
+                ],
+                None,
+                AuthMode::None,
+            )
+            .await?;
+        let ticker = response
+            .list
+            .into_iter()
+            .find(|ticker| ticker.symbol == symbol)
+            .with_context(|| format!("missing Bybit ticker for `{symbol}`"))?;
+        ensure!(
+            ticker.mark_price.is_finite() && ticker.mark_price > 0.0,
+            "invalid Bybit mark price for `{symbol}`: {}",
+            ticker.mark_price
+        );
+        Ok(ticker.mark_price)
+    }
+
+    pub async fn get_candles(
+        &self,
+        symbol: &str,
+        interval: CandleInterval,
+        limit: usize,
+    ) -> Result<Vec<MarketCandle>> {
+        ensure!(
+            (1..=200).contains(&limit),
+            "Bybit candle limit must be 1..=200"
+        );
+        let response: MarkPriceKlineResult = self
+            .send_request(
+                Method::GET,
+                "/v5/market/mark-price-kline",
+                vec![
+                    ("category", "linear".to_string()),
+                    ("symbol", symbol.to_string()),
+                    ("interval", bybit_candle_interval(interval).to_string()),
+                    ("limit", limit.to_string()),
+                ],
+                None,
+                AuthMode::None,
+            )
+            .await?;
+        parse_mark_price_candles(response.list)
     }
 
     pub async fn submit_order(&self, req: OrderRequest) -> Result<OrderReceipt> {
@@ -428,6 +481,44 @@ impl BybitRestClient {
     }
 }
 
+fn bybit_candle_interval(interval: CandleInterval) -> &'static str {
+    match interval {
+        CandleInterval::OneMinute => "1",
+        CandleInterval::FiveMinutes => "5",
+        CandleInterval::FifteenMinutes => "15",
+        CandleInterval::OneHour => "60",
+    }
+}
+
+fn parse_mark_price_candles(rows: Vec<Vec<String>>) -> Result<Vec<MarketCandle>> {
+    let mut candles = rows
+        .into_iter()
+        .map(|row| {
+            ensure!(row.len() >= 5, "Bybit mark-price kline row is incomplete");
+            let open_time_ms = row[0]
+                .parse::<i64>()
+                .context("invalid Bybit kline open time")?;
+            let parse_price = |index: usize, label: &str| {
+                row[index]
+                    .parse::<f64>()
+                    .with_context(|| format!("invalid Bybit kline {label}"))
+            };
+            MarketCandle::try_new(
+                Utc.timestamp_millis_opt(open_time_ms)
+                    .single()
+                    .context("invalid Bybit kline timestamp")?,
+                parse_price(1, "open")?,
+                parse_price(2, "high")?,
+                parse_price(3, "low")?,
+                parse_price(4, "close")?,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    candles.sort_by_key(|candle| candle.open_time);
+    Ok(candles)
+}
+
 fn classify_dispatched_submit_error(error: anyhow::Error) -> anyhow::Error {
     if error.chain().any(|cause| {
         cause
@@ -507,6 +598,23 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn mark_price_candles_are_projected_in_time_order() {
+        let candles = parse_mark_price_candles(
+            vec![
+                vec!["120000", "102", "105", "101", "104"],
+                vec!["60000", "100", "103", "99", "102"],
+            ]
+            .into_iter()
+            .map(|row| row.into_iter().map(str::to_string).collect())
+            .collect(),
+        )
+        .unwrap();
+
+        assert_eq!(candles[0].open_time.timestamp_millis(), 60_000);
+        assert_eq!(candles[1].close, 104.0);
+    }
+
     #[tokio::test]
     async fn requests_include_required_query_parameters_for_public_and_private_calls() {
         let server = MockHttpServer::spawn(vec![
@@ -577,6 +685,63 @@ mod tests {
                 "accountType=UNIFIED"
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn mark_price_queries_the_public_linear_ticker() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":0,"retMsg":"OK","result":{"category":"linear","list":[{"symbol":"BTCUSDT","markPrice":"64000.25"}]}}"#,
+        )])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        let mark_price = client.get_mark_price("BTCUSDT").await.unwrap();
+        let requests = server.requests();
+
+        assert_eq!(mark_price, 64_000.25);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].path,
+            "/v5/market/tickers?category=linear&symbol=BTCUSDT"
+        );
+        assert!(!requests[0].headers.contains_key("x-bapi-api-key"));
+    }
+
+    #[tokio::test]
+    async fn mark_price_candles_use_the_public_kline_endpoint() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"retCode":0,"retMsg":"OK","result":{"category":"linear","list":[["1699999800000","64000","64100","63900","64050"]]}}"#,
+        )])
+        .await;
+        let client = BybitRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            build_http_client(&server.base_url()),
+        );
+
+        let candles = client
+            .get_candles("BTCUSDT", CandleInterval::FiveMinutes, 20)
+            .await
+            .unwrap();
+        let requests = server.requests();
+
+        assert_eq!(candles[0].close, 64_050.0);
+        assert_eq!(
+            requests[0].path,
+            "/v5/market/mark-price-kline?category=linear&symbol=BTCUSDT&interval=5&limit=20"
+        );
+        assert!(!requests[0].headers.contains_key("x-bapi-api-key"));
     }
 
     #[tokio::test]

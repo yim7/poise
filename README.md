@@ -48,9 +48,12 @@ Poise 是个人策略运行实验项目。源码公开主要为了透明记录�
 ```bash
 mkdir -p "$HOME/poise-instances/testnet"
 cp configs/demo.toml "$HOME/poise-instances/testnet/config.toml"
+chmod 700 "$HOME/poise-instances/testnet"
+chmod 600 "$HOME/poise-instances/testnet/config.toml"
 ```
 
 把实例目录里的 `[exchange]` 改成当前实例要连接的交易所和凭证。一个实例只能选择一个交易所。
+实例目录还会保存 SQLite 和日志；运行前应确保实例目录及其子目录为 `700`、其中的配置、数据库和日志文件为 `600`。
 
 ### 2. 选择交易所
 

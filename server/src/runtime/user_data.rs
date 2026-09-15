@@ -44,16 +44,10 @@ pub(super) fn spawn_user_task(
 
             let instrument = event.instrument().clone();
             let Some(track_id) = state.reconcile.runtime.resolve_track_id(&instrument).await else {
-                state.runtime_health.record_error_now(
-                    RuntimeHealthComponent::UserData,
-                    format!(
-                        "received user data for unknown instrument {}:{}",
-                        instrument.venue.as_str(),
-                        instrument.symbol
-                    ),
-                );
-                tracing::warn!(
-                    "received user data for unknown instrument {}:{}",
+                // Account-wide streams also contain instruments not managed by this instance.
+                // Skipping one must neither create nor clear a task/track health failure.
+                tracing::debug!(
+                    "ignoring user data for unmanaged instrument {}:{}",
                     instrument.venue.as_str(),
                     instrument.symbol
                 );

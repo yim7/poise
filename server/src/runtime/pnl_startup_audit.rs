@@ -465,6 +465,10 @@ mod tests {
         ) -> Result<mpsc::Receiver<poise_application::exchange::MarketDataTick>> {
             anyhow::bail!("market data should not run before PNL capability gate")
         }
+
+        async fn get_mark_price(&self, _instrument: &Instrument) -> Result<f64> {
+            anyhow::bail!("mark price should not run before PNL capability gate")
+        }
     }
 
     #[async_trait::async_trait]

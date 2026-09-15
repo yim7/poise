@@ -19,6 +19,26 @@ pub(crate) struct PerpAssetMeta {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct PerpAssetContext {
+    #[serde(rename = "markPx")]
+    pub mark_price: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct CandleSnapshot {
+    #[serde(rename = "t")]
+    pub open_time_ms: i64,
+    #[serde(rename = "o")]
+    pub open: String,
+    #[serde(rename = "h")]
+    pub high: String,
+    #[serde(rename = "l")]
+    pub low: String,
+    #[serde(rename = "c")]
+    pub close: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct PerpDexMeta {
     pub name: String,
 }
@@ -42,7 +62,7 @@ pub(crate) struct SpotClearinghouseStateResponse {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct SpotBalance {
     pub coin: String,
-    pub token: u32,
+    pub token: Option<u32>,
     pub total: String,
     pub hold: String,
 }
@@ -188,7 +208,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.balances[0].coin, "USDC");
-        assert_eq!(response.balances[0].token, 0);
+        assert_eq!(response.balances[0].token, Some(0));
         assert_eq!(
             response.token_to_available_after_maintenance[0],
             (0, "871.15175301".to_string())

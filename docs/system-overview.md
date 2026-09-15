@@ -105,13 +105,23 @@ external fact / command / effect result
 - `out_of_band_policy` 是每个 track 的单字段枚举配置，默认 `freeze`；`flatten` 可以用简写，也可以用对象形式配置 `trigger` 和 `recover`。
 - `risk_acquisition` 是每个 track 的参数子表，TOML 写作 `[tracks.risk_acquisition]`，归属于它前面最近的 `[[tracks]]`；省略子表时使用默认参数，不支持 `risk_acquisition = { ... }` 行内对象形式。
 
-当前交易所接入只覆盖 Poise 运行需要的合约能力。Hyperliquid 适配器只接入 perpetuals，不提供 spot、提现、划转、TWAP 或 vault 运维功能；可选 `vault_address` 只作为 Hyperliquid action 签名上下文进入适配器内部。Hyperliquid 默认 perpetuals 和 HIP-3 perpetuals 可以在同一实例中混配，适配器按 symbol 解析默认 dex 或 `{dex}:{coin}` HIP-3 dex 上下文；账户资产按 Hyperliquid 账户级共享余额处理。Hyperliquid standard mode 使用账户级 perps `clearinghouseState.withdrawable` 作为可用保证金口径；unified account / portfolio margin 使用 `spotClearinghouseState` 的 USDC 可用余额作为启动容量口径。OKX 适配器只接入 `SWAP` 永续合约，REST 覆盖规则查询、账户摘要、持仓、open orders、下单、撤单、cancel all 和启动期杠杆设置；WebSocket 覆盖 ticker、mark price、订单更新、成交 PNL、持仓更新、断线重连和重订阅。OKX 当前只支持 `cross` 保证金模式和 `net` 持仓模式，不提供 spot、期权、划转、提现或资金账户操作。
+当前交易所接入只覆盖 Poise 运行需要的合约能力。Hyperliquid 适配器只接入 perpetuals，不提供 spot、提现、划转、TWAP 或 vault 运维功能；可选 `vault_address` 只作为 Hyperliquid action 签名上下文进入适配器内部。Hyperliquid 默认 perpetuals 和 HIP-3 perpetuals 可以在同一实例中混配，适配器按 symbol 解析默认 dex 或 `{dex}:{coin}` HIP-3 dex 上下文；账户资产按 Hyperliquid 账户级共享余额处理。Hyperliquid standard mode 使用账户级 perps `clearinghouseState.withdrawable` 作为可用保证金口径；unified account / portfolio margin 使用 `spotClearinghouseState` 中身份明确为 token `0` 的 USDC 余额作为启动容量口径，并忽略其他缺失 token identity 的余额行。Hyperliquid 响应解析错误只报告请求类型和结构错误，不记录原始响应体；幂等的 `/info` 查询对连接、超时和响应体传输错误做有限重试，写入用的 `/exchange` 不进入这条重试路径。Bybit Unified Account 的 `totalAvailableBalance` 是 USD 估值，不能直接当作 USDT/USDC 标的的可用余额；当前没有 USD 与稳定币之间的权威换算事实，因此这类标的会在启动容量检查中显式失败。OKX 适配器只接入 `SWAP` 永续合约，REST 覆盖规则查询、账户摘要、持仓、open orders、下单、撤单、cancel all 和启动期杠杆设置；WebSocket 覆盖 ticker、mark price、订单更新、成交 PNL、持仓更新、断线重连和重订阅。OKX 当前只支持 `cross` 保证金模式和 `net` 持仓模式，不提供 spot、期权、划转、提现或资金账户操作。
 
 `TrackSpec::to_track_definition(venue)` 负责把配置字段投影为 `TrackDefinition`，并触发 core 层策略、风险和默认值校验。
 
+Hyperliquid 行情和账户 WebSocket 在连接、订阅阶段使用 10 秒超时；接收空闲 15 秒发送应用层心跳，45 秒无任何响应则断开重连并重新订阅。发送心跳不会延长接收期限。心跳仅证明连接可响应，不能替代有效报价，也不清除策略的行情过期标记；该标记仍由新报价清除。
+
+账户级事件流可以包含本实例未管理的标的。启动回放和运行时路由均跳过这些事件，仅记录 debug 日志，不创建或清除任务健康错误，不更新任何 Track。受管理标的的处理失败及事件接收通道关闭仍按真实异常报告；账户容量由账户摘要更新，不依赖对未管理标的事件的处理。
+
 ## 本地 Web 控制台与在线配置应用
 
+运行工作区按用户判断顺序组织：顶部标的与仓位概览展示持有仓位、当前执行目标和累计盈亏；主区域以价格图为中心，旁边展示当前执行原因、下一次释放条件和目标明细。策略参数、订单明细与人工操作放在下方，内部 revision 等放入折叠诊断。主操作“调整策略”直接进入配置页，沿用预览、保存并应用流程。视觉采用深石墨底色与低饱和青绿，暖色提示待满足条件，盈亏颜色表达正负。图表默认用行情、订单和触发价确定范围，完整策略区间由用户切换显示，避免远处上下界压缩行情波动。
+
 server 在 loopback 地址同源提供唯一的本地 Web 控制台、HTTP API 和 WebSocket。控制台包含总览、Track 与系统页；它只显示 committed DTO 并提交命令或候选配置，不计算策略、风险、数量、名义价值或 PNL，不直接访问交易所、写入实例文件或拥有另一套运行状态。`bind_address` 不是远程控制面，不应暴露到不受信任网络。
+
+Track 运行页把行情和执行状态放在同一张图上。`GET /tracks/:id/chart` 通过 `MarketDataPort` 返回最近 100 根统一 OHLC，支持 `1m`、`5m`、`15m` 和 `1h`。前端定期重新读取交易所快照，并用 WebSocket 已推送的当前 mark price 只更新尚未结束的展示 K 线；下一次 server 快照覆盖该临时投影。这个展示聚合不进入 engine、read model 或 persistence，也不能作为策略输入。
+
+图上的执行线不使用“潜在订单”概括不同状态：`Working` / `CancelPending` binding 显示为交易所挂单，`SubmitAuthorized` / `SubmitPending` / `CancelAfterSubmit` 显示为提交中订单；risk acquisition 的 `next_advantage_price` 单独显示为潜在挂单条件，它只是下一次释放风险的触发价，不表示订单已经生成。策略上下界和当前策略价是独立参考线。所有订单线都来自 committed binding ledger，触发线来自 committed acquisition diagnostics；前端不从策略参数反推订单。
 
 Track 配置接口把字段分成两类：价格带、exposure、`notional_per_unit`、风险限制、曲线、带外策略和 acquisition 参数可在线编辑；identity、instrument、交易所凭证、`leverage` 与 `tick_timeout_secs` 是 restart-required 事实。在线编辑先从 active 定义生成候选，使用当前 committed position、有效行情、`InstrumentSpec` 和账户容量预览策略、风险、quantity、notional 与阻塞原因。预览纯只读，缺少必要事实、配置非法、资产不匹配、venue minimum 或容量不足时失败关闭。
 
@@ -130,9 +140,9 @@ Track 配置接口把字段分成两类：价格带、exposure、`notional_per_u
 当前有效 port 边界：
 
 - `ExecutionPort`：下单、撤单、cancel all、持仓查询、open orders 查询。
-- `MarketDataPort`：订阅当前 track 需要的价格流。
+- `MarketDataPort`：订阅当前 track 需要的价格流，提供启动与 dry-run 使用的一次性 mark price 查询，并提供控制台使用的统一 OHLC K 线快照。K 线 interval 和 OHLC 是 canonical 结构；endpoint、数组字段、时间顺序和价格类型差异由各交易所 adapter 转换。
 - `AccountPort`：recent track PNL capability 和 user data 订阅。
-- `AccountSummaryPort`：账户摘要，用于 account monitor 和部分启动资金策略。
+- `AccountSummaryPort`：带估值资产和分资产余额的账户摘要，用于 account monitor 和启动资金策略；不提供会抹掉资产单位的便捷余额方法。
 - `MetadataPort`：交易规则和交易所时间。
 
 port 的共享契约比方法签名更重要：
@@ -140,9 +150,9 @@ port 的共享契约比方法签名更重要：
 - `ExecutionPort` 必须区分确定失败与结果未知。`SubmitOutcomeUnknown` 只表示请求已经越过 dispatch 边界，交易所可能接受了订单，但本地没有权威 receipt；它不能被当成普通失败后直接提交替代订单。当前 session 会保留 submit effect、client order identity 和 binding 所有权，把 exchange freshness 标为需要对账，并通过完整 position/open-orders 快照或后续订单事实裁决。只有权威事实解决这笔 submit 后，队列才能释放它；`track_effects` journal 不参与这条所有权协议。
 - open orders 必须完成全部分页后才能构造完整快照；无法证明完整时应返回错误。cancel ACK 只表示交易所接受撤单请求，terminal 状态仍由权威查询或流确认。
 - recent PNL 请求携带 required window，结果携带 covered window 与 completeness；空记录不等于 `Unsupported`，也不能在覆盖范围未知时伪装成 complete。
-- 启动容量及其快照由 server 私有 runtime guard 使用显式 startup leverage、账户余额和 `InstrumentSpec` 计算，不属于 application 的交易所 port。insufficient-margin 后立即激活账户 gate。当前进程内不查询运行期“容量快照”来解除该 gate，也不存在 adapter 隐藏倍率；新增风险持续禁止，重启时再按新的启动事实重新计算。
+- 启动容量及其快照由 server 私有 runtime guard 使用显式 startup leverage、账户余额和 `InstrumentSpec` 计算，不属于 application 的交易所 port。线性标的只能使用与 `InstrumentSpec::notional_asset` 相同的余额；inverse 标的使用 settlement asset 余额并通过 mark price 换算。资产不一致且没有权威换算事实时显式失败，不假设 USD、USDT、USDC 等值。insufficient-margin 后立即激活账户 gate。当前进程内不查询运行期“容量快照”来解除该 gate，也不存在 adapter 隐藏倍率；新增风险持续禁止，重启时再按新的启动事实重新计算。
 - metadata 缺少 base、quote、settlement、contract value、tick、lot 或最小量等必要事实时必须失败，不能根据 symbol 猜测。
-- Binance 和 Bybit adapter 各自私有维护 REST、WebSocket 与 recent-PNL mapper 共用的 instrument registry；`MetadataPort::get_exchange_info` 是填充 registry 的唯一入口。registry 缺项、wire asset 与 metadata 不一致，或成交消息缺少完整 fee value/asset 时显式失败。actual cashflow 的 value/asset 来自交易所消息，canonical quantity unit 来自同一份 `InstrumentSpec`，server 和 application 不解析 symbol 补事实。
+- Binance adapter 私有维护 REST recent-PNL 与 WebSocket mapper 共用的 instrument registry；Bybit adapter 私有维护 REST metadata 与 WebSocket execution mapper 共用的 registry，Bybit recent PNL capability 为 `Unsupported`。`MetadataPort::get_exchange_info` 是填充这些 registry 的唯一入口。registry 缺项、wire asset 与 metadata 不一致，或成交消息缺少完整 fee value/asset 时显式失败。actual cashflow 的 value/asset 来自交易所消息，canonical quantity unit 来自同一份 `InstrumentSpec`，server 和 application 不解析 symbol 补事实。
 
 新增交易所时按下面顺序接入：
 
@@ -169,7 +179,7 @@ SQLite 只接受代码当前定义的精确 schema。表结构不匹配时启动
 
 fresh session 的第一笔有效策略行情采用保守 acquisition 初始化：如果 risk-approved target 要增加当前真实仓位的风险，acquisition frontier 从当前仓位开始；如果目标降低风险，则立即允许减到 risk-approved target；跨零目标先只允许平到 `0`。这次初始化不使用 `initial_ratio`，也不会因为重启授予新增风险。`initial_ratio` 只用于同一进程 session 中后来形成的普通 acquisition episode。stale 计时从 fresh session 的第一笔有效决策开始，因此进程离线时间不计入 `stale_release_minutes`。
 
-配置 dry-run 是启动前只读检查，入口是 `poise-server --instance-dir <dir> --dry-run`。它读取同一份 `config.toml`，连接交易所只读 port，加载账户摘要、symbol metadata 和可用的 mark price，然后输出 JSON 格式的 `ConfigDryRunResponse`。dry-run 不初始化 SQLite，不执行 startup-only 杠杆设置，不下单，不订阅 market data 或 user data，也不启动 runtime task。输出中的配置解释和容量估算只是当前配置与交易所 metadata/account snapshot 的读模型，不写入持久化，也不作为 engine、PNL 或恢复流程的事实源。
+配置 dry-run 是启动前只读检查，入口是 `poise-server --instance-dir <dir> --dry-run`。它读取同一份 `config.toml`，连接交易所只读 port，加载账户摘要、symbol metadata 和一次性 mark price，然后输出 JSON 格式的 `ConfigDryRunResponse`。四个 adapter 都必须实现这项只读价格查询，不能用默认 `None` 隐藏缺失能力。dry-run 不初始化 SQLite，不执行 startup-only 杠杆设置，不下单，不订阅 market data 或 user data，也不启动 runtime task。输出中的配置解释和容量估算只是当前配置与交易所 metadata/account snapshot 的读模型，不写入持久化，也不作为 engine、PNL 或恢复流程的事实源。
 
 dry-run 对每个 track 解释 canonical position quantity：`PositionBasis::BaseAsset` 按价格带中心把 `notional_per_unit` 换算为 base asset quantity；`PositionBasis::Contracts` 按 `contract_value` 换算为 contracts。loss limit 资产来自 `InstrumentSpec::settlement_asset`。容量估算使用 instrument 对应的 available balance、mark price、startup leverage 和同一份 spec 计算最大 position quantity 与名义金额；缺必要 metadata、余额或 mark price，或者 unit quantity 低于 `min_position_qty` / `min_notional` 时，dry-run 给出包含 track、symbol、字段名和计算值的错误。
 
@@ -360,6 +370,7 @@ Available venue 的 recent fills 和 funding 都映射为 `TrackPnlRecord`，不
 - `GET /account`
 - `GET /tracks`
 - `GET /tracks/:id`
+- `GET /tracks/:id/chart`
 - `POST /tracks/:id/commands`
 - `GET /debug/tracks/:id/diagnostics`
 - `GET /debug/tracks/:id/recent-fills-audit`

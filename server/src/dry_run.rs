@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow};
 use poise_application::exchange::{AccountSummarySnapshot, ExchangePorts, MarketDataPort};
 use poise_core::instrument::{InstrumentSpec, PositionBasis};
 use poise_core::track::{Instrument, TrackDefinition};
@@ -7,6 +7,7 @@ use poise_protocol::{
     InstrumentView, TrackPositionQuantityUnitView,
 };
 
+use crate::account_capacity::estimate_account_capacity;
 use crate::config::Config;
 use crate::config_explain::{TrackConfigExplanation, explain_track_config};
 use crate::exchange_startup::build_track_leverage_index;
@@ -89,7 +90,7 @@ fn project_track_explanation(
     explanation: TrackConfigExplanation,
     instrument: &Instrument,
     leverage: u32,
-    capacity: Option<ConfigDryRunCapacityView>,
+    capacity: ConfigDryRunCapacityView,
 ) -> ConfigDryRunTrackView {
     ConfigDryRunTrackView {
         track_id: explanation.track_id,
@@ -126,7 +127,7 @@ async fn estimate_capacity(
     account: &AccountSummarySnapshot,
     leverage: u32,
     market_data: &dyn MarketDataPort,
-) -> Result<Option<ConfigDryRunCapacityView>> {
+) -> Result<ConfigDryRunCapacityView> {
     let mark_price = market_data
         .get_mark_price(track.instrument())
         .await
@@ -137,58 +138,21 @@ async fn estimate_capacity(
                 track.instrument().symbol
             )
         })?;
-    let Some(mark_price) = mark_price else {
-        if matches!(
-            instrument_spec.position_basis(),
-            PositionBasis::Contracts { .. }
-        ) {
-            return Err(anyhow!(
-                "missing mark price for inverse dry-run capacity on `{}`",
+    let capacity = estimate_account_capacity(account, instrument_spec, Some(mark_price), leverage)
+        .map_err(|error| {
+            anyhow!(
+                "failed to estimate dry-run capacity for track `{}` symbol `{}`: {error}",
+                track.track_id().as_str(),
                 track.instrument().symbol
-            ));
-        }
-        return Ok(None);
-    };
-    ensure!(
-        mark_price.is_finite() && mark_price > 0.0,
-        "invalid mark price for dry-run capacity on `{}`: got {}",
-        track.instrument().symbol,
-        mark_price
-    );
-
-    let available_asset = instrument_spec.settlement_asset().as_str().to_string();
-    let available = match instrument_spec.position_basis() {
-        PositionBasis::Contracts { .. } => account
-            .available_for_asset(&available_asset)
-            .with_context(|| {
-                format!(
-                    "missing available balance for settlement asset `{}`",
-                    available_asset
-                )
-            })?,
-        PositionBasis::BaseAsset => {
-            match account.available_for_asset(&available_asset).or_else(|| {
-                (account.valuation_asset() == instrument_spec.notional_asset())
-                    .then(|| account.available().map(|amount| amount.value()))
-                    .flatten()
-            }) {
-                Some(available) => available,
-                None => return Ok(None),
-            }
-        }
-    };
-    ensure!(
-        available.is_finite(),
-        "invalid available balance for `{}`: got {}",
-        available_asset,
-        available
-    );
-    let available = available.max(0.0);
+            )
+        })?;
+    let available_asset = capacity.available.asset().as_str().to_string();
+    let available = capacity.available.value();
 
     let (estimated_max_position_qty, estimated_max_notional, estimated_max_notional_asset) =
         match instrument_spec.position_basis() {
             PositionBasis::BaseAsset => {
-                let estimated_max_notional = available * leverage as f64;
+                let estimated_max_notional = capacity.max_increase_notional;
                 (
                     estimated_max_notional / mark_price,
                     estimated_max_notional,
@@ -197,8 +161,7 @@ async fn estimate_capacity(
             }
             PositionBasis::Contracts { contract_value } => {
                 let contract_notional = contract_value.value();
-                let estimated_contracts =
-                    available * mark_price * leverage as f64 / contract_notional;
+                let estimated_contracts = capacity.max_increase_notional / contract_notional;
                 (
                     estimated_contracts,
                     estimated_contracts * contract_notional,
@@ -207,7 +170,7 @@ async fn estimate_capacity(
             }
         };
 
-    Ok(Some(ConfigDryRunCapacityView {
+    Ok(ConfigDryRunCapacityView {
         available,
         available_asset,
         mark_price,
@@ -215,7 +178,7 @@ async fn estimate_capacity(
         estimated_max_position_qty,
         estimated_max_notional,
         estimated_max_notional_asset,
-    }))
+    })
 }
 
 #[cfg(test)]
@@ -296,7 +259,7 @@ total_loss_limit = 0.03
         assert_eq!(track.position_qty_per_unit, 3.0);
         assert_eq!(track.unit_notional_asset, "USD");
         assert_eq!(track.loss_limit_asset, "BTC");
-        let capacity = track.capacity.as_ref().unwrap();
+        let capacity = &track.capacity;
         assert_eq!(capacity.available, 0.25);
         assert_eq!(capacity.available_asset, "BTC");
         assert_eq!(capacity.mark_price, 60_000.0);
@@ -357,6 +320,150 @@ total_loss_limit = 0.03
         assert!(error.contains("0.5"));
         assert!(error.contains("min_qty"));
         assert!(error.contains("1"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_rejects_missing_mark_price_for_linear_capacity() {
+        let config = crate::config::parse_config(
+            r#"
+[exchange]
+venue = "bybit"
+api_key = "demo-key"
+api_secret = "demo-secret"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 60000.0
+upper_price = 70000.0
+long_exposure_units = 4.0
+short_exposure_units = 6.0
+notional_per_unit = 300.0
+leverage = 3
+daily_loss_limit = 0.01
+total_loss_limit = 0.03
+"#,
+        )
+        .unwrap();
+        let exchange = Arc::new(RecordingDryRunExchange {
+            instrument_spec: Mutex::new(linear_spec()),
+            mark_price: Mutex::new(None),
+            ..RecordingDryRunExchange::default()
+        });
+
+        let error = run_config_dry_run_with_ports(
+            &config,
+            ExchangePorts::new(
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange,
+            ),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("BTCUSDT"));
+        assert!(error.contains("mark price"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_rejects_non_positive_mark_price_with_track_context() {
+        let config = crate::config::parse_config(
+            r#"
+[exchange]
+venue = "bybit"
+api_key = "demo-key"
+api_secret = "demo-secret"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 60000.0
+upper_price = 70000.0
+long_exposure_units = 4.0
+short_exposure_units = 6.0
+notional_per_unit = 300.0
+leverage = 3
+daily_loss_limit = 0.01
+total_loss_limit = 0.03
+"#,
+        )
+        .unwrap();
+        let exchange = Arc::new(RecordingDryRunExchange {
+            instrument_spec: Mutex::new(linear_spec()),
+            mark_price: Mutex::new(Some(0.0)),
+            ..RecordingDryRunExchange::default()
+        });
+
+        let error = run_config_dry_run_with_ports(
+            &config,
+            ExchangePorts::new(
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange,
+            ),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("btc-core"));
+        assert!(error.contains("BTCUSDT"));
+        assert!(error.contains("invalid mark price"));
+        assert!(error.contains('0'));
+    }
+
+    #[tokio::test]
+    async fn dry_run_rejects_linear_available_balance_in_a_different_asset() {
+        let config = crate::config::parse_config(
+            r#"
+[exchange]
+venue = "bybit"
+api_key = "demo-key"
+api_secret = "demo-secret"
+
+[[tracks]]
+track_id = "btc-core"
+symbol = "BTCUSDT"
+lower_price = 60000.0
+upper_price = 70000.0
+long_exposure_units = 4.0
+short_exposure_units = 6.0
+notional_per_unit = 300.0
+leverage = 3
+daily_loss_limit = 0.01
+total_loss_limit = 0.03
+"#,
+        )
+        .unwrap();
+        let exchange = Arc::new(RecordingDryRunExchange {
+            instrument_spec: Mutex::new(linear_spec()),
+            ..RecordingDryRunExchange::default()
+        });
+
+        let error = run_config_dry_run_with_ports(
+            &config,
+            ExchangePorts::new(
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange.clone(),
+                exchange,
+            ),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("btc-core"));
+        assert!(error.contains("BTCUSDT"));
+        assert!(error.contains("USD"));
+        assert!(error.contains("USDT"));
     }
 
     fn inverse_config_with_notional_per_unit(notional_per_unit: f64) -> crate::config::Config {
@@ -516,10 +623,30 @@ total_loss_limit = 0.03
             panic!("dry-run must not subscribe market data")
         }
 
-        async fn get_mark_price(&self, _instrument: &Instrument) -> Result<Option<f64>> {
-            self.record("mark_price:BTC-USD-SWAP");
-            Ok(*self.mark_price.lock().unwrap())
+        async fn get_mark_price(&self, instrument: &Instrument) -> Result<f64> {
+            self.record(format!("mark_price:{}", instrument.symbol));
+            self.mark_price
+                .lock()
+                .unwrap()
+                .ok_or_else(|| anyhow!("missing mark price for `{}`", instrument.symbol))
         }
+    }
+
+    fn linear_spec() -> InstrumentSpec {
+        let instrument = Instrument::new(Venue::Bybit, "BTCUSDT");
+        let usdt = Asset::try_new("USDT").unwrap();
+        InstrumentSpec::try_linear(
+            instrument,
+            Asset::try_new("BTC").unwrap(),
+            usdt.clone(),
+            usdt.clone(),
+            Default::default(),
+            0.1,
+            0.001,
+            0.001,
+            Amount::new(5.0, usdt).unwrap(),
+        )
+        .unwrap()
     }
 
     fn inverse_spec() -> InstrumentSpec {

@@ -51,22 +51,6 @@ pub(crate) fn account_summary_from_balance(
     .map_err(anyhow::Error::msg)
 }
 
-pub(crate) fn available_balance_from_balance(
-    value: &BalanceSnapshot,
-    quote_asset: &str,
-) -> Result<f64> {
-    let detail = value
-        .details
-        .iter()
-        .find(|detail| detail.currency == quote_asset)
-        .with_context(|| format!("missing OKX balance detail for quote asset `{quote_asset}`"))?;
-
-    let available = detail.avail_bal.as_deref().with_context(|| {
-        format!("missing OKX available balance for quote asset `{quote_asset}`")
-    })?;
-    parse_decimal(&format!("details[{quote_asset}].availBal"), available)
-}
-
 pub(crate) fn position_from_snapshot_with_metadata(
     value: PositionSnapshot,
     metadata: &OkxInstrumentMetadata,
@@ -606,32 +590,6 @@ mod tests {
         assert_eq!(summary.unrealized_pnl(), None);
         assert_eq!(summary.available_for_asset("BTC"), Some(0.2));
         assert_eq!(summary.available_for_asset("USDT"), Some(9_800.25));
-    }
-
-    #[test]
-    fn maps_available_balance_for_quote_asset() {
-        let balance = BalanceSnapshot {
-            total_eq: "12500.5".to_string(),
-            details: vec![
-                BalanceDetail {
-                    currency: "USDT".to_string(),
-                    avail_bal: Some("9800.25".to_string()),
-                },
-                BalanceDetail {
-                    currency: "BTC".to_string(),
-                    avail_bal: Some("0.2".to_string()),
-                },
-            ],
-        };
-
-        assert_eq!(
-            available_balance_from_balance(&balance, "USDT").unwrap(),
-            9_800.25
-        );
-        assert_eq!(
-            available_balance_from_balance(&balance, "BTC").unwrap(),
-            0.2
-        );
     }
 
     #[test]

@@ -876,7 +876,7 @@ total_loss_limit = 600.0
             &self,
         ) -> Result<poise_application::exchange::AccountSummarySnapshot> {
             Ok(crate::test_support::test_account_summary_snapshot(
-                "USD",
+                "USDT",
                 1_000_000.0,
                 Some(1_000_000.0),
                 &[],
@@ -996,6 +996,10 @@ total_loss_limit = 600.0
                 .remove(&instrument.symbol)
                 .ok_or_else(|| anyhow!("missing price receiver for {}", instrument.symbol))
         }
+
+        async fn get_mark_price(&self, _instrument: &Instrument) -> Result<f64> {
+            Ok(100.0)
+        }
     }
 
     struct FailingStartMarketData;
@@ -1008,6 +1012,10 @@ total_loss_limit = 600.0
         ) -> Result<mpsc::Receiver<MarketDataTick>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
+        }
+
+        async fn get_mark_price(&self, _instrument: &Instrument) -> Result<f64> {
+            Ok(100.0)
         }
     }
 

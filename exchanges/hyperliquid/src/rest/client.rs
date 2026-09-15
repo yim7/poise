@@ -2,15 +2,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, ensure};
+use chrono::{TimeZone, Utc};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use tokio::sync::{Mutex as AsyncMutex, OnceCell};
+use tokio::{
+    sync::{Mutex as AsyncMutex, OnceCell},
+    time::{Duration, sleep},
+};
 
 use poise_application::exchange::TrackPnlRecord;
 use poise_application::exchange::{
-    AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt,
-    OrderRequest as PortOrderRequest, OrderStatus, PnlHistoryWindow, Position, RecentTrackPnlBatch,
+    AccountSummarySnapshot, CandleInterval, ExchangeInfo, ExchangeOrder, MarketCandle,
+    OrderReceipt, OrderRequest as PortOrderRequest, OrderStatus, PnlHistoryWindow, Position,
+    RecentTrackPnlBatch,
 };
 use poise_core::types::PriceRounding;
 
@@ -26,8 +31,9 @@ use crate::rest::actions::{
 };
 use crate::rest::error::HyperliquidRestError;
 use crate::rest::models::{
-    ClearinghouseStateResponse, MetaResponse, OpenOrderResponse, PerpAssetMeta, PerpDexMeta,
-    SpotClearinghouseStateResponse, UserFillResponse, UserFundingResponse,
+    CandleSnapshot, ClearinghouseStateResponse, MetaResponse, OpenOrderResponse, PerpAssetContext,
+    PerpAssetMeta, PerpDexMeta, SpotClearinghouseStateResponse, UserFillResponse,
+    UserFundingResponse,
 };
 use crate::rules::normalize_perp_price;
 use crate::signing::{HyperliquidChain, action_hash, sign_l1_action};
@@ -36,6 +42,11 @@ const MAX_DECIMAL_SCALE: u32 = 16;
 const USER_FILLS_PAGE_SIZE: usize = 2_000;
 const USER_FILLS_RETENTION_LIMIT: usize = 10_000;
 const USER_FUNDING_PAGE_SIZE: usize = 500;
+const INFO_TRANSPORT_ATTEMPTS: usize = 5;
+#[cfg(test)]
+const INFO_TRANSPORT_RETRY_DELAY: Duration = Duration::from_millis(1);
+#[cfg(not(test))]
+const INFO_TRANSPORT_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 pub(crate) struct HyperliquidRestClient {
     http: reqwest::Client,
@@ -145,6 +156,52 @@ impl HyperliquidRestClient {
         let dex_ref = parse_perp_dex(symbol)?;
         let meta = self.meta(dex_ref).await?;
         build_exchange_info(&meta, symbol)
+    }
+
+    pub(crate) async fn get_mark_price(&self, symbol: &str) -> Result<f64> {
+        let dex_ref = parse_perp_dex(symbol)?;
+        let body = with_perp_dex(json!({ "type": "metaAndAssetCtxs" }), dex_ref);
+        let (meta, contexts): (MetaResponse, Vec<PerpAssetContext>) = self.post_info(&body).await?;
+        let index = meta
+            .universe
+            .iter()
+            .position(|asset| asset.name == symbol)
+            .with_context(|| format!("missing Hyperliquid metadata for `{symbol}`"))?;
+        let context = contexts.get(index).with_context(|| {
+            format!("missing Hyperliquid asset context for `{symbol}` at index {index}")
+        })?;
+        let mark_price = parse_decimal("asset context markPx", &context.mark_price)?;
+        ensure!(
+            mark_price > 0.0,
+            "invalid Hyperliquid mark price for `{symbol}`: {mark_price}"
+        );
+        Ok(mark_price)
+    }
+
+    pub(crate) async fn get_candles(
+        &self,
+        symbol: &str,
+        interval: CandleInterval,
+        limit: usize,
+    ) -> Result<Vec<MarketCandle>> {
+        ensure!(
+            (1..=500).contains(&limit),
+            "Hyperliquid candle limit must be 1..=500"
+        );
+        let end_time_ms = (self.timestamp_provider)() as i64;
+        let start_time_ms =
+            end_time_ms.saturating_sub(interval.duration_millis().saturating_mul(limit as i64 + 1));
+        let body = json!({
+            "type": "candleSnapshot",
+            "req": {
+                "coin": symbol,
+                "interval": hyperliquid_candle_interval(interval),
+                "startTime": start_time_ms,
+                "endTime": end_time_ms,
+            }
+        });
+        let rows: Vec<CandleSnapshot> = self.post_info(&body).await?;
+        parse_candle_snapshots(rows)
     }
 
     pub(crate) async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
@@ -557,7 +614,29 @@ impl HyperliquidRestClient {
     }
 
     async fn post_info<T: DeserializeOwned>(&self, body: &serde_json::Value) -> Result<T> {
-        self.post_json("/info", body).await
+        let request_type = body
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let mut attempt = 1;
+        loop {
+            match self.post_json("/info", body).await {
+                Err(error)
+                    if attempt < INFO_TRANSPORT_ATTEMPTS
+                        && is_retryable_info_transport_error(&error) =>
+                {
+                    tracing::warn!(
+                        request_type,
+                        attempt,
+                        max_attempts = INFO_TRANSPORT_ATTEMPTS,
+                        "Hyperliquid info transport failed; retrying"
+                    );
+                    attempt += 1;
+                    sleep(INFO_TRANSPORT_RETRY_DELAY).await;
+                }
+                result => return result,
+            }
+        }
     }
 
     async fn post_exchange(&self, action: &ExchangeAction) -> Result<serde_json::Value> {
@@ -585,6 +664,10 @@ impl HyperliquidRestClient {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<T> {
+        let request_type = body
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         let url = format!("{}{}", self.base_url, path);
         let response = self
             .http
@@ -602,9 +685,61 @@ impl HyperliquidRestClient {
             return Err(HyperliquidRestError::http_status(path, status, body).into());
         }
         serde_json::from_str(&body).map_err(|error| {
-            anyhow!("failed to deserialize Hyperliquid response for {path}: {error}; body: {body}")
+            let error_category = match error.classify() {
+                serde_json::error::Category::Io => "I/O",
+                serde_json::error::Category::Syntax => "syntax",
+                serde_json::error::Category::Data => "data",
+                serde_json::error::Category::Eof => "end-of-input",
+            };
+            let location = format!(
+                "{error_category} error at line {} column {}",
+                error.line(),
+                error.column()
+            );
+            if let Some(request_type) = request_type {
+                anyhow!("failed to deserialize Hyperliquid `{request_type}` response: {location}")
+            } else {
+                anyhow!("failed to deserialize Hyperliquid response for {path}: {location}")
+            }
         })
     }
+}
+
+fn is_retryable_info_transport_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+            error.is_connect() || error.is_timeout() || error.is_body() || error.is_request()
+        })
+    })
+}
+
+fn hyperliquid_candle_interval(interval: CandleInterval) -> &'static str {
+    match interval {
+        CandleInterval::OneMinute => "1m",
+        CandleInterval::FiveMinutes => "5m",
+        CandleInterval::FifteenMinutes => "15m",
+        CandleInterval::OneHour => "1h",
+    }
+}
+
+fn parse_candle_snapshots(rows: Vec<CandleSnapshot>) -> Result<Vec<MarketCandle>> {
+    let mut candles = rows
+        .into_iter()
+        .map(|row| {
+            MarketCandle::try_new(
+                Utc.timestamp_millis_opt(row.open_time_ms)
+                    .single()
+                    .context("invalid Hyperliquid candle timestamp")?,
+                parse_decimal("candle open", &row.open)?,
+                parse_decimal("candle high", &row.high)?,
+                parse_decimal("candle low", &row.low)?,
+                parse_decimal("candle close", &row.close)?,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    candles.sort_by_key(|candle| candle.open_time);
+    Ok(candles)
 }
 
 fn build_http_client() -> Result<reqwest::Client> {
@@ -744,7 +879,7 @@ fn usdc_balance(
     state
         .balances
         .iter()
-        .find(|balance| balance.coin == "USDC" && balance.token == 0)
+        .find(|balance| balance.coin == "USDC" && balance.token == Some(0))
         .context("missing Hyperliquid unified USDC balance")
 }
 
@@ -873,7 +1008,7 @@ mod tests {
 
     use poise_application::exchange::TrackPnlRecordKind;
     use poise_application::exchange::{
-        OrderRequest as PortOrderRequest, OrderStatus, PnlHistoryWindow,
+        CandleInterval, OrderRequest as PortOrderRequest, OrderStatus, PnlHistoryWindow,
     };
     use poise_core::instrument::PositionQty;
     use poise_core::track::{Instrument, Venue};
@@ -886,9 +1021,25 @@ mod tests {
 
     use super::{
         HyperliquidRestClient, PerpDexRef, build_http_client, ensure_recent_fill_history_complete,
-        next_recent_history_start, parse_perp_dex,
+        next_recent_history_start, parse_candle_snapshots, parse_perp_dex,
     };
     use crate::config::Credentials;
+    use crate::rest::models::CandleSnapshot;
+
+    #[test]
+    fn parses_hyperliquid_candle_snapshot() {
+        let candles = parse_candle_snapshots(vec![CandleSnapshot {
+            open_time_ms: 60_000,
+            open: "100".to_string(),
+            high: "103".to_string(),
+            low: "99".to_string(),
+            close: "102".to_string(),
+        }])
+        .unwrap();
+
+        assert_eq!(candles[0].open_time.timestamp_millis(), 60_000);
+        assert_eq!(candles[0].close, 102.0);
+    }
 
     fn credentials() -> Credentials {
         crate::Config {
@@ -1433,7 +1584,11 @@ mod tests {
         let error = recent_pnl_records(&client, "BTC").await.unwrap_err();
 
         assert!(error.to_string().contains("failed to deserialize"));
-        assert!(error.to_string().contains("hash"));
+        assert!(
+            error
+                .to_string()
+                .contains("`userFunding` response: data error")
+        );
     }
 
     #[tokio::test]
@@ -1536,6 +1691,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mark_price_queries_perpetual_asset_contexts() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"[{"universe":[{"name":"BTC","szDecimals":5}]},[{"markPx":"64000.25"}]]"#,
+        )])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_000_000_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let mark_price = client.get_mark_price("BTC").await.unwrap();
+        let requests = server.requests().await;
+
+        assert_eq!(mark_price, 64_000.25);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/info");
+        assert_eq!(requests[0].json_body()["type"], "metaAndAssetCtxs");
+        assert!(requests[0].json_body().get("dex").is_none());
+    }
+
+    #[tokio::test]
+    async fn candle_snapshot_uses_the_public_info_endpoint() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"[{"t":1699999800000,"T":1700000099999,"s":"BTC","i":"5m","o":"64000","c":"64050","h":"64100","l":"63900","v":"10","n":4}]"#,
+        )])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_000_000_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let candles = client
+            .get_candles("BTC", CandleInterval::FiveMinutes, 20)
+            .await
+            .unwrap();
+        let requests = server.requests().await;
+        let body = requests[0].json_body();
+
+        assert_eq!(candles[0].close, 64_050.0);
+        assert_eq!(requests[0].path, "/info");
+        assert_eq!(body["type"], "candleSnapshot");
+        assert_eq!(body["req"]["coin"], "BTC");
+        assert_eq!(body["req"]["interval"], "5m");
+        assert_eq!(body["req"]["endTime"], 1_700_000_000_000_i64);
+        assert_eq!(body["req"]["startTime"], 1_699_993_700_000_i64);
+    }
+
+    #[tokio::test]
+    async fn info_query_retries_when_response_body_is_truncated() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::truncated_json(200, r#"{"universe":[{"name":"BTC","szDecimals":5}]}"#),
+            MockResponse::json(200, r#"{"universe":[{"name":"BTC","szDecimals":5}]}"#),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_000_000_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let info = client.get_exchange_info("BTC").await.unwrap();
+
+        assert_eq!(info.instrument_spec.instrument().symbol, "BTC");
+        assert_eq!(server.requests().await.len(), 2);
+    }
+
+    #[tokio::test]
     async fn unified_account_summary_uses_spot_usdc_as_balance_source_of_truth() {
         let server = MockHttpServer::spawn(vec![
             MockResponse::json(200, r#""unifiedAccount""#),
@@ -1566,6 +1795,88 @@ mod tests {
         assert_eq!(requests[0].json_body()["type"], "userAbstraction");
         assert_eq!(requests[1].json_body()["type"], "clearinghouseState");
         assert_eq!(requests[2].json_body()["type"], "spotClearinghouseState");
+    }
+
+    #[tokio::test]
+    async fn unified_account_summary_ignores_unrelated_spot_balance_without_token() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, r#""unifiedAccount""#),
+            MockResponse::json(
+                200,
+                r#"{"marginSummary":{"accountValue":"300.509522"},"withdrawable":"0.0","assetPositions":[]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"balances":[{"coin":"USDC","token":0,"total":"891.55684101","hold":"314.896004"},{"coin":"+12140","total":"0.0","hold":"0.0"}],"tokenToAvailableAfterMaintenance":[[0,"871.15175301"]]}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_000_000_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let summary = client.get_account_summary().await.unwrap();
+
+        assert_eq!(summary.equity().value(), 891.55684101);
+        assert_eq!(summary.available().unwrap().value(), 871.15175301);
+    }
+
+    #[tokio::test]
+    async fn unified_account_summary_rejects_usdc_without_token_identity() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, r#""unifiedAccount""#),
+            MockResponse::json(
+                200,
+                r#"{"marginSummary":{"accountValue":"300.509522"},"withdrawable":"0.0","assetPositions":[]}"#,
+            ),
+            MockResponse::json(
+                200,
+                r#"{"balances":[{"coin":"USDC","total":"891.55684101","hold":"314.896004"}],"tokenToAvailableAfterMaintenance":[[0,"871.15175301"]]}"#,
+            ),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_000_000_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = client.get_account_summary().await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing Hyperliquid unified USDC balance")
+        );
+    }
+
+    #[tokio::test]
+    async fn private_info_deserialization_error_does_not_expose_response_body() {
+        let server = MockHttpServer::spawn(vec![
+            MockResponse::json(200, r#""unifiedAccount""#),
+            MockResponse::json(200, r#""sensitive-account-value""#),
+        ])
+        .await;
+        let client = HyperliquidRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            credentials(),
+            Arc::new(|| 1_700_000_000_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = client.get_account_summary().await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(
+            message.contains("failed to deserialize Hyperliquid `clearinghouseState` response")
+        );
+        assert!(message.contains("data error at line 1 column"));
+        assert!(!message.contains("sensitive-account-value"));
+        assert!(!message.contains("body:"));
     }
 
     #[tokio::test]
@@ -2431,6 +2742,7 @@ mod tests {
         status: u16,
         body: String,
         location: Option<String>,
+        content_length: Option<usize>,
     }
 
     impl MockResponse {
@@ -2439,6 +2751,16 @@ mod tests {
                 status,
                 body: body.to_string(),
                 location: None,
+                content_length: None,
+            }
+        }
+
+        fn truncated_json(status: u16, body: &str) -> Self {
+            Self {
+                status,
+                body: body.to_string(),
+                location: None,
+                content_length: Some(body.len() + 1),
             }
         }
 
@@ -2447,6 +2769,7 @@ mod tests {
                 status,
                 body: String::new(),
                 location: Some(location.to_string()),
+                content_length: None,
             }
         }
     }
@@ -2497,12 +2820,10 @@ mod tests {
                         .as_deref()
                         .map(|location| format!("location: {location}\r\n"))
                         .unwrap_or_default();
+                    let content_length = response.content_length.unwrap_or(response.body.len());
                     let reply = format!(
                         "HTTP/1.1 {} OK\r\n{}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                        response.status,
-                        location,
-                        response.body.len(),
-                        response.body
+                        response.status, location, content_length, response.body
                     );
                     socket.write_all(reply.as_bytes()).await.unwrap();
                     socket.shutdown().await.unwrap();

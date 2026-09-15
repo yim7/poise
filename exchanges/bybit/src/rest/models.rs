@@ -32,6 +32,23 @@ pub(crate) struct InstrumentInfoResult {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub(crate) struct TickerResult {
+    pub list: Vec<LinearTicker>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct MarkPriceKlineResult {
+    pub list: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct LinearTicker {
+    pub symbol: String,
+    #[serde(rename = "markPrice", deserialize_with = "deserialize_f64")]
+    pub mark_price: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct LinearInstrumentInfo {
     pub symbol: String,
     #[serde(rename = "baseCoin")]

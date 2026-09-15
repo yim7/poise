@@ -4,7 +4,7 @@ use std::sync::{
     atomic::{AtomicI64, Ordering},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{TimeZone, Utc};
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
@@ -12,8 +12,8 @@ use tokio::time::{Duration, sleep};
 use url::{Host, Url};
 
 use poise_application::exchange::{
-    AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt, OrderRequest,
-    PnlHistoryWindow, Position, RecentTrackPnlBatch,
+    AccountSummarySnapshot, CandleInterval, ExchangeInfo, ExchangeOrder, MarketCandle,
+    OrderReceipt, OrderRequest, PnlHistoryWindow, Position, RecentTrackPnlBatch,
 };
 
 use super::auth::{encode_query, sign_query};
@@ -21,8 +21,8 @@ use super::error::{BinanceRestError, BinanceSubmitOutcomeUnknown};
 use super::models::{
     BinanceAccountSummaryInformation, BinanceAccountTrade, BinanceErrorResponse,
     BinanceExchangeInfoResponse, BinanceIncomeRecord, BinanceLeverageChangeResponse,
-    BinanceOpenOrder, BinanceOrderResponse, BinancePositionMode, BinancePositionRisk,
-    ListenKeyResponse, ServerTimeResponse,
+    BinanceMarkPrice, BinanceOpenOrder, BinanceOrderResponse, BinancePositionMode,
+    BinancePositionRisk, ListenKeyResponse, ServerTimeResponse,
 };
 use crate::instrument::BinanceInstrumentRegistry;
 use crate::mapper::{track_pnl_record_from_funding, track_pnl_record_from_trade};
@@ -142,6 +142,56 @@ impl BinanceRestClient {
 
     pub async fn get_server_time(&self) -> Result<chrono::DateTime<Utc>> {
         self.sync_server_time_offset().await
+    }
+
+    pub async fn get_mark_price(&self, symbol: &str) -> Result<f64> {
+        let response: BinanceMarkPrice = self
+            .send_request(
+                Method::GET,
+                "/fapi/v1/premiumIndex",
+                vec![("symbol", symbol.to_string())],
+                AuthMode::None,
+            )
+            .await?;
+        ensure!(
+            response.symbol == symbol,
+            "Binance mark price response symbol `{}` does not match `{symbol}`",
+            response.symbol
+        );
+        let mark_price = response
+            .mark_price
+            .parse::<f64>()
+            .with_context(|| format!("invalid Binance mark price for `{symbol}`"))?;
+        ensure!(
+            mark_price.is_finite() && mark_price > 0.0,
+            "invalid Binance mark price for `{symbol}`: {mark_price}"
+        );
+        Ok(mark_price)
+    }
+
+    pub async fn get_candles(
+        &self,
+        symbol: &str,
+        interval: CandleInterval,
+        limit: usize,
+    ) -> Result<Vec<MarketCandle>> {
+        ensure!(
+            (1..=500).contains(&limit),
+            "Binance candle limit must be 1..=500"
+        );
+        let rows: Vec<Vec<serde_json::Value>> = self
+            .send_request(
+                Method::GET,
+                "/fapi/v1/markPriceKlines",
+                vec![
+                    ("symbol", symbol.to_string()),
+                    ("interval", binance_candle_interval(interval).to_string()),
+                    ("limit", limit.to_string()),
+                ],
+                AuthMode::None,
+            )
+            .await?;
+        parse_mark_price_candles(rows)
     }
 
     pub async fn get_position(&self, symbol: &str) -> Result<Position> {
@@ -579,6 +629,41 @@ impl BinanceRestClient {
     }
 }
 
+fn binance_candle_interval(interval: CandleInterval) -> &'static str {
+    match interval {
+        CandleInterval::OneMinute => "1m",
+        CandleInterval::FiveMinutes => "5m",
+        CandleInterval::FifteenMinutes => "15m",
+        CandleInterval::OneHour => "1h",
+    }
+}
+
+fn parse_mark_price_candles(rows: Vec<Vec<serde_json::Value>>) -> Result<Vec<MarketCandle>> {
+    rows.into_iter()
+        .map(|row| {
+            ensure!(row.len() >= 5, "Binance mark-price kline row is incomplete");
+            let open_time_ms = row[0].as_i64().context("invalid Binance kline open time")?;
+            let parse_price = |index: usize, label: &str| {
+                row[index]
+                    .as_str()
+                    .with_context(|| format!("invalid Binance kline {label}"))?
+                    .parse::<f64>()
+                    .with_context(|| format!("invalid Binance kline {label}"))
+            };
+            MarketCandle::try_new(
+                Utc.timestamp_millis_opt(open_time_ms)
+                    .single()
+                    .context("invalid Binance kline timestamp")?,
+                parse_price(1, "open")?,
+                parse_price(2, "high")?,
+                parse_price(3, "low")?,
+                parse_price(4, "close")?,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .collect()
+}
+
 fn classify_dispatched_submit_error(error: anyhow::Error) -> anyhow::Error {
     if error.chain().any(|cause| {
         cause
@@ -728,6 +813,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_binance_mark_price_candle() {
+        let candles = parse_mark_price_candles(vec![vec![
+            serde_json::json!(60_000),
+            serde_json::json!("100"),
+            serde_json::json!("103"),
+            serde_json::json!("99"),
+            serde_json::json!("102"),
+        ]])
+        .unwrap();
+
+        assert_eq!(candles[0].open_time.timestamp_millis(), 60_000);
+        assert_eq!(candles[0].close, 102.0);
+    }
+
+    #[test]
     fn signs_query_with_hmac_sha256() {
         let client = BinanceRestClient::with_timestamp_provider(
             "http://127.0.0.1:0",
@@ -786,6 +886,60 @@ mod tests {
         assert_eq!(registered, info.instrument_spec);
         assert_eq!(registered.base_asset().as_str(), "BTC");
         assert_eq!(registered.settlement_asset().as_str(), "USDC");
+    }
+
+    #[tokio::test]
+    async fn mark_price_queries_the_public_symbol_snapshot() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"symbol":"BTCUSDT","markPrice":"64000.25"}"#,
+        )])
+        .await;
+        let client = BinanceRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let mark_price = client.get_mark_price("BTCUSDT").await.unwrap();
+        let requests = server.requests().await;
+
+        assert_eq!(mark_price, 64_000.25);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/fapi/v1/premiumIndex?symbol=BTCUSDT");
+        assert!(!requests[0].headers.contains_key("x-mbx-apikey"));
+    }
+
+    #[tokio::test]
+    async fn mark_price_candles_use_the_public_kline_endpoint() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"[[1699999800000,"64000","64100","63900","64050"]]"#,
+        )])
+        .await;
+        let client = BinanceRestClient::with_http_client_and_timestamp_provider(
+            server.base_url(),
+            "api-key",
+            "secret-key",
+            Arc::new(|| 1_700_000_000_000),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let candles = client
+            .get_candles("BTCUSDT", CandleInterval::FiveMinutes, 20)
+            .await
+            .unwrap();
+        let requests = server.requests().await;
+
+        assert_eq!(candles[0].close, 64_050.0);
+        assert_eq!(
+            requests[0].path,
+            "/fapi/v1/markPriceKlines?symbol=BTCUSDT&interval=5m&limit=20"
+        );
+        assert!(!requests[0].headers.contains_key("x-mbx-apikey"));
     }
 
     #[tokio::test]

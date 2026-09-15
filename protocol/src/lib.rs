@@ -198,8 +198,7 @@ pub struct ConfigDryRunTrackView {
     pub loss_limit_asset: String,
     pub daily_loss_limit: f64,
     pub total_loss_limit: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capacity: Option<ConfigDryRunCapacityView>,
+    pub capacity: ConfigDryRunCapacityView,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -587,6 +586,32 @@ pub struct TrackMarketView {
     pub mark_price: Option<f64>,
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandleIntervalView {
+    OneMinute,
+    FiveMinutes,
+    FifteenMinutes,
+    OneHour,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandleView {
+    pub open_time: String,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackChartResponse {
+    pub interval: CandleIntervalView,
+    pub candles: Vec<CandleView>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1151,19 +1176,38 @@ mod tests {
         AccountAnalysisView, AccountAssetExposureView, AccountAssetQuantitySourceView,
         AccountHedgeLikeView, AccountNotionalExposureView, AccountSummaryView,
         AccountTrackAnalysisView, AcquisitionResetReasonView, AcquisitionSessionView,
-        BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy, DecisionReasonView,
-        ExecutionBindingIntentView, ExecutionBindingOrderView, ExecutionBindingPolicyView,
-        ExecutionBindingStatusView, ExecutionBindingView, ExecutionStateView, ExecutionStatusView,
-        InstrumentView, InventoryDecisionView, PnlBackfillStatusView,
-        PriceExecutionBlockReasonView, ReadinessIssueView, RecentFillsAuditResponse,
-        RecentPnlAvailabilityView, RiskAcquisitionConfigView, RiskAcquisitionDirectionView,
-        RiskAcquisitionView, RiskSignalView, ShapeFamily, Side, StrategyPriceStatusView,
-        StreamEvent, SystemInfoResponse, TrackCommandAccepted, TrackCommandRequest,
-        TrackCommandType, TrackConfigurationApplicationStatusView,
-        TrackConfigurationApplicationView, TrackConfigurationPreviewResponse, TrackDetailView,
-        TrackDiagnosticsView, TrackExecutionView, TrackListItemView, TrackListResponse,
-        TrackLiveView, TrackStatus, TradingReadinessResponse,
+        BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy, CandleIntervalView,
+        CandleView, DecisionReasonView, ExecutionBindingIntentView, ExecutionBindingOrderView,
+        ExecutionBindingPolicyView, ExecutionBindingStatusView, ExecutionBindingView,
+        ExecutionStateView, ExecutionStatusView, InstrumentView, InventoryDecisionView,
+        PnlBackfillStatusView, PriceExecutionBlockReasonView, ReadinessIssueView,
+        RecentFillsAuditResponse, RecentPnlAvailabilityView, RiskAcquisitionConfigView,
+        RiskAcquisitionDirectionView, RiskAcquisitionView, RiskSignalView, ShapeFamily, Side,
+        StrategyPriceStatusView, StreamEvent, SystemInfoResponse, TrackChartResponse,
+        TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
+        TrackConfigurationApplicationStatusView, TrackConfigurationApplicationView,
+        TrackConfigurationPreviewResponse, TrackDetailView, TrackDiagnosticsView,
+        TrackExecutionView, TrackListItemView, TrackListResponse, TrackLiveView, TrackStatus,
+        TradingReadinessResponse,
     };
+
+    #[test]
+    fn chart_response_uses_explicit_interval_and_ohlc_fields() {
+        let response = TrackChartResponse {
+            interval: CandleIntervalView::FiveMinutes,
+            candles: vec![CandleView {
+                open_time: "2026-09-09T00:00:00+00:00".to_string(),
+                open: 100.0,
+                high: 103.0,
+                low: 99.0,
+                close: 102.0,
+            }],
+        };
+
+        let wire = serde_json::to_value(response).unwrap();
+        assert_eq!(wire["interval"], "five_minutes");
+        assert_eq!(wire["candles"][0]["high"], 103.0);
+    }
 
     #[test]
     fn pnl_capability_views_preserve_available_empty_and_unsupported() {

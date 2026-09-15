@@ -23,6 +23,13 @@ pub struct BinancePositionRisk {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct BinanceMarkPrice {
+    pub symbol: String,
+    #[serde(rename = "markPrice")]
+    pub mark_price: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct BinanceAccountSummaryInformation {
     #[serde(default, rename = "multiAssetsMargin")]
     pub multi_assets_margin: bool,

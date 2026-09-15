@@ -5,10 +5,11 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use poise_application::exchange::{
-    AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
+    AccountPort, AccountSummaryPort, AccountSummarySnapshot, CandleInterval, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError,
-    ExecutionPortErrorKind, ExecutionResult, MarketDataPort, MarketDataTick, MetadataPort,
-    OrderReceipt, OrderRequest, PnlHistoryWindow, Position, RecentTrackPnlRecords, UserDataEvent,
+    ExecutionPortErrorKind, ExecutionResult, MarketCandle, MarketDataPort, MarketDataTick,
+    MetadataPort, OrderReceipt, OrderRequest, PnlHistoryWindow, Position, RecentTrackPnlRecords,
+    UserDataEvent,
 };
 use poise_core::track::Instrument;
 
@@ -38,7 +39,10 @@ pub async fn connect(config: &Config) -> Result<ExchangePorts> {
 
 fn ports_from_clients(rest: Arc<BinanceRestClient>, ws: Arc<BinanceWsClient>) -> ExchangePorts {
     let execution: Arc<dyn ExecutionPort> = rest.clone();
-    let market_data: Arc<dyn MarketDataPort> = ws.clone();
+    let market_data: Arc<dyn MarketDataPort> = Arc::new(BinanceMarketData {
+        rest: Arc::clone(&rest),
+        ws: Arc::clone(&ws),
+    });
     let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
     let metadata: Arc<dyn MetadataPort> = rest.clone();
 
@@ -85,6 +89,11 @@ fn map_submit_execution_error(error: anyhow::Error) -> ExecutionPortError {
 }
 
 struct BinanceAccount {
+    rest: Arc<BinanceRestClient>,
+    ws: Arc<BinanceWsClient>,
+}
+
+struct BinanceMarketData {
     rest: Arc<BinanceRestClient>,
     ws: Arc<BinanceWsClient>,
 }
@@ -167,12 +176,27 @@ impl MetadataPort for BinanceRestClient {
 }
 
 #[async_trait]
-impl MarketDataPort for BinanceWsClient {
+impl MarketDataPort for BinanceMarketData {
     async fn subscribe_prices(
         &self,
         instrument: &Instrument,
     ) -> Result<mpsc::Receiver<MarketDataTick>> {
-        self.subscribe_prices(instrument).await
+        self.ws.subscribe_prices(instrument).await
+    }
+
+    async fn get_mark_price(&self, instrument: &Instrument) -> Result<f64> {
+        self.rest.get_mark_price(&instrument.symbol).await
+    }
+
+    async fn get_candles(
+        &self,
+        instrument: &Instrument,
+        interval: CandleInterval,
+        limit: usize,
+    ) -> Result<Vec<MarketCandle>> {
+        self.rest
+            .get_candles(&instrument.symbol, interval, limit)
+            .await
     }
 }
 
@@ -249,6 +273,10 @@ mod tests {
             &self,
             _instrument: &Instrument,
         ) -> Result<mpsc::Receiver<MarketDataTick>> {
+            unreachable!("not used in test")
+        }
+
+        async fn get_mark_price(&self, _instrument: &Instrument) -> Result<f64> {
             unreachable!("not used in test")
         }
     }

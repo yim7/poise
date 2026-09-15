@@ -5,10 +5,10 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use poise_application::exchange::{
-    AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
+    AccountPort, AccountSummaryPort, AccountSummarySnapshot, CandleInterval, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
-    MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, PnlHistoryWindow,
-    Position, RecentTrackPnlRecords, UserDataEvent,
+    MarketCandle, MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest,
+    PnlHistoryWindow, Position, RecentTrackPnlRecords, UserDataEvent,
 };
 use poise_core::track::Instrument;
 
@@ -130,16 +130,6 @@ impl ExecutionPort for OkxRestClient {
 }
 
 #[async_trait]
-impl MarketDataPort for OkxWsClient {
-    async fn subscribe_prices(
-        &self,
-        instrument: &Instrument,
-    ) -> Result<mpsc::Receiver<MarketDataTick>> {
-        self.subscribe_prices(instrument).await
-    }
-}
-
-#[async_trait]
 impl MarketDataPort for OkxMarketData {
     async fn subscribe_prices(
         &self,
@@ -148,8 +138,19 @@ impl MarketDataPort for OkxMarketData {
         self.ws.subscribe_prices(instrument).await
     }
 
-    async fn get_mark_price(&self, instrument: &Instrument) -> Result<Option<f64>> {
-        self.rest.get_mark_price(&instrument.symbol).await.map(Some)
+    async fn get_mark_price(&self, instrument: &Instrument) -> Result<f64> {
+        self.rest.get_mark_price(&instrument.symbol).await
+    }
+
+    async fn get_candles(
+        &self,
+        instrument: &Instrument,
+        interval: CandleInterval,
+        limit: usize,
+    ) -> Result<Vec<MarketCandle>> {
+        self.rest
+            .get_candles(&instrument.symbol, interval, limit)
+            .await
     }
 }
 
@@ -157,10 +158,6 @@ impl MarketDataPort for OkxMarketData {
 impl AccountSummaryPort for OkxRestClient {
     async fn get_account_summary(&self) -> Result<AccountSummarySnapshot> {
         self.get_account_summary().await
-    }
-
-    async fn get_available_balance(&self, instrument: &Instrument) -> Result<f64> {
-        self.get_available_balance(&instrument.symbol).await
     }
 }
 
@@ -234,13 +231,6 @@ mod tests {
         fn assert_execution_port<T: ExecutionPort>() {}
 
         assert_execution_port::<OkxRestClient>();
-    }
-
-    #[test]
-    fn ws_client_implements_market_data_port_directly() {
-        fn assert_market_data_port<T: MarketDataPort>() {}
-
-        assert_market_data_port::<OkxWsClient>();
     }
 
     #[tokio::test]

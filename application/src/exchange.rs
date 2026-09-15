@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use poise_core::instrument::{Amount, Asset, PositionQty};
@@ -118,6 +118,62 @@ pub struct MarkPriceTick {
     pub instrument: Instrument,
     pub mark_price: f64,
     pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandleInterval {
+    OneMinute,
+    FiveMinutes,
+    FifteenMinutes,
+    OneHour,
+}
+
+impl CandleInterval {
+    pub fn duration_millis(self) -> i64 {
+        match self {
+            Self::OneMinute => 60_000,
+            Self::FiveMinutes => 5 * 60_000,
+            Self::FifteenMinutes => 15 * 60_000,
+            Self::OneHour => 60 * 60_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MarketCandle {
+    pub open_time: DateTime<Utc>,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+}
+
+impl MarketCandle {
+    pub fn try_new(
+        open_time: DateTime<Utc>,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+    ) -> Result<Self, String> {
+        if [open, high, low, close]
+            .into_iter()
+            .any(|price| !price.is_finite() || price <= 0.0)
+        {
+            return Err("candle prices must be finite and positive".to_string());
+        }
+        if low > open.min(close) || high < open.max(close) || low > high {
+            return Err("candle high/low do not contain open and close".to_string());
+        }
+        Ok(Self {
+            open_time,
+            open,
+            high,
+            low,
+            close,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -329,14 +385,6 @@ pub enum RecentTrackPnlRecords {
 #[async_trait]
 pub trait AccountSummaryPort: Send + Sync {
     async fn get_account_summary(&self) -> Result<AccountSummarySnapshot>;
-
-    async fn get_available_balance(&self, _instrument: &Instrument) -> Result<f64> {
-        let summary = self.get_account_summary().await?;
-        Ok(summary
-            .available()
-            .context("account-wide available amount is unavailable")?
-            .value())
-    }
 }
 
 #[async_trait]
@@ -384,8 +432,15 @@ pub trait MarketDataPort: Send + Sync {
         instrument: &Instrument,
     ) -> Result<mpsc::Receiver<MarketDataTick>>;
 
-    async fn get_mark_price(&self, _instrument: &Instrument) -> Result<Option<f64>> {
-        Ok(None)
+    async fn get_mark_price(&self, instrument: &Instrument) -> Result<f64>;
+
+    async fn get_candles(
+        &self,
+        _instrument: &Instrument,
+        _interval: CandleInterval,
+        _limit: usize,
+    ) -> Result<Vec<MarketCandle>> {
+        Err(anyhow::anyhow!("market candle history is unavailable"))
     }
 }
 
@@ -444,12 +499,26 @@ mod tests {
     use poise_core::instrument::{Amount, Asset};
 
     use super::{
-        AccountSummarySnapshot, ExecutionPortError, ExecutionPortErrorKind, PnlHistoryWindow,
-        RecentPnlCompleteness, RecentTrackPnlBatch,
+        AccountSummarySnapshot, ExecutionPortError, ExecutionPortErrorKind, MarketCandle,
+        PnlHistoryWindow, RecentPnlCompleteness, RecentTrackPnlBatch,
     };
 
     fn amount(value: f64, asset: &str) -> Amount {
         Amount::new(value, Asset::try_new(asset).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn market_candle_rejects_a_high_below_its_close() {
+        let error = MarketCandle::try_new(
+            Utc.with_ymd_and_hms(2026, 9, 9, 0, 0, 0).unwrap(),
+            100.0,
+            101.0,
+            99.0,
+            102.0,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "candle high/low do not contain open and close");
     }
 
     #[test]

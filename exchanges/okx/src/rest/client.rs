@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{SecondsFormat, TimeZone, Utc};
 use reqwest::Method;
 use serde::Serialize;
@@ -10,15 +10,15 @@ use url::form_urlencoded::Serializer;
 
 use poise_application::exchange::TrackPnlRecord;
 use poise_application::exchange::{
-    AccountSummarySnapshot, ExchangeInfo, ExchangeOrder, OrderReceipt, OrderRequest, OrderStatus,
-    PnlHistoryWindow, Position, RecentTrackPnlBatch,
+    AccountSummarySnapshot, CandleInterval, ExchangeInfo, ExchangeOrder, MarketCandle,
+    OrderReceipt, OrderRequest, OrderStatus, PnlHistoryWindow, Position, RecentTrackPnlBatch,
 };
 use poise_core::track::{Instrument, Venue};
 
 use crate::instrument::{OkxInstrumentMetadata, OkxInstrumentRegistry};
 use crate::mapper::{
-    account_summary_from_balance, available_balance_from_balance,
-    open_order_from_snapshot_with_metadata, position_from_snapshot_with_metadata, side_to_okx,
+    account_summary_from_balance, open_order_from_snapshot_with_metadata,
+    position_from_snapshot_with_metadata, side_to_okx,
     track_pnl_record_from_funding_bill_with_metadata,
     track_pnl_record_from_trade_fill_with_metadata,
 };
@@ -121,7 +121,38 @@ impl OkxRestClient {
             .into_iter()
             .find(|snapshot| snapshot.inst_id == symbol)
             .with_context(|| format!("OKX mark price not found: {symbol}"))?;
-        parse_decimal("markPx", &snapshot.mark_px)
+        let mark_price = parse_decimal("markPx", &snapshot.mark_px)?;
+        ensure!(
+            mark_price > 0.0,
+            "invalid OKX mark price for `{symbol}`: {mark_price}"
+        );
+        Ok(mark_price)
+    }
+
+    pub(crate) async fn get_candles(
+        &self,
+        symbol: &str,
+        interval: CandleInterval,
+        limit: usize,
+    ) -> Result<Vec<MarketCandle>> {
+        ensure!(
+            (1..=100).contains(&limit),
+            "OKX candle limit must be 1..=100"
+        );
+        let rows: Vec<Vec<String>> = self
+            .send_request(
+                Method::GET,
+                "/api/v5/market/mark-price-candles",
+                vec![
+                    ("instId", symbol.to_string()),
+                    ("bar", okx_candle_interval(interval).to_string()),
+                    ("limit", limit.to_string()),
+                ],
+                None,
+                AuthMode::None,
+            )
+            .await?;
+        parse_mark_price_candles(rows)
     }
 
     pub(crate) async fn validate_net_position_mode(&self) -> Result<()> {
@@ -146,12 +177,6 @@ impl OkxRestClient {
             ));
         }
         Ok(())
-    }
-
-    pub(crate) async fn get_available_balance(&self, symbol: &str) -> Result<f64> {
-        let metadata = self.get_or_fetch_instrument_metadata(symbol).await?;
-        let balance = self.get_balance_snapshot().await?;
-        available_balance_from_balance(&balance, metadata.settlement_asset())
     }
 
     pub(crate) async fn get_position(&self, symbol: &str) -> Result<Position> {
@@ -594,6 +619,44 @@ impl OkxRestClient {
     }
 }
 
+fn okx_candle_interval(interval: CandleInterval) -> &'static str {
+    match interval {
+        CandleInterval::OneMinute => "1m",
+        CandleInterval::FiveMinutes => "5m",
+        CandleInterval::FifteenMinutes => "15m",
+        CandleInterval::OneHour => "1H",
+    }
+}
+
+fn parse_mark_price_candles(rows: Vec<Vec<String>>) -> Result<Vec<MarketCandle>> {
+    let mut candles = rows
+        .into_iter()
+        .map(|row| {
+            ensure!(row.len() >= 5, "OKX mark-price candle row is incomplete");
+            let open_time_ms = row[0]
+                .parse::<i64>()
+                .context("invalid OKX candle open time")?;
+            let parse_price = |index: usize, label: &str| {
+                row[index]
+                    .parse::<f64>()
+                    .with_context(|| format!("invalid OKX candle {label}"))
+            };
+            MarketCandle::try_new(
+                Utc.timestamp_millis_opt(open_time_ms)
+                    .single()
+                    .context("invalid OKX candle timestamp")?,
+                parse_price(1, "open")?,
+                parse_price(2, "high")?,
+                parse_price(3, "low")?,
+                parse_price(4, "close")?,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    candles.sort_by_key(|candle| candle.open_time);
+    Ok(candles)
+}
+
 #[derive(Serialize)]
 struct PlaceOrderBody<'a> {
     #[serde(rename = "instId")]
@@ -732,6 +795,23 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn okx_mark_price_candles_are_projected_in_time_order() {
+        let candles = parse_mark_price_candles(
+            vec![
+                vec!["120000", "102", "105", "101", "104"],
+                vec!["60000", "100", "103", "99", "102"],
+            ]
+            .into_iter()
+            .map(|row| row.into_iter().map(str::to_string).collect())
+            .collect(),
+        )
+        .unwrap();
+
+        assert_eq!(candles[0].open_time.timestamp_millis(), 60_000);
+        assert_eq!(candles[1].close, 104.0);
+    }
     use crate::Config;
     use crate::rest::auth::sign_okx_payload;
 
@@ -809,53 +889,6 @@ mod tests {
             requests[1].headers.get("x-simulated-trading"),
             Some(&"1".to_string())
         );
-    }
-
-    #[tokio::test]
-    async fn available_balance_uses_settlement_asset_from_metadata() {
-        let server = MockHttpServer::spawn(vec![
-            MockResponse::json(200, linear_instrument_response()),
-            MockResponse::json(
-                200,
-                r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[
-                {"ccy":"USDT","availBal":"9800.25","availEq":"9800.25","upl":"-120.75"},
-                {"ccy":"BTC","availBal":"200.0","availEq":"200.0","upl":"10.0"}
-            ]}]}"#,
-            ),
-        ])
-        .await;
-        let client = test_client(&server, true);
-
-        let available = client.get_available_balance("BTC-USDT-SWAP").await.unwrap();
-
-        assert_eq!(available, 9_800.25);
-        let requests = server.requests();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(
-            requests[0].path,
-            "/api/v5/public/instruments?instType=SWAP&instId=BTC-USDT-SWAP"
-        );
-        assert_eq!(requests[1].path, "/api/v5/account/balance");
-    }
-
-    #[tokio::test]
-    async fn inverse_available_balance_uses_settlement_asset() {
-        let server = MockHttpServer::spawn(vec![
-            MockResponse::json(200, inverse_instrument_response()),
-            MockResponse::json(
-                200,
-                r#"{"code":"0","msg":"","data":[{"totalEq":"12500.5","details":[
-                {"ccy":"USD","availBal":"9800.25","availEq":"9800.25","upl":"0"},
-                {"ccy":"BTC","availBal":"0.5","availEq":"0.5","upl":"0"}
-            ]}]}"#,
-            ),
-        ])
-        .await;
-        let client = test_client(&server, true);
-
-        let available = client.get_available_balance("BTC-USD-SWAP").await.unwrap();
-
-        assert_eq!(available, 0.5);
     }
 
     #[tokio::test]
@@ -1140,6 +1173,48 @@ mod tests {
             server.requests()[0].path,
             "/api/v5/public/mark-price?instType=SWAP&instId=BTC-USD-SWAP"
         );
+    }
+
+    #[tokio::test]
+    async fn mark_price_candles_use_the_public_candle_endpoint() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"code":"0","msg":"","data":[["1699999800000","64000","64100","63900","64050","1"]]}"#,
+        )])
+        .await;
+        let client = test_client(&server, true);
+
+        let candles = client
+            .get_candles("BTC-USDT-SWAP", CandleInterval::FiveMinutes, 20)
+            .await
+            .unwrap();
+
+        assert_eq!(candles[0].close, 64_050.0);
+        assert_eq!(
+            server.requests()[0].path,
+            "/api/v5/market/mark-price-candles?instId=BTC-USDT-SWAP&bar=5m&limit=20"
+        );
+        assert!(!server.requests()[0].headers.contains_key("ok-access-key"));
+    }
+
+    #[tokio::test]
+    async fn mark_price_rejects_non_positive_value() {
+        let server = MockHttpServer::spawn(vec![MockResponse::json(
+            200,
+            r#"{"code":"0","msg":"","data":[{"instId":"BTC-USD-SWAP","instType":"SWAP","markPx":"0","ts":"1781068207856"}]}"#,
+        )])
+        .await;
+        let client = test_client(&server, true);
+
+        let error = client
+            .get_mark_price("BTC-USD-SWAP")
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("invalid OKX mark price"));
+        assert!(error.contains("BTC-USD-SWAP"));
+        assert!(error.contains('0'));
     }
 
     #[tokio::test]

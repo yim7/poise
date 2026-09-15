@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
+use poise_application::exchange::{CandleInterval, MarketCandle};
 use poise_application::{
     ConfigurationApplicationError, ConfigurationApplicationRequest, ConfigurationApplicationStatus,
     DiagnosticSeverity, TrackInput, TrackMutationError,
@@ -13,11 +14,12 @@ use poise_core::track::TrackId;
 use poise_engine::command::TrackCommand;
 use poise_protocol::{
     AccountSummaryView, ActivityLevelView, BandFlattenTrigger, BandProtectionPolicy,
-    BandRecoverPolicy, HealthResponse, HealthStatusView, HealthTaskStatusView, HealthTaskView,
-    InstrumentView, PnlBackfillStatusView, PnlHistoryWindowView, ReadinessIssueView,
-    RecentConfigurationConflictView, RecentFillAuditItemView, RecentFillCoverageView,
-    RecentFillsAuditResponse, RecentPnlAvailabilityView, RecentPnlCompletenessView, ShapeFamily,
-    SystemInfoResponse, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
+    BandRecoverPolicy, CandleIntervalView, CandleView, HealthResponse, HealthStatusView,
+    HealthTaskStatusView, HealthTaskView, InstrumentView, PnlBackfillStatusView,
+    PnlHistoryWindowView, ReadinessIssueView, RecentConfigurationConflictView,
+    RecentFillAuditItemView, RecentFillCoverageView, RecentFillsAuditResponse,
+    RecentPnlAvailabilityView, RecentPnlCompletenessView, ShapeFamily, SystemInfoResponse,
+    TrackChartResponse, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
     TrackConfigurationApplicationStatusView, TrackConfigurationApplyRequest,
     TrackConfigurationBlockerView, TrackConfigurationCapacityProofView,
     TrackConfigurationFieldErrorView, TrackConfigurationIdentityView, TrackConfigurationImpactView,
@@ -27,7 +29,7 @@ use poise_protocol::{
     TrackConfigurationView, TrackDetailView, TrackDiagnosticItemView, TrackDiagnosticsView,
     TrackListResponse, TrackPositionQuantityUnitView, TradingReadinessResponse,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -68,6 +70,7 @@ pub(crate) fn router_with_web_root(
         .route("/account", get(get_account))
         .route("/tracks", get(list_tracks))
         .route("/tracks/:id", get(get_track_detail))
+        .route("/tracks/:id/chart", get(get_track_chart))
         .route("/tracks/:id/configuration", get(get_track_configuration))
         .route("/tracks/:id/configuration", put(apply_track_configuration))
         .route(
@@ -318,6 +321,75 @@ async fn get_track_detail(
         .map_err(map_query_error)?
         .ok_or_else(|| not_found(format!("track `{id}` not found")))?;
     Ok(Json(state.projector.project_detail(&source)))
+}
+
+#[derive(Debug, Deserialize)]
+struct TrackChartQuery {
+    interval: Option<CandleIntervalView>,
+    limit: Option<usize>,
+}
+
+async fn get_track_chart(
+    Path(id): Path<String>,
+    Query(query): Query<TrackChartQuery>,
+    State(state): State<HttpState>,
+) -> Result<Json<TrackChartResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let track_id = TrackId::new(id.clone());
+    let source = state
+        .query_service
+        .load_track_detail_source(&track_id)
+        .await
+        .map_err(map_query_error)?
+        .ok_or_else(|| not_found(format!("track `{id}` not found")))?;
+    let interval = query.interval.unwrap_or(CandleIntervalView::FiveMinutes);
+    let limit = query.limit.unwrap_or(100);
+    if !(20..=100).contains(&limit) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "chart limit must be 20..=100".to_string(),
+            }),
+        ));
+    }
+    let candles = state
+        .market_data
+        .get_candles(
+            &source.instrument,
+            application_candle_interval(interval),
+            limit,
+        )
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("failed to load venue candles: {error}"),
+                }),
+            )
+        })?;
+    Ok(Json(TrackChartResponse {
+        interval,
+        candles: candles.into_iter().map(project_candle).collect(),
+    }))
+}
+
+fn application_candle_interval(interval: CandleIntervalView) -> CandleInterval {
+    match interval {
+        CandleIntervalView::OneMinute => CandleInterval::OneMinute,
+        CandleIntervalView::FiveMinutes => CandleInterval::FiveMinutes,
+        CandleIntervalView::FifteenMinutes => CandleInterval::FifteenMinutes,
+        CandleIntervalView::OneHour => CandleInterval::OneHour,
+    }
+}
+
+fn project_candle(candle: MarketCandle) -> CandleView {
+    CandleView {
+        open_time: candle.open_time.to_rfc3339(),
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+    }
 }
 
 async fn get_track_configuration(
@@ -1266,7 +1338,8 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use chrono::{TimeZone, Utc};
     use poise_application::exchange::{
-        AccountPort, AccountSummarySnapshot, RecentTrackPnlRecords, UserDataEvent,
+        AccountPort, AccountSummarySnapshot, CandleInterval, MarketCandle, MarketDataPort,
+        MarketDataTick, RecentTrackPnlRecords, UserDataEvent,
     };
     use poise_application::{
         CommittedTrackWrite, EffectJournalEntry, EffectStatusUpdate, PersistedTrackEffect,
@@ -1288,9 +1361,9 @@ mod tests {
         AccountSummaryView, DecisionReasonView, ExecutionBindingIntentView,
         ExecutionBindingStatusView, ExecutionStatusView, RecentFillCoverageView,
         RecentFillsAuditResponse, RecentPnlAvailabilityView, RecentPnlCompletenessView,
-        RiskSignalView, TrackCommandAccepted, TrackCommandRequest, TrackCommandType,
-        TrackConfigurationView, TrackDetailView, TrackDiagnosticsView, TrackListResponse,
-        TrackStatus, TradingReadinessResponse,
+        RiskSignalView, TrackChartResponse, TrackCommandAccepted, TrackCommandRequest,
+        TrackCommandType, TrackConfigurationView, TrackDetailView, TrackDiagnosticsView,
+        TrackListResponse, TrackStatus, TradingReadinessResponse,
     };
     use poise_storage::sqlite::SqliteStorage;
     use tokio::sync::mpsc;
@@ -1320,6 +1393,44 @@ mod tests {
         http_state: HttpState,
         websocket_state: WebSocketState,
         _configuration_dir: Option<Arc<tempfile::TempDir>>,
+    }
+
+    struct ChartMarketData;
+
+    #[async_trait::async_trait]
+    impl MarketDataPort for ChartMarketData {
+        async fn subscribe_prices(
+            &self,
+            _instrument: &Instrument,
+        ) -> anyhow::Result<mpsc::Receiver<MarketDataTick>> {
+            let (_sender, receiver) = mpsc::channel(1);
+            Ok(receiver)
+        }
+
+        async fn get_mark_price(&self, _instrument: &Instrument) -> anyhow::Result<f64> {
+            Ok(102.0)
+        }
+
+        async fn get_candles(
+            &self,
+            instrument: &Instrument,
+            interval: CandleInterval,
+            limit: usize,
+        ) -> anyhow::Result<Vec<MarketCandle>> {
+            assert_eq!(instrument.symbol, "BTCUSDT");
+            assert_eq!(interval, CandleInterval::FiveMinutes);
+            assert_eq!(limit, 20);
+            Ok(vec![
+                MarketCandle::try_new(
+                    Utc.with_ymd_and_hms(2026, 9, 9, 0, 0, 0).unwrap(),
+                    100.0,
+                    103.0,
+                    99.0,
+                    102.0,
+                )
+                .unwrap(),
+            ])
+        }
     }
 
     fn configuration_file() -> String {
@@ -1596,6 +1707,7 @@ mod tests {
                 query_service.clone(),
                 debug_query_service,
                 projector.clone(),
+                Arc::new(crate::test_support::NoopMarketDataPort),
                 account_monitor.clone(),
                 account_projector.clone(),
                 Arc::new(RuntimeHealth::new()),
@@ -3289,6 +3401,27 @@ mod tests {
                 .iter()
                 .any(|item| item.message.contains("client-1"))
         );
+    }
+
+    #[tokio::test]
+    async fn get_track_chart_returns_exchange_candles() {
+        let mut state = app_state().await;
+        state.http_state.market_data = Arc::new(ChartMarketData);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/chart?interval=five_minutes&limit=20")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: TrackChartResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload.candles.len(), 1);
+        assert_eq!(payload.candles[0].close, 102.0);
     }
 
     #[tokio::test]

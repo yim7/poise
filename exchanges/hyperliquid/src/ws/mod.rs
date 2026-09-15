@@ -21,11 +21,13 @@ use crate::mapper::{track_pnl_record_from_fill, track_pnl_record_from_ws_funding
 use crate::rest::models::{UserFillResponse, WsUserFundingResponse};
 
 const DEFAULT_RECONNECT_DELAY: Duration = Duration::from_millis(250);
+const RECEIVE_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub struct HyperliquidWsClient {
     ws_url: String,
     account_address: String,
     reconnect_delay: Duration,
+    receive_timeout: Duration,
     client_order_ids: Arc<ClientOrderIdMapper>,
 }
 
@@ -39,6 +41,7 @@ impl HyperliquidWsClient {
             ws_url: ws_url.into(),
             account_address: account_address.into(),
             reconnect_delay: DEFAULT_RECONNECT_DELAY,
+            receive_timeout: RECEIVE_TIMEOUT,
             client_order_ids,
         }
     }
@@ -53,6 +56,7 @@ impl HyperliquidWsClient {
             ws_url: ws_url.into(),
             account_address: account_address.into(),
             reconnect_delay,
+            receive_timeout: RECEIVE_TIMEOUT,
             client_order_ids: ClientOrderIdMapper::shared(),
         }
     }
@@ -65,9 +69,10 @@ impl HyperliquidWsClient {
         let (sender, receiver) = mpsc::channel(128);
         let ws_url = self.ws_url.clone();
         let reconnect_delay = self.reconnect_delay;
+        let receive_timeout = self.receive_timeout;
 
         tokio::spawn(async move {
-            run_market_stream(ws_url, symbol, sender, reconnect_delay).await;
+            run_market_stream(ws_url, symbol, sender, reconnect_delay, receive_timeout).await;
         });
         Ok(receiver)
     }
@@ -77,6 +82,7 @@ impl HyperliquidWsClient {
         let ws_url = self.ws_url.clone();
         let account_address = self.account_address.clone();
         let reconnect_delay = self.reconnect_delay;
+        let receive_timeout = self.receive_timeout;
         let client_order_ids = Arc::clone(&self.client_order_ids);
 
         tokio::spawn(async move {
@@ -86,6 +92,7 @@ impl HyperliquidWsClient {
                 sender,
                 reconnect_delay,
                 client_order_ids,
+                receive_timeout,
             )
             .await;
         });
@@ -98,17 +105,24 @@ async fn run_market_stream(
     symbol: String,
     sender: mpsc::Sender<MarketDataTick>,
     reconnect_delay: Duration,
+    receive_timeout: Duration,
 ) {
     let mut attempt = 0_u32;
 
     loop {
-        match connect_async(&ws_url).await {
+        match tokio::time::timeout(Duration::from_secs(10), connect_async(&ws_url))
+            .await
+            .unwrap_or_else(|_| Err(socket_timeout()))
+        {
             Ok((mut ws, _)) => {
                 attempt = 0;
                 if let Err(error) = subscribe_market(&mut ws, &symbol).await {
                     tracing::warn!("failed to subscribe Hyperliquid market stream: {error}");
                 } else {
-                    while let Some(message) = ws.next().await {
+                    while let Some(message) = tokio::select! {
+                        _ = sender.closed() => return,
+                        message = next_with_heartbeat(&mut ws, receive_timeout) => message,
+                    } {
                         match message {
                             Ok(Message::Text(text)) => {
                                 match parse_market_data_message(&text, &symbol) {
@@ -160,17 +174,24 @@ async fn run_user_stream(
     sender: mpsc::Sender<UserDataEvent>,
     reconnect_delay: Duration,
     client_order_ids: Arc<ClientOrderIdMapper>,
+    receive_timeout: Duration,
 ) {
     let mut attempt = 0_u32;
 
     loop {
-        match connect_async(&ws_url).await {
+        match tokio::time::timeout(Duration::from_secs(10), connect_async(&ws_url))
+            .await
+            .unwrap_or_else(|_| Err(socket_timeout()))
+        {
             Ok((mut ws, _)) => {
                 attempt = 0;
                 if let Err(error) = subscribe_user(&mut ws, &account_address).await {
                     tracing::warn!("failed to subscribe Hyperliquid user stream: {error}");
                 } else {
-                    while let Some(message) = ws.next().await {
+                    while let Some(message) = tokio::select! {
+                        _ = sender.closed() => return,
+                        message = next_with_heartbeat(&mut ws, receive_timeout) => message,
+                    } {
                         match message {
                             Ok(Message::Text(text)) => {
                                 match parse_user_data_message_with_client_order_ids(
@@ -217,6 +238,40 @@ async fn run_user_stream(
 
         sleep(backoff_delay(reconnect_delay, attempt)).await;
         attempt = attempt.saturating_add(1);
+    }
+}
+
+fn socket_timeout() -> tokio_tungstenite::tungstenite::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "Hyperliquid websocket response timed out",
+    )
+    .into()
+}
+
+/// A quiet user channel is healthy if it answers application heartbeats.
+/// Sending a ping never extends the receive deadline.
+async fn next_with_heartbeat<S>(
+    ws: &mut tokio_tungstenite::WebSocketStream<S>,
+    receive_timeout: Duration,
+) -> Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let deadline = tokio::time::Instant::now() + receive_timeout;
+    loop {
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(deadline) => return Some(Err(socket_timeout())),
+            message = ws.next() => return message,
+            _ = sleep(receive_timeout / 3) => {
+                match tokio::time::timeout_at(deadline, ws.send(Message::Text(r#"{"method":"ping"}"#.into()))).await {
+                    Ok(Ok(())) => {},
+                    Ok(Err(error)) => return Some(Err(error)),
+                    Err(_) => return Some(Err(socket_timeout())),
+                }
+            }
+        }
     }
 }
 
@@ -267,14 +322,18 @@ where
     S: futures_util::Sink<Message> + Unpin,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
-    ws.send(Message::Text(
-        serde_json::json!({
-            "method": "subscribe",
-            "subscription": subscription,
-        })
-        .to_string(),
-    ))
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        ws.send(Message::Text(
+            serde_json::json!({
+                "method": "subscribe",
+                "subscription": subscription,
+            })
+            .to_string(),
+        )),
+    )
     .await
+    .context("Hyperliquid websocket subscription timed out")?
     .context("failed to send Hyperliquid websocket subscription")
 }
 
@@ -785,6 +844,106 @@ mod tests {
                 Some("hyperliquid:funding:ETH:1700000000000".to_string()),
                 amount(-0.15, "USDC"),
             ))
+        );
+    }
+
+    #[tokio::test]
+    async fn quiet_connection_answers_heartbeats_without_reconnecting() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            for _ in 0..4 {
+                let request = ws.next().await.unwrap().unwrap();
+                assert_eq!(request, Message::Text(r#"{"method":"ping"}"#.into()));
+                ws.send(Message::Text(r#"{"channel":"pong"}"#.into()))
+                    .await
+                    .unwrap();
+            }
+        });
+        let (mut ws, _) = super::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        for _ in 0..4 {
+            let reply = timeout(
+                Duration::from_secs(2),
+                super::next_with_heartbeat(&mut ws, Duration::from_millis(150)),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+            assert_eq!(reply, Message::Text(r#"{"channel":"pong"}"#.into()));
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnects_user_stream_after_silent_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut silent = accept_async(stream).await.unwrap();
+            for _ in 0..4 {
+                silent.next().await.unwrap().unwrap();
+            }
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut recovered = accept_async(stream).await.unwrap();
+            for _ in 0..4 {
+                recovered.next().await.unwrap().unwrap();
+            }
+            recovered.send(Message::Text(r#"{"channel":"orderUpdates","data":[{"order":{"coin":"BTC","side":"B","limitPx":"65000.5","sz":"0.02","oid":12345,"timestamp":1700000000000,"origSz":"0.02"},"status":"open","statusTimestamp":1700000000001}]}"#.into())).await.unwrap();
+        });
+        let mut client = HyperliquidWsClient::with_reconnect_delay(
+            format!("ws://{address}"),
+            "test",
+            Duration::from_millis(10),
+        );
+        client.receive_timeout = Duration::from_millis(100);
+        let mut receiver = client.subscribe_user_data().await.unwrap();
+        let recovered = timeout(Duration::from_secs(2), receiver.recv()).await;
+        server.abort();
+        assert!(
+            matches!(recovered, Ok(Some(_))),
+            "silent user stream must reconnect and deliver events"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnects_market_stream_after_silent_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut silent = accept_async(stream).await.unwrap();
+            for _ in 0..2 {
+                silent.next().await.unwrap().unwrap();
+            }
+            // Keep the first socket open but never answer it.
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut recovered = accept_async(stream).await.unwrap();
+            for _ in 0..2 {
+                recovered.next().await.unwrap().unwrap();
+            }
+            recovered.send(Message::Text(r#"{"channel":"bbo","data":{"coin":"BTC","time":1700000000000,"bbo":[{"px":"65000.5","sz":"1.2","n":1},{"px":"65001.0","sz":"0.8","n":1}]}}"#.into())).await.unwrap();
+        });
+        let mut client = HyperliquidWsClient::with_reconnect_delay(
+            format!("ws://{address}"),
+            "test",
+            Duration::from_millis(10),
+        );
+        client.receive_timeout = Duration::from_millis(100);
+        let mut receiver = client
+            .subscribe_prices(&Instrument::new(Venue::Hyperliquid, "BTC"))
+            .await
+            .unwrap();
+        let recovered = timeout(Duration::from_secs(2), receiver.recv()).await;
+        server.abort();
+        assert!(
+            matches!(recovered, Ok(Some(MarketDataTick::ExecutionQuote(_)))),
+            "silent connection must reconnect and deliver the resubscribed quote"
         );
     }
 

@@ -37,6 +37,10 @@ function api(path: string) {
   if (path === '/readiness') return { ready_to_trade: true, blockers: [], warnings: [] }
   if (path === '/account') return { valuation_asset: 'USD', equity: 1200, available: 900, unrealized_pnl: 8, risk_signal: 'normal', updated_at: '2026-09-08T00:00:00Z' }
   if (path === '/tracks') return { items: [{ id: 'btc-core', instrument: track.identity.instrument, lifecycle: track.status.lifecycle, exposure: { current: 0 }, decision: track.decision, execution: track.execution, pnl: track.pnl }] }
+  if (path.startsWith('/tracks/btc-core/chart')) return { interval: 'five_minutes', candles: [
+    { open_time: '2026-09-08T00:00:00Z', open: 79_800, high: 80_200, low: 79_600, close: 80_000 },
+    { open_time: '2026-09-08T00:05:00Z', open: 80_000, high: 80_300, low: 79_900, close: 80_100 },
+  ] }
   return track
 }
 
@@ -69,6 +73,17 @@ describe('Poise read-only console', () => {
     screen.getAllByRole('button', { name: /btc-core/ })[0].click()
     await screen.findByRole('heading', { name: '等待风险释放' })
 
+    const workspace = screen.getByRole('region', { name: '运行工作台' })
+    expect(within(workspace).getByRole('button', { name: '调整策略' })).toBeVisible()
+    expect(within(workspace).getByLabelText('仓位概览')).toBeVisible()
+    expect(within(workspace).getByRole('button', { name: '完整区间' })).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.click(within(workspace).getByRole('button', { name: '完整区间' }))
+    expect(within(workspace).getByRole('button', { name: '完整区间' })).toHaveAttribute('aria-pressed', 'true')
+    expect(within(workspace).getByRole('heading', { name: '仓位与目标' })).toBeVisible()
+    expect(await within(workspace).findByRole('heading', { name: '行情与订单' })).toBeVisible()
+    expect(within(workspace).getByText('交易所挂单')).toBeVisible()
+    expect(within(screen.getByLabelText('图上价格线')).getByText(/卖 0.1000 @ 80,100.00/)).toBeVisible()
+
     const live = {
         strategy_price: 79_800, strategy_price_status: 'live', mark_price: 79_810, best_bid: 79_805, best_ask: 79_815,
         position_to_execution_gap: -1.25,
@@ -82,17 +97,41 @@ describe('Poise read-only console', () => {
     act(() => BrowserStream.instances.at(-1)!.emit({ type: 'track_live_view_changed', track_id: 'btc-core', live }))
 
     expect(screen.getByRole('heading', { name: '价格保护阻止执行' })).toBeVisible()
+    expect(screen.getByText('策略价').nextElementSibling).toHaveTextContent('79,800.00')
+    expect(screen.getByText('Mark').nextElementSibling).toHaveTextContent('79,810.00')
+    expect(screen.getByText('Bid / Ask').nextElementSibling).toHaveTextContent('79,805.00 / 79,815.00')
     expect(screen.getByText('策略目标').nextElementSibling).toHaveTextContent('-3.0000')
     expect(screen.getByText('实际到执行差额').nextElementSibling).toHaveTextContent('-1.2500')
     expect(screen.getByText('待释放').nextElementSibling).toHaveTextContent('空头 1.7500')
     expect(screen.getByText('下一有利价格').nextElementSibling).toHaveTextContent('79,500.00')
     expect(screen.getByText('风险释放等待').nextElementSibling).toHaveTextContent('已等待 17.0 分钟 / 上限 60.0 分钟')
+    expect(within(workspace).getByRole('heading', { name: '下一步条件' })).toBeVisible()
     expect(screen.getByText('下一次释放').nextElementSibling).toHaveTextContent('0.2500')
     expect(screen.getByText('释放后的执行目标').nextElementSibling).toHaveTextContent('-1.5000')
     expect(screen.getByText('价格区间').nextElementSibling).toHaveTextContent('70,000.00 – 90,000.00')
     expect(screen.getByText('最大多空 exposure').nextElementSibling).toHaveTextContent('多 2.0000 / 空 3.0000')
     expect(screen.getByText('每单位名义金额').nextElementSibling).toHaveTextContent('125.0000')
     expect(screen.getByText('区间外策略').nextElementSibling).toHaveTextContent('freeze')
+  })
+
+  it('keeps the loaded track visible when selecting the same track again', async () => {
+    render(<App />)
+    await screen.findByText('btc-core')
+    const navigation = screen.getAllByRole('button', { name: /btc-core/ })[0]
+    fireEvent.click(navigation)
+    await screen.findByRole('region', { name: '运行工作台' })
+    fireEvent.click(navigation)
+    expect(screen.getByRole('region', { name: '运行工作台' })).toBeVisible()
+    expect(screen.queryByText('Track 载入中')).not.toBeInTheDocument()
+  })
+
+  it('opens the configuration workflow from the primary strategy action without submitting changes', async () => {
+    render(<App />)
+    await screen.findByText('btc-core')
+    fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0])
+    fireEvent.click(await screen.findByRole('button', { name: '调整策略' }))
+    expect(screen.getByRole('tab', { name: '配置' })).toHaveAttribute('aria-selected', 'true')
+    expect(vi.mocked(fetch).mock.calls.some(([, options]) => options?.method === 'POST')).toBe(false)
   })
 
   it('uses server command availability and confirms flatten with observed position and bindings', async () => {
@@ -245,15 +284,15 @@ describe('Poise read-only console', () => {
     render(<App />)
     await screen.findByRole('button', { name: /btc-core BTC/ })
     fireEvent.click(screen.getByRole('button', { name: /btc-core BTC/ }))
-    await screen.findByText(/hyperliquid · BTC/)
+    await screen.findByRole("region", { name: "运行工作台" })
 
     fireEvent.click(screen.getByRole('button', { name: /eth-core ETH/ }))
     expect(screen.getByRole('heading', { name: 'Track 载入中' })).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: /btc-core BTC/ }))
-    await screen.findByText(/hyperliquid · BTC/)
+    await screen.findByRole("region", { name: "运行工作台" })
     await act(async () => resolveEth(response(eth)))
-    expect(screen.getByText(/hyperliquid · BTC/)).toBeVisible()
-    expect(screen.queryByText(/hyperliquid · ETH/)).not.toBeInTheDocument()
+    expect(screen.getByText(/hyperliquid \/ btc-core/)).toBeVisible()
+    expect(screen.queryByText(/hyperliquid \/ eth-core/)).not.toBeInTheDocument()
   })
 
   it('retries the selected Track detail after its GET fails', async () => {
@@ -270,7 +309,7 @@ describe('Poise read-only console', () => {
     screen.getAllByRole('button', { name: /btc-core/ })[0].click()
     expect(await screen.findByText('无法读取运行状态')).toBeVisible()
     screen.getByRole('button', { name: '重试' }).click()
-    expect(await screen.findByText(/hyperliquid · BTC/)).toBeVisible()
+    expect(await screen.findByRole("region", { name: "运行工作台" })).toBeVisible()
     expect(attempts).toBe(2)
   })
 
@@ -283,7 +322,7 @@ describe('Poise read-only console', () => {
     expect(screen.getByText('风险批准目标')).toBeVisible()
     expect(screen.getByText('风险释放边界')).toBeVisible()
     expect(screen.getByText('当前可执行目标')).toBeVisible()
-    expect(screen.getByText(/风险目标已经批准/)).toBeVisible()
+    expect(screen.getByText(/目标仓位已获风险批准/)).toBeVisible()
     expect(screen.getByText('诊断详情').parentElement).not.toHaveAttribute('open')
   })
 
@@ -310,10 +349,12 @@ describe('Poise read-only console', () => {
     render(<App />)
     await screen.findByText('btc-core')
     fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0])
-    await screen.findByText(/hyperliquid · BTC/)
+    await screen.findByRole("region", { name: "运行工作台" })
     expect(fetch).not.toHaveBeenCalledWith('/tracks/btc-core/configuration', expect.anything())
     fireEvent.click(screen.getByRole('tab', { name: '配置' }))
     expect(await screen.findByText('当前生效值')).toBeVisible()
+    expect(screen.getByRole('region', { name: '配置编辑' })).toBeVisible()
+    expect(screen.getByRole('complementary', { name: '配置上下文' })).toBeVisible()
     expect(screen.getByText('配置应用状态 · 空闲')).toBeVisible()
     const lower = screen.getByLabelText('下限价格') as HTMLInputElement
     fireEvent.change(lower, { target: { value: '71000' } })
@@ -341,7 +382,7 @@ describe('Poise read-only console', () => {
     vi.stubGlobal('fetch', vi.fn((input: string) => input === '/tracks/btc-core/configuration/preview'
       ? Promise.resolve(response(failedPreview)) : input === '/tracks/btc-core/configuration' ? Promise.resolve(response(configuration)) : Promise.resolve(response(api(input)))))
     render(<App />)
-    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByRole("region", { name: "运行工作台" })
     fireEvent.click(screen.getByRole('tab', { name: '配置' })); await screen.findByText('当前生效值')
     fireEvent.click(screen.getByRole('button', { name: '重新预览' }))
     expect(await screen.findByText('必须大于下限价格')).toBeVisible(); expect(screen.getByText('超过风险限制')).toBeVisible()
@@ -364,9 +405,9 @@ describe('Poise read-only console', () => {
       if (input === '/tracks/btc-core/configuration') return delayed
       return Promise.resolve(response(input === '/tracks/eth-core' ? eth : api(input)))
     }))
-    render(<App />); await screen.findByRole('button', { name: /btc-core BTC/ }); fireEvent.click(screen.getByRole('button', { name: /btc-core BTC/ })); await screen.findByText(/hyperliquid · BTC/)
+    render(<App />); await screen.findByRole('button', { name: /btc-core BTC/ }); fireEvent.click(screen.getByRole('button', { name: /btc-core BTC/ })); await screen.findByRole("region", { name: "运行工作台" })
     fireEvent.click(screen.getByRole('tab', { name: '配置' })); expect(screen.getByText('配置载入中')).toBeVisible()
-    fireEvent.click(screen.getByRole('button', { name: /eth-core ETH/ })); await screen.findByText(/hyperliquid · ETH/)
+    fireEvent.click(screen.getByRole('button', { name: /eth-core ETH/ })); await screen.findByText(/hyperliquid \/ eth-core/)
     await act(async () => resolveBtc(response(configuration)))
     expect(screen.queryByText('当前生效值')).not.toBeInTheDocument()
   })
@@ -377,7 +418,7 @@ describe('Poise read-only console', () => {
       if (input === '/tracks/btc-core/configuration/preview') { previewBody = String(init?.body); return Promise.resolve(response({ previewed_at: '2026-09-09T00:00:00Z', valid: false, field_errors: [], blockers: [], impact: null, capacity_proof: null })) }
       return Promise.resolve(response(input === '/tracks/btc-core/configuration' ? configuration : api(input)))
     }))
-    render(<App />); await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    render(<App />); await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByRole("region", { name: "运行工作台" })
     fireEvent.click(screen.getByRole('tab', { name: '配置' })); await screen.findByText('当前生效值')
     fireEvent.change(screen.getByLabelText('区间外策略'), { target: { value: 'flatten' } })
     expect((screen.getByLabelText('Flatten 确认 bps') as HTMLInputElement).value).toBe('500')
@@ -405,12 +446,12 @@ describe('Poise read-only console', () => {
       if (input === '/tracks/eth-core') return Promise.resolve(response(eth))
       return Promise.resolve(response(api(input)))
     }))
-    render(<App />); await screen.findByRole('button', { name: /btc-core BTC/ }); fireEvent.click(screen.getByRole('button', { name: /btc-core BTC/ })); await screen.findByText(/hyperliquid · BTC/)
+    render(<App />); await screen.findByRole('button', { name: /btc-core BTC/ }); fireEvent.click(screen.getByRole('button', { name: /btc-core BTC/ })); await screen.findByRole("region", { name: "运行工作台" })
     fireEvent.click(screen.getByRole('tab', { name: '配置' })); await screen.findByText('当前生效值')
     fireEvent.click(screen.getByRole('button', { name: '重新预览' })); fireEvent.change(screen.getByLabelText('下限价格'), { target: { value: '71000' } })
     await act(async () => resolveFirst(response(delayedPreview)))
     expect(screen.queryByText('预览结果')).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '重新预览' })); fireEvent.click(screen.getByRole('button', { name: /eth-core ETH/ })); await screen.findByText(/hyperliquid · ETH/)
+    fireEvent.click(screen.getByRole('button', { name: '重新预览' })); fireEvent.click(screen.getByRole('button', { name: /eth-core ETH/ })); await screen.findByText(/hyperliquid \/ eth-core/)
     await act(async () => resolveSecond(response(delayedPreview)))
     expect(screen.queryByText('预览结果')).not.toBeInTheDocument()
   })
@@ -426,7 +467,7 @@ describe('Poise read-only console', () => {
       if (input === '/tracks/btc-core/configuration') return Promise.resolve(response(++getConfiguration === 1 ? configuration : applied))
       return Promise.resolve(response(api(input)))
     }))
-    render(<App />); await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    render(<App />); await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByRole("region", { name: "运行工作台" })
     fireEvent.click(screen.getByRole('tab', { name: '配置' })); await screen.findByText('当前生效值')
     fireEvent.change(screen.getByLabelText('下限价格'), { target: { value: '71000' } }); fireEvent.change(screen.getByLabelText('初始比例'), { target: { value: '0.3' } }); fireEvent.change(screen.getByLabelText('区间外策略'), { target: { value: 'flatten' } }); expect(screen.getByRole('button', { name: '保存并应用' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: '重新预览' })); await screen.findByText('预览结果')
@@ -447,7 +488,7 @@ describe('Poise read-only console', () => {
       if (input === '/tracks/btc-core/configuration' && init?.method === 'PUT') { bodies.push(String(init.body)); attempts += 1; return attempts === 1 ? Promise.reject(new Error('offline')) : Promise.resolve(response({ error: 'conflict' }, 409)) }
       return Promise.resolve(response(input === '/tracks/btc-core/configuration' ? configuration : api(input)))
     }))
-    render(<App />); await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    render(<App />); await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByRole("region", { name: "运行工作台" })
     fireEvent.click(screen.getByRole('tab', { name: '配置' })); await screen.findByText('当前生效值'); fireEvent.change(screen.getByLabelText('下限价格'), { target: { value: '71000' } }); fireEvent.click(screen.getByRole('button', { name: '重新预览' })); await screen.findByText('预览结果'); fireEvent.click(screen.getByRole('button', { name: '保存并应用' })); fireEvent.click(screen.getByRole('button', { name: '确认保存并应用' }))
     expect(await screen.findByText('提交结果未确认')).toBeVisible(); fireEvent.click(screen.getByRole('button', { name: '重试提交' }))
     expect(await screen.findByText('配置版本冲突')).toBeVisible()
@@ -462,7 +503,7 @@ describe('Poise read-only console', () => {
       if (input === '/tracks/btc-core/configuration' && init?.method === 'PUT') { bodies.push(String(init.body)); return Promise.resolve(response({ error: '下限价格必须小于上限价格' }, 400)) }
       return Promise.resolve(response(input === '/tracks/btc-core/configuration' ? configuration : api(input)))
     }))
-    render(<App />); await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    render(<App />); await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByRole("region", { name: "运行工作台" })
     fireEvent.click(screen.getByRole('tab', { name: '配置' })); await screen.findByText('当前生效值'); fireEvent.change(screen.getByLabelText('下限价格'), { target: { value: '71000' } })
     fireEvent.click(screen.getByRole('button', { name: '重新预览' })); await screen.findByText('预览结果'); fireEvent.click(screen.getByRole('button', { name: '保存并应用' })); fireEvent.click(screen.getByRole('button', { name: '确认保存并应用' }))
     expect(await screen.findByText('配置未被接受')).toBeVisible(); expect(screen.getByText('下限价格必须小于上限价格')).toBeVisible(); expect(screen.queryByText('预览结果')).not.toBeInTheDocument()
@@ -482,7 +523,7 @@ describe('Poise read-only console', () => {
     }
     vi.stubGlobal('fetch', vi.fn((input: string) => Promise.resolve(response(input === '/tracks/btc-core/configuration' ? waiting : api(input)))))
     render(<App />)
-    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByRole("region", { name: "运行工作台" })
     fireEvent.click(screen.getByRole('tab', { name: '配置' }))
     expect(await screen.findByText('配置应用状态 · 等待订单完成 · 正在等待 2 个旧订单的终态和权威订单快照。')).toBeVisible()
     expect(screen.getByRole('heading', { name: '配置应用正在进行' })).toBeVisible()
@@ -510,7 +551,7 @@ describe('Poise read-only console', () => {
       return Promise.resolve(response(api(input)))
     }))
     render(<App />)
-    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByRole("region", { name: "运行工作台" })
     fireEvent.click(screen.getByRole('tab', { name: '配置' }))
     await screen.findByText(/等待订单完成/)
     fireEvent.click(screen.getByRole('button', { name: '取消本次申请' }))
@@ -538,7 +579,7 @@ describe('Poise read-only console', () => {
       return Promise.resolve(response(api(input)))
     }))
     render(<App />)
-    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByRole("region", { name: "运行工作台" })
     fireEvent.click(screen.getByRole('tab', { name: '配置' }))
     expect(await screen.findByText(/使用同一申请 ID 重新预览并重试/)).toBeVisible()
     fireEvent.change(screen.getByLabelText('下限价格'), { target: { value: '71000' } })
@@ -559,7 +600,7 @@ describe('Poise read-only console', () => {
     let reads = 0
     vi.stubGlobal('fetch', vi.fn((input: string) => Promise.resolve(response(input === '/tracks/btc-core/configuration' ? [waiting, activating][reads++] ?? activating : api(input)))))
     render(<App />)
-    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByRole("region", { name: "运行工作台" })
     fireEvent.click(screen.getByRole('tab', { name: '配置' })); expect(await screen.findByText('配置应用状态 · 等待订单完成')).toBeVisible()
     await act(async () => { applicationPoll(); await Promise.resolve(); await Promise.resolve() })
     expect(screen.getByText('配置应用状态 · 正在启用')).toBeVisible()
@@ -571,7 +612,7 @@ describe('Poise read-only console', () => {
     const waiting = { ...configuration, application_status: 'activating', application: { application_id: 'apply-2', status: 'activating', accepted: true, message: null, active_version: null } }
     vi.stubGlobal('fetch', vi.fn((input: string) => Promise.resolve(response(input === '/tracks/btc-core/configuration' && reconnected ? waiting : input === '/tracks/btc-core/configuration' ? configuration : api(input)))))
     render(<App />)
-    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByRole("region", { name: "运行工作台" })
     fireEvent.click(screen.getByRole('tab', { name: '配置' })); expect(await screen.findByText('配置应用状态 · 空闲')).toBeVisible()
     act(() => BrowserStream.instances[0].open())
     vi.useFakeTimers(); reconnected = true
@@ -592,7 +633,7 @@ describe('Poise read-only console', () => {
       return Promise.resolve(response(api(input)))
     }))
     render(<App />)
-    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByRole("region", { name: "运行工作台" })
     fireEvent.click(screen.getByRole('tab', { name: '配置' })); await screen.findByText('配置应用状态 · 空闲')
     fireEvent.change(screen.getByLabelText('下限价格'), { target: { value: '71000' } })
     fireEvent.click(screen.getByRole('button', { name: '重新预览' })); await screen.findByText('预览结果')
@@ -619,7 +660,7 @@ describe('Poise read-only console', () => {
       return Promise.resolve(response(api(input)))
     }))
     render(<App />)
-    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByText(/hyperliquid · BTC/)
+    await screen.findByText('btc-core'); fireEvent.click(screen.getAllByRole('button', { name: /btc-core/ })[0]); await screen.findByRole("region", { name: "运行工作台" })
     fireEvent.click(screen.getByRole('tab', { name: '配置' })); await screen.findByText('配置应用状态 · 空闲')
     fireEvent.change(screen.getByLabelText('下限价格'), { target: { value: '71000' } })
     fireEvent.click(screen.getByRole('button', { name: '重新预览' })); await screen.findByText('预览结果')

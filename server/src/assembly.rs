@@ -322,6 +322,7 @@ async fn assemble_with_state_store(
         query_service.clone(),
         debug_query_service.clone(),
         projector.clone(),
+        exchange_ports.market_data(),
         account_monitor.clone(),
         account_projector.clone(),
         runtime_health.clone(),
@@ -445,6 +446,7 @@ pub(crate) fn build_http_state(
     query_service: Arc<TradingQueries>,
     debug_query_service: Arc<TrackDebugQueryService>,
     projector: Arc<TrackProjector>,
+    market_data: Arc<dyn poise_application::exchange::MarketDataPort>,
     account_monitor: Arc<AccountMonitor>,
     account_projector: Arc<AccountProjector>,
     runtime_health: Arc<RuntimeHealth>,
@@ -464,6 +466,7 @@ pub(crate) fn build_http_state(
         query_service,
         debug_query_service,
         projector,
+        market_data,
         account_monitor,
         account_projector,
         runtime_health,
@@ -1575,7 +1578,7 @@ total_loss_limit = 600.0
             &self,
         ) -> Result<poise_application::exchange::AccountSummarySnapshot> {
             Ok(crate::test_support::test_account_summary_snapshot(
-                "USD",
+                "USDT",
                 1_000_000.0,
                 Some(1_000_000.0),
                 &[],
@@ -1864,6 +1867,10 @@ total_loss_limit = 600.0
                 .remove(&instrument.symbol)
                 .ok_or_else(|| anyhow!("no test receiver for symbol `{}`", instrument.symbol))
         }
+
+        async fn get_mark_price(&self, _instrument: &Instrument) -> Result<f64> {
+            Ok(100.0)
+        }
     }
 
     #[async_trait::async_trait]
@@ -1925,7 +1932,7 @@ total_loss_limit = 600.0
             &self,
         ) -> Result<poise_application::exchange::AccountSummarySnapshot> {
             Ok(crate::test_support::test_account_summary_snapshot(
-                "USD",
+                "USDT",
                 1_000_000.0,
                 Some(1_000_000.0),
                 &[],
@@ -1979,6 +1986,10 @@ total_loss_limit = 600.0
         ) -> Result<mpsc::Receiver<MarketDataTick>> {
             let (_sender, receiver) = mpsc::channel(1);
             Ok(receiver)
+        }
+
+        async fn get_mark_price(&self, _instrument: &Instrument) -> Result<f64> {
+            Ok(100.0)
         }
     }
 }

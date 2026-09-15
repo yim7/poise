@@ -227,6 +227,10 @@ export interface TrackLiveView {
   price_execution_block_reason?: string | null
 }
 
+export type CandleIntervalView = 'one_minute' | 'five_minutes' | 'fifteen_minutes' | 'one_hour'
+export interface CandleView { open_time: string; open: number; high: number; low: number; close: number }
+export interface TrackChartResponse { interval: CandleIntervalView; candles: CandleView[] }
+
 export type StreamEvent =
   | { type: 'track_list_item_changed'; track_id: string; item: TrackListItemView }
   | { type: 'track_detail_changed'; track_id: string; detail: TrackDetailView }

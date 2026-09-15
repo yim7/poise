@@ -6,10 +6,10 @@ use chrono::Utc;
 use tokio::sync::mpsc;
 
 use poise_application::exchange::{
-    AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
+    AccountPort, AccountSummaryPort, AccountSummarySnapshot, CandleInterval, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError, ExecutionResult,
-    MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest, PnlHistoryWindow,
-    Position, RecentTrackPnlRecords, UserDataEvent,
+    MarketCandle, MarketDataPort, MarketDataTick, MetadataPort, OrderReceipt, OrderRequest,
+    PnlHistoryWindow, Position, RecentTrackPnlRecords, UserDataEvent,
 };
 use poise_core::track::Instrument;
 
@@ -31,7 +31,10 @@ pub async fn connect(config: &Config) -> Result<ExchangePorts> {
         client_order_ids,
     )?);
     let execution: Arc<dyn ExecutionPort> = rest.clone();
-    let market_data: Arc<dyn MarketDataPort> = ws.clone();
+    let market_data: Arc<dyn MarketDataPort> = Arc::new(HyperliquidMarketData {
+        rest: Arc::clone(&rest),
+        ws: Arc::clone(&ws),
+    });
     let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
     let metadata: Arc<dyn MetadataPort> = rest.clone();
 
@@ -48,6 +51,11 @@ pub async fn connect(config: &Config) -> Result<ExchangePorts> {
 }
 
 struct HyperliquidAccount {
+    rest: Arc<HyperliquidRestClient>,
+    ws: Arc<HyperliquidWsClient>,
+}
+
+struct HyperliquidMarketData {
     rest: Arc<HyperliquidRestClient>,
     ws: Arc<HyperliquidWsClient>,
 }
@@ -116,12 +124,27 @@ impl ExecutionPort for HyperliquidRestClient {
 }
 
 #[async_trait]
-impl MarketDataPort for HyperliquidWsClient {
+impl MarketDataPort for HyperliquidMarketData {
     async fn subscribe_prices(
         &self,
         instrument: &Instrument,
     ) -> Result<mpsc::Receiver<MarketDataTick>> {
-        self.subscribe_prices(instrument).await
+        self.ws.subscribe_prices(instrument).await
+    }
+
+    async fn get_mark_price(&self, instrument: &Instrument) -> Result<f64> {
+        self.rest.get_mark_price(&instrument.symbol).await
+    }
+
+    async fn get_candles(
+        &self,
+        instrument: &Instrument,
+        interval: CandleInterval,
+        limit: usize,
+    ) -> Result<Vec<MarketCandle>> {
+        self.rest
+            .get_candles(&instrument.symbol, interval, limit)
+            .await
     }
 }
 

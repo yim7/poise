@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use poise_application::exchange::MarketDataPort;
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
     AccountMonitor, ApplicationNotification, EffectJournalDiagnostics, SessionEffectQueue,
@@ -24,6 +25,7 @@ pub struct HttpState {
     pub query_service: Arc<TradingQueries>,
     pub debug_query_service: Arc<TrackDebugQueryService>,
     pub projector: Arc<TrackProjector>,
+    pub market_data: Arc<dyn MarketDataPort>,
     pub account_monitor: Arc<AccountMonitor>,
     pub account_projector: Arc<AccountProjector>,
     pub runtime_health: Arc<RuntimeHealth>,

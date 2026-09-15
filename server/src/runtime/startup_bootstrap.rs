@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Result, anyhow, ensure};
 use chrono::{DateTime, Utc};
 use poise_application::TrackInput;
 use poise_application::exchange::{Position, UserDataEvent};
@@ -11,6 +11,8 @@ use poise_core::track::{Instrument, TrackId};
 use poise_engine::runtime::FreshSessionExternalInputs;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
+
+use crate::account_capacity::estimate_account_capacity;
 
 use super::{
     RuntimeStartupDefinition, STARTUP_RETRY_ATTEMPTS, STARTUP_RETRY_DELAY, ServerRuntime,
@@ -340,50 +342,22 @@ async fn probe_startup_account_capacity(
         let position = position.clone();
         let instrument_spec = instrument_spec.clone();
         async move {
-            if matches!(
-                instrument_spec.position_basis(),
-                PositionBasis::Contracts { .. }
-            ) {
-                let summary = account_summary.get_account_summary().await?;
-                let available = summary
-                    .available_for_asset(instrument_spec.settlement_asset().as_str())
-                    .with_context(|| {
-                        format!(
-                            "missing available balance for settlement asset `{}`",
-                            instrument_spec.settlement_asset().as_str()
-                        )
-                    })?;
-                let mark_price = match position.mark_price {
+            let mark_price = match instrument_spec.position_basis() {
+                PositionBasis::BaseAsset => None,
+                PositionBasis::Contracts { .. } => Some(match position.mark_price {
                     Some(mark_price) => mark_price,
-                    None => market_data
-                        .get_mark_price(&instrument)
-                        .await?
-                        .with_context(|| {
-                            format!(
-                                "missing mark price for inverse account capacity on `{}`",
-                                instrument.symbol
-                            )
-                        })?,
-                };
-                let contract_notional = instrument_spec
-                    .contract_value()
-                    .with_context(|| {
-                        format!(
-                            "missing contract notional for inverse account capacity on `{}`",
-                            instrument.symbol
-                        )
-                    })?
-                    .value();
-                let estimated_contracts =
-                    available * mark_price * startup_leverage as f64 / contract_notional;
-                return Ok::<AccountCapacitySnapshot, anyhow::Error>(AccountCapacitySnapshot {
-                    max_increase_notional: estimated_contracts * contract_notional,
-                });
-            }
-
-            let available = account_summary.get_available_balance(&instrument).await?;
+                    None => market_data.get_mark_price(&instrument).await?,
+                }),
+            };
+            let summary = account_summary.get_account_summary().await?;
+            let capacity = estimate_account_capacity(
+                &summary,
+                &instrument_spec,
+                mark_price,
+                startup_leverage,
+            )?;
             Ok::<AccountCapacitySnapshot, anyhow::Error>(AccountCapacitySnapshot {
-                max_increase_notional: available * startup_leverage as f64,
+                max_increase_notional: capacity.max_increase_notional,
             })
         }
     })
@@ -414,8 +388,8 @@ async fn collect_startup_replay_events(
             .resolve_track_id(&instrument)
             .await
         else {
-            tracing::warn!(
-                "received user data for unknown instrument {}:{}",
+            tracing::debug!(
+                "ignoring user data for unmanaged instrument {}:{}",
                 instrument.venue.as_str(),
                 instrument.symbol
             );
@@ -536,6 +510,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_stream_ignores_unmanaged_instruments_but_reports_closed_receiver() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let services = build_test_application_services(
+            seeded_manager(),
+            repository.clone() as Arc<dyn TrackMutationStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
+            notifications.clone(),
+            Arc::new(crate::runtime::AccountMarginGuardStore::default()),
+        );
+        let (context, effects) = build_runtime_and_effect_worker_test_contexts(
+            &services,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository as Arc<dyn TrackEffectJournal>,
+            unavailable_account_monitor(notifications),
+        );
+        let runtime = super::ServerRuntime::new(
+            context.runtime_state(),
+            effects.effect_worker_state,
+            exchange_ports(Arc::new(StartupExchange::with_inherited_order("BTCUSDT"))),
+            Arc::new(SystemClock),
+            vec![],
+        );
+        let (sender, receiver) = mpsc::channel(8);
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let task = super::super::user_data::spawn_user_task(&runtime, receiver, shutdown_rx);
+        // The managed position update is an ordered processing barrier after the unrelated event.
+        for instrument in [
+            Instrument::new(Venue::Hyperliquid, "xyz:CL"),
+            Instrument::new(Venue::Binance, "BTCUSDT"),
+        ] {
+            sender
+                .send(UserDataEvent {
+                    event_time: Utc::now(),
+                    payload: UserDataPayload::PositionUpdate(Position {
+                        instrument,
+                        qty: poise_core::instrument::PositionQty::new(1.25).unwrap(),
+                        avg_price: 100.0,
+                        unrealized_pnl: 0.0,
+                        mark_price: None,
+                    }),
+                })
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let view = runtime
+                    .state
+                    .reconcile
+                    .runtime
+                    .track_runtime_view("btc-core")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if view.position_qty == 1.25 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let snapshot = runtime.state.runtime_health.snapshot();
+        let user = snapshot
+            .tasks
+            .iter()
+            .find(|task| task.component == crate::runtime::RuntimeHealthComponent::UserData)
+            .unwrap();
+        assert!(
+            user.last_error.is_none(),
+            "unmanaged events must not be recorded as stream failures"
+        );
+        drop(sender);
+        task.await.unwrap();
+        let snapshot = runtime.state.runtime_health.snapshot();
+        let user = snapshot
+            .tasks
+            .iter()
+            .find(|task| task.component == crate::runtime::RuntimeHealthComponent::UserData)
+            .unwrap();
+        assert_eq!(user.status, crate::runtime::RuntimeHealthStatus::Degraded);
+        assert_eq!(
+            user.last_error.as_deref(),
+            Some("user data receiver closed")
+        );
+    }
+
+    #[tokio::test]
     async fn startup_capacity_uses_account_summary_available_with_track_leverage() {
         let repository = Arc::new(SqliteStorage::in_memory().unwrap());
         let manager = seeded_manager();
@@ -581,8 +645,54 @@ mod tests {
             .account_margin_guard
             .constraint_for(&Instrument::new(Venue::Binance, "BTCUSDT"));
         assert_eq!(constraint.max_increase_notional, Some(5_000.0));
-        assert_eq!(exchange.available_balance_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(exchange.account_summary_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(exchange.account_summary_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn startup_capacity_rejects_account_available_in_a_different_asset() {
+        let repository = Arc::new(SqliteStorage::in_memory().unwrap());
+        let manager = seeded_manager();
+        let (notifications, _) = tokio::sync::broadcast::channel(16);
+        let account_margin_guard = Arc::new(crate::runtime::AccountMarginGuardStore::default());
+        let services = build_test_application_services(
+            manager,
+            repository.clone() as Arc<dyn TrackMutationStore>,
+            repository.clone() as Arc<dyn TrackQueryStore>,
+            repository.clone() as Arc<dyn TrackEffectJournal>,
+            notifications.clone(),
+            account_margin_guard,
+        );
+        let account_monitor = unavailable_account_monitor(notifications.clone());
+        let (runtime_context, effect_worker_context) =
+            build_runtime_and_effect_worker_test_contexts(
+                &services,
+                repository.clone() as Arc<dyn TrackQueryStore>,
+                repository.clone() as Arc<dyn TrackEffectJournal>,
+                account_monitor,
+            );
+        let exchange = Arc::new(StartupExchange::with_inherited_order("BTCUSDT"));
+        exchange.set_available_balance(200.0);
+        exchange.set_valuation_asset("USD");
+        let runtime = super::ServerRuntime::new(
+            runtime_context.runtime_state(),
+            effect_worker_context.effect_worker_state,
+            exchange_ports(exchange),
+            Arc::new(SystemClock),
+            vec![RuntimeStartupDefinition::new(
+                test_track_definition("btc-core"),
+                25,
+            )],
+        );
+        let (_sender, mut receiver) = mpsc::channel(8);
+        let startup_replay_floor = Utc.with_ymd_and_hms(2026, 4, 23, 12, 0, 0).unwrap();
+
+        let error = complete_startup(&runtime, &mut receiver, startup_replay_floor)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("USD"));
+        assert!(error.contains("USDT"));
     }
 
     #[tokio::test]
@@ -659,7 +769,6 @@ mod tests {
             .account_margin_guard
             .constraint_for(&Instrument::new(Venue::Okx, "BTC-USD-SWAP"));
         assert_eq!(constraint.max_increase_notional, Some(100_000.0));
-        assert_eq!(exchange.available_balance_calls.load(Ordering::SeqCst), 0);
         assert_eq!(exchange.account_summary_calls.load(Ordering::SeqCst), 1);
     }
 
@@ -758,6 +867,27 @@ mod tests {
         assert!(message.contains("btc-coin"));
         assert!(message.contains("BTC-USD-SWAP"));
         assert!(message.contains("missing mark price"));
+    }
+
+    #[tokio::test]
+    async fn startup_preflight_rejects_non_positive_inverse_mark_price() {
+        let track = inverse_track();
+        let inverse_rules = inverse_rules();
+        let (runtime, exchange) = runtime_for_track(track, inverse_rules);
+        exchange.set_available_asset("BTC", 0.5);
+        exchange.set_position_mark_price(-1.0);
+        let (_sender, mut receiver) = mpsc::channel(8);
+        let startup_replay_floor = Utc.with_ymd_and_hms(2026, 4, 23, 12, 0, 0).unwrap();
+
+        let message = complete_startup(&runtime, &mut receiver, startup_replay_floor)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(message.contains("btc-coin"));
+        assert!(message.contains("BTC-USD-SWAP"));
+        assert!(message.contains("invalid mark price"));
+        assert!(message.contains("-1"));
     }
 
     #[tokio::test]
@@ -1364,9 +1494,9 @@ mod tests {
         cancel_all_calls: AtomicUsize,
         get_position_calls: AtomicUsize,
         get_open_orders_calls: AtomicUsize,
-        available_balance_calls: AtomicUsize,
         account_summary_calls: AtomicUsize,
         available_balance: std::sync::Mutex<f64>,
+        valuation_asset: std::sync::Mutex<String>,
         available_by_asset: std::sync::Mutex<BTreeMap<String, f64>>,
         position_mark_price: std::sync::Mutex<Option<f64>>,
         market_mark_price: std::sync::Mutex<Option<f64>>,
@@ -1387,9 +1517,9 @@ mod tests {
                 cancel_all_calls: AtomicUsize::new(0),
                 get_position_calls: AtomicUsize::new(0),
                 get_open_orders_calls: AtomicUsize::new(0),
-                available_balance_calls: AtomicUsize::new(0),
                 account_summary_calls: AtomicUsize::new(0),
                 available_balance: std::sync::Mutex::new(1_000_000.0),
+                valuation_asset: std::sync::Mutex::new("USDT".to_string()),
                 available_by_asset: std::sync::Mutex::new(BTreeMap::new()),
                 position_mark_price: std::sync::Mutex::new(None),
                 market_mark_price: std::sync::Mutex::new(None),
@@ -1401,6 +1531,10 @@ mod tests {
 
         fn set_available_balance(&self, available: f64) {
             *self.available_balance.lock().unwrap() = available;
+        }
+
+        fn set_valuation_asset(&self, asset: &str) {
+            *self.valuation_asset.lock().unwrap() = asset.to_string();
         }
 
         fn set_available_asset(&self, asset: &str, available: f64) {
@@ -1514,6 +1648,7 @@ mod tests {
         ) -> Result<poise_application::exchange::AccountSummarySnapshot> {
             self.account_summary_calls.fetch_add(1, Ordering::SeqCst);
             let available = *self.available_balance.lock().unwrap();
+            let valuation_asset = self.valuation_asset.lock().unwrap().clone();
             let available_by_asset = self
                 .available_by_asset
                 .lock()
@@ -1527,19 +1662,16 @@ mod tests {
                 })
                 .collect();
             poise_application::exchange::AccountSummarySnapshot::try_new(
-                crate::test_support::test_amount(1_000_000.0, "USD"),
-                Some(crate::test_support::test_amount(available, "USD")),
+                crate::test_support::test_amount(1_000_000.0, &valuation_asset),
+                Some(crate::test_support::test_amount(
+                    available,
+                    &valuation_asset,
+                )),
                 available_by_asset,
-                Some(crate::test_support::test_amount(0.0, "USD")),
+                Some(crate::test_support::test_amount(0.0, &valuation_asset)),
                 Utc::now(),
             )
             .map_err(anyhow::Error::msg)
-        }
-
-        async fn get_available_balance(&self, instrument: &Instrument) -> Result<f64> {
-            assert_eq!(instrument, &self.instrument);
-            self.available_balance_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(*self.available_balance.lock().unwrap())
         }
     }
 
@@ -1593,9 +1725,12 @@ mod tests {
             Ok(receiver)
         }
 
-        async fn get_mark_price(&self, instrument: &Instrument) -> Result<Option<f64>> {
+        async fn get_mark_price(&self, instrument: &Instrument) -> Result<f64> {
             assert_eq!(instrument, &self.instrument);
-            Ok(*self.market_mark_price.lock().unwrap())
+            self.market_mark_price
+                .lock()
+                .unwrap()
+                .ok_or_else(|| anyhow::anyhow!("missing mark price for `{}`", instrument.symbol))
         }
     }
 }

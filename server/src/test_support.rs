@@ -4,7 +4,8 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use poise_application::exchange::{
     AccountPort, AccountSummarySnapshot, ExchangeOpenOrderSnapshot, ExecutionPort, ExecutionQuote,
-    OrderReceipt, OrderRequest, OrderStatus, Position, RecentTrackPnlRecords, UserDataEvent,
+    MarketDataPort, MarketDataTick, OrderReceipt, OrderRequest, OrderStatus, Position,
+    RecentTrackPnlRecords, UserDataEvent,
 };
 use poise_application::submit_effect_service::SubmitEffectService;
 use poise_application::{
@@ -501,6 +502,24 @@ impl AccountPort for NoopAccountPort {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct NoopMarketDataPort;
+
+#[async_trait::async_trait]
+impl MarketDataPort for NoopMarketDataPort {
+    async fn subscribe_prices(
+        &self,
+        _instrument: &Instrument,
+    ) -> Result<mpsc::Receiver<MarketDataTick>> {
+        let (_sender, receiver) = mpsc::channel(1);
+        Ok(receiver)
+    }
+
+    async fn get_mark_price(&self, _instrument: &Instrument) -> Result<f64> {
+        anyhow::bail!("test market data is unavailable")
+    }
+}
+
 pub(crate) fn build_http_state(
     services: &TestApplicationServices,
     query_store: Arc<dyn TrackQueryStore>,
@@ -515,6 +534,7 @@ pub(crate) fn build_http_state(
         query_service,
         debug_query_service,
         projector,
+        Arc::new(NoopMarketDataPort),
         account_monitor,
         account_projector,
         Arc::new(RuntimeHealth::new()),

@@ -51,13 +51,12 @@ pub(crate) async fn apply_exchange_startup_controls(
         exchange_startup_control
             .set_leverage(&instrument, leverage)
             .await
-            .map_err(|error| {
-                anyhow!(
-                    "failed to set startup leverage for track `{}` symbol `{}` to {}x: {}",
+            .with_context(|| {
+                format!(
+                    "failed to set startup leverage for track `{}` symbol `{}` to {}x",
                     track_id.as_str(),
                     instrument.symbol,
-                    leverage,
-                    error
+                    leverage
                 )
             })?;
     }

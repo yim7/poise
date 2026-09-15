@@ -5,10 +5,11 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use poise_application::exchange::{
-    AccountPort, AccountSummaryPort, AccountSummarySnapshot, ExchangeInfo,
+    AccountPort, AccountSummaryPort, AccountSummarySnapshot, CandleInterval, ExchangeInfo,
     ExchangeOpenOrderSnapshot, ExchangePorts, ExecutionPort, ExecutionPortError,
-    ExecutionPortErrorKind, ExecutionResult, MarketDataPort, MarketDataTick, MetadataPort,
-    OrderReceipt, OrderRequest, PnlHistoryWindow, Position, RecentTrackPnlRecords, UserDataEvent,
+    ExecutionPortErrorKind, ExecutionResult, MarketCandle, MarketDataPort, MarketDataTick,
+    MetadataPort, OrderReceipt, OrderRequest, PnlHistoryWindow, Position, RecentTrackPnlRecords,
+    UserDataEvent,
 };
 use poise_core::track::Instrument;
 
@@ -34,7 +35,10 @@ pub async fn connect(config: &Config) -> Result<ExchangePorts> {
 
 fn ports_from_clients(rest: Arc<BybitRestClient>, ws: Arc<BybitWsClient>) -> ExchangePorts {
     let execution: Arc<dyn ExecutionPort> = rest.clone();
-    let market_data: Arc<dyn MarketDataPort> = ws.clone();
+    let market_data: Arc<dyn MarketDataPort> = Arc::new(BybitMarketData {
+        rest: Arc::clone(&rest),
+        ws: Arc::clone(&ws),
+    });
     let account_summary: Arc<dyn AccountSummaryPort> = rest.clone();
     let metadata: Arc<dyn MetadataPort> = Arc::new(BybitMetadata {
         rest: Arc::clone(&rest),
@@ -51,6 +55,11 @@ fn ports_from_clients(rest: Arc<BybitRestClient>, ws: Arc<BybitWsClient>) -> Exc
 }
 
 struct BybitAccount {
+    ws: Arc<BybitWsClient>,
+}
+
+struct BybitMarketData {
+    rest: Arc<BybitRestClient>,
     ws: Arc<BybitWsClient>,
 }
 
@@ -120,12 +129,27 @@ impl ExecutionPort for BybitRestClient {
 }
 
 #[async_trait]
-impl MarketDataPort for BybitWsClient {
+impl MarketDataPort for BybitMarketData {
     async fn subscribe_prices(
         &self,
         instrument: &Instrument,
     ) -> Result<mpsc::Receiver<MarketDataTick>> {
-        self.subscribe_prices(instrument).await
+        self.ws.subscribe_prices(instrument).await
+    }
+
+    async fn get_mark_price(&self, instrument: &Instrument) -> Result<f64> {
+        self.rest.get_mark_price(&instrument.symbol).await
+    }
+
+    async fn get_candles(
+        &self,
+        instrument: &Instrument,
+        interval: CandleInterval,
+        limit: usize,
+    ) -> Result<Vec<MarketCandle>> {
+        self.rest
+            .get_candles(&instrument.symbol, interval, limit)
+            .await
     }
 }
 
