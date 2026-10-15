@@ -486,7 +486,7 @@
 | 最低下单金额 | 10 美元 | [错误说明](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/error-responses) |
 | 已授权 API 钱包 | `extraAgents` 按主账户地址返回已授权的 API 钱包 `name, address, validUntil`；API 钱包最长有效期 180 天，过期或被替换后失效 | 实测；[Nonces and API wallets](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets) |
 | 请求次数 | `userRateLimit` 返回 `nRequestsUsed`、`nRequestsCap`（随累计成交量增长）。这是按地址的请求上限，**不确定**是否就是 Unified 账户每天 5 万次的操作上限 | 实测；未核实二者关系 |
-| API 钱包能否提现 | **未核实**。文档说明 API 钱包只用于代为签名；提现、转账属于用户签名动作（文档提到“User-signed actions such as Core USDC transfer”），推断需要主钱包签名，API 钱包不能提现 | 推断，未见书面说明 |
+| API 钱包能否提现 | 不能转账或提现（用户确认）。与文档一致：API 钱包只用于代为签名，转账、提现属于用户签名动作，需要主钱包签名 | 用户确认；[Nonces and API wallets](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets) |
 
 由此对设计的补充：
 - 第 2.0 节的启动校验：用由私钥推出的地址到 `extraAgents` 中查找，并检查 `validUntil` 未过期；剩余有效期少于 14 天时在界面提醒用户续期。
