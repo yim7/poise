@@ -36,6 +36,7 @@ pub struct HttpState {
     pub recent_fills_auditor: Arc<RecentFillsAuditor>,
     pub configuration_metadata: Arc<HashMap<String, TrackConfigurationMetadata>>,
     pub configuration_store: Option<Arc<ConfigurationApplicationStoreAdapter>>,
+    pub track_creation_exchange: Option<poise_application::exchange::ExchangePorts>,
     pub system_info: SystemInfo,
 }
 

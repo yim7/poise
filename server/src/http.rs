@@ -43,8 +43,8 @@ use crate::runtime::{
 use crate::server_context::{HttpState, WebSocketState};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-struct ErrorResponse {
-    error: String,
+pub(crate) struct ErrorResponse {
+    pub(crate) error: String,
 }
 
 pub fn router(http_state: HttpState, websocket_state: WebSocketState) -> Router {
@@ -68,7 +68,15 @@ pub(crate) fn router_with_web_root(
         .route("/readiness", get(readiness))
         .route("/system", get(get_system))
         .route("/account", get(get_account))
-        .route("/tracks", get(list_tracks))
+        .route(
+            "/tracks",
+            get(list_tracks).post(crate::track_creation::save),
+        )
+        .route("/track-creation", get(crate::track_creation::context))
+        .route(
+            "/track-creation/preview",
+            post(crate::track_creation::preview),
+        )
         .route("/tracks/:id", get(get_track_detail))
         .route("/tracks/:id/chart", get(get_track_chart))
         .route("/tracks/:id/configuration", get(get_track_configuration))
@@ -414,7 +422,12 @@ async fn get_track_configuration(
             )
         })
         .collect();
-    let version = configuration_version(configurations);
+    let version = match state.configuration_store.as_ref() {
+        Some(store) => store
+            .current_version()
+            .map_err(map_configuration_store_error)?,
+        None => configuration_version(configurations),
+    };
     let application = match state.configuration_store.as_ref() {
         Some(store) => store
             .latest_for_track(&id)
@@ -687,7 +700,7 @@ fn project_application_view(
     }
 }
 
-fn map_configuration_store_error(
+pub(crate) fn map_configuration_store_error(
     error: poise_application::ConfigurationApplicationStoreError,
 ) -> (StatusCode, Json<ErrorResponse>) {
     match error {
@@ -1265,7 +1278,7 @@ fn map_command(
     }
 }
 
-fn bad_request(message: String) -> (StatusCode, Json<ErrorResponse>) {
+pub(crate) fn bad_request(message: String) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::BAD_REQUEST,
         Json(ErrorResponse { error: message }),
@@ -1279,7 +1292,7 @@ fn not_found(message: String) -> (StatusCode, Json<ErrorResponse>) {
     )
 }
 
-fn internal_error(message: String) -> (StatusCode, Json<ErrorResponse>) {
+pub(crate) fn internal_error(message: String) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ErrorResponse { error: message }),
@@ -1462,6 +1475,136 @@ mod tests {
 
     fn router(state: HttpTestState) -> axum::Router {
         super::router(state.http_state, state.websocket_state)
+    }
+
+    #[tokio::test]
+    async fn creation_http_saves_pending_track_without_activation_and_preserves_online_edits() {
+        let (mut state, audit, path, _directory) =
+            with_configuration_store(app_state_with_usdt_account_summary().await);
+        let (_fixture_dir, _store, ports, candidate, _exchange) =
+            crate::track_creation::tests::fixture();
+        state.http_state.track_creation_exchange = Some(ports);
+        let app = router(state.clone());
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/track-creation")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+        let context: poise_protocol::TrackCreationContext =
+            serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert!(context.pending.is_empty());
+        let request = poise_protocol::TrackCreationPreviewRequest {
+            expected_version: context.version.clone(),
+            candidate: candidate.clone(),
+        };
+        let preview = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/track-creation/preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = preview.status();
+        let body = to_bytes(preview.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let preview: poise_protocol::TrackCreationPreviewResponse =
+            serde_json::from_slice(&body).unwrap();
+        let saved = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tracks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&poise_protocol::TrackCreationSaveRequest {
+                            expected_version: context.version,
+                            candidate,
+                            preview_token: preview.preview_token,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = saved.status();
+        let body = to_bytes(saved.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let saved: poise_protocol::TrackCreationContext = serde_json::from_slice(&body).unwrap();
+        assert_eq!(saved.pending.len(), 1);
+        assert_eq!(saved.pending[0].track_id, "gold");
+        assert_eq!(
+            state
+                .http_state
+                .runtime
+                .committed_track_definitions()
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(crate::config::load_config(&path).unwrap().tracks.len(), 2);
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/tracks/btc-core/configuration")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let configuration: poise_protocol::TrackConfigurationResponse =
+            serde_json::from_slice(&to_bytes(get.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(
+            configuration.version,
+            state
+                .http_state
+                .configuration_store
+                .as_ref()
+                .unwrap()
+                .current_version()
+                .unwrap()
+        );
+        let put = app.clone().oneshot(Request::builder().method("PUT").uri("/tracks/btc-core/configuration").header("content-type", "application/json").body(Body::from(serde_json::json!({ "application_id": "apply-with-pending-track", "expected_version": configuration.version, "candidate": configuration.active }).to_string())).unwrap()).await.unwrap();
+        let status = put.status();
+        let body = to_bytes(put.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert!(
+            audit
+                .load_configuration_application("apply-with-pending-track")
+                .unwrap()
+                .is_some()
+        );
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/track-creation")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+        // Pending definitions survive process restart and disappear from the pending
+        // list only once the normal startup path has installed them in runtime.
+        let definitions = crate::config::load_config(&path)
+            .unwrap()
+            .track_definitions()
+            .unwrap();
+        assert_eq!(definitions[1].instrument().symbol, "GOLDUSDT");
     }
 
     fn router_with_web_root(state: HttpTestState, web_root: std::path::PathBuf) -> axum::Router {

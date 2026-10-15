@@ -294,6 +294,20 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .confirmation dl { margin: 12px 0; }
 .confirmation button + button { margin-left: 8px; }
 
+.creation-intro { color: #aeb6c1; margin: 0 0 16px; max-width: 700px; }
+.creation-hint { color: #929ba9; font-size: 12px; line-height: 1.6; }
+.creation-advanced { margin-top: 16px; border-top: 1px solid #303a43; padding-top: 12px; }
+.creation-advanced summary { cursor: pointer; color: #bde4d0; margin-bottom: 12px; }
+.creation-reduction { border-left: 3px solid #e6aa58; padding: 8px 10px; background: #33291d; color: #f5d5a5; }
+.creation-orders { list-style: none; padding: 0; }
+.creation-orders li { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 9px 0; border-top: 1px solid #303a43; }
+.creation-orders strong { overflow-wrap: anywhere; }
+.creation-orders span { color: #aeb6c1; }
+.pending-tracks { margin-bottom: 12px; border-color: #796443; }
+.sidebar-pending { color: #e6bd79; padding: 0 8px 8px; font-size: 11px; overflow-wrap: anywhere; }
+.sidebar-pending p { margin-left: 0 !important; }
+.track-creation > .alert { margin-bottom: 12px; }
+
 @media (max-width: 1100px) {
   .topbar { gap: 10px; padding-inline: 12px; }
   .operational-strip { justify-self: start; }

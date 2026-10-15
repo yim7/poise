@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { AccountSummaryView, BandFlattenTrigger, BandProtectionPolicy, BandRecoverPolicy, ExecutionBindingView, HealthResponse, StreamEvent, SystemResponse, TrackActivityItemView, TrackCommandType, TrackConfigurationActiveView, TrackConfigurationApplicationStatus, TrackConfigurationApplicationView, TrackConfigurationPreviewResponse, TrackConfigurationResponse, TrackDetailView, TrackDiagnosticsView, TrackListItemView, TrackListResponse, TradingReadinessResponse } from './types'
 import { MarketChart } from './MarketChart'
+import { HttpResponseError, requestJson } from './api'
+import { TrackCreationPanel } from './TrackCreationPanel'
+import type { TrackCreationContext } from './types'
 
 const chineseReason: Record<string, { title: string; detail: string }> = {
   waiting_risk_release: { title: '等待风险释放', detail: '目标仓位已获风险批准，新增风险需要等待释放条件满足。已有订单的执行状态见图中挂单。' },
@@ -47,24 +50,6 @@ function policy(value: string | Record<string, unknown>) {
   return typeof value === 'string' ? title(value) : JSON.stringify(value)
 }
 
-class HttpResponseError extends Error {
-  constructor(readonly status: number, message: string) { super(message) }
-}
-
-async function requestJson<T>(path: string, init?: RequestInit) {
-  const response = init ? await fetch(path, init) : await fetch(path)
-  if (!response.ok) {
-    let message = `${path} ${response.status}`
-    try {
-      const body = await response.json() as { error?: unknown; message?: unknown }
-      const detail = typeof body.error === 'string' ? body.error : typeof body.message === 'string' ? body.message : null
-      if (detail) message = detail
-    } catch { /* Keep the HTTP status as the deterministic error signal. */ }
-    throw new HttpResponseError(response.status, message)
-  }
-  return response.json() as Promise<T>
-}
-
 async function requestOperationalStatusJson<T>(path: string) {
   const response = await fetch(path)
   if (response.status !== 200 && response.status !== 503) throw new Error(`${path} ${response.status}`)
@@ -90,6 +75,10 @@ export function App() {
   const [tracks, setTracks] = useState<TrackListItemView[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [systemOpen, setSystemOpen] = useState(false)
+  const [creationOpen, setCreationOpen] = useState(false)
+  const [creationContext, setCreationContext] = useState<TrackCreationContext | null>(null)
+  const creationSequence = useRef(0)
+  const [creationReadError, setCreationReadError] = useState(false)
   const [detail, setDetail] = useState<TrackDetailView | null>(null)
   const [detailRequestVersion, setDetailRequestVersion] = useState(0)
   const selectedIdRef = useRef<string | null>(null)
@@ -101,7 +90,17 @@ export function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [system, setSystem] = useState<SystemResponse | null>(null)
 
+  const refreshCreationContext = async () => {
+    const current = ++creationSequence.current
+    try {
+      const context = await requestJson<TrackCreationContext>('/track-creation')
+      if (current === creationSequence.current) { setCreationContext(context); setCreationReadError(false) }
+    } catch {
+      if (current === creationSequence.current) setCreationReadError(true)
+    }
+  }
   const refresh = async () => {
+    void refreshCreationContext()
     try {
       const [nextReadiness, nextHealth, nextSystem, nextAccount, trackList] = await Promise.all([
         requestOperationalStatusJson<TradingReadinessResponse>('/readiness'),
@@ -115,6 +114,7 @@ export function App() {
   }
 
   const refreshOperationalState = async () => {
+    void refreshCreationContext()
     try {
       const [nextReadiness, nextHealth, nextSystem] = await Promise.all([
         requestOperationalStatusJson<TradingReadinessResponse>('/readiness'),
@@ -228,6 +228,7 @@ export function App() {
     setDetail(null)
     setError(false)
     setSystemOpen(false)
+    setCreationOpen(false)
     setSelectedId(id)
   }
   const retry = () => {
@@ -249,8 +250,11 @@ export function App() {
   return <main>
     <header className="topbar"><div className="brand"><strong>Poise</strong><span>交易所 {system?.exchange ?? '载入中'}</span></div><div className="operational-strip"><span>{exchangeTasks}</span><span>{status}</span><span className={system?.deployment === 'mainnet' ? 'deployment-mainnet' : 'deployment'}>环境 {deploymentLabel(system?.deployment)}</span></div><div className="stream-status"><span className={connection === 'connected' ? 'connection online' : 'connection'}>{connectionLabel}</span><span>更新 {lastUpdated}</span></div></header>
     {(error || readinessPollError) && <div role="alert" className="alert"><strong>无法读取运行状态</strong><span>请确认本地 server 正在运行后重试。</span><button onClick={retry}>重试</button></div>}
-    <div className="layout"><aside><button className={!selectedId && !systemOpen ? 'nav active' : 'nav'} onClick={() => selectTrack(null)}>总览</button><p>Tracks</p>{tracks.map(track => <button key={track.id} className={selectedId === track.id ? 'track active' : 'track'} onClick={() => selectTrack(track.id)}><strong>{track.id}</strong><small>{track.instrument?.symbol} · {title(track.lifecycle?.status)}</small></button>)}<button className={systemOpen ? 'nav active' : 'nav'} onClick={() => { selectedIdRef.current = null; setSelectedId(null); setSystemOpen(true) }}>系统</button></aside>
-    <section className="content">{systemOpen ? <SystemPanel readiness={readiness} health={health} system={system} /> : selectedId ? detail ? <TrackPage key={detail.identity.id} detail={detail} configurationRefreshVersion={configurationRefreshVersion} onDetail={setDetail} /> : <h1>Track 载入中</h1> : <Overview readiness={readiness} health={health} account={account} tracks={tracks} onSelect={selectTrack} onSystem={() => setSystemOpen(true)} />}</section></div>
+    <div className="layout"><aside><button className={!selectedId && !systemOpen && !creationOpen ? 'nav active' : 'nav'} onClick={() => selectTrack(null)}>总览</button><p>Tracks</p>{tracks.map(track => <button key={track.id} className={selectedId === track.id ? 'track active' : 'track'} onClick={() => selectTrack(track.id)}><strong>{track.id}</strong><small>{track.instrument?.symbol} · {title(track.lifecycle?.status)}</small></button>)}
+      <button className={creationOpen ? 'nav active' : 'nav'} disabled={!system} onClick={() => { selectedIdRef.current = null; setSelectedId(null); setDetail(null); setSystemOpen(false); setCreationOpen(true) }}>新增 Track</button>
+      {creationReadError ? <div className="sidebar-pending">待重启状态未能核验</div> : (creationContext?.pending?.length ?? 0) > 0 && <div className="sidebar-pending"><p>待重启</p>{creationContext!.pending.map(item => <div key={item.track_id}>{item.track_id} · {item.symbol}</div>)}</div>}
+      <button className={systemOpen ? 'nav active' : 'nav'} onClick={() => { selectedIdRef.current = null; setSelectedId(null); setCreationOpen(false); setSystemOpen(true) }}>系统</button></aside>
+    <section className="content">{creationOpen ? <TrackCreationPanel exchange={system?.exchange ?? null} deployment={system?.deployment ?? null} onSaved={context => { creationSequence.current += 1; setCreationContext(context); setCreationReadError(false); setConfigurationRefreshVersion(version => version + 1) }} /> : systemOpen ? <SystemPanel readiness={readiness} health={health} system={system} /> : selectedId ? detail ? <TrackPage key={detail.identity.id} detail={detail} configurationRefreshVersion={configurationRefreshVersion} onDetail={setDetail} /> : <h1>Track 载入中</h1> : <Overview readiness={readiness} health={health} account={account} tracks={tracks} onSelect={selectTrack} onSystem={() => setSystemOpen(true)} />}</section></div>
   </main>
 }
 

@@ -49,6 +49,19 @@ function response(value: object, status = 200) {
 }
 
 describe('Poise read-only console', () => {
+  it('opens creation from the sidebar and shows persisted pending tracks without treating them as running', async () => {
+    vi.stubGlobal('fetch', vi.fn((path: string) => Promise.resolve(response(
+      path === '/track-creation' ? { version: 'file-1', pending: [{ track_id: 'gold', symbol: 'xyz:GOLD' }] }
+      : path === '/system' ? { exchange: 'hyperliquid', deployment: 'mainnet' } : api(path),
+    ))))
+    render(<App />)
+    expect(await screen.findByText('gold · xyz:GOLD')).toBeVisible()
+    expect(screen.getByText('待重启')).toBeVisible()
+    expect(screen.queryByRole('button', { name: /gold · xyz:GOLD/ })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '新增 Track' }))
+    expect(await screen.findByRole('heading', { name: '新增 Track' })).toBeVisible()
+    expect(screen.getByLabelText('合约名称')).toBeVisible()
+  })
   afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals() })
   beforeEach(() => {
     BrowserStream.instances = []
@@ -230,7 +243,7 @@ describe('Poise read-only console', () => {
     await screen.findByRole('heading', { name: '可以交易' })
     expect(await screen.findByText('环境 TESTNET 测试网')).toBeVisible()
     act(() => BrowserStream.instances[0].open())
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(10))
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(([path]) => path === '/tracks')).toHaveLength(2))
     vi.useFakeTimers()
     reconnected = true
     act(() => BrowserStream.instances[0].serverClose())

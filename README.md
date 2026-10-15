@@ -268,6 +268,10 @@ cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet"
 
 控制台分为总览、Track 和系统：总览展示 readiness、账户和 Track 摘要；Track 展示运行状态、配置、活动与人工命令；系统展示实例诊断。配置编辑以 server 当前 active 配置为起点，先请求预览，再以版本号保存并应用；应用会保留可见状态，必要时可恢复或放弃中断的应用。人工命令、配置预览和应用都由 server 验证、持久化并进入既有 runtime 路径，前端不直接访问交易所或写入实例文件。
 
+侧栏的「新增 Track」支持为当前交易所添加合约。填写稳定 ID、完整合约名称、策略和杠杆后，先预览交易所已有净仓位、策略目标、首次执行目标估算、容量和重启时会撤销的挂单，再确认保存。预览与保存均不下单、不撤单、不设置杠杆；保存仅向实例 `config.toml` 追加 track，侧栏会显示「待重启」。当前进程不会管理该合约，重启后才由正常启动流程读取当时的仓位并接管整个净仓位。重启会重新初始化所有已配置 Tracks、设置各自杠杆并清理已有挂单，接管后可能减仓。
+
+新增保存前会重新读取交易所事实；配置、仓位、挂单或归一化目标变化时要求重新预览。金额单位来自合约 metadata，预览不替代重启时的行情、PNL 和启动校验。已有 track 可继续在线编辑，新增待重启配置会保留；正在进行的在线配置应用会阻止新的追加写入。
+
 ### 6. HTTP 快速确认
 
 ```bash
@@ -285,6 +289,9 @@ curl http://127.0.0.1:8000/debug/tracks/btc-core/recent-fills-audit
 - `GET /readiness`
 - `GET /account`
 - `GET /tracks`
+- `GET /track-creation`：配置版本与已保存、待重启的 tracks。
+- `POST /track-creation/preview`：只读预览新增 track 的接管影响。
+- `POST /tracks`：核验预览并追加配置，重启后生效。
 - `GET /tracks/:id`
 - `POST /tracks/:id/commands`
 - `GET /debug/tracks/:id/diagnostics`

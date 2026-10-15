@@ -129,6 +129,82 @@ impl ConfigurationApplicationStoreAdapter {
         canonical_version(&patched)
     }
 
+    pub(crate) fn current_version(
+        &self,
+    ) -> std::result::Result<String, ConfigurationApplicationStoreError> {
+        let raw = self.committed_raw.lock().map_err(|_| {
+            ConfigurationApplicationStoreError::Internal(
+                "configuration baseline lock poisoned".into(),
+            )
+        })?;
+        canonical_version(&raw)
+    }
+
+    /// Read the accepted file baseline under the same lock used by online edits.
+    pub(crate) async fn creation_snapshot(
+        &self,
+    ) -> std::result::Result<(String, String), ConfigurationApplicationStoreError> {
+        let _guard = self.lock.lock().await;
+        self.checked_creation_snapshot()
+    }
+
+    fn checked_creation_snapshot(
+        &self,
+    ) -> std::result::Result<(String, String), ConfigurationApplicationStoreError> {
+        let raw = fs::read_to_string(&self.path)
+            .map_err(|error| ConfigurationApplicationStoreError::WriteFailed(error.to_string()))?;
+        if raw
+            != *self.committed_raw.lock().map_err(|_| {
+                ConfigurationApplicationStoreError::Internal(
+                    "configuration baseline lock poisoned".into(),
+                )
+            })?
+        {
+            return Err(ConfigurationApplicationStoreError::ExternalChange);
+        }
+        let version = format!("{:x}", Sha256::digest(raw.as_bytes()));
+        Ok((raw, version))
+    }
+
+    pub(crate) async fn append_track(
+        &self,
+        expected_version: &str,
+        candidate: &poise_protocol::TrackCreationCandidate,
+    ) -> std::result::Result<(), ConfigurationApplicationStoreError> {
+        let _guard = self.lock.lock().await;
+        let (original, version) = self.checked_creation_snapshot()?;
+        if self.active_application()?.is_some() {
+            return Err(ConfigurationApplicationStoreError::ApplicationIdConflict);
+        }
+        if version != expected_version {
+            return Err(ConfigurationApplicationStoreError::VersionConflict);
+        }
+        let replacement = append_track_configuration(&original, candidate)
+            .map_err(|error| ConfigurationApplicationStoreError::WriteFailed(error.to_string()))?;
+        if let Err(error) = replace_file_atomically_if_unchanged_with_hook(
+            &self.path,
+            &original,
+            &replacement,
+            || {},
+        ) {
+            if let Some(error) = post_rename_durability_error(&error) {
+                return Err(error);
+            }
+            if error.to_string().contains("changed externally") {
+                return Err(ConfigurationApplicationStoreError::ExternalChange);
+            }
+            return Err(ConfigurationApplicationStoreError::WriteFailed(
+                error.to_string(),
+            ));
+        }
+        *self.committed_raw.lock().map_err(|_| {
+            ConfigurationApplicationStoreError::Internal(
+                "configuration baseline lock poisoned".into(),
+            )
+        })? = replacement;
+        Ok(())
+    }
+
     fn record_external_change(
         &self,
         track_id: &TrackId,
@@ -663,6 +739,63 @@ pub(crate) fn patch_track_configuration(
     Ok(document.to_string())
 }
 
+pub(crate) fn append_track_configuration(
+    input: &str,
+    candidate: &poise_protocol::TrackCreationCandidate,
+) -> Result<String> {
+    anyhow::ensure!(
+        !candidate.track_id.trim().is_empty()
+            && candidate.track_id.trim() == candidate.track_id
+            && !candidate
+                .track_id
+                .chars()
+                .any(|c| c.is_control() || "/?#".contains(c)),
+        "track_id must be nonempty and contain no URL separators or control characters"
+    );
+    anyhow::ensure!(
+        !candidate.symbol.is_empty() && candidate.symbol.chars().all(|c| c.is_ascii_graphic()),
+        "symbol must be a nonempty exchange wire name"
+    );
+    anyhow::ensure!(
+        candidate.tick_timeout_secs > 0,
+        "tick_timeout_secs must be positive"
+    );
+    let config = crate::config::parse_config(input)?;
+    anyhow::ensure!(
+        !config
+            .tracks
+            .iter()
+            .any(|track| track.track_id == candidate.track_id),
+        "duplicate track id `{}`",
+        candidate.track_id
+    );
+    anyhow::ensure!(
+        !config
+            .tracks
+            .iter()
+            .any(|track| track.symbol == candidate.symbol),
+        "duplicate instrument `{}`",
+        candidate.symbol
+    );
+    let mut document = input.parse::<toml_edit::DocumentMut>()?;
+    let mut table = toml_edit::Table::new();
+    table["track_id"] = toml_edit::value(&candidate.track_id);
+    table["symbol"] = toml_edit::value(&candidate.symbol);
+    table["leverage"] = toml_edit::value(i64::from(candidate.leverage));
+    table["tick_timeout_secs"] = toml_edit::value(i64::try_from(candidate.tick_timeout_secs)?);
+    document["tracks"]
+        .as_array_of_tables_mut()
+        .context("missing tracks array")?
+        .push(table);
+    let patched = patch_track_configuration(
+        &document.to_string(),
+        &candidate.track_id,
+        &candidate.configuration,
+    )?;
+    crate::config::parse_config(&patched)?;
+    Ok(patched)
+}
+
 fn out_of_band_policy_toml(policy: &poise_protocol::BandProtectionPolicy) -> String {
     match policy {
         poise_protocol::BandProtectionPolicy::Freeze => "\"freeze\"".to_string(),
@@ -734,6 +867,21 @@ fn patch_file_atomically_if_unchanged_with_hook(
     candidate: &TrackConfigurationView,
     before_final_check: impl FnOnce(),
 ) -> Result<()> {
+    let patched = patch_track_configuration(expected_original, track_id, candidate)?;
+    replace_file_atomically_if_unchanged_with_hook(
+        path,
+        expected_original,
+        &patched,
+        before_final_check,
+    )
+}
+
+fn replace_file_atomically_if_unchanged_with_hook(
+    path: &Path,
+    expected_original: &str,
+    replacement: &str,
+    before_final_check: impl FnOnce(),
+) -> Result<()> {
     if fs::read_to_string(path)? != expected_original {
         anyhow::bail!("configuration changed externally");
     }
@@ -741,12 +889,11 @@ fn patch_file_atomically_if_unchanged_with_hook(
     // Construct the replacement from the accepted snapshot, never from a
     // later read. An external writer can still race the final read and rename;
     // ordinary filesystem replacement has no cross-process compare-and-swap.
-    let patched = patch_track_configuration(expected_original, track_id, candidate)?;
     let permissions = fs::metadata(path)?.permissions();
     let parent = path.parent().context("configuration path has no parent")?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     temporary.as_file_mut().set_permissions(permissions)?;
-    temporary.write_all(patched.as_bytes())?;
+    temporary.write_all(replacement.as_bytes())?;
     temporary.as_file_mut().sync_all()?;
 
     before_final_check();
@@ -768,6 +915,106 @@ fn sync_parent_directory(parent: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn creation_candidate() -> poise_protocol::TrackCreationCandidate {
+        let config = crate::config::parse_config(creation_config()).unwrap();
+        poise_protocol::TrackCreationCandidate {
+            track_id: "gold".to_string(),
+            symbol: "GOLDUSDT".to_string(),
+            leverage: 2,
+            tick_timeout_secs: 30,
+            configuration: super::configuration_view_from_definition(
+                &config.track_definitions().unwrap()[0],
+            ),
+        }
+    }
+
+    fn creation_config() -> &'static str {
+        "# preserve comment\n[exchange]\nvenue='binance'\napi_key='secret'\napi_secret='secret'\n[[tracks]]\ntrack_id='btc'\nsymbol='BTCUSDT'\nlower_price=90.0\nupper_price=110.0\nlong_exposure_units=1.0\nshort_exposure_units=0.0\nnotional_per_unit=100.0\ndaily_loss_limit=10.0\ntotal_loss_limit=20.0\n"
+    }
+
+    #[tokio::test]
+    async fn creation_appends_atomically_and_keeps_online_configuration_version_usable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, creation_config()).unwrap();
+        let adapter = ConfigurationApplicationStoreAdapter::new(
+            path.clone(),
+            Arc::new(SqliteStorage::in_memory().unwrap()),
+        )
+        .unwrap();
+        let (original, version) = adapter.creation_snapshot().await.unwrap();
+        let candidate = creation_candidate();
+        adapter.append_track(&version, &candidate).await.unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# preserve comment"));
+        assert!(saved.contains("api_key='secret'"));
+        let before = crate::config::parse_config(&original).unwrap();
+        let after = crate::config::parse_config(&saved).unwrap();
+        assert_eq!(after.tracks.len(), 2);
+        assert_eq!(before.tracks[0], after.tracks[0]);
+        assert_eq!(after.tracks[1].symbol, "GOLDUSDT");
+        assert_eq!(after.tracks[1].leverage, Some(2));
+        assert_eq!(
+            adapter.current_version().unwrap(),
+            canonical_version(&saved).unwrap()
+        );
+        assert!(adapter.append_track(&version, &candidate).await.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+    }
+
+    #[test]
+    fn creation_rejects_duplicate_identity_symbol_and_invalid_parameters() {
+        for mutate in [0, 1, 2, 3, 4] {
+            let mut candidate = creation_candidate();
+            match mutate {
+                0 => candidate.track_id = "btc".to_string(),
+                1 => candidate.symbol = "BTCUSDT".to_string(),
+                2 => candidate.configuration.upper_price = 80.0,
+                3 => candidate.leverage = 0,
+                _ => candidate.tick_timeout_secs = 0,
+            }
+            assert!(super::append_track_configuration(creation_config(), &candidate).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn creation_refuses_external_changes_and_preserves_permissions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, creation_config()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let adapter = ConfigurationApplicationStoreAdapter::new(
+            path.clone(),
+            Arc::new(SqliteStorage::in_memory().unwrap()),
+        )
+        .unwrap();
+        let (_, version) = adapter.creation_snapshot().await.unwrap();
+        adapter
+            .append_track(&version, &creation_candidate())
+            .await
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let (_, version) = adapter.creation_snapshot().await.unwrap();
+        let external = format!("# external\n{}", std::fs::read_to_string(&path).unwrap());
+        std::fs::write(&path, &external).unwrap();
+        let mut second = creation_candidate();
+        second.track_id = "silver".to_string();
+        second.symbol = "SILVERUSDT".to_string();
+        assert!(adapter.append_track(&version, &second).await.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
+    }
+
     use super::{
         ConfigurationApplicationStoreAdapter, ParentDirectorySyncAfterRenameError,
         canonical_version, external_change_already_recorded, patch_file_atomically,

@@ -20,6 +20,65 @@ pub struct TrackListResponse {
     pub items: Vec<TrackListItemView>,
 }
 
+/// New tracks are persisted for the next process start, never activated online.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackCreationCandidate {
+    pub track_id: String,
+    pub symbol: String,
+    pub leverage: u32,
+    pub tick_timeout_secs: u64,
+    pub configuration: TrackConfigurationView,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackCreationContext {
+    pub version: String,
+    pub pending: Vec<TrackCreationCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackCreationPreviewRequest {
+    pub expected_version: String,
+    pub candidate: TrackCreationCandidate,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackCreationSaveRequest {
+    pub expected_version: String,
+    pub preview_token: String,
+    pub candidate: TrackCreationCandidate,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackCreationPreviewResponse {
+    pub preview_token: String,
+    pub previewed_at: String,
+    pub mark_price: f64,
+    pub position_quantity: f64,
+    pub quantity_unit: String,
+    pub notional_asset: String,
+    pub settlement_asset: String,
+    pub policy_target_quantity: f64,
+    pub initial_execution_quantity: f64,
+    pub available_increase_notional: f64,
+    pub required_increase_notional: f64,
+    pub orders_to_cancel_on_restart: Vec<TrackCreationOrderView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackCreationOrderView {
+    pub order_id: String,
+    pub side: String,
+    pub price: f64,
+    pub quantity: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthStatusView {

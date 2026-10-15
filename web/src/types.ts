@@ -95,6 +95,29 @@ export interface TrackListItemView {
 
 export interface TrackListResponse { items: TrackListItemView[] }
 
+export interface TrackCreationCandidate {
+  track_id: string
+  symbol: string
+  leverage: number
+  tick_timeout_secs: number
+  configuration: TrackConfigurationActiveView
+}
+export interface TrackCreationContext { version: string; pending: TrackCreationCandidate[] }
+export interface TrackCreationPreviewResponse {
+  preview_token: string
+  previewed_at: string
+  mark_price: number
+  position_quantity: number
+  quantity_unit: string
+  notional_asset: string
+  settlement_asset: string
+  policy_target_quantity: number
+  initial_execution_quantity: number
+  available_increase_notional: number
+  required_increase_notional: number
+  orders_to_cancel_on_restart: { order_id: string; side: string; price: number; quantity: number }[]
+}
+
 export interface TrackDetailView {
   identity: { id: string; instrument: InstrumentView }
   status: { lifecycle: TrackLifecycleView; strategy_price: number | null; strategy_price_status: string }

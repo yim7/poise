@@ -317,7 +317,7 @@ async fn assemble_with_state_store(
             })
             .collect::<HashMap<_, _>>(),
     );
-    let http_state = build_http_state(
+    let mut http_state = build_http_state(
         trading_runtime.clone(),
         query_service.clone(),
         debug_query_service.clone(),
@@ -335,6 +335,7 @@ async fn assemble_with_state_store(
         configuration_store,
         system_info,
     );
+    http_state.track_creation_exchange = Some(exchange_ports.clone());
     let websocket_state = build_websocket_state(
         notifications.clone(),
         live_view_notifications.clone(),
@@ -477,6 +478,7 @@ pub(crate) fn build_http_state(
         recent_fills_auditor,
         configuration_metadata,
         configuration_store,
+        track_creation_exchange: None,
         system_info,
     }
 }

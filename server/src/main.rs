@@ -21,6 +21,7 @@ mod startup_preparation;
 mod state_bootstrap;
 #[cfg(test)]
 mod test_support;
+mod track_creation;
 mod websocket;
 
 use std::env;
