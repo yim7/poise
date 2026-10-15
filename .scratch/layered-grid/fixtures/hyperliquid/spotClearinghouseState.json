@@ -1,0 +1,17 @@
+{
+  "balances": [
+    {
+      "coin": "USDC",
+      "token": 0,
+      "total": "1000.0",
+      "hold": "120.5",
+      "entryNtl": "0.0"
+    }
+  ],
+  "tokenToAvailableAfterMaintenance": [
+    [
+      0,
+      "870.25"
+    ]
+  ]
+}

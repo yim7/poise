@@ -2,6 +2,18 @@
 
 **要构建什么：** 用真实 Hyperliquid 运行任务 02 的最小网格：读取启动文件和私钥并校验，从旧代码复制并裁剪 Hyperliquid 适配，补齐任务 01 确认的接口，最后在测试网跑通。
 
+**启动文件格式（已确定）：** 实例目录下的 `poise.toml`，由用户自己填写，权限必须是 600：
+
+```toml
+network = "testnet"                # testnet 或 mainnet
+account_address = ""               # Hyperliquid 主账户地址
+api_wallet_private_key = ""        # 授权给 Poise 的 API 钱包私钥，0x 加 64 个十六进制字符
+data_dir = "data"                  # 数据库目录，相对本文件所在目录
+listen = "127.0.0.1:8000"          # 网页控制台只监听本机
+```
+
+程序通过启动参数指定实例目录，只读取、不修改这个文件。
+
 **被阻塞于：** 01、02
 
 **状态：** ready-for-agent

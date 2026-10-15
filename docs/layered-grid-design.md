@@ -467,3 +467,29 @@
 目前没有待用户确认的事项。适配阶段需要按官方文档确认的事实：Unified 账户余额与占用的具体字段、每日操作上限的计数周期、订单结果未知时的安全余量、成交去重字段。
 
 自动远期退出列为后续事项（第 1 节）；首版退出由用户手动处理，处理后按第 8 节重新接管。
+
+## 附录 A：Hyperliquid 事实核对（2026-10-15，任务 01）
+
+核对方式：阅读官方文档，并用用户授权的公开账户地址，对正式网和测试网的公开只读接口各查询一次。没有使用私钥，没有下单。脱敏后的响应样例见 `.scratch/layered-grid/fixtures/hyperliquid/`，任务 04 使用。
+
+| 事项 | 结论 | 来源 |
+| --- | --- | --- |
+| 账户模式 | 用户账户在正式网和测试网都是 `unifiedAccount`；按地址查询 `userAbstraction` 得到 | 实测；[info endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint) |
+| Unified 余额 | `spotClearinghouseState.balances` 每项含 `coin`、`token`、`total`、`hold`；另有 `tokenToAvailableAfterMaintenance`，形如 `[[token, 可用量]]`，可作为资金预检的可用量来源 | 实测 |
+| 账户比率 | 官方公式用到的字段：各合约 DEX 的 `clearinghouseState.crossMaintenanceMarginUsed`、逐仓仓位的 `marginUsed`，以及现货余额 `total` | 实测；[账户模式](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes) |
+| 成交查询 | `userFillsByTime` 按起止时间查询，每次最多 2000 条，只能查到最近 10000 条 | [info endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint) |
+| 成交字段 | `coin, px, sz, side, time, startPosition, dir, closedPnl, hash, oid, crossed, fee, feeToken, tid, twapId`，下单带客户端订单 ID 时还有 `cloid`；强平成交有 `liquidation` | 实测 |
+| 成交去重 | 抽样 479 条成交中 `tid` 全部唯一，可作为去重标识；有 96 条与其他成交时间相同，同一时间多笔成交很常见 | 实测；去重标识的唯一性未见官方书面保证 |
+| 订单查询 | `orderStatus` 可用 `oid` 或 16 字节 cloid 查询；查不到时返回 `{"status":"unknownOid"}`；终态包括 `filled`、`canceled`、`rejected`、`marginCanceled`、`selfTradeCanceled`、`reduceOnlyCanceled` 等 | 实测；info endpoint |
+| `expiresAfter` | 下单等动作可带此字段，超过该时间戳的动作会被拒绝 | [exchange endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint) |
+| 费率 | 用户当前 taker 0.045%、maker 0.015%（`userFees` 的 `userCrossRate`、`userAddRate`） | 实测 |
+| 最低下单金额 | 10 美元 | [错误说明](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/error-responses) |
+| 已授权 API 钱包 | `extraAgents` 按主账户地址返回已授权的 API 钱包 `name, address, validUntil`；API 钱包最长有效期 180 天，过期或被替换后失效 | 实测；[Nonces and API wallets](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets) |
+| 请求次数 | `userRateLimit` 返回 `nRequestsUsed`、`nRequestsCap`（随累计成交量增长）。这是按地址的请求上限，**不确定**是否就是 Unified 账户每天 5 万次的操作上限 | 实测；未核实二者关系 |
+| API 钱包能否提现 | **未核实**。文档说明 API 钱包只用于代为签名；提现、转账属于用户签名动作（文档提到“User-signed actions such as Core USDC transfer”），推断需要主钱包签名，API 钱包不能提现 | 推断，未见书面说明 |
+
+由此对设计的补充：
+- 第 2.0 节的启动校验：用由私钥推出的地址到 `extraAgents` 中查找，并检查 `validUntil` 未过期；剩余有效期少于 14 天时在界面提醒用户续期。
+- 第 10 节的可用资金：优先使用 `tokenToAvailableAfterMaintenance` 中 USDC（token 0）的可用量。
+- 第 9.3 节的成交去重：使用 `tid`。
+- 第 10 节的每日操作上限：计数来源仍未确认，任务 12 实现时先用本地计数（每次下单、撤单记一次），再与 `userRateLimit` 对照。
