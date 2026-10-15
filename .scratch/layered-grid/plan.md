@@ -40,7 +40,8 @@
 | 04 | [Hyperliquid 接入与启动文件](issues/04-hyperliquid-integration.md) | 01、02 |
 | 05 | [主仓批次与格子跟随](issues/05-core-batches.md) | 02 |
 | 06 | [限速](issues/06-throttle.md) | 05 |
-| 07 | [做空与中性网格](issues/07-short-and-neutral.md) | 05 |
+| 06b | [拆分执行步骤（重构）](issues/06b-split-runtime-step.md) | 06 |
+| 07 | [做空与中性网格](issues/07-short-and-neutral.md) | 05、06b |
 | 08 | [订单结果未知与系统状态闸门](issues/08-unknown-orders-and-state-gate.md) | 04 |
 | 09 | [资金预检、保证金率闸门与满仓压力测试](issues/09-funds-and-margin.md) | 04、07 |
 | 10 | [接管已有仓位](issues/10-takeover.md) | 05、07 |
