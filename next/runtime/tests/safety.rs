@@ -400,6 +400,60 @@ async fn a_cancel_of_an_order_the_exchange_never_saw_keeps_the_reservation() {
     );
 }
 
+/// 部分成交之后被交易所自己撤掉（自成交保护、只减仓冲突这类终态）：
+/// 成交照记进格子，剩下的预留释放出来重新挂。
+#[tokio::test]
+async fn a_partially_filled_order_canceled_by_the_exchange_is_booked_and_released() {
+    let harness = harness();
+    harness.step(0).await;
+
+    // 第 0 格的买单成交 0.02（成交记录暂时查不到），随后交易所把它撤掉。
+    let cloid = harness.working_cloid(0, OrderPurpose::GridBuy);
+    harness.exchange.delay_next_fills(1);
+    harness
+        .exchange
+        .fill(&cloid, Quantity::parse("0.02").unwrap(), at(1))
+        .unwrap();
+    assert!(harness.exchange.cancel_externally(&cloid));
+
+    let report = harness.step(1).await;
+
+    // 撤销带回了最终的累计成交量：0.02 记进格子，这张单是终态。
+    let order = harness
+        .orders()
+        .into_iter()
+        .find(|order| order.record.client_order_id == cloid)
+        .expect("the canceled order must stay in the database");
+    assert_eq!(order.record.status, OrderStatus::Canceled);
+    assert_eq!(
+        order.record.cumulative_filled,
+        Quantity::parse("0.02").unwrap()
+    );
+    assert_eq!(
+        harness.cell(0).to_buy_back,
+        Quantity::parse("0.03").unwrap(),
+        "买到的 0.02 不再算待买回"
+    );
+
+    // 剩余预留释放：这一格补挂 0.03 的买单，买到的 0.02 挂出卖单。
+    assert_eq!(report.placed.len(), 2);
+    let placed: Vec<_> = harness
+        .working()
+        .into_iter()
+        .filter(|order| order.record.cell_index == CellIndex(0))
+        .collect();
+    let buy = placed
+        .iter()
+        .find(|order| order.record.purpose == OrderPurpose::GridBuy)
+        .expect("the remaining quantity must be placed again");
+    assert_eq!(buy.record.quantity, Quantity::parse("0.03").unwrap());
+    let sell = placed
+        .iter()
+        .find(|order| order.record.purpose == OrderPurpose::GridSell)
+        .expect("the filled quantity must be offered for sale");
+    assert_eq!(sell.record.quantity, Quantity::parse("0.02").unwrap());
+}
+
 #[tokio::test]
 async fn b18_a_position_mismatch_pauses_the_strategy_and_cancels_its_orders() {
     let harness = harness();
