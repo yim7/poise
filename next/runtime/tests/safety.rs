@@ -2,12 +2,11 @@
 
 mod common;
 
-use common::{at, btc, btc_fees, btc_spec, harness, long_grid_config};
+use common::{at, btc, btc_fees, btc_spec, harness, long_cell, long_grid_config, long_side_mut};
 use poise_runtime::{
     ResumeOutcome, Runtime, RuntimeError, SimulatedExchange, Store, StoredOrder, StrategyStatus,
 };
-use poise_strategy::grid::CellIndex;
-use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, Unit};
+use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus};
 use poise_strategy::planning::WaitReason;
 use poise_strategy::units::{Position, Price, Quantity};
 
@@ -98,8 +97,8 @@ async fn a_cancel_with_an_unknown_result_keeps_the_reservation_and_places_nothin
             &StoredOrder {
                 record: OrderRecord {
                     client_order_id: ghost.clone(),
-                    unit: Unit::Cell(CellIndex(0)),
-                    purpose: OrderPurpose::GridBuy,
+                    unit: long_cell(0),
+                    purpose: OrderPurpose::GridEntry,
                     // 价格与格子买价不符，规划会要求撤掉它、再补一张新的。
                     limit_price: Price::parse("94000").unwrap(),
                     quantity: Quantity::parse("0.05").unwrap(),
@@ -128,7 +127,7 @@ async fn a_cancel_with_an_unknown_result_keeps_the_reservation_and_places_nothin
             .plan
             .place
             .iter()
-            .all(|intent| intent.unit != Unit::Cell(CellIndex(0)))
+            .all(|intent| intent.unit != long_cell(0))
     );
     assert!(report.plan.waiting.contains(&WaitReason::FillsPending));
     assert!(report.canceled.is_empty());
@@ -153,7 +152,7 @@ async fn a_cancel_with_an_unknown_result_keeps_the_reservation_and_places_nothin
 async fn a_position_mismatch_explained_by_an_unrecorded_fill_does_not_pause() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
 
     // 交易所已经成交 0.02，但这笔成交的时间戳早于拉取窗口，我们还没记入。
     // 挂单快照里带着这个累计量，仓位差额能由它解释（第 7.1.3 节）。
@@ -216,7 +215,7 @@ async fn a_cancel_that_fails_while_pausing_is_retried_by_pausing_again() {
 async fn pausing_absorbs_a_late_fill_older_than_the_fills_lookback() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 下单当时就成交了 0.02，但成交记录迟迟不到。
     harness.exchange.delay_next_fills(1);
     harness
@@ -243,7 +242,7 @@ async fn pausing_absorbs_a_late_fill_older_than_the_fills_lookback() {
 async fn a_fill_delivered_after_the_pause_is_still_recorded_on_resume() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 下单当时就成交了 0.02，成交记录要等到暂停之后才到。
     harness.exchange.delay_next_fills(1);
     harness
@@ -287,7 +286,7 @@ async fn a_fill_delivered_after_the_pause_is_still_recorded_on_resume() {
 async fn a_fill_hidden_from_the_fills_query_does_not_pause_the_strategy() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 成交记录查不到：第一次补拉和第二次补拉都看不到它。
     harness.exchange.delay_next_fills(1);
     // 查完挂单、查仓位之前成交 0.02：这一笔不在挂单快照里，也不在成交流水里。
@@ -319,7 +318,7 @@ async fn a_fill_hidden_from_the_fills_query_does_not_pause_the_strategy() {
 async fn a_fully_filled_order_whose_fill_record_is_late_is_not_replaced() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 这张买单在交易所全部成交了，但成交记录要下一步才查得到。
     harness.exchange.delay_next_fills(1);
     harness
@@ -352,7 +351,7 @@ async fn a_fully_filled_order_whose_fill_record_is_late_is_not_replaced() {
         "the whole cell was bought"
     );
     assert_eq!(harness.working().len(), 20);
-    let sell = harness.working_cloid(0, OrderPurpose::GridSell);
+    let sell = harness.working_cloid(0, OrderPurpose::GridExit);
     assert_eq!(
         harness.at_exchange(&sell).unwrap().limit_price,
         Price::parse("96000").unwrap()
@@ -363,7 +362,7 @@ async fn a_fully_filled_order_whose_fill_record_is_late_is_not_replaced() {
 async fn a_fill_between_the_fills_query_and_the_position_query_does_not_pause() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 查完成交、还没查仓位时成交了 0.02。
     harness
         .exchange
@@ -385,7 +384,7 @@ async fn a_fill_between_the_fills_query_and_the_position_query_does_not_pause() 
 async fn a_fill_between_the_position_query_and_the_fills_requery_does_not_pause() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 查成交、查仓位之间成交 0.02：仓位快照里没有它，于是触发补拉成交；
     // 补拉成交之前又成交了 0.02，这一笔同样不在刚才那份仓位快照里。
     harness
@@ -461,7 +460,7 @@ async fn a_cancel_of_an_order_the_exchange_never_saw_keeps_the_reservation() {
         .into_iter()
         .filter(|order| {
             order.record.unit == unknown.record.unit
-                && order.record.purpose == OrderPurpose::GridBuy
+                && order.record.purpose == OrderPurpose::GridEntry
         })
         .collect();
     assert_eq!(buys.len(), 1);
@@ -479,7 +478,7 @@ async fn a_partially_filled_order_canceled_by_the_exchange_is_booked_and_release
     harness.step(0).await;
 
     // 第 0 格的买单成交 0.02（成交记录暂时查不到），随后交易所把它撤掉。
-    let cloid = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let cloid = harness.working_cloid(0, OrderPurpose::GridEntry);
     harness.exchange.delay_next_fills(1);
     harness
         .exchange
@@ -510,7 +509,7 @@ async fn a_partially_filled_order_canceled_by_the_exchange_is_booked_and_release
     // 累计成交量，流水还没到，这张单的成交没对完账（第 9.2 节，同
     // `a_fully_filled_order_whose_fill_record_is_late_is_not_replaced`）。
     assert_eq!(report.placed.len(), 1);
-    let sell = harness.working_cloid(0, OrderPurpose::GridSell);
+    let sell = harness.working_cloid(0, OrderPurpose::GridExit);
     assert_eq!(
         harness.at_exchange(&sell).unwrap().quantity,
         Quantity::parse("0.02").unwrap(),
@@ -523,7 +522,7 @@ async fn a_partially_filled_order_canceled_by_the_exchange_is_booked_and_release
 
     assert!(!report.is_paused());
     assert_eq!(report.placed.len(), 1);
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     assert_eq!(
         harness.order(&buy).record.quantity,
         Quantity::parse("0.03").unwrap(),
@@ -601,7 +600,7 @@ async fn a_reduce_only_sell_does_not_open_a_short_position() {
         harness.exchange.current_position(),
         Position::parse("0.05").unwrap()
     );
-    let sell = harness.working_cloid(0, OrderPurpose::GridSell);
+    let sell = harness.working_cloid(0, OrderPurpose::GridExit);
     assert!(harness.at_exchange(&sell).unwrap().reduce_only);
 
     // 用户在交易所手动清仓，运行时还没对账。
@@ -662,7 +661,7 @@ async fn b23_an_invalid_config_is_refused_before_anything_is_stored() {
     let harness = harness();
     let mut config = long_grid_config();
     // 价差 1 美元覆盖不了两条腿的 taker 费率。
-    config.long.grid_spread = poise_strategy::units::Price::parse("1").unwrap();
+    long_side_mut(&mut config).grid_spread = poise_strategy::units::Price::parse("1").unwrap();
 
     let error = harness
         .runtime
@@ -672,7 +671,7 @@ async fn b23_an_invalid_config_is_refused_before_anything_is_stored() {
     assert!(matches!(error, RuntimeError::Config(_)));
     // 数据库仍然可用：同一批参数换一个合法的价差就能创建。
     let mut valid = long_grid_config();
-    valid.long.grid_spread = poise_strategy::units::Price::parse("1000").unwrap();
+    long_side_mut(&mut valid).grid_spread = poise_strategy::units::Price::parse("1000").unwrap();
     let strategy_id = harness
         .runtime
         .create_strategy(valid, btc_spec(), btc_fees())

@@ -47,39 +47,48 @@ impl Strategy {
 
         if !applied.is_zero() {
             match order.unit {
-                Unit::Batch(batch_index) => {
-                    // 主仓只买入，永不为它下平仓单（第 7.1 节）。
+                Unit::Batch(direction, batch_index) => {
+                    // 主仓只建仓，永不为它下平仓单（第 7.1 节）。
                     let core_quantity = self
-                        .batches()
-                        .batch(batch_index)
+                        .side(direction)
+                        .and_then(|side| side.batches().batch(batch_index))
                         .map(|batch| batch.core_quantity)
                         .unwrap_or(Quantity::ZERO);
-                    if let Some(batch_state) = state.batch_mut(batch_index) {
+                    if let Some(batch_state) = state
+                        .side_mut(direction)
+                        .and_then(|side| side.batch_mut(batch_index))
+                    {
                         batch_state.filled = batch_state
                             .filled
                             .saturating_add(applied)
                             .min(core_quantity);
                     }
                 }
-                Unit::Cell(cell_index) => {
+                Unit::Cell(direction, cell_index) => {
                     let cell_quantity = self
-                        .grid()
-                        .cell(cell_index)
+                        .side(direction)
+                        .and_then(|side| side.grid().cell(cell_index))
                         .map(|cell| cell.quantity)
                         .unwrap_or(Quantity::ZERO);
-                    if let Some(cell_state) = state.cell_mut(cell_index) {
+                    if let Some(cell_state) = state
+                        .side_mut(direction)
+                        .and_then(|side| side.cell_mut(cell_index))
+                    {
+                        // 建仓腿建起这一格，平仓腿把它平掉。两条腿的买卖方向由方向决定，
+                        // 但记的都是同一个量 `S`（第 4.3 节）：多头侧是还差多少买入，空头侧
+                        // 是还差多少卖出开空。
                         match order.purpose {
-                            OrderPurpose::GridBuy => {
+                            OrderPurpose::GridEntry => {
                                 cell_state.to_buy_back =
                                     cell_state.to_buy_back.saturating_sub(applied);
                             }
-                            OrderPurpose::GridSell => {
+                            OrderPurpose::GridExit => {
                                 cell_state.to_buy_back = cell_state
                                     .to_buy_back
                                     .saturating_add(applied)
                                     .min(cell_quantity);
                             }
-                            OrderPurpose::CoreBuy => {}
+                            OrderPurpose::Core => {}
                         }
                     }
                 }
@@ -107,18 +116,32 @@ mod tests {
     use crate::fixtures::{at, core_long_strategy, long_grid_strategy};
     use crate::grid::CellIndex;
     use crate::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, Unit};
-    use crate::state::StrategyState;
+    use crate::side::Direction;
+    use crate::state::{SideState, StrategyState};
     use crate::units::{Price, Quantity};
+
+    /// 测试里大多只看多头侧。
+    fn long_state(state: &StrategyState) -> &SideState {
+        state
+            .side(Direction::Long)
+            .expect("the long side is configured")
+    }
+
+    fn long_state_mut(state: &mut StrategyState) -> &mut SideState {
+        state
+            .side_mut(Direction::Long)
+            .expect("the long side is configured")
+    }
 
     fn order(purpose: OrderPurpose, quantity: &str) -> OrderRecord {
         OrderRecord {
             client_order_id: ClientOrderId::try_new("0x01").unwrap(),
-            unit: Unit::Cell(CellIndex(0)),
+            unit: Unit::Cell(Direction::Long, CellIndex(0)),
             purpose,
             limit_price: Price::parse("95000").unwrap(),
             quantity: Quantity::parse(quantity).unwrap(),
             cumulative_filled: Quantity::ZERO,
-            reduce_only: purpose == OrderPurpose::GridSell,
+            reduce_only: purpose == OrderPurpose::GridExit,
             status: OrderStatus::Open,
         }
     }
@@ -138,8 +161,8 @@ mod tests {
     fn core_order(quantity: &str) -> OrderRecord {
         OrderRecord {
             client_order_id: ClientOrderId::try_new("0x02").unwrap(),
-            unit: Unit::Batch(BatchIndex(0)),
-            purpose: OrderPurpose::CoreBuy,
+            unit: Unit::Batch(Direction::Long, BatchIndex(0)),
+            purpose: OrderPurpose::Core,
             limit_price: Price::parse("95000").unwrap(),
             quantity: Quantity::parse(quantity).unwrap(),
             cumulative_filled: Quantity::ZERO,
@@ -152,7 +175,7 @@ mod tests {
     fn b17_duplicate_out_of_order_and_regressed_fills_are_applied_once() {
         let strategy = long_grid_strategy();
         let mut state = strategy.initial_state();
-        let mut order = order(OrderPurpose::GridBuy, "0.05");
+        let mut order = order(OrderPurpose::GridEntry, "0.05");
 
         assert_eq!(
             fill(&strategy, &mut state, &mut order, "0.02"),
@@ -184,7 +207,7 @@ mod tests {
         );
         assert_eq!(order.status, OrderStatus::Filled);
         assert_eq!(
-            state.cell(CellIndex(0)).unwrap().to_buy_back,
+            long_state(&state).cell(CellIndex(0)).unwrap().to_buy_back,
             Quantity::ZERO
         );
     }
@@ -195,7 +218,7 @@ mod tests {
         let orders = ["0.01", "0.03", "0.02", "0.04", "0.05"];
         let mut final_states = Vec::new();
         for ordering in [[0, 1, 2, 3, 4], [4, 3, 2, 1, 0], [2, 0, 4, 1, 3]] {
-            let mut order = order(OrderPurpose::GridBuy, "0.05");
+            let mut order = order(OrderPurpose::GridEntry, "0.05");
             let mut state = strategy.initial_state();
             for index in ordering {
                 strategy.apply_fill(
@@ -211,7 +234,10 @@ mod tests {
         assert_eq!(final_states[0], final_states[1]);
         assert_eq!(final_states[1], final_states[2]);
         assert_eq!(
-            final_states[0].0.cell(CellIndex(0)).unwrap().to_buy_back,
+            long_state(&final_states[0].0)
+                .cell(CellIndex(0))
+                .unwrap()
+                .to_buy_back,
             Quantity::ZERO
         );
         assert_eq!(
@@ -224,8 +250,11 @@ mod tests {
     fn grid_sell_fills_move_quantity_back_to_to_buy_back() {
         let strategy = long_grid_strategy();
         let mut state = strategy.initial_state();
-        state.cell_mut(CellIndex(0)).unwrap().to_buy_back = Quantity::parse("0.02").unwrap();
-        let mut order = order(OrderPurpose::GridSell, "0.03");
+        long_state_mut(&mut state)
+            .cell_mut(CellIndex(0))
+            .unwrap()
+            .to_buy_back = Quantity::parse("0.02").unwrap();
+        let mut order = order(OrderPurpose::GridExit, "0.03");
         assert_eq!(
             strategy.expected_position(&state),
             crate::units::Position::parse("0.03").unwrap()
@@ -240,7 +269,7 @@ mod tests {
 
         assert_eq!(application.applied, Quantity::parse("0.03").unwrap());
         assert_eq!(
-            state.cell(CellIndex(0)).unwrap().to_buy_back,
+            long_state(&state).cell(CellIndex(0)).unwrap().to_buy_back,
             Quantity::parse("0.05").unwrap()
         );
         assert_eq!(
@@ -252,7 +281,7 @@ mod tests {
     #[test]
     fn fills_above_the_order_quantity_are_clamped() {
         let strategy = long_grid_strategy();
-        let mut order = order(OrderPurpose::GridBuy, "0.05");
+        let mut order = order(OrderPurpose::GridEntry, "0.05");
 
         let application = strategy.apply_fill(
             &mut strategy.initial_state(),
@@ -273,10 +302,13 @@ mod tests {
 
         fill(&strategy, &mut state, &mut order, "0.07");
         assert_eq!(
-            state.batch(BatchIndex(0)).unwrap().filled,
+            long_state(&state).batch(BatchIndex(0)).unwrap().filled,
             Quantity::parse("0.07").unwrap()
         );
-        assert_eq!(state.batch(BatchIndex(1)).unwrap().filled, Quantity::ZERO);
+        assert_eq!(
+            long_state(&state).batch(BatchIndex(1)).unwrap().filled,
+            Quantity::ZERO
+        );
         assert_eq!(
             strategy.expected_position(&state),
             crate::units::Position::parse("0.07").unwrap()
@@ -285,7 +317,7 @@ mod tests {
         // 超过 C 的部分不计入：主仓不会超过配置的比例。
         fill(&strategy, &mut state, &mut order, "0.2");
         assert_eq!(
-            state.batch(BatchIndex(0)).unwrap().filled,
+            long_state(&state).batch(BatchIndex(0)).unwrap().filled,
             Quantity::parse("0.175").unwrap()
         );
     }
@@ -294,14 +326,17 @@ mod tests {
     fn grid_orders_never_touch_the_core() {
         let strategy = core_long_strategy();
         let mut state = strategy.initial_state();
-        state.batch_mut(BatchIndex(0)).unwrap().filled = Quantity::parse("0.175").unwrap();
+        long_state_mut(&mut state)
+            .batch_mut(BatchIndex(0))
+            .unwrap()
+            .filled = Quantity::parse("0.175").unwrap();
         strategy.advance(&mut state, &[]);
-        let mut order = order(OrderPurpose::GridSell, "0.015");
+        let mut order = order(OrderPurpose::GridExit, "0.015");
 
         fill(&strategy, &mut state, &mut order, "0.015");
 
         assert_eq!(
-            state.batch(BatchIndex(0)).unwrap().filled,
+            long_state(&state).batch(BatchIndex(0)).unwrap().filled,
             Quantity::parse("0.175").unwrap()
         );
         assert_eq!(

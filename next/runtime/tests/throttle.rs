@@ -6,18 +6,44 @@
 mod common;
 
 use chrono::Duration;
-use common::{Harness, at, core_long_config, core_only_config, harness_with, restart, throttled};
+use common::{
+    Harness, at, cheap_spec, core_long_config, core_only_config, harness_with, harness_with_spec,
+    long_batch, long_cell, long_side, long_side_mut, long_state, neutral_grid_config, restart,
+    short_side, throttled,
+};
 use poise_runtime::{ResumeOutcome, RuntimeError, Store};
 use poise_strategy::batch::BatchIndex;
 use poise_strategy::config::{SideConfig, StrategyConfig};
-use poise_strategy::grid::CellIndex;
 use poise_strategy::instrument::Instrument;
 use poise_strategy::order::{OrderPurpose, OrderStatus, Unit};
 use poise_strategy::planning::{Plan, WaitReason};
+use poise_strategy::side::Direction;
 use poise_strategy::units::{Position, Price, Quantity, Rate};
 
 /// τ = 1 小时。
 const HOUR: Duration = Duration::hours(1);
+
+/// 两侧网格，只给多头侧限速：空头侧的单位一开始就全部放行。
+fn long_throttled_neutral() -> StrategyConfig {
+    StrategyConfig {
+        long: Some(SideConfig {
+            throttle_interval: Some(HOUR),
+            ..long_side(&neutral_grid_config()).clone()
+        }),
+        ..neutral_grid_config()
+    }
+}
+
+/// 在 [`long_throttled_neutral`] 之上再给空头侧加上限速。
+fn both_sides_throttled_neutral() -> StrategyConfig {
+    StrategyConfig {
+        short: Some(SideConfig {
+            throttle_interval: Some(HOUR),
+            ..short_side(&neutral_grid_config()).clone()
+        }),
+        ..long_throttled_neutral()
+    }
+}
 
 /// 四批主仓加网格，带限速。
 fn throttled_core() -> Harness {
@@ -41,12 +67,8 @@ fn versions(harness: &Harness) -> Vec<poise_runtime::StoredConfigVersion> {
 }
 
 fn released(harness: &Harness) -> usize {
-    harness
-        .runtime
-        .state(&harness.strategy_id)
-        .unwrap()
-        .throttle()
-        .released
+    let state = harness.runtime.state(&harness.strategy_id).unwrap();
+    long_state(&state).throttle().released
 }
 
 /// 改配置被拒绝时，报出的是哪个字段。
@@ -64,7 +86,7 @@ async fn b02_a_crash_releases_one_batch_and_then_one_batch_per_interval() {
 
     // 起步：只有 95 批放行，它的主仓买单挂在批次价 95000 等待。
     let report = harness.step(0).await;
-    assert_eq!(planned(&report.plan), vec![Unit::Batch(BatchIndex(0))]);
+    assert_eq!(planned(&report.plan), vec![long_batch(0)]);
     assert!(
         report
             .plan
@@ -86,11 +108,9 @@ async fn b02_a_crash_releases_one_batch_and_then_one_batch_per_interval() {
     assert_eq!(harness.core_filled(0), Quantity::parse("0.175").unwrap());
     assert_eq!(
         planned(&report.plan),
-        (0..5)
-            .map(|cell| Unit::Cell(CellIndex(cell)))
-            .collect::<Vec<_>>()
+        (0..5).map(long_cell).collect::<Vec<_>>()
     );
-    assert!(!planned(&report.plan).contains(&Unit::Batch(BatchIndex(1))));
+    assert!(!planned(&report.plan).contains(&long_batch(1)));
     assert!(
         report
             .plan
@@ -110,24 +130,22 @@ async fn b02_a_crash_releases_one_batch_and_then_one_batch_per_interval() {
     let report = harness.step(100).await;
     assert_eq!(
         planned(&report.plan),
-        (0..5)
-            .map(|cell| Unit::Cell(CellIndex(cell)))
-            .collect::<Vec<_>>()
+        (0..5).map(long_cell).collect::<Vec<_>>()
     );
     assert!(
         report
             .plan
             .place
             .iter()
-            .all(|intent| intent.purpose == OrderPurpose::GridSell)
+            .all(|intent| intent.purpose == OrderPurpose::GridExit)
     );
     assert_eq!(report.position, Position::parse("0.25").unwrap());
-    assert!(!planned(&report.plan).contains(&Unit::Batch(BatchIndex(1))));
+    assert!(!planned(&report.plan).contains(&long_batch(1)));
 
     // 95 批的第一笔成交在 t = 10：满 τ 之前不放行 90 批。
     let report = harness.step(3609).await;
     assert!(
-        !planned(&report.plan).contains(&Unit::Batch(BatchIndex(1))),
+        !planned(&report.plan).contains(&long_batch(1)),
         "放行时刻从实际成交时刻算起，不是从起步时刻"
     );
     assert!(
@@ -139,7 +157,7 @@ async fn b02_a_crash_releases_one_batch_and_then_one_batch_per_interval() {
 
     // t = 3610 放行 90 批：它的主仓买单挂在自己的批次价 90000。
     let report = harness.step(3610).await;
-    assert!(planned(&report.plan).contains(&Unit::Batch(BatchIndex(1))));
+    assert!(planned(&report.plan).contains(&long_batch(1)));
     assert_eq!(released(&harness), 2);
     let batch1 = harness.working_core_cloid(1);
     assert_eq!(
@@ -154,7 +172,7 @@ async fn b02_a_crash_releases_one_batch_and_then_one_batch_per_interval() {
             .contains(&WaitReason::WaitingForThrottle)
     );
     let report = harness.step(100_000).await;
-    assert!(!planned(&report.plan).contains(&Unit::Batch(BatchIndex(2))));
+    assert!(!planned(&report.plan).contains(&long_batch(2)));
 }
 
 /// B03：下一批放行前价格反弹到批次价以上时，主仓买单挂在批次价等待，不追高。
@@ -195,7 +213,7 @@ async fn b03_a_rebound_before_the_release_keeps_waiting_at_the_batch_price() {
 
     // 95 批一直没有成交：靠前的单位没成交，后面的单位永远不放开。
     let report = harness.step(1_000_000).await;
-    assert!(!planned(&report.plan).contains(&Unit::Batch(BatchIndex(1))));
+    assert!(!planned(&report.plan).contains(&long_batch(1)));
     assert_eq!(released(&harness), 1);
 }
 
@@ -215,7 +233,7 @@ async fn b06_a_batch_released_below_its_price_buys_its_cells_immediately() {
 
     // 60 分钟后放行 90 批，此时价格还在 95500：买单挂在批次价 90000 等待。
     let report = harness.step(3610).await;
-    assert!(planned(&report.plan).contains(&Unit::Batch(BatchIndex(1))));
+    assert!(planned(&report.plan).contains(&long_batch(1)));
     let batch1 = harness.working_core_cloid(1);
     assert_eq!(
         harness.at_exchange(&batch1).unwrap().limit_price,
@@ -237,8 +255,7 @@ async fn b06_a_batch_released_below_its_price_buys_its_cells_immediately() {
     for cell in 5..10 {
         assert!(
             report.plan.place.iter().any(|intent| {
-                intent.unit == Unit::Cell(CellIndex(cell))
-                    && intent.purpose == OrderPurpose::GridBuy
+                intent.unit == long_cell(cell) && intent.purpose == OrderPurpose::GridEntry
             }),
             "第 {cell} 格必须挂买单"
         );
@@ -258,7 +275,7 @@ async fn b06_a_batch_released_below_its_price_buys_its_cells_immediately() {
     assert_eq!(report.position, Position::parse("0.5").unwrap());
     assert_eq!(report.expected_position, Position::parse("0.5").unwrap());
     for (cell, sell_price) in (5..10).zip(["91000", "90000", "89000", "88000", "87000"]) {
-        let sell = harness.working_cloid(cell, OrderPurpose::GridSell);
+        let sell = harness.working_cloid(cell, OrderPurpose::GridExit);
         assert_eq!(
             harness.at_exchange(&sell).unwrap().limit_price,
             Price::parse(sell_price).unwrap(),
@@ -290,7 +307,7 @@ async fn a_restart_continues_the_interval_from_the_real_fill_time() {
             .unwrap();
         harness.step(10).await;
         let state = harness.runtime.state(&harness.strategy_id).unwrap();
-        assert_eq!(state.throttle().first_fill_at, Some(at(10)));
+        assert_eq!(long_state(&state).throttle().first_fill_at, Some(at(10)));
         strategy_id = harness.strategy_id.clone();
         exchange = harness.exchange.clone();
         // 进程结束，数据库连接关闭。
@@ -304,12 +321,12 @@ async fn a_restart_continues_the_interval_from_the_real_fill_time() {
 
     // 重启读回的是成交时刻本身：还差一秒就不放行。
     let state = harness.runtime.state(&strategy_id).unwrap();
-    assert_eq!(state.throttle().released, 1);
-    assert_eq!(state.throttle().first_fill_at, Some(at(10)));
+    assert_eq!(long_state(&state).throttle().released, 1);
+    assert_eq!(long_state(&state).throttle().first_fill_at, Some(at(10)));
     let report = harness.step(3609).await;
-    assert!(!planned(&report.plan).contains(&Unit::Batch(BatchIndex(1))));
+    assert!(!planned(&report.plan).contains(&long_batch(1)));
     let report = harness.step(3610).await;
-    assert!(planned(&report.plan).contains(&Unit::Batch(BatchIndex(1))));
+    assert!(planned(&report.plan).contains(&long_batch(1)));
 }
 
 /// 暂停再恢复不额外给额度：恢复不会把 τ 重新计时。
@@ -331,16 +348,16 @@ async fn pausing_and_resuming_does_not_grant_an_extra_release() {
     };
 
     // 恢复的这一步不会顺手放行下一个单位。
-    assert!(!planned(&report.plan).contains(&Unit::Batch(BatchIndex(1))));
+    assert!(!planned(&report.plan).contains(&long_batch(1)));
     let state = harness.runtime.state(&harness.strategy_id).unwrap();
-    assert_eq!(state.throttle().released, 1);
-    assert_eq!(state.throttle().first_fill_at, Some(at(10)));
+    assert_eq!(long_state(&state).throttle().released, 1);
+    assert_eq!(long_state(&state).throttle().first_fill_at, Some(at(10)));
 
     // 满 τ 之后才放行，中间的暂停不占时间也不额外给额度。
     let report = harness.step(3609).await;
-    assert!(!planned(&report.plan).contains(&Unit::Batch(BatchIndex(1))));
+    assert!(!planned(&report.plan).contains(&long_batch(1)));
     let report = harness.step(3610).await;
-    assert!(planned(&report.plan).contains(&Unit::Batch(BatchIndex(1))));
+    assert!(planned(&report.plan).contains(&long_batch(1)));
     assert_eq!(released(&harness), 2);
 }
 
@@ -363,7 +380,7 @@ async fn b44_changing_the_throttle_interval_while_running_takes_effect_and_recor
         .unwrap();
     assert_eq!(versions.len(), 1);
     assert_eq!(versions[0].version, 1);
-    assert_eq!(versions[0].config.long.throttle_interval, Some(HOUR));
+    assert_eq!(long_side(&versions[0].config).throttle_interval, Some(HOUR));
     assert_eq!(versions[0].recorded_at, at(0));
 
     // 改成 5 分钟：立刻生效，并记第 2 个版本。
@@ -384,7 +401,7 @@ async fn b44_changing_the_throttle_interval_while_running_takes_effect_and_recor
     assert_eq!(versions.len(), 2);
     assert_eq!(versions[1].version, 2);
     assert_eq!(
-        versions[1].config.long.throttle_interval,
+        long_side(&versions[1].config).throttle_interval,
         Some(Duration::minutes(5))
     );
     assert_eq!(versions[1].recorded_at, at(11));
@@ -392,30 +409,30 @@ async fn b44_changing_the_throttle_interval_while_running_takes_effect_and_recor
     // 按新间隔放行：95 批在 t = 10 成交，5 分钟之后（t = 310）就放行 90 批，
     // 换成原来的 1 小时则是 t = 3610。
     let report = harness.step(309).await;
-    assert!(!planned(&report.plan).contains(&Unit::Batch(BatchIndex(1))));
+    assert!(!planned(&report.plan).contains(&long_batch(1)));
     let report = harness.step(310).await;
-    assert!(planned(&report.plan).contains(&Unit::Batch(BatchIndex(1))));
+    assert!(planned(&report.plan).contains(&long_batch(1)));
     assert_eq!(released(&harness), 2);
 
     // 其它参数运行中不能改：改了就得停下来按新配置重建。
     let mut range = core_long_config();
-    range.long.price_low = Price::parse("74000").unwrap();
+    long_side_mut(&mut range).price_low = Price::parse("74000").unwrap();
     assert_eq!(refused(&harness, range), "price_low");
 
     let mut spacing = core_long_config();
-    spacing.long.grid_spacing = Price::parse("2000").unwrap();
+    long_side_mut(&mut spacing).grid_spacing = Price::parse("2000").unwrap();
     assert_eq!(refused(&harness, spacing), "grid_spacing");
 
     let mut position = core_long_config();
-    position.long.max_position = Quantity::parse("2").unwrap();
+    long_side_mut(&mut position).max_position = Quantity::parse("2").unwrap();
     assert_eq!(refused(&harness, position), "max_position");
 
     let mut ratio = core_long_config();
-    ratio.long.core_ratio = Rate::parse("0.6").unwrap();
+    long_side_mut(&mut ratio).core_ratio = Rate::parse("0.6").unwrap();
     assert_eq!(refused(&harness, ratio), "core_ratio");
 
     let mut batches = core_long_config();
-    batches.long.batch_count = Some(3);
+    long_side_mut(&mut batches).batch_count = Some(3);
     assert_eq!(refused(&harness, batches), "batch_count");
 
     // 换标的在规整时就拒绝了：新配置的标的必须和交易所的一致。
@@ -435,12 +452,12 @@ async fn b44_changing_the_throttle_interval_while_running_takes_effect_and_recor
         .unwrap();
     assert_eq!(versions.len(), 2);
     assert_eq!(
-        versions[1].config.long.throttle_interval,
+        long_side(&versions[1].config).throttle_interval,
         Some(Duration::minutes(5))
     );
     let stored = harness.runtime.state(&harness.strategy_id).unwrap();
     assert_eq!(released(&harness), 2);
-    assert_eq!(stored.cells().len(), 20);
+    assert_eq!(long_state(&stored).cells().len(), 20);
 }
 
 /// B44：参数一个都没变时不记新版本，报当前版本号。
@@ -495,10 +512,10 @@ async fn b44_clearing_the_interval_while_running_lifts_the_throttle() {
         .update_config(
             &harness.strategy_id,
             StrategyConfig {
-                long: SideConfig {
+                long: Some(SideConfig {
                     throttle_interval: None,
-                    ..core_long_config().long
-                },
+                    ..long_side(&core_long_config()).clone()
+                }),
                 ..core_long_config()
             },
         )
@@ -506,14 +523,18 @@ async fn b44_clearing_the_interval_while_running_lifts_the_throttle() {
 
     let report = harness.step(10).await;
     assert_eq!(released(&harness), 4, "没有限速时所有单位都可以启动");
-    assert!(planned(&report.plan).contains(&Unit::Batch(BatchIndex(1))));
-    assert!(planned(&report.plan).contains(&Unit::Batch(BatchIndex(3))));
+    assert!(planned(&report.plan).contains(&long_batch(1)));
+    assert!(planned(&report.plan).contains(&long_batch(3)));
     assert!(
         !report
             .plan
             .waiting
             .contains(&WaitReason::WaitingForThrottle)
     );
+    // 去掉限速之后，状态跟一开始就不限速时一样：没有放行时刻。
+    let state = harness.runtime.state(&harness.strategy_id).unwrap();
+    assert_eq!(long_state(&state).throttle().released_at, None);
+    assert_eq!(long_state(&state).throttle().first_fill_at, None);
 
     // 加回来也允许：放行进度按「修改这一刻」重建，而不是按启动时刻。
     harness.clock.set(at(100));
@@ -523,13 +544,9 @@ async fn b44_clearing_the_interval_while_running_lifts_the_throttle() {
         .unwrap();
     assert_eq!(version, 3);
     assert_eq!(released(&harness), 1, "加回限速后退回只放行第一个单位");
+    let state = harness.runtime.state(&harness.strategy_id).unwrap();
     assert_eq!(
-        harness
-            .runtime
-            .state(&harness.strategy_id)
-            .unwrap()
-            .throttle()
-            .first_fill_at,
+        long_state(&state).throttle().first_fill_at,
         Some(at(100)),
         "计时从修改时刻开始"
     );
@@ -553,9 +570,7 @@ async fn b44_adding_a_throttle_while_running_starts_the_interval_from_that_momen
     let report = harness.step(0).await;
     assert_eq!(
         planned(&report.plan),
-        (0..4)
-            .map(|batch| Unit::Batch(BatchIndex(batch)))
-            .collect::<Vec<_>>()
+        (0..4).map(long_batch).collect::<Vec<_>>()
     );
     let batch1 = harness.working_core_cloid(1);
 
@@ -604,7 +619,12 @@ async fn adding_a_throttle_keeps_finished_batches_released() {
             .unwrap();
         harness.step(seconds).await;
         let state = harness.runtime.state(&harness.strategy_id).unwrap();
-        assert!(state.batch(BatchIndex(batch)).unwrap().finished);
+        assert!(
+            long_state(&state)
+                .batch(BatchIndex(batch))
+                .unwrap()
+                .finished
+        );
     }
 
     // 暂停再恢复：遗留挂单全部撤掉，恢复时按状态重新挂单。两笔成交的流水就此落在
@@ -670,7 +690,7 @@ async fn adding_a_throttle_does_not_strand_batches_behind_a_gap() {
     let rejected = harness
         .orders()
         .into_iter()
-        .find(|order| order.record.unit == Unit::Batch(BatchIndex(0)))
+        .find(|order| order.record.unit == long_batch(0))
         .expect("第 0 批的订单记录");
     assert_eq!(rejected.record.status, OrderStatus::Rejected);
 
@@ -681,15 +701,8 @@ async fn adding_a_throttle_does_not_strand_batches_behind_a_gap() {
         .fill(&batch1, Quantity::parse("0.25").unwrap(), at(1))
         .unwrap();
     harness.step(1).await;
-    assert!(
-        harness
-            .runtime
-            .state(&harness.strategy_id)
-            .unwrap()
-            .batch(BatchIndex(1))
-            .unwrap()
-            .finished
-    );
+    let state = harness.runtime.state(&harness.strategy_id).unwrap();
+    assert!(long_state(&state).batch(BatchIndex(1)).unwrap().finished);
     assert_eq!(
         harness.core_filled(0),
         Quantity::ZERO,
@@ -722,7 +735,7 @@ async fn adding_a_throttle_does_not_strand_batches_behind_a_gap() {
     assert_eq!(released(&harness), 2, "放行到最后一个已经开始的批次");
     let state = harness.runtime.state(&harness.strategy_id).unwrap();
     assert_eq!(
-        state.throttle().first_fill_at,
+        long_state(&state).throttle().first_fill_at,
         Some(at(1000)),
         "间隔的起点留着，不会被已经结束的批次吃掉"
     );
@@ -781,7 +794,7 @@ async fn adding_a_throttle_writes_the_config_and_the_progress_in_one_transaction
         .store()
         .load_strategy(&harness.strategy_id)
         .unwrap();
-    assert!(stored.config.long.throttle_interval.is_none());
+    assert!(long_side(&stored.config).throttle_interval.is_none());
     assert_eq!(
         harness
             .runtime
@@ -789,6 +802,74 @@ async fn adding_a_throttle_writes_the_config_and_the_progress_in_one_transaction
             .unwrap()
             .len(),
         1
+    );
+}
+
+/// 运行中只给一侧加上限速：另一侧的放行进度和计时完全不动。
+///
+/// 另一侧没被改过。把两侧一起重建的话，它的放行进度会退回「最后一个已经开始的单位」
+/// 并重新计时，下一次放行白白推后一整个 τ——它本来再等一会儿就该放行了。
+#[tokio::test]
+async fn adding_a_throttle_to_one_side_leaves_the_other_sides_progress_alone() {
+    let harness = harness_with_spec(
+        long_throttled_neutral(),
+        cheap_spec(),
+        Store::open_in_memory().unwrap(),
+    );
+
+    // 价格一路跌到 87：多头侧每满一个 τ 放行一格，这一格在自己的买价上当场买入，
+    // 于是放行时刻和首笔成交时刻是同一个。
+    for (second, price) in [(0, "89"), (3600, "88"), (7200, "87")] {
+        harness
+            .exchange
+            .set_market_price(Price::parse(price).unwrap(), at(second));
+        harness.step(second).await;
+    }
+    let long = harness.side_state(Direction::Long).throttle().clone();
+    assert_eq!(long.released, 3);
+    assert_eq!(long.released_at, Some(at(7200)));
+    assert_eq!(long.first_fill_at, Some(at(7200)));
+    // 空头侧不限速：五格一开始就全部放行。
+    assert_eq!(
+        harness.side_state(Direction::Short).throttle().released,
+        5,
+        "不限速的侧一开始就放行了全部单位"
+    );
+
+    // 运行中只给空头侧加上限速：多头侧没有被动过。
+    harness.clock.set(at(10000));
+    let version = harness
+        .runtime
+        .update_config(&harness.strategy_id, both_sides_throttled_neutral())
+        .unwrap();
+    assert_eq!(version, 2);
+
+    assert_eq!(
+        harness.side_state(Direction::Long).throttle(),
+        &long,
+        "另一侧的放行进度与计时保持不变"
+    );
+    let short = harness.side_state(Direction::Short).throttle().clone();
+    assert_eq!(short.released, 1, "新加限速的一侧退回只放行第一个单位");
+    assert_eq!(short.released_at, Some(at(10000)), "计时从修改时刻开始");
+    assert_eq!(short.first_fill_at, Some(at(10000)));
+
+    // 多头侧的计时接着原来那一次走：at(7200) 满 τ 是 at(10800)，不是 at(13600)。
+    let report = harness.step(10800).await;
+    assert_eq!(
+        harness.side_state(Direction::Long).throttle().released,
+        4,
+        "多头侧的放行没有被推后"
+    );
+    assert!(
+        planned(&report.plan).contains(&long_cell(3)),
+        "多头侧新放行的格子照常挂单"
+    );
+    // 空头侧按新的计时走：at(10000) 满 τ 之前不放行第二个单位。
+    assert_eq!(
+        harness.side_state(Direction::Short).throttle().released,
+        1,
+        "空头侧按修改时刻计时"
     );
 }
 
@@ -819,12 +900,8 @@ async fn a_release_follows_the_real_fill_time_when_the_flow_arrives_late() {
 
     // 补记用的是这一步的时刻 at(101)：挂单状态里没有成交时间。
     let throttle = |harness: &Harness| {
-        harness
-            .runtime
-            .state(&harness.strategy_id)
-            .unwrap()
-            .throttle()
-            .clone()
+        let state = harness.runtime.state(&harness.strategy_id).unwrap();
+        long_state(&state).throttle().clone()
     };
     assert_eq!(throttle(&harness).first_fill_at, Some(at(101)));
 

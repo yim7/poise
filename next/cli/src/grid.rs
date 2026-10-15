@@ -14,6 +14,7 @@ use poise_strategy::config::{SideConfig, StrategyConfig};
 use poise_strategy::error::ConfigError;
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
 use poise_strategy::planning::WaitReason;
+use poise_strategy::side::{Direction, SidePlan};
 use poise_strategy::units::{Price, PriceRounding, Quantity, Rate};
 
 use crate::instance::Instance;
@@ -158,7 +159,7 @@ fn config(
 
     Ok(StrategyConfig {
         instrument: params.instrument.clone(),
-        long: SideConfig {
+        long: Some(SideConfig {
             price_low,
             price_high,
             max_position: Quantity::from_units(position_units as i64),
@@ -167,7 +168,8 @@ fn config(
             grid_spacing: spacing,
             grid_spread: spread,
             throttle_interval: None,
-        },
+        }),
+        short: None,
     })
 }
 
@@ -179,6 +181,7 @@ fn normalize(
 ) -> Result<Price, ConfigError> {
     spec.normalize_price(price, rounding)
         .ok_or(ConfigError::PriceOutOfRange {
+            direction: Direction::Long,
             field: "grid price",
             price,
             price_tick: spec.price_rule().step_at(price),
@@ -308,19 +311,27 @@ fn waiting(reasons: &[WaitReason]) -> String {
 }
 
 fn print_grid(strategy: &Strategy, mark: Price) {
+    let side = long_plan(strategy);
     println!(
         "网格 {} 共 {} 格，标记价 {}，最高一格买价 {}",
         strategy.spec().instrument().symbol(),
-        strategy.grid().len(),
+        side.grid().len(),
         mark,
-        strategy.config().long.price_high
+        side.config().price_high
     );
-    for cell in strategy.grid().cells() {
+    for cell in side.grid().cells() {
         println!(
             "  第 {} 格 买 {} 卖 {} 数量 {}",
-            cell.index, cell.buy_price, cell.sell_price, cell.quantity
+            cell.index, cell.entry_price, cell.exit_price, cell.quantity
         );
     }
+}
+
+/// 本期 CLI 只做多：取多头侧的划分。
+fn long_plan(strategy: &Strategy) -> &SidePlan {
+    strategy
+        .side(Direction::Long)
+        .expect("this CLI always configures the long side")
 }
 
 #[cfg(test)]
@@ -330,7 +341,7 @@ mod tests {
 
     use poise_strategy::error::ConfigError;
 
-    use super::{GridParams, config, plan, plan_minimum};
+    use super::{GridParams, config, long_plan, plan, plan_minimum};
 
     fn btc_spec() -> InstrumentSpec {
         InstrumentSpec::new(
@@ -365,13 +376,14 @@ mod tests {
         let mark = Price::parse("95000").unwrap();
 
         let config = config(&params(2, None), &spec, mark).unwrap();
+        let long = config.long.as_ref().unwrap();
 
         // 间距和价差按万分之几取整到报价精度。
-        assert_eq!(config.long.grid_spacing, Price::parse("190").unwrap());
-        assert_eq!(config.long.grid_spread, Price::parse("380").unwrap());
+        assert_eq!(long.grid_spacing, Price::parse("190").unwrap());
+        assert_eq!(long.grid_spread, Price::parse("380").unwrap());
         // 最高一格在标记价下面一个间距。
-        assert_eq!(config.long.price_high, Price::parse("94810").unwrap());
-        assert!(config.long.price_high < mark);
+        assert_eq!(long.price_high, Price::parse("94810").unwrap());
+        assert!(long.price_high < mark);
     }
 
     #[test]
@@ -381,20 +393,20 @@ mod tests {
 
         let strategy = plan_minimum(&params(2, None), &spec, &fees(), mark).unwrap();
 
-        let cells = strategy.grid().cells();
+        let cells = long_plan(&strategy).grid().cells();
         assert_eq!(cells.len(), 2);
-        assert_eq!(cells[0].buy_price, Price::parse("94810").unwrap());
-        assert_eq!(cells[1].buy_price, Price::parse("94620").unwrap());
-        assert!(cells.iter().all(|cell| cell.buy_price < mark));
+        assert_eq!(cells[0].entry_price, Price::parse("94810").unwrap());
+        assert_eq!(cells[1].entry_price, Price::parse("94620").unwrap());
+        assert!(cells.iter().all(|cell| cell.entry_price < mark));
         // 缺省数量每格一样，而且每格都顶得住交易所的最低订单金额。
         assert_eq!(cells[0].quantity, cells[1].quantity);
         assert!(
             cells
                 .iter()
-                .all(|cell| spec.meets_minimum_order(cell.quantity, cell.buy_price))
+                .all(|cell| spec.meets_minimum_order(cell.quantity, cell.entry_price))
         );
         assert_eq!(
-            strategy.config().long.max_position,
+            long_plan(&strategy).config().max_position,
             Quantity::from_units(cells[0].quantity.units() * 2)
         );
     }
@@ -405,16 +417,11 @@ mod tests {
         let mark = Price::parse("95000").unwrap();
 
         let strategy = plan(&params(1, Some("0.001")), &spec, &fees(), mark).unwrap();
+        let grid = long_plan(&strategy).grid();
 
-        assert_eq!(strategy.grid().len(), 1);
-        assert_eq!(
-            strategy.grid().cells()[0].buy_price,
-            Price::parse("94810").unwrap()
-        );
-        assert_eq!(
-            strategy.grid().cells()[0].quantity,
-            Quantity::parse("0.001").unwrap()
-        );
+        assert_eq!(grid.len(), 1);
+        assert_eq!(grid.cells()[0].entry_price, Price::parse("94810").unwrap());
+        assert_eq!(grid.cells()[0].quantity, Quantity::parse("0.001").unwrap());
     }
 
     #[test]

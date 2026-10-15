@@ -7,21 +7,47 @@ use serde::{Deserialize, Serialize};
 
 use crate::batch::BatchIndex;
 use crate::grid::CellIndex;
+use crate::side::Direction;
 use crate::units::{Price, Quantity};
 
-/// 订单的归属单位：一批主仓或一个格子。
+/// 订单的归属单位：某一侧的一批主仓或一个格子。
+///
+/// 中性网格两侧都有批次和格子，所以要带上方向才能区分。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Unit {
-    Batch(BatchIndex),
-    Cell(CellIndex),
+    Batch(Direction, BatchIndex),
+    Cell(Direction, CellIndex),
+}
+
+impl Unit {
+    /// 这个单位属于哪一侧。
+    pub const fn direction(self) -> Direction {
+        match self {
+            Self::Batch(direction, _) | Self::Cell(direction, _) => direction,
+        }
+    }
+
+    /// 这个单位在启动顺序上的下标：批次的顺序就是批次下标，格子的顺序就是格子下标
+    /// （两者都是从靠近空隙的一端开始）。
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Batch(_, index) => index.0,
+            Self::Cell(_, index) => index.0,
+        }
+    }
+
+    /// 这个单位的这一部分在这一侧上的订单方向。
+    pub const fn side(self, purpose: OrderPurpose) -> Side {
+        purpose.side(self.direction())
+    }
 }
 
 impl std::fmt::Display for Unit {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Batch(index) => write!(formatter, "batch {index}"),
-            Self::Cell(index) => write!(formatter, "cell {index}"),
+            Self::Batch(direction, index) => write!(formatter, "{direction} batch {index}"),
+            Self::Cell(direction, index) => write!(formatter, "{direction} cell {index}"),
         }
     }
 }
@@ -79,31 +105,35 @@ pub enum Side {
     Sell,
 }
 
-/// 订单用途：它记到哪个单位的哪一部分。
+/// 订单用途：它记到哪个单位的哪一部分，也就是订单的腿。
+///
+/// 建仓腿与平仓腿在各侧上的买卖方向相反（设计第 5.1 节），所以这里只记「哪条腿」，
+/// 具体买卖由 [`OrderPurpose::side`] 按方向算。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderPurpose {
-    /// 主仓买入：本批主仓部分，策略永不为它下平仓单。
-    CoreBuy,
-    /// 格子买入：买回待买回部分。
-    GridBuy,
-    /// 格子卖出：卖出持有部分。
-    GridSell,
+    /// 主仓建仓腿：本批主仓部分，策略永不为它下平仓单。
+    Core,
+    /// 格子的建仓腿：多头侧买入，空头侧卖出开空。
+    GridEntry,
+    /// 格子的平仓腿：多头侧卖出，空头侧买入平仓。
+    GridExit,
 }
 
 impl OrderPurpose {
-    pub const fn side(self) -> Side {
+    /// 这条腿在某一侧上的订单方向。
+    pub const fn side(self, direction: Direction) -> Side {
         match self {
-            Self::CoreBuy | Self::GridBuy => Side::Buy,
-            Self::GridSell => Side::Sell,
+            Self::Core | Self::GridEntry => direction.entry_side(),
+            Self::GridExit => direction.exit_side(),
         }
     }
 
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::CoreBuy => "core_buy",
-            Self::GridBuy => "grid_buy",
-            Self::GridSell => "grid_sell",
+            Self::Core => "core",
+            Self::GridEntry => "grid_entry",
+            Self::GridExit => "grid_exit",
         }
     }
 }

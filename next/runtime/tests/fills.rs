@@ -10,7 +10,7 @@ use poise_strategy::units::{Position, Price, Quantity};
 async fn b17_duplicate_out_of_order_and_regressed_fills_are_recorded_once() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
 
     // 交易所先送来后发生的成交 0.01，累计量 0.02：先发生的那笔 0.01 还没到。
     // 订单累计量、待买回都跟着变。
@@ -130,7 +130,7 @@ async fn b17_duplicate_out_of_order_and_regressed_fills_are_recorded_once() {
 async fn a_late_fill_older_than_the_sync_point_is_still_recorded() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 同步点已经推到 at(2)。
     harness.step(2).await;
 

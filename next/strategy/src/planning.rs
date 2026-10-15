@@ -1,16 +1,19 @@
 //! 规划：给定状态、在场订单和当前价格，输出要下的单、要撤的单和等待原因。
 //!
-//! 规则（做多侧）：
-//! - 每批主仓在自己的批次价挂买单，不追高；成交后格子按比例启用（第 4.2 节）；
-//! - 启用后的格子：持有部分在卖价挂卖单（只减仓），待买回部分在买价挂买单；
+//! 规则（每一侧都一样，只是买卖方向相反）：
+//! - 每批主仓在自己的批次价挂建仓单，不追价；成交后格子按比例启用（第 4.2 节）；
+//! - 启用后的格子：持有部分在平仓价挂平仓单，待买回部分在建仓价挂建仓单；
 //! - 还没被限速放行的单位不挂新单（第 4.1 节）；
 //! - 某一侧剩余量不足最低订单金额时，这一侧先不挂单，只挂另一侧（第 4.4 节）；
-//! - 新订单的限价不与本策略在场的反向订单相交（第 6 节）。
+//! - 新订单的限价不与本策略在场的反向订单相交（第 6 节），两侧一起看。
 //!
 //! 限速只挡住「新单位的第一次挂单」：已启用格子的买卖循环不受限速影响（第 4.3 节），
 //! 也不会因为等待放行而释放任何预留。运行中改成限速会让还没开始的单位回到未放行
 //! （第 4.1 节），未放行的单位这一步不挂新单，也不撤它在场的订单；已经结束的批次不受
-//! 放行影响，它的主仓买单照撤。
+//! 放行影响，它的主仓建仓单照撤。
+//!
+//! 中性网格两侧的格子平仓单不标只减仓（第 5.2 节）：一侧的平仓在交易所层面可能就是
+//! 在减另一侧的仓位。
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +22,7 @@ use crate::batch::{Batch, BatchIndex};
 use crate::grid::Cell;
 use crate::instrument::PriceRule;
 use crate::order::{ClientOrderId, OrderPurpose, Side, Unit, WorkingOrder};
+use crate::side::{Direction, SidePlan};
 use crate::state::{BatchState, CellState, StrategyState};
 use crate::units::{Price, Quantity};
 
@@ -102,6 +106,8 @@ pub struct Plan {
 struct Demand {
     unit: Unit,
     purpose: OrderPurpose,
+    /// 这条腿的买卖方向：由用途和这一侧的方向决定（第 5.1 节）。
+    side: Side,
     /// 已经按第 6 节调整过的限价。
     limit_price: Price,
     quantity: Quantity,
@@ -139,7 +145,7 @@ impl OwnOrderBounds {
     fn of(working_orders: &[WorkingOrder]) -> Self {
         let mut bounds = Self::default();
         for order in working_orders {
-            bounds.include(order.purpose.side(), order.limit_price);
+            bounds.include(order.unit.side(order.purpose), order.limit_price);
         }
         bounds
     }
@@ -224,54 +230,62 @@ impl<'a> Planner<'a> {
         }
     }
 
-    /// 主仓：每批在自己的批次价挂买单，不追高。
-    fn plan_batches(&mut self) {
-        for batch in self.strategy.batches().batches() {
-            let Some(batch_state) = self.state.batch(batch.index) else {
+    /// 两侧：先主仓、后格子。顺序不影响结果，只影响 `waiting` 的排列。
+    fn plan_sides(&mut self) {
+        for side in self.strategy.sides() {
+            self.plan_batches(side);
+            self.plan_cells(side);
+        }
+    }
+
+    /// 一侧的主仓：每批在自己的批次价挂建仓单，不追价。
+    fn plan_batches(&mut self, side: &SidePlan) {
+        let direction = side.direction();
+        for batch in side.batches().batches() {
+            let Some(batch_state) = self.batch_state(direction, batch.index) else {
                 continue;
             };
-            // 已经结束的批次先处理：它不再买入，在场的主仓买单必须撤掉。这一步不能等放行
+            let unit = Unit::Batch(direction, batch.index);
+            // 已经结束的批次先处理：它不再建仓，在场的建仓单必须撤掉。这一步不能等放行
             // ——结束的批次不会再成交，等它「重新放行」可能永远等不到，留着那张单就会在
-            // 本批已经决定不再买入之后又买进来。
+            // 本批已经决定不再建仓之后又建进来。
             if batch_state.finished {
-                self.cancel_core_buys(batch.index);
+                self.cancel_core_orders(unit);
                 continue;
             }
             // 还没放行的批次不挂单。启动时它本来没有在场订单，但运行中从不限速改成限速
             // 会让还没开始的批次回到未放行（第 4.1 节），那种情况下它的在场订单留在原地，
             // 重新放行之后再处理。
-            if !self
-                .strategy
-                .is_released(self.state, Unit::Batch(batch.index))
-            {
+            if !self.strategy.is_released(self.state, unit) {
                 self.waiting_for_throttle = true;
                 continue;
             }
-            self.plan_batch(batch, batch_state);
+            self.plan_batch(direction, batch, batch_state);
         }
     }
 
-    /// 一批主仓的买单：本批最多能在场的数量是 `C − F`，在场订单已经有多少由
+    /// 一批主仓的建仓单：本批最多能在场的数量是 `C − F`，在场订单已经有多少由
     /// [`Strategy::reconcile`] 判断。
-    fn plan_batch(&mut self, batch: &Batch, batch_state: &BatchState) {
+    fn plan_batch(&mut self, direction: Direction, batch: &Batch, batch_state: &BatchState) {
         let outstanding = batch.core_quantity.saturating_sub(batch_state.filled);
         if outstanding.is_zero() {
             return;
         }
-        let unit = Unit::Batch(batch.index);
-        let limit_price = self.bounds.buy_limit(batch.price, self.rule);
+        let unit = Unit::Batch(direction, batch.index);
+        let limit_price = self.entry_limit(direction, batch.price);
         let demand = Demand {
             unit,
-            purpose: OrderPurpose::CoreBuy,
+            purpose: OrderPurpose::Core,
+            side: direction.entry_side(),
             limit_price,
             quantity: outstanding,
             reduce_only: false,
-            blocked: self.blocked(unit, OrderPurpose::CoreBuy),
+            blocked: self.blocked(unit, OrderPurpose::Core),
         };
         match self.reconcile(&demand) {
             Placement::Blocked => self.waiting_for_fills = true,
-            // 剩余量按批次价足够、只是因为下调才不够：本批不结束，主仓买单暂不挂出，
-            // 等自身卖单成交或价格回到批次价后再补齐（第 4.2.3 节）。
+            // 剩余量按批次价足够、只是因为避让才不够：本批不结束，主仓建仓单暂不挂出，
+            // 等自身反向订单成交或价格回到批次价后再补齐（第 4.2.3 节）。
             Placement::BelowMinimum if limit_price != batch.price => {
                 self.plan.waiting.push(WaitReason::LimitAdjustedByOwnOrder);
             }
@@ -279,76 +293,117 @@ impl<'a> Planner<'a> {
         }
     }
 
-    /// 本批已经结束：不再挂主仓买单，在场的那张也要撤掉。
+    /// 本批已经结束：不再挂主仓建仓单，在场的那张也要撤掉。
     ///
     /// 结束可能是迟到成交带来的，而这张单是上一次规划按当时的 `C − F` 挂出来的；
-    /// 留着它就会在本批已经决定不再买入之后又买进来。
-    fn cancel_core_buys(&mut self, index: BatchIndex) {
-        let unit = Unit::Batch(index);
+    /// 留着它就会在本批已经决定不再建仓之后又建进来。
+    fn cancel_core_orders(&mut self, unit: Unit) {
         self.plan.cancel.extend(
             self.working_orders
                 .iter()
-                .filter(|order| order.unit == unit && order.purpose == OrderPurpose::CoreBuy)
+                .filter(|order| order.unit == unit && order.purpose == OrderPurpose::Core)
                 .map(|order| order.client_order_id.clone()),
         );
     }
 
-    /// 格子：启用的照常循环，没启用的等所属批次。
-    fn plan_cells(&mut self) {
-        for cell in self.strategy.grid().cells() {
-            let Some(cell_state) = self.state.cell(cell.index) else {
+    /// 一侧的格子：启用的照常循环，没启用的等所属批次。
+    fn plan_cells(&mut self, side: &SidePlan) {
+        let direction = side.direction();
+        for cell in side.grid().cells() {
+            let Some(cell_state) = self.cell_state(direction, cell.index) else {
                 continue;
             };
             if !cell_state.enabled {
                 // 所属批次已经结束的格子不会再启用，不算在等批次。
                 let batch_running = cell
                     .batch
-                    .and_then(|batch| self.state.batch(batch))
+                    .and_then(|batch| self.batch_state(direction, batch))
                     .is_some_and(|batch_state| !batch_state.finished);
                 self.waiting_for_batch |= batch_running;
                 continue;
             }
-            self.plan_cell(cell, cell_state);
+            self.plan_cell(direction, cell, cell_state);
         }
     }
 
-    /// 一个启用格子的两侧：先买回、再卖出。
-    fn plan_cell(&mut self, cell: &Cell, cell_state: &CellState) {
+    /// 一个启用格子的两侧：先建仓腿、再平仓腿。
+    fn plan_cell(&mut self, direction: Direction, cell: &Cell, cell_state: &CellState) {
         let held = cell_state.held(cell.quantity);
-        let unit = Unit::Cell(cell.index);
-        // 没有主仓时格子自成单位（第 4.1 节）：还没放行的格子不挂第一次买回单。
+        let unit = Unit::Cell(direction, cell.index);
+        // 没有主仓时格子自成单位（第 4.1 节）：还没放行的格子不挂第一次建仓单。
         // 已经持有仓位的格子一定是放行过的，它的买卖循环不受限速约束（第 4.3 节）。
         if self.strategy.is_released(self.state, unit) {
-            self.plan_buy_back(cell, cell_state, unit);
+            self.plan_cell_entry(direction, cell, cell_state, unit);
         } else {
             self.waiting_for_throttle = true;
         }
-        let sell = Demand {
+        let exit = Demand {
             unit,
-            purpose: OrderPurpose::GridSell,
-            // 卖单的限价要用买回之后的最新边界：买回的限价可能刚被下调。
-            limit_price: self.bounds.sell_limit(cell.sell_price, self.rule),
+            purpose: OrderPurpose::GridExit,
+            side: direction.exit_side(),
+            // 平仓单的限价要用建仓腿之后的最新边界：建仓腿的限价可能刚被调整过。
+            limit_price: self.exit_limit(direction, cell.exit_price),
             quantity: held,
-            reduce_only: true,
-            blocked: self.blocked(unit, OrderPurpose::GridSell),
+            // 中性网格的平仓单不标只减仓：一侧的平仓在交易所层面可能是在减另一侧的仓位
+            // （第 5.2 节）。
+            reduce_only: !self.strategy.is_neutral(),
+            blocked: self.blocked(unit, OrderPurpose::GridExit),
         };
-        if let Placement::Blocked = self.reconcile(&sell) {
+        if let Placement::Blocked = self.reconcile(&exit) {
             self.waiting_for_fills = true;
         }
     }
 
-    /// 格子的买回单：待买回的数量挂在自己的买价上。
-    fn plan_buy_back(&mut self, cell: &Cell, cell_state: &CellState, unit: Unit) {
-        let buy = Demand {
+    /// 格子的建仓单：待建仓的数量挂在自己的建仓价上。
+    fn plan_cell_entry(
+        &mut self,
+        direction: Direction,
+        cell: &Cell,
+        cell_state: &CellState,
+        unit: Unit,
+    ) {
+        let entry = Demand {
             unit,
-            purpose: OrderPurpose::GridBuy,
-            limit_price: self.bounds.buy_limit(cell.buy_price, self.rule),
+            purpose: OrderPurpose::GridEntry,
+            side: direction.entry_side(),
+            limit_price: self.entry_limit(direction, cell.entry_price),
             quantity: cell_state.to_buy_back,
             reduce_only: false,
-            blocked: self.blocked(unit, OrderPurpose::GridBuy),
+            blocked: self.blocked(unit, OrderPurpose::GridEntry),
         };
-        if let Placement::Blocked = self.reconcile(&buy) {
+        if let Placement::Blocked = self.reconcile(&entry) {
             self.waiting_for_fills = true;
+        }
+    }
+
+    /// 一侧某一批的状态。
+    fn batch_state(&self, direction: Direction, index: BatchIndex) -> Option<&'a BatchState> {
+        self.state.side(direction)?.batch(index)
+    }
+
+    /// 一侧某一个格子的状态。
+    fn cell_state(
+        &self,
+        direction: Direction,
+        index: crate::grid::CellIndex,
+    ) -> Option<&'a CellState> {
+        self.state.side(direction)?.cell(index)
+    }
+
+    /// 建仓腿的限价：买单不能高过自身最低卖价，卖单不能低过自身最高买价（第 6 节）。
+    fn entry_limit(&self, direction: Direction, desired: Price) -> Price {
+        self.leg_limit(direction.entry_side(), desired)
+    }
+
+    /// 平仓腿的限价。
+    fn exit_limit(&self, direction: Direction, desired: Price) -> Price {
+        self.leg_limit(direction.exit_side(), desired)
+    }
+
+    fn leg_limit(&self, side: Side, desired: Price) -> Price {
+        match side {
+            Side::Buy => self.bounds.buy_limit(desired, self.rule),
+            Side::Sell => self.bounds.sell_limit(desired, self.rule),
         }
     }
 
@@ -399,8 +454,7 @@ impl Strategy {
         market_price: Price,
     ) -> Plan {
         let mut planner = Planner::new(self, state, working_orders, pending, market_price);
-        planner.plan_batches();
-        planner.plan_cells();
+        planner.plan_sides();
         planner.finish()
     }
 
@@ -443,12 +497,12 @@ impl Strategy {
         plan.place.push(OrderIntent {
             unit: demand.unit,
             purpose: demand.purpose,
-            side: demand.purpose.side(),
+            side: demand.side,
             limit_price: demand.limit_price,
             quantity: missing,
             reduce_only: demand.reduce_only,
         });
-        bounds.include(demand.purpose.side(), demand.limit_price);
+        bounds.include(demand.side, demand.limit_price);
         Placement::Handled
     }
 }
@@ -459,15 +513,29 @@ mod tests {
     use crate::Strategy;
     use crate::batch::BatchIndex;
     use crate::fixtures::{
-        at, core_long_strategy, fine_core_long_strategy, five_cell_strategy,
+        at, core_long_strategy, fine_core_long_strategy, five_cell_strategy, short_grid_strategy,
         single_batch_core_strategy, single_small_batch_strategy, throttled_core_long_strategy,
     };
     use crate::grid::CellIndex;
     use crate::order::{
         ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, Side, Unit, WorkingOrder,
     };
-    use crate::state::StrategyState;
+    use crate::side::Direction;
+    use crate::state::{SideState, StrategyState};
     use crate::units::{Price, Quantity};
+
+    /// 测试里大多只看多头侧。
+    fn long_state(state: &StrategyState) -> &SideState {
+        state
+            .side(Direction::Long)
+            .expect("the long side is configured")
+    }
+
+    fn long_state_mut(state: &mut StrategyState) -> &mut SideState {
+        state
+            .side_mut(Direction::Long)
+            .expect("the long side is configured")
+    }
 
     fn working_order(
         id: &str,
@@ -514,7 +582,10 @@ mod tests {
     /// 第 0 格：买价 95000，卖价 96000，数量 .015；主仓成交 .07 后启用 95、94 两格。
     fn two_cells_enabled(strategy: &Strategy) -> StrategyState {
         let mut state = strategy.initial_state();
-        state.batch_mut(BatchIndex(0)).unwrap().filled = Quantity::parse("0.07").unwrap();
+        long_state_mut(&mut state)
+            .batch_mut(BatchIndex(0))
+            .unwrap()
+            .filled = Quantity::parse("0.07").unwrap();
         strategy.advance(&mut state, &[]);
         state
     }
@@ -529,29 +600,68 @@ mod tests {
         // 每批的主仓买单挂在自己的批次价上，数量是 C − F。
         let prices = ["95000", "90000", "85000", "80000"];
         for (index, price) in prices.iter().enumerate() {
-            let intent = intent(&plan, Unit::Batch(BatchIndex(index)), OrderPurpose::CoreBuy);
+            let intent = intent(
+                &plan,
+                Unit::Batch(Direction::Long, BatchIndex(index)),
+                OrderPurpose::Core,
+            );
             assert_eq!(intent.limit_price, Price::parse(price).unwrap());
             let expected = if index == 0 { "0.105" } else { "0.175" };
             assert_eq!(intent.quantity, Quantity::parse(expected).unwrap());
         }
         // 已启用的两格挂买回单，其余格子等所属批次。
         assert_eq!(
-            intent(&plan, Unit::Cell(CellIndex(0)), OrderPurpose::GridBuy).quantity,
+            intent(
+                &plan,
+                Unit::Cell(Direction::Long, CellIndex(0)),
+                OrderPurpose::GridEntry
+            )
+            .quantity,
             Quantity::parse("0.015").unwrap()
         );
         // 主仓只买不卖：批次上的订单全是买单。
         assert!(
             plan.place
                 .iter()
-                .filter(|intent| matches!(intent.unit, Unit::Batch(_)))
+                .filter(|intent| matches!(intent.unit, Unit::Batch(..)))
                 .all(|intent| intent.side == Side::Buy && !intent.reduce_only)
         );
         assert!(!has_intent(
             &plan,
-            Unit::Cell(CellIndex(2)),
-            OrderPurpose::GridBuy
+            Unit::Cell(Direction::Long, CellIndex(2)),
+            OrderPurpose::GridEntry
         ));
         assert!(plan.waiting.contains(&WaitReason::WaitingForBatch));
+    }
+
+    /// 做空网格是多头网格的镜像：每格在自己的开空价挂卖单，还没持有就没有买平单。
+    #[test]
+    fn b10_the_short_grid_places_the_mirror_orders() {
+        let strategy = short_grid_strategy();
+        let state = strategy.initial_state();
+
+        let plan = strategy.plan(&state, &[], &[], Price::parse("94000").unwrap());
+
+        // 二十格各挂一张卖单，价格从 75000 往上每格 1000，数量 .05。
+        assert_eq!(plan.place.len(), 20);
+        for (index, intent) in plan.place.iter().enumerate() {
+            assert_eq!(intent.unit, Unit::Cell(Direction::Short, CellIndex(index)));
+            assert_eq!(intent.purpose, OrderPurpose::GridEntry);
+            assert_eq!(intent.side, Side::Sell);
+            assert_eq!(
+                intent.limit_price,
+                Price::parse(&(75000 + index * 1000).to_string()).unwrap()
+            );
+            assert_eq!(intent.quantity, Quantity::parse("0.05").unwrap());
+            assert!(!intent.reduce_only);
+        }
+        // 还没有持有任何一格，所以没有买平单。
+        assert!(
+            plan.place
+                .iter()
+                .all(|intent| intent.purpose != OrderPurpose::GridExit)
+        );
+        assert!(plan.cancel.is_empty());
     }
 
     #[test]
@@ -559,15 +669,27 @@ mod tests {
         let strategy = core_long_strategy();
         let mut state = two_cells_enabled(&strategy);
         // 第 0 格买回 .005，持有 .01。
-        state.cell_mut(CellIndex(0)).unwrap().to_buy_back = Quantity::parse("0.01").unwrap();
+        long_state_mut(&mut state)
+            .cell_mut(CellIndex(0))
+            .unwrap()
+            .to_buy_back = Quantity::parse("0.01").unwrap();
 
         let plan = strategy.plan(&state, &[], &[], Price::parse("95000").unwrap());
 
         assert_eq!(
-            intent(&plan, Unit::Cell(CellIndex(0)), OrderPurpose::GridBuy).quantity,
+            intent(
+                &plan,
+                Unit::Cell(Direction::Long, CellIndex(0)),
+                OrderPurpose::GridEntry
+            )
+            .quantity,
             Quantity::parse("0.01").unwrap()
         );
-        let sell = intent(&plan, Unit::Cell(CellIndex(0)), OrderPurpose::GridSell);
+        let sell = intent(
+            &plan,
+            Unit::Cell(Direction::Long, CellIndex(0)),
+            OrderPurpose::GridExit,
+        );
         assert_eq!(sell.limit_price, Price::parse("96000").unwrap());
         assert_eq!(sell.quantity, Quantity::parse("0.005").unwrap());
         assert!(sell.reduce_only);
@@ -578,27 +700,37 @@ mod tests {
         let strategy = single_batch_core_strategy();
         let mut state = strategy.initial_state();
         // 主仓成交 6.9，还差 .1；两格已启用并全部持有。
-        state.batch_mut(BatchIndex(0)).unwrap().filled = Quantity::parse("6.9").unwrap();
+        long_state_mut(&mut state)
+            .batch_mut(BatchIndex(0))
+            .unwrap()
+            .filled = Quantity::parse("6.9").unwrap();
         strategy.advance(&mut state, &[]);
         for index in 0..2 {
-            state.cell_mut(CellIndex(index)).unwrap().to_buy_back = Quantity::ZERO;
+            long_state_mut(&mut state)
+                .cell_mut(CellIndex(index))
+                .unwrap()
+                .to_buy_back = Quantity::ZERO;
         }
-        assert!(state.cells()[..2].iter().all(|cell| cell.enabled));
-        assert!(!state.cells()[2].enabled);
+        assert!(
+            long_state(&state).cells()[..2]
+                .iter()
+                .all(|cell| cell.enabled)
+        );
+        assert!(!long_state(&state).cells()[2].enabled);
 
         // 自身卖单在 100，主仓买单只能挂 99.99，.1 × 99.99 = 9.999 美元。
         let working = vec![
             working_order(
                 "0x01",
-                Unit::Cell(CellIndex(0)),
-                OrderPurpose::GridSell,
+                Unit::Cell(Direction::Long, CellIndex(0)),
+                OrderPurpose::GridExit,
                 "101",
                 "1",
             ),
             working_order(
                 "0x02",
-                Unit::Cell(CellIndex(1)),
-                OrderPurpose::GridSell,
+                Unit::Cell(Direction::Long, CellIndex(1)),
+                OrderPurpose::GridExit,
                 "100",
                 "1",
             ),
@@ -606,11 +738,11 @@ mod tests {
         let plan = strategy.plan(&state, &working, &[], Price::parse("100").unwrap());
 
         // 按批次价 100 计算是 10 美元，够最低金额：本批不结束，只是暂时挂不出去。
-        assert!(!state.batch(BatchIndex(0)).unwrap().finished);
+        assert!(!long_state(&state).batch(BatchIndex(0)).unwrap().finished);
         assert!(!has_intent(
             &plan,
-            Unit::Batch(BatchIndex(0)),
-            OrderPurpose::CoreBuy
+            Unit::Batch(Direction::Long, BatchIndex(0)),
+            OrderPurpose::Core
         ));
         assert!(plan.waiting.contains(&WaitReason::LimitAdjustedByOwnOrder));
         assert!(plan.cancel.is_empty());
@@ -619,8 +751,8 @@ mod tests {
         let mut after_sell = state.clone();
         let mut sell = OrderRecord {
             client_order_id: ClientOrderId::try_new("0x02").unwrap(),
-            unit: Unit::Cell(CellIndex(1)),
-            purpose: OrderPurpose::GridSell,
+            unit: Unit::Cell(Direction::Long, CellIndex(1)),
+            purpose: OrderPurpose::GridExit,
             limit_price: Price::parse("100").unwrap(),
             quantity: Quantity::parse("1").unwrap(),
             cumulative_filled: Quantity::ZERO,
@@ -635,23 +767,40 @@ mod tests {
         );
         let working = vec![working_order(
             "0x01",
-            Unit::Cell(CellIndex(0)),
-            OrderPurpose::GridSell,
+            Unit::Cell(Direction::Long, CellIndex(0)),
+            OrderPurpose::GridExit,
             "101",
             "1",
         )];
         let plan = strategy.plan(&after_sell, &working, &[], Price::parse("100").unwrap());
 
-        let core = intent(&plan, Unit::Batch(BatchIndex(0)), OrderPurpose::CoreBuy);
+        let core = intent(
+            &plan,
+            Unit::Batch(Direction::Long, BatchIndex(0)),
+            OrderPurpose::Core,
+        );
         assert_eq!(core.limit_price, Price::parse("100").unwrap());
         assert_eq!(core.quantity, Quantity::parse("0.1").unwrap());
         assert!(!plan.waiting.contains(&WaitReason::LimitAdjustedByOwnOrder));
 
         // 主仓买完后本批结束，98 格随后启用。
-        after_sell.batch_mut(BatchIndex(0)).unwrap().filled = Quantity::parse("7").unwrap();
+        long_state_mut(&mut after_sell)
+            .batch_mut(BatchIndex(0))
+            .unwrap()
+            .filled = Quantity::parse("7").unwrap();
         strategy.advance(&mut after_sell, &[]);
-        assert!(after_sell.batch(BatchIndex(0)).unwrap().finished);
-        assert!(after_sell.cells().iter().all(|cell| cell.enabled));
+        assert!(
+            long_state(&after_sell)
+                .batch(BatchIndex(0))
+                .unwrap()
+                .finished
+        );
+        assert!(
+            long_state(&after_sell)
+                .cells()
+                .iter()
+                .all(|cell| cell.enabled)
+        );
     }
 
     #[test]
@@ -659,17 +808,27 @@ mod tests {
         let strategy = fine_core_long_strategy();
         let mut state = strategy.initial_state();
         // 第 0 格卖出 .0149，只剩 .0001 持有：.0001 × 96000 = 9.6 美元，不足最低金额。
-        state.cell_mut(CellIndex(0)).unwrap().enabled = true;
-        state.cell_mut(CellIndex(0)).unwrap().to_buy_back = Quantity::parse("0.0149").unwrap();
+        long_state_mut(&mut state)
+            .cell_mut(CellIndex(0))
+            .unwrap()
+            .enabled = true;
+        long_state_mut(&mut state)
+            .cell_mut(CellIndex(0))
+            .unwrap()
+            .to_buy_back = Quantity::parse("0.0149").unwrap();
 
         let plan = strategy.plan(&state, &[], &[], Price::parse("95000").unwrap());
 
         assert!(!has_intent(
             &plan,
-            Unit::Cell(CellIndex(0)),
-            OrderPurpose::GridSell
+            Unit::Cell(Direction::Long, CellIndex(0)),
+            OrderPurpose::GridExit
         ));
-        let buy = intent(&plan, Unit::Cell(CellIndex(0)), OrderPurpose::GridBuy);
+        let buy = intent(
+            &plan,
+            Unit::Cell(Direction::Long, CellIndex(0)),
+            OrderPurpose::GridEntry,
+        );
         assert_eq!(buy.quantity, Quantity::parse("0.0149").unwrap());
 
         // 买回全部成交后格子恢复整份，按 .015 挂卖。
@@ -684,10 +843,14 @@ mod tests {
 
         assert!(!has_intent(
             &plan,
-            Unit::Cell(CellIndex(0)),
-            OrderPurpose::GridBuy
+            Unit::Cell(Direction::Long, CellIndex(0)),
+            OrderPurpose::GridEntry
         ));
-        let sell = intent(&plan, Unit::Cell(CellIndex(0)), OrderPurpose::GridSell);
+        let sell = intent(
+            &plan,
+            Unit::Cell(Direction::Long, CellIndex(0)),
+            OrderPurpose::GridExit,
+        );
         assert_eq!(sell.quantity, Quantity::parse("0.015").unwrap());
         assert_eq!(sell.limit_price, Price::parse("96000").unwrap());
     }
@@ -698,43 +861,45 @@ mod tests {
         let mut state = strategy.initial_state();
         // 价格跌到 91500：95、94、93、91 四格已买入并持有，92 格没成交。
         for index in [0, 1, 2, 4] {
-            let cell = state.cell_mut(CellIndex(index)).unwrap();
+            let cell = long_state_mut(&mut state)
+                .cell_mut(CellIndex(index))
+                .unwrap();
             cell.enabled = true;
             cell.to_buy_back = Quantity::ZERO;
         }
         let working = vec![
             working_order(
                 "0x01",
-                Unit::Cell(CellIndex(0)),
-                OrderPurpose::GridSell,
+                Unit::Cell(Direction::Long, CellIndex(0)),
+                OrderPurpose::GridExit,
                 "96000",
                 "0.05",
             ),
             working_order(
                 "0x02",
-                Unit::Cell(CellIndex(1)),
-                OrderPurpose::GridSell,
+                Unit::Cell(Direction::Long, CellIndex(1)),
+                OrderPurpose::GridExit,
                 "95000",
                 "0.05",
             ),
             working_order(
                 "0x03",
-                Unit::Cell(CellIndex(2)),
-                OrderPurpose::GridSell,
+                Unit::Cell(Direction::Long, CellIndex(2)),
+                OrderPurpose::GridExit,
                 "94000",
                 "0.05",
             ),
             working_order(
                 "0x04",
-                Unit::Cell(CellIndex(4)),
-                OrderPurpose::GridSell,
+                Unit::Cell(Direction::Long, CellIndex(4)),
+                OrderPurpose::GridExit,
                 "92000",
                 "0.05",
             ),
             working_order(
                 "0x05",
-                Unit::Cell(CellIndex(3)),
-                OrderPurpose::GridBuy,
+                Unit::Cell(Direction::Long, CellIndex(3)),
+                OrderPurpose::GridEntry,
                 "92000",
                 "0.05",
             ),
@@ -743,9 +908,17 @@ mod tests {
         let plan = strategy.plan(&state, &working, &[], Price::parse("91500").unwrap());
 
         // 92 格的买单下调到自身最低卖价减一个报价单位，91 格的卖单上移一个报价单位。
-        let buy = intent(&plan, Unit::Cell(CellIndex(3)), OrderPurpose::GridBuy);
+        let buy = intent(
+            &plan,
+            Unit::Cell(Direction::Long, CellIndex(3)),
+            OrderPurpose::GridEntry,
+        );
         assert_eq!(buy.limit_price, Price::parse("91999").unwrap());
-        let sell = intent(&plan, Unit::Cell(CellIndex(4)), OrderPurpose::GridSell);
+        let sell = intent(
+            &plan,
+            Unit::Cell(Direction::Long, CellIndex(4)),
+            OrderPurpose::GridExit,
+        );
         assert_eq!(sell.limit_price, Price::parse("92001").unwrap());
         // 不相交，两张单不会互相成交。
         assert!(buy.limit_price < sell.limit_price);
@@ -754,8 +927,8 @@ mod tests {
         // 高处的卖单不受影响。
         assert!(!has_intent(
             &plan,
-            Unit::Cell(CellIndex(0)),
-            OrderPurpose::GridSell
+            Unit::Cell(Direction::Long, CellIndex(0)),
+            OrderPurpose::GridExit
         ));
     }
 
@@ -766,7 +939,9 @@ mod tests {
         // 高处的三格持有等卖出，92 格卖完了等买回：买价 92000 低于最低卖价 94000，
         // 不相交，各自的限价都不动。
         for (index, to_buy_back) in [(0, "0"), (1, "0"), (2, "0"), (3, "0.05")] {
-            let cell = state.cell_mut(CellIndex(index)).unwrap();
+            let cell = long_state_mut(&mut state)
+                .cell_mut(CellIndex(index))
+                .unwrap();
             cell.enabled = true;
             cell.to_buy_back = Quantity::parse(to_buy_back).unwrap();
         }
@@ -774,12 +949,22 @@ mod tests {
         let plan = strategy.plan(&state, &[], &[], Price::parse("91500").unwrap());
 
         assert_eq!(
-            intent(&plan, Unit::Cell(CellIndex(3)), OrderPurpose::GridBuy).limit_price,
+            intent(
+                &plan,
+                Unit::Cell(Direction::Long, CellIndex(3)),
+                OrderPurpose::GridEntry
+            )
+            .limit_price,
             Price::parse("92000").unwrap()
         );
         for (index, price) in [(0, "96000"), (1, "95000"), (2, "94000")] {
             assert_eq!(
-                intent(&plan, Unit::Cell(CellIndex(index)), OrderPurpose::GridSell).limit_price,
+                intent(
+                    &plan,
+                    Unit::Cell(Direction::Long, CellIndex(index)),
+                    OrderPurpose::GridExit
+                )
+                .limit_price,
                 Price::parse(price).unwrap()
             );
         }
@@ -792,14 +977,25 @@ mod tests {
         // 高处的四格持有等卖出，92 格卖完了等买回：92 格的买价和 91 格的卖价都是
         // 92000。两张单都是这一步新挂出去的，同样不能相交。
         for index in [0, 1, 2, 4] {
-            state.cell_mut(CellIndex(index)).unwrap().to_buy_back = Quantity::ZERO;
+            long_state_mut(&mut state)
+                .cell_mut(CellIndex(index))
+                .unwrap()
+                .to_buy_back = Quantity::ZERO;
         }
 
         let plan = strategy.plan(&state, &[], &[], Price::parse("91500").unwrap());
 
-        let buy = intent(&plan, Unit::Cell(CellIndex(3)), OrderPurpose::GridBuy);
+        let buy = intent(
+            &plan,
+            Unit::Cell(Direction::Long, CellIndex(3)),
+            OrderPurpose::GridEntry,
+        );
         assert_eq!(buy.limit_price, Price::parse("92000").unwrap());
-        let sell = intent(&plan, Unit::Cell(CellIndex(4)), OrderPurpose::GridSell);
+        let sell = intent(
+            &plan,
+            Unit::Cell(Direction::Long, CellIndex(4)),
+            OrderPurpose::GridExit,
+        );
         assert_eq!(sell.limit_price, Price::parse("92001").unwrap());
         assert!(buy.limit_price < sell.limit_price);
 
@@ -807,36 +1003,36 @@ mod tests {
         let working = vec![
             working_order(
                 "0x01",
-                Unit::Cell(CellIndex(0)),
-                OrderPurpose::GridSell,
+                Unit::Cell(Direction::Long, CellIndex(0)),
+                OrderPurpose::GridExit,
                 "96000",
                 "0.05",
             ),
             working_order(
                 "0x02",
-                Unit::Cell(CellIndex(1)),
-                OrderPurpose::GridSell,
+                Unit::Cell(Direction::Long, CellIndex(1)),
+                OrderPurpose::GridExit,
                 "95000",
                 "0.05",
             ),
             working_order(
                 "0x03",
-                Unit::Cell(CellIndex(2)),
-                OrderPurpose::GridSell,
+                Unit::Cell(Direction::Long, CellIndex(2)),
+                OrderPurpose::GridExit,
                 "94000",
                 "0.05",
             ),
             working_order(
                 "0x04",
-                Unit::Cell(CellIndex(3)),
-                OrderPurpose::GridBuy,
+                Unit::Cell(Direction::Long, CellIndex(3)),
+                OrderPurpose::GridEntry,
                 "92000",
                 "0.05",
             ),
             working_order(
                 "0x05",
-                Unit::Cell(CellIndex(4)),
-                OrderPurpose::GridSell,
+                Unit::Cell(Direction::Long, CellIndex(4)),
+                OrderPurpose::GridExit,
                 "92001",
                 "0.05",
             ),
@@ -851,10 +1047,13 @@ mod tests {
         // 一批一格：主仓成交 .02 后本批提前结束，这一格不会再启用。
         let strategy = single_small_batch_strategy();
         let mut state = strategy.initial_state();
-        state.batch_mut(BatchIndex(0)).unwrap().filled = Quantity::parse("0.02").unwrap();
+        long_state_mut(&mut state)
+            .batch_mut(BatchIndex(0))
+            .unwrap()
+            .filled = Quantity::parse("0.02").unwrap();
         strategy.advance(&mut state, &[]);
-        assert!(state.batch(BatchIndex(0)).unwrap().finished);
-        assert!(!state.cells()[0].enabled);
+        assert!(long_state(&state).batch(BatchIndex(0)).unwrap().finished);
+        assert!(!long_state(&state).cells()[0].enabled);
 
         let plan = strategy.plan(&state, &[], &[], Price::parse("99").unwrap());
 
@@ -872,14 +1071,17 @@ mod tests {
         let strategy = core_long_strategy();
         let mut state = two_cells_enabled(&strategy);
         // 迟到成交把主仓补到 C：本批结束。
-        state.batch_mut(BatchIndex(0)).unwrap().filled = Quantity::parse("0.175").unwrap();
+        long_state_mut(&mut state)
+            .batch_mut(BatchIndex(0))
+            .unwrap()
+            .filled = Quantity::parse("0.175").unwrap();
         strategy.advance(&mut state, &[]);
-        assert!(state.batch(BatchIndex(0)).unwrap().finished);
+        assert!(long_state(&state).batch(BatchIndex(0)).unwrap().finished);
         // 上一次规划按 `C − F = .105` 挂出去的那张单还在场。
         let working = vec![working_order(
             "0x01",
-            Unit::Batch(BatchIndex(0)),
-            OrderPurpose::CoreBuy,
+            Unit::Batch(Direction::Long, BatchIndex(0)),
+            OrderPurpose::Core,
             "95000",
             "0.105",
         )];
@@ -893,14 +1095,14 @@ mod tests {
         );
         assert!(!has_intent(
             &plan,
-            Unit::Batch(BatchIndex(0)),
-            OrderPurpose::CoreBuy
+            Unit::Batch(Direction::Long, BatchIndex(0)),
+            OrderPurpose::Core
         ));
         // 其他批次不受影响。
         assert!(has_intent(
             &plan,
-            Unit::Batch(BatchIndex(1)),
-            OrderPurpose::CoreBuy
+            Unit::Batch(Direction::Long, BatchIndex(1)),
+            OrderPurpose::Core
         ));
     }
 
@@ -913,15 +1115,18 @@ mod tests {
         let strategy = throttled_core_long_strategy();
         let mut state = strategy.initial_state();
         // 第 1 批成交结束，但放行进度只到第 0 批。
-        state.batch_mut(BatchIndex(1)).unwrap().filled = Quantity::parse("0.175").unwrap();
+        long_state_mut(&mut state)
+            .batch_mut(BatchIndex(1))
+            .unwrap()
+            .filled = Quantity::parse("0.175").unwrap();
         strategy.advance(&mut state, &[]);
-        assert!(state.batch(BatchIndex(1)).unwrap().finished);
-        assert!(!strategy.is_released(&state, Unit::Batch(BatchIndex(1))));
+        assert!(long_state(&state).batch(BatchIndex(1)).unwrap().finished);
+        assert!(!strategy.is_released(&state, Unit::Batch(Direction::Long, BatchIndex(1))));
 
         let working = vec![working_order(
             "0x01",
-            Unit::Batch(BatchIndex(1)),
-            OrderPurpose::CoreBuy,
+            Unit::Batch(Direction::Long, BatchIndex(1)),
+            OrderPurpose::Core,
             "90000",
             "0.105",
         )];
@@ -935,8 +1140,8 @@ mod tests {
         );
         assert!(!has_intent(
             &plan,
-            Unit::Batch(BatchIndex(1)),
-            OrderPurpose::CoreBuy
+            Unit::Batch(Direction::Long, BatchIndex(1)),
+            OrderPurpose::Core
         ));
     }
 
@@ -947,15 +1152,15 @@ mod tests {
         let working = vec![
             working_order(
                 "0x01",
-                Unit::Batch(BatchIndex(0)),
-                OrderPurpose::CoreBuy,
+                Unit::Batch(Direction::Long, BatchIndex(0)),
+                OrderPurpose::Core,
                 "95000",
                 "0.105",
             ),
             working_order(
                 "0x02",
-                Unit::Cell(CellIndex(0)),
-                OrderPurpose::GridBuy,
+                Unit::Cell(Direction::Long, CellIndex(0)),
+                OrderPurpose::GridEntry,
                 "95000",
                 "0.015",
             ),
@@ -966,24 +1171,24 @@ mod tests {
         assert!(plan.cancel.is_empty());
         assert!(!has_intent(
             &plan,
-            Unit::Batch(BatchIndex(0)),
-            OrderPurpose::CoreBuy
+            Unit::Batch(Direction::Long, BatchIndex(0)),
+            OrderPurpose::Core
         ));
         assert!(!has_intent(
             &plan,
-            Unit::Cell(CellIndex(0)),
-            OrderPurpose::GridBuy
+            Unit::Cell(Direction::Long, CellIndex(0)),
+            OrderPurpose::GridEntry
         ));
         // 其余批次和格子照常挂出。
         assert!(has_intent(
             &plan,
-            Unit::Batch(BatchIndex(1)),
-            OrderPurpose::CoreBuy
+            Unit::Batch(Direction::Long, BatchIndex(1)),
+            OrderPurpose::Core
         ));
         assert!(has_intent(
             &plan,
-            Unit::Cell(CellIndex(1)),
-            OrderPurpose::GridBuy
+            Unit::Cell(Direction::Long, CellIndex(1)),
+            OrderPurpose::GridEntry
         ));
     }
 
@@ -994,15 +1199,15 @@ mod tests {
         let working = vec![
             working_order(
                 "0x01",
-                Unit::Batch(BatchIndex(0)),
-                OrderPurpose::CoreBuy,
+                Unit::Batch(Direction::Long, BatchIndex(0)),
+                OrderPurpose::Core,
                 "95000",
                 "0.2",
             ),
             working_order(
                 "0x02",
-                Unit::Cell(CellIndex(0)),
-                OrderPurpose::GridBuy,
+                Unit::Cell(Direction::Long, CellIndex(0)),
+                OrderPurpose::GridEntry,
                 "94000",
                 "0.015",
             ),
@@ -1014,7 +1219,12 @@ mod tests {
         canceled.sort_unstable();
         assert_eq!(canceled, vec!["0x01", "0x02"]);
         assert_eq!(
-            intent(&plan, Unit::Batch(BatchIndex(0)), OrderPurpose::CoreBuy).quantity,
+            intent(
+                &plan,
+                Unit::Batch(Direction::Long, BatchIndex(0)),
+                OrderPurpose::Core
+            )
+            .quantity,
             Quantity::parse("0.105").unwrap()
         );
     }
@@ -1026,8 +1236,8 @@ mod tests {
         // 本批还差 .105，其中 .1 已经挂在场上了。
         let working = vec![working_order(
             "0x01",
-            Unit::Batch(BatchIndex(0)),
-            OrderPurpose::CoreBuy,
+            Unit::Batch(Direction::Long, BatchIndex(0)),
+            OrderPurpose::Core,
             "95000",
             "0.1",
         )];
@@ -1035,17 +1245,25 @@ mod tests {
         let plan = strategy.plan(&state, &working, &[], Price::parse("96000").unwrap());
 
         assert_eq!(
-            intent(&plan, Unit::Batch(BatchIndex(0)), OrderPurpose::CoreBuy).quantity,
+            intent(
+                &plan,
+                Unit::Batch(Direction::Long, BatchIndex(0)),
+                OrderPurpose::Core
+            )
+            .quantity,
             Quantity::parse("0.005").unwrap()
         );
 
         // 在场订单已经覆盖本批还差的部分：不重复挂单。
-        state.batch_mut(BatchIndex(0)).unwrap().filled = Quantity::parse("0.075").unwrap();
+        long_state_mut(&mut state)
+            .batch_mut(BatchIndex(0))
+            .unwrap()
+            .filled = Quantity::parse("0.075").unwrap();
         let plan = strategy.plan(&state, &working, &[], Price::parse("96000").unwrap());
         assert!(!has_intent(
             &plan,
-            Unit::Batch(BatchIndex(0)),
-            OrderPurpose::CoreBuy
+            Unit::Batch(Direction::Long, BatchIndex(0)),
+            OrderPurpose::Core
         ));
         assert!(plan.cancel.is_empty());
     }
@@ -1060,14 +1278,14 @@ mod tests {
         let state = two_cells_enabled(&strategy);
         let working = vec![working_order(
             "0x01",
-            Unit::Batch(BatchIndex(0)),
-            OrderPurpose::CoreBuy,
+            Unit::Batch(Direction::Long, BatchIndex(0)),
+            OrderPurpose::Core,
             "95000",
             "0.2",
         )];
         let pending = [PendingUnit {
-            unit: Unit::Batch(BatchIndex(0)),
-            purpose: OrderPurpose::CoreBuy,
+            unit: Unit::Batch(Direction::Long, BatchIndex(0)),
+            purpose: OrderPurpose::Core,
         }];
 
         let plan = strategy.plan(&state, &working, &pending, Price::parse("96000").unwrap());
@@ -1077,20 +1295,20 @@ mod tests {
         // 但这一批的主仓买单不补：等对完账再按新的状态算数量。
         assert!(!has_intent(
             &plan,
-            Unit::Batch(BatchIndex(0)),
-            OrderPurpose::CoreBuy
+            Unit::Batch(Direction::Long, BatchIndex(0)),
+            OrderPurpose::Core
         ));
         assert!(plan.waiting.contains(&WaitReason::FillsPending));
         // 其他批次和其他用途不受影响。
         assert!(has_intent(
             &plan,
-            Unit::Batch(BatchIndex(1)),
-            OrderPurpose::CoreBuy
+            Unit::Batch(Direction::Long, BatchIndex(1)),
+            OrderPurpose::Core
         ));
         assert!(has_intent(
             &plan,
-            Unit::Cell(CellIndex(0)),
-            OrderPurpose::GridBuy
+            Unit::Cell(Direction::Long, CellIndex(0)),
+            OrderPurpose::GridEntry
         ));
     }
 }

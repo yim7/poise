@@ -7,10 +7,9 @@
 
 mod common;
 
-use common::{at, core_harness, harness};
+use common::{at, core_harness, harness, long_cell};
 use poise_runtime::{ResumeOutcome, StrategyStatus};
-use poise_strategy::grid::CellIndex;
-use poise_strategy::order::{OrderPurpose, OrderStatus, Unit};
+use poise_strategy::order::{OrderPurpose, OrderStatus};
 use poise_strategy::planning::WaitReason;
 use poise_strategy::units::{Position, Price, Quantity};
 
@@ -47,12 +46,12 @@ async fn a_sell_filled_while_being_canceled_is_not_replaced_with_the_old_quantit
     );
 
     // 卖单成交 .005（这一格要买回 .005），同时 94 格的买单成交整份。
-    let sell = harness.working_cloid(0, OrderPurpose::GridSell);
+    let sell = harness.working_cloid(0, OrderPurpose::GridExit);
     harness
         .exchange
         .fill(&sell, Quantity::parse("0.005").unwrap(), at(3))
         .unwrap();
-    let buy = harness.working_cloid(1, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(1, OrderPurpose::GridEntry);
     harness
         .exchange
         .fill(&buy, Quantity::parse("0.015").unwrap(), at(3))
@@ -61,7 +60,7 @@ async fn a_sell_filled_while_being_canceled_is_not_replaced_with_the_old_quantit
 
     // 买回单挂在自己的买价 95000 上，把 94 格的卖单顶到 95001。
     assert_eq!(report.placed.len(), 2);
-    let sell = harness.working_cloid(1, OrderPurpose::GridSell);
+    let sell = harness.working_cloid(1, OrderPurpose::GridExit);
     assert_eq!(
         harness.at_exchange(&sell).unwrap().limit_price,
         Price::parse("95001").unwrap(),
@@ -86,7 +85,7 @@ async fn a_sell_filled_while_being_canceled_is_not_replaced_with_the_old_quantit
     );
     assert!(
         !report.plan.place.iter().any(|intent| {
-            intent.unit == Unit::Cell(CellIndex(1)) && intent.purpose == OrderPurpose::GridSell
+            intent.unit == long_cell(1) && intent.purpose == OrderPurpose::GridExit
         }),
         "the replacement must wait until the canceled order's fills are reconciled"
     );
@@ -106,7 +105,7 @@ async fn a_sell_filled_while_being_canceled_is_not_replaced_with_the_old_quantit
         harness.cell(1).to_buy_back,
         Quantity::parse("0.005").unwrap()
     );
-    let sell = harness.working_cloid(1, OrderPurpose::GridSell);
+    let sell = harness.working_cloid(1, OrderPurpose::GridExit);
     assert_eq!(
         harness.at_exchange(&sell).unwrap().quantity,
         Quantity::parse("0.010").unwrap(),
@@ -125,7 +124,7 @@ async fn a_sell_filled_while_being_canceled_is_not_replaced_with_the_old_quantit
 async fn a_fully_filled_order_keeps_its_reservation_while_its_fills_are_missing() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 整份成交，但成交流水查不到。
     harness.exchange.delay_next_fills(1);
     harness
@@ -160,7 +159,7 @@ async fn a_fully_filled_order_keeps_its_reservation_while_its_fills_are_missing(
     // 但这一格不能再买：它的预留还在，只是成交没核对完。
     assert!(
         !report.plan.place.iter().any(|intent| {
-            intent.unit == Unit::Cell(CellIndex(0)) && intent.purpose == OrderPurpose::GridBuy
+            intent.unit == long_cell(0) && intent.purpose == OrderPurpose::GridEntry
         }),
         "a fully filled order must not lose its reservation"
     );
@@ -169,8 +168,8 @@ async fn a_fully_filled_order_keeps_its_reservation_while_its_fills_are_missing(
         harness
             .orders()
             .into_iter()
-            .filter(|order| order.record.unit == Unit::Cell(CellIndex(0))
-                && order.record.purpose == OrderPurpose::GridBuy)
+            .filter(|order| order.record.unit == long_cell(0)
+                && order.record.purpose == OrderPurpose::GridEntry)
             .count(),
         1,
         "no second buy for the same cell"
@@ -186,7 +185,7 @@ async fn a_fully_filled_order_keeps_its_reservation_while_its_fills_are_missing(
         harness.exchange.current_position(),
         Position::parse("0.05").unwrap()
     );
-    let sell = harness.working_cloid(0, OrderPurpose::GridSell);
+    let sell = harness.working_cloid(0, OrderPurpose::GridExit);
     assert_eq!(
         harness.at_exchange(&sell).unwrap().quantity,
         Quantity::parse("0.05").unwrap()
@@ -203,7 +202,7 @@ async fn a_fully_filled_order_keeps_its_reservation_while_its_fills_are_missing(
 async fn a_late_fill_outside_the_lookback_window_still_lands_in_the_fills_table() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     harness.exchange.delay_next_fills(1);
     harness
         .exchange
@@ -241,7 +240,7 @@ async fn a_late_fill_outside_the_lookback_window_still_lands_in_the_fills_table(
     // 成交还没对完账：这一格的预留还在，不能按订单状态补单。
     assert!(report.plan.waiting.contains(&WaitReason::FillsPending));
     assert!(!report.plan.place.iter().any(|intent| {
-        intent.unit == Unit::Cell(CellIndex(0)) && intent.purpose == OrderPurpose::GridBuy
+        intent.unit == long_cell(0) && intent.purpose == OrderPurpose::GridEntry
     }));
 
     // 流水终于到手：虽然时间戳早于同步点，仍然写进流水表，并且不重复记账。
@@ -270,7 +269,7 @@ async fn a_late_fill_outside_the_lookback_window_still_lands_in_the_fills_table(
 async fn a_booked_fill_puts_an_already_reconciled_order_back_to_pending() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
 
     // 没有成交的一步：这张单的成交对完账了。
     harness.step(1).await;
@@ -360,7 +359,7 @@ async fn a_booked_fill_puts_an_already_reconciled_order_back_to_pending() {
 async fn a_duplicate_report_does_not_cover_a_missing_fill() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
 
     // 真实成交 .02，流水已保存。
     harness
@@ -444,8 +443,7 @@ async fn a_duplicate_report_does_not_cover_a_missing_fill() {
         .working()
         .into_iter()
         .filter(|order| {
-            order.record.unit == Unit::Cell(CellIndex(0))
-                && order.record.purpose == OrderPurpose::GridSell
+            order.record.unit == long_cell(0) && order.record.purpose == OrderPurpose::GridExit
         })
         .collect();
     let sell_total = sells.iter().fold(Quantity::ZERO, |total, order| {
@@ -468,7 +466,7 @@ async fn a_duplicate_report_does_not_cover_a_missing_fill() {
     );
     assert!(
         report.plan.place.iter().any(|intent| {
-            intent.unit == Unit::Cell(CellIndex(0)) && intent.purpose == OrderPurpose::GridBuy
+            intent.unit == long_cell(0) && intent.purpose == OrderPurpose::GridEntry
         }),
         "the cell must be able to buy back once the order is reconciled"
     );
@@ -484,7 +482,7 @@ async fn a_duplicate_report_does_not_cover_a_missing_fill() {
 async fn fill_records_that_exceed_the_cumulative_pause_the_strategy() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
 
     // 真实成交 .02，流水已保存：这一步两边一致，照常运行。
     harness
@@ -545,7 +543,7 @@ async fn fill_records_that_exceed_the_cumulative_pause_the_strategy() {
 async fn a_position_that_settles_within_the_check_rounds_does_not_pause_the_strategy() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 两笔成交都查不到，并且分别落在两次查仓位之前。
     harness.exchange.delay_next_fills(2);
     harness
@@ -599,14 +597,14 @@ async fn a_position_that_settles_within_the_check_rounds_does_not_pause_the_stra
 async fn alternating_buys_and_sells_do_not_look_like_stable_data() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 买入 .02：待买回剩 .03，这一格挂出 .02 的卖单。
     harness
         .exchange
         .fill(&buy, Quantity::parse("0.02").unwrap(), at(1))
         .unwrap();
     harness.step(1).await;
-    let sell = harness.working_cloid(0, OrderPurpose::GridSell);
+    let sell = harness.working_cloid(0, OrderPurpose::GridExit);
 
     // 四次查仓位之前各安排一笔；第一轮刷新订单之前再卖出一笔。
     harness.exchange.delay_next_fills(5);
@@ -648,7 +646,7 @@ async fn alternating_buys_and_sells_do_not_look_like_stable_data() {
 async fn a_position_that_keeps_changing_waits_instead_of_pausing() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 每一轮核对之前都成交一笔 `.01`，三次核对读到的数据各不相同。
     harness.exchange.delay_next_fills(4);
     harness

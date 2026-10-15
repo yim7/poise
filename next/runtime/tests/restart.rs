@@ -18,8 +18,8 @@ async fn b19_restart_backfills_offline_fills_and_replaces_orders_by_state() {
         let harness = harness_with_store(Store::open(&path).unwrap());
         harness.step(0).await;
         assert_eq!(harness.working().len(), 20);
-        cell0_buy = harness.working_cloid(0, OrderPurpose::GridBuy);
-        cell1_buy = harness.working_cloid(1, OrderPurpose::GridBuy);
+        cell0_buy = harness.working_cloid(0, OrderPurpose::GridEntry);
+        cell1_buy = harness.working_cloid(1, OrderPurpose::GridEntry);
         old_cloids = harness
             .orders()
             .into_iter()
@@ -106,28 +106,28 @@ async fn b19_restart_backfills_offline_fills_and_replaces_orders_by_state() {
     assert_eq!(exchange.place_count(), 41);
     assert_eq!(
         harness
-            .at_exchange(&harness.working_cloid(0, OrderPurpose::GridSell))
+            .at_exchange(&harness.working_cloid(0, OrderPurpose::GridExit))
             .unwrap()
             .limit_price,
         Price::parse("96000").unwrap()
     );
     assert_eq!(
         harness
-            .at_exchange(&harness.working_cloid(1, OrderPurpose::GridBuy))
+            .at_exchange(&harness.working_cloid(1, OrderPurpose::GridEntry))
             .unwrap()
             .limit_price,
         Price::parse("94000").unwrap()
     );
     assert_eq!(
         harness
-            .at_exchange(&harness.working_cloid(1, OrderPurpose::GridSell))
+            .at_exchange(&harness.working_cloid(1, OrderPurpose::GridExit))
             .unwrap()
             .limit_price,
         Price::parse("95000").unwrap()
     );
     assert_eq!(
         harness
-            .at_exchange(&harness.working_cloid(19, OrderPurpose::GridBuy))
+            .at_exchange(&harness.working_cloid(19, OrderPurpose::GridEntry))
             .unwrap()
             .limit_price,
         Price::parse("76000").unwrap()
@@ -154,7 +154,7 @@ async fn a_fill_delivered_after_the_order_went_terminal_is_still_recorded() {
     {
         let harness = harness_with_store(Store::open(&path).unwrap());
         harness.step(0).await;
-        cell0_buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+        cell0_buy = harness.working_cloid(0, OrderPurpose::GridEntry);
         // 这张买单当场成交 0.02，但成交记录查不到。
         harness.exchange.delay_next_fills(1);
         harness

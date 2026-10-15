@@ -19,7 +19,7 @@ async fn b24_every_cell_is_its_own_unit_and_only_buys_what_it_holds() {
 
     // 没有主仓时每格自成单位：各自在自己的买价挂一份买单，没有卖单。
     for cell in 0..20 {
-        let cloid = harness.working_cloid(cell, OrderPurpose::GridBuy);
+        let cloid = harness.working_cloid(cell, OrderPurpose::GridEntry);
         let order = harness.at_exchange(&cloid).unwrap();
         assert_eq!(
             order.limit_price,
@@ -33,7 +33,7 @@ async fn b24_every_cell_is_its_own_unit_and_only_buys_what_it_holds() {
         harness
             .working()
             .iter()
-            .all(|order| order.record.purpose == OrderPurpose::GridBuy)
+            .all(|order| order.record.purpose == OrderPurpose::GridEntry)
     );
     assert_eq!(
         harness.cell(0).to_buy_back,
@@ -45,7 +45,7 @@ async fn b24_every_cell_is_its_own_unit_and_only_buys_what_it_holds() {
 async fn b07_partially_filled_cell_keeps_a_buy_back_and_a_sell_that_do_not_match() {
     let harness = harness();
     harness.step(0).await;
-    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
 
     // 95 格买回 0.05，只成交 0.02。
     harness
@@ -67,7 +67,7 @@ async fn b07_partially_filled_cell_keeps_a_buy_back_and_a_sell_that_do_not_match
     let buy_back = harness.at_exchange(&buy).unwrap();
     assert_eq!(buy_back.status, OrderStatus::PartiallyFilled);
     assert_eq!(buy_back.cumulative_filled, Quantity::parse("0.02").unwrap());
-    let sell = harness.working_cloid(0, OrderPurpose::GridSell);
+    let sell = harness.working_cloid(0, OrderPurpose::GridExit);
     let sell_order = harness.at_exchange(&sell).unwrap();
     assert_eq!(sell_order.limit_price, Price::parse("96000").unwrap());
     assert_eq!(sell_order.quantity, Quantity::parse("0.02").unwrap());
@@ -106,14 +106,14 @@ async fn b09_after_an_upward_breakout_every_cell_is_sold_and_buys_back_at_its_ow
         harness
             .orders()
             .iter()
-            .filter(|order| order.record.purpose == OrderPurpose::GridSell)
+            .filter(|order| order.record.purpose == OrderPurpose::GridExit)
             .all(|order| !order.record.is_working()),
         "every cell was sold"
     );
 
     // 买回单留在各自的买价，数量回到整份。
     for cell in 0..20 {
-        let cloid = harness.working_cloid(cell, OrderPurpose::GridBuy);
+        let cloid = harness.working_cloid(cell, OrderPurpose::GridEntry);
         let order = harness.at_exchange(&cloid).unwrap();
         assert_eq!(
             order.limit_price,

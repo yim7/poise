@@ -9,6 +9,7 @@ use poise_runtime::{
     Exchange, Runtime, StartupCheck, StartupWarning, StoredOrder, StrategyStatus, validate_startup,
 };
 use poise_strategy::instrument::{Instrument, PriceRule};
+use poise_strategy::side::Direction;
 
 use crate::instance::Instance;
 
@@ -94,25 +95,34 @@ pub async fn status(instance: &Instance, instrument: &Instrument) -> Result<()> 
         stored.spec.quantity_step(),
         stored.spec.min_order_notional()
     );
-    println!(
-        "网格        买价 {} 到 {}，间距 {}，价差 {}，上限 {}",
-        stored.config.long.price_low,
-        stored.config.long.price_high,
-        stored.config.long.grid_spacing,
-        stored.config.long.grid_spread,
-        stored.config.long.max_position
-    );
-
-    for (index, cell) in store.load_state(strategy_id)?.cells().iter().enumerate() {
+    let state = store.load_state(strategy_id)?;
+    for direction in Direction::ALL {
+        let Some(side) = stored.config.side(direction) else {
+            continue;
+        };
         println!(
-            "  格 {index} {} 待买回 {}",
-            if cell.enabled {
-                "已启用"
-            } else {
-                "未启用"
-            },
-            cell.to_buy_back
+            "{direction} 网格    {} 到 {}，间距 {}，价差 {}，上限 {}",
+            side.price_low, side.price_high, side.grid_spacing, side.grid_spread, side.max_position
         );
+        let Some(side_state) = state.side(direction) else {
+            continue;
+        };
+        for (index, cell) in side_state.cells().iter().enumerate() {
+            // 待买回量 `S` 是还差多少才建满这一格：多头侧是买入，空头侧是卖出开空。
+            let pending = match direction {
+                Direction::Long => "待买回",
+                Direction::Short => "待开空",
+            };
+            println!(
+                "  格 {index} {} {pending} {}",
+                if cell.enabled {
+                    "已启用"
+                } else {
+                    "未启用"
+                },
+                cell.to_buy_back
+            );
+        }
     }
 
     let orders = store.load_orders(strategy_id)?;

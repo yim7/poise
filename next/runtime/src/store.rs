@@ -13,7 +13,8 @@ use poise_strategy::config::StrategyConfig;
 use poise_strategy::grid::CellIndex;
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
 use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, Unit};
-use poise_strategy::state::{BatchState, CellState, StrategyState};
+use poise_strategy::side::Direction;
+use poise_strategy::state::{BatchState, CellState, SideState, StrategyState};
 use poise_strategy::throttle::ThrottleState;
 use poise_strategy::units::{Price, Quantity};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -151,6 +152,8 @@ pub enum StoreError {
     UnknownPurpose { value: String },
     #[error("unknown order unit `{value}`")]
     UnknownUnit { value: String },
+    #[error("unknown direction `{value}`")]
+    UnknownDirection { value: String },
     #[error("unknown order status `{value}`")]
     UnknownOrderStatus { value: String },
     #[error("column `{column}` holds an invalid value `{value}`")]
@@ -189,22 +192,25 @@ impl Store {
              );
              CREATE TABLE IF NOT EXISTS batch_states (
                  strategy_id TEXT NOT NULL,
+                 direction TEXT NOT NULL,
                  batch_index INTEGER NOT NULL,
                  filled_units INTEGER NOT NULL,
                  finished INTEGER NOT NULL,
-                 PRIMARY KEY (strategy_id, batch_index)
+                 PRIMARY KEY (strategy_id, direction, batch_index)
              );
              CREATE TABLE IF NOT EXISTS cell_states (
                  strategy_id TEXT NOT NULL,
+                 direction TEXT NOT NULL,
                  cell_index INTEGER NOT NULL,
                  enabled INTEGER NOT NULL,
                  to_buy_back_units INTEGER NOT NULL,
-                 PRIMARY KEY (strategy_id, cell_index)
+                 PRIMARY KEY (strategy_id, direction, cell_index)
              );
              CREATE TABLE IF NOT EXISTS orders (
                  client_order_id TEXT PRIMARY KEY,
                  strategy_id TEXT NOT NULL,
                  unit_kind TEXT NOT NULL,
+                 unit_direction TEXT NOT NULL,
                  unit_index INTEGER NOT NULL,
                  purpose TEXT NOT NULL,
                  limit_price_units INTEGER NOT NULL,
@@ -231,10 +237,12 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS fills_by_strategy ON fills (strategy_id, filled_at);
              CREATE TABLE IF NOT EXISTS throttle_states (
-                 strategy_id TEXT PRIMARY KEY,
+                 strategy_id TEXT NOT NULL,
+                 direction TEXT NOT NULL,
                  released INTEGER NOT NULL,
                  released_at TEXT,
-                 first_fill_at TEXT
+                 first_fill_at TEXT,
+                 PRIMARY KEY (strategy_id, direction)
              );
              CREATE TABLE IF NOT EXISTS config_versions (
                  strategy_id TEXT NOT NULL,
@@ -475,73 +483,36 @@ impl Store {
         Ok(())
     }
 
-    /// 读一个策略的状态：各批主仓的成交与结束标记、各格子的启用标记与待买回量。
+    /// 读一个策略的状态：每一侧各批主仓的成交与结束标记、各格子的启用标记与待买回量，
+    /// 以及每一侧的限速放行进度。
     pub fn load_state(&self, strategy_id: &StrategyId) -> Result<StrategyState, StoreError> {
         let connection = self.lock();
-        let mut batches = Vec::new();
-        {
-            let mut statement = connection.prepare(
-                "SELECT filled_units, finished FROM batch_states
-                 WHERE strategy_id = ?1 ORDER BY batch_index",
-            )?;
-            let rows = statement.query_map(params![strategy_id.as_str()], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })?;
-            for row in rows {
-                let (filled, finished) = row?;
-                batches.push(BatchState {
-                    filled: Quantity::from_units(filled),
-                    finished: finished != 0,
-                });
+        let batches = load_batch_states(&connection, strategy_id)?;
+        let cells = load_cell_states(&connection, strategy_id)?;
+        let directions = directions_of(&batches, &cells);
+        let mut sides = Vec::with_capacity(directions.len());
+        for direction in directions {
+            let mut side = SideState::new(
+                direction,
+                batches
+                    .iter()
+                    .filter(|(side, _)| *side == direction)
+                    .map(|(_, batch)| batch.clone())
+                    .collect(),
+                cells
+                    .iter()
+                    .filter(|(side, _)| *side == direction)
+                    .map(|(_, cell)| cell.clone())
+                    .collect(),
+            );
+            // 限速的放行进度（第 12 节）。没有这一行时按「一个单位都没放行」处理：
+            // 下一步会按当时的时间重新放行，不会卡住。
+            if let Some(throttle) = load_throttle(&connection, strategy_id, direction)? {
+                side.set_throttle(throttle);
             }
+            sides.push(side);
         }
-
-        let mut cells = Vec::new();
-        {
-            let mut statement = connection.prepare(
-                "SELECT enabled, to_buy_back_units FROM cell_states
-                 WHERE strategy_id = ?1 ORDER BY cell_index",
-            )?;
-            let rows = statement.query_map(params![strategy_id.as_str()], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })?;
-            for row in rows {
-                let (enabled, to_buy_back) = row?;
-                cells.push(CellState {
-                    enabled: enabled != 0,
-                    to_buy_back: Quantity::from_units(to_buy_back),
-                });
-            }
-        }
-
-        // 限速的放行进度（第 12 节）。没有这一行时按「一个单位都没放行」处理：
-        // 下一步会按当时的时间重新放行，不会卡住。
-        let mut state = StrategyState::new(batches, cells);
-        let throttle = connection
-            .query_row(
-                "SELECT released, released_at, first_fill_at FROM throttle_states
-                 WHERE strategy_id = ?1",
-                params![strategy_id.as_str()],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        if let Some((released, released_at, first_fill_at)) = throttle {
-            state.set_throttle(ThrottleState {
-                released: usize::try_from(released).map_err(|_| StoreError::InvalidColumn {
-                    column: "throttle_states.released",
-                    value: released.to_string(),
-                })?,
-                released_at: released_at.as_deref().map(parse_time).transpose()?,
-                first_fill_at: first_fill_at.as_deref().map(parse_time).transpose()?,
-            });
-        }
-        Ok(state)
+        Ok(StrategyState::new(sides))
     }
 
     /// 把一次成交记账的结果落盘：策略状态和订单记录写在同一个事务里。
@@ -587,17 +558,18 @@ impl Store {
         order: &StoredOrder,
     ) -> Result<(), StoreError> {
         let record = &order.record;
-        let (unit_kind, unit_index) = unit_columns(record.unit);
+        let (unit_kind, unit_direction, unit_index) = unit_columns(record.unit);
         self.lock().execute(
             "INSERT INTO orders (
-                 client_order_id, strategy_id, unit_kind, unit_index, purpose, limit_price_units,
-                 quantity_units, cumulative_filled_units, reduce_only, status,
+                 client_order_id, strategy_id, unit_kind, unit_direction, unit_index, purpose,
+                 limit_price_units, quantity_units, cumulative_filled_units, reduce_only, status,
                  fills_reconciled, exchange_order_id, expires_at, placed_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 record.client_order_id.as_str(),
                 strategy_id.as_str(),
                 unit_kind,
+                unit_direction,
                 unit_index,
                 record.purpose.as_str(),
                 record.limit_price.units(),
@@ -743,8 +715,8 @@ impl Store {
     pub fn load_orders(&self, strategy_id: &StrategyId) -> Result<Vec<StoredOrder>, StoreError> {
         let connection = self.lock();
         let mut statement = connection.prepare(
-            "SELECT client_order_id, unit_kind, unit_index, purpose, limit_price_units,
-                    quantity_units, cumulative_filled_units, reduce_only, status,
+            "SELECT client_order_id, unit_kind, unit_direction, unit_index, purpose,
+                    limit_price_units, quantity_units, cumulative_filled_units, reduce_only, status,
                     fills_reconciled, exchange_order_id, expires_at, placed_at, updated_at
              FROM orders WHERE strategy_id = ?1 ORDER BY placed_at, rowid",
         )?;
@@ -752,18 +724,19 @@ impl Store {
             Ok(StoredOrderRow {
                 client_order_id: row.get(0)?,
                 unit_kind: row.get(1)?,
-                unit_index: row.get(2)?,
-                purpose: row.get(3)?,
-                limit_price_units: row.get(4)?,
-                quantity_units: row.get(5)?,
-                cumulative_filled_units: row.get(6)?,
-                reduce_only: row.get(7)?,
-                status: row.get(8)?,
-                fills_reconciled: row.get(9)?,
-                exchange_order_id: row.get(10)?,
-                expires_at: row.get(11)?,
-                placed_at: row.get(12)?,
-                updated_at: row.get(13)?,
+                unit_direction: row.get(2)?,
+                unit_index: row.get(3)?,
+                purpose: row.get(4)?,
+                limit_price_units: row.get(5)?,
+                quantity_units: row.get(6)?,
+                cumulative_filled_units: row.get(7)?,
+                reduce_only: row.get(8)?,
+                status: row.get(9)?,
+                fills_reconciled: row.get(10)?,
+                exchange_order_id: row.get(11)?,
+                expires_at: row.get(12)?,
+                placed_at: row.get(13)?,
+                updated_at: row.get(14)?,
             })
         })?;
 
@@ -837,6 +810,7 @@ impl Store {
 struct StoredOrderRow {
     client_order_id: String,
     unit_kind: String,
+    unit_direction: String,
     unit_index: i64,
     purpose: String,
     limit_price_units: i64,
@@ -861,7 +835,7 @@ impl StoredOrderRow {
                         value: String::new(),
                     }
                 })?,
-                unit: parse_unit(&self.unit_kind, self.unit_index)?,
+                unit: parse_unit(&self.unit_kind, &self.unit_direction, self.unit_index)?,
                 purpose: parse_purpose(&self.purpose)?,
                 limit_price: Price::from_units(self.limit_price_units),
                 quantity: Quantity::from_units(self.quantity_units),
@@ -880,31 +854,43 @@ impl StoredOrderRow {
 
 fn parse_purpose(value: &str) -> Result<OrderPurpose, StoreError> {
     match value {
-        "core_buy" => Ok(OrderPurpose::CoreBuy),
-        "grid_buy" => Ok(OrderPurpose::GridBuy),
-        "grid_sell" => Ok(OrderPurpose::GridSell),
+        "core" => Ok(OrderPurpose::Core),
+        "grid_entry" => Ok(OrderPurpose::GridEntry),
+        "grid_exit" => Ok(OrderPurpose::GridExit),
         other => Err(StoreError::UnknownPurpose {
             value: other.to_string(),
         }),
     }
 }
 
-/// 订单归属单位存成两列：种类和下标。
-fn unit_columns(unit: Unit) -> (&'static str, i64) {
-    match unit {
-        Unit::Batch(BatchIndex(index)) => ("batch", index as i64),
-        Unit::Cell(CellIndex(index)) => ("cell", index as i64),
+fn parse_direction(value: &str) -> Result<Direction, StoreError> {
+    match value {
+        "long" => Ok(Direction::Long),
+        "short" => Ok(Direction::Short),
+        other => Err(StoreError::UnknownDirection {
+            value: other.to_string(),
+        }),
     }
 }
 
-fn parse_unit(kind: &str, index: i64) -> Result<Unit, StoreError> {
+/// 订单归属单位存成三列：种类、方向和下标。
+fn unit_columns(unit: Unit) -> (&'static str, &'static str, i64) {
+    let direction = unit.direction().as_str();
+    match unit {
+        Unit::Batch(_, BatchIndex(index)) => ("batch", direction, index as i64),
+        Unit::Cell(_, CellIndex(index)) => ("cell", direction, index as i64),
+    }
+}
+
+fn parse_unit(kind: &str, direction: &str, index: i64) -> Result<Unit, StoreError> {
     let unknown = || StoreError::UnknownUnit {
         value: kind.to_string(),
     };
+    let direction = parse_direction(direction)?;
     let index = usize::try_from(index).map_err(|_| unknown())?;
     match kind {
-        "batch" => Ok(Unit::Batch(BatchIndex(index))),
-        "cell" => Ok(Unit::Cell(CellIndex(index))),
+        "batch" => Ok(Unit::Batch(direction, BatchIndex(index))),
+        "cell" => Ok(Unit::Cell(direction, CellIndex(index))),
         _ => Err(unknown()),
     }
 }
@@ -926,7 +912,7 @@ fn parse_order_status(value: &str) -> Result<OrderStatus, StoreError> {
 
 /// 全量改写一个策略的状态。
 ///
-/// 批次和格子都是整体替换的：它们的数量由配置决定，不会中途增减。
+/// 两侧的批次和格子都是整体替换的：它们的数量由配置决定，不会中途增减。
 fn write_state(
     transaction: &rusqlite::Transaction<'_>,
     strategy_id: &StrategyId,
@@ -938,16 +924,19 @@ fn write_state(
     )?;
     {
         let mut statement = transaction.prepare(
-            "INSERT INTO batch_states (strategy_id, batch_index, filled_units, finished)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO batch_states (strategy_id, direction, batch_index, filled_units, finished)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
-        for (index, batch) in state.batches().iter().enumerate() {
-            statement.execute(params![
-                strategy_id.as_str(),
-                index as i64,
-                batch.filled.units(),
-                i64::from(batch.finished),
-            ])?;
+        for side in state.sides() {
+            for (index, batch) in side.batches().iter().enumerate() {
+                statement.execute(params![
+                    strategy_id.as_str(),
+                    side.direction().as_str(),
+                    index as i64,
+                    batch.filled.units(),
+                    i64::from(batch.finished),
+                ])?;
+            }
         }
     }
 
@@ -955,36 +944,154 @@ fn write_state(
         "DELETE FROM cell_states WHERE strategy_id = ?1",
         params![strategy_id.as_str()],
     )?;
-    let mut statement = transaction.prepare(
-        "INSERT INTO cell_states (strategy_id, cell_index, enabled, to_buy_back_units)
-         VALUES (?1, ?2, ?3, ?4)",
-    )?;
-    for (index, cell) in state.cells().iter().enumerate() {
-        statement.execute(params![
-            strategy_id.as_str(),
-            index as i64,
-            i64::from(cell.enabled),
-            cell.to_buy_back.units(),
-        ])?;
+    {
+        let mut statement = transaction.prepare(
+            "INSERT INTO cell_states (strategy_id, direction, cell_index, enabled, to_buy_back_units)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for side in state.sides() {
+            for (index, cell) in side.cells().iter().enumerate() {
+                statement.execute(params![
+                    strategy_id.as_str(),
+                    side.direction().as_str(),
+                    index as i64,
+                    i64::from(cell.enabled),
+                    cell.to_buy_back.units(),
+                ])?;
+            }
+        }
     }
-    drop(statement);
 
-    let throttle = state.throttle();
-    transaction.execute(
-        "INSERT INTO throttle_states (strategy_id, released, released_at, first_fill_at)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT (strategy_id) DO UPDATE SET
-             released = excluded.released,
-             released_at = excluded.released_at,
-             first_fill_at = excluded.first_fill_at",
-        params![
-            strategy_id.as_str(),
-            throttle.released as i64,
-            throttle.released_at.map(format_time),
-            throttle.first_fill_at.map(format_time),
-        ],
-    )?;
+    {
+        let mut statement = transaction.prepare(
+            "INSERT INTO throttle_states (strategy_id, direction, released, released_at, first_fill_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (strategy_id, direction) DO UPDATE SET
+                 released = excluded.released,
+                 released_at = excluded.released_at,
+                 first_fill_at = excluded.first_fill_at",
+        )?;
+        for side in state.sides() {
+            let throttle = side.throttle();
+            statement.execute(params![
+                strategy_id.as_str(),
+                side.direction().as_str(),
+                throttle.released as i64,
+                throttle.released_at.map(format_time),
+                throttle.first_fill_at.map(format_time),
+            ])?;
+        }
+    }
     Ok(())
+}
+
+/// 每一侧的批次状态，按方向与批次下标排列。
+fn load_batch_states(
+    connection: &Connection,
+    strategy_id: &StrategyId,
+) -> Result<Vec<(Direction, BatchState)>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT direction, filled_units, finished FROM batch_states
+         WHERE strategy_id = ?1 ORDER BY direction, batch_index",
+    )?;
+    let rows = statement.query_map(params![strategy_id.as_str()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut batches = Vec::new();
+    for row in rows {
+        let (direction, filled, finished) = row?;
+        batches.push((
+            parse_direction(&direction)?,
+            BatchState {
+                filled: Quantity::from_units(filled),
+                finished: finished != 0,
+            },
+        ));
+    }
+    Ok(batches)
+}
+
+/// 每一侧的格子状态，按方向与格子下标排列。
+fn load_cell_states(
+    connection: &Connection,
+    strategy_id: &StrategyId,
+) -> Result<Vec<(Direction, CellState)>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT direction, enabled, to_buy_back_units FROM cell_states
+         WHERE strategy_id = ?1 ORDER BY direction, cell_index",
+    )?;
+    let rows = statement.query_map(params![strategy_id.as_str()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut cells = Vec::new();
+    for row in rows {
+        let (direction, enabled, to_buy_back) = row?;
+        cells.push((
+            parse_direction(&direction)?,
+            CellState {
+                enabled: enabled != 0,
+                to_buy_back: Quantity::from_units(to_buy_back),
+            },
+        ));
+    }
+    Ok(cells)
+}
+
+/// 一侧的限速放行进度；没有这一行时是 `None`。
+fn load_throttle(
+    connection: &Connection,
+    strategy_id: &StrategyId,
+    direction: Direction,
+) -> Result<Option<ThrottleState>, StoreError> {
+    let throttle = connection
+        .query_row(
+            "SELECT released, released_at, first_fill_at FROM throttle_states
+             WHERE strategy_id = ?1 AND direction = ?2",
+            params![strategy_id.as_str(), direction.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((released, released_at, first_fill_at)) = throttle else {
+        return Ok(None);
+    };
+    Ok(Some(ThrottleState {
+        released: usize::try_from(released).map_err(|_| StoreError::InvalidColumn {
+            column: "throttle_states.released",
+            value: released.to_string(),
+        })?,
+        released_at: released_at.as_deref().map(parse_time).transpose()?,
+        first_fill_at: first_fill_at.as_deref().map(parse_time).transpose()?,
+    }))
+}
+
+/// 状态里出现过的方向，按 [`Direction::ALL`] 的顺序。
+///
+/// 每一侧至少有一批主仓或者一个格子，所以两个表合起来就能给出配了哪几侧。
+fn directions_of(
+    batches: &[(Direction, BatchState)],
+    cells: &[(Direction, CellState)],
+) -> Vec<Direction> {
+    Direction::ALL
+        .into_iter()
+        .filter(|direction| {
+            batches.iter().any(|(side, _)| side == direction)
+                || cells.iter().any(|(side, _)| side == direction)
+        })
+        .collect()
 }
 
 /// 记一个参数版本。`version` 由调用方给出，第一次建策略是 1。
@@ -1029,7 +1136,8 @@ mod tests {
     use poise_strategy::batch::BatchIndex;
     use poise_strategy::grid::CellIndex;
     use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, Unit};
-    use poise_strategy::state::{BatchState, CellState, StrategyState};
+    use poise_strategy::side::Direction;
+    use poise_strategy::state::{BatchState, CellState, SideState, StrategyState};
     use poise_strategy::units::{Price, Quantity};
 
     fn at(seconds: i64) -> DateTime<Utc> {
@@ -1040,8 +1148,8 @@ mod tests {
         StoredOrder {
             record: OrderRecord {
                 client_order_id: ClientOrderId::try_new(cloid).unwrap(),
-                unit: Unit::Cell(CellIndex(0)),
-                purpose: OrderPurpose::GridBuy,
+                unit: Unit::Cell(Direction::Long, CellIndex(0)),
+                purpose: OrderPurpose::GridEntry,
                 limit_price: Price::parse("95000").unwrap(),
                 quantity: Quantity::parse("0.05").unwrap(),
                 cumulative_filled: Quantity::ZERO,
@@ -1160,22 +1268,29 @@ mod tests {
         let strategy_id = StrategyId::try_from("s-test".to_string()).unwrap();
         let store = Store::open_in_memory().unwrap();
         let mut batch_order = order("0x02");
-        batch_order.record.unit = Unit::Batch(BatchIndex(3));
-        batch_order.record.purpose = OrderPurpose::CoreBuy;
+        batch_order.record.unit = Unit::Batch(Direction::Long, BatchIndex(3));
+        batch_order.record.purpose = OrderPurpose::Core;
 
         store.insert_order(&strategy_id, &order("0x01")).unwrap();
         store.insert_order(&strategy_id, &batch_order).unwrap();
 
         let stored = store.load_orders(&strategy_id).unwrap();
-        assert_eq!(stored[0].record.unit, Unit::Cell(CellIndex(0)));
-        assert_eq!(stored[1].record.unit, Unit::Batch(BatchIndex(3)));
-        assert_eq!(stored[1].record.purpose, OrderPurpose::CoreBuy);
+        assert_eq!(
+            stored[0].record.unit,
+            Unit::Cell(Direction::Long, CellIndex(0))
+        );
+        assert_eq!(
+            stored[1].record.unit,
+            Unit::Batch(Direction::Long, BatchIndex(3))
+        );
+        assert_eq!(stored[1].record.purpose, OrderPurpose::Core);
     }
 
     #[test]
     fn batch_and_cell_state_survive_reopening() {
         let strategy_id = StrategyId::try_from("s-test".to_string()).unwrap();
-        let state = StrategyState::new(
+        let state = StrategyState::new(vec![SideState::new(
+            Direction::Long,
             vec![
                 BatchState {
                     filled: Quantity::parse("0.07").unwrap(),
@@ -1196,7 +1311,7 @@ mod tests {
                     to_buy_back: Quantity::parse("0.015").unwrap(),
                 },
             ],
-        );
+        )]);
 
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("poise.sqlite");

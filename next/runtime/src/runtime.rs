@@ -31,6 +31,7 @@ use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
 use poise_strategy::order::{ClientOrderId, OrderRecord, OrderStatus, WorkingOrder};
 use poise_strategy::planning::{OrderIntent, PendingUnit, Plan, WaitReason};
 use poise_strategy::preview::StartupPreview;
+use poise_strategy::side::Direction;
 use poise_strategy::state::{StateError, StrategyState};
 use poise_strategy::units::{Position, Price, Quantity};
 
@@ -322,7 +323,7 @@ impl Runtime {
         tracing::info!(
             strategy = %strategy_id,
             instrument = strategy.spec().instrument().symbol(),
-            cells = strategy.grid().len(),
+            sides = strategy.sides().len(),
             "strategy created"
         );
         Ok(strategy_id)
@@ -378,9 +379,11 @@ impl Runtime {
     /// 范围、比例、批数或网格间距都会让已有的批次划分和格子状态对不上，必须停下来
     /// 重建。改动立刻生效——下一步读的就是新配置——并记一个新的参数版本。
     ///
-    /// 加上限速也是改同一个参数：放行进度按修改这一刻重建，限速从这一刻开始计时。
-    /// 已经开始的单位保持放行，还没开始的单位回到未放行——它们在场上的订单留在原地，
-    /// 等重新放行之后再由规划处理（第 4.1 节）。
+    /// 加上限速也是改同一个参数：只重建「从不限速变成限速」的那几侧的放行进度，限速
+    /// 从这一刻开始计时。已经开始的单位保持放行，还没开始的单位回到未放行——它们在场
+    /// 上的订单留在原地，等重新放行之后再由规划处理（第 4.1 节）。另一侧没被改过，
+    /// 放行进度和计时完全不动：重建会把它退回「最后一个已经开始的单位」并重新计时，
+    /// 白白推后它下一次放行。
     ///
     /// 改配置和走一步都会读写同一份状态，所以两者互斥：正在被驱动时返回
     /// [`RuntimeError::Busy`]。
@@ -403,17 +406,19 @@ impl Runtime {
             // 版本号不再对应不同的参数集。
             return Ok(self.store.latest_config_version(strategy_id)?);
         }
-        let adding_throttle = stored.config.long.throttle_interval.is_none()
-            && new_config.long.throttle_interval.is_some();
+        let throttled: Vec<Direction> = Direction::ALL
+            .into_iter()
+            .filter(|direction| gained_throttle(&stored.config, &new_config, *direction))
+            .collect();
         // 限速进度不属于配置，加上限速时要单独重建：按修改这一刻重建放行进度。它和新
         // 配置写在同一笔里——分成两次写，中间崩掉就留下「配置已经限速、进度还是全部
         // 放行」，重启后限速静默失效（第 4.1 节）。
-        let state = if adding_throttle {
-            let mut state = self.load_state(strategy_id, &candidate)?;
-            candidate.rebuild_throttle(&mut state, now);
-            Some(state)
-        } else {
+        let state = if throttled.is_empty() {
             None
+        } else {
+            let mut state = self.load_state(strategy_id, &candidate)?;
+            candidate.rebuild_throttle(&mut state, now, &throttled);
+            Some(state)
         };
         let version = self
             .store
@@ -421,7 +426,8 @@ impl Runtime {
         tracing::info!(
             strategy = %strategy_id,
             version,
-            throttle_interval = ?new_config.long.throttle_interval,
+            long_throttle_interval = ?new_config.long.as_ref().and_then(|side| side.throttle_interval),
+            short_throttle_interval = ?new_config.short.as_ref().and_then(|side| side.throttle_interval),
             "config updated"
         );
         Ok(version)
@@ -1387,42 +1393,75 @@ impl Runtime {
 /// 除限速间隔之外，新配置改动了的第一个字段。
 ///
 /// 这些参数决定了批次划分和格子划分，运行中改动会让已保存的状态对不上，只能在
-/// 停止后重建（第 2.4 节）。返回字段名是为了让报错说清楚改了什么。
+/// 停止后重建（第 2.4 节）。返回字段名是为了让报错说清楚改了什么；两侧都看，
+/// 哪一侧先被改动就报哪一侧（先多头侧、后空头侧）。
 ///
 /// 标的没有列在这里：新配置的标的必须和交易所的一致，规整时就会以配置错误拒绝。
 fn changed_field(old: &StrategyConfig, new: &StrategyConfig) -> Option<&'static str> {
-    // 先逐项比较，好报出具体是哪个字段被改了。
-    let (old_side, new_side) = (&old.long, &new.long);
-    if old_side.price_low != new_side.price_low {
-        return Some("price_low");
-    }
-    if old_side.price_high != new_side.price_high {
-        return Some("price_high");
-    }
-    if old_side.max_position != new_side.max_position {
-        return Some("max_position");
-    }
-    if old_side.core_ratio != new_side.core_ratio {
-        return Some("core_ratio");
-    }
-    if old_side.batch_count != new_side.batch_count {
-        return Some("batch_count");
-    }
-    if old_side.grid_spacing != new_side.grid_spacing {
-        return Some("grid_spacing");
-    }
-    if old_side.grid_spread != new_side.grid_spread {
-        return Some("grid_spread");
+    for direction in Direction::ALL {
+        let (old_side, new_side) = (old.side(direction), new.side(direction));
+        if old_side.is_some() != new_side.is_some() {
+            return Some("sides");
+        }
+        let (Some(old_side), Some(new_side)) = (old_side, new_side) else {
+            continue;
+        };
+        // 先逐项比较，好报出具体是哪个字段被改了。
+        if old_side.price_low != new_side.price_low {
+            return Some("price_low");
+        }
+        if old_side.price_high != new_side.price_high {
+            return Some("price_high");
+        }
+        if old_side.max_position != new_side.max_position {
+            return Some("max_position");
+        }
+        if old_side.core_ratio != new_side.core_ratio {
+            return Some("core_ratio");
+        }
+        if old_side.batch_count != new_side.batch_count {
+            return Some("batch_count");
+        }
+        if old_side.grid_spacing != new_side.grid_spacing {
+            return Some("grid_spacing");
+        }
+        if old_side.grid_spread != new_side.grid_spread {
+            return Some("grid_spread");
+        }
     }
     // 兜底：以后给配置加了新参数而忘了在这里列出来，也必须是「拒绝」而不是「悄悄
     // 生效」——放行一个决定批次与格子划分的参数会让状态和配置对不上。比较的是整个
-    // 配置，所以将来加在顶层的参数（比如空头侧）也挡得住。
-    let mut unlisted = new.clone();
-    unlisted.long.throttle_interval = old.long.throttle_interval;
-    if unlisted != *old {
+    // 配置，所以将来加在顶层的参数也挡得住。
+    if without_throttle(new) != without_throttle(old) {
         return Some("unlisted");
     }
     None
+}
+
+/// 去掉两侧的限速参数：限速随时可以改，不参与「配置有没有被改过」的比较。
+fn without_throttle(config: &StrategyConfig) -> StrategyConfig {
+    let mut cleared = config.clone();
+    for side in [&mut cleared.long, &mut cleared.short]
+        .into_iter()
+        .flatten()
+    {
+        side.throttle_interval = None;
+    }
+    cleared
+}
+
+/// 这一侧是不是「从不限速变成限速」。
+///
+/// 只有这样的侧需要重建放行进度。本来就有间隔的侧只是换了间隔长度，放行进度和计时
+/// 照旧；不限速的侧没有进度可言。已经限速的侧改成不限速也不需要重建：规划对不限速
+/// 的侧本来就不看放行进度，下一次走步会自己把状态写成不限速的样子。
+fn gained_throttle(previous: &StrategyConfig, next: &StrategyConfig, direction: Direction) -> bool {
+    let interval = |config: &StrategyConfig| {
+        config
+            .side(direction)
+            .and_then(|side| side.throttle_interval)
+    };
+    interval(previous).is_none() && interval(next).is_some()
 }
 
 /// 一张还没发出去的订单。

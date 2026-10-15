@@ -6,7 +6,10 @@
 
 mod common;
 
-use common::{at, btc_fees, btc_spec, core_harness, core_long_config, core_only_harness};
+use common::{
+    at, btc_fees, btc_spec, core_harness, core_long_config, core_only_harness, long_batch,
+    long_cell, long_state,
+};
 use poise_strategy::batch::BatchIndex;
 use poise_strategy::order::{OrderPurpose, OrderStatus, Unit};
 use poise_strategy::units::{Position, Price, Quantity};
@@ -69,7 +72,7 @@ async fn b01_a_downturn_and_a_recovery_build_the_core_and_cycle_the_cells() {
     for cell in 8..10 {
         assert!(harness.cell(cell).enabled);
         let buy = harness
-            .at_exchange(&harness.working_cloid(cell, OrderPurpose::GridBuy))
+            .at_exchange(&harness.working_cloid(cell, OrderPurpose::GridEntry))
             .unwrap();
         assert_eq!(buy.limit_price, cell_buy_price(cell));
         assert_eq!(
@@ -88,7 +91,7 @@ async fn b01_a_downturn_and_a_recovery_build_the_core_and_cycle_the_cells() {
     assert_eq!(sells.expected_position, Position::parse("0.47").unwrap());
     for cell in 0..8 {
         let sell = harness
-            .at_exchange(&harness.working_cloid(cell, OrderPurpose::GridSell))
+            .at_exchange(&harness.working_cloid(cell, OrderPurpose::GridExit))
             .unwrap();
         assert_eq!(
             sell.limit_price,
@@ -117,7 +120,7 @@ async fn b01_a_downturn_and_a_recovery_build_the_core_and_cycle_the_cells() {
             Quantity::parse("0.015").unwrap()
         );
         let buy = harness
-            .at_exchange(&harness.working_cloid(cell, OrderPurpose::GridBuy))
+            .at_exchange(&harness.working_cloid(cell, OrderPurpose::GridEntry))
             .unwrap();
         assert_eq!(buy.limit_price, cell_buy_price(cell));
     }
@@ -125,7 +128,7 @@ async fn b01_a_downturn_and_a_recovery_build_the_core_and_cycle_the_cells() {
         harness
             .orders()
             .iter()
-            .filter(|order| order.record.purpose == OrderPurpose::GridSell)
+            .filter(|order| order.record.purpose == OrderPurpose::GridExit)
             .all(|order| order.record.status == OrderStatus::Filled),
         "every cell that bought was sold"
     );
@@ -136,8 +139,8 @@ async fn b01_a_downturn_and_a_recovery_build_the_core_and_cycle_the_cells() {
         harness
             .orders()
             .iter()
-            .filter(|order| matches!(order.record.unit, Unit::Batch(_)))
-            .all(|order| order.record.purpose == OrderPurpose::CoreBuy),
+            .filter(|order| matches!(order.record.unit, Unit::Batch(..)))
+            .all(|order| order.record.purpose == OrderPurpose::Core),
         "the core is never sold"
     );
 
@@ -192,19 +195,22 @@ async fn b28_a_full_core_ratio_buys_only_the_core() {
     );
     let state = harness.runtime.state(&harness.strategy_id).unwrap();
     assert_eq!(
-        state.core_position(),
+        long_state(&state).core_position(),
         Quantity::parse("1").unwrap(),
         "the whole position is core"
     );
     // 应有持仓等于已买入的主仓：没有格子，也没有待买回量。
     assert_eq!(last.position, Position::parse("1").unwrap());
     assert_eq!(last.expected_position, Position::parse("1").unwrap());
-    assert!(state.cells().is_empty(), "r = 1 has no cells at all");
+    assert!(
+        long_state(&state).cells().is_empty(),
+        "r = 1 has no cells at all"
+    );
     assert!(
         harness
             .orders()
             .iter()
-            .all(|order| order.record.purpose == OrderPurpose::CoreBuy),
+            .all(|order| order.record.purpose == OrderPurpose::Core),
         "r = 1 never sells"
     );
 
@@ -244,15 +250,15 @@ async fn the_startup_preview_shows_the_batch_table_and_the_immediate_fills() {
     }
     // 95、90 两批的主仓立即买入，跟随它们的 95 到 88 共 8 格随即买入。
     assert_eq!(preview.immediate_fills.len(), 10);
-    assert_eq!(preview.immediate_fills[0].unit, Unit::Batch(BatchIndex(0)));
-    assert_eq!(preview.immediate_fills[0].purpose, OrderPurpose::CoreBuy);
+    assert_eq!(preview.immediate_fills[0].unit, long_batch(0));
+    assert_eq!(preview.immediate_fills[0].purpose, OrderPurpose::Core);
     assert_eq!(
         preview.immediate_fills[0].quantity,
         Quantity::parse("0.175").unwrap()
     );
     let last = preview.immediate_fills.last().unwrap();
-    assert_eq!(last.unit, Unit::Cell(poise_strategy::grid::CellIndex(7)));
-    assert_eq!(last.purpose, OrderPurpose::GridBuy);
+    assert_eq!(last.unit, long_cell(7));
+    assert_eq!(last.purpose, OrderPurpose::GridEntry);
     assert_eq!(last.limit_price, Price::parse("88000").unwrap());
     assert_eq!(last.quantity, Quantity::parse("0.015").unwrap());
 }

@@ -126,8 +126,8 @@ pub(crate) fn div_round(numerator: i128, denominator: i128) -> i128 {
 
 /// 把 `total_steps` 个最小单位平均分成 `count` 份，除不尽的余数依次多给前几份。
 ///
-/// 「前」指下标小的那一份。批次和格子都按价格从高到低排列，所以下标小的
-/// 那一份就是靠近空隙的一端。
+/// 「前」指下标小的那一份，也就是靠近两侧之间空隙的那一端：多头侧的批次与格子按价格
+/// 从高到低编号，空头侧从低到高，两侧的下标 0 都是最靠近空隙的那一份。
 pub(crate) fn split_steps(total_steps: i64, index: usize, count: usize) -> i64 {
     debug_assert!(count > 0, "count must be positive");
     let base = total_steps / count as i64;
@@ -331,6 +331,16 @@ impl Price {
     /// 会变成一张无法合法报出的订单。
     pub const fn checked_add(self, other: Price) -> Option<Price> {
         match self.0.checked_add(other.0) {
+            Some(units) => Some(Price(units)),
+            None => None,
+        }
+    }
+
+    /// 减法，超出可表示范围时返回 `None`。空头侧的平仓价是减出来的，用得上。
+    ///
+    /// 价格是有符号的：减出来是零或负数时照样返回，由调用方判断这样的价格能不能挂出去。
+    pub const fn checked_sub(self, other: Price) -> Option<Price> {
+        match self.0.checked_sub(other.0) {
             Some(units) => Some(Price(units)),
             None => None,
         }

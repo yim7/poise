@@ -16,7 +16,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use common::{
-    INITIAL_MARKET_PRICE, at, btc, btc_fees, btc_spec, exchange, long_grid_config, throttled,
+    INITIAL_MARKET_PRICE, at, btc, btc_fees, btc_spec, exchange, long_grid_config, long_state,
+    throttled,
 };
 use poise_runtime::{
     Clock, Exchange, ExchangeError, ExchangeFill, ExchangeOrder, ManualClock, OrderLookup,
@@ -254,9 +255,9 @@ async fn an_immediate_fill_is_dated_by_the_receipt_not_the_send() {
     assert_eq!(report.placed.len(), 1, "限速之下只有第 0 格挂单");
 
     let state = runtime.state(&strategy_id).unwrap();
-    assert_eq!(state.throttle().released, 1);
+    assert_eq!(long_state(&state).throttle().released, 1);
     assert_eq!(
-        state.throttle().first_fill_at,
+        long_state(&state).throttle().first_fill_at,
         Some(at(1)),
         "回执没有时间戳：取收到回执的时刻，不是发送时刻 at(0)"
     );
@@ -337,7 +338,7 @@ async fn a_terminal_fill_is_dated_by_the_query_receipt_not_the_step_start() {
 
     let state = runtime.state(&strategy_id).unwrap();
     assert_eq!(
-        state.throttle().first_fill_at,
+        long_state(&state).throttle().first_fill_at,
         Some(at(100)),
         "成交时刻取拿到订单状态的时刻，不是这一步开始的 at(90)"
     );
@@ -348,5 +349,5 @@ async fn a_terminal_fill_is_dated_by_the_query_receipt_not_the_step_start() {
     runtime.step(&strategy_id).await.unwrap();
 
     let state = runtime.state(&strategy_id).unwrap();
-    assert_eq!(state.throttle().first_fill_at, Some(at(95)));
+    assert_eq!(long_state(&state).throttle().first_fill_at, Some(at(95)));
 }

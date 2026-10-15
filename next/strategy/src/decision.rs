@@ -168,7 +168,7 @@ pub fn expected_position(
         // `reported` 是读取阶段的快照。补拉成交之后我们的记录可能已经追上甚至超过它，
         // 那时差额按 0 算，而不是负数。
         let unbooked = unbooked_quantity(*cumulative, order.cumulative_filled);
-        unrecorded += signed_delta(order.purpose.side(), unbooked);
+        unrecorded += signed_delta(order.unit.side(order.purpose), unbooked);
     }
     Position::from_units(base.units() + unrecorded)
 }
@@ -263,6 +263,7 @@ mod tests {
     use crate::grid::CellIndex;
     use crate::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, Unit};
     use crate::planning::{PendingUnit, WaitReason};
+    use crate::side::Direction;
     use crate::units::{Position, Price, Quantity};
     use std::collections::HashMap;
 
@@ -290,8 +291,8 @@ mod tests {
     fn cell_order(cumulative_filled: &str, fills_reconciled: bool) -> OrderState {
         order(
             "0x01",
-            Unit::Cell(CellIndex(0)),
-            OrderPurpose::GridBuy,
+            Unit::Cell(Direction::Long, CellIndex(0)),
+            OrderPurpose::GridEntry,
             cumulative_filled,
             fills_reconciled,
         )
@@ -309,8 +310,8 @@ mod tests {
     fn order_state_carries_the_fields_the_judgement_needs() {
         let record = OrderRecord {
             client_order_id: cloid("0x01"),
-            unit: Unit::Batch(BatchIndex(2)),
-            purpose: OrderPurpose::CoreBuy,
+            unit: Unit::Batch(Direction::Long, BatchIndex(2)),
+            purpose: OrderPurpose::Core,
             limit_price: Price::parse("85000").unwrap(),
             quantity: Quantity::parse("0.175").unwrap(),
             cumulative_filled: Quantity::parse("0.07").unwrap(),
@@ -321,8 +322,8 @@ mod tests {
         let state = OrderState::of(&record, false);
 
         assert_eq!(state.client_order_id, cloid("0x01"));
-        assert_eq!(state.unit, Unit::Batch(BatchIndex(2)));
-        assert_eq!(state.purpose, OrderPurpose::CoreBuy);
+        assert_eq!(state.unit, Unit::Batch(Direction::Long, BatchIndex(2)));
+        assert_eq!(state.purpose, OrderPurpose::Core);
         assert_eq!(state.cumulative_filled, Quantity::parse("0.07").unwrap());
         assert!(!state.fills_reconciled);
     }
@@ -388,8 +389,8 @@ mod tests {
             cell_order("0", true),
             order(
                 "0x02",
-                Unit::Cell(CellIndex(1)),
-                OrderPurpose::GridBuy,
+                Unit::Cell(Direction::Long, CellIndex(1)),
+                OrderPurpose::GridEntry,
                 "0",
                 true,
             ),
@@ -406,8 +407,8 @@ mod tests {
     fn a_sell_that_is_not_recorded_yet_comes_off_the_expected_position() {
         let orders = [order(
             "0x01",
-            Unit::Cell(CellIndex(0)),
-            OrderPurpose::GridSell,
+            Unit::Cell(Direction::Long, CellIndex(0)),
+            OrderPurpose::GridExit,
             "0",
             true,
         )];
@@ -448,15 +449,15 @@ mod tests {
             cell_order("0.02", false),
             order(
                 "0x02",
-                Unit::Batch(BatchIndex(1)),
-                OrderPurpose::CoreBuy,
+                Unit::Batch(Direction::Long, BatchIndex(1)),
+                OrderPurpose::Core,
                 "0.175",
                 true,
             ),
             order(
                 "0x03",
-                Unit::Cell(CellIndex(1)),
-                OrderPurpose::GridSell,
+                Unit::Cell(Direction::Long, CellIndex(1)),
+                OrderPurpose::GridExit,
                 "0.01",
                 false,
             ),
@@ -466,12 +467,12 @@ mod tests {
             pending_units(&orders),
             vec![
                 PendingUnit {
-                    unit: Unit::Cell(CellIndex(0)),
-                    purpose: OrderPurpose::GridBuy,
+                    unit: Unit::Cell(Direction::Long, CellIndex(0)),
+                    purpose: OrderPurpose::GridEntry,
                 },
                 PendingUnit {
-                    unit: Unit::Cell(CellIndex(1)),
-                    purpose: OrderPurpose::GridSell,
+                    unit: Unit::Cell(Direction::Long, CellIndex(1)),
+                    purpose: OrderPurpose::GridExit,
                 },
             ]
         );
@@ -600,8 +601,8 @@ mod tests {
     fn every_verdict_carries_the_blocked_units() {
         let orders = [cell_order("0.02", false)];
         let blocked = vec![PendingUnit {
-            unit: Unit::Cell(CellIndex(0)),
-            purpose: OrderPurpose::GridBuy,
+            unit: Unit::Cell(Direction::Long, CellIndex(0)),
+            purpose: OrderPurpose::GridEntry,
         }];
 
         assert_eq!(
