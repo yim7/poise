@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{at, btc_fees, btc_spec, core_harness, core_long_config, core_only_harness};
+use common::{at, core_harness, core_long_config, core_only_harness};
 use poise_strategy::batch::BatchIndex;
 use poise_strategy::order::{OrderPurpose, OrderStatus, Unit};
 use poise_strategy::units::{Position, Price, Quantity};
@@ -23,7 +23,7 @@ fn batch_price(batch: usize) -> Price {
 
 #[tokio::test]
 async fn b01_a_downturn_and_a_recovery_build_the_core_and_cycle_the_cells() {
-    let harness = core_harness();
+    let harness = core_harness().await;
     // 从 96 开始：四批主仓买单挂在各自批次价，都不成交；格子全部未启用。
     harness
         .exchange
@@ -150,17 +150,17 @@ async fn b01_a_downturn_and_a_recovery_build_the_core_and_cycle_the_cells() {
 
 #[tokio::test]
 async fn b28_a_full_core_ratio_buys_only_the_core() {
-    let harness = core_only_harness();
+    let harness = core_only_harness().await;
     harness
         .exchange
         .set_market_price(Price::parse("96000").unwrap(), at(0));
 
-    // 启动预览同样没有网格：只有四批主仓，没有一格。
-    let preview = harness
+    // 草稿预览同样没有网格：只有四批主仓，没有一格。
+    let draft_id = harness
         .runtime
-        .preview_startup(common::core_only_config(), btc_spec(), btc_fees())
-        .await
+        .create_draft(common::core_only_config())
         .unwrap();
+    let preview = harness.runtime.preview_draft(&draft_id).await.unwrap();
     assert_eq!(preview.batches.len(), 4);
     assert!(
         preview
@@ -169,6 +169,7 @@ async fn b28_a_full_core_ratio_buys_only_the_core() {
             .all(|batch| batch.cell_count == 0 && batch.grid_quantity == Quantity::ZERO)
     );
     assert!(preview.immediate_fills.is_empty());
+    harness.runtime.delete_draft(&draft_id).unwrap();
 
     let start = harness.step(0).await;
 
@@ -220,17 +221,14 @@ async fn b28_a_full_core_ratio_buys_only_the_core() {
 }
 
 #[tokio::test]
-async fn the_startup_preview_shows_the_batch_table_and_the_immediate_fills() {
-    let harness = core_harness();
+async fn the_draft_preview_shows_the_batch_table_and_the_immediate_fills() {
+    let harness = core_harness().await;
     harness
         .exchange
         .set_market_price(Price::parse("88000").unwrap(), at(0));
 
-    let preview = harness
-        .runtime
-        .preview_startup(core_long_config(), btc_spec(), btc_fees())
-        .await
-        .unwrap();
+    let draft_id = harness.runtime.create_draft(core_long_config()).unwrap();
+    let preview = harness.runtime.preview_draft(&draft_id).await.unwrap();
 
     assert_eq!(preview.market_price, Price::parse("88000").unwrap());
     assert_eq!(preview.batches.len(), 4);

@@ -1,25 +1,23 @@
 //! `poise`：一个实例的命令行入口。
 //!
-//! 本期只有测试网验证需要的四个命令：`check`、`grid`、`status`、`stop`；没有网页界面。
-//! 启动文件写的网络是 `mainnet` 时，全部命令都拒绝运行（[`instance`]）。
+//! `serve` 是常驻进程：驱动运行中的策略，并在本机提供网页控制台。新建、预览、
+//! 确认启动、暂停、恢复、停止都在网页上做，命令行只留 `check`、`status`、`stop`
+//! 三个辅助命令。启动文件写的网络是 `mainnet` 时，全部命令都拒绝运行（[`instance`]）。
 //!
-//! 网格参数用「距标记价万分之几」表达，精度和最低金额按交易所给的合约规则算；
-//! 想在任何价位上跑，直接给 `--spacing-bps` / `--spread-bps` / `--quantity`。
-//!
-//! 会写数据库、会向交易所下单撤单的命令（`grid`、`stop`）先取实例锁：
+//! 会写数据库、会向交易所下单撤单的命令（`serve`、`stop`）先取实例锁：
 //! 一个实例同时只允许一个这样的进程。
 
-mod grid;
 mod instance;
 mod report;
+mod serve;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+use poise_runtime::ServeOptions;
 use poise_strategy::instrument::Instrument;
-use poise_strategy::units::Quantity;
 use tracing_subscriber::EnvFilter;
 
 use crate::instance::Instance;
@@ -41,8 +39,8 @@ struct Cli {
 enum Command {
     /// 只做启动校验，不下任何单。
     Check,
-    /// 运行最小做多网格；已经有策略就按恢复流程接着跑。
-    Grid(GridArgs),
+    /// 常驻服务：驱动运行中的策略，并在本机提供网页控制台。
+    Serve(ServeArgs),
     /// 显示策略状态、订单、仓位和可用余额。
     Status(InstrumentArgs),
     /// 撤销这个标的上本系统全部在场订单。
@@ -56,35 +54,21 @@ struct InstrumentArgs {
     instrument: String,
 }
 
-/// `--spacing-bps` / `--spread-bps` 的上限：标记价的 100%。
-///
-/// 再大就不只是「网格很宽」，而是 `标记价 × bps` 会溢出 `Price` 的整数范围，
-/// 算出来是个负数，后面的取整会直接 panic。
-const MAX_BPS: i64 = 10_000;
-
 #[derive(Args)]
-struct GridArgs {
-    #[command(flatten)]
-    instrument: InstrumentArgs,
-    /// 格数。
-    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(i64).range(1..=1_000))]
-    cells: i64,
-    /// 网格间距，按标记价的万分之几。上限是 100% 的标记价。
-    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(i64).range(1..=MAX_BPS))]
-    spacing_bps: i64,
-    /// 网格价差，按标记价的万分之几。上限是 100% 的标记价。
-    #[arg(long, default_value_t = 40, value_parser = clap::value_parser!(i64).range(1..=MAX_BPS))]
-    spread_bps: i64,
-    /// 每格数量；缺省取刚好满足最低订单金额的数量。
-    #[arg(long)]
-    quantity: Option<String>,
+struct ServeArgs {
     /// 两步之间的间隔秒数。
-    #[arg(long, default_value_t = 5)]
-    interval_secs: u64,
-    /// 只走一步就退出。
-    #[arg(long)]
-    once: bool,
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    step_interval_secs: u64,
+    /// 网页控制台的静态文件目录（前端 `npm run build` 的产物）。
+    #[arg(long, value_name = "目录", default_value = DEFAULT_WEB_ROOT)]
+    web_root: PathBuf,
+    /// 覆盖启动文件里的 `listen`，只在本机地址冲突时用；仍然只接受本机地址。
+    #[arg(long, value_name = "地址")]
+    listen: Option<String>,
 }
+
+/// 缺省就是仓库里的前端产物：源码树里直接 `poise serve` 就能打开控制台。
+const DEFAULT_WEB_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../web/dist");
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -94,26 +78,12 @@ async fn main() -> Result<()> {
     let instance = Instance::load(&cli.instance)?;
     match cli.command {
         Command::Check => report::check(&instance).await,
-        Command::Grid(args) => {
-            let instrument = parse_instrument(&args.instrument.instrument)?;
-            let quantity = args
-                .quantity
-                .as_deref()
-                .map(Quantity::parse)
-                .transpose()
-                .context("`--quantity` is not a number")?;
-            let params = grid::GridParams {
-                instrument,
-                cells: args.cells as usize,
-                spacing_bps: args.spacing_bps,
-                spread_bps: args.spread_bps,
-                quantity,
+        Command::Serve(args) => {
+            let options = ServeOptions {
+                step_interval: Duration::from_secs(args.step_interval_secs),
+                web_root: Some(args.web_root),
             };
-            let options = grid::LoopOptions {
-                interval: Duration::from_secs(args.interval_secs),
-                once: args.once,
-            };
-            grid::run(&instance, params, options).await
+            serve::run(&instance, options, args.listen).await
         }
         Command::Status(args) => {
             let instrument = parse_instrument(&args.instrument)?;
@@ -137,4 +107,58 @@ fn init_logging(verbose: bool) {
         .with_env_filter(filter)
         .with_target(false)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Command};
+
+    /// 常驻服务的节拍可以调，缺省 5 秒。
+    #[test]
+    fn serve_takes_a_step_interval() {
+        for (arguments, expected) in [
+            (vec!["poise", "serve"], 5),
+            (
+                vec![
+                    "poise",
+                    "--instance",
+                    "/tmp/i",
+                    "serve",
+                    "--step-interval-secs",
+                    "9",
+                ],
+                9,
+            ),
+        ] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            let Command::Serve(args) = cli.command else {
+                panic!("`serve` must parse into the serve command");
+            };
+            assert_eq!(args.step_interval_secs, expected);
+        }
+    }
+
+    /// `grid` 没有了：跑策略现在是 `serve` 加网页控制台的事。
+    #[test]
+    fn grid_is_gone() {
+        assert!(Cli::try_parse_from(["poise", "grid"]).is_err());
+    }
+
+    /// 地址缺省用启动文件里的；命令行可以覆盖，覆盖值走同一套本机地址检查。
+    #[test]
+    fn serve_can_override_the_listen_address() {
+        let cli = Cli::try_parse_from(["poise", "serve"]).unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("`serve` must parse into the serve command");
+        };
+        assert!(args.listen.is_none());
+
+        let cli = Cli::try_parse_from(["poise", "serve", "--listen", "127.0.0.1:18080"]).unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("`serve` must parse into the serve command");
+        };
+        assert_eq!(args.listen.as_deref(), Some("127.0.0.1:18080"));
+    }
 }

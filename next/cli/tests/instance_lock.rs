@@ -43,7 +43,7 @@ fn a_second_process_on_the_same_instance_refuses_to_start() {
     let lock = InstanceLock::acquire(directory.path().join("data")).unwrap();
 
     // 会写数据库、会下单撤单的命令都要先取锁，取不到就什么也不做。
-    for args in [&["grid", "--once"][..], &["stop"][..]] {
+    for args in [&["serve"][..], &["stop"][..]] {
         let output = run(directory.path(), args);
 
         assert!(

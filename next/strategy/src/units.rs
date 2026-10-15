@@ -6,7 +6,7 @@
 //!   使最低金额、扣费后盈利这类边界判断不受取整影响。
 
 use std::fmt;
-use std::ops::Add;
+use std::ops::{Add, Sub};
 use std::str::FromStr;
 
 use serde::de::{self, Visitor};
@@ -430,6 +430,15 @@ impl Notional {
     pub const fn scaled_floor(self) -> i64 {
         (self.0 / SCALE_RAW) as i64
     }
+
+    /// 按费率取一部分（手续费），向下取整。
+    ///
+    /// 向下取整让算出来的费用偏小：它用在「扣费后还剩多少」的展示上，真正的拒绝
+    /// 判断由 [`crate::grid::spread_is_profitable`] 用整数比较完成，不经过这里。
+    pub fn mul_rate(self, rate: Rate) -> Self {
+        debug_assert!(rate.0 >= 0, "rate must be non-negative");
+        Self(self.0 * rate.0 as i128 / SCALE_RAW)
+    }
 }
 
 impl Add for Notional {
@@ -437,6 +446,15 @@ impl Add for Notional {
 
     fn add(self, other: Notional) -> Notional {
         Notional(self.0 + other.0)
+    }
+}
+
+impl Sub for Notional {
+    type Output = Notional;
+
+    /// 收益这类结果可以是负的，所以这里不做饱和。
+    fn sub(self, other: Notional) -> Notional {
+        Notional(self.0 - other.0)
     }
 }
 

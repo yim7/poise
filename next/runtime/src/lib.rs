@@ -7,12 +7,15 @@
 //! 重启恢复、运行中修改限速间隔；启动文件与私钥校验。HTTP 接口、资金预检属于后续任务。
 
 pub mod account;
+pub mod api;
 pub mod clock;
 pub mod exchange;
 pub mod lock;
 pub mod runtime;
 pub mod secret;
+pub mod serve;
 pub mod simulated;
+pub mod simulated_account;
 pub mod startup;
 pub mod store;
 
@@ -22,13 +25,18 @@ pub use crate::exchange::{
     Exchange, ExchangeError, ExchangeFill, ExchangeOrder, OrderLookup, OrderReceipt, OrderRequest,
 };
 pub use crate::lock::{InstanceLock, LockError};
-pub use crate::runtime::{ResumeOutcome, Runtime, RuntimeError, RuntimeOptions, StepReport};
+pub use crate::runtime::{
+    DraftPreview, ResumeOutcome, Runtime, RuntimeError, RuntimeOptions, StepReport, StrategyDetail,
+    StrategySummary, Validation,
+};
 pub use crate::secret::{Address, SecretError, SecretKey};
+pub use crate::serve::{ServeError, ServeOptions, Server};
 pub use crate::simulated::SimulatedExchange;
+pub use crate::simulated_account::SimulatedAccount;
 pub use crate::startup::{
     Network, StartupCheck, StartupError, StartupFile, StartupWarning, validate as validate_startup,
 };
 pub use crate::store::{
-    Store, StoreError, StoredConfigVersion, StoredFill, StoredOrder, StoredStrategy, StrategyId,
-    StrategyStatus,
+    DraftId, Store, StoreError, StoredConfigVersion, StoredDraft, StoredFill, StoredOrder,
+    StoredStrategy, StrategyId, StrategyStatus, ViewSnapshot,
 };

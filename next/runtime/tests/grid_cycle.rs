@@ -8,7 +8,7 @@ use poise_strategy::units::{Position, Price, Quantity};
 
 #[tokio::test]
 async fn b24_every_cell_is_its_own_unit_and_only_buys_what_it_holds() {
-    let harness = harness();
+    let harness = harness().await;
 
     let report = harness.step(0).await;
 
@@ -43,7 +43,7 @@ async fn b24_every_cell_is_its_own_unit_and_only_buys_what_it_holds() {
 
 #[tokio::test]
 async fn b07_partially_filled_cell_keeps_a_buy_back_and_a_sell_that_do_not_match() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
 
@@ -80,7 +80,7 @@ async fn b07_partially_filled_cell_keeps_a_buy_back_and_a_sell_that_do_not_match
 
 #[tokio::test]
 async fn b09_after_an_upward_breakout_every_cell_is_sold_and_buys_back_at_its_own_price() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
 
     // 价格跌到网格下方：20 格全部按各自的买价成交。

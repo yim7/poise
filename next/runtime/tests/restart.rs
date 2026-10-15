@@ -1,10 +1,13 @@
 //! 进程重启后的恢复（第 12 节）：等 `expiresAfter` 过期、撤销遗留挂单、
 //! 补拉成交、核对仓位、按保存的状态重新挂单，不重发旧单。
+//!
+//! 走的是常驻服务启动时的那条路：先把策略落到「恢复中」，再一轮一轮驱动。交易所上
+//! 的挂单在重启后已经不可信，必须撤掉重挂；重启前挂出去、还可能落地的单先等到过期。
 
 mod common;
 
 use common::{at, harness_with_store, restart};
-use poise_runtime::{ResumeOutcome, Store, StrategyId, StrategyStatus};
+use poise_runtime::{Store, StrategyId, StrategyStatus};
 use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderStatus};
 use poise_strategy::units::{Position, Price, Quantity};
 
@@ -15,7 +18,7 @@ async fn b19_restart_backfills_offline_fills_and_replaces_orders_by_state() {
 
     let (strategy_id, exchange, cell0_buy, cell1_buy, old_cloids);
     {
-        let harness = harness_with_store(Store::open(&path).unwrap());
+        let harness = harness_with_store(Store::open(&path).unwrap()).await;
         harness.step(0).await;
         assert_eq!(harness.working().len(), 20);
         cell0_buy = harness.working_cloid(0, OrderPurpose::GridBuy);
@@ -46,18 +49,17 @@ async fn b19_restart_backfills_offline_fills_and_replaces_orders_by_state() {
     );
 
     // 还有可能落地的订单：先等到它们过期，不重复下单。
-    let outcome = harness.resume(1).await;
+    let report = harness.recover(1).await;
     assert_eq!(
-        outcome,
-        ResumeOutcome::WaitingForExpiry { until: at(5) },
-        "resume must wait for expiresAfter before touching the exchange"
+        report.status,
+        StrategyStatus::Restoring,
+        "recover must wait for expiresAfter before touching the exchange"
     );
+    assert!(report.placed.is_empty() && report.canceled.is_empty());
     assert_eq!(exchange.place_count(), 20);
 
-    let outcome = harness.resume(12).await;
-    let ResumeOutcome::Resumed(report) = outcome else {
-        panic!("expected the resume to run a step, got {outcome:?}");
-    };
+    let report = harness.recover(12).await;
+    assert_eq!(report.status, StrategyStatus::Running);
 
     // 离线期间的成交补记完毕，仓位核对通过。
     assert_eq!(report.applied_fills, 2);
@@ -152,7 +154,7 @@ async fn a_fill_delivered_after_the_order_went_terminal_is_still_recorded() {
 
     let (strategy_id, exchange, cell0_buy);
     {
-        let harness = harness_with_store(Store::open(&path).unwrap());
+        let harness = harness_with_store(Store::open(&path).unwrap()).await;
         harness.step(0).await;
         cell0_buy = harness.working_cloid(0, OrderPurpose::GridBuy);
         // 这张买单当场成交 0.02，但成交记录查不到。
@@ -189,10 +191,8 @@ async fn a_fill_delivered_after_the_order_went_terminal_is_still_recorded() {
         strategy_id.clone(),
     );
 
-    let outcome = harness.resume(121).await;
-    let ResumeOutcome::Resumed(report) = outcome else {
-        panic!("expected the resumed step, got {outcome:?}");
-    };
+    let report = harness.recover(121).await;
+    assert_eq!(report.status, StrategyStatus::Running);
 
     // 恢复先撤掉遗留挂单，再补拉成交：这张单的成交核对还没完成，
     // 回查起点仍然追到它挂出去的时刻，t=0 的成交没有漏掉。
@@ -209,21 +209,19 @@ async fn a_fill_delivered_after_the_order_went_terminal_is_still_recorded() {
 }
 
 #[tokio::test]
-async fn resuming_a_fresh_strategy_does_not_wait_for_expiry() {
-    let harness = harness_with_store(Store::open_in_memory().unwrap());
+async fn recovering_a_fresh_strategy_does_not_wait_for_expiry() {
+    let harness = harness_with_store(Store::open_in_memory().unwrap()).await;
 
     // 还没有下过单：没有需要等待的订单。
-    let outcome = harness.resume(0).await;
+    let report = harness.recover(0).await;
 
-    let ResumeOutcome::Resumed(report) = outcome else {
-        panic!("expected a step, got {outcome:?}");
-    };
+    assert_eq!(report.status, StrategyStatus::Running);
     assert_eq!(report.placed.len(), 20);
 }
 
 #[tokio::test]
 async fn resume_is_refused_for_an_unknown_strategy() {
-    let harness = harness_with_store(Store::open_in_memory().unwrap());
+    let harness = harness_with_store(Store::open_in_memory().unwrap()).await;
     let missing = StrategyId::try_from("s-missing".to_string()).unwrap();
 
     let error = harness.runtime.resume(&missing).await.unwrap_err();

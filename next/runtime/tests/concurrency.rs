@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use common::{at, btc_fees, btc_spec, exchange, long_grid_config, throttled};
+use common::{account, at, exchange, long_grid_config, start_strategy, throttled};
 use poise_runtime::{
     Exchange, ExchangeError, ExchangeFill, ExchangeOrder, ManualClock, OrderLookup, OrderReceipt,
     OrderRequest, Runtime, RuntimeError, RuntimeOptions, SimulatedExchange, Store,
@@ -88,13 +88,12 @@ async fn a_strategy_cannot_be_driven_by_two_callers_at_once() {
     let clock = Arc::new(ManualClock::new(at(0)));
     let runtime = Runtime::with_clock(
         exchange.clone(),
+        account(),
         store,
         RuntimeOptions::default(),
         clock.clone(),
     );
-    let strategy_id = runtime
-        .create_strategy(long_grid_config(), btc_spec(), btc_fees())
-        .unwrap();
+    let strategy_id = start_strategy(&runtime, long_grid_config()).await;
     clock.set(at(1));
 
     let (first, second) = tokio::join!(runtime.step(&strategy_id), runtime.step(&strategy_id),);
@@ -125,13 +124,12 @@ async fn changing_the_config_cannot_race_a_step() {
     let clock = Arc::new(ManualClock::new(at(0)));
     let runtime = Runtime::with_clock(
         exchange.clone(),
+        account(),
         store,
         RuntimeOptions::default(),
         clock.clone(),
     );
-    let strategy_id = runtime
-        .create_strategy(long_grid_config(), btc_spec(), btc_fees())
-        .unwrap();
+    let strategy_id = start_strategy(&runtime, long_grid_config()).await;
     clock.set(at(1));
 
     let (step, update) = tokio::join!(runtime.step(&strategy_id), async {

@@ -22,7 +22,7 @@ use poise_strategy::units::{Position, Price, Quantity};
 /// 实际持有的 `.010`：多出来的部分会卖到主仓（只减仓是按整个账户算的，拦不住它）。
 #[tokio::test]
 async fn a_sell_filled_while_being_canceled_is_not_replaced_with_the_old_quantity() {
-    let harness = core_harness();
+    let harness = core_harness().await;
     // 从 94500 开始：95 批的主仓买单挂在自己的批次价 95000，当场成交。
     harness
         .exchange
@@ -123,7 +123,7 @@ async fn a_sell_filled_while_being_canceled_is_not_replaced_with_the_old_quantit
 /// 数量，这一格的预留就没了，会再买一份 `.05`，持仓变成 `.10`。
 #[tokio::test]
 async fn a_fully_filled_order_keeps_its_reservation_while_its_fills_are_missing() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
     // 整份成交，但成交流水查不到。
@@ -201,7 +201,7 @@ async fn a_fully_filled_order_keeps_its_reservation_while_its_fills_are_missing(
 /// `t = 61`，时间戳是 `t = 0` 的流水就永远读不到了。
 #[tokio::test]
 async fn a_late_fill_outside_the_lookback_window_still_lands_in_the_fills_table() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
     harness.exchange.delay_next_fills(1);
@@ -223,13 +223,11 @@ async fn a_late_fill_outside_the_lookback_window_still_lands_in_the_fills_table(
     );
     let canceled = harness.pause(120).await;
     assert!(canceled.contains(&buy));
-
-    // 恢复：按订单状态补记 .02，但流水还没到，这一格仍然不下买单。
-    let outcome = harness.resume(121).await;
-    let ResumeOutcome::Resumed(report) = outcome else {
-        panic!("the canceled order must not block the resume: {outcome:?}");
-    };
-    assert_eq!(report.applied_fills, 1);
+    // 撤销时按订单状态把 `.02` 补记进格子，但流水还查不到：这一格的成交没有对完账。
+    assert_eq!(
+        harness.exchange.current_position(),
+        Position::parse("0.02").unwrap()
+    );
     assert!(
         harness
             .runtime
@@ -238,7 +236,12 @@ async fn a_late_fill_outside_the_lookback_window_still_lands_in_the_fills_table(
             .is_empty(),
         "the fill record is still not visible"
     );
-    // 成交还没对完账：这一格的预留还在，不能按订单状态补单。
+
+    // 恢复：成交还没对完账，这一格仍然不下买单。
+    let outcome = harness.resume(121).await;
+    let ResumeOutcome::Resumed(report) = outcome else {
+        panic!("the canceled order must not block the resume: {outcome:?}");
+    };
     assert!(report.plan.waiting.contains(&WaitReason::FillsPending));
     assert!(!report.plan.place.iter().any(|intent| {
         intent.unit == Unit::Cell(CellIndex(0)) && intent.purpose == OrderPurpose::GridBuy
@@ -268,7 +271,7 @@ async fn a_late_fill_outside_the_lookback_window_still_lands_in_the_fills_table(
 /// 回查起点跟着同步点前移，`t = 2` 的 `.02` 就永远读不到了。
 #[tokio::test]
 async fn a_booked_fill_puts_an_already_reconciled_order_back_to_pending() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
 
@@ -358,7 +361,7 @@ async fn a_booked_fill_puts_an_already_reconciled_order_back_to_pending() {
 /// 预留，这一格卖出之后再挂不出买回单。
 #[tokio::test]
 async fn a_duplicate_report_does_not_cover_a_missing_fill() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
 
@@ -482,7 +485,7 @@ async fn a_duplicate_report_does_not_cover_a_missing_fill() {
 /// 订单会一直占着 pending、这一格再也挂不出新单，所以不能让它无声地卡住。
 #[tokio::test]
 async fn fill_records_that_exceed_the_cumulative_pause_the_strategy() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
 
@@ -517,7 +520,7 @@ async fn fill_records_that_exceed_the_cumulative_pause_the_strategy() {
         report.is_paused(),
         "inconsistent fill records must stop the strategy"
     );
-    assert_eq!(report.status, StrategyStatus::Paused);
+    assert_eq!(report.status, StrategyStatus::Pausing);
     assert!(
         report
             .plan
@@ -531,8 +534,13 @@ async fn fill_records_that_exceed_the_cumulative_pause_the_strategy() {
     );
     assert_eq!(
         harness.runtime.status(&harness.strategy_id).unwrap(),
-        StrategyStatus::Paused
+        StrategyStatus::Pausing
     );
+    // 多出来的流水永远对不平，所以它一直停在「暂停中」：不会再下任何新单，
+    // 页面上看得到原因，等用户处理。
+    let report = harness.step(3).await;
+    assert!(report.placed.is_empty());
+    assert_eq!(report.status, StrategyStatus::Pausing);
 }
 
 /// 连续两次成交之后仓位数据还在变：这一步不下新单，也不暂停。
@@ -543,7 +551,7 @@ async fn fill_records_that_exceed_the_cumulative_pause_the_strategy() {
 /// 才是真的仓位异常。
 #[tokio::test]
 async fn a_position_that_settles_within_the_check_rounds_does_not_pause_the_strategy() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
     // 两笔成交都查不到，并且分别落在两次查仓位之前。
@@ -597,7 +605,7 @@ async fn a_position_that_settles_within_the_check_rounds_does_not_pause_the_stra
 /// 数据明显还在动。
 #[tokio::test]
 async fn alternating_buys_and_sells_do_not_look_like_stable_data() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
     // 买入 .02：待买回剩 .03，这一格挂出 .02 的卖单。
@@ -646,7 +654,7 @@ async fn alternating_buys_and_sells_do_not_look_like_stable_data() {
 /// 核对轮次用完时数据还在变：不下新单，记等待原因，下一步再核对。
 #[tokio::test]
 async fn a_position_that_keeps_changing_waits_instead_of_pausing() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
     // 每一轮核对之前都成交一笔 `.01`，三次核对读到的数据各不相同。
@@ -692,7 +700,7 @@ async fn a_position_that_keeps_changing_waits_instead_of_pausing() {
 /// 成功路径也要先写库再发送：下单请求到达交易所时，这张单已经在库里。
 #[tokio::test]
 async fn every_placement_is_stored_before_it_is_sent() {
-    let harness = harness();
+    let harness = harness().await;
 
     let report = harness.step(0).await;
 

@@ -10,13 +10,16 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use chrono::{DateTime, SecondsFormat, Utc};
 use poise_strategy::batch::BatchIndex;
 use poise_strategy::config::StrategyConfig;
+use poise_strategy::planning::WaitReason;
+
 use poise_strategy::grid::CellIndex;
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
 use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, Unit};
 use poise_strategy::state::{BatchState, CellState, StrategyState};
 use poise_strategy::throttle::ThrottleState;
-use poise_strategy::units::{Price, Quantity};
+use poise_strategy::units::{Notional, Position, Price, Quantity};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// 策略标识。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -38,6 +41,12 @@ impl Default for StrategyId {
     }
 }
 
+/// 草稿标识。
+///
+/// 和策略标识共用一套：草稿保存过的参数版本在确认启动后原样延续给策略，
+/// 事后能看出这次启动用的是第几个版本（第 2.4 节）。
+pub type DraftId = StrategyId;
+
 impl std::fmt::Display for StrategyId {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
@@ -55,31 +64,102 @@ impl TryFrom<String> for StrategyId {
     }
 }
 
-/// 策略生命周期状态。
+/// 接口上的标识就是字符串；反序列化仍然走 [`StrategyId::try_from`]，空标识读不进来。
+impl Serialize for StrategyId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for StrategyId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        StrategyId::try_from(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// 策略生命周期状态（第 2.4 节）。
 ///
-/// 设计里还有草稿、已停止、已失效；本任务只会产生运行中和已暂停两种。
+/// 「暂停中」「停止中」是只撤单的过渡状态：暂停和停止都先落到这里，后台继续撤单、
+/// 查订单终态、补记成交，全部订单结束且成交对完账之后才转成「已暂停」或「已归档」。
+/// 先落状态再动手，是为了让「不再下新单」这件事在崩溃后依然成立——只存在内存里的
+/// 意图，重启就没了。
+///
+/// 设计里还有「已失效」，它由风控触发，属于后续任务。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrategyStatus {
+    /// 草稿：参数已保存，还没有开始下单。草稿不在 `strategies` 表里。
+    Draft,
     Running,
+    /// 恢复中：进程重启后还没恢复成功，不下任何新单，后台继续重试。
+    ///
+    /// 恢复失败（交易所连不上、账户查不到）不能把策略放回「运行中」：那会让它在
+    /// 遗留订单还没撤掉的情况下重新挂单。也不能直接暂停它——暂停会撤掉全部订单，
+    /// 一次临时故障不该让用户的挂单全部消失。
+    Restoring,
+    /// 暂停中：不再下新单，正在撤掉在场订单、把成交对完账。
+    Pausing,
     Paused,
+    /// 停止中：不再下新单，撤干净、对完账之后归档。
+    Stopping,
+    /// 已停止：订单已撤销、仓位保留，策略归档只读。
+    Stopped,
 }
 
 impl StrategyStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Draft => "draft",
             Self::Running => "running",
+            Self::Restoring => "restoring",
+            Self::Pausing => "pausing",
             Self::Paused => "paused",
+            Self::Stopping => "stopping",
+            Self::Stopped => "stopped",
         }
+    }
+
+    /// 这个状态下策略还在交易所里活动（在场订单由它负责）。
+    ///
+    /// 「恢复中」「暂停中」「停止中」也算：订单还没撤干净，这个标的不能交给别的策略（B46）。
+    pub const fn is_live(self) -> bool {
+        matches!(
+            self,
+            Self::Running | Self::Restoring | Self::Pausing | Self::Paused | Self::Stopping
+        )
+    }
+
+    /// 只撤单：不下任何新单，只撤掉在场订单、按 `cloid` 查终态、补记成交。
+    pub const fn is_cancel_only(self) -> bool {
+        matches!(self, Self::Pausing | Self::Stopping)
     }
 
     fn parse(value: &str) -> Result<Self, StoreError> {
         match value {
+            "draft" => Ok(Self::Draft),
             "running" => Ok(Self::Running),
+            "restoring" => Ok(Self::Restoring),
+            "pausing" => Ok(Self::Pausing),
             "paused" => Ok(Self::Paused),
+            "stopping" => Ok(Self::Stopping),
+            "stopped" => Ok(Self::Stopped),
             other => Err(StoreError::UnknownStatus {
                 value: other.to_string(),
             }),
         }
+    }
+}
+
+/// 接口上的状态就是数据库里那个字符串：两边说的是同一件事，不该有两套写法。
+impl Serialize for StrategyStatus {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for StrategyStatus {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        StrategyStatus::parse(&value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -99,7 +179,7 @@ pub struct StoredStrategy {
 }
 
 /// 一张订单的持久化记录。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredOrder {
     pub record: OrderRecord,
     pub exchange_order_id: Option<String>,
@@ -114,8 +194,21 @@ pub struct StoredOrder {
     pub updated_at: DateTime<Utc>,
 }
 
+/// 一个草稿的持久化记录（第 2.4 节）。
+///
+/// 草稿只有参数，没有批次与格子状态：它还没开始下单，划分要在预览和确认启动时
+/// 按当时的合约规则和费率重新算一遍。标识和策略共用一套：确认启动后参数版本原样
+/// 延续，事后能看出这次启动用的是第几个版本。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredDraft {
+    pub draft_id: StrategyId,
+    pub config: StrategyConfig,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// 一次参数的存档：运行中改了可以改的参数就记一条（第 2.4 节）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredConfigVersion {
     /// 从 1 开始，按记录顺序递增。
     pub version: i64,
@@ -124,7 +217,7 @@ pub struct StoredConfigVersion {
 }
 
 /// 一笔已补记的成交。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredFill {
     pub trade_id: String,
     pub strategy_id: StrategyId,
@@ -133,6 +226,31 @@ pub struct StoredFill {
     pub quantity: Quantity,
     pub cumulative_quantity: Quantity,
     pub filled_at: DateTime<Utc>,
+}
+
+/// 一份视图快照：后台每走一步就落一份（第 11 节）。
+///
+/// 网页的列表和详情只读它。不这样做的话，每次刷新页面都要问一遍交易所的行情、仓位和
+/// 可用资金，还要和常驻服务抢同一把驱动锁——页面慢、驱动也被拖住，而页面想要的其实
+/// 只是「最近一次读到的数」。
+///
+/// 每个策略从建起来那一刻就有快照：确认启动时读到的仓位和可用资金就是第一份。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewSnapshot {
+    /// 这份读数是什么时候取的。
+    pub taken_at: DateTime<Utc>,
+    /// 这份快照对应的策略状态。
+    pub status: StrategyStatus,
+    /// 一句话说明这个策略为什么还没走完当前状态；没有特殊情况时是 `None`。
+    pub note: Option<String>,
+    pub market_price: Price,
+    /// 交易所上的仓位。
+    pub position: Position,
+    /// 按状态算出的应有持仓。
+    pub expected_position: Position,
+    pub available_collateral: Notional,
+    /// 最近一步在等什么。
+    pub waiting: Vec<WaitReason>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -145,6 +263,18 @@ pub enum StoreError {
     EmptyStrategyId,
     #[error("strategy `{0}` is not stored")]
     UnknownStrategy(StrategyId),
+    #[error("strategy `{0}` has no view snapshot")]
+    UnknownView(StrategyId),
+    #[error("draft `{0}` is not stored")]
+    UnknownDraft(StrategyId),
+    #[error(
+        "instrument `{}` already has a live strategy `{strategy_id}`",
+        instrument.symbol()
+    )]
+    InstrumentBusy {
+        instrument: Instrument,
+        strategy_id: StrategyId,
+    },
     #[error("unknown strategy status `{value}`")]
     UnknownStatus { value: String },
     #[error("unknown order purpose `{value}`")]
@@ -184,6 +314,12 @@ impl Store {
                  spec_json TEXT NOT NULL,
                  fees_json TEXT NOT NULL,
                  fills_synced_through TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS drafts (
+                 draft_id TEXT PRIMARY KEY,
+                 config_json TEXT NOT NULL,
                  created_at TEXT NOT NULL,
                  updated_at TEXT NOT NULL
              );
@@ -242,6 +378,11 @@ impl Store {
                  config_json TEXT NOT NULL,
                  recorded_at TEXT NOT NULL,
                  PRIMARY KEY (strategy_id, version)
+             );
+             CREATE TABLE IF NOT EXISTS strategy_views (
+                 strategy_id TEXT PRIMARY KEY,
+                 taken_at TEXT NOT NULL,
+                 view_json TEXT NOT NULL
              );",
         )?;
         Ok(Self {
@@ -253,44 +394,178 @@ impl Store {
         self.connection.lock().expect("store lock poisoned")
     }
 
-    /// 建策略：策略记录、初始状态和第一个参数版本写在同一个事务里。
+    /// 建策略：策略记录、初始状态、一个参数版本和第一份视图快照写在同一个事务里。
     ///
     /// 分开写就可能留下「策略已存在、格子状态是空的」的记录，这种策略既跑不起来
-    /// 也暂停不了（每次读状态都会因为格数对不上而失败）。
+    /// 也暂停不了（每次读状态都会因为格数对不上而失败）。视图快照同理：列表和详情
+    /// 只读快照，缺一份就什么都显示不出来。
     pub fn insert_strategy(
         &self,
         strategy: &StoredStrategy,
         state: &StrategyState,
+        view: &ViewSnapshot,
     ) -> Result<(), StoreError> {
         let mut connection = self.lock();
         let transaction = connection.transaction()?;
+        write_strategy(&transaction, strategy, state, view)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// 草稿确认启动：写入策略记录、初始状态和一个参数版本，并删掉草稿，同一个事务。
+    ///
+    /// 分开写会留下两种中间态：草稿没了、策略没建起来（用户以为启动了，其实什么都没有），
+    /// 或者策略建起来了、草稿还在（同一个参数能再启动一次）。
+    ///
+    /// 一个标的同时只能有一个活动策略，所以「这个标的上还没有活动策略」这个检查也在
+    /// 同一个事务里做（B46）：放到事务外面，两个不同草稿可以各自通过检查，再各自建出
+    /// 一个策略，同一个标的上就有两个策略在挂单。
+    pub fn start_draft(
+        &self,
+        draft_id: &StrategyId,
+        strategy: &StoredStrategy,
+        state: &StrategyState,
+        view: &ViewSnapshot,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        if let Some(strategy_id) = live_strategy_on(&transaction, &strategy.instrument)? {
+            return Err(StoreError::InstrumentBusy {
+                instrument: strategy.instrument.clone(),
+                strategy_id,
+            });
+        }
+        write_strategy(&transaction, strategy, state, view)?;
         transaction.execute(
-            "INSERT INTO strategies (
-                 strategy_id, instrument, status, config_json, spec_json, fees_json,
-                 fills_synced_through, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                strategy.strategy_id.as_str(),
-                strategy.instrument.symbol(),
-                strategy.status.as_str(),
-                serde_json::to_string(&strategy.config)?,
-                serde_json::to_string(&strategy.spec)?,
-                serde_json::to_string(&strategy.fees)?,
-                format_time(strategy.fills_synced_through),
-                format_time(strategy.created_at),
-                format_time(strategy.updated_at),
-            ],
-        )?;
-        write_state(&transaction, &strategy.strategy_id, state)?;
-        insert_config_version(
-            &transaction,
-            &strategy.strategy_id,
-            1,
-            &strategy.config,
-            strategy.created_at,
+            "DELETE FROM drafts WHERE draft_id = ?1",
+            params![draft_id.as_str()],
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// 存一个草稿：草稿记录和第一个参数版本写在同一个事务里。
+    pub fn insert_draft(&self, draft: &StoredDraft) -> Result<(), StoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO drafts (draft_id, config_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                draft.draft_id.as_str(),
+                serde_json::to_string(&draft.config)?,
+                format_time(draft.created_at),
+                format_time(draft.updated_at),
+            ],
+        )?;
+        insert_config_version(
+            &transaction,
+            &draft.draft_id,
+            1,
+            &draft.config,
+            draft.created_at,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// 保存草稿改过的参数，并记一个新的参数版本，返回新版本号（第 2.4 节）。
+    pub fn save_draft_config(
+        &self,
+        draft_id: &StrategyId,
+        config: &StrategyConfig,
+        at: DateTime<Utc>,
+    ) -> Result<i64, StoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        let updated = transaction.execute(
+            "UPDATE drafts SET config_json = ?2, updated_at = ?3 WHERE draft_id = ?1",
+            params![
+                draft_id.as_str(),
+                serde_json::to_string(config)?,
+                format_time(at),
+            ],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::UnknownDraft(draft_id.clone()));
+        }
+        let version = record_config_version(&transaction, draft_id, config, at)?;
+        transaction.commit()?;
+        Ok(version)
+    }
+
+    pub fn load_draft(&self, draft_id: &StrategyId) -> Result<StoredDraft, StoreError> {
+        let connection = self.lock();
+        let row = connection
+            .query_row(
+                "SELECT config_json, created_at, updated_at FROM drafts WHERE draft_id = ?1",
+                params![draft_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((config_json, created_at, updated_at)) = row else {
+            return Err(StoreError::UnknownDraft(draft_id.clone()));
+        };
+        Ok(StoredDraft {
+            draft_id: draft_id.clone(),
+            config: serde_json::from_str(&config_json)?,
+            created_at: parse_time(&created_at)?,
+            updated_at: parse_time(&updated_at)?,
+        })
+    }
+
+    /// 删掉一个草稿，连它保存过的参数版本一起删。
+    ///
+    /// 参数版本是给「这次启动用的是第几版参数」留的，草稿都没了就没有再留着它的理由。
+    /// 草稿标识和策略标识共用一套，所以要先确认删掉的确实是一行草稿：删一个碰巧和
+    /// 某个策略同名的草稿，不能把那个策略的参数版本抹掉。
+    pub fn delete_draft(&self, draft_id: &StrategyId) -> Result<(), StoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        let removed = transaction.execute(
+            "DELETE FROM drafts WHERE draft_id = ?1",
+            params![draft_id.as_str()],
+        )?;
+        if removed > 0 {
+            transaction.execute(
+                "DELETE FROM config_versions WHERE strategy_id = ?1",
+                params![draft_id.as_str()],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// 全部草稿，最近建的在前。
+    pub fn load_draft_ids(&self) -> Result<Vec<StrategyId>, StoreError> {
+        let connection = self.lock();
+        let mut statement = connection
+            .prepare("SELECT draft_id FROM drafts ORDER BY created_at DESC, rowid DESC")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(StrategyId::try_from(row?)?);
+        }
+        Ok(ids)
+    }
+
+    /// 全部策略，最近建的在前。
+    pub fn load_all_strategy_ids(&self) -> Result<Vec<StrategyId>, StoreError> {
+        let connection = self.lock();
+        let mut statement = connection
+            .prepare("SELECT strategy_id FROM strategies ORDER BY created_at DESC, rowid DESC")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(StrategyId::try_from(row?)?);
+        }
+        Ok(ids)
     }
 
     /// 保存运行中改过的配置，并记一个新的参数版本，返回新版本号。
@@ -313,11 +588,6 @@ impl Store {
     ) -> Result<i64, StoreError> {
         let mut connection = self.lock();
         let transaction = connection.transaction()?;
-        let next: i64 = transaction.query_row(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM config_versions WHERE strategy_id = ?1",
-            params![strategy_id.as_str()],
-            |row| row.get(0),
-        )?;
         transaction.execute(
             "UPDATE strategies SET config_json = ?2, updated_at = ?3 WHERE strategy_id = ?1",
             params![
@@ -326,7 +596,7 @@ impl Store {
                 format_time(at),
             ],
         )?;
-        insert_config_version(&transaction, strategy_id, next, config, at)?;
+        let next = record_config_version(&transaction, strategy_id, config, at)?;
         if let Some(state) = state {
             write_state(&transaction, strategy_id, state)?;
         }
@@ -473,6 +743,35 @@ impl Store {
             params![strategy_id.as_str(), format_time(at)],
         )?;
         Ok(())
+    }
+
+    /// 落一份视图快照（第 11 节）。
+    pub fn save_view(
+        &self,
+        strategy_id: &StrategyId,
+        view: &ViewSnapshot,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        write_view(&transaction, strategy_id, view)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// 读一个策略最近一份视图快照。
+    pub fn load_view(&self, strategy_id: &StrategyId) -> Result<ViewSnapshot, StoreError> {
+        let connection = self.lock();
+        let json = connection
+            .query_row(
+                "SELECT view_json FROM strategy_views WHERE strategy_id = ?1",
+                params![strategy_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(json) = json else {
+            return Err(StoreError::UnknownView(strategy_id.clone()));
+        };
+        Ok(serde_json::from_str(&json)?)
     }
 
     /// 读一个策略的状态：各批主仓的成交与结束标记、各格子的启用标记与待买回量。
@@ -987,7 +1286,120 @@ fn write_state(
     Ok(())
 }
 
-/// 记一个参数版本。`version` 由调用方给出，第一次建策略是 1。
+/// 一个标的上正在活动（运行中或暂停）的策略。
+///
+/// 活动与否的判定用 [`StrategyStatus::is_live`]，和别处只有这一个定义。
+fn live_strategy_on(
+    transaction: &rusqlite::Transaction<'_>,
+    instrument: &Instrument,
+) -> Result<Option<StrategyId>, StoreError> {
+    let mut statement =
+        transaction.prepare("SELECT strategy_id, status FROM strategies WHERE instrument = ?1")?;
+    let rows = statement.query_map(params![instrument.symbol()], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (strategy_id, status) = row?;
+        if StrategyStatus::parse(&status)?.is_live() {
+            return Ok(Some(StrategyId::try_from(strategy_id)?));
+        }
+    }
+    Ok(None)
+}
+
+/// 写入一条策略记录、它的初始状态和一个参数版本。
+///
+/// 版本号接着已有的往下排：草稿保存过几次，确认启动后策略的参数版本就从那之后继续，
+/// 而不是重新从 1 开始——同一次启动前后是同一份参数历史。
+fn write_strategy(
+    transaction: &rusqlite::Transaction<'_>,
+    strategy: &StoredStrategy,
+    state: &StrategyState,
+    view: &ViewSnapshot,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO strategies (
+             strategy_id, instrument, status, config_json, spec_json, fees_json,
+             fills_synced_through, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            strategy.strategy_id.as_str(),
+            strategy.instrument.symbol(),
+            strategy.status.as_str(),
+            serde_json::to_string(&strategy.config)?,
+            serde_json::to_string(&strategy.spec)?,
+            serde_json::to_string(&strategy.fees)?,
+            format_time(strategy.fills_synced_through),
+            format_time(strategy.created_at),
+            format_time(strategy.updated_at),
+        ],
+    )?;
+    write_state(transaction, &strategy.strategy_id, state)?;
+    write_view(transaction, &strategy.strategy_id, view)?;
+    record_config_version(
+        transaction,
+        &strategy.strategy_id,
+        &strategy.config,
+        strategy.created_at,
+    )
+    .map(|_| ())
+}
+
+/// 写一份视图快照，覆盖同一策略上一份。
+///
+/// 不动 `strategies.updated_at`：快照每走一步就落一份，拿它当「策略什么时候变过」
+/// 会让那个时间每几秒跳一次，看不出参数和状态是什么时候改的。
+fn write_view(
+    transaction: &rusqlite::Transaction<'_>,
+    strategy_id: &StrategyId,
+    view: &ViewSnapshot,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO strategy_views (strategy_id, taken_at, view_json)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT (strategy_id) DO UPDATE SET
+             taken_at = excluded.taken_at,
+             view_json = excluded.view_json",
+        params![
+            strategy_id.as_str(),
+            format_time(view.taken_at),
+            serde_json::to_string(view)?,
+        ],
+    )?;
+    Ok(())
+}
+
+/// 记一个参数版本，返回这次用的版本号。
+///
+/// 和最后一个版本完全相同的参数不再记一条，直接沿用它的版本号：参数版本是事后复盘
+/// 「哪次改动让成交变了」的依据，同样的参数记两遍会让版本号不再对应不同的参数集。
+/// 从草稿启动的策略就是这种情况——最后一次保存之后参数没有动过。
+fn record_config_version(
+    transaction: &rusqlite::Transaction<'_>,
+    id: &StrategyId,
+    config: &StrategyConfig,
+    at: DateTime<Utc>,
+) -> Result<i64, StoreError> {
+    let latest = transaction
+        .query_row(
+            "SELECT version, config_json FROM config_versions WHERE strategy_id = ?1
+             ORDER BY version DESC LIMIT 1",
+            params![id.as_str()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let version = match latest {
+        Some((version, json)) if serde_json::from_str::<StrategyConfig>(&json)? == *config => {
+            return Ok(version);
+        }
+        Some((version, _)) => version + 1,
+        None => 1,
+    };
+    insert_config_version(transaction, id, version, config, at)?;
+    Ok(version)
+}
+
+/// 记一个参数版本。`version` 由调用方给出。
 fn insert_config_version(
     transaction: &rusqlite::Transaction<'_>,
     strategy_id: &StrategyId,
@@ -1024,13 +1436,18 @@ fn parse_time(value: &str) -> Result<DateTime<Utc>, StoreError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Store, StoreError, StoredFill, StoredOrder, StrategyId, StrategyStatus};
+    use super::{
+        Store, StoreError, StoredDraft, StoredFill, StoredOrder, StoredStrategy, StrategyId,
+        StrategyStatus, ViewSnapshot,
+    };
     use chrono::{DateTime, TimeZone, Utc};
     use poise_strategy::batch::BatchIndex;
+    use poise_strategy::config::{SideConfig, StrategyConfig};
     use poise_strategy::grid::CellIndex;
+    use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
     use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, Unit};
     use poise_strategy::state::{BatchState, CellState, StrategyState};
-    use poise_strategy::units::{Price, Quantity};
+    use poise_strategy::units::{Notional, Position, Price, Quantity, Rate};
 
     fn at(seconds: i64) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 15, 0, 0, 0).unwrap() + chrono::Duration::seconds(seconds)
@@ -1152,7 +1569,400 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, StoreError::UnknownStrategy(_)));
-        assert!(StrategyStatus::parse("stopped").is_err());
+        assert!(StrategyStatus::parse("archived").is_err());
+    }
+
+    /// 七种状态都能存下来再读回去（第 2.4 节）。
+    #[test]
+    fn every_lifecycle_status_round_trips() {
+        for status in [
+            StrategyStatus::Draft,
+            StrategyStatus::Running,
+            StrategyStatus::Restoring,
+            StrategyStatus::Pausing,
+            StrategyStatus::Paused,
+            StrategyStatus::Stopping,
+            StrategyStatus::Stopped,
+        ] {
+            assert_eq!(StrategyStatus::parse(status.as_str()).unwrap(), status);
+        }
+        // 还在交易所里活动的状态都占着这个标的，只撤单的过渡状态和恢复中也算。
+        assert!(StrategyStatus::Running.is_live());
+        assert!(StrategyStatus::Restoring.is_live());
+        assert!(StrategyStatus::Pausing.is_live());
+        assert!(StrategyStatus::Paused.is_live());
+        assert!(StrategyStatus::Stopping.is_live());
+        assert!(!StrategyStatus::Stopped.is_live());
+        assert!(!StrategyStatus::Draft.is_live());
+        // 只撤单的只有两个过渡状态。
+        assert!(StrategyStatus::Pausing.is_cancel_only());
+        assert!(StrategyStatus::Stopping.is_cancel_only());
+        assert!(!StrategyStatus::Restoring.is_cancel_only());
+        assert!(!StrategyStatus::Running.is_cancel_only());
+        assert!(!StrategyStatus::Paused.is_cancel_only());
+        assert!(!StrategyStatus::Stopped.is_cancel_only());
+    }
+
+    /// 视图快照跟着策略一起建起来，之后每落一份就覆盖上一份（第 11 节）。
+    #[test]
+    fn the_view_snapshot_is_written_with_the_strategy_and_updated_in_place() {
+        let store = Store::open_in_memory().unwrap();
+        let strategy_id = StrategyId::try_from("s-view".to_string()).unwrap();
+        let config = long_grid_config();
+        let view = view_at(at(0), StrategyStatus::Running);
+        store
+            .insert_strategy(
+                &StoredStrategy {
+                    strategy_id: strategy_id.clone(),
+                    instrument: btc(),
+                    status: StrategyStatus::Running,
+                    config: config.clone(),
+                    spec: btc_spec(),
+                    fees: btc_fees(),
+                    fills_synced_through: at(0),
+                    created_at: at(0),
+                    updated_at: at(0),
+                },
+                &initial_state(&config),
+                &view,
+            )
+            .unwrap();
+        assert_eq!(store.load_view(&strategy_id).unwrap(), view);
+
+        let later = ViewSnapshot {
+            taken_at: at(30),
+            status: StrategyStatus::Pausing,
+            note: Some("还有 2 张订单没撤掉，正在重试。".to_string()),
+            position: Position::parse("0.5").unwrap(),
+            ..view.clone()
+        };
+        store.save_view(&strategy_id, &later).unwrap();
+
+        let loaded = store.load_view(&strategy_id).unwrap();
+        assert_eq!(loaded, later);
+        // 快照是覆盖，不是追加：同一个策略只有一份。
+        assert_eq!(
+            loaded.note.as_deref(),
+            Some("还有 2 张订单没撤掉，正在重试。")
+        );
+        // 落快照不算「策略变过」：参数和状态的改动时间不能被它推着走。
+        assert_eq!(store.load_strategy(&strategy_id).unwrap().updated_at, at(0));
+    }
+
+    #[test]
+    fn a_strategy_without_a_view_snapshot_is_an_error() {
+        let store = Store::open_in_memory().unwrap();
+
+        let error = store
+            .load_view(&StrategyId::try_from("s-missing".to_string()).unwrap())
+            .unwrap_err();
+
+        assert!(matches!(error, StoreError::UnknownView(_)));
+    }
+
+    /// B42：草稿每次保存记一个版本；确认启动后策略沿用同一份参数历史，草稿消失。
+    #[test]
+    fn b42_a_draft_keeps_every_saved_version_and_hands_them_to_the_strategy() {
+        let draft_id = StrategyId::try_from("s-draft".to_string()).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let config = long_grid_config();
+        store
+            .insert_draft(&StoredDraft {
+                draft_id: draft_id.clone(),
+                config: config.clone(),
+                created_at: at(0),
+                updated_at: at(0),
+            })
+            .unwrap();
+
+        // 两次保存各记一个版本。
+        let mut second = config.clone();
+        second.long.grid_spacing = Price::parse("500").unwrap();
+        assert_eq!(
+            store.save_draft_config(&draft_id, &second, at(10)).unwrap(),
+            2
+        );
+        let mut third = second.clone();
+        third.long.throttle_interval = Some(chrono::Duration::minutes(60));
+        assert_eq!(
+            store.save_draft_config(&draft_id, &third, at(20)).unwrap(),
+            3
+        );
+        assert_eq!(store.load_draft(&draft_id).unwrap().config, third);
+        assert_eq!(store.load_draft(&draft_id).unwrap().updated_at, at(20));
+
+        // 确认启动：策略接过草稿的标识和版本历史，草稿不再存在。
+        let strategy = StoredStrategy {
+            strategy_id: draft_id.clone(),
+            instrument: btc(),
+            status: StrategyStatus::Running,
+            config: third.clone(),
+            spec: btc_spec(),
+            fees: btc_fees(),
+            fills_synced_through: at(30),
+            created_at: at(30),
+            updated_at: at(30),
+        };
+        store
+            .start_draft(
+                &draft_id,
+                &strategy,
+                &initial_state(&third),
+                &view_at(at(30), StrategyStatus::Running),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.load_draft(&draft_id).unwrap_err(),
+            StoreError::UnknownDraft(_)
+        ));
+        assert_eq!(store.load_strategy(&draft_id).unwrap().config, third);
+        assert_eq!(store.latest_config_version(&draft_id).unwrap(), 3);
+        assert_eq!(store.load_config_versions(&draft_id).unwrap().len(), 3);
+        assert_eq!(store.load_draft_ids().unwrap(), vec![]);
+    }
+
+    /// 直接建的策略没有草稿历史，参数版本从 1 开始。
+    #[test]
+    fn a_strategy_without_a_draft_starts_at_version_one() {
+        let strategy_id = StrategyId::try_from("s-direct".to_string()).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let config = long_grid_config();
+        store
+            .insert_strategy(
+                &StoredStrategy {
+                    strategy_id: strategy_id.clone(),
+                    instrument: btc(),
+                    status: StrategyStatus::Running,
+                    config: config.clone(),
+                    spec: btc_spec(),
+                    fees: btc_fees(),
+                    fills_synced_through: at(0),
+                    created_at: at(0),
+                    updated_at: at(0),
+                },
+                &initial_state(&config),
+                &view_at(at(0), StrategyStatus::Running),
+            )
+            .unwrap();
+
+        assert_eq!(store.latest_config_version(&strategy_id).unwrap(), 1);
+    }
+
+    /// 草稿按建立时间倒序列出；不存在的草稿读写都报错。
+    #[test]
+    fn drafts_are_listed_newest_first() {
+        let store = Store::open_in_memory().unwrap();
+        for (id, seconds) in [("s-a", 0), ("s-b", 10)] {
+            store
+                .insert_draft(&StoredDraft {
+                    draft_id: StrategyId::try_from(id.to_string()).unwrap(),
+                    config: long_grid_config(),
+                    created_at: at(seconds),
+                    updated_at: at(seconds),
+                })
+                .unwrap();
+        }
+
+        let ids: Vec<String> = store
+            .load_draft_ids()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+        assert_eq!(ids, vec!["s-b", "s-a"]);
+
+        let missing = StrategyId::try_from("s-missing".to_string()).unwrap();
+        assert!(matches!(
+            store.load_draft(&missing).unwrap_err(),
+            StoreError::UnknownDraft(_)
+        ));
+        assert!(matches!(
+            store.save_draft_config(&missing, &long_grid_config(), at(0)),
+            Err(StoreError::UnknownDraft(_))
+        ));
+        // 删一个不存在的草稿不是错误：删除是幂等的。
+        store.delete_draft(&missing).unwrap();
+    }
+
+    /// 删掉草稿要连它保存过的参数版本一起删。
+    ///
+    /// 参数版本按标识存，草稿删了版本还在，下一个用同一个标识的草稿就会从第 4 版
+    /// 开始，版本号不再对应「这套参数改过几次」。
+    #[test]
+    fn deleting_a_draft_also_drops_its_config_versions() {
+        let store = Store::open_in_memory().unwrap();
+        let draft_id = StrategyId::try_from("s-again".to_string()).unwrap();
+        let draft = StoredDraft {
+            draft_id: draft_id.clone(),
+            config: long_grid_config(),
+            created_at: at(0),
+            updated_at: at(0),
+        };
+        store.insert_draft(&draft).unwrap();
+        let mut changed = long_grid_config();
+        changed.long.grid_spacing = Price::parse("2000").unwrap();
+        assert_eq!(
+            store
+                .save_draft_config(&draft_id, &changed, at(10))
+                .unwrap(),
+            2
+        );
+
+        store.delete_draft(&draft_id).unwrap();
+        assert!(store.load_config_versions(&draft_id).unwrap().is_empty());
+
+        // 再建同标识的草稿：版本从 1 重新开始。
+        store.insert_draft(&draft).unwrap();
+        assert_eq!(store.latest_config_version(&draft_id).unwrap(), 1);
+    }
+
+    /// 删一个不是草稿的标识：什么也不删。
+    ///
+    /// 草稿标识和策略标识共用一套，删除草稿的接口拿到一个策略标识时，不能把那个
+    /// 策略的参数版本抹掉——没有版本记录的策略连列表都读不出来。
+    #[test]
+    fn deleting_a_draft_leaves_a_strategy_with_the_same_id_alone() {
+        let store = Store::open_in_memory().unwrap();
+        let strategy_id = StrategyId::try_from("s-live".to_string()).unwrap();
+        let config = long_grid_config();
+        store
+            .insert_strategy(
+                &StoredStrategy {
+                    strategy_id: strategy_id.clone(),
+                    instrument: btc(),
+                    status: StrategyStatus::Running,
+                    config: config.clone(),
+                    spec: btc_spec(),
+                    fees: btc_fees(),
+                    fills_synced_through: at(0),
+                    created_at: at(0),
+                    updated_at: at(0),
+                },
+                &initial_state(&config),
+                &view_at(at(0), StrategyStatus::Running),
+            )
+            .unwrap();
+
+        store.delete_draft(&strategy_id).unwrap();
+
+        assert_eq!(store.latest_config_version(&strategy_id).unwrap(), 1);
+        assert_eq!(store.load_all_strategy_ids().unwrap(), vec![strategy_id]);
+    }
+
+    /// 同一标的已有活动策略时，写策略的那个事务自己拒绝（B46）。
+    ///
+    /// 检查必须和写入在同一个事务里：分成两步，两个草稿同时确认就可能各自先查一遍、
+    /// 都查不到，然后都写进去。
+    #[test]
+    fn start_draft_refuses_a_second_live_strategy_on_the_same_instrument() {
+        let store = Store::open_in_memory().unwrap();
+        let first = StrategyId::try_from("s-first".to_string()).unwrap();
+        let second = StrategyId::try_from("s-second".to_string()).unwrap();
+        for id in [&first, &second] {
+            store
+                .insert_draft(&StoredDraft {
+                    draft_id: id.clone(),
+                    config: long_grid_config(),
+                    created_at: at(0),
+                    updated_at: at(0),
+                })
+                .unwrap();
+        }
+        let config = long_grid_config();
+        let stored = |id: &StrategyId| StoredStrategy {
+            strategy_id: id.clone(),
+            instrument: btc(),
+            status: StrategyStatus::Running,
+            config: config.clone(),
+            spec: btc_spec(),
+            fees: btc_fees(),
+            fills_synced_through: at(0),
+            created_at: at(0),
+            updated_at: at(0),
+        };
+
+        store
+            .start_draft(
+                &first,
+                &stored(&first),
+                &initial_state(&config),
+                &view_at(at(0), StrategyStatus::Running),
+            )
+            .unwrap();
+        let error = store
+            .start_draft(
+                &second,
+                &stored(&second),
+                &initial_state(&config),
+                &view_at(at(0), StrategyStatus::Running),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, StoreError::InstrumentBusy { .. }),
+            "{error:?}"
+        );
+        // 被拒之后：第二个草稿还在，第一个策略没被动过。
+        assert!(store.load_draft(&second).is_ok());
+        assert_eq!(store.load_all_strategy_ids().unwrap(), vec![first.clone()]);
+        assert_eq!(store.load_draft_ids().unwrap(), vec![second.clone()]);
+    }
+
+    fn initial_state(config: &StrategyConfig) -> StrategyState {
+        poise_strategy::Strategy::new(config.clone(), btc_spec(), btc_fees())
+            .unwrap()
+            .initial_state()
+    }
+
+    /// 一份没有特殊情况的视图快照：确认启动那一刻读到的数。
+    fn view_at(taken_at: DateTime<Utc>, status: StrategyStatus) -> ViewSnapshot {
+        ViewSnapshot {
+            taken_at,
+            status,
+            note: None,
+            market_price: Price::parse("95500").unwrap(),
+            position: Position::ZERO,
+            expected_position: Position::ZERO,
+            available_collateral: Notional::parse("100000").unwrap(),
+            waiting: Vec::new(),
+        }
+    }
+
+    fn btc() -> Instrument {
+        Instrument::try_new("BTC").unwrap()
+    }
+
+    fn btc_spec() -> InstrumentSpec {
+        InstrumentSpec::new(
+            btc(),
+            Price::parse("1").unwrap(),
+            Quantity::parse("0.001").unwrap(),
+            Notional::parse("10").unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn btc_fees() -> Fees {
+        Fees::new(
+            Rate::parse("0.00045").unwrap(),
+            Rate::parse("0.00015").unwrap(),
+        )
+    }
+
+    fn long_grid_config() -> StrategyConfig {
+        StrategyConfig {
+            instrument: btc(),
+            long: SideConfig {
+                price_low: Price::parse("75000").unwrap(),
+                price_high: Price::parse("95000").unwrap(),
+                max_position: Quantity::parse("1").unwrap(),
+                core_ratio: Rate::ZERO,
+                batch_count: None,
+                grid_spacing: Price::parse("1000").unwrap(),
+                grid_spread: Price::parse("1000").unwrap(),
+                throttle_interval: None,
+            },
+        }
     }
 
     #[test]
