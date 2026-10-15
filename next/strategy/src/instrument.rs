@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::units::{Notional, Price, PriceRounding, Quantity, Rate};
+use crate::units::{Notional, Price, PriceRounding, Quantity, Rate, SCALE};
 
 /// 标的，例如 Hyperliquid 上的 `BTC`。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -46,6 +46,59 @@ impl From<Instrument> for String {
     }
 }
 
+/// 报价规则：一个价位上允许的最小变动。
+///
+/// 多数交易所全价位共用一个步长；Hyperliquid 永续不是：价格最多 5 位有效数字，
+/// 所以步长随价格变粗——8 万时是 1，十几万时是 10。规整和校验都要按「这个价格处的
+/// 步长」算，按一个固定步长算出来的高价格子交易所不收。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PriceRule {
+    /// 固定步长：任何价位都是同一个最小变动。
+    Fixed(Price),
+    /// 有效数字规则：最多 `max_figures` 位有效数字，并且步长不小于 `step_floor`
+    /// （数量精度等其它约束带来的下限）。整数价格一律允许。
+    SignificantFigures { max_figures: u32, step_floor: Price },
+}
+
+impl PriceRule {
+    /// 这个价位上的最小变动。
+    pub fn step_at(self, price: Price) -> Price {
+        match self {
+            Self::Fixed(step) => step,
+            Self::SignificantFigures {
+                max_figures,
+                step_floor,
+            } => {
+                let figures = Price::power_of_ten(price.decade() - (max_figures.max(1) as i32 - 1));
+                figures.max(step_floor)
+            }
+        }
+    }
+
+    /// 价格是不是落在交易所肯收的价位上。
+    ///
+    /// 有效数字规则下整数价格一律允许：`100005` 有 6 位数字，但交易所收。
+    /// 我们自己产生的价格都是步长的整数倍，这一条只是不拒绝别人给的合法价。
+    pub fn is_legal(self, price: Price) -> bool {
+        if price.units() <= 0 {
+            return false;
+        }
+        if matches!(self, Self::SignificantFigures { .. }) && price.units() % SCALE == 0 {
+            return true;
+        }
+        price.units() % self.step_at(price).units() == 0
+    }
+
+    /// 按这个价格处的步长规整；规整结果超出可表示范围时返回 `None`。
+    ///
+    /// 向上规整可能越过可表示上限，所以不饱和：饱和出来的价格不是步长的整数倍，
+    /// 会变成一张无法合法报出的订单。
+    pub fn round(self, price: Price, rounding: PriceRounding) -> Option<Price> {
+        price.checked_round_to_tick(self.step_at(price), rounding)
+    }
+}
+
 /// 合约规则不合法。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SpecError {
@@ -53,6 +106,8 @@ pub enum SpecError {
     EmptySymbol,
     #[error("price tick must be positive, got {0}")]
     InvalidPriceTick(Price),
+    #[error("a significant-figures price rule needs at least one figure and a positive step floor")]
+    InvalidPriceRule,
     #[error("quantity step must be positive, got {0}")]
     InvalidQuantityStep(Quantity),
     #[error("minimum order notional must be positive, got {0}")]
@@ -63,20 +118,46 @@ pub enum SpecError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstrumentSpec {
     instrument: Instrument,
-    price_tick: Price,
+    /// 报价规则。
+    price_rule: PriceRule,
     quantity_step: Quantity,
     min_order_notional: Notional,
 }
 
 impl InstrumentSpec {
+    /// 固定报价步长的合约规则。
     pub fn new(
         instrument: Instrument,
         price_tick: Price,
         quantity_step: Quantity,
         min_order_notional: Notional,
     ) -> Result<Self, SpecError> {
-        if price_tick.units() <= 0 {
-            return Err(SpecError::InvalidPriceTick(price_tick));
+        Self::with_price_rule(
+            instrument,
+            PriceRule::Fixed(price_tick),
+            quantity_step,
+            min_order_notional,
+        )
+    }
+
+    /// 按交易所给的报价规则构造。
+    pub fn with_price_rule(
+        instrument: Instrument,
+        price_rule: PriceRule,
+        quantity_step: Quantity,
+        min_order_notional: Notional,
+    ) -> Result<Self, SpecError> {
+        match price_rule {
+            PriceRule::Fixed(tick) if tick.units() <= 0 => {
+                return Err(SpecError::InvalidPriceTick(tick));
+            }
+            PriceRule::SignificantFigures { max_figures: 0, .. } => {
+                return Err(SpecError::InvalidPriceRule);
+            }
+            PriceRule::SignificantFigures { step_floor, .. } if step_floor.units() <= 0 => {
+                return Err(SpecError::InvalidPriceRule);
+            }
+            _ => {}
         }
         if quantity_step.units() <= 0 {
             return Err(SpecError::InvalidQuantityStep(quantity_step));
@@ -86,7 +167,7 @@ impl InstrumentSpec {
         }
         Ok(Self {
             instrument,
-            price_tick,
+            price_rule,
             quantity_step,
             min_order_notional,
         })
@@ -96,8 +177,8 @@ impl InstrumentSpec {
         &self.instrument
     }
 
-    pub fn price_tick(&self) -> Price {
-        self.price_tick
+    pub fn price_rule(&self) -> PriceRule {
+        self.price_rule
     }
 
     pub fn quantity_step(&self) -> Quantity {
@@ -108,9 +189,9 @@ impl InstrumentSpec {
         self.min_order_notional
     }
 
-    /// 价格按报价精度规整；规整结果超出可表示范围时返回 `None`。
+    /// 价格按这个价格处的报价精度规整；规整结果超出可表示范围时返回 `None`。
     pub fn normalize_price(&self, price: Price, rounding: PriceRounding) -> Option<Price> {
-        price.checked_round_to_tick(self.price_tick, rounding)
+        self.price_rule.round(price, rounding)
     }
 
     /// 数量按数量精度向下规整。
@@ -142,7 +223,7 @@ impl Fees {
 
 #[cfg(test)]
 mod tests {
-    use super::{Instrument, InstrumentSpec, Notional, SpecError};
+    use super::{Instrument, InstrumentSpec, Notional, PriceRule, SpecError};
     use crate::fixtures::btc_spec;
     use crate::units::{Price, PriceRounding, Quantity};
 
@@ -200,10 +281,125 @@ mod tests {
         let json = serde_json::to_string(&spec).unwrap();
 
         assert!(json.contains("\"instrument\":\"BTC\""));
-        assert!(json.contains("\"price_tick\":\"1\""));
+        assert!(json.contains("\"price_rule\":\"1\""));
         assert!(json.contains("\"quantity_step\":\"0.001\""));
         assert!(json.contains("\"min_order_notional\":\"10\""));
         assert_eq!(serde_json::from_str::<InstrumentSpec>(&json).unwrap(), spec);
         assert!(serde_json::from_str::<Instrument>("\"\"").is_err());
+    }
+
+    /// 有效数字规则也能存进数据库再读回来（枚举在 JSON 里是不带标签的）。
+    #[test]
+    fn a_significant_figures_spec_round_trips_through_json() {
+        let spec = crate::fixtures::hl_btc_spec();
+
+        let json = serde_json::to_string(&spec).unwrap();
+
+        assert!(json.contains("\"price_rule\":{\"max_figures\":5,\"step_floor\":\"0.1\"}"));
+        assert_eq!(serde_json::from_str::<InstrumentSpec>(&json).unwrap(), spec);
+    }
+
+    /// 有效数字规则的步长随价格变粗，整数价一律允许。
+    #[test]
+    fn a_significant_figures_rule_coarsens_the_step_as_the_price_grows() {
+        let rule = PriceRule::SignificantFigures {
+            max_figures: 5,
+            step_floor: Price::parse("0.1").unwrap(),
+        };
+
+        // 8 万这一档是 1，十几万这一档是 10。
+        assert_eq!(
+            rule.step_at(Price::parse("95000").unwrap()),
+            Price::parse("1").unwrap()
+        );
+        assert_eq!(
+            rule.step_at(Price::parse("105000").unwrap()),
+            Price::parse("10").unwrap()
+        );
+        // 有效数字允许 0.00001，但步长下限（数量精度）把它顶到 0.1。
+        assert_eq!(
+            rule.step_at(Price::parse("0.5").unwrap()),
+            Price::parse("0.1").unwrap()
+        );
+
+        // 整数价一律允许：`100005` 有 6 位数字，交易所照样收。
+        assert!(rule.is_legal(Price::parse("100005").unwrap()));
+        assert!(rule.is_legal(Price::parse("95000").unwrap()));
+        // 带小数就得落在步长上。
+        assert!(!rule.is_legal(Price::parse("100005.5").unwrap()));
+        assert!(!rule.is_legal(Price::parse("95001.5").unwrap()));
+        assert!(!rule.is_legal(Price::ZERO));
+    }
+
+    /// 规整出来的价格必须自己能通过校验：否则策略算得出格子，却一张单也发不出去。
+    #[test]
+    fn rounding_always_lands_on_a_price_the_rule_accepts() {
+        let rule = PriceRule::SignificantFigures {
+            max_figures: 5,
+            step_floor: Price::parse("0.1").unwrap(),
+        };
+
+        // 含跨十进位边界（99999.4、100004.9）和步长下限生效（0.34）的价格。
+        for raw in ["99999.4", "100004", "100004.9", "0.34", "105000.7", "95000"] {
+            let raw = Price::parse(raw).unwrap();
+            for rounding in [
+                PriceRounding::Down,
+                PriceRounding::Up,
+                PriceRounding::Nearest,
+            ] {
+                let rounded = rule.round(raw, rounding).unwrap();
+                assert!(
+                    rule.is_legal(rounded),
+                    "{raw} 按 {rounding:?} 规整成 {rounded}，但它不是合法报价（步长 {}）",
+                    rule.step_at(rounded)
+                );
+            }
+        }
+    }
+
+    /// 固定步长的规则不随价格变，用来跑模拟交易所和其它交易所。
+    #[test]
+    fn a_fixed_rule_keeps_one_step_at_every_price() {
+        let rule = PriceRule::Fixed(Price::parse("0.5").unwrap());
+
+        assert_eq!(
+            rule.step_at(Price::parse("95000").unwrap()),
+            Price::parse("0.5").unwrap()
+        );
+        assert_eq!(
+            rule.step_at(Price::parse("0.2").unwrap()),
+            Price::parse("0.5").unwrap()
+        );
+        assert!(rule.is_legal(Price::parse("95000.5").unwrap()));
+        assert!(!rule.is_legal(Price::parse("95000.4").unwrap()));
+    }
+
+    #[test]
+    fn a_significant_figures_rule_rejects_impossible_settings() {
+        let build = |rule| {
+            InstrumentSpec::with_price_rule(
+                Instrument::try_new("BTC").unwrap(),
+                rule,
+                Quantity::parse("0.001").unwrap(),
+                Notional::parse("10").unwrap(),
+            )
+        };
+
+        assert_eq!(
+            build(PriceRule::SignificantFigures {
+                max_figures: 0,
+                step_floor: Price::parse("1").unwrap(),
+            })
+            .unwrap_err(),
+            SpecError::InvalidPriceRule
+        );
+        assert_eq!(
+            build(PriceRule::SignificantFigures {
+                max_figures: 5,
+                step_floor: Price::ZERO,
+            })
+            .unwrap_err(),
+            SpecError::InvalidPriceRule
+        );
     }
 }

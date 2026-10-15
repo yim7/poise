@@ -471,6 +471,66 @@ async fn a_cancel_of_an_order_the_exchange_never_saw_keeps_the_reservation() {
     );
 }
 
+/// 部分成交之后被交易所自己撤掉（自成交保护、只减仓冲突这类终态）：
+/// 成交照记进格子，剩下的预留释放出来重新挂。
+#[tokio::test]
+async fn a_partially_filled_order_canceled_by_the_exchange_is_booked_and_released() {
+    let harness = harness();
+    harness.step(0).await;
+
+    // 第 0 格的买单成交 0.02（成交记录暂时查不到），随后交易所把它撤掉。
+    let cloid = harness.working_cloid(0, OrderPurpose::GridBuy);
+    harness.exchange.delay_next_fills(1);
+    harness
+        .exchange
+        .fill(&cloid, Quantity::parse("0.02").unwrap(), at(1))
+        .unwrap();
+    assert!(harness.exchange.cancel_externally(&cloid));
+
+    let report = harness.step(1).await;
+
+    // 撤销带回了最终的累计成交量：0.02 记进格子，这张单是终态。
+    let order = harness
+        .orders()
+        .into_iter()
+        .find(|order| order.record.client_order_id == cloid)
+        .expect("the canceled order must stay in the database");
+    assert_eq!(order.record.status, OrderStatus::Canceled);
+    assert_eq!(
+        order.record.cumulative_filled,
+        Quantity::parse("0.02").unwrap()
+    );
+    assert_eq!(
+        harness.cell(0).to_buy_back,
+        Quantity::parse("0.03").unwrap(),
+        "买到的 0.02 不再算待买回"
+    );
+
+    // 买到的 0.02 这一步就挂出卖单；补挂 0.03 的买单要等成交流水到齐：撤单只带回了
+    // 累计成交量，流水还没到，这张单的成交没对完账（第 9.2 节，同
+    // `a_fully_filled_order_whose_fill_record_is_late_is_not_replaced`）。
+    assert_eq!(report.placed.len(), 1);
+    let sell = harness.working_cloid(0, OrderPurpose::GridSell);
+    assert_eq!(
+        harness.at_exchange(&sell).unwrap().quantity,
+        Quantity::parse("0.02").unwrap(),
+        "买到的 0.02 必须挂出卖单"
+    );
+
+    // 流水到了：这张单对完账，剩余预留释放出来补挂 0.03 的买单。
+    harness.exchange.deliver_delayed_fills();
+    let report = harness.step(2).await;
+
+    assert!(!report.is_paused());
+    assert_eq!(report.placed.len(), 1);
+    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    assert_eq!(
+        harness.order(&buy).record.quantity,
+        Quantity::parse("0.03").unwrap(),
+        "剩余的 0.03 必须补挂回去"
+    );
+}
+
 #[tokio::test]
 async fn b18_a_position_mismatch_pauses_the_strategy_and_cancels_its_orders() {
     let harness = harness();

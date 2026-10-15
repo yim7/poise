@@ -109,9 +109,14 @@ impl StrategyConfig {
                 high: price_high,
             });
         }
-        let price_tick = spec.price_tick();
-        let grid_spacing = normalize_price("grid spacing", self.long.grid_spacing, spec)?;
-        let grid_spread = normalize_price("grid spread", self.long.grid_spread, spec)?;
+        // 报价规则随价格变粗，间距和价差是差值，按最高的那个价处的步长规整：
+        // 网格里所有价格都在它下面，步长只会更细，这样规整过的间距处处都落得下。
+        // 「至少一个报价单位」的校验留到生成格子时做：主仓比例为 1 时没有网格，
+        // 间距与价差不参与计算，也就不该被拒绝。
+        let price_tick = spec.price_rule().step_at(price_high);
+        let grid_spacing =
+            normalize_difference("grid spacing", self.long.grid_spacing, price_tick)?;
+        let grid_spread = normalize_difference("grid spread", self.long.grid_spread, price_tick)?;
 
         let max_position = spec.normalize_quantity(self.long.max_position);
         if max_position.units() < spec.quantity_step().units() {
@@ -337,7 +342,7 @@ fn check_cell_profitability(
     Ok(())
 }
 
-/// 按报价精度规整；规整结果超出可表示范围时是配置错误，不做饱和。
+/// 按这个价格处的报价精度规整；规整结果超出可表示范围时是配置错误，不做饱和。
 fn normalize_price(
     field: &'static str,
     price: Price,
@@ -347,7 +352,25 @@ fn normalize_price(
         .ok_or(ConfigError::PriceOutOfRange {
             field,
             price,
-            price_tick: spec.price_tick(),
+            price_tick: spec.price_rule().step_at(price),
+        })
+}
+
+/// 把差值（网格间距、价差）规整到 `price_tick` 的整数倍。
+///
+/// 差值是「两个价格之间的距离」，不是价格本身：它的精度要按它所在区间的最高价算，
+/// 也就是网格里最粗的那个步长，否则低位处规整出来的间距在高位处落不下。
+fn normalize_difference(
+    field: &'static str,
+    value: Price,
+    price_tick: Price,
+) -> Result<Price, ConfigError> {
+    value
+        .checked_round_to_tick(price_tick, PriceRounding::Nearest)
+        .ok_or(ConfigError::PriceOutOfRange {
+            field,
+            price: value,
+            price_tick,
         })
 }
 
@@ -355,7 +378,10 @@ fn normalize_price(
 mod tests {
     use super::{ConfigError, MAX_CELL_COUNT, SideConfig, StrategyConfig};
     use crate::batch::BatchIndex;
-    use crate::fixtures::{btc_fees, btc_spec, core_only_config, fine_spec, long_grid_config};
+    use crate::fixtures::{
+        btc_fees, btc_spec, core_only_config, fine_spec, hl_btc_spec, is_quotable,
+        long_grid_config, significant_figures,
+    };
     use crate::grid::{CellIndex, required_cell_quantity};
     use crate::instrument::{Fees, Instrument, InstrumentSpec};
     use crate::units::{Notional, Price, Quantity, Rate};
@@ -393,6 +419,29 @@ mod tests {
                 ..config("75000", "95000", "1").long
             },
             ..config("75000", "95000", "1")
+        }
+    }
+
+    /// 间距和价差可调的那份配置，用来构造跨价位的网格。
+    fn hl_config(
+        price_low: &str,
+        price_high: &str,
+        grid_spacing: &str,
+        grid_spread: &str,
+        max_position: &str,
+    ) -> StrategyConfig {
+        StrategyConfig {
+            instrument: Instrument::try_new("BTC").unwrap(),
+            long: SideConfig {
+                price_low: Price::parse(price_low).unwrap(),
+                price_high: Price::parse(price_high).unwrap(),
+                max_position: Quantity::parse(max_position).unwrap(),
+                core_ratio: Rate::ZERO,
+                batch_count: None,
+                grid_spacing: Price::parse(grid_spacing).unwrap(),
+                grid_spread: Price::parse(grid_spread).unwrap(),
+                throttle_interval: None,
+            },
         }
     }
 
@@ -1012,6 +1061,63 @@ mod tests {
                 max_cell_count: MAX_CELL_COUNT,
             }
         );
+    }
+
+    /// 跨过 10 万价位的网格：步长在 10 万处从 1 变成 10。买价是最高价一格格减下来的，
+    /// 卖价则在 10 万下面一点点、加上价差就跨到了粗步长那一档。
+    #[test]
+    fn a_grid_spanning_a_hundred_thousand_normalizes_to_prices_the_exchange_takes() {
+        let spec = hl_btc_spec();
+        let raw = hl_config("90000", "105000", "2500", "250", "1");
+
+        let normalized = raw.normalize(&spec, &btc_fees()).unwrap();
+
+        let cells = normalized.grid.cells();
+        assert_eq!(cells.len(), 6);
+        assert_eq!(cells[0].buy_price, Price::parse("105000").unwrap());
+        assert_eq!(cells[2].buy_price, Price::parse("100000").unwrap());
+        assert_eq!(cells[5].buy_price, Price::parse("92500").unwrap());
+        // 两边都跨过了 10 万：一档在它下面，一档在它上面。
+        assert!(
+            cells
+                .iter()
+                .any(|cell| cell.buy_price < Price::parse("100000").unwrap())
+        );
+        assert!(
+            cells
+                .iter()
+                .any(|cell| cell.buy_price > Price::parse("100000").unwrap())
+        );
+        for cell in cells {
+            for price in [cell.buy_price, cell.sell_price] {
+                assert!(
+                    is_quotable(&spec, price),
+                    "第 {} 格的价格 {price} 交易所不收（该价位步长 {}，有效数字 {}）",
+                    cell.index.0,
+                    spec.price_rule().step_at(price),
+                    significant_figures(price)
+                );
+            }
+        }
+    }
+
+    /// 卖价跨到粗步长那一档时向上规整：价差只会变大，不会让价格变得不合规。
+    #[test]
+    fn a_sell_price_crossing_into_a_coarser_decade_is_rounded_up() {
+        let spec = hl_btc_spec();
+        let raw = hl_config("99000", "99999", "500", "95", "1");
+
+        let normalized = raw.normalize(&spec, &btc_fees()).unwrap();
+
+        let cells = normalized.grid.cells();
+        assert_eq!(cells.len(), 2);
+        // 99999 + 95 = 100094，在 10 万上面只能报 10 的整数倍，向上取到 100100。
+        assert_eq!(cells[0].buy_price, Price::parse("99999").unwrap());
+        assert_eq!(cells[0].sell_price, Price::parse("100100").unwrap());
+        // 10 万下面还是 1 的整数倍，价差原样落地。
+        assert_eq!(cells[1].buy_price, Price::parse("99499").unwrap());
+        assert_eq!(cells[1].sell_price, Price::parse("99594").unwrap());
+        assert!(is_quotable(&spec, cells[0].sell_price));
     }
 
     #[test]

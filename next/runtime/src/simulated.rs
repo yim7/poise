@@ -348,6 +348,27 @@ impl SimulatedExchange {
         state.position = Position::from_units(state.position.units() + quantity.units());
     }
 
+    /// 交易所自己把一张挂单撤掉（自成交保护、只减仓冲突、账户被强平这类原因），
+    /// 本系统没有发撤单请求。已经成交的部分留在累计成交量里。
+    ///
+    /// 用来构造「订单离开了挂单列表，但结局是撤销而不是成交」的情形。
+    /// 返回这张单是否确实被撤掉了。
+    pub fn cancel_externally(&self, client_order_id: &ClientOrderId) -> bool {
+        let mut state = self.lock();
+        let Some(order) = state
+            .orders
+            .iter_mut()
+            .find(|order| &order.request.client_order_id == client_order_id)
+        else {
+            return false;
+        };
+        if !order.is_working() {
+            return false;
+        }
+        order.status = OrderStatus::Canceled;
+        true
+    }
+
     /// 让下一次下单被拒绝。
     pub fn reject_next_place(&self, reason: &str) {
         self.lock().reject_next_place = Some(reason.to_string());

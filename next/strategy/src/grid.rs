@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::batch::BatchIndex;
 use crate::error::ConfigError;
 use crate::instrument::InstrumentSpec;
-use crate::units::{Notional, Price, Quantity, Rate, SCALE, div_ceil, split_steps};
+use crate::units::{Notional, Price, PriceRounding, Quantity, Rate, SCALE, div_ceil, split_steps};
 
 /// 格子在网格中的下标，0 是最靠近空隙的一格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -105,8 +105,10 @@ pub(crate) fn build_cells(
         .map(|(index, price)| {
             Ok(Cell {
                 index: CellIndex(index),
+                // 买价是最高价一格一格减下来的：它和间距都是最高价处步长的整数倍，
+                // 越往下步长只会更细，所以买价本来就合规，不用再规整。
                 buy_price: *price,
-                sell_price: sell_price(*price, CellIndex(index), shape)?,
+                sell_price: sell_price(*price, CellIndex(index), shape, spec)?,
                 quantity: cell_quantity(index, prices.len(), shape.max_position, step),
                 batch: None,
             })
@@ -114,19 +116,27 @@ pub(crate) fn build_cells(
         .collect::<Result<Vec<Cell>, ConfigError>>()
 }
 
-/// 格子卖价 = 买价 + 价差；加出来超出可表示范围时是配置错误，不做饱和。
+/// 格子卖价 = 买价 + 价差，再按卖价处的报价精度向上规整。
+///
+/// 卖价高过买价，可能跨到步长更粗的价位上（例如 `0.099999` 上面就是 `0.1`，
+/// `99999` 上面就是 `100000`）：按卖价处的步长向上规整，价差只会变大，不会变小。
+/// 加出来或规整后超出可表示范围时是配置错误，不做饱和。
 pub(crate) fn sell_price(
     buy_price: Price,
     cell_index: CellIndex,
     shape: &GridShape,
+    spec: &InstrumentSpec,
 ) -> Result<Price, ConfigError> {
-    buy_price
+    let out_of_range = || ConfigError::SellPriceOutOfRange {
+        cell_index,
+        buy_price,
+        grid_spread: shape.grid_spread,
+    };
+    let sell_price = buy_price
         .checked_add(shape.grid_spread)
-        .ok_or(ConfigError::SellPriceOutOfRange {
-            cell_index,
-            buy_price,
-            grid_spread: shape.grid_spread,
-        })
+        .ok_or_else(out_of_range)?;
+    spec.normalize_price(sell_price, PriceRounding::Up)
+        .ok_or_else(out_of_range)
 }
 
 pub(crate) fn cell_quantity(

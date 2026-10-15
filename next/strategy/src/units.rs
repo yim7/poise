@@ -200,6 +200,18 @@ macro_rules! fixed_point_type {
             pub const fn max(self, other: Self) -> Self {
                 Self(if self.0 > other.0 { self.0 } else { other.0 })
             }
+
+            /// `10^exponent`；不足一个最小单位时按一个最小单位算。
+            pub fn power_of_ten(exponent: i32) -> Self {
+                let decimals = exponent + MAX_DECIMALS as i32;
+                if decimals <= 0 {
+                    return Self(1);
+                }
+                if decimals > 18 {
+                    return Self(i64::MAX);
+                }
+                Self(10_i64.pow(decimals as u32))
+            }
         }
 
         impl fmt::Display for $name {
@@ -290,6 +302,19 @@ impl Price {
         i64::try_from(round_units_to_step(self.0, tick.0, rounding))
             .ok()
             .map(Price)
+    }
+
+    /// 小于等于这个价格的十的幂次，也就是十进制位数减一：`95000` → 4，`0.00123` → -3。
+    ///
+    /// 零和负数没有量级，按 0 处理；调用方应当先把它们挡掉。
+    pub fn decade(self) -> i32 {
+        let mut magnitude = self.0.unsigned_abs();
+        let mut decade: i32 = 0;
+        while magnitude >= 10 {
+            magnitude /= 10;
+            decade += 1;
+        }
+        decade - MAX_DECIMALS as i32
     }
 
     pub const fn saturating_sub(self, other: Price) -> Price {

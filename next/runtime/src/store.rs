@@ -430,6 +430,25 @@ impl Store {
         })
     }
 
+    /// 一个标的上的全部策略，最近建的在前。
+    pub fn load_strategy_ids(
+        &self,
+        instrument: &Instrument,
+    ) -> Result<Vec<StrategyId>, StoreError> {
+        let connection = self.lock();
+        let mut statement = connection.prepare(
+            "SELECT strategy_id FROM strategies WHERE instrument = ?1
+             ORDER BY created_at DESC, rowid DESC",
+        )?;
+        let rows =
+            statement.query_map(params![instrument.symbol()], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(StrategyId::try_from(row?)?);
+        }
+        Ok(ids)
+    }
+
     pub fn save_strategy_status(
         &self,
         strategy_id: &StrategyId,

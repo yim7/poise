@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::Strategy;
 use crate::batch::{Batch, BatchIndex};
 use crate::grid::Cell;
+use crate::instrument::PriceRule;
 use crate::order::{ClientOrderId, OrderPurpose, Side, Unit, WorkingOrder};
 use crate::state::{BatchState, CellState, StrategyState};
 use crate::units::{Price, Quantity};
@@ -125,6 +126,9 @@ enum Placement {
 /// 新订单的限价不得与本策略在场的反向订单相交：买单最高到「在场卖单最低价 −
 /// 一个报价单位」，卖单最低到「在场买单最高价 + 一个报价单位」。调整只会让
 /// 买单更低、卖单更高，不会劣于原价。
+///
+/// 「一个报价单位」是那张反向订单价位上的最小变动：报价规则随价格变粗，
+/// 按粗步长退开的价格是细步长的整数倍，在两边都合规。
 #[derive(Debug, Default)]
 struct OwnOrderBounds {
     lowest_sell: Option<Price>,
@@ -160,16 +164,16 @@ impl OwnOrderBounds {
         }
     }
 
-    fn buy_limit(&self, desired: Price, tick: Price) -> Price {
+    fn buy_limit(&self, desired: Price, rule: PriceRule) -> Price {
         match self.lowest_sell {
-            Some(lowest_sell) => desired.min(lowest_sell.saturating_sub(tick)),
+            Some(lowest_sell) => desired.min(lowest_sell.saturating_sub(rule.step_at(lowest_sell))),
             None => desired,
         }
     }
 
-    fn sell_limit(&self, desired: Price, tick: Price) -> Price {
+    fn sell_limit(&self, desired: Price, rule: PriceRule) -> Price {
         match self.highest_buy {
-            Some(highest_buy) => desired.max(highest_buy.saturating_add(tick)),
+            Some(highest_buy) => desired.max(highest_buy.saturating_add(rule.step_at(highest_buy))),
             None => desired,
         }
     }
@@ -188,8 +192,8 @@ struct Planner<'a> {
     plan: Plan,
     /// 在场订单给出的限价边界（第 6 节），随规划过程更新。
     bounds: OwnOrderBounds,
-    /// 一个报价单位；下调限价时用。
-    tick: Price,
+    /// 报价规则；让新限价退开一个报价单位时用。
+    rule: PriceRule,
     waiting_for_fills: bool,
     waiting_for_throttle: bool,
     waiting_for_batch: bool,
@@ -213,7 +217,7 @@ impl<'a> Planner<'a> {
                 ..Plan::default()
             },
             bounds: OwnOrderBounds::of(working_orders),
-            tick: strategy.spec().price_tick(),
+            rule: strategy.spec().price_rule(),
             waiting_for_fills: false,
             waiting_for_throttle: false,
             waiting_for_batch: false,
@@ -255,7 +259,7 @@ impl<'a> Planner<'a> {
             return;
         }
         let unit = Unit::Batch(batch.index);
-        let limit_price = self.bounds.buy_limit(batch.price, self.tick);
+        let limit_price = self.bounds.buy_limit(batch.price, self.rule);
         let demand = Demand {
             unit,
             purpose: OrderPurpose::CoreBuy,
@@ -323,7 +327,7 @@ impl<'a> Planner<'a> {
             unit,
             purpose: OrderPurpose::GridSell,
             // 卖单的限价要用买回之后的最新边界：买回的限价可能刚被下调。
-            limit_price: self.bounds.sell_limit(cell.sell_price, self.tick),
+            limit_price: self.bounds.sell_limit(cell.sell_price, self.rule),
             quantity: held,
             reduce_only: true,
             blocked: self.blocked(unit, OrderPurpose::GridSell),
@@ -338,7 +342,7 @@ impl<'a> Planner<'a> {
         let buy = Demand {
             unit,
             purpose: OrderPurpose::GridBuy,
-            limit_price: self.bounds.buy_limit(cell.buy_price, self.tick),
+            limit_price: self.bounds.buy_limit(cell.buy_price, self.rule),
             quantity: cell_state.to_buy_back,
             reduce_only: false,
             blocked: self.blocked(unit, OrderPurpose::GridBuy),

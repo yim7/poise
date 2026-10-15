@@ -117,10 +117,12 @@ pub(crate) fn build_batches(
     let step = spec.quantity_step();
     let (price_high, price_low) = (shape.price_high, shape.price_low);
 
-    // 批次价：把范围均分后按报价精度规整。
+    // 批次价：把范围均分后按报价精度规整。报价规则随价格变粗，批次价都在 `H` 以下，
+    // 按 `H` 处的步长规整，越往下步长只会更细，规整出来的价格处处都落得下。
+    let tick = spec.price_rule().step_at(price_high);
     let batch_prices: Vec<Price> = (0..count)
         .map(|index| {
-            batch_price(price_high, price_low, batch_count, index, spec.price_tick()).ok_or(
+            batch_price(price_high, price_low, batch_count, index, tick).ok_or(
                 ConfigError::BatchPriceOutOfRange {
                     batch_index: BatchIndex(index),
                     price_low,
@@ -188,7 +190,7 @@ pub(crate) fn build_batches(
             cells.push(Cell {
                 index: *cell_index,
                 buy_price: prices[cell_index.0],
-                sell_price: sell_price(prices[cell_index.0], *cell_index, shape)?,
+                sell_price: sell_price(prices[cell_index.0], *cell_index, shape, spec)?,
                 quantity,
                 batch: Some(batch_index),
             });

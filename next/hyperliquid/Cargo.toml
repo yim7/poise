@@ -1,0 +1,23 @@
+[package]
+name = "poise-hyperliquid"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+hex.workspace = true
+k256.workspace = true
+poise-runtime.workspace = true
+poise-strategy.workspace = true
+reqwest.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha3.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
