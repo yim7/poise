@@ -1,12 +1,30 @@
-//! 订单身份、用途和状态。
+//! 订单身份、归属单位、用途和状态。
 //!
-//! 每张订单在发送前确定它属于哪个格子、用途、限价和数量；客户端订单 ID 由
+//! 每张订单在发送前确定它属于哪个批次或格子、用途、限价和数量；客户端订单 ID 由
 //! runtime 生成并持久化，永不复用。
 
 use serde::{Deserialize, Serialize};
 
+use crate::batch::BatchIndex;
 use crate::grid::CellIndex;
 use crate::units::{Price, Quantity};
+
+/// 订单的归属单位：一批主仓或一个格子。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unit {
+    Batch(BatchIndex),
+    Cell(CellIndex),
+}
+
+impl std::fmt::Display for Unit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Batch(index) => write!(formatter, "batch {index}"),
+            Self::Cell(index) => write!(formatter, "cell {index}"),
+        }
+    }
+}
 
 /// 客户端订单 ID（Hyperliquid `cloid`）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -61,10 +79,12 @@ pub enum Side {
     Sell,
 }
 
-/// 订单用途：它记到哪个格子的哪一部分。
+/// 订单用途：它记到哪个单位的哪一部分。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderPurpose {
+    /// 主仓买入：本批主仓部分，策略永不为它下平仓单。
+    CoreBuy,
     /// 格子买入：买回待买回部分。
     GridBuy,
     /// 格子卖出：卖出持有部分。
@@ -74,13 +94,14 @@ pub enum OrderPurpose {
 impl OrderPurpose {
     pub const fn side(self) -> Side {
         match self {
-            Self::GridBuy => Side::Buy,
+            Self::CoreBuy | Self::GridBuy => Side::Buy,
             Self::GridSell => Side::Sell,
         }
     }
 
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::CoreBuy => "core_buy",
             Self::GridBuy => "grid_buy",
             Self::GridSell => "grid_sell",
         }
@@ -128,7 +149,7 @@ impl OrderStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderRecord {
     pub client_order_id: ClientOrderId,
-    pub cell_index: CellIndex,
+    pub unit: Unit,
     pub purpose: OrderPurpose,
     pub limit_price: Price,
     pub quantity: Quantity,
@@ -151,7 +172,7 @@ impl OrderRecord {
     pub fn working_view(&self) -> WorkingOrder {
         WorkingOrder {
             client_order_id: self.client_order_id.clone(),
-            cell_index: self.cell_index,
+            unit: self.unit,
             purpose: self.purpose,
             limit_price: self.limit_price,
             remaining: self.remaining(),
@@ -163,7 +184,7 @@ impl OrderRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkingOrder {
     pub client_order_id: ClientOrderId,
-    pub cell_index: CellIndex,
+    pub unit: Unit,
     pub purpose: OrderPurpose,
     pub limit_price: Price,
     pub remaining: Quantity,

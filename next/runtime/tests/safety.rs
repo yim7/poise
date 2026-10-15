@@ -7,7 +7,7 @@ use poise_runtime::{
     ResumeOutcome, Runtime, RuntimeError, SimulatedExchange, Store, StoredOrder, StrategyStatus,
 };
 use poise_strategy::grid::CellIndex;
-use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus};
+use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, Unit};
 use poise_strategy::planning::WaitReason;
 use poise_strategy::units::{Position, Price, Quantity};
 
@@ -98,7 +98,7 @@ async fn a_cancel_with_an_unknown_result_keeps_the_reservation_and_places_nothin
             &StoredOrder {
                 record: OrderRecord {
                     client_order_id: ghost.clone(),
-                    cell_index: CellIndex(0),
+                    unit: Unit::Cell(CellIndex(0)),
                     purpose: OrderPurpose::GridBuy,
                     // 价格与格子买价不符，规划会要求撤掉它、再补一张新的。
                     limit_price: Price::parse("94000").unwrap(),
@@ -107,6 +107,7 @@ async fn a_cancel_with_an_unknown_result_keeps_the_reservation_and_places_nothin
                     reduce_only: false,
                     status: OrderStatus::Open,
                 },
+                fills_reconciled: false,
                 exchange_order_id: None,
                 expires_at: at(6),
                 placed_at: at(0),
@@ -118,9 +119,18 @@ async fn a_cancel_with_an_unknown_result_keeps_the_reservation_and_places_nothin
 
     let report = harness.step(1).await;
 
-    // 规划想撤掉这张单、再补上 20 格的买单；撤单结果未知时这一步什么也不做。
+    // 规划想撤掉这张单，再补上其余 19 格的买单。第 0 格不补：这张单的成交还没对完账，
+    // 它可能已经成交了一部分，再按整份数量补一张就会买多。
     assert_eq!(report.plan.cancel, vec![ghost.clone()]);
-    assert_eq!(report.plan.place.len(), 20);
+    assert_eq!(report.plan.place.len(), 19);
+    assert!(
+        report
+            .plan
+            .place
+            .iter()
+            .all(|intent| intent.unit != Unit::Cell(CellIndex(0)))
+    );
+    assert!(report.plan.waiting.contains(&WaitReason::FillsPending));
     assert!(report.canceled.is_empty());
     assert!(report.placed.is_empty());
     assert!(
@@ -236,6 +246,91 @@ async fn pausing_absorbs_a_late_fill_older_than_the_fills_lookback() {
     );
 }
 
+/// 暂停后流水才到，而且已经超出回看窗口：恢复时要能补记。
+#[tokio::test]
+async fn a_fill_delivered_after_the_pause_is_still_recorded_on_resume() {
+    let harness = harness();
+    harness.step(0).await;
+    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    // 下单当时就成交了 0.02，成交记录要等到暂停之后才到。
+    harness.exchange.delay_next_fills(1);
+    harness
+        .exchange
+        .fill(&buy, Quantity::parse("0.02").unwrap(), at(0))
+        .unwrap();
+    // 走到 t=120：挂单累计量解释了仓位差额，同步点推到 120。
+    harness.step(120).await;
+    // 暂停先撤单，再补拉成交；这时流水还查不到，成交没有入账。
+    let canceled = harness
+        .runtime
+        .pause(&harness.strategy_id, at(120))
+        .await
+        .unwrap();
+    assert_eq!(canceled.len(), 20);
+    assert_eq!(
+        harness.cell(0).to_buy_back,
+        Quantity::parse("0.05").unwrap(),
+        "the fill record is not visible yet"
+    );
+
+    harness.exchange.deliver_delayed_fills();
+    let outcome = harness
+        .runtime
+        .resume(&harness.strategy_id, at(121))
+        .await
+        .unwrap();
+    let ResumeOutcome::Resumed(report) = outcome else {
+        panic!("expected a resumed step, got {outcome:?}");
+    };
+
+    // 撤单只把订单变成终态，成交核对还没完成：回查起点仍然追到它挂出去的时刻。
+    assert_eq!(report.applied_fills, 1);
+    assert_eq!(
+        harness.cell(0).to_buy_back,
+        Quantity::parse("0.03").unwrap()
+    );
+    assert_eq!(report.position, Position::parse("0.02").unwrap());
+    assert_eq!(report.expected_position, Position::parse("0.02").unwrap());
+    assert!(!report.is_paused());
+}
+
+/// 二次核对必须重新取订单快照，不能沿用查仓位之前的旧快照。
+///
+/// 事件序列：挂单快照里累计量是 0；查仓位之前成交 `.02`；两次补拉成交都暂时看不到
+/// 这笔流水。沿用旧快照就会把「刚成交、还没入账」当成仓位对不上，误暂停一个正常
+/// 运行的策略。
+#[tokio::test]
+async fn a_fill_hidden_from_the_fills_query_does_not_pause_the_strategy() {
+    let harness = harness();
+    harness.step(0).await;
+    let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
+    // 成交记录查不到：第一次补拉和第二次补拉都看不到它。
+    harness.exchange.delay_next_fills(1);
+    // 查完挂单、查仓位之前成交 0.02：这一笔不在挂单快照里，也不在成交流水里。
+    harness
+        .exchange
+        .fill_before_next_position(1, buy, Quantity::parse("0.02").unwrap());
+
+    let report = harness.step(1).await;
+
+    // 二次核对重新取挂单快照，累计量 0.02 解释了仓位差额。
+    assert!(!report.is_paused());
+    assert_eq!(report.applied_fills, 0, "the fill record is still hidden");
+    assert_eq!(report.position, Position::parse("0.02").unwrap());
+    assert_eq!(report.expected_position, Position::parse("0.02").unwrap());
+
+    // 流水到手后照常入账。
+    harness.exchange.deliver_delayed_fills();
+    let report = harness.step(2).await;
+
+    assert!(!report.is_paused());
+    assert_eq!(report.applied_fills, 1);
+    assert_eq!(
+        harness.cell(0).to_buy_back,
+        Quantity::parse("0.03").unwrap()
+    );
+}
+
 #[tokio::test]
 async fn a_fully_filled_order_whose_fill_record_is_late_is_not_replaced() {
     let harness = harness();
@@ -288,7 +383,7 @@ async fn a_fill_between_the_fills_query_and_the_position_query_does_not_pause() 
     // 查完成交、还没查仓位时成交了 0.02。
     harness
         .exchange
-        .fill_before_next_position(buy, Quantity::parse("0.02").unwrap());
+        .fill_before_next_position(1, buy, Quantity::parse("0.02").unwrap());
 
     let report = harness.step(1).await;
 
@@ -311,7 +406,7 @@ async fn a_fill_between_the_position_query_and_the_fills_requery_does_not_pause(
     // 补拉成交之前又成交了 0.02，这一笔同样不在刚才那份仓位快照里。
     harness
         .exchange
-        .fill_before_next_position(buy.clone(), Quantity::parse("0.02").unwrap());
+        .fill_before_next_position(1, buy.clone(), Quantity::parse("0.02").unwrap());
     harness
         .exchange
         .fill_after_next_position(buy, Quantity::parse("0.02").unwrap());
@@ -389,7 +484,7 @@ async fn a_cancel_of_an_order_the_exchange_never_saw_keeps_the_reservation() {
         .orders()
         .into_iter()
         .filter(|order| {
-            order.record.cell_index == unknown.record.cell_index
+            order.record.unit == unknown.record.unit
                 && order.record.purpose == OrderPurpose::GridBuy
         })
         .collect();
@@ -454,6 +549,78 @@ async fn b18_a_position_mismatch_pauses_the_strategy_and_cancels_its_orders() {
         harness.runtime.status(&harness.strategy_id).unwrap(),
         StrategyStatus::Paused
     );
+}
+
+/// 只减仓的卖单不能把仓位做到反方向。
+///
+/// 事件序列：格子买入 `.05` 并挂出只减仓的卖单；用户手动把仓位平掉；价格随后上穿
+/// 卖价。这张卖单此刻没有任何仓位可减，不能成交。
+#[tokio::test]
+async fn a_reduce_only_sell_does_not_open_a_short_position() {
+    let harness = harness();
+    harness.step(0).await;
+    // 跌到 95000：第 0 格买回 .05。
+    harness
+        .exchange
+        .set_market_price(Price::parse("95000").unwrap(), at(1));
+    harness.step(1).await;
+    assert_eq!(
+        harness.exchange.current_position(),
+        Position::parse("0.05").unwrap()
+    );
+    let sell = harness.working_cloid(0, OrderPurpose::GridSell);
+    assert!(harness.at_exchange(&sell).unwrap().reduce_only);
+
+    // 用户在交易所手动清仓，运行时还没对账。
+    harness
+        .exchange
+        .manual_trade(Quantity::parse("-0.05").unwrap());
+    // 价格上穿卖价 96000。
+    harness
+        .exchange
+        .set_market_price(Price::parse("96100").unwrap(), at(2));
+
+    // 没有仓位可减：卖单不成交，仓位停在零，不会变成 -0.05。
+    assert_eq!(harness.exchange.current_position(), Position::ZERO);
+    assert_eq!(
+        harness.at_exchange(&sell).unwrap().status,
+        OrderStatus::Open
+    );
+    // 直接指定成交也一样：只减仓的可成交数量按当前仓位收窄，收窄到零就不成交。
+    assert_eq!(
+        harness
+            .exchange
+            .fill(&sell, Quantity::parse("0.05").unwrap(), at(2))
+            .unwrap(),
+        Quantity::ZERO
+    );
+    assert_eq!(harness.exchange.current_position(), Position::ZERO);
+
+    // 对账时发现仓位对不上：应有持仓是 .05，实际是 0，策略暂停。
+    let report = harness.step(2).await;
+
+    assert!(report.is_paused());
+    assert_eq!(report.position, Position::ZERO);
+    assert_eq!(report.expected_position, Position::parse("0.05").unwrap());
+}
+
+/// 写库失败时一张单都不能发出去（第 9.1 节）。
+#[tokio::test]
+async fn b17_nothing_is_sent_when_the_order_cannot_be_stored() {
+    let harness = harness();
+    // 让写订单表失败，模拟磁盘写不进去。
+    harness
+        .runtime
+        .store()
+        .fail_order_writes_for_test()
+        .unwrap();
+
+    let error = harness.runtime.step(&harness.strategy_id, at(0)).await;
+
+    assert!(matches!(error, Err(RuntimeError::Store(_))));
+    // 先写库、后发送：写不进去就一张单也不发。
+    assert_eq!(harness.exchange.place_count(), 0);
+    assert!(harness.orders().is_empty());
 }
 
 #[tokio::test]

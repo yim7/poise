@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::batch::BatchIndex;
 use crate::units::{Price, Quantity, div_ceil};
 
 /// 格子在网格中的下标，0 是最靠近空隙的一格。
@@ -24,7 +25,10 @@ pub struct Cell {
     pub index: CellIndex,
     pub buy_price: Price,
     pub sell_price: Price,
+    /// 本格的网格数量：所在批次的网格部分平均分给跟随它的格子。
     pub quantity: Quantity,
+    /// 跟随哪一批；主仓比例为 0 时没有批次，格子自成单位。
+    pub batch: Option<BatchIndex>,
 }
 
 /// 一个策略的格子划分。

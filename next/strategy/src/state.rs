@@ -1,10 +1,12 @@
-//! 策略状态：每个格子的启用标记与待买回量。
+//! 策略状态：每批的主仓累计成交与结束标记，每个格子的启用标记与待买回量。
 //!
-//! 只有这两项需要保存，其余数量都可以推算：
-//! 格子持有 = 格子数量 − 待买回量；应有持仓 = 各已启用格子的持有量之和。
+//! 只有这几项需要保存，其余数量都可以推算：
+//! 格子持有 = 格子数量 − 待买回量；主仓 = 各批累计成交之和；
+//! 应有持仓 = 主仓 + 各已启用格子的持有量。
 
 use serde::{Deserialize, Serialize};
 
+use crate::batch::BatchIndex;
 use crate::grid::{CellIndex, GridPlan};
 use crate::units::{Position, Quantity};
 
@@ -18,24 +20,47 @@ pub struct CellState {
 }
 
 impl CellState {
-    /// 格子刚启用时全部是待买回。
-    pub fn enabled_all_to_buy_back(quantity: Quantity) -> Self {
-        Self {
-            enabled: true,
-            to_buy_back: quantity,
+    /// 持有量：已启用的格子中，已经买回、还没卖出的部分。
+    pub fn held(&self, quantity: Quantity) -> Quantity {
+        if self.enabled {
+            quantity.saturating_sub(self.to_buy_back)
+        } else {
+            Quantity::ZERO
         }
     }
 }
 
-/// 一个策略的格子状态，按格子下标排列。
+/// 一批主仓的状态。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BatchState {
+    /// 主仓累计成交 `F`，`0 ≤ F ≤ C`。
+    pub filled: Quantity,
+    /// 是否已结束：主仓买完，或剩余量按批次价不足最低下单金额而提前结束。
+    pub finished: bool,
+}
+
+/// 一个策略的状态。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StrategyState {
+    batches: Vec<BatchState>,
     cells: Vec<CellState>,
 }
 
 impl StrategyState {
-    pub fn new(cells: Vec<CellState>) -> Self {
-        Self { cells }
+    pub fn new(batches: Vec<BatchState>, cells: Vec<CellState>) -> Self {
+        Self { batches, cells }
+    }
+
+    pub fn batches(&self) -> &[BatchState] {
+        &self.batches
+    }
+
+    pub fn batch(&self, index: BatchIndex) -> Option<&BatchState> {
+        self.batches.get(index.0)
+    }
+
+    pub fn batch_mut(&mut self, index: BatchIndex) -> Option<&mut BatchState> {
+        self.batches.get_mut(index.0)
     }
 
     pub fn cells(&self) -> &[CellState] {
@@ -50,25 +75,32 @@ impl StrategyState {
         self.cells.get_mut(index.0)
     }
 
-    /// 已启用格子的持有量之和，做多时为正仓位。
-    pub fn expected_position(&self, grid: &GridPlan) -> Position {
-        let held = grid
-            .cells()
+    /// 主仓合计：各批累计成交之和。
+    pub fn core_position(&self) -> Quantity {
+        self.batches
             .iter()
-            .filter_map(|cell| {
-                let state = self.cell(cell.index)?;
-                state
-                    .enabled
-                    .then(|| cell.quantity.saturating_sub(state.to_buy_back))
-            })
-            .fold(Quantity::ZERO, |total, held| total + held);
-        Position::from_quantity(held)
+            .fold(Quantity::ZERO, |total, batch| total + batch.filled)
+    }
+
+    /// 格子持有合计：各已启用格子的持有量之和。
+    pub fn grid_position(&self, grid: &GridPlan) -> Quantity {
+        grid.cells()
+            .iter()
+            .filter_map(|cell| Some(self.cell(cell.index)?.held(cell.quantity)))
+            .fold(Quantity::ZERO, |total, held| total + held)
+    }
+
+    /// 应有持仓：主仓合计 + 格子持有。做多时为正。
+    pub fn expected_position(&self, grid: &GridPlan) -> Position {
+        Position::from_quantity(self.core_position() + self.grid_position(grid))
     }
 }
 
-/// 状态与格子划分不一致。
+/// 状态与批次、格子划分不一致。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StateError {
+    #[error("state has {actual} batches but the plan has {expected}")]
+    BatchCountMismatch { expected: usize, actual: usize },
     #[error("state has {actual} cells but the grid has {expected}")]
     CellCountMismatch { expected: usize, actual: usize },
     #[error("cell {cell_index} to buy back {to_buy_back} exceeds its quantity {cell_quantity}")]
@@ -77,4 +109,109 @@ pub enum StateError {
         to_buy_back: Quantity,
         cell_quantity: Quantity,
     },
+    #[error("batch {batch_index} filled {filled}, above its core quantity {core_quantity}")]
+    FilledAboveCoreQuantity {
+        batch_index: BatchIndex,
+        filled: Quantity,
+        core_quantity: Quantity,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BatchState, StateError, StrategyState};
+    use crate::batch::BatchIndex;
+    use crate::fixtures::{core_long_strategy, long_grid_strategy};
+    use crate::grid::CellIndex;
+    use crate::units::{Position, Quantity};
+
+    #[test]
+    fn expected_position_is_the_core_plus_the_held_cells() {
+        let strategy = core_long_strategy();
+        let mut state = strategy.initial_state();
+
+        // 主仓成交 .175，格子全部启用但还没买：持仓就是主仓。
+        state.batch_mut(BatchIndex(0)).unwrap().filled = Quantity::parse("0.175").unwrap();
+        strategy.advance(&mut state, &[]);
+        assert_eq!(state.core_position(), Quantity::parse("0.175").unwrap());
+        assert_eq!(state.grid_position(strategy.grid()), Quantity::ZERO);
+        assert_eq!(
+            strategy.expected_position(&state),
+            Position::parse("0.175").unwrap()
+        );
+
+        // 95、94 两格买回：各自 .015 计入持仓。
+        for index in 0..2 {
+            state.cell_mut(CellIndex(index)).unwrap().to_buy_back = Quantity::ZERO;
+        }
+        assert_eq!(
+            state.grid_position(strategy.grid()),
+            Quantity::parse("0.03").unwrap()
+        );
+        assert_eq!(
+            strategy.expected_position(&state),
+            Position::parse("0.205").unwrap()
+        );
+
+        // 95 格卖回：持仓减回主仓加剩下那一格。
+        state.cell_mut(CellIndex(0)).unwrap().to_buy_back = Quantity::parse("0.015").unwrap();
+        assert_eq!(
+            strategy.expected_position(&state),
+            Position::parse("0.19").unwrap()
+        );
+    }
+
+    #[test]
+    fn disabled_cells_hold_nothing_even_with_a_partial_to_buy_back() {
+        let strategy = long_grid_strategy();
+        let mut state = strategy.initial_state();
+        state.cell_mut(CellIndex(0)).unwrap().enabled = false;
+
+        assert_eq!(state.grid_position(strategy.grid()), Quantity::ZERO);
+        assert_eq!(strategy.expected_position(&state), Position::ZERO);
+    }
+
+    #[test]
+    fn validate_state_rejects_state_that_does_not_match_the_plan() {
+        let strategy = core_long_strategy();
+        let state = strategy.initial_state();
+        assert!(strategy.validate_state(&state).is_ok());
+
+        let fewer_batches = StrategyState::new(vec![BatchState::default()], state.cells().to_vec());
+        assert!(matches!(
+            strategy.validate_state(&fewer_batches).unwrap_err(),
+            StateError::BatchCountMismatch {
+                expected: 4,
+                actual: 1
+            }
+        ));
+
+        let fewer_cells = StrategyState::new(state.batches().to_vec(), vec![]);
+        assert!(matches!(
+            strategy.validate_state(&fewer_cells).unwrap_err(),
+            StateError::CellCountMismatch {
+                expected: 20,
+                actual: 0
+            }
+        ));
+
+        // 主仓成交超过 C = .175。
+        let mut overfilled = state.clone();
+        overfilled.batch_mut(BatchIndex(0)).unwrap().filled = Quantity::parse("0.2").unwrap();
+        assert!(matches!(
+            strategy.validate_state(&overfilled).unwrap_err(),
+            StateError::FilledAboveCoreQuantity { .. }
+        ));
+
+        // 待买回量超过格子数量 .015。
+        let mut too_much_to_buy_back = state.clone();
+        too_much_to_buy_back
+            .cell_mut(CellIndex(0))
+            .unwrap()
+            .to_buy_back = Quantity::parse("0.02").unwrap();
+        assert!(matches!(
+            strategy.validate_state(&too_much_to_buy_back).unwrap_err(),
+            StateError::ToBuyBackAboveCellQuantity { .. }
+        ));
+    }
 }

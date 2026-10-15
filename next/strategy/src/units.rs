@@ -110,10 +110,41 @@ pub(crate) fn div_ceil(numerator: i128, denominator: i128) -> i128 {
     (numerator + denominator - 1) / denominator
 }
 
-/// 把非负整数单位规整到 `step` 的整数倍。
-fn round_units_to_step(units: i64, step: i64, rounding: PriceRounding) -> i64 {
+/// 非负整数之间的向下取整除法。
+pub(crate) fn div_floor(numerator: i128, denominator: i128) -> i128 {
+    debug_assert!(denominator > 0, "denominator must be positive");
+    debug_assert!(numerator >= 0, "numerator must be non-negative");
+    numerator / denominator
+}
+
+/// 非负整数之间的四舍五入除法（.5 向上）。
+pub(crate) fn div_round(numerator: i128, denominator: i128) -> i128 {
+    debug_assert!(denominator > 0, "denominator must be positive");
+    debug_assert!(numerator >= 0, "numerator must be non-negative");
+    (2 * numerator + denominator) / (2 * denominator)
+}
+
+/// 把 `total_steps` 个最小单位平均分成 `count` 份，除不尽的余数依次多给前几份。
+///
+/// 「前」指下标小的那一份。批次和格子都按价格从高到低排列，所以下标小的
+/// 那一份就是靠近空隙的一端。
+pub(crate) fn split_steps(total_steps: i64, index: usize, count: usize) -> i64 {
+    debug_assert!(count > 0, "count must be positive");
+    let base = total_steps / count as i64;
+    let remainder = total_steps % count as i64;
+    base + i64::from((index as i64) < remainder)
+}
+
+/// 把非负整数单位规整到 `step` 的整数倍，用 i128 算中间量。
+///
+/// 返回值可能超过 `i64`：向上取整时 `(商 + 1) × step` 在接近上限的输入上就会越界。
+/// 调用方必须自己决定越界怎么办，不能让它变成 debug 构建里的 panic，也不能悄悄饱和成
+/// 一个不是 `step` 整数倍的值。
+fn round_units_to_step(units: i64, step: i64, rounding: PriceRounding) -> i128 {
     debug_assert!(step > 0, "step must be positive");
     debug_assert!(units >= 0, "units must be non-negative");
+    let units = i128::from(units);
+    let step = i128::from(step);
     let quotient = units / step;
     let remainder = units % step;
     match rounding {
@@ -253,10 +284,12 @@ fixed_point_type!(
 );
 
 impl Price {
-    /// 按报价精度规整。
-    pub fn round_to_tick(self, tick: Price, rounding: PriceRounding) -> Price {
+    /// 按报价精度规整；规整结果超出可表示范围时返回 `None`。
+    pub fn checked_round_to_tick(self, tick: Price, rounding: PriceRounding) -> Option<Price> {
         debug_assert!(tick.units() > 0, "price tick must be positive");
-        Price(round_units_to_step(self.0, tick.0, rounding))
+        i64::try_from(round_units_to_step(self.0, tick.0, rounding))
+            .ok()
+            .map(Price)
     }
 
     pub const fn saturating_sub(self, other: Price) -> Price {
@@ -266,13 +299,41 @@ impl Price {
     pub const fn saturating_add(self, other: Price) -> Price {
         Price(self.0.saturating_add(other.0))
     }
+
+    /// 加法，超出可表示范围时返回 `None`。
+    ///
+    /// 价格由配置和合约规则算出，不能悄悄饱和：饱和出来的价格不是报价精度的整数倍，
+    /// 会变成一张无法合法报出的订单。
+    pub const fn checked_add(self, other: Price) -> Option<Price> {
+        match self.0.checked_add(other.0) {
+            Some(units) => Some(Price(units)),
+            None => None,
+        }
+    }
 }
 
 impl Quantity {
     /// 按数量精度向下规整。
     pub fn floor_to_step(self, step: Quantity) -> Quantity {
         debug_assert!(step.units() > 0, "quantity step must be positive");
-        Quantity(round_units_to_step(self.0, step.0, PriceRounding::Down))
+        // 向下取整的结果不会超过原值，不可能越界。
+        Quantity(round_units_to_step(self.0, step.0, PriceRounding::Down) as i64)
+    }
+
+    /// 按数量精度向上规整；规整结果超出可表示范围时返回 `None`。
+    pub fn checked_ceil_to_step(self, step: Quantity) -> Option<Quantity> {
+        debug_assert!(step.units() > 0, "quantity step must be positive");
+        i64::try_from(round_units_to_step(self.0, step.0, PriceRounding::Up))
+            .ok()
+            .map(Quantity)
+    }
+
+    /// 乘以一个比率，向上取整到最小单位。
+    pub fn mul_rate_ceil(self, rate: Rate) -> Quantity {
+        debug_assert!(self.0 >= 0, "quantity must be non-negative");
+        debug_assert!(rate.0 >= 0, "rate must be non-negative");
+        let scaled = self.0 as i128 * rate.0 as i128;
+        Quantity(div_ceil(scaled, SCALE_RAW) as i64)
     }
 
     pub const fn saturating_sub(self, other: Quantity) -> Quantity {
@@ -452,28 +513,59 @@ mod tests {
         let price = Price::parse("94.6").unwrap();
 
         assert_eq!(
-            price.round_to_tick(tick, PriceRounding::Down),
-            Price::parse("94").unwrap()
+            price.checked_round_to_tick(tick, PriceRounding::Down),
+            Some(Price::parse("94").unwrap())
         );
         assert_eq!(
-            price.round_to_tick(tick, PriceRounding::Up),
-            Price::parse("95").unwrap()
+            price.checked_round_to_tick(tick, PriceRounding::Up),
+            Some(Price::parse("95").unwrap())
         );
         assert_eq!(
-            price.round_to_tick(tick, PriceRounding::Nearest),
-            Price::parse("95").unwrap()
+            price.checked_round_to_tick(tick, PriceRounding::Nearest),
+            Some(Price::parse("95").unwrap())
         );
         assert_eq!(
             Price::parse("94.5")
                 .unwrap()
-                .round_to_tick(tick, PriceRounding::Nearest),
-            Price::parse("95").unwrap()
+                .checked_round_to_tick(tick, PriceRounding::Nearest),
+            Some(Price::parse("95").unwrap())
         );
         assert_eq!(
             Price::parse("94")
                 .unwrap()
-                .round_to_tick(tick, PriceRounding::Up),
-            Price::parse("94").unwrap()
+                .checked_round_to_tick(tick, PriceRounding::Up),
+            Some(Price::parse("94").unwrap())
+        );
+    }
+
+    /// 向上规整到 `tick` 的整数倍可能超过 `i64`：这个输入在 debug 构建里
+    /// 曾经直接 panic（`(商 + 1) × step` 越界）。
+    #[test]
+    fn reports_prices_whose_rounded_value_is_not_representable() {
+        let tick = Price::parse("1").unwrap();
+        let price = Price::parse("92233720368.54").unwrap();
+
+        assert_eq!(
+            price.checked_round_to_tick(tick, PriceRounding::Down),
+            Some(Price::parse("92233720368").unwrap())
+        );
+        assert_eq!(
+            price.checked_round_to_tick(tick, PriceRounding::Nearest),
+            None
+        );
+        assert_eq!(price.checked_round_to_tick(tick, PriceRounding::Up), None);
+    }
+
+    /// 数量向上规整同样可能越界。
+    #[test]
+    fn reports_quantities_whose_rounded_value_is_not_representable() {
+        let step = Quantity::parse("0.00000003").unwrap();
+        let quantity = Quantity::parse("92233720368.54775807").unwrap();
+
+        assert_eq!(
+            quantity.checked_ceil_to_step(step),
+            None,
+            "rounding up past i64 must be reported, not wrapped"
         );
     }
 

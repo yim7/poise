@@ -108,9 +108,9 @@ impl InstrumentSpec {
         self.min_order_notional
     }
 
-    /// 价格按报价精度规整。
-    pub fn normalize_price(&self, price: Price, rounding: PriceRounding) -> Price {
-        price.round_to_tick(self.price_tick, rounding)
+    /// 价格按报价精度规整；规整结果超出可表示范围时返回 `None`。
+    pub fn normalize_price(&self, price: Price, rounding: PriceRounding) -> Option<Price> {
+        price.checked_round_to_tick(self.price_tick, rounding)
     }
 
     /// 数量按数量精度向下规整。
@@ -152,7 +152,7 @@ mod tests {
 
         assert_eq!(
             spec.normalize_price(Price::parse("94321.6").unwrap(), PriceRounding::Down),
-            Price::parse("94321").unwrap()
+            Some(Price::parse("94321").unwrap())
         );
         assert_eq!(
             spec.normalize_quantity(Quantity::parse("0.0159").unwrap()),

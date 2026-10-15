@@ -9,10 +9,11 @@ use std::sync::Arc;
 
 use chrono::{DateTime, TimeZone, Utc};
 use poise_runtime::{Runtime, SimulatedExchange, StepReport, Store, StoredOrder, StrategyId};
+use poise_strategy::batch::BatchIndex;
 use poise_strategy::config::{SideConfig, StrategyConfig};
 use poise_strategy::grid::CellIndex;
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
-use poise_strategy::order::{ClientOrderId, OrderPurpose};
+use poise_strategy::order::{ClientOrderId, OrderPurpose, Unit};
 use poise_strategy::state::CellState;
 use poise_strategy::units::{Notional, Price, Quantity, Rate};
 
@@ -51,9 +52,40 @@ pub fn long_grid_config() -> StrategyConfig {
             price_low: Price::parse("75000").unwrap(),
             price_high: Price::parse("95000").unwrap(),
             max_position: Quantity::parse("1").unwrap(),
+            core_ratio: Rate::ZERO,
+            batch_count: None,
             grid_spacing: Price::parse("1000").unwrap(),
             grid_spread: Price::parse("1000").unwrap(),
         },
+    }
+}
+
+/// 同一个网格加上主仓：`r = .7`，`n = 4`。
+///
+/// 四批的主仓价是 95000、90000、85000、80000，每批 `C = .175`、`G = .075`，
+/// 跟随每批的 5 格各 `.015`。
+pub fn core_long_config() -> StrategyConfig {
+    StrategyConfig {
+        long: SideConfig {
+            core_ratio: Rate::parse("0.7").unwrap(),
+            batch_count: Some(4),
+            ..long_grid_config().long
+        },
+        ..long_grid_config()
+    }
+}
+
+/// `r = 1`：只积累主仓，没有网格（第 2.3 节）。
+///
+/// 四批的主仓价是 95000、90000、85000、80000，每批 `q = C = .25`，没有格子。
+pub fn core_only_config() -> StrategyConfig {
+    StrategyConfig {
+        long: SideConfig {
+            core_ratio: Rate::parse("1").unwrap(),
+            batch_count: Some(4),
+            ..long_grid_config().long
+        },
+        ..long_grid_config()
     }
 }
 
@@ -72,14 +104,28 @@ pub fn exchange() -> Arc<SimulatedExchange> {
 }
 
 pub fn harness() -> Harness {
-    harness_with_store(Store::open_in_memory().unwrap())
+    harness_with(long_grid_config(), Store::open_in_memory().unwrap())
+}
+
+pub fn core_harness() -> Harness {
+    harness_with(core_long_config(), Store::open_in_memory().unwrap())
+}
+
+pub fn core_only_harness() -> Harness {
+    harness_with(core_only_config(), Store::open_in_memory().unwrap())
 }
 
 pub fn harness_with_store(store: Store) -> Harness {
+    harness_with(long_grid_config(), store)
+}
+
+pub fn harness_with(config: StrategyConfig, store: Store) -> Harness {
     let exchange = exchange();
+    // 每次下单都查一次库：这张单必须在发出去之前就已经落盘（第 9.1 节）。
+    exchange.probe_stored_orders(store.clone());
     let runtime = Runtime::new(exchange.clone(), store);
     let strategy_id = runtime
-        .create_strategy(long_grid_config(), btc_spec(), btc_fees(), at(0))
+        .create_strategy(config, btc_spec(), btc_fees(), at(0))
         .unwrap();
     Harness {
         exchange,
@@ -90,6 +136,7 @@ pub fn harness_with_store(store: Store) -> Harness {
 
 /// 进程重启：交易所还在（同一个模拟交易所），数据库重新打开，策略沿用原来的标识。
 pub fn restart(store: Store, exchange: Arc<SimulatedExchange>, strategy_id: StrategyId) -> Harness {
+    exchange.probe_stored_orders(store.clone());
     Harness {
         runtime: Runtime::new(exchange.clone(), store),
         exchange,
@@ -119,29 +166,54 @@ impl Harness {
 
     /// 某个格子某一侧当前在场订单的 `cloid`。
     pub fn working_cloid(&self, cell: usize, purpose: OrderPurpose) -> ClientOrderId {
+        self.unit_cloid(Unit::Cell(CellIndex(cell)), purpose)
+    }
+
+    /// 某一批主仓当前在场订单的 `cloid`。
+    pub fn working_core_cloid(&self, batch: usize) -> ClientOrderId {
+        self.unit_cloid(Unit::Batch(BatchIndex(batch)), OrderPurpose::CoreBuy)
+    }
+
+    /// 按 `cloid` 取订单记录。
+    pub fn order(&self, client_order_id: &ClientOrderId) -> StoredOrder {
+        self.orders()
+            .into_iter()
+            .find(|order| &order.record.client_order_id == client_order_id)
+            .unwrap_or_else(|| panic!("no order `{client_order_id}`"))
+    }
+
+    fn unit_cloid(&self, unit: Unit, purpose: OrderPurpose) -> ClientOrderId {
         let matching: Vec<ClientOrderId> = self
             .working()
             .into_iter()
-            .filter(|order| {
-                order.record.cell_index == CellIndex(cell) && order.record.purpose == purpose
-            })
+            .filter(|order| order.record.unit == unit && order.record.purpose == purpose)
             .map(|order| order.record.client_order_id)
             .collect();
         assert_eq!(
             matching.len(),
             1,
-            "expected exactly one working {purpose:?} order in cell {cell}"
+            "expected exactly one working {purpose:?} order in {unit:?}"
         );
         matching[0].clone()
     }
 
     pub fn cell(&self, cell: usize) -> CellState {
         self.runtime
-            .cell_states(&self.strategy_id)
+            .state(&self.strategy_id)
             .unwrap()
             .cell(CellIndex(cell))
             .unwrap()
             .clone()
+    }
+
+    /// 某一批的主仓累计成交。
+    pub fn core_filled(&self, batch: usize) -> Quantity {
+        self.runtime
+            .state(&self.strategy_id)
+            .unwrap()
+            .batch(BatchIndex(batch))
+            .unwrap()
+            .filled
     }
 
     /// 交易所上某张挂单。

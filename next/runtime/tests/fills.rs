@@ -12,10 +12,17 @@ async fn b17_duplicate_out_of_order_and_regressed_fills_are_recorded_once() {
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridBuy);
 
-    // 真实成交 0.02：仓位、订单累计量和待买回都跟着变。
+    // 交易所先送来后发生的成交 0.01，累计量 0.02：先发生的那笔 0.01 还没到。
+    // 订单累计量、待买回都跟着变。
     harness
         .exchange
-        .fill(&buy, Quantity::parse("0.02").unwrap(), at(1))
+        .inject_fill(
+            "trade-1",
+            &buy,
+            Quantity::parse("0.01").unwrap(),
+            Quantity::parse("0.02").unwrap(),
+            at(1),
+        )
         .unwrap();
     let first = harness.step(1).await;
     assert_eq!(first.applied_fills, 1);
@@ -24,23 +31,13 @@ async fn b17_duplicate_out_of_order_and_regressed_fills_are_recorded_once() {
         Quantity::parse("0.03").unwrap()
     );
 
-    // 交易所重复投递同一笔成交、投递累计量回退的旧成交。
+    // 交易所重复投递同一笔成交（成交编号相同，这才是真实情况）、投递累计量回退的旧成交。
     harness
         .exchange
         .inject_fill(
             "trade-1",
             &buy,
-            Quantity::parse("0.02").unwrap(),
-            Quantity::parse("0.02").unwrap(),
-            at(1),
-        )
-        .unwrap();
-    harness
-        .exchange
-        .inject_fill(
-            "trade-dup",
-            &buy,
-            Quantity::parse("0.02").unwrap(),
+            Quantity::parse("0.01").unwrap(),
             Quantity::parse("0.02").unwrap(),
             at(1),
         )
@@ -55,12 +52,35 @@ async fn b17_duplicate_out_of_order_and_regressed_fills_are_recorded_once() {
             at(1),
         )
         .unwrap();
+    // 模拟交易所原样返回投递进来的累计量：回退的成交不能先被它夹到已有累计量上，
+    // 否则这里验证的只是重复值，回退这条路根本没被走到。
+    let regressed = harness
+        .exchange
+        .fills()
+        .into_iter()
+        .find(|fill| fill.trade_id == "trade-regressed")
+        .expect("the regressed fill must be visible");
+    assert_eq!(
+        regressed.cumulative_quantity,
+        Quantity::parse("0.01").unwrap()
+    );
+
     let second = harness.step(2).await;
 
     assert_eq!(second.applied_fills, 0);
     assert_eq!(
         harness.cell(0).to_buy_back,
         Quantity::parse("0.03").unwrap()
+    );
+    // 流水照记，累计量原样保留：回退的成交是审计记录，不做修正。
+    let recorded = harness.runtime.fills(&harness.strategy_id).unwrap();
+    let regressed_row = recorded
+        .iter()
+        .find(|fill| fill.trade_id == "trade-regressed")
+        .expect("the regressed fill must be recorded");
+    assert_eq!(
+        regressed_row.cumulative_quantity,
+        Quantity::parse("0.01").unwrap()
     );
     let order = harness
         .orders()
@@ -90,6 +110,20 @@ async fn b17_duplicate_out_of_order_and_regressed_fills_are_recorded_once() {
     );
     assert_eq!(third.position, Position::parse("0.03").unwrap());
     assert_eq!(third.expected_position, Position::parse("0.03").unwrap());
+    // 重复投递的那笔只留一条：流水表里是两笔真实成交加上这一步的新成交。
+    let final_fills = harness.runtime.fills(&harness.strategy_id).unwrap();
+    assert_eq!(
+        final_fills.len(),
+        3,
+        "the duplicate report must not add a row"
+    );
+    // 按成交编号去重后的数量之和正好是累计成交量：这张单的成交对完账了。
+    let order = harness
+        .orders()
+        .into_iter()
+        .find(|order| order.record.client_order_id == buy)
+        .unwrap();
+    assert!(order.fills_reconciled);
 }
 
 #[tokio::test]

@@ -4,7 +4,7 @@
 //! 重复、乱序和累计回退的成交都只会记一次，且结果与到达顺序无关。
 
 use crate::Strategy;
-use crate::order::{OrderPurpose, OrderRecord, OrderStatus};
+use crate::order::{OrderPurpose, OrderRecord, OrderStatus, Unit};
 use crate::state::StrategyState;
 use crate::units::Quantity;
 
@@ -39,23 +39,43 @@ impl Strategy {
         let applied = effective.saturating_sub(order.cumulative_filled);
         order.cumulative_filled = effective;
 
-        if !applied.is_zero()
-            && let Some(cell_state) = state.cell_mut(order.cell_index)
-        {
-            match order.purpose {
-                OrderPurpose::GridBuy => {
-                    cell_state.to_buy_back = cell_state.to_buy_back.saturating_sub(applied);
+        if !applied.is_zero() {
+            match order.unit {
+                Unit::Batch(batch_index) => {
+                    // 主仓只买入，永不为它下平仓单（第 7.1 节）。
+                    let core_quantity = self
+                        .batches()
+                        .batch(batch_index)
+                        .map(|batch| batch.core_quantity)
+                        .unwrap_or(Quantity::ZERO);
+                    if let Some(batch_state) = state.batch_mut(batch_index) {
+                        batch_state.filled = batch_state
+                            .filled
+                            .saturating_add(applied)
+                            .min(core_quantity);
+                    }
                 }
-                OrderPurpose::GridSell => {
+                Unit::Cell(cell_index) => {
                     let cell_quantity = self
                         .grid()
-                        .cell(order.cell_index)
+                        .cell(cell_index)
                         .map(|cell| cell.quantity)
                         .unwrap_or(Quantity::ZERO);
-                    cell_state.to_buy_back = cell_state
-                        .to_buy_back
-                        .saturating_add(applied)
-                        .min(cell_quantity);
+                    if let Some(cell_state) = state.cell_mut(cell_index) {
+                        match order.purpose {
+                            OrderPurpose::GridBuy => {
+                                cell_state.to_buy_back =
+                                    cell_state.to_buy_back.saturating_sub(applied);
+                            }
+                            OrderPurpose::GridSell => {
+                                cell_state.to_buy_back = cell_state
+                                    .to_buy_back
+                                    .saturating_add(applied)
+                                    .min(cell_quantity);
+                            }
+                            OrderPurpose::CoreBuy => {}
+                        }
+                    }
                 }
             }
         }
@@ -75,16 +95,17 @@ impl Strategy {
 #[cfg(test)]
 mod tests {
     use crate::Strategy;
-    use crate::fixtures::long_grid_strategy;
+    use crate::batch::BatchIndex;
+    use crate::fixtures::{core_long_strategy, long_grid_strategy};
     use crate::grid::CellIndex;
-    use crate::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus};
+    use crate::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, Unit};
     use crate::state::StrategyState;
     use crate::units::{Price, Quantity};
 
     fn order(purpose: OrderPurpose, quantity: &str) -> OrderRecord {
         OrderRecord {
             client_order_id: ClientOrderId::try_new("0x01").unwrap(),
-            cell_index: CellIndex(0),
+            unit: Unit::Cell(CellIndex(0)),
             purpose,
             limit_price: Price::parse("95000").unwrap(),
             quantity: Quantity::parse(quantity).unwrap(),
@@ -103,6 +124,20 @@ mod tests {
         strategy
             .apply_fill(state, order, Quantity::parse(cumulative).unwrap())
             .applied
+    }
+
+    /// 第 0 批的主仓买单，数量是 `C = .175`。
+    fn core_order(quantity: &str) -> OrderRecord {
+        OrderRecord {
+            client_order_id: ClientOrderId::try_new("0x02").unwrap(),
+            unit: Unit::Batch(BatchIndex(0)),
+            purpose: OrderPurpose::CoreBuy,
+            limit_price: Price::parse("95000").unwrap(),
+            quantity: Quantity::parse(quantity).unwrap(),
+            cumulative_filled: Quantity::ZERO,
+            reduce_only: false,
+            status: OrderStatus::Open,
+        }
     }
 
     #[test]
@@ -214,5 +249,50 @@ mod tests {
 
         assert_eq!(application.applied, Quantity::parse("0.05").unwrap());
         assert_eq!(order.cumulative_filled, Quantity::parse("0.05").unwrap());
+    }
+
+    #[test]
+    fn core_buy_fills_add_to_their_batch_and_stop_at_the_core_quantity() {
+        let strategy = core_long_strategy();
+        let mut state = strategy.initial_state();
+        let mut order = core_order("0.175");
+
+        fill(&strategy, &mut state, &mut order, "0.07");
+        assert_eq!(
+            state.batch(BatchIndex(0)).unwrap().filled,
+            Quantity::parse("0.07").unwrap()
+        );
+        assert_eq!(state.batch(BatchIndex(1)).unwrap().filled, Quantity::ZERO);
+        assert_eq!(
+            strategy.expected_position(&state),
+            crate::units::Position::parse("0.07").unwrap()
+        );
+
+        // 超过 C 的部分不计入：主仓不会超过配置的比例。
+        fill(&strategy, &mut state, &mut order, "0.2");
+        assert_eq!(
+            state.batch(BatchIndex(0)).unwrap().filled,
+            Quantity::parse("0.175").unwrap()
+        );
+    }
+
+    #[test]
+    fn grid_orders_never_touch_the_core() {
+        let strategy = core_long_strategy();
+        let mut state = strategy.initial_state();
+        state.batch_mut(BatchIndex(0)).unwrap().filled = Quantity::parse("0.175").unwrap();
+        strategy.advance(&mut state, &[]);
+        let mut order = order(OrderPurpose::GridSell, "0.015");
+
+        fill(&strategy, &mut state, &mut order, "0.015");
+
+        assert_eq!(
+            state.batch(BatchIndex(0)).unwrap().filled,
+            Quantity::parse("0.175").unwrap()
+        );
+        assert_eq!(
+            strategy.expected_position(&state),
+            crate::units::Position::parse("0.175").unwrap()
+        );
     }
 }
