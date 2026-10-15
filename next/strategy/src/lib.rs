@@ -3,9 +3,9 @@
 //! 不读时钟、不读写文件、不访问网络。所有输入（状态、在场订单、当前价格、时间）
 //! 都由调用方传入，所有输出都是可以再算一遍的值。
 //!
-//! 本任务支持的配置：做多侧、不限速。主仓比例大于 0 时按批次买入主仓、格子跟随
+//! 本任务支持的配置：做多侧，可选限速。主仓比例大于 0 时按批次买入主仓、格子跟随
 //! 所属批次按成交比例启用；比例为 0 时每个格子自成单位。
-//! 限速、做空与中性、接管、观点失效价属于后续任务。
+//! 做空与中性、接管、观点失效价属于后续任务。
 
 pub mod batch;
 pub mod config;
@@ -16,6 +16,7 @@ pub mod order;
 pub mod planning;
 pub mod preview;
 pub mod state;
+pub mod throttle;
 pub mod units;
 
 #[cfg(test)]
@@ -27,6 +28,7 @@ use crate::grid::GridPlan;
 use crate::instrument::{Fees, InstrumentSpec};
 use crate::order::{OrderPurpose, Unit, WorkingOrder};
 use crate::state::{BatchState, CellState, StateError, StrategyState};
+use crate::throttle::ThrottleState;
 use crate::units::{Position, Quantity, div_floor, div_round};
 
 /// 一个已经规整并校验过的策略。
@@ -86,8 +88,11 @@ impl Strategy {
     ///
     /// 没有主仓时每格自成单位，全部启用、全部待买回；有主仓时格子全部未启用，
     /// 要等所属批次的主仓开始成交后才逐个启用。
+    ///
+    /// 限速进度：不限速时全部单位都已放行；限速时只有第一个单位放行（第 4.1 节），
+    /// 它的放行时刻由调用方在启动时用 [`Strategy::advance_throttle`] 记下。
     pub fn initial_state(&self) -> StrategyState {
-        StrategyState::new(
+        let mut state = StrategyState::new(
             self.batches
                 .batches()
                 .iter()
@@ -101,7 +106,16 @@ impl Strategy {
                     to_buy_back: cell.quantity,
                 })
                 .collect(),
-        )
+        );
+        let released = match self.throttle_interval() {
+            Some(_) => self.unit_count().min(1),
+            None => self.unit_count(),
+        };
+        state.set_throttle(ThrottleState {
+            released,
+            ..ThrottleState::default()
+        });
+        state
     }
 
     /// 检查保存的状态与批次、格子划分是否一致。
@@ -116,6 +130,13 @@ impl Strategy {
             return Err(StateError::CellCountMismatch {
                 expected: self.grid.len(),
                 actual: state.cells().len(),
+            });
+        }
+        // 放行数只会随单位总数一起增长，超出来说明状态不是这份配置产生的。
+        if state.throttle().released > self.unit_count() {
+            return Err(StateError::ThrottleReleasedAboveUnitCount {
+                released: state.throttle().released,
+                unit_count: self.unit_count(),
             });
         }
         for batch in self.batches.batches() {
@@ -250,7 +271,7 @@ mod tests {
     use super::Strategy;
     use crate::batch::BatchIndex;
     use crate::fixtures::{
-        core_long_strategy, fine_core_long_strategy, single_small_batch_strategy,
+        at, core_long_strategy, fine_core_long_strategy, single_small_batch_strategy,
     };
     use crate::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, Unit};
     use crate::state::StrategyState;
@@ -269,7 +290,7 @@ mod tests {
             reduce_only: false,
             status: OrderStatus::Open,
         };
-        strategy.apply_fill(state, &mut order, Quantity::parse(quantity).unwrap());
+        strategy.apply_fill(state, &mut order, Quantity::parse(quantity).unwrap(), at(0));
     }
 
     #[test]

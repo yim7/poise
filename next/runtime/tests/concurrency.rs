@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use common::{at, btc_fees, btc_spec, exchange, long_grid_config};
 use poise_runtime::{
-    Exchange, ExchangeError, ExchangeFill, ExchangeOrder, OrderLookup, OrderReceipt, OrderRequest,
-    Runtime, RuntimeError, SimulatedExchange, Store,
+    Exchange, ExchangeError, ExchangeFill, ExchangeOrder, ManualClock, OrderLookup, OrderReceipt,
+    OrderRequest, Runtime, RuntimeError, RuntimeOptions, SimulatedExchange, Store,
 };
 use poise_strategy::instrument::Instrument;
 use poise_strategy::order::ClientOrderId;
@@ -85,15 +85,19 @@ impl Exchange for YieldingExchange {
 async fn a_strategy_cannot_be_driven_by_two_callers_at_once() {
     let store = Store::open_in_memory().unwrap();
     let exchange = Arc::new(YieldingExchange::new(exchange()));
-    let runtime = Runtime::new(exchange.clone(), store);
-    let strategy_id = runtime
-        .create_strategy(long_grid_config(), btc_spec(), btc_fees(), at(0))
-        .unwrap();
-
-    let (first, second) = tokio::join!(
-        runtime.step(&strategy_id, at(1)),
-        runtime.step(&strategy_id, at(1)),
+    let clock = Arc::new(ManualClock::new(at(0)));
+    let runtime = Runtime::with_clock(
+        exchange.clone(),
+        store,
+        RuntimeOptions::default(),
+        clock.clone(),
     );
+    let strategy_id = runtime
+        .create_strategy(long_grid_config(), btc_spec(), btc_fees())
+        .unwrap();
+    clock.set(at(1));
+
+    let (first, second) = tokio::join!(runtime.step(&strategy_id), runtime.step(&strategy_id),);
 
     // 恰好一个走完这一步，另一个被挡在门外。
     match (&first, &second) {
@@ -107,7 +111,8 @@ async fn a_strategy_cannot_be_driven_by_two_callers_at_once() {
     assert_eq!(runtime.orders(&strategy_id).unwrap().len(), 20);
 
     // 走完这一步之后驱动权就释放了：下一步照常。
-    let report = runtime.step(&strategy_id, at(2)).await.unwrap();
+    clock.set(at(2));
+    let report = runtime.step(&strategy_id).await.unwrap();
     assert!(report.placed.is_empty());
     assert_eq!(report.plan.place.len(), 0);
 }

@@ -2,7 +2,8 @@
 //!
 //! 纯计算，供网页预览使用。启动后会立即成交的订单按启动时的第一批订单推算：
 //! 主仓买单挂在批次价上，批次价已经不低于当前价时它立即成交；这一批的格子因此
-//! 全部启用，格子买价也不低于当前价的那些格子随即买入。
+//! 全部启用，格子买价也不低于当前价的那些格子随即买入。开启限速时启动只放行
+//! 第一个单位，其余单位不会挂单，也就不会立即成交（第 4.1 节）。
 
 use serde::{Deserialize, Serialize};
 
@@ -117,11 +118,18 @@ impl Strategy {
     ///
     /// 假设主仓买单一旦成交就整批成交（限价单挂在批次价上，成交即全部成交），
     /// 因此这一批的格子会全部启用；格子买价低于当前价的不在列表里。
+    ///
+    /// 开启限速时启动只放行第一个单位（第 4.1 节），后面那些还没放行的单位这一步根本
+    /// 不会挂单，所以也不会立即成交：预览不能把它们算进来。
     pub fn immediate_fills(&self, market_price: Price) -> Vec<ImmediateFill> {
+        let state = self.initial_state();
         let mut fills = Vec::new();
         if self.batches().is_empty() {
-            // 没有主仓：格子启动时全部启用，买价不低于当前价的立即买入。
+            // 没有主仓：格子就是限速单位，只有已放行的格子会挂单。
             for cell in self.grid().cells() {
+                if !self.is_released(&state, Unit::Cell(cell.index)) {
+                    break;
+                }
                 if cell.buy_price >= market_price {
                     fills.push(ImmediateFill {
                         unit: Unit::Cell(cell.index),
@@ -137,6 +145,9 @@ impl Strategy {
         // 批次价从高到低：某一批的批次价已经低于当前价时，后面的批次更低，都不会成交。
         for batch in self.batches().batches() {
             if batch.price < market_price {
+                break;
+            }
+            if !self.is_released(&state, Unit::Batch(batch.index)) {
                 break;
             }
             fills.push(ImmediateFill {
@@ -167,7 +178,10 @@ impl Strategy {
 mod tests {
     use super::{ImmediateFill, StartupPreview};
     use crate::batch::BatchIndex;
-    use crate::fixtures::{core_long_strategy, long_grid_strategy, single_small_batch_strategy};
+    use crate::fixtures::{
+        core_long_strategy, long_grid_strategy, single_small_batch_strategy,
+        throttled_core_long_strategy, throttled_long_grid_strategy,
+    };
     use crate::grid::CellIndex;
     use crate::order::{OrderPurpose, Unit};
     use crate::units::{Price, Quantity};
@@ -261,6 +275,46 @@ mod tests {
         assert_eq!(
             preview.immediate_fills.last().unwrap(),
             &fill(Unit::Cell(CellIndex(19)), "76000", "0.015")
+        );
+    }
+
+    #[test]
+    fn a_throttled_start_lists_only_the_units_it_releases() {
+        let strategy = throttled_core_long_strategy();
+
+        // 价格在全部批次价之下：没有限速时四批主仓会一起成交。
+        assert_eq!(
+            core_long_strategy()
+                .immediate_fills(Price::parse("75000").unwrap())
+                .len(),
+            24
+        );
+
+        // 开启限速：启动只放行 95 批，其余三批不会挂单，也就不会立即成交。
+        let preview = strategy.startup_preview(Price::parse("75000").unwrap());
+        assert_eq!(
+            preview.immediate_fills,
+            vec![
+                core_fill(0, "95000", "0.175"),
+                fill(Unit::Cell(CellIndex(0)), "95000", "0.015"),
+                fill(Unit::Cell(CellIndex(1)), "94000", "0.015"),
+                fill(Unit::Cell(CellIndex(2)), "93000", "0.015"),
+                fill(Unit::Cell(CellIndex(3)), "92000", "0.015"),
+                fill(Unit::Cell(CellIndex(4)), "91000", "0.015"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_throttled_grid_without_core_starts_with_the_first_cell_only() {
+        let strategy = throttled_long_grid_strategy();
+
+        let preview = strategy.startup_preview(Price::parse("92000").unwrap());
+
+        // `r = 0`：格子就是单位，启动只放行最高的那一格。
+        assert_eq!(
+            preview.immediate_fills,
+            vec![fill(Unit::Cell(CellIndex(0)), "95000", "0.05")]
         );
     }
 

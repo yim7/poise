@@ -1,9 +1,16 @@
 //! 测试用的公共样例：设计第 3.2 节的做多网格。
 
+use chrono::{DateTime, Duration, TimeZone, Utc};
+
 use crate::Strategy;
 use crate::config::{SideConfig, StrategyConfig};
 use crate::instrument::{Fees, Instrument, InstrumentSpec};
 use crate::units::{Notional, Price, Quantity, Rate};
+
+/// 测试用的固定时刻：2026-10-15 00:00:00 UTC 之后的第 `seconds` 秒。
+pub(crate) fn at(seconds: i64) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 10, 15, 0, 0, 0).unwrap() + Duration::seconds(seconds)
+}
 
 /// BTC：报价精度 1 美元，数量精度 0.001，最低订单金额 10 美元。
 pub(crate) fn btc_spec() -> InstrumentSpec {
@@ -57,6 +64,7 @@ pub(crate) fn long_grid_config() -> StrategyConfig {
             batch_count: None,
             grid_spacing: Price::parse("1000").unwrap(),
             grid_spread: Price::parse("1000").unwrap(),
+            throttle_interval: None,
         },
     }
 }
@@ -117,6 +125,7 @@ pub(crate) fn single_small_batch_strategy() -> Strategy {
             batch_count: Some(1),
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
+            throttle_interval: None,
         },
     };
     Strategy::new(config, btc_spec(), btc_fees()).unwrap()
@@ -136,9 +145,39 @@ pub(crate) fn single_batch_core_strategy() -> Strategy {
             batch_count: Some(1),
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
+            throttle_interval: None,
         },
     };
     Strategy::new(config, cent_spec(), btc_fees()).unwrap()
+}
+
+/// 限速一小时、其余同 [`core_long_config`]：四批，每批五格。
+pub(crate) fn throttled_core_long_strategy() -> Strategy {
+    throttled_core_long_with_interval(Duration::hours(1))
+}
+
+/// 限速一小时、没有主仓的小网格：`r = 0`，二十格各自是限速单位。
+pub(crate) fn throttled_long_grid_strategy() -> Strategy {
+    let config = StrategyConfig {
+        long: SideConfig {
+            throttle_interval: Some(Duration::hours(1)),
+            ..long_grid_config().long
+        },
+        ..long_grid_config()
+    };
+    Strategy::new(config, btc_spec(), btc_fees()).unwrap()
+}
+
+/// 与 [`throttled_core_long_strategy`] 同一划分，可以指定限速间隔。
+pub(crate) fn throttled_core_long_with_interval(interval: Duration) -> Strategy {
+    let config = StrategyConfig {
+        long: SideConfig {
+            throttle_interval: Some(interval),
+            ..core_long_config().long
+        },
+        ..core_long_config()
+    };
+    Strategy::new(config, btc_spec(), btc_fees()).unwrap()
 }
 
 /// 没有主仓的小网格：`[90000, 95000]`，`M = .25`，`d = g = 1000`，五格各 .05。

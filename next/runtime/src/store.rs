@@ -14,6 +14,7 @@ use poise_strategy::grid::CellIndex;
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
 use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, Unit};
 use poise_strategy::state::{BatchState, CellState, StrategyState};
+use poise_strategy::throttle::ThrottleState;
 use poise_strategy::units::{Price, Quantity};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -111,6 +112,15 @@ pub struct StoredOrder {
     pub expires_at: DateTime<Utc>,
     pub placed_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// 一次参数的存档：运行中改了可以改的参数就记一条（第 2.4 节）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredConfigVersion {
+    /// 从 1 开始，按记录顺序递增。
+    pub version: i64,
+    pub config: StrategyConfig,
+    pub recorded_at: DateTime<Utc>,
 }
 
 /// 一笔已补记的成交。
@@ -219,7 +229,20 @@ impl Store {
                  cumulative_quantity_units INTEGER NOT NULL,
                  filled_at TEXT NOT NULL
              );
-             CREATE INDEX IF NOT EXISTS fills_by_strategy ON fills (strategy_id, filled_at);",
+             CREATE INDEX IF NOT EXISTS fills_by_strategy ON fills (strategy_id, filled_at);
+             CREATE TABLE IF NOT EXISTS throttle_states (
+                 strategy_id TEXT PRIMARY KEY,
+                 released INTEGER NOT NULL,
+                 released_at TEXT,
+                 first_fill_at TEXT
+             );
+             CREATE TABLE IF NOT EXISTS config_versions (
+                 strategy_id TEXT NOT NULL,
+                 version INTEGER NOT NULL,
+                 config_json TEXT NOT NULL,
+                 recorded_at TEXT NOT NULL,
+                 PRIMARY KEY (strategy_id, version)
+             );",
         )?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
@@ -230,7 +253,7 @@ impl Store {
         self.connection.lock().expect("store lock poisoned")
     }
 
-    /// 建策略：策略记录和初始格子状态写在同一个事务里。
+    /// 建策略：策略记录、初始状态和第一个参数版本写在同一个事务里。
     ///
     /// 分开写就可能留下「策略已存在、格子状态是空的」的记录，这种策略既跑不起来
     /// 也暂停不了（每次读状态都会因为格数对不上而失败）。
@@ -259,8 +282,92 @@ impl Store {
             ],
         )?;
         write_state(&transaction, &strategy.strategy_id, state)?;
+        insert_config_version(
+            &transaction,
+            &strategy.strategy_id,
+            1,
+            &strategy.config,
+            strategy.created_at,
+        )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// 保存运行中改过的配置，并记一个新的参数版本，返回新版本号。
+    ///
+    /// 配置和版本号写在同一个事务里：改了参数却没有版本记录，事后就说不清哪一段时间
+    /// 用的是哪套参数（第 2.4 节）。
+    ///
+    /// 只给 runtime 用（运行中改参数要经过 [`crate::Runtime::update_config`] 的检查，比如
+    /// 「不限速的策略不能加限速」）。放出去就直接改配置、绕过那些检查了。
+    pub(crate) fn save_config(
+        &self,
+        strategy_id: &StrategyId,
+        config: &StrategyConfig,
+        at: DateTime<Utc>,
+    ) -> Result<i64, StoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        let next: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM config_versions WHERE strategy_id = ?1",
+            params![strategy_id.as_str()],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "UPDATE strategies SET config_json = ?2, updated_at = ?3 WHERE strategy_id = ?1",
+            params![
+                strategy_id.as_str(),
+                serde_json::to_string(config)?,
+                format_time(at),
+            ],
+        )?;
+        insert_config_version(&transaction, strategy_id, next, config, at)?;
+        transaction.commit()?;
+        Ok(next)
+    }
+
+    /// 一个策略当前的参数版本号。
+    ///
+    /// 策略在建立时就写了第 1 个版本，而且是和策略记录写在同一个事务里，所以读得到
+    /// 策略就一定读得到版本号。
+    pub fn latest_config_version(&self, strategy_id: &StrategyId) -> Result<i64, StoreError> {
+        let connection = self.lock();
+        let version = connection.query_row(
+            "SELECT MAX(version) FROM config_versions WHERE strategy_id = ?1",
+            params![strategy_id.as_str()],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        version.ok_or_else(|| StoreError::UnknownStrategy(strategy_id.clone()))
+    }
+
+    /// 一个策略的参数版本，按版本号从小到大。
+    pub fn load_config_versions(
+        &self,
+        strategy_id: &StrategyId,
+    ) -> Result<Vec<StoredConfigVersion>, StoreError> {
+        let connection = self.lock();
+        let mut statement = connection.prepare(
+            "SELECT version, config_json, recorded_at FROM config_versions
+             WHERE strategy_id = ?1 ORDER BY version",
+        )?;
+        let rows = statement.query_map(params![strategy_id.as_str()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        let mut versions = Vec::new();
+        for row in rows {
+            let (version, config_json, recorded_at) = row?;
+            versions.push(StoredConfigVersion {
+                version,
+                config: serde_json::from_str(&config_json)?,
+                recorded_at: parse_time(&recorded_at)?,
+            });
+        }
+        Ok(versions)
     }
 
     pub fn load_strategy(&self, strategy_id: &StrategyId) -> Result<StoredStrategy, StoreError> {
@@ -379,7 +486,35 @@ impl Store {
                 });
             }
         }
-        Ok(StrategyState::new(batches, cells))
+
+        // 限速的放行进度（第 12 节）。没有这一行时按「一个单位都没放行」处理：
+        // 下一步会按当时的时间重新放行，不会卡住。
+        let mut state = StrategyState::new(batches, cells);
+        let throttle = connection
+            .query_row(
+                "SELECT released, released_at, first_fill_at FROM throttle_states
+                 WHERE strategy_id = ?1",
+                params![strategy_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((released, released_at, first_fill_at)) = throttle {
+            state.set_throttle(ThrottleState {
+                released: usize::try_from(released).map_err(|_| StoreError::InvalidColumn {
+                    column: "throttle_states.released",
+                    value: released.to_string(),
+                })?,
+                released_at: released_at.as_deref().map(parse_time).transpose()?,
+                first_fill_at: first_fill_at.as_deref().map(parse_time).transpose()?,
+            });
+        }
+        Ok(state)
     }
 
     /// 把一次成交记账的结果落盘：策略状态和订单记录写在同一个事务里。
@@ -769,6 +904,44 @@ fn write_state(
             cell.to_buy_back.units(),
         ])?;
     }
+    drop(statement);
+
+    let throttle = state.throttle();
+    transaction.execute(
+        "INSERT INTO throttle_states (strategy_id, released, released_at, first_fill_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (strategy_id) DO UPDATE SET
+             released = excluded.released,
+             released_at = excluded.released_at,
+             first_fill_at = excluded.first_fill_at",
+        params![
+            strategy_id.as_str(),
+            throttle.released as i64,
+            throttle.released_at.map(format_time),
+            throttle.first_fill_at.map(format_time),
+        ],
+    )?;
+    Ok(())
+}
+
+/// 记一个参数版本。`version` 由调用方给出，第一次建策略是 1。
+fn insert_config_version(
+    transaction: &rusqlite::Transaction<'_>,
+    strategy_id: &StrategyId,
+    version: i64,
+    config: &StrategyConfig,
+    at: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO config_versions (strategy_id, version, config_json, recorded_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            strategy_id.as_str(),
+            version,
+            serde_json::to_string(config)?,
+            format_time(at),
+        ],
+    )?;
     Ok(())
 }
 

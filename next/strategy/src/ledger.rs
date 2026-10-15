@@ -3,6 +3,8 @@
 //! 去重规则（第 9.3 节）：同一订单的累计成交量只接受更大的值。因此
 //! 重复、乱序和累计回退的成交都只会记一次，且结果与到达顺序无关。
 
+use chrono::{DateTime, Utc};
+
 use crate::Strategy;
 use crate::order::{OrderPurpose, OrderRecord, OrderStatus, Unit};
 use crate::state::StrategyState;
@@ -28,11 +30,15 @@ impl Strategy {
     ///
     /// `cumulative` 是交易所给出的该订单累计成交量；小于已记录的累计量时忽略。
     /// 记账后订单全部成交时，订单状态改为已成交。
+    ///
+    /// `filled_at` 是这笔成交在交易所发生的时刻，用来算限速的放行时刻（第 4.1 节）；
+    /// 只有真的记入了新数量才算数，重复和迟到的成交不会重新计时。
     pub fn apply_fill(
         &self,
         state: &mut StrategyState,
         order: &mut OrderRecord,
         cumulative: Quantity,
+        filled_at: DateTime<Utc>,
     ) -> FillApplication {
         let reported = cumulative.min(order.quantity).max(Quantity::ZERO);
         let effective = order.cumulative_filled.max(reported);
@@ -78,6 +84,8 @@ impl Strategy {
                     }
                 }
             }
+            // 限速的放行时刻从「最近放行单位的第一笔成交」算起。
+            self.record_fill_time(state, order.unit, filled_at);
         }
 
         // 全部成交就是全部成交：即使这张单先被判成撤销，补记的成交也要把它改回已成交。
@@ -96,7 +104,7 @@ impl Strategy {
 mod tests {
     use crate::Strategy;
     use crate::batch::BatchIndex;
-    use crate::fixtures::{core_long_strategy, long_grid_strategy};
+    use crate::fixtures::{at, core_long_strategy, long_grid_strategy};
     use crate::grid::CellIndex;
     use crate::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, Unit};
     use crate::state::StrategyState;
@@ -122,7 +130,7 @@ mod tests {
         cumulative: &str,
     ) -> Quantity {
         strategy
-            .apply_fill(state, order, Quantity::parse(cumulative).unwrap())
+            .apply_fill(state, order, Quantity::parse(cumulative).unwrap(), at(0))
             .applied
     }
 
@@ -194,6 +202,7 @@ mod tests {
                     &mut state,
                     &mut order,
                     Quantity::parse(orders[index]).unwrap(),
+                    at(0),
                 );
             }
             final_states.push((state, order.clone()));
@@ -222,8 +231,12 @@ mod tests {
             crate::units::Position::parse("0.03").unwrap()
         );
 
-        let application =
-            strategy.apply_fill(&mut state, &mut order, Quantity::parse("0.03").unwrap());
+        let application = strategy.apply_fill(
+            &mut state,
+            &mut order,
+            Quantity::parse("0.03").unwrap(),
+            at(0),
+        );
 
         assert_eq!(application.applied, Quantity::parse("0.03").unwrap());
         assert_eq!(
@@ -245,6 +258,7 @@ mod tests {
             &mut strategy.initial_state(),
             &mut order,
             Quantity::parse("0.06").unwrap(),
+            at(0),
         );
 
         assert_eq!(application.applied, Quantity::parse("0.05").unwrap());

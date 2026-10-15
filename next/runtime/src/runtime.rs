@@ -4,8 +4,11 @@
 //! 核对仓位、进程重启后恢复（第 9.1、9.4、12 节）。
 //!
 //! 一个策略由「一步」驱动（[`Runtime::step`]）：与交易所核对在场订单、补记成交、
-//! 按主仓成交推进批次、核对仓位、规划、撤单、下单。什么时候走这一步由调用方决定，
-//! 测试里直接调用。
+//! 按主仓成交推进批次、按限速放行下一个单位、核对仓位、规划、撤单、下单。
+//! 什么时候走这一步由调用方决定，测试里直接调用。
+//!
+//! 时间全部来自注入的时钟（[`crate::clock::Clock`]）：订单的 `expiresAfter` 按实际
+//! 发送时刻算，限速按实际成交时刻算（第 4.1、9.1 节）。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -20,9 +23,11 @@ use poise_strategy::preview::StartupPreview;
 use poise_strategy::state::{StateError, StrategyState};
 use poise_strategy::units::{Position, Quantity};
 
+use crate::clock::{Clock, SystemClock};
 use crate::exchange::{Exchange, ExchangeError, ExchangeOrder, OrderLookup, OrderRequest};
 use crate::store::{
-    Store, StoreError, StoredFill, StoredOrder, StoredStrategy, StrategyId, StrategyStatus,
+    Store, StoreError, StoredConfigVersion, StoredFill, StoredOrder, StoredStrategy, StrategyId,
+    StrategyStatus,
 };
 
 /// 运行参数。
@@ -65,6 +70,16 @@ pub enum RuntimeError {
     /// 这个策略正在被另一个调用驱动。同一个策略同一时刻只能走一步。
     #[error("strategy `{0}` is already being driven")]
     Busy(StrategyId),
+    /// 运行中只允许改限速间隔；改了别的参数必须停下来重建（第 2.4 节）。
+    #[error(
+        "only the throttle interval can be changed while running, but the new config also changes `{field}`"
+    )]
+    ConfigChangeNotAllowed { field: &'static str },
+    /// 不限速的策略在运行中不能加上限速：所有单位在启动时就已放行，放行进度无从重建。
+    #[error(
+        "the throttle cannot be added while the strategy is running: every unit was released at start; stop it and create a new strategy with the interval"
+    )]
+    ThrottleCannotBeAdded,
 }
 
 /// 走一步的结果。
@@ -129,6 +144,8 @@ pub struct Runtime {
     exchange: Arc<dyn Exchange>,
     store: Store,
     options: RuntimeOptions,
+    /// 当前时间的来源。策略是纯计算，时间只在这里取。
+    clock: Arc<dyn Clock>,
     /// 正在被驱动的策略。同一个策略并发走两步会用同一份状态各下一遍单。
     stepping: Mutex<HashSet<StrategyId>>,
 }
@@ -158,12 +175,28 @@ impl Runtime {
         store: Store,
         options: RuntimeOptions,
     ) -> Self {
+        Self::with_clock(exchange, store, options, Arc::new(SystemClock))
+    }
+
+    /// 用给定的时钟建运行时。测试注入可控时钟，时间就不再依赖跑得多快。
+    pub fn with_clock(
+        exchange: Arc<dyn Exchange>,
+        store: Store,
+        options: RuntimeOptions,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         Self {
             exchange,
             store,
             options,
+            clock,
             stepping: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// 当前时间。
+    pub fn now(&self) -> DateTime<Utc> {
+        self.clock.now()
     }
 
     /// 取得一个策略的驱动权；已经有调用在驱动时返回 [`RuntimeError::Busy`]。
@@ -195,8 +228,8 @@ impl Runtime {
         config: StrategyConfig,
         spec: InstrumentSpec,
         fees: Fees,
-        now: DateTime<Utc>,
     ) -> Result<StrategyId, RuntimeError> {
+        let now = self.clock.now();
         // 先校验：不合法就不要落库。
         let strategy = Strategy::new(config, spec.clone(), fees)?;
         let strategy_id = StrategyId::new();
@@ -262,13 +295,60 @@ impl Runtime {
     /// 走一步。
     ///
     /// 同一个策略同一时刻只能走一步：并发调用会返回 [`RuntimeError::Busy`]。
-    pub async fn step(
+    pub async fn step(&self, strategy_id: &StrategyId) -> Result<StepReport, RuntimeError> {
+        let _guard = self.begin(strategy_id)?;
+        self.step_inner(strategy_id, self.clock.now()).await
+    }
+
+    /// 运行中修改参数：目前只有限速间隔可以改（第 2.4 节）。
+    ///
+    /// 新配置按策略的标的与费率规整后，除了限速间隔必须和现有配置完全一致：改价格
+    /// 范围、比例、批数或网格间距都会让已有的批次划分和格子状态对不上，必须停下来
+    /// 重建。改动立刻生效——下一步读的就是新配置——并记一个新的参数版本。
+    ///
+    /// 限速只能往松里改：不限速的策略在运行中加限速会被拒绝。不限速时所有单位在启动
+    /// 时就已放行，放行进度无从重建，而「已放行的单位不会退回未放行」是限速的硬性
+    /// 前提（第 4.1 节），所以只能停下来按新配置重建。
+    pub fn update_config(
         &self,
         strategy_id: &StrategyId,
-        now: DateTime<Utc>,
-    ) -> Result<StepReport, RuntimeError> {
-        let _guard = self.begin(strategy_id)?;
-        self.step_inner(strategy_id, now).await
+        config: StrategyConfig,
+    ) -> Result<i64, RuntimeError> {
+        let stored = self.store.load_strategy(strategy_id)?;
+        let candidate = Strategy::new(config, stored.spec.clone(), stored.fees)?;
+        let new_config = candidate.config().clone();
+        if let Some(field) = changed_field(&stored.config, &new_config) {
+            return Err(RuntimeError::ConfigChangeNotAllowed { field });
+        }
+        if stored.config == new_config {
+            // 一个参数都没变（比如网页上连点两次保存）：不记新版本，报当前版本号。
+            // 参数版本是事后复盘「哪次改动让成交变了」的依据，同样的参数记两遍会让
+            // 版本号不再对应不同的参数集。
+            return Ok(self.store.latest_config_version(strategy_id)?);
+        }
+        if stored.config.long.throttle_interval.is_none()
+            && new_config.long.throttle_interval.is_some()
+        {
+            return Err(RuntimeError::ThrottleCannotBeAdded);
+        }
+        let version = self
+            .store
+            .save_config(strategy_id, &new_config, self.clock.now())?;
+        tracing::info!(
+            strategy = %strategy_id,
+            version,
+            throttle_interval = ?new_config.long.throttle_interval,
+            "config updated"
+        );
+        Ok(version)
+    }
+
+    /// 一个策略的参数版本，按版本号从小到大。
+    pub fn config_versions(
+        &self,
+        strategy_id: &StrategyId,
+    ) -> Result<Vec<StoredConfigVersion>, RuntimeError> {
+        Ok(self.store.load_config_versions(strategy_id)?)
     }
 
     /// 调用方必须已经通过 [`Runtime::begin`] 取得这个策略的驱动权。
@@ -302,9 +382,10 @@ impl Runtime {
         let mut unknown_result = reconciled.unknown_result;
         let mut inconsistent_fills = reconciled.inconsistent;
 
-        // 3. 按主仓成交推进批次：启用格子、判断本批是否结束（第 4.2 节）。
+        // 3. 按主仓成交推进批次：启用格子、判断本批是否结束（第 4.2 节）；
+        //    按限速放行下一个单位（第 4.1 节）。
         //    放在仓位核对之前：核对用的是状态推算的应有持仓，先推进不会改变它。
-        self.advance_batches(strategy_id, &strategy, &mut state, &orders)?;
+        self.advance_progress(strategy_id, &strategy, &mut state, &orders, now)?;
 
         // 标记价：只进 `Plan` 供展示和日志使用，提前读出来是为了让仓位核对的提前返回
         // 也能报出当时的标记价，而不是一个零值。
@@ -348,7 +429,7 @@ impl Runtime {
             reported = again.reported;
             unknown_result |= again.unknown_result;
             inconsistent_fills = inconsistent_fills.or(again.inconsistent);
-            self.advance_batches(strategy_id, &strategy, &mut state, &orders)?;
+            self.advance_progress(strategy_id, &strategy, &mut state, &orders, now)?;
             position = self.exchange.position(&instrument).await?;
             expected_position = Self::expected_position(&strategy, &state, &reported, &orders);
         }
@@ -511,7 +592,10 @@ impl Runtime {
         }
         for intent in intents {
             let client_order_id = new_client_order_id();
-            let expires_at = now + self.options.order_expires_after;
+            // `expiresAfter` 按这张单实际发出去的时刻算，不是这一步开始的时刻：
+            // 一步里可能挂好几张单，套用步首时间会让后面的单少活一段时间（第 9.1 节）。
+            let sent_at = self.clock.now();
+            let expires_at = sent_at + self.options.order_expires_after;
             let mut order = StoredOrder {
                 record: OrderRecord {
                     client_order_id: client_order_id.clone(),
@@ -526,8 +610,8 @@ impl Runtime {
                 exchange_order_id: None,
                 fills_reconciled: false,
                 expires_at,
-                placed_at: now,
-                updated_at: now,
+                placed_at: sent_at,
+                updated_at: sent_at,
             };
             self.store.insert_order(strategy_id, &order)?;
             // 先写库、后发送（第 9.1 节）：订单在发出去之前必须已经落盘，
@@ -553,10 +637,12 @@ impl Runtime {
                     if !receipt.cumulative_filled.is_zero() {
                         // 下单即成交：当场记账，避免这一步结束时仓位对不上。
                         // 格子状态和订单记录写在同一个事务里。
+                        // 成交时刻取发送时刻：交易所的回执没有时间戳，这是唯一已知的时刻。
                         strategy.apply_fill(
                             &mut state,
                             &mut order.record,
                             receipt.cumulative_filled,
+                            sent_at,
                         );
                         self.store
                             .save_applied_fills(strategy_id, &state, &[&order])?;
@@ -619,10 +705,9 @@ impl Runtime {
     pub async fn pause(
         &self,
         strategy_id: &StrategyId,
-        now: DateTime<Utc>,
     ) -> Result<Vec<ClientOrderId>, RuntimeError> {
         let _guard = self.begin(strategy_id)?;
-        self.pause_inner(strategy_id, now).await
+        self.pause_inner(strategy_id, self.clock.now()).await
     }
 
     /// 调用方必须已经通过 [`Runtime::begin`] 取得这个策略的驱动权。
@@ -673,12 +758,9 @@ impl Runtime {
     ///
     /// 进程重启后用这个入口（第 12 节）；暂停后用户修好仓位也可以用它继续（第 9.4 节）。
     /// 永远不会重发旧订单：新订单都用新的 `cloid`。
-    pub async fn resume(
-        &self,
-        strategy_id: &StrategyId,
-        now: DateTime<Utc>,
-    ) -> Result<ResumeOutcome, RuntimeError> {
+    pub async fn resume(&self, strategy_id: &StrategyId) -> Result<ResumeOutcome, RuntimeError> {
         let _guard = self.begin(strategy_id)?;
+        let now = self.clock.now();
         let stored = self.store.load_strategy(strategy_id)?;
         let instrument = stored.spec.instrument().clone();
         let mut orders = self.store.load_orders(strategy_id)?;
@@ -803,9 +885,17 @@ impl Runtime {
             }
 
             // 终态：把交易所认到的成交量吸收进格子。
+            //
+            // 成交时刻只能用这一步的时间：挂单状态里没有成交时间，而这类「成交记录还没到」
+            // 的补记本来就发生在成交之后，用晚一点的时间只会让限速更保守。
             let booked = !unbooked.is_zero()
                 && !strategy
-                    .apply_fill(state, &mut order.record, exchange_view.cumulative_filled)
+                    .apply_fill(
+                        state,
+                        &mut order.record,
+                        exchange_view.cumulative_filled,
+                        now,
+                    )
                     .is_duplicate();
             if booked {
                 applied_fills += 1;
@@ -966,7 +1056,12 @@ impl Runtime {
                 continue;
             }
             if strategy
-                .apply_fill(state, &mut order.record, fill.cumulative_quantity)
+                .apply_fill(
+                    state,
+                    &mut order.record,
+                    fill.cumulative_quantity,
+                    fill.filled_at,
+                )
                 .is_duplicate()
             {
                 continue;
@@ -1071,28 +1166,75 @@ impl Runtime {
         Ok(state)
     }
 
-    /// 按主仓成交推进批次（第 4.2 节），有变化就落盘。
+    /// 按主仓成交推进批次（第 4.2 节）、按限速放行下一个单位（第 4.1 节），有变化就落盘。
     ///
-    /// 记账之后、规划之前调用：新启用的格子这一步就会挂上单，提前结束的批次这一步
-    /// 就不再补挂主仓买单。
-    fn advance_batches(
+    /// 记账之后、规划之前调用：新启用的格子和新放行的单位这一步就会挂上单，
+    /// 提前结束的批次这一步就不再补挂主仓买单。
+    ///
+    /// 放行时刻由时钟给出，判断依据是记下来的真实成交时刻：重启和暂停都不会多给额度
+    /// （第 9.4 节）。
+    fn advance_progress(
         &self,
         strategy_id: &StrategyId,
         strategy: &Strategy,
         state: &mut StrategyState,
         orders: &[StoredOrder],
+        now: DateTime<Utc>,
     ) -> Result<(), RuntimeError> {
         let working: Vec<WorkingOrder> = orders
             .iter()
             .filter(|order| order.record.is_working())
             .map(|order| order.record.working_view())
             .collect();
-        if strategy.advance(state, &working) {
+        let advanced = strategy.advance(state, &working);
+        let released = strategy.advance_throttle(state, now);
+        if advanced || released {
             // 只改了状态，没有新的成交要记，订单记录不用动。
             self.store.save_applied_fills(strategy_id, state, &[])?;
         }
         Ok(())
     }
+}
+
+/// 除限速间隔之外，新配置改动了的第一个字段。
+///
+/// 这些参数决定了批次划分和格子划分，运行中改动会让已保存的状态对不上，只能在
+/// 停止后重建（第 2.4 节）。返回字段名是为了让报错说清楚改了什么。
+///
+/// 标的没有列在这里：新配置的标的必须和交易所的一致，规整时就会以配置错误拒绝。
+fn changed_field(old: &StrategyConfig, new: &StrategyConfig) -> Option<&'static str> {
+    // 先逐项比较，好报出具体是哪个字段被改了。
+    let (old_side, new_side) = (&old.long, &new.long);
+    if old_side.price_low != new_side.price_low {
+        return Some("price_low");
+    }
+    if old_side.price_high != new_side.price_high {
+        return Some("price_high");
+    }
+    if old_side.max_position != new_side.max_position {
+        return Some("max_position");
+    }
+    if old_side.core_ratio != new_side.core_ratio {
+        return Some("core_ratio");
+    }
+    if old_side.batch_count != new_side.batch_count {
+        return Some("batch_count");
+    }
+    if old_side.grid_spacing != new_side.grid_spacing {
+        return Some("grid_spacing");
+    }
+    if old_side.grid_spread != new_side.grid_spread {
+        return Some("grid_spread");
+    }
+    // 兜底：以后给配置加了新参数而忘了在这里列出来，也必须是「拒绝」而不是「悄悄
+    // 生效」——放行一个决定批次与格子划分的参数会让状态和配置对不上。比较的是整个
+    // 配置，所以将来加在顶层的参数（比如空头侧）也挡得住。
+    let mut unlisted = new.clone();
+    unlisted.long.throttle_interval = old.long.throttle_interval;
+    if unlisted != *old {
+        return Some("unlisted");
+    }
+    None
 }
 
 /// 一笔成交对仓位的贡献，以 1e-8 标的为单位：买为正，卖为负。

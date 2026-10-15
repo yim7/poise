@@ -1,4 +1,5 @@
-//! 策略状态：每批的主仓累计成交与结束标记，每个格子的启用标记与待买回量。
+//! 策略状态：每批的主仓累计成交与结束标记，每个格子的启用标记与待买回量，
+//! 以及限速的放行进度。
 //!
 //! 只有这几项需要保存，其余数量都可以推算：
 //! 格子持有 = 格子数量 − 待买回量；主仓 = 各批累计成交之和；
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::batch::BatchIndex;
 use crate::grid::{CellIndex, GridPlan};
+use crate::throttle::ThrottleState;
 use crate::units::{Position, Quantity};
 
 /// 一个格子的状态。
@@ -44,11 +46,34 @@ pub struct BatchState {
 pub struct StrategyState {
     batches: Vec<BatchState>,
     cells: Vec<CellState>,
+    /// 本侧限速的放行进度（第 4.1 节）。做多网格只有一侧，所以只有一份。
+    throttle: ThrottleState,
 }
 
 impl StrategyState {
+    /// 不带限速进度的状态：限速进度从零开始，全部单位还没放行。
+    ///
+    /// 调用方要么用 [`crate::Strategy::initial_state`]，要么自己给出限速进度
+    /// （[`StrategyState::set_throttle`]）。
     pub fn new(batches: Vec<BatchState>, cells: Vec<CellState>) -> Self {
-        Self { batches, cells }
+        Self {
+            batches,
+            cells,
+            throttle: ThrottleState::default(),
+        }
+    }
+
+    pub fn throttle(&self) -> &ThrottleState {
+        &self.throttle
+    }
+
+    /// 可变的限速进度：放行和记录成交时刻都要改它。
+    pub fn throttle_mut(&mut self) -> &mut ThrottleState {
+        &mut self.throttle
+    }
+
+    pub fn set_throttle(&mut self, throttle: ThrottleState) {
+        self.throttle = throttle;
     }
 
     pub fn batches(&self) -> &[BatchState] {
@@ -115,6 +140,8 @@ pub enum StateError {
         filled: Quantity,
         core_quantity: Quantity,
     },
+    #[error("throttle released {released} units but the plan has {unit_count}")]
+    ThrottleReleasedAboveUnitCount { released: usize, unit_count: usize },
 }
 
 #[cfg(test)]

@@ -46,7 +46,7 @@ async fn b19_restart_backfills_offline_fills_and_replaces_orders_by_state() {
     );
 
     // 还有可能落地的订单：先等到它们过期，不重复下单。
-    let outcome = harness.runtime.resume(&strategy_id, at(1)).await.unwrap();
+    let outcome = harness.resume(1).await;
     assert_eq!(
         outcome,
         ResumeOutcome::WaitingForExpiry { until: at(5) },
@@ -54,7 +54,7 @@ async fn b19_restart_backfills_offline_fills_and_replaces_orders_by_state() {
     );
     assert_eq!(exchange.place_count(), 20);
 
-    let outcome = harness.runtime.resume(&strategy_id, at(12)).await.unwrap();
+    let outcome = harness.resume(12).await;
     let ResumeOutcome::Resumed(report) = outcome else {
         panic!("expected the resume to run a step, got {outcome:?}");
     };
@@ -189,7 +189,7 @@ async fn a_fill_delivered_after_the_order_went_terminal_is_still_recorded() {
         strategy_id.clone(),
     );
 
-    let outcome = harness.runtime.resume(&strategy_id, at(121)).await.unwrap();
+    let outcome = harness.resume(121).await;
     let ResumeOutcome::Resumed(report) = outcome else {
         panic!("expected the resumed step, got {outcome:?}");
     };
@@ -213,11 +213,7 @@ async fn resuming_a_fresh_strategy_does_not_wait_for_expiry() {
     let harness = harness_with_store(Store::open_in_memory().unwrap());
 
     // 还没有下过单：没有需要等待的订单。
-    let outcome = harness
-        .runtime
-        .resume(&harness.strategy_id, at(0))
-        .await
-        .unwrap();
+    let outcome = harness.resume(0).await;
 
     let ResumeOutcome::Resumed(report) = outcome else {
         panic!("expected a step, got {outcome:?}");
@@ -230,7 +226,7 @@ async fn resume_is_refused_for_an_unknown_strategy() {
     let harness = harness_with_store(Store::open_in_memory().unwrap());
     let missing = StrategyId::try_from("s-missing".to_string()).unwrap();
 
-    let error = harness.runtime.resume(&missing, at(0)).await.unwrap_err();
+    let error = harness.runtime.resume(&missing).await.unwrap_err();
 
     assert!(matches!(
         error,

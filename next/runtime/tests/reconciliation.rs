@@ -134,11 +134,7 @@ async fn a_fully_filled_order_keeps_its_reservation_while_its_fills_are_missing(
         .unwrap();
 
     // 暂停：撤单只把它变成终态，成交还没核对。
-    let canceled = harness
-        .runtime
-        .pause(&harness.strategy_id, at(1))
-        .await
-        .unwrap();
+    let canceled = harness.pause(1).await;
     assert!(canceled.contains(&buy));
     assert_eq!(canceled.len(), 20, "every working order is canceled");
     assert_eq!(
@@ -153,11 +149,7 @@ async fn a_fully_filled_order_keeps_its_reservation_while_its_fills_are_missing(
     );
 
     // 不交付流水就恢复。
-    let outcome = harness
-        .runtime
-        .resume(&harness.strategy_id, at(2))
-        .await
-        .unwrap();
+    let outcome = harness.resume(2).await;
     let ResumeOutcome::Resumed(report) = outcome else {
         panic!("the canceled order must not block the resume: {outcome:?}");
     };
@@ -229,19 +221,11 @@ async fn a_late_fill_outside_the_lookback_window_still_lands_in_the_fills_table(
             .unwrap()
             .is_empty()
     );
-    let canceled = harness
-        .runtime
-        .pause(&harness.strategy_id, at(120))
-        .await
-        .unwrap();
+    let canceled = harness.pause(120).await;
     assert!(canceled.contains(&buy));
 
     // 恢复：按订单状态补记 .02，但流水还没到，这一格仍然不下买单。
-    let outcome = harness
-        .runtime
-        .resume(&harness.strategy_id, at(121))
-        .await
-        .unwrap();
+    let outcome = harness.resume(121).await;
     let ResumeOutcome::Resumed(report) = outcome else {
         panic!("the canceled order must not block the resume: {outcome:?}");
     };

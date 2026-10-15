@@ -1,10 +1,14 @@
 //! 规划：给定状态、在场订单和当前价格，输出要下的单、要撤的单和等待原因。
 //!
-//! 规则（做多侧、不限速）：
+//! 规则（做多侧）：
 //! - 每批主仓在自己的批次价挂买单，不追高；成交后格子按比例启用（第 4.2 节）；
 //! - 启用后的格子：持有部分在卖价挂卖单（只减仓），待买回部分在买价挂买单；
+//! - 还没被限速放行的单位不挂新单（第 4.1 节）；
 //! - 某一侧剩余量不足最低订单金额时，这一侧先不挂单，只挂另一侧（第 4.4 节）；
 //! - 新订单的限价不与本策略在场的反向订单相交（第 6 节）。
+//!
+//! 限速只挡住「新单位的第一次挂单」：已放行单位在场订单的撤销、已启用格子的买卖
+//! 循环都不受限速影响（第 4.3 节），也不会因为等待放行而释放任何预留。
 
 use serde::{Deserialize, Serialize};
 
@@ -37,8 +41,8 @@ pub struct PendingUnit {
 
 /// 策略当前不发出新订单的原因。
 ///
-/// 除最后两条外是设计第 11 节列出的集合。本任务支持的配置（做多、不限速）会产生
-/// 「等待所属批次」和「限价因自身反向订单下调」两种；其余属于后续任务。
+/// 除最后三条外是设计第 11 节列出的集合。本任务支持的配置（做多、可选限速）会产生
+/// 「等待限速放行」「等待所属批次」和「限价因自身反向订单下调」三种；其余属于后续任务。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitReason {
@@ -192,12 +196,18 @@ impl Strategy {
         let blocked =
             |unit: Unit, purpose: OrderPurpose| pending.contains(&PendingUnit { unit, purpose });
         let mut waiting_for_fills = false;
+        let mut waiting_for_throttle = false;
 
         // 主仓：每批在自己的批次价挂买单，不追高。
         for batch in self.batches().batches() {
             let Some(batch_state) = state.batch(batch.index) else {
                 continue;
             };
+            // 还没放行的批次不挂单：它不可能有在场订单，也就没有要撤的。
+            if !self.is_released(state, Unit::Batch(batch.index)) {
+                waiting_for_throttle = true;
+                continue;
+            }
             if batch_state.finished {
                 // 本批已经结束：不再挂主仓买单，在场的那张也要撤掉。
                 // 结束可能是迟到成交带来的，而这张单是上一次规划按当时的 `C − F` 挂出来的；
@@ -256,18 +266,25 @@ impl Strategy {
             }
             let held = cell_state.held(cell.quantity);
             let unit = Unit::Cell(cell.index);
-            // 先买回、再卖出：卖出看到的边界包含刚规划出去的买回单。
-            let buy = Demand {
-                unit,
-                purpose: OrderPurpose::GridBuy,
-                limit_price: bounds.buy_limit(cell.buy_price, tick),
-                quantity: cell_state.to_buy_back,
-                reduce_only: false,
-                blocked: blocked(unit, OrderPurpose::GridBuy),
-            };
-            if let Placement::Blocked = self.reconcile(working_orders, &buy, &mut plan, &mut bounds)
-            {
-                waiting_for_fills = true;
+            // 没有主仓时格子自成单位（第 4.1 节）：还没放行的格子不挂第一次买回单。
+            // 已经持有仓位的格子一定是放行过的，它的买卖循环不受限速约束（第 4.3 节）。
+            if self.is_released(state, unit) {
+                // 先买回、再卖出：卖出看到的边界包含刚规划出去的买回单。
+                let buy = Demand {
+                    unit,
+                    purpose: OrderPurpose::GridBuy,
+                    limit_price: bounds.buy_limit(cell.buy_price, tick),
+                    quantity: cell_state.to_buy_back,
+                    reduce_only: false,
+                    blocked: blocked(unit, OrderPurpose::GridBuy),
+                };
+                if let Placement::Blocked =
+                    self.reconcile(working_orders, &buy, &mut plan, &mut bounds)
+                {
+                    waiting_for_fills = true;
+                }
+            } else {
+                waiting_for_throttle = true;
             }
             let sell = Demand {
                 unit,
@@ -283,6 +300,9 @@ impl Strategy {
             {
                 waiting_for_fills = true;
             }
+        }
+        if waiting_for_throttle {
+            plan.waiting.push(WaitReason::WaitingForThrottle);
         }
         if waiting_for_batch {
             plan.waiting.push(WaitReason::WaitingForBatch);
@@ -348,7 +368,7 @@ mod tests {
     use crate::Strategy;
     use crate::batch::BatchIndex;
     use crate::fixtures::{
-        core_long_strategy, fine_core_long_strategy, five_cell_strategy,
+        at, core_long_strategy, fine_core_long_strategy, five_cell_strategy,
         single_batch_core_strategy, single_small_batch_strategy,
     };
     use crate::grid::CellIndex;
@@ -516,7 +536,12 @@ mod tests {
             reduce_only: true,
             status: OrderStatus::Open,
         };
-        strategy.apply_fill(&mut after_sell, &mut sell, Quantity::parse("1").unwrap());
+        strategy.apply_fill(
+            &mut after_sell,
+            &mut sell,
+            Quantity::parse("1").unwrap(),
+            at(0),
+        );
         let working = vec![working_order(
             "0x01",
             Unit::Cell(CellIndex(0)),
@@ -558,7 +583,12 @@ mod tests {
 
         // 买回全部成交后格子恢复整份，按 .015 挂卖。
         let mut buy = order_from(buy, "0x01");
-        strategy.apply_fill(&mut state, &mut buy, Quantity::parse("0.0149").unwrap());
+        strategy.apply_fill(
+            &mut state,
+            &mut buy,
+            Quantity::parse("0.0149").unwrap(),
+            at(0),
+        );
         let plan = strategy.plan(&state, &[], &[], Price::parse("95000").unwrap());
 
         assert!(!has_intent(

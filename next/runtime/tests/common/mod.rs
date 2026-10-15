@@ -8,7 +8,10 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, TimeZone, Utc};
-use poise_runtime::{Runtime, SimulatedExchange, StepReport, Store, StoredOrder, StrategyId};
+use poise_runtime::{
+    ManualClock, ResumeOutcome, Runtime, RuntimeOptions, SimulatedExchange, StepReport, Store,
+    StoredOrder, StrategyId,
+};
 use poise_strategy::batch::BatchIndex;
 use poise_strategy::config::{SideConfig, StrategyConfig};
 use poise_strategy::grid::CellIndex;
@@ -56,7 +59,19 @@ pub fn long_grid_config() -> StrategyConfig {
             batch_count: None,
             grid_spacing: Price::parse("1000").unwrap(),
             grid_spread: Price::parse("1000").unwrap(),
+            throttle_interval: None,
         },
+    }
+}
+
+/// 加上限速：同样的划分，`τ = 1` 小时。
+pub fn throttled(config: StrategyConfig, interval: chrono::Duration) -> StrategyConfig {
+    StrategyConfig {
+        long: SideConfig {
+            throttle_interval: Some(interval),
+            ..config.long
+        },
+        ..config
     }
 }
 
@@ -92,6 +107,8 @@ pub fn core_only_config() -> StrategyConfig {
 pub struct Harness {
     pub exchange: Arc<SimulatedExchange>,
     pub runtime: Runtime,
+    /// 测试自己控制的时钟：`step`、`pause`、`resume` 都先把拨到指定时刻再调用。
+    pub clock: Arc<ManualClock>,
     pub strategy_id: StrategyId,
 }
 
@@ -123,13 +140,20 @@ pub fn harness_with(config: StrategyConfig, store: Store) -> Harness {
     let exchange = exchange();
     // 每次下单都查一次库：这张单必须在发出去之前就已经落盘（第 9.1 节）。
     exchange.probe_stored_orders(store.clone());
-    let runtime = Runtime::new(exchange.clone(), store);
+    let clock = Arc::new(ManualClock::new(at(0)));
+    let runtime = Runtime::with_clock(
+        exchange.clone(),
+        store,
+        RuntimeOptions::default(),
+        clock.clone(),
+    );
     let strategy_id = runtime
-        .create_strategy(config, btc_spec(), btc_fees(), at(0))
+        .create_strategy(config, btc_spec(), btc_fees())
         .unwrap();
     Harness {
         exchange,
         runtime,
+        clock,
         strategy_id,
     }
 }
@@ -137,19 +161,37 @@ pub fn harness_with(config: StrategyConfig, store: Store) -> Harness {
 /// 进程重启：交易所还在（同一个模拟交易所），数据库重新打开，策略沿用原来的标识。
 pub fn restart(store: Store, exchange: Arc<SimulatedExchange>, strategy_id: StrategyId) -> Harness {
     exchange.probe_stored_orders(store.clone());
+    let clock = Arc::new(ManualClock::new(at(0)));
     Harness {
-        runtime: Runtime::new(exchange.clone(), store),
+        runtime: Runtime::with_clock(
+            exchange.clone(),
+            store,
+            RuntimeOptions::default(),
+            clock.clone(),
+        ),
         exchange,
+        clock,
         strategy_id,
     }
 }
 
 impl Harness {
+    /// 拨到 `seconds`，再走一步。
     pub async fn step(&self, seconds: i64) -> StepReport {
-        self.runtime
-            .step(&self.strategy_id, at(seconds))
-            .await
-            .unwrap()
+        self.clock.set(at(seconds));
+        self.runtime.step(&self.strategy_id).await.unwrap()
+    }
+
+    /// 拨到 `seconds`，再暂停。
+    pub async fn pause(&self, seconds: i64) -> Vec<ClientOrderId> {
+        self.clock.set(at(seconds));
+        self.runtime.pause(&self.strategy_id).await.unwrap()
+    }
+
+    /// 拨到 `seconds`，再恢复。
+    pub async fn resume(&self, seconds: i64) -> ResumeOutcome {
+        self.clock.set(at(seconds));
+        self.runtime.resume(&self.strategy_id).await.unwrap()
     }
 
     pub fn orders(&self) -> Vec<StoredOrder> {

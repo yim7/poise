@@ -2,6 +2,7 @@
 //!
 //! 校验都使用规整后的值：价格按报价精度规整，数量按数量精度向下规整。
 
+use chrono::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::batch::{Batch, BatchIndex, BatchPlan, batch_price};
@@ -17,7 +18,7 @@ pub const MAX_CELL_COUNT: usize = 10_000;
 
 /// 多头侧的配置。
 ///
-/// 限速、观点失效价属于后续任务，这里还没有对应的字段。
+/// 观点失效价属于后续任务，这里还没有对应的字段。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SideConfig {
     /// 本侧建仓的价格范围下限 `L`。
@@ -34,6 +35,10 @@ pub struct SideConfig {
     pub grid_spacing: Price,
     /// 网格价差 `g`：每格卖价 = 格子买价 + g。
     pub grid_spread: Price,
+    /// 限速间隔 τ（可选，第 4.1 节）：同一侧在 τ 时间内最多启动一个单位；`None` 表示不限速。
+    ///
+    /// 它是运行中可以修改的参数（第 2.4 节），所以在配置里而不是状态里。
+    pub throttle_interval: Option<Duration>,
 }
 
 /// 做多网格配置：只有多头侧，不限速。
@@ -92,6 +97,8 @@ pub enum ConfigError {
     },
     #[error("core ratio {core_ratio} must be between 0 and 1 inclusive")]
     CoreRatioOutOfRange { core_ratio: Rate },
+    #[error("throttle interval must not be negative, got {interval:?}")]
+    NegativeThrottleInterval { interval: Duration },
     #[error("core ratio is above 0, so the batch count must be at least 1, got {batch_count:?}")]
     BatchCountOutOfRange { batch_count: Option<u32> },
     #[error("batch count {batch_count} is above the supported maximum {max_batch_count}")]
@@ -305,6 +312,7 @@ impl StrategyConfig {
                     batch_count,
                     grid_spacing,
                     grid_spread,
+                    throttle_interval: self.long.throttle_interval,
                 },
             },
             batches,
@@ -337,6 +345,12 @@ impl StrategyConfig {
             return Err(ConfigError::CoreRatioOutOfRange {
                 core_ratio: long.core_ratio,
             });
+        }
+        // 限速间隔只用来算「下一笔放行还要等多久」，负值没有意义。
+        if let Some(interval) = long.throttle_interval
+            && interval < Duration::zero()
+        {
+            return Err(ConfigError::NegativeThrottleInterval { interval });
         }
         Ok(())
     }
@@ -647,6 +661,7 @@ mod tests {
     use crate::grid::CellIndex;
     use crate::instrument::{Fees, Instrument, InstrumentSpec};
     use crate::units::{Notional, Price, Quantity, Rate};
+    use chrono::Duration;
 
     /// 没有主仓的配置，价格范围与数量按参数给定。
     fn config(price_low: &str, price_high: &str, max_position: &str) -> StrategyConfig {
@@ -660,6 +675,7 @@ mod tests {
                 batch_count: None,
                 grid_spacing: Price::parse("1000").unwrap(),
                 grid_spread: Price::parse("1000").unwrap(),
+                throttle_interval: None,
             },
         }
     }
@@ -1009,6 +1025,7 @@ mod tests {
                 batch_count: None,
                 grid_spacing: Price::parse("1").unwrap(),
                 grid_spread: Price::parse("1").unwrap(),
+                throttle_interval: None,
             },
             ..long_grid_config()
         };
@@ -1044,6 +1061,7 @@ mod tests {
                 batch_count: Some(5),
                 grid_spacing: Price::parse("1").unwrap(),
                 grid_spread: Price::parse("1").unwrap(),
+                throttle_interval: None,
             },
             ..long_grid_config()
         };
@@ -1323,5 +1341,48 @@ mod tests {
                 Price::parse("91000").unwrap()
             ) < threshold
         );
+    }
+
+    /// 限速间隔是配置的一部分：规整不改动它，写进数据库再读回来还是同一个值。
+    #[test]
+    fn b44_the_throttle_interval_survives_normalizing_and_json() {
+        let mut raw = core_config();
+        raw.long.throttle_interval = Some(Duration::minutes(60));
+
+        let normalized = raw.normalize(&btc_spec(), &btc_fees()).unwrap();
+
+        assert_eq!(
+            normalized.config.long.throttle_interval,
+            Some(Duration::minutes(60))
+        );
+        let json = serde_json::to_string(&normalized.config).unwrap();
+        let restored: StrategyConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, normalized.config);
+        assert_eq!(restored.long.throttle_interval, Some(Duration::minutes(60)));
+
+        // 不限速也是配置的一部分：`None` 不会在读回来之后变成别的值。
+        let plain = long_grid_config()
+            .normalize(&btc_spec(), &btc_fees())
+            .unwrap();
+        let restored: StrategyConfig =
+            serde_json::from_str(&serde_json::to_string(&plain.config).unwrap()).unwrap();
+        assert_eq!(restored.long.throttle_interval, None);
+    }
+
+    #[test]
+    fn rejects_a_negative_throttle_interval() {
+        let mut raw = core_config();
+        raw.long.throttle_interval = Some(Duration::seconds(-1));
+
+        assert_eq!(
+            raw.normalize(&btc_spec(), &btc_fees()).unwrap_err(),
+            ConfigError::NegativeThrottleInterval {
+                interval: Duration::seconds(-1),
+            }
+        );
+
+        // 零是允许的：相邻两个单位仍然要等前一个单位先成交。
+        raw.long.throttle_interval = Some(Duration::zero());
+        assert!(raw.normalize(&btc_spec(), &btc_fees()).is_ok());
     }
 }

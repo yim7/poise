@@ -199,11 +199,7 @@ async fn a_cancel_that_fails_while_pausing_is_retried_by_pausing_again() {
     assert_eq!(harness.working().len(), 1);
 
     // 再暂停一次就能把剩下的撤掉：`pause` 可以重复调用。
-    let canceled = harness
-        .runtime
-        .pause(&harness.strategy_id, at(2))
-        .await
-        .unwrap();
+    let canceled = harness.pause(2).await;
 
     assert_eq!(canceled.len(), 1);
     assert!(harness.working().is_empty());
@@ -231,11 +227,7 @@ async fn pausing_absorbs_a_late_fill_older_than_the_fills_lookback() {
     harness.step(120).await;
     harness.exchange.deliver_delayed_fills();
 
-    let canceled = harness
-        .runtime
-        .pause(&harness.strategy_id, at(121))
-        .await
-        .unwrap();
+    let canceled = harness.pause(121).await;
 
     // 暂停要吸收最终成交（第 9.4 节）：这笔成交比同步点早得多，但订单是那时挂出去的，
     // 所以它仍然在拉取范围内，不能漏掉。
@@ -261,11 +253,7 @@ async fn a_fill_delivered_after_the_pause_is_still_recorded_on_resume() {
     // 走到 t=120：挂单累计量解释了仓位差额，同步点推到 120。
     harness.step(120).await;
     // 暂停先撤单，再补拉成交；这时流水还查不到，成交没有入账。
-    let canceled = harness
-        .runtime
-        .pause(&harness.strategy_id, at(120))
-        .await
-        .unwrap();
+    let canceled = harness.pause(120).await;
     assert_eq!(canceled.len(), 20);
     assert_eq!(
         harness.cell(0).to_buy_back,
@@ -274,11 +262,7 @@ async fn a_fill_delivered_after_the_pause_is_still_recorded_on_resume() {
     );
 
     harness.exchange.deliver_delayed_fills();
-    let outcome = harness
-        .runtime
-        .resume(&harness.strategy_id, at(121))
-        .await
-        .unwrap();
+    let outcome = harness.resume(121).await;
     let ResumeOutcome::Resumed(report) = outcome else {
         panic!("expected a resumed step, got {outcome:?}");
     };
@@ -445,11 +429,7 @@ async fn a_cancel_of_an_order_the_exchange_never_saw_keeps_the_reservation() {
 
     // 过了 expiresAfter 撤它，交易所只会回答「查无此单」：这分不出它是已成交、
     // 已撤销还是压根没落地，所以和挂单列表里消失时一样保留预留、不释放。
-    let canceled = harness
-        .runtime
-        .pause(&harness.strategy_id, at(6))
-        .await
-        .unwrap();
+    let canceled = harness.pause(6).await;
 
     assert_eq!(canceled.len(), 19);
     assert_eq!(harness.exchange.place_count(), place_count);
@@ -465,11 +445,7 @@ async fn a_cancel_of_an_order_the_exchange_never_saw_keeps_the_reservation() {
     );
 
     // 预留还在：恢复后只为被撤掉的那 19 格补单，这一格不会补挂新的买单。
-    let outcome = harness
-        .runtime
-        .resume(&harness.strategy_id, at(7))
-        .await
-        .unwrap();
+    let outcome = harness.resume(7).await;
     let ResumeOutcome::Resumed(report) = outcome else {
         panic!("expected a step, got {outcome:?}");
     };
@@ -529,17 +505,14 @@ async fn b18_a_position_mismatch_pauses_the_strategy_and_cancels_its_orders() {
     );
 
     // 暂停后不再走步。
+    harness.clock.set(at(2));
     assert!(matches!(
-        harness.runtime.step(&harness.strategy_id, at(2)).await,
+        harness.runtime.step(&harness.strategy_id).await,
         Err(RuntimeError::NotRunning(_, StrategyStatus::Paused))
     ));
 
     // 仓位没修好之前，恢复会立刻再次暂停。
-    let outcome = harness
-        .runtime
-        .resume(&harness.strategy_id, at(3))
-        .await
-        .unwrap();
+    let outcome = harness.resume(3).await;
 
     let ResumeOutcome::Resumed(report) = outcome else {
         panic!("expected a step, got {outcome:?}");
@@ -615,7 +588,8 @@ async fn b17_nothing_is_sent_when_the_order_cannot_be_stored() {
         .fail_order_writes_for_test()
         .unwrap();
 
-    let error = harness.runtime.step(&harness.strategy_id, at(0)).await;
+    harness.clock.set(at(0));
+    let error = harness.runtime.step(&harness.strategy_id).await;
 
     assert!(matches!(error, Err(RuntimeError::Store(_))));
     // 先写库、后发送：写不进去就一张单也不发。
@@ -632,7 +606,7 @@ async fn b23_an_invalid_config_is_refused_before_anything_is_stored() {
 
     let error = harness
         .runtime
-        .create_strategy(config, btc_spec(), btc_fees(), at(0))
+        .create_strategy(config, btc_spec(), btc_fees())
         .unwrap_err();
 
     assert!(matches!(error, RuntimeError::Config(_)));
@@ -641,7 +615,7 @@ async fn b23_an_invalid_config_is_refused_before_anything_is_stored() {
     valid.long.grid_spread = poise_strategy::units::Price::parse("1000").unwrap();
     let strategy_id = harness
         .runtime
-        .create_strategy(valid, btc_spec(), btc_fees(), at(0))
+        .create_strategy(valid, btc_spec(), btc_fees())
         .unwrap();
     assert_eq!(
         harness.runtime.status(&strategy_id).unwrap(),
@@ -654,7 +628,7 @@ async fn step_on_an_unknown_strategy_is_refused() {
     let harness = harness();
     let missing = poise_runtime::StrategyId::try_from("s-missing".to_string()).unwrap();
 
-    let error = harness.runtime.step(&missing, at(0)).await.unwrap_err();
+    let error = harness.runtime.step(&missing).await.unwrap_err();
 
     assert!(matches!(
         error,
