@@ -1,0 +1,157 @@
+//! 集成测试共用的夹具：设计第 3.2 节的例子。
+//!
+//! BTC，报价精度 1，数量精度 0.001，最低订单金额 10；做多网格 75000–95000，
+//! M = 1，间距 1000，价差 1000，得到 20 格、每格 0.05。
+
+#![allow(dead_code)]
+
+use std::sync::Arc;
+
+use chrono::{DateTime, TimeZone, Utc};
+use poise_runtime::{Runtime, SimulatedExchange, StepReport, Store, StoredOrder, StrategyId};
+use poise_strategy::config::{SideConfig, StrategyConfig};
+use poise_strategy::grid::CellIndex;
+use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
+use poise_strategy::order::{ClientOrderId, OrderPurpose};
+use poise_strategy::state::CellState;
+use poise_strategy::units::{Notional, Price, Quantity, Rate};
+
+/// 起始标记价落在网格最高买价与最低卖价之间：买单和卖单挂上时都不会立刻成交。
+pub const INITIAL_MARKET_PRICE: &str = "95500";
+
+pub fn at(seconds: i64) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 10, 15, 0, 0, 0).unwrap() + chrono::Duration::seconds(seconds)
+}
+
+pub fn btc() -> Instrument {
+    Instrument::try_new("BTC").unwrap()
+}
+
+pub fn btc_spec() -> InstrumentSpec {
+    InstrumentSpec::new(
+        btc(),
+        Price::parse("1").unwrap(),
+        Quantity::parse("0.001").unwrap(),
+        Notional::parse("10").unwrap(),
+    )
+    .unwrap()
+}
+
+pub fn btc_fees() -> Fees {
+    Fees::new(
+        Rate::parse("0.00045").unwrap(),
+        Rate::parse("0.00015").unwrap(),
+    )
+}
+
+pub fn long_grid_config() -> StrategyConfig {
+    StrategyConfig {
+        instrument: btc(),
+        long: SideConfig {
+            price_low: Price::parse("75000").unwrap(),
+            price_high: Price::parse("95000").unwrap(),
+            max_position: Quantity::parse("1").unwrap(),
+            grid_spacing: Price::parse("1000").unwrap(),
+            grid_spread: Price::parse("1000").unwrap(),
+        },
+    }
+}
+
+pub struct Harness {
+    pub exchange: Arc<SimulatedExchange>,
+    pub runtime: Runtime,
+    pub strategy_id: StrategyId,
+}
+
+pub fn exchange() -> Arc<SimulatedExchange> {
+    Arc::new(SimulatedExchange::new(
+        btc(),
+        Price::parse(INITIAL_MARKET_PRICE).unwrap(),
+        at(0),
+    ))
+}
+
+pub fn harness() -> Harness {
+    harness_with_store(Store::open_in_memory().unwrap())
+}
+
+pub fn harness_with_store(store: Store) -> Harness {
+    let exchange = exchange();
+    let runtime = Runtime::new(exchange.clone(), store);
+    let strategy_id = runtime
+        .create_strategy(long_grid_config(), btc_spec(), btc_fees(), at(0))
+        .unwrap();
+    Harness {
+        exchange,
+        runtime,
+        strategy_id,
+    }
+}
+
+/// 进程重启：交易所还在（同一个模拟交易所），数据库重新打开，策略沿用原来的标识。
+pub fn restart(store: Store, exchange: Arc<SimulatedExchange>, strategy_id: StrategyId) -> Harness {
+    Harness {
+        runtime: Runtime::new(exchange.clone(), store),
+        exchange,
+        strategy_id,
+    }
+}
+
+impl Harness {
+    pub async fn step(&self, seconds: i64) -> StepReport {
+        self.runtime
+            .step(&self.strategy_id, at(seconds))
+            .await
+            .unwrap()
+    }
+
+    pub fn orders(&self) -> Vec<StoredOrder> {
+        self.runtime.orders(&self.strategy_id).unwrap()
+    }
+
+    /// 当前还在场的订单记录。
+    pub fn working(&self) -> Vec<StoredOrder> {
+        self.orders()
+            .into_iter()
+            .filter(|order| order.record.is_working())
+            .collect()
+    }
+
+    /// 某个格子某一侧当前在场订单的 `cloid`。
+    pub fn working_cloid(&self, cell: usize, purpose: OrderPurpose) -> ClientOrderId {
+        let matching: Vec<ClientOrderId> = self
+            .working()
+            .into_iter()
+            .filter(|order| {
+                order.record.cell_index == CellIndex(cell) && order.record.purpose == purpose
+            })
+            .map(|order| order.record.client_order_id)
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "expected exactly one working {purpose:?} order in cell {cell}"
+        );
+        matching[0].clone()
+    }
+
+    pub fn cell(&self, cell: usize) -> CellState {
+        self.runtime
+            .cell_states(&self.strategy_id)
+            .unwrap()
+            .cell(CellIndex(cell))
+            .unwrap()
+            .clone()
+    }
+
+    /// 交易所上某张挂单。
+    pub fn at_exchange(
+        &self,
+        client_order_id: &ClientOrderId,
+    ) -> Option<poise_runtime::ExchangeOrder> {
+        self.exchange
+            .orders()
+            .into_iter()
+            .find(|order| &order.client_order_id == client_order_id)
+    }
+}
