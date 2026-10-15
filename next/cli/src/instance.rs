@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use poise_hyperliquid::{Hyperliquid, HyperliquidConfig};
-use poise_runtime::{Account, InstanceLock, Network, StartupFile, Store};
+use poise_runtime::{
+    Account, Exchange, InstanceLock, Network, Runtime, RuntimeOptions, StartupFile, Store,
+};
 
 /// 启动文件名，固定放在实例目录下。
 pub const STARTUP_FILE_NAME: &str = "poise.toml";
@@ -80,6 +82,18 @@ impl Instance {
     pub fn open_store(&self) -> Result<Store> {
         let path = self.startup.database_path();
         Store::open(&path).with_context(|| format!("cannot open the database `{}`", path.display()))
+    }
+
+    /// 用系统时钟建一个运行时，交易所和账户都是这个实例的客户端。
+    pub fn runtime(&self) -> Result<Runtime> {
+        let exchange: Arc<dyn Exchange> = self.exchange.clone();
+        let account: Arc<dyn Account> = self.exchange.clone();
+        Ok(Runtime::with_options(
+            exchange,
+            account,
+            self.open_store()?,
+            RuntimeOptions::default(),
+        ))
     }
 }
 

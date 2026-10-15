@@ -8,7 +8,7 @@ use poise_strategy::units::{Position, Price, Quantity};
 
 #[tokio::test]
 async fn b17_duplicate_out_of_order_and_regressed_fills_are_recorded_once() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
 
@@ -128,7 +128,7 @@ async fn b17_duplicate_out_of_order_and_regressed_fills_are_recorded_once() {
 
 #[tokio::test]
 async fn a_late_fill_older_than_the_sync_point_is_still_recorded() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 同步点已经推到 at(2)。
@@ -160,7 +160,7 @@ async fn a_late_fill_older_than_the_sync_point_is_still_recorded() {
 
 #[tokio::test]
 async fn fills_of_other_orders_are_not_recorded() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
 
     // 一张不属于本策略的订单的成交（例如用户手动挂的单）。

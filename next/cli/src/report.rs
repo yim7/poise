@@ -1,4 +1,4 @@
-//! 三个只读或收尾的命令：`check`、`status`、`stop`。
+//! 三个辅助命令：`check`、`status`、`stop`。
 //!
 //! 都只打印结论，不打印私钥；启动校验里最要紧的一句是「由私钥推出的地址确实在
 //! 这个账户已授权的 API 钱包列表里」。
@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use poise_runtime::{
-    Exchange, Runtime, StartupCheck, StartupWarning, StoredOrder, StrategyStatus, validate_startup,
+    Exchange, StartupCheck, StartupWarning, StoredOrder, StrategyStatus, validate_startup,
 };
 use poise_strategy::instrument::{Instrument, PriceRule};
 use poise_strategy::side::Direction;
@@ -23,7 +23,7 @@ pub async fn check(instance: &Instance) -> Result<()> {
 
 /// 交易所那一侧的启动校验（设计第 2.0 节）：账户模式、API 钱包授权、到期提醒。
 ///
-/// 这是启动闸门，会真正下单的命令（`grid`）在动手之前都先走这一步——
+/// 这是启动闸门，会真正下单的命令（`serve`）在动手之前都先走这一步——
 /// 账户不是 Unified、或私钥推出的地址不在已授权列表里，就一张单也不该发出去。
 ///
 /// `stop` 刻意不走这一步：出问题时撤单是唯一要做的事，不能被一次读接口失败挡住。
@@ -64,7 +64,7 @@ pub async fn status(instance: &Instance, instrument: &Instrument) -> Result<()> 
         return Ok(());
     };
 
-    // `stop` 会把本标的上所有策略一起暂停，所以别让这里看起来只有一个。
+    // `stop` 会把本标的上所有还能动的策略一起暂停，所以别让这里看起来只有一个。
     if ids.len() > 1 {
         println!(
             "提醒        本标的上还有 {} 个策略，`stop` 会把它们一起暂停：{}",
@@ -80,13 +80,7 @@ pub async fn status(instance: &Instance, instrument: &Instrument) -> Result<()> 
     let stored = store.load_strategy(strategy_id)?;
     println!("策略        {strategy_id}");
     println!("标的        {}", stored.instrument.symbol());
-    println!(
-        "状态        {}",
-        match stored.status {
-            StrategyStatus::Running => "运行中",
-            StrategyStatus::Paused => "已暂停",
-        }
-    );
+    println!("状态        {}", status_name(stored.status));
     println!("建立时间    {}", stored.created_at);
     println!("成交同步点  {}", stored.fills_synced_through);
     println!(
@@ -155,10 +149,10 @@ pub async fn status(instance: &Instance, instrument: &Instrument) -> Result<()> 
 
 /// 撤销全部策略在本标的上的在场订单（第 9.4 节的暂停）。
 pub async fn stop(instance: &Instance, instrument: &Instrument) -> Result<()> {
-    // 撤单会写数据库，也要先取实例锁：否则会和正在跑的 `grid` 抢同一批订单。
+    // 撤单会写数据库，也要先取实例锁：否则会和正在跑的 `serve` 抢同一批订单。
     let _lock = instance.lock()?;
 
-    let runtime = Runtime::new(instance.exchange().clone(), instance.open_store()?);
+    let runtime = instance.runtime()?;
     let ids = runtime
         .store()
         .load_strategy_ids(instrument)
@@ -169,8 +163,22 @@ pub async fn stop(instance: &Instance, instrument: &Instrument) -> Result<()> {
     }
 
     for strategy_id in ids {
-        let canceled = runtime.pause(&strategy_id).await?;
-        println!("策略 {strategy_id} 已暂停，撤销 {} 张订单", canceled.len());
+        let stored = runtime.store().load_strategy(&strategy_id)?;
+        match action_for(stored.status) {
+            // 归档的策略没有挂单，也不该被重新唤醒。
+            Action::Skip => println!("策略 {strategy_id} {}，跳过", status_name(stored.status)),
+            // 恢复中、暂停中都没有新单在场外等着，暂停只是把它们收尾的进度往前推一步。
+            Action::Pause => {
+                let canceled = runtime.pause(&strategy_id).await?;
+                println!("策略 {strategy_id} 已暂停，撤销 {} 张订单", canceled.len());
+            }
+            // 已经点过停止的走停止那条路：暂停不收「停止中」，而它要的正是把撤单收尾
+            // 推进一步，和停止是同一件事。
+            Action::Stop => {
+                let canceled = runtime.stop(&strategy_id).await?;
+                println!("策略 {strategy_id} 停止中，撤销 {} 张订单", canceled.len());
+            }
+        }
     }
 
     // 收尾核对：交易所上不该再剩本系统的挂单。
@@ -185,6 +193,45 @@ pub async fn stop(instance: &Instance, instrument: &Instrument) -> Result<()> {
     let position = instance.exchange().position(instrument).await?;
     println!("仓位        {position}");
     Ok(())
+}
+
+/// `stop` 对每个策略做的事。
+///
+/// 这个映射跟着运行时那边的契约走：暂停只收运行中、恢复中、暂停中、已暂停，已经点过
+/// 停止的策略再点暂停会被拒（`NotRunning`），而它要的本来就是继续收尾，推进一步的是
+/// 停止那条路。
+#[derive(Debug, PartialEq, Eq)]
+enum Action {
+    /// 归档的没有挂单，草稿还没启动：都不用动。
+    Skip,
+    /// 撤销挂单、留在暂停：仓位保留。
+    Pause,
+    /// 已经点过停止：把撤单收尾推进一步。
+    Stop,
+}
+
+fn action_for(status: StrategyStatus) -> Action {
+    match status {
+        StrategyStatus::Stopped | StrategyStatus::Draft => Action::Skip,
+        StrategyStatus::Stopping => Action::Stop,
+        StrategyStatus::Running
+        | StrategyStatus::Restoring
+        | StrategyStatus::Pausing
+        | StrategyStatus::Paused => Action::Pause,
+    }
+}
+
+/// 状态的中文说法。
+fn status_name(status: StrategyStatus) -> &'static str {
+    match status {
+        StrategyStatus::Draft => "草稿",
+        StrategyStatus::Running => "运行中",
+        StrategyStatus::Restoring => "恢复中",
+        StrategyStatus::Pausing => "暂停中",
+        StrategyStatus::Paused => "已暂停",
+        StrategyStatus::Stopping => "停止中",
+        StrategyStatus::Stopped => "已归档",
+    }
 }
 
 /// 报价规则的一句话说明。
@@ -210,4 +257,30 @@ fn print_order(order: &StoredOrder) {
         order.record.status,
         order.exchange_order_id.as_deref().unwrap_or("-"),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Action, action_for, status_name};
+    use poise_runtime::StrategyStatus;
+
+    /// 每个状态下 `stop` 该走哪条路。
+    ///
+    /// 「停止中」走的是停止：点过停止的策略再点暂停会被运行时拒掉，整条命令会在它这里
+    /// 中断，排在后头的策略一张单都撤不掉。
+    #[test]
+    fn stop_advances_a_stopping_strategy_along_the_stop_path() {
+        let expected = [
+            (StrategyStatus::Draft, Action::Skip),
+            (StrategyStatus::Stopped, Action::Skip),
+            (StrategyStatus::Running, Action::Pause),
+            (StrategyStatus::Restoring, Action::Pause),
+            (StrategyStatus::Pausing, Action::Pause),
+            (StrategyStatus::Paused, Action::Pause),
+            (StrategyStatus::Stopping, Action::Stop),
+        ];
+        for (status, action) in expected {
+            assert_eq!(action_for(status), action, "{}", status_name(status));
+        }
+    }
 }

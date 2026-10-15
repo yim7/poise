@@ -46,11 +46,12 @@ fn both_sides_throttled_neutral() -> StrategyConfig {
 }
 
 /// 四批主仓加网格，带限速。
-fn throttled_core() -> Harness {
+async fn throttled_core() -> Harness {
     harness_with(
         throttled(core_long_config(), HOUR),
         Store::open_in_memory().unwrap(),
     )
+    .await
 }
 
 /// 这一步规划要挂单的单位，按规划顺序。
@@ -82,7 +83,7 @@ fn refused(harness: &Harness, config: StrategyConfig) -> &'static str {
 /// B02：快跌时只放行一个批次，之后按限速依次放行；已启用的格子照常循环。
 #[tokio::test]
 async fn b02_a_crash_releases_one_batch_and_then_one_batch_per_interval() {
-    let harness = throttled_core();
+    let harness = throttled_core().await;
 
     // 起步：只有 95 批放行，它的主仓买单挂在批次价 95000 等待。
     let report = harness.step(0).await;
@@ -178,7 +179,7 @@ async fn b02_a_crash_releases_one_batch_and_then_one_batch_per_interval() {
 /// B03：下一批放行前价格反弹到批次价以上时，主仓买单挂在批次价等待，不追高。
 #[tokio::test]
 async fn b03_a_rebound_before_the_release_keeps_waiting_at_the_batch_price() {
-    let harness = throttled_core();
+    let harness = throttled_core().await;
 
     // 起步价 95500 已经在批次价 95000 之上：买单照样挂在 95000，不抬到市价。
     harness.step(0).await;
@@ -220,7 +221,7 @@ async fn b03_a_rebound_before_the_release_keeps_waiting_at_the_batch_price() {
 /// B06：批次在更低价位才放行时，主仓在批次价成交，格子按启用规则立即买入。
 #[tokio::test]
 async fn b06_a_batch_released_below_its_price_buys_its_cells_immediately() {
-    let harness = throttled_core();
+    let harness = throttled_core().await;
 
     // 95 批买完，五格在 95500 的行情下挂着买单等待。
     harness.step(0).await;
@@ -297,7 +298,8 @@ async fn a_restart_continues_the_interval_from_the_real_fill_time() {
         let harness = harness_with(
             throttled(core_long_config(), HOUR),
             Store::open(&path).unwrap(),
-        );
+        )
+        .await;
         harness.step(0).await;
         batch0 = harness.working_core_cloid(0);
         // 部分成交：放行时刻从第一笔成交算起，不等这一批买完。
@@ -332,7 +334,7 @@ async fn a_restart_continues_the_interval_from_the_real_fill_time() {
 /// 暂停再恢复不额外给额度：恢复不会把 τ 重新计时。
 #[tokio::test]
 async fn pausing_and_resuming_does_not_grant_an_extra_release() {
-    let harness = throttled_core();
+    let harness = throttled_core().await;
     harness.step(0).await;
     let batch0 = harness.working_core_cloid(0);
     harness
@@ -364,7 +366,7 @@ async fn pausing_and_resuming_does_not_grant_an_extra_release() {
 /// B44：运行中修改限速间隔立即生效，并记一个新的参数版本。
 #[tokio::test]
 async fn b44_changing_the_throttle_interval_while_running_takes_effect_and_records_a_version() {
-    let harness = throttled_core();
+    let harness = throttled_core().await;
     harness.step(0).await;
     let batch0 = harness.working_core_cloid(0);
     harness
@@ -466,7 +468,7 @@ async fn b44_changing_the_throttle_interval_while_running_takes_effect_and_recor
 /// 对应不同的参数集（网页上连点两次保存就会走到这里）。
 #[tokio::test]
 async fn b44_saving_the_same_config_again_does_not_add_a_version() {
-    let harness = throttled_core();
+    let harness = throttled_core().await;
     harness.step(0).await;
 
     // 刚建好的配置再存一遍：还是第 1 版，不写新版本。
@@ -504,7 +506,7 @@ async fn b44_saving_the_same_config_again_does_not_add_a_version() {
 /// 反方向（不限速改成有限速）同样允许，限速从修改时刻重新计时。
 #[tokio::test]
 async fn b44_clearing_the_interval_while_running_lifts_the_throttle() {
-    let harness = throttled_core();
+    let harness = throttled_core().await;
     harness.step(0).await;
 
     harness
@@ -559,7 +561,7 @@ async fn b44_clearing_the_interval_while_running_lifts_the_throttle() {
 /// 可以挂新单」。
 #[tokio::test]
 async fn b44_adding_a_throttle_while_running_starts_the_interval_from_that_moment() {
-    let harness = harness_with(core_long_config(), Store::open_in_memory().unwrap());
+    let harness = harness_with(core_long_config(), Store::open_in_memory().unwrap()).await;
     assert_eq!(
         released(&harness),
         4,
@@ -607,7 +609,7 @@ async fn b44_adding_a_throttle_while_running_starts_the_interval_from_that_momen
 /// 已经结束、不会再成交，第 2 批就永远等不到放行。
 #[tokio::test]
 async fn adding_a_throttle_keeps_finished_batches_released() {
-    let harness = harness_with(core_only_config(), Store::open_in_memory().unwrap());
+    let harness = harness_with(core_only_config(), Store::open_in_memory().unwrap()).await;
     harness.step(0).await;
 
     // 前两批主仓先后成交结束。
@@ -682,7 +684,7 @@ async fn adding_a_throttle_keeps_finished_batches_released() {
 /// 结束、不会再成交，满 τ 之后放行的是它自己，放行进度停在那里，第 2 批永远等不到。
 #[tokio::test]
 async fn adding_a_throttle_does_not_strand_batches_behind_a_gap() {
-    let harness = harness_with(core_only_config(), Store::open_in_memory().unwrap());
+    let harness = harness_with(core_only_config(), Store::open_in_memory().unwrap()).await;
 
     // 起步：第 0 批的主仓买单被交易所拒掉，它没有成交也没有结束。
     harness.exchange.reject_next_place("rejected");
@@ -773,7 +775,7 @@ async fn adding_a_throttle_does_not_strand_batches_behind_a_gap() {
 /// 而且没有任何报错。所以配置写不进去时，进度也不能写进去。
 #[tokio::test]
 async fn adding_a_throttle_writes_the_config_and_the_progress_in_one_transaction() {
-    let harness = harness_with(core_long_config(), Store::open_in_memory().unwrap());
+    let harness = harness_with(core_long_config(), Store::open_in_memory().unwrap()).await;
     harness.step(0).await;
     harness.clock.set(at(100));
     // 让写策略状态失败，模拟磁盘写不进去。
@@ -815,7 +817,8 @@ async fn adding_a_throttle_to_one_side_leaves_the_other_sides_progress_alone() {
         long_throttled_neutral(),
         cheap_spec(),
         Store::open_in_memory().unwrap(),
-    );
+    )
+    .await;
 
     // 价格一路跌到 87：多头侧每满一个 τ 放行一格，这一格在自己的买价上当场买入，
     // 于是放行时刻和首笔成交时刻是同一个。
@@ -883,7 +886,8 @@ async fn a_release_follows_the_real_fill_time_when_the_flow_arrives_late() {
     let harness = harness_with(
         throttled(core_only_config(), HOUR),
         Store::open_in_memory().unwrap(),
-    );
+    )
+    .await;
     harness.step(0).await;
     let batch0 = harness.working_core_cloid(0);
 
@@ -894,16 +898,16 @@ async fn a_release_follows_the_real_fill_time_when_the_flow_arrives_late() {
         .fill(&batch0, Quantity::parse("0.1").unwrap(), at(50))
         .unwrap();
 
-    // 暂停撤掉这张单：撤销前成交的那部分只能等下一步按挂单状态补记。
+    // 暂停撤掉这张单，撤销后按挂单状态补记：挂单状态里没有成交时间，只能用记账那一刻
+    // 的时刻 at(100) 兜底。
     harness.pause(100).await;
     harness.resume(101).await;
 
-    // 补记用的是这一步的时刻 at(101)：挂单状态里没有成交时间。
     let throttle = |harness: &Harness| {
         let state = harness.runtime.state(&harness.strategy_id).unwrap();
         long_state(&state).throttle().clone()
     };
-    assert_eq!(throttle(&harness).first_fill_at, Some(at(101)));
+    assert_eq!(throttle(&harness).first_fill_at, Some(at(100)));
 
     // 流水到达：改回真实成交时刻 at(50)。
     harness.exchange.deliver_delayed_fills();

@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{at, btc, btc_fees, btc_spec, harness, long_cell, long_grid_config, long_side_mut};
+use common::{at, btc, harness, long_cell, long_grid_config, long_side_mut};
 use poise_runtime::{
     ResumeOutcome, Runtime, RuntimeError, SimulatedExchange, Store, StoredOrder, StrategyStatus,
 };
@@ -12,7 +12,7 @@ use poise_strategy::units::{Position, Price, Quantity};
 
 #[tokio::test]
 async fn a_rejected_order_is_written_to_the_database_before_it_is_sent() {
-    let harness = harness();
+    let harness = harness().await;
     harness.exchange.reject_next_place("insufficient margin");
 
     let report = harness.step(0).await;
@@ -41,7 +41,7 @@ async fn a_rejected_order_is_written_to_the_database_before_it_is_sent() {
 
 #[tokio::test]
 async fn an_order_the_exchange_does_not_know_keeps_its_reservation() {
-    let harness = harness();
+    let harness = harness().await;
     harness.exchange.unknown_next_place("timed out");
 
     let report = harness.step(0).await;
@@ -85,7 +85,7 @@ async fn an_order_the_exchange_does_not_know_keeps_its_reservation() {
 
 #[tokio::test]
 async fn a_cancel_with_an_unknown_result_keeps_the_reservation_and_places_nothing() {
-    let harness = harness();
+    let harness = harness().await;
     // 数据库里留着一张交易所并不认识的挂单（上一次进程崩溃时的记录）：
     // 撤单只会得到「查无此单」，这不能当成撤销成功。
     let ghost = ClientOrderId::try_new("0xghost").unwrap();
@@ -150,7 +150,7 @@ async fn a_cancel_with_an_unknown_result_keeps_the_reservation_and_places_nothin
 
 #[tokio::test]
 async fn a_position_mismatch_explained_by_an_unrecorded_fill_does_not_pause() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
 
@@ -183,7 +183,7 @@ async fn a_position_mismatch_explained_by_an_unrecorded_fill_does_not_pause() {
 
 #[tokio::test]
 async fn a_cancel_that_fails_while_pausing_is_retried_by_pausing_again() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     harness
         .exchange
@@ -213,7 +213,7 @@ async fn a_cancel_that_fails_while_pausing_is_retried_by_pausing_again() {
 
 #[tokio::test]
 async fn pausing_absorbs_a_late_fill_older_than_the_fills_lookback() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 下单当时就成交了 0.02，但成交记录迟迟不到。
@@ -240,7 +240,7 @@ async fn pausing_absorbs_a_late_fill_older_than_the_fills_lookback() {
 /// 暂停后流水才到，而且已经超出回看窗口：恢复时要能补记。
 #[tokio::test]
 async fn a_fill_delivered_after_the_pause_is_still_recorded_on_resume() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 下单当时就成交了 0.02，成交记录要等到暂停之后才到。
@@ -251,12 +251,21 @@ async fn a_fill_delivered_after_the_pause_is_still_recorded_on_resume() {
         .unwrap();
     // 走到 t=120：挂单累计量解释了仓位差额，同步点推到 120。
     harness.step(120).await;
-    // 暂停先撤单，再补拉成交；这时流水还查不到，成交没有入账。
+    // 暂停先撤单，再按订单状态核对：格子按订单累计量记入 .02，但流水还查不到，
+    // 这一格的成交没有对完账。
     let canceled = harness.pause(120).await;
     assert_eq!(canceled.len(), 20);
     assert_eq!(
         harness.cell(0).to_buy_back,
-        Quantity::parse("0.05").unwrap(),
+        Quantity::parse("0.03").unwrap(),
+        "the order's cumulative filled quantity is booked"
+    );
+    assert!(
+        harness
+            .runtime
+            .fills(&harness.strategy_id)
+            .unwrap()
+            .is_empty(),
         "the fill record is not visible yet"
     );
 
@@ -266,8 +275,14 @@ async fn a_fill_delivered_after_the_pause_is_still_recorded_on_resume() {
         panic!("expected a resumed step, got {outcome:?}");
     };
 
-    // 撤单只把订单变成终态，成交核对还没完成：回查起点仍然追到它挂出去的时刻。
-    assert_eq!(report.applied_fills, 1);
+    // 流水到了：时间戳早于同步点，回查起点仍然追到它挂出去的时刻，流水照样补进表里，
+    // 而且不重复记账。
+    assert_eq!(report.applied_fills, 0, "the fill was already booked");
+    assert_eq!(
+        harness.runtime.fills(&harness.strategy_id).unwrap().len(),
+        1,
+        "the late fill must be recorded"
+    );
     assert_eq!(
         harness.cell(0).to_buy_back,
         Quantity::parse("0.03").unwrap()
@@ -284,7 +299,7 @@ async fn a_fill_delivered_after_the_pause_is_still_recorded_on_resume() {
 /// 运行的策略。
 #[tokio::test]
 async fn a_fill_hidden_from_the_fills_query_does_not_pause_the_strategy() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 成交记录查不到：第一次补拉和第二次补拉都看不到它。
@@ -316,7 +331,7 @@ async fn a_fill_hidden_from_the_fills_query_does_not_pause_the_strategy() {
 
 #[tokio::test]
 async fn a_fully_filled_order_whose_fill_record_is_late_is_not_replaced() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 这张买单在交易所全部成交了，但成交记录要下一步才查得到。
@@ -360,7 +375,7 @@ async fn a_fully_filled_order_whose_fill_record_is_late_is_not_replaced() {
 
 #[tokio::test]
 async fn a_fill_between_the_fills_query_and_the_position_query_does_not_pause() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 查完成交、还没查仓位时成交了 0.02。
@@ -382,7 +397,7 @@ async fn a_fill_between_the_fills_query_and_the_position_query_does_not_pause() 
 
 #[tokio::test]
 async fn a_fill_between_the_position_query_and_the_fills_requery_does_not_pause() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     // 查成交、查仓位之间成交 0.02：仓位快照里没有它，于是触发补拉成交；
@@ -415,7 +430,7 @@ async fn a_fill_between_the_position_query_and_the_fills_requery_does_not_pause(
 
 #[tokio::test]
 async fn a_cancel_of_an_order_the_exchange_never_saw_keeps_the_reservation() {
-    let harness = harness();
+    let harness = harness().await;
     // 下单超时：交易所根本没有这张单。
     harness.exchange.unknown_next_place("timed out");
     harness.step(0).await;
@@ -474,7 +489,7 @@ async fn a_cancel_of_an_order_the_exchange_never_saw_keeps_the_reservation() {
 /// 成交照记进格子，剩下的预留释放出来重新挂。
 #[tokio::test]
 async fn a_partially_filled_order_canceled_by_the_exchange_is_booked_and_released() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
 
     // 第 0 格的买单成交 0.02（成交记录暂时查不到），随后交易所把它撤掉。
@@ -532,7 +547,7 @@ async fn a_partially_filled_order_canceled_by_the_exchange_is_booked_and_release
 
 #[tokio::test]
 async fn b18_a_position_mismatch_pauses_the_strategy_and_cancels_its_orders() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     // 用户在交易所手动买入 0.01。
     harness
@@ -589,7 +604,7 @@ async fn b18_a_position_mismatch_pauses_the_strategy_and_cancels_its_orders() {
 /// 卖价。这张卖单此刻没有任何仓位可减，不能成交。
 #[tokio::test]
 async fn a_reduce_only_sell_does_not_open_a_short_position() {
-    let harness = harness();
+    let harness = harness().await;
     harness.step(0).await;
     // 跌到 95000：第 0 格买回 .05。
     harness
@@ -639,7 +654,7 @@ async fn a_reduce_only_sell_does_not_open_a_short_position() {
 /// 写库失败时一张单都不能发出去（第 9.1 节）。
 #[tokio::test]
 async fn b17_nothing_is_sent_when_the_order_cannot_be_stored() {
-    let harness = harness();
+    let harness = harness().await;
     // 让写订单表失败，模拟磁盘写不进去。
     harness
         .runtime
@@ -658,33 +673,39 @@ async fn b17_nothing_is_sent_when_the_order_cannot_be_stored() {
 
 #[tokio::test]
 async fn b23_an_invalid_config_is_refused_before_anything_is_stored() {
-    let harness = harness();
+    let console = common::console();
     let mut config = long_grid_config();
     // 价差 1 美元覆盖不了两条腿的 taker 费率。
     long_side_mut(&mut config).grid_spread = poise_strategy::units::Price::parse("1").unwrap();
 
-    let error = harness
-        .runtime
-        .create_strategy(config, btc_spec(), btc_fees())
-        .unwrap_err();
+    let draft_id = console.runtime.create_draft(config).unwrap();
+    let preview = console.runtime.preview_draft(&draft_id).await.unwrap();
 
-    assert!(matches!(error, RuntimeError::Config(_)));
-    // 数据库仍然可用：同一批参数换一个合法的价差就能创建。
+    // 预览就说不过去：只有原因，没有表格，也没有确认令牌。
+    assert!(!preview.validation.valid);
+    assert!(preview.validation.reason.is_some());
+    assert!(preview.token.is_none());
+    assert!(preview.batches.is_empty());
+    // 没拿到令牌也就启动不了，一张策略记录都不会留下。
+    assert!(matches!(
+        console.runtime.start_draft(&draft_id, "whatever").await,
+        Err(RuntimeError::Config(_))
+    ));
+    assert!(console.runtime.strategies().unwrap().is_empty());
+
+    // 数据库仍然可用：同一批参数换一个合法的价差就能启动。
     let mut valid = long_grid_config();
     long_side_mut(&mut valid).grid_spread = poise_strategy::units::Price::parse("1000").unwrap();
-    let strategy_id = harness
-        .runtime
-        .create_strategy(valid, btc_spec(), btc_fees())
-        .unwrap();
+    let strategy_id = console.start(valid).await;
     assert_eq!(
-        harness.runtime.status(&strategy_id).unwrap(),
+        console.runtime.status(&strategy_id).unwrap(),
         StrategyStatus::Running
     );
 }
 
 #[tokio::test]
 async fn step_on_an_unknown_strategy_is_refused() {
-    let harness = harness();
+    let harness = harness().await;
     let missing = poise_runtime::StrategyId::try_from("s-missing".to_string()).unwrap();
 
     let error = harness.runtime.step(&missing).await.unwrap_err();
@@ -699,7 +720,8 @@ async fn step_on_an_unknown_strategy_is_refused() {
 fn the_runtime_can_be_built_from_any_exchange_implementation() {
     // 只验证 trait 的形状：模拟交易所可以作为 `Arc<dyn Exchange>` 传进去。
     let exchange: std::sync::Arc<dyn poise_runtime::Exchange> = common::exchange();
-    let runtime = Runtime::new(exchange, Store::open_in_memory().unwrap());
+    let account: std::sync::Arc<dyn poise_runtime::Account> = common::account();
+    let runtime = Runtime::new(exchange, account, Store::open_in_memory().unwrap());
 
     assert_eq!(runtime.options().order_expires_after.num_seconds(), 5);
     assert_eq!(

@@ -40,7 +40,10 @@ struct SimState {
     next_trade_id: u64,
     reject_next_place: Option<String>,
     unknown_next_place: Option<String>,
-    unknown_next_cancel: Option<String>,
+    unknown_cancels: usize,
+    unknown_cancel_reason: String,
+    reject_cancels: usize,
+    reject_cancel_reason: String,
     /// 排队等着在接下来几次查仓位之前成交的挂单，先进先出。
     fill_before_next_position: VecDeque<(ClientOrderId, Quantity)>,
     /// 排队等着在接下来几次撤单之前成交的挂单，先进先出。
@@ -49,6 +52,8 @@ struct SimState {
     fill_after_next_position: Option<(ClientOrderId, Quantity)>,
     pending_fill: Option<(ClientOrderId, Quantity)>,
     place_count: usize,
+    /// 收到的全部请求次数（见 [`SimulatedExchange::call_count`]）。
+    call_count: usize,
     /// 可选的数据库句柄：设上之后每次下单都会先查一次这张单是不是已经落库，
     /// 用来在成功路径上验证「先写库、再发送」（第 9.1 节）。
     store: Option<Store>,
@@ -129,12 +134,16 @@ impl SimulatedExchange {
                 next_trade_id: 0,
                 reject_next_place: None,
                 unknown_next_place: None,
-                unknown_next_cancel: None,
+                unknown_cancels: 0,
+                unknown_cancel_reason: String::new(),
+                reject_cancels: 0,
+                reject_cancel_reason: String::new(),
                 fill_before_next_position: VecDeque::new(),
                 fill_before_next_cancel: VecDeque::new(),
                 fill_after_next_position: None,
                 pending_fill: None,
                 place_count: 0,
+                call_count: 0,
                 store: None,
                 stored_before_place: Vec::new(),
             }),
@@ -164,6 +173,14 @@ impl SimulatedExchange {
         state.now = now;
         state.market_price = price;
         match_crossed_orders(&mut state, now);
+    }
+
+    /// 直接设定仓位：用来构造「账户上本来就有仓位」的场景。
+    ///
+    /// 真实账户上的仓位可能来自手动交易，也可能来自别的策略；模拟交易所平时只靠成交
+    /// 累积，这里给测试一个直接的入口。
+    pub fn set_position(&self, position: Position) {
+        self.lock().position = position;
     }
 
     /// 强制让一张挂单成交 `quantity`（超过剩余量时按剩余量成交），返回实际成交量。
@@ -381,7 +398,24 @@ impl SimulatedExchange {
 
     /// 让下一次撤单结果未知：请求超时，订单还在交易所。
     pub fn unknown_next_cancel(&self, reason: &str) {
-        self.lock().unknown_next_cancel = Some(reason.to_string());
+        self.unknown_next_cancels(1, reason);
+    }
+
+    /// 让接下来 `count` 次撤单都结果未知。
+    ///
+    /// 撤单回执丢在路上的时候，一次停止要发出去的是全部在场订单的撤销请求，丢的是
+    /// 这一批回执，不是其中一张。
+    pub fn unknown_next_cancels(&self, count: usize, reason: &str) {
+        let mut state = self.lock();
+        state.unknown_cancels = count;
+        state.unknown_cancel_reason = reason.to_string();
+    }
+
+    /// 让接下来 `count` 次撤单被明确拒绝：交易所拒收，订单还在场。
+    pub fn reject_next_cancels(&self, count: usize, reason: &str) {
+        let mut state = self.lock();
+        state.reject_cancels = count;
+        state.reject_cancel_reason = reason.to_string();
     }
 
     pub fn current_position(&self) -> Position {
@@ -399,6 +433,19 @@ impl SimulatedExchange {
     /// 收到的下单请求次数（含被拒绝的）。
     pub fn place_count(&self) -> usize {
         self.lock().place_count
+    }
+
+    /// 收到的全部请求次数，含下单、撤单、查挂单、查订单状态、查成交、查仓位、查标记价。
+    ///
+    /// 用来验证「读详情不碰交易所」这类要求：只看下单次数不够——读一次详情可能不下单，
+    /// 却问了一遍行情和仓位。
+    pub fn call_count(&self) -> usize {
+        self.lock().call_count
+    }
+
+    /// 把请求计数清零，方便只统计之后的一段。
+    pub fn reset_call_count(&self) {
+        self.lock().call_count = 0;
     }
 
     fn lock(&self) -> MutexGuard<'_, SimState> {
@@ -426,6 +473,7 @@ impl Exchange for SimulatedExchange {
         }
         let mut state = self.lock();
         state.place_count += 1;
+        state.call_count += 1;
         if request.instrument != self.instrument {
             return Err(ExchangeError::Rejected {
                 reason: format!(
@@ -486,6 +534,7 @@ impl Exchange for SimulatedExchange {
         client_order_id: &ClientOrderId,
     ) -> Result<(), ExchangeError> {
         let mut state = self.lock();
+        state.call_count += 1;
         if instrument != &self.instrument {
             return Err(ExchangeError::Rejected {
                 reason: format!("instrument `{instrument}` does not belong to this exchange"),
@@ -496,8 +545,15 @@ impl Exchange for SimulatedExchange {
             state.now = at;
             fill_order(&mut state, &client_order_id, quantity);
         }
-        if let Some(reason) = state.unknown_next_cancel.take() {
+        if state.unknown_cancels > 0 {
+            state.unknown_cancels -= 1;
+            let reason = state.unknown_cancel_reason.clone();
             return Err(ExchangeError::Unknown { reason });
+        }
+        if state.reject_cancels > 0 {
+            state.reject_cancels -= 1;
+            let reason = state.reject_cancel_reason.clone();
+            return Err(ExchangeError::Rejected { reason });
         }
         let Some(order) = state
             .orders
@@ -518,7 +574,8 @@ impl Exchange for SimulatedExchange {
         &self,
         instrument: &Instrument,
     ) -> Result<Vec<ExchangeOrder>, ExchangeError> {
-        let state = self.lock();
+        let mut state = self.lock();
+        state.call_count += 1;
         if instrument != &self.instrument {
             return Err(ExchangeError::Rejected {
                 reason: format!("instrument `{instrument}` does not belong to this exchange"),
@@ -537,7 +594,8 @@ impl Exchange for SimulatedExchange {
         instrument: &Instrument,
         client_order_id: &ClientOrderId,
     ) -> Result<OrderLookup, ExchangeError> {
-        let state = self.lock();
+        let mut state = self.lock();
+        state.call_count += 1;
         if instrument != &self.instrument {
             return Err(ExchangeError::Rejected {
                 reason: format!("instrument `{instrument}` does not belong to this exchange"),
@@ -561,6 +619,7 @@ impl Exchange for SimulatedExchange {
         since: DateTime<Utc>,
     ) -> Result<Vec<ExchangeFill>, ExchangeError> {
         let mut state = self.lock();
+        state.call_count += 1;
         if instrument != &self.instrument {
             return Err(ExchangeError::Rejected {
                 reason: format!("instrument `{instrument}` does not belong to this exchange"),
@@ -579,6 +638,7 @@ impl Exchange for SimulatedExchange {
 
     async fn position(&self, instrument: &Instrument) -> Result<Position, ExchangeError> {
         let mut state = self.lock();
+        state.call_count += 1;
         if instrument != &self.instrument {
             return Err(ExchangeError::Rejected {
                 reason: format!("instrument `{instrument}` does not belong to this exchange"),
@@ -593,7 +653,8 @@ impl Exchange for SimulatedExchange {
     }
 
     async fn mark_price(&self, instrument: &Instrument) -> Result<Price, ExchangeError> {
-        let state = self.lock();
+        let mut state = self.lock();
+        state.call_count += 1;
         if instrument != &self.instrument {
             return Err(ExchangeError::Rejected {
                 reason: format!("instrument `{instrument}` does not belong to this exchange"),

@@ -93,7 +93,7 @@ pub enum WaitReason {
 }
 
 /// 一次规划的完整结果。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Plan {
     /// 做出这次规划时的标记价。
     pub market_price: Price,

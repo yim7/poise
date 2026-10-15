@@ -14,7 +14,7 @@ use crate::throttle::ThrottleState;
 use crate::units::{Position, Quantity};
 
 /// 一个格子的状态。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellState {
     /// 是否已启用；已启用的格子不会关闭。
     pub enabled: bool,

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use common::{
-    INITIAL_MARKET_PRICE, at, btc, btc_fees, btc_spec, exchange, long_grid_config, long_state,
+    INITIAL_MARKET_PRICE, account, at, btc, exchange, long_grid_config, long_state, start_strategy,
     throttled,
 };
 use poise_runtime::{
@@ -123,13 +123,17 @@ async fn every_order_expires_from_its_own_send_time() {
         clock.clone(),
         Duration::seconds(1),
     ));
-    let runtime = Runtime::with_clock(slow, store, RuntimeOptions::default(), clock.clone());
+    let runtime = Runtime::with_clock(
+        slow,
+        account(),
+        store,
+        RuntimeOptions::default(),
+        clock.clone(),
+    );
 
     // runtime 的当前时间就是注入时钟的时间。
     assert_eq!(runtime.now(), at(0));
-    let strategy_id = runtime
-        .create_strategy(long_grid_config(), btc_spec(), btc_fees())
-        .unwrap();
+    let strategy_id = start_strategy(&runtime, long_grid_config()).await;
 
     let report = runtime.step(&strategy_id).await.unwrap();
     assert_eq!(report.placed.len(), 20);
@@ -203,10 +207,14 @@ impl Clock for TickingClock {
 async fn an_order_is_sent_with_a_fresh_expiry_after_the_write() {
     let store = Store::open_in_memory().unwrap();
     let clock = Arc::new(TickingClock::new(at(0), Duration::seconds(1)));
-    let runtime = Runtime::with_clock(exchange(), store, RuntimeOptions::default(), clock.clone());
-    let strategy_id = runtime
-        .create_strategy(long_grid_config(), btc_spec(), btc_fees())
-        .unwrap();
+    let runtime = Runtime::with_clock(
+        exchange(),
+        account(),
+        store,
+        RuntimeOptions::default(),
+        clock.clone(),
+    );
+    let strategy_id = start_strategy(&runtime, long_grid_config()).await;
 
     let report = runtime.step(&strategy_id).await.unwrap();
     assert_eq!(report.placed.len(), 20);
@@ -242,14 +250,15 @@ async fn an_immediate_fill_is_dated_by_the_receipt_not_the_send() {
         SlowExchange::new(sim.clone(), clock.clone(), Duration::seconds(1))
             .with_market_price(Price::parse("95000").unwrap()),
     );
-    let runtime = Runtime::with_clock(slow, store, RuntimeOptions::default(), clock.clone());
-    let strategy_id = runtime
-        .create_strategy(
-            throttled(long_grid_config(), Duration::hours(1)),
-            btc_spec(),
-            btc_fees(),
-        )
-        .unwrap();
+    let runtime = Runtime::with_clock(
+        slow,
+        account(),
+        store,
+        RuntimeOptions::default(),
+        clock.clone(),
+    );
+    let strategy_id =
+        start_strategy(&runtime, throttled(long_grid_config(), Duration::hours(1))).await;
 
     let report = runtime.step(&strategy_id).await.unwrap();
     assert_eq!(report.placed.len(), 1, "限速之下只有第 0 格挂单");
@@ -275,10 +284,14 @@ async fn an_order_whose_refreshed_expiry_is_used_up_is_not_sent() {
     sim.probe_stored_orders(store.clone());
     // 每读一次时钟走 10 秒，`expiresAfter` 只有 5 秒：重算和落库花掉的时间里就过期了。
     let clock = Arc::new(TickingClock::new(at(0), Duration::seconds(10)));
-    let runtime = Runtime::with_clock(sim.clone(), store, RuntimeOptions::default(), clock.clone());
-    let strategy_id = runtime
-        .create_strategy(long_grid_config(), btc_spec(), btc_fees())
-        .unwrap();
+    let runtime = Runtime::with_clock(
+        sim.clone(),
+        account(),
+        store,
+        RuntimeOptions::default(),
+        clock.clone(),
+    );
+    let strategy_id = start_strategy(&runtime, long_grid_config()).await;
 
     let report = runtime.step(&strategy_id).await.unwrap();
 
@@ -311,14 +324,15 @@ async fn a_terminal_fill_is_dated_by_the_query_receipt_not_the_step_start() {
         SlowExchange::new(sim.clone(), clock.clone(), Duration::zero())
             .with_slow_queries(Duration::seconds(10)),
     );
-    let runtime = Runtime::with_clock(slow, store, RuntimeOptions::default(), clock.clone());
-    let strategy_id = runtime
-        .create_strategy(
-            throttled(long_grid_config(), Duration::hours(1)),
-            btc_spec(),
-            btc_fees(),
-        )
-        .unwrap();
+    let runtime = Runtime::with_clock(
+        slow,
+        account(),
+        store,
+        RuntimeOptions::default(),
+        clock.clone(),
+    );
+    let strategy_id =
+        start_strategy(&runtime, throttled(long_grid_config(), Duration::hours(1))).await;
 
     // 限速之下只有第 0 格挂单。
     let report = runtime.step(&strategy_id).await.unwrap();

@@ -8,8 +8,8 @@ mod common;
 
 use chrono::Duration;
 use common::{
-    at, btc, btc_fees, cheap_spec, core_short_harness, harness_with_spec, neutral_grid_config,
-    neutral_harness, short_cell,
+    at, btc, core_short_harness, harness_with_spec, neutral_grid_config, neutral_harness,
+    short_cell,
 };
 use poise_runtime::Store;
 use poise_strategy::config::{SideConfig, StrategyConfig};
@@ -89,7 +89,8 @@ async fn b10_the_short_cells_across_a_decade_are_released_under_a_throttle() {
         throttled_short_across_a_decade(),
         spec.clone(),
         Store::open_in_memory().unwrap(),
-    );
+    )
+    .await;
     // 11 格：从 `L` 往上每格 `.01`，跨过 10 之后按 10 那一档的 `.001` 规整。
     let entries = [
         "9.9999", "10.0090", "10.0190", "10.0290", "10.0390", "10.0490", "10.0590", "10.0690",
@@ -151,7 +152,7 @@ async fn b10_the_short_cells_across_a_decade_are_released_under_a_throttle() {
 /// B10：做空网格的完整过程，与 B01、B09 的数量结果一致、方向相反。
 #[tokio::test]
 async fn b10_a_rally_and_a_breakdown_build_the_core_short_and_cycle_the_cells() {
-    let harness = core_short_harness();
+    let harness = core_short_harness().await;
     // 从 74 开始：四批主仓开空单挂在各自批次价，都不成交；格子全部未启用。
     harness
         .exchange
@@ -292,16 +293,14 @@ async fn b10_a_rally_and_a_breakdown_build_the_core_short_and_cycle_the_cells() 
 /// B12：启动预览里将要立即开空的那几格，确认之后确实按顺序开了空。
 #[tokio::test]
 async fn b12_the_preview_and_the_first_step_open_the_same_short_cells() {
-    let harness = neutral_harness();
+    let harness = neutral_harness().await;
     harness
         .exchange
         .set_market_price(Price::parse("93").unwrap(), at(0));
 
-    let preview = harness
-        .runtime
-        .preview_startup(neutral_grid_config(), cheap_spec(), btc_fees())
-        .await
-        .unwrap();
+    // 网页上的预览路径：新建草稿再看预览，确认之前一张单都不下。
+    let draft_id = harness.runtime.create_draft(neutral_grid_config()).unwrap();
+    let preview = harness.runtime.preview_draft(&draft_id).await.unwrap();
 
     assert_eq!(preview.market_price, Price::parse("93").unwrap());
     assert!(preview.batches.is_empty());
@@ -367,7 +366,7 @@ async fn b12_the_preview_and_the_first_step_open_the_same_short_cells() {
 /// B11：中性网格两侧各自做 T，净仓位不超过两侧上限，格子单不标只减仓。
 #[tokio::test]
 async fn b11_a_neutral_grid_cycles_both_sides_within_the_two_limits() {
-    let harness = neutral_harness();
+    let harness = neutral_harness().await;
     // 价格 90 落在两侧之间的空隙里：两侧的单都挂着，谁也不成交。
     harness
         .exchange
@@ -515,7 +514,7 @@ async fn b11_a_neutral_grid_cycles_both_sides_within_the_two_limits() {
 /// 单独走一遍价格路径，每一步都核对上界，而不是只看终点。
 #[tokio::test]
 async fn b11_the_net_position_stays_within_the_two_sides_limits() {
-    let harness = neutral_harness();
+    let harness = neutral_harness().await;
     let long_limit = Position::parse("1").unwrap();
     let short_limit = Position::parse("-0.25").unwrap();
     let path = ["90", "93", "96", "90", "85", "79", "96", "78", "96"];
