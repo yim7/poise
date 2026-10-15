@@ -15,6 +15,8 @@ Poise 是个人策略运行实验项目。源码公开主要为了透明记录�
 - [SECURITY.md](SECURITY.md)：安全边界、密钥使用和漏洞报告方式。
 - [LICENSE](LICENSE)：源码许可证。
 
+下一版策略设计见 [分批主仓与网格设计](docs/layered-grid-design.md)：在 Hyperliquid 上用分批挂单和网格表达做多、做空或中性的仓位观点，主仓分批买入并保留，网格仓位循环做 T，可选限速。相关用语见 [GLOSSARY.md](GLOSSARY.md)。设计尚未实现，不替代下文及系统文档对当前行为的说明。
+
 ## 工作区结构
 
 - [core/](core/)：领域模型、策略参数、风险规则、领域事件和 curve-immediate benchmark。
