@@ -6,7 +6,7 @@
 mod common;
 
 use chrono::Duration;
-use common::{Harness, at, core_long_config, harness_with, restart, throttled};
+use common::{Harness, at, core_long_config, core_only_config, harness_with, restart, throttled};
 use poise_runtime::{ResumeOutcome, RuntimeError, Store};
 use poise_strategy::batch::BatchIndex;
 use poise_strategy::config::{SideConfig, StrategyConfig};
@@ -484,7 +484,7 @@ async fn b44_saving_the_same_config_again_does_not_add_a_version() {
 /// 把限速间隔改成「不限速」也是改同一个参数：剩下的单位立刻全部放行。
 ///
 /// 这是本任务采取的读法——`None` 是限速间隔的取值之一，不是另一个参数。
-/// 反方向（不限速改成有限速）只能停下来重建：不限速时所有单位在启动时就已放行。
+/// 反方向（不限速改成有限速）同样允许，限速从修改时刻重新计时。
 #[tokio::test]
 async fn b44_clearing_the_interval_while_running_lifts_the_throttle() {
     let harness = throttled_core();
@@ -515,43 +515,331 @@ async fn b44_clearing_the_interval_while_running_lifts_the_throttle() {
             .contains(&WaitReason::WaitingForThrottle)
     );
 
-    // 取消限速之后再想加回来就不行了：放行进度已经无从重建。
-    assert!(matches!(
+    // 加回来也允许：放行进度按「修改这一刻」重建，而不是按启动时刻。
+    harness.clock.set(at(100));
+    let version = harness
+        .runtime
+        .update_config(&harness.strategy_id, throttled(core_long_config(), HOUR))
+        .unwrap();
+    assert_eq!(version, 3);
+    assert_eq!(released(&harness), 1, "加回限速后退回只放行第一个单位");
+    assert_eq!(
         harness
             .runtime
-            .update_config(&harness.strategy_id, throttled(core_long_config(), HOUR)),
-        Err(RuntimeError::ThrottleCannotBeAdded)
-    ));
+            .state(&harness.strategy_id)
+            .unwrap()
+            .throttle()
+            .first_fill_at,
+        Some(at(100)),
+        "计时从修改时刻开始"
+    );
 }
 
-/// 不限速的策略在运行中不能加限速：所有单位在启动时就已放行。
+/// 运行中加上限速：允许，限速从修改时刻开始计时（第 4.1 节）。
 ///
-/// 不限速被编码成「全部放行」，而「已放行的单位不会退回未放行」是限速的前提，
-/// 所以加限速只能停下来按新配置重建（第 2.4 节）。
+/// 不限速时所有单位在启动时就已放行；加上限速后退回只放行第一个单位，其余单位重新
+/// 按顺序放行。之前放行的单位在场上的订单留在原地，不会被撤掉——限速只决定「哪些单位
+/// 可以挂新单」。
 #[tokio::test]
-async fn b44_adding_a_throttle_to_an_unthrottled_strategy_is_refused() {
+async fn b44_adding_a_throttle_while_running_starts_the_interval_from_that_moment() {
     let harness = harness_with(core_long_config(), Store::open_in_memory().unwrap());
-
-    // 起步之前也一样：这一步还没有任何订单，但放行进度还是重建不出来。
-    assert!(matches!(
-        harness
-            .runtime
-            .update_config(&harness.strategy_id, throttled(core_long_config(), HOUR)),
-        Err(RuntimeError::ThrottleCannotBeAdded)
-    ));
-    let versions = harness
-        .runtime
-        .config_versions(&harness.strategy_id)
-        .unwrap();
-    assert_eq!(versions.len(), 1, "被拒绝的改动不记版本");
     assert_eq!(
         released(&harness),
         4,
         "不限速的策略在启动时就放行了全部单位"
     );
 
-    // 不走 `update_config` 就不会有这些麻烦：按新配置新建一个策略。
-    let throttled_harness = throttled_core();
-    let report = throttled_harness.step(0).await;
-    assert_eq!(planned(&report.plan), vec![Unit::Batch(BatchIndex(0))]);
+    // 起步：四批主仓都挂上买单。
+    let report = harness.step(0).await;
+    assert_eq!(
+        planned(&report.plan),
+        (0..4)
+            .map(|batch| Unit::Batch(BatchIndex(batch)))
+            .collect::<Vec<_>>()
+    );
+    let batch1 = harness.working_core_cloid(1);
+
+    // 运行中加上限速：立刻生效，记第 2 个版本。
+    harness.clock.set(at(100));
+    let version = harness
+        .runtime
+        .update_config(&harness.strategy_id, throttled(core_long_config(), HOUR))
+        .unwrap();
+    assert_eq!(version, 2);
+    assert_eq!(released(&harness), 1, "改成限速后退回只放行第一个单位");
+
+    // 满 τ 就放行第二个单位，起点是修改时刻 at(100) 而不是起步时刻 at(0)：
+    // 修改时刻之前的时间不算在间隔里，也不需要第一个单位先成交。
+    let report = harness.step(3699).await;
+    assert_eq!(released(&harness), 1);
+    assert!(
+        report
+            .plan
+            .waiting
+            .contains(&WaitReason::WaitingForThrottle)
+    );
+    harness.step(3700).await;
+    assert_eq!(released(&harness), 2);
+
+    // 之前放行的批次在场上的订单还在原地：限速只挡住新单，不撤已有订单。
+    assert!(harness.at_exchange(&batch1).is_some());
+}
+
+/// 运行中加上限速：已经开始的批次保持放行，后面的批次不会永久等待。
+///
+/// 场景：两批主仓已经成交结束，它们的流水也早已落在回看窗口之外（不会再有成交来
+/// 「补记」）。按「退回只放行第一个单位」重建进度的话，第 1 批会被退回未放行——而它
+/// 已经结束、不会再成交，第 2 批就永远等不到放行。
+#[tokio::test]
+async fn adding_a_throttle_keeps_finished_batches_released() {
+    let harness = harness_with(core_only_config(), Store::open_in_memory().unwrap());
+    harness.step(0).await;
+
+    // 前两批主仓先后成交结束。
+    for (batch, seconds) in [(0, 1), (1, 2)] {
+        let cloid = harness.working_core_cloid(batch);
+        harness
+            .exchange
+            .fill(&cloid, Quantity::parse("0.25").unwrap(), at(seconds))
+            .unwrap();
+        harness.step(seconds).await;
+        let state = harness.runtime.state(&harness.strategy_id).unwrap();
+        assert!(state.batch(BatchIndex(batch)).unwrap().finished);
+    }
+
+    // 暂停再恢复：遗留挂单全部撤掉，恢复时按状态重新挂单。两笔成交的流水就此落在
+    // 回查起点之后——还在场和还没对完账的订单都晚于它们。
+    harness.pause(3).await;
+    harness.resume(1000).await;
+    let earliest = harness
+        .orders()
+        .iter()
+        .filter(|order| order.record.is_working() || !order.fills_reconciled)
+        .map(|order| order.placed_at)
+        .min()
+        .unwrap();
+    assert_eq!(
+        earliest,
+        at(1000),
+        "成交流水已经超出回看窗口，不会再被拉回来"
+    );
+
+    // 运行中加上限速：已经开始的第 0、1 批保持放行，第 2 批等修改时刻满 τ。
+    harness.clock.set(at(1000));
+    harness
+        .runtime
+        .update_config(&harness.strategy_id, throttled(core_only_config(), HOUR))
+        .unwrap();
+    assert_eq!(released(&harness), 2, "已经开始的批次保持放行");
+
+    let report = harness.step(4599).await;
+    assert_eq!(released(&harness), 2);
+    assert!(
+        report
+            .plan
+            .waiting
+            .contains(&WaitReason::WaitingForThrottle)
+    );
+    harness.step(4600).await;
+    assert_eq!(released(&harness), 3, "第 2 批在修改时刻满 τ 之后照常放行");
+
+    // 第 2 批成交结束之后，第 3 批按它的成交时刻放行：链条继续往下走。
+    let batch2 = harness.working_core_cloid(2);
+    harness
+        .exchange
+        .fill(&batch2, Quantity::parse("0.25").unwrap(), at(4601))
+        .unwrap();
+    harness.step(4601).await;
+    assert_eq!(released(&harness), 3);
+    harness.step(8201).await;
+    assert_eq!(released(&harness), 4);
+}
+
+/// 运行中加上限速：中间没开始的批次不挡住后面已经开始的批次。
+///
+/// 场景：不限速时第 0 批的主仓买单被交易所拒掉，第 1 批成交结束，两笔成交的流水都早已
+/// 落在回看窗口之外。按「连续开始的前缀」重建进度的话，第 1 批会被退回未放行——它已经
+/// 结束、不会再成交，满 τ 之后放行的是它自己，放行进度停在那里，第 2 批永远等不到。
+#[tokio::test]
+async fn adding_a_throttle_does_not_strand_batches_behind_a_gap() {
+    let harness = harness_with(core_only_config(), Store::open_in_memory().unwrap());
+
+    // 起步：第 0 批的主仓买单被交易所拒掉，它没有成交也没有结束。
+    harness.exchange.reject_next_place("rejected");
+    harness.step(0).await;
+    let rejected = harness
+        .orders()
+        .into_iter()
+        .find(|order| order.record.unit == Unit::Batch(BatchIndex(0)))
+        .expect("第 0 批的订单记录");
+    assert_eq!(rejected.record.status, OrderStatus::Rejected);
+
+    // 第 1 批主仓成交结束：放行顺序上出现了空洞（第 0 批没开始，第 1 批已结束）。
+    let batch1 = harness.working_core_cloid(1);
+    harness
+        .exchange
+        .fill(&batch1, Quantity::parse("0.25").unwrap(), at(1))
+        .unwrap();
+    harness.step(1).await;
+    assert!(
+        harness
+            .runtime
+            .state(&harness.strategy_id)
+            .unwrap()
+            .batch(BatchIndex(1))
+            .unwrap()
+            .finished
+    );
+    assert_eq!(
+        harness.core_filled(0),
+        Quantity::ZERO,
+        "第 0 批一直没有成交"
+    );
+
+    // 暂停再恢复：遗留挂单全部撤掉，恢复时按状态重新挂单，两笔成交的流水就此落在回查
+    // 起点之后——还在场和还没对完账的订单都晚于它们。
+    harness.pause(3).await;
+    harness.resume(1000).await;
+    let earliest = harness
+        .orders()
+        .iter()
+        .filter(|order| order.record.is_working() || !order.fills_reconciled)
+        .map(|order| order.placed_at)
+        .min()
+        .unwrap();
+    assert_eq!(
+        earliest,
+        at(1000),
+        "成交流水已经超出回看窗口，不会再被拉回来"
+    );
+
+    // 运行中加上限速：放行到最后一个已经开始的批次（第 1 批），第 0 批跟着一起放行。
+    harness.clock.set(at(1000));
+    harness
+        .runtime
+        .update_config(&harness.strategy_id, throttled(core_only_config(), HOUR))
+        .unwrap();
+    assert_eq!(released(&harness), 2, "放行到最后一个已经开始的批次");
+    let state = harness.runtime.state(&harness.strategy_id).unwrap();
+    assert_eq!(
+        state.throttle().first_fill_at,
+        Some(at(1000)),
+        "间隔的起点留着，不会被已经结束的批次吃掉"
+    );
+
+    // 满 τ 之前不放行：起点是修改时刻 at(1000)。
+    let report = harness.step(4599).await;
+    assert_eq!(released(&harness), 2);
+    assert!(
+        report
+            .plan
+            .waiting
+            .contains(&WaitReason::WaitingForThrottle)
+    );
+
+    // 满 τ 放行的是第 2 批，不是已经结束的第 1 批：链条继续往下走。
+    harness.step(4600).await;
+    assert_eq!(released(&harness), 3, "第 2 批在修改时刻满 τ 之后照常放行");
+    let batch2 = harness.working_core_cloid(2);
+
+    // 第 2 批成交结束之后，第 3 批按它的成交时刻放行。
+    harness
+        .exchange
+        .fill(&batch2, Quantity::parse("0.25").unwrap(), at(4601))
+        .unwrap();
+    harness.step(4601).await;
+    assert_eq!(released(&harness), 3);
+    harness.step(8201).await;
+    assert_eq!(released(&harness), 4);
+}
+
+/// 加上限速时，新配置和重建的放行进度写在同一个事务里。
+///
+/// 分成两次写，中间崩掉就留下「配置已经限速、放行进度还是全部放行」：重启后
+/// `advance_throttle` 看到已放行的单位数已经等于单位总数就直接返回，限速静默失效，
+/// 而且没有任何报错。所以配置写不进去时，进度也不能写进去。
+#[tokio::test]
+async fn adding_a_throttle_writes_the_config_and_the_progress_in_one_transaction() {
+    let harness = harness_with(core_long_config(), Store::open_in_memory().unwrap());
+    harness.step(0).await;
+    harness.clock.set(at(100));
+    // 让写策略状态失败，模拟磁盘写不进去。
+    harness
+        .runtime
+        .store()
+        .fail_state_writes_for_test()
+        .unwrap();
+
+    let error = harness
+        .runtime
+        .update_config(&harness.strategy_id, throttled(core_long_config(), HOUR));
+
+    assert!(matches!(error, Err(RuntimeError::Store(_))));
+    // 新配置和参数版本一起回滚：库里还是那套不限速的参数，下一步改配置才是第 2 版。
+    let stored = harness
+        .runtime
+        .store()
+        .load_strategy(&harness.strategy_id)
+        .unwrap();
+    assert!(stored.config.long.throttle_interval.is_none());
+    assert_eq!(
+        harness
+            .runtime
+            .config_versions(&harness.strategy_id)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// 限速的首笔成交时刻取真实成交时刻，不是当时用来兜底的那个估计值。
+///
+/// 成交记录可能比挂单状态晚到：撤销期间成交的那部分没有成交时间可用，只能先用「记账
+/// 那一刻的时刻」兜底记下。流水到手之后必须改回真实成交时刻，否则放行会被推后——
+/// 估计值总是晚于真实成交。
+#[tokio::test]
+async fn a_release_follows_the_real_fill_time_when_the_flow_arrives_late() {
+    let harness = harness_with(
+        throttled(core_only_config(), HOUR),
+        Store::open_in_memory().unwrap(),
+    );
+    harness.step(0).await;
+    let batch0 = harness.working_core_cloid(0);
+
+    // 主仓在 at(50) 成交了 .1，但成交记录这一刻还查不到。
+    harness.exchange.delay_next_fills(1);
+    harness
+        .exchange
+        .fill(&batch0, Quantity::parse("0.1").unwrap(), at(50))
+        .unwrap();
+
+    // 暂停撤掉这张单：撤销前成交的那部分只能等下一步按挂单状态补记。
+    harness.pause(100).await;
+    harness.resume(101).await;
+
+    // 补记用的是这一步的时刻 at(101)：挂单状态里没有成交时间。
+    let throttle = |harness: &Harness| {
+        harness
+            .runtime
+            .state(&harness.strategy_id)
+            .unwrap()
+            .throttle()
+            .clone()
+    };
+    assert_eq!(throttle(&harness).first_fill_at, Some(at(101)));
+
+    // 流水到达：改回真实成交时刻 at(50)。
+    harness.exchange.deliver_delayed_fills();
+    harness.step(102).await;
+    assert_eq!(
+        throttle(&harness).first_fill_at,
+        Some(at(50)),
+        "放行时刻从真实成交算起，不是从兜底的那一刻算起"
+    );
+
+    // 满 τ 就放行第 1 批：起点是 at(50) 而不是 at(101)。
+    harness.step(3649).await;
+    assert_eq!(released(&harness), 1);
+    harness.step(3650).await;
+    assert_eq!(released(&harness), 2);
 }

@@ -5,10 +5,14 @@
 use chrono::Duration;
 use serde::{Deserialize, Serialize};
 
-use crate::batch::{Batch, BatchIndex, BatchPlan, batch_price};
-use crate::grid::{Cell, CellIndex, GridPlan, cell_count, cell_prices};
+use crate::batch::{BatchPlan, build_batches};
+use crate::error::ConfigError;
+use crate::grid::{
+    Cell, GridPlan, GridShape, build_cells, cell_count, cell_prices, max_cell_count,
+    meets_minimum_cell_notional, minimum_grid_spread, required_cell_quantity, spread_is_profitable,
+};
 use crate::instrument::{Fees, Instrument, InstrumentSpec};
-use crate::units::{Notional, Price, PriceRounding, Quantity, Rate, SCALE, div_ceil, split_steps};
+use crate::units::{Price, PriceRounding, Quantity, Rate, SCALE};
 
 /// 网格格数的技术上限。
 ///
@@ -56,116 +60,6 @@ pub(crate) struct NormalizedConfig {
     pub grid: GridPlan,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ConfigError {
-    #[error("config instrument `{config}` does not match the exchange instrument `{spec}`")]
-    InstrumentMismatch { config: String, spec: String },
-    #[error("{field} must not be negative, got {price}")]
-    NegativePrice { field: &'static str, price: Price },
-    #[error("max position must not be negative, got {max_position}")]
-    NegativeMaxPosition { max_position: Quantity },
-    #[error("price range must be ascending after rounding, got {low} and {high}")]
-    PriceRangeNotAscending { low: Price, high: Price },
-    #[error("{field} {price} is out of the representable price range at tick {price_tick}")]
-    PriceOutOfRange {
-        field: &'static str,
-        price: Price,
-        price_tick: Price,
-    },
-    #[error(
-        "batch {batch_index} price between {price_low} and {price_high} is out of the representable price range"
-    )]
-    BatchPriceOutOfRange {
-        batch_index: BatchIndex,
-        price_low: Price,
-        price_high: Price,
-    },
-    #[error("grid spacing {grid_spacing} must be at least one price tick {price_tick}")]
-    GridSpacingBelowOneTick {
-        grid_spacing: Price,
-        price_tick: Price,
-    },
-    #[error("grid spread {grid_spread} must be at least one price tick {price_tick}")]
-    GridSpreadBelowOneTick {
-        grid_spread: Price,
-        price_tick: Price,
-    },
-    #[error("max position {max_position} is below one quantity step {quantity_step}")]
-    MaxPositionBelowOneStep {
-        max_position: Quantity,
-        quantity_step: Quantity,
-    },
-    #[error("core ratio {core_ratio} must be between 0 and 1 inclusive")]
-    CoreRatioOutOfRange { core_ratio: Rate },
-    #[error("throttle interval must not be negative, got {interval:?}")]
-    NegativeThrottleInterval { interval: Duration },
-    #[error("core ratio is above 0, so the batch count must be at least 1, got {batch_count:?}")]
-    BatchCountOutOfRange { batch_count: Option<u32> },
-    #[error("batch count {batch_count} is above the supported maximum {max_batch_count}")]
-    TooManyBatches {
-        batch_count: u32,
-        max_batch_count: usize,
-    },
-    #[error("grid needs {cell_count} cells, more than the supported maximum {max_cell_count}")]
-    TooManyCells {
-        cell_count: usize,
-        max_cell_count: usize,
-    },
-    #[error(
-        "cell {cell_index} at {cell_price} holds {cell_quantity}, below the {required_quantity} required for the minimum order amount; at most {max_cell_count} cells fit in this range"
-    )]
-    CellBelowMinimumOrderNotional {
-        cell_index: CellIndex,
-        cell_price: Price,
-        cell_quantity: Quantity,
-        required_quantity: Quantity,
-        max_cell_count: usize,
-    },
-    #[error(
-        "batch {batch_index} at {batch_price} has no cell in its segment ({segment_low}, {segment_high}]; use a smaller grid spacing or fewer batches"
-    )]
-    BatchWithoutCell {
-        batch_index: BatchIndex,
-        batch_price: Price,
-        segment_low: Price,
-        segment_high: Price,
-    },
-    #[error(
-        "batch {batch_index} at {batch_price} buys {core_quantity} as core, below the {required_quantity} required for the minimum order amount; use fewer batches"
-    )]
-    BatchCoreBelowMinimumOrderNotional {
-        batch_index: BatchIndex,
-        batch_price: Price,
-        core_quantity: Quantity,
-        required_quantity: Quantity,
-    },
-    #[error(
-        "cell {cell_index} at {buy_price} plus the grid spread {grid_spread} is a price out of range"
-    )]
-    SellPriceOutOfRange {
-        cell_index: CellIndex,
-        buy_price: Price,
-        grid_spread: Price,
-    },
-    #[error(
-        "grid spread {grid_spread} does not stay profitable after taker fees {taker_fee_rate} on both legs; at least {minimum_grid_spread} is required"
-    )]
-    GridSpreadNotProfitable {
-        grid_spread: Price,
-        minimum_grid_spread: Price,
-        taker_fee_rate: Rate,
-    },
-    #[error(
-        "no price at {buy_price} can cover taker fees {taker_fee_rate} on both legs within the representable range"
-    )]
-    GridSpreadUnreachable {
-        buy_price: Price,
-        taker_fee_rate: Rate,
-    },
-    #[error("taker fee rate {taker_fee_rate} is at least 1, so no grid can be profitable")]
-    TakerFeeRateTooHigh { taker_fee_rate: Rate },
-}
-
 impl StrategyConfig {
     /// 规整配置、划分批次与格子并校验。
     pub(crate) fn normalize(
@@ -173,17 +67,40 @@ impl StrategyConfig {
         spec: &InstrumentSpec,
         fees: &Fees,
     ) -> Result<NormalizedConfig, ConfigError> {
-        if &self.instrument != spec.instrument() {
-            return Err(ConfigError::InstrumentMismatch {
-                config: self.instrument.symbol().to_string(),
-                spec: spec.instrument().symbol().to_string(),
-            });
-        }
-
+        self.check_instrument(spec)?;
         // 符号检查放在规整之前：规整只对非负值有意义，负价格、负间距、负数量
         // 应该在这里变成配置错误，而不是走到规整里的断言上。
         self.check_signs()?;
 
+        let side = self.normalize_side(spec)?;
+        let prices = side.cell_buy_prices()?;
+        let (batches, cells) = side.build_plan(&prices, spec)?;
+        check_cell_notional(&cells, &side, spec)?;
+        check_cell_profitability(&cells, fees, side.grid_spread, side.price_tick)?;
+
+        Ok(NormalizedConfig {
+            config: side.to_config(&self.instrument, self.long.throttle_interval),
+            batches,
+            grid: GridPlan::from_cells(cells),
+        })
+    }
+
+    /// 配置的标的必须和交易所的一致。
+    fn check_instrument(&self, spec: &InstrumentSpec) -> Result<(), ConfigError> {
+        if &self.instrument == spec.instrument() {
+            return Ok(());
+        }
+        Err(ConfigError::InstrumentMismatch {
+            config: self.instrument.symbol().to_string(),
+            spec: spec.instrument().symbol().to_string(),
+        })
+    }
+
+    /// 规整一侧的价格与数量，并把比例与批数收拢成后续步骤要用的值。
+    ///
+    /// 检查顺序固定：价格范围 → 数量 → 比例与批数。这是原来那个大函数里的顺序，
+    /// 同时有多处不合法时报出来的仍然是第一个。
+    fn normalize_side(&self, spec: &InstrumentSpec) -> Result<NormalizedSide, ConfigError> {
         let price_low = normalize_price("price low", self.long.price_low, spec)?;
         let price_high = normalize_price("price high", self.long.price_high, spec)?;
         if price_low >= price_high {
@@ -192,7 +109,6 @@ impl StrategyConfig {
                 high: price_high,
             });
         }
-
         let price_tick = spec.price_tick();
         let grid_spacing = normalize_price("grid spacing", self.long.grid_spacing, spec)?;
         let grid_spread = normalize_price("grid spread", self.long.grid_spread, spec)?;
@@ -216,107 +132,15 @@ impl StrategyConfig {
             other => return Err(ConfigError::BatchCountOutOfRange { batch_count: other }),
         };
 
-        // 主仓比例为 1 时只积累主仓，没有网格（第 2.3 节）：不生成格子，网格间距、
-        // 价差和格子金额都不需要，也就不校验；只校验每批的主仓买入金额。
-        let core_only = core_ratio.units() == SCALE;
-        let prices = if core_only {
-            Vec::new()
-        } else {
-            if grid_spacing.units() < price_tick.units() {
-                return Err(ConfigError::GridSpacingBelowOneTick {
-                    grid_spacing,
-                    price_tick,
-                });
-            }
-            if grid_spread.units() < price_tick.units() {
-                return Err(ConfigError::GridSpreadBelowOneTick {
-                    grid_spread,
-                    price_tick,
-                });
-            }
-            // 先按范围与间距算出格数，再构造价格：极端配置不能因为分配内存而拖死进程。
-            let count = cell_count(price_high, price_low, grid_spacing);
-            if count > MAX_CELL_COUNT as i64 {
-                return Err(ConfigError::TooManyCells {
-                    cell_count: count as usize,
-                    max_cell_count: MAX_CELL_COUNT,
-                });
-            }
-            cell_prices(price_high, price_low, grid_spacing)
-        };
-        // 先挡住过大的批数再划分批次：极端配置不能因为分配内存而拖死进程，
-        // 具体的「哪一批没有格子」由划分批次时报出。
-        if let Some(batch_count) = batch_count
-            && batch_count as usize > MAX_CELL_COUNT
-        {
-            return Err(ConfigError::TooManyBatches {
-                batch_count,
-                max_batch_count: MAX_CELL_COUNT,
-            });
-        }
-        let shape = GridShape {
+        Ok(NormalizedSide {
             price_low,
             price_high,
+            price_tick,
+            grid_spacing,
+            grid_spread,
             max_position,
             core_ratio,
-            grid_spread,
-        };
-
-        let (batches, cells) = match batch_count {
-            Some(batch_count) => build_batches(&prices, &shape, batch_count, spec)?,
-            None => (BatchPlan::default(), build_cells(&prices, &shape, spec)?),
-        };
-
-        // 最低金额：每一格按两条腿中较低的价格计算。多头侧的最低腿是格子买价，
-        // 价格最低的一格最严格；这里逐格检查，不依赖这条推理。
-        // 没有网格时 `cells` 是空的，这些检查自然跳过。
-        for cell in cells.iter().rev() {
-            if !meets_minimum_cell_notional(cell.quantity, cell.buy_price, spec) {
-                return Err(ConfigError::CellBelowMinimumOrderNotional {
-                    cell_index: cell.index,
-                    cell_price: cell.buy_price,
-                    cell_quantity: cell.quantity,
-                    required_quantity: required_cell_quantity(cell.buy_price, spec),
-                    max_cell_count: max_cell_count(
-                        cells.len(),
-                        price_high,
-                        max_position,
-                        spec,
-                        grid_spacing,
-                    ),
-                });
-            }
-        }
-
-        // 扣费后盈利：每格的价差要覆盖两条腿的 taker 费率。价格最高的一格最严格。
-        for cell in cells.iter() {
-            if !spread_is_profitable(cell.buy_price, cell.sell_price, fees.taker_rate) {
-                let minimum_grid_spread =
-                    minimum_grid_spread(cell.buy_price, fees.taker_rate, price_tick)?;
-                return Err(ConfigError::GridSpreadNotProfitable {
-                    grid_spread,
-                    minimum_grid_spread,
-                    taker_fee_rate: fees.taker_rate,
-                });
-            }
-        }
-
-        Ok(NormalizedConfig {
-            config: StrategyConfig {
-                instrument: self.instrument.clone(),
-                long: SideConfig {
-                    price_low,
-                    price_high,
-                    max_position,
-                    core_ratio,
-                    batch_count,
-                    grid_spacing,
-                    grid_spread,
-                    throttle_interval: self.long.throttle_interval,
-                },
-            },
-            batches,
-            grid: GridPlan::from_cells(cells),
+            batch_count,
         })
     }
 
@@ -356,6 +180,163 @@ impl StrategyConfig {
     }
 }
 
+/// 规整后的一侧参数：价格已按报价精度规整，数量已按数量精度向下规整。
+///
+/// 批次划分、格子划分和最终配置都由它构造，所以这些值只算一次。
+struct NormalizedSide {
+    price_low: Price,
+    price_high: Price,
+    price_tick: Price,
+    grid_spacing: Price,
+    grid_spread: Price,
+    max_position: Quantity,
+    core_ratio: Rate,
+    /// 主仓批数；主仓比例为 0 时没有批次，这里是 `None`。
+    batch_count: Option<u32>,
+}
+
+impl NormalizedSide {
+    /// 格子的买价，从高到低。
+    ///
+    /// 主仓比例为 1 时只积累主仓、没有网格（第 2.3 节）：不生成格子，网格间距、价差
+    /// 和格子金额都不需要，也就不校验。否则先要求间距与价差至少一个报价精度，再按范围
+    /// 与间距算出格数——先算格数再构造价格，极端配置不能因为分配内存而拖死进程。
+    fn cell_buy_prices(&self) -> Result<Vec<Price>, ConfigError> {
+        if self.core_ratio.units() == SCALE {
+            return Ok(Vec::new());
+        }
+        if self.grid_spacing.units() < self.price_tick.units() {
+            return Err(ConfigError::GridSpacingBelowOneTick {
+                grid_spacing: self.grid_spacing,
+                price_tick: self.price_tick,
+            });
+        }
+        if self.grid_spread.units() < self.price_tick.units() {
+            return Err(ConfigError::GridSpreadBelowOneTick {
+                grid_spread: self.grid_spread,
+                price_tick: self.price_tick,
+            });
+        }
+        let count = cell_count(self.price_high, self.price_low, self.grid_spacing);
+        if count > MAX_CELL_COUNT as i64 {
+            return Err(ConfigError::TooManyCells {
+                cell_count: count as usize,
+                max_cell_count: MAX_CELL_COUNT,
+            });
+        }
+        Ok(cell_prices(
+            self.price_high,
+            self.price_low,
+            self.grid_spacing,
+        ))
+    }
+
+    /// 划分批次与格子。
+    ///
+    /// 先挡住过大的批数再划分批次：极端配置不能因为分配内存而拖死进程，具体的
+    /// 「哪一批没有格子」由划分批次时报出。
+    fn build_plan(
+        &self,
+        prices: &[Price],
+        spec: &InstrumentSpec,
+    ) -> Result<(BatchPlan, Vec<Cell>), ConfigError> {
+        if let Some(batch_count) = self.batch_count
+            && batch_count as usize > MAX_CELL_COUNT
+        {
+            return Err(ConfigError::TooManyBatches {
+                batch_count,
+                max_batch_count: MAX_CELL_COUNT,
+            });
+        }
+        let shape = self.grid_shape();
+        match self.batch_count {
+            Some(batch_count) => build_batches(prices, &shape, batch_count, spec),
+            None => Ok((BatchPlan::default(), build_cells(prices, &shape, spec)?)),
+        }
+    }
+
+    fn grid_shape(&self) -> GridShape {
+        GridShape {
+            price_low: self.price_low,
+            price_high: self.price_high,
+            max_position: self.max_position,
+            core_ratio: self.core_ratio,
+            grid_spread: self.grid_spread,
+        }
+    }
+
+    /// 规整后的配置：只有限速间隔不在规整范围内，由调用方传进来。
+    fn to_config(
+        &self,
+        instrument: &Instrument,
+        throttle_interval: Option<Duration>,
+    ) -> StrategyConfig {
+        StrategyConfig {
+            instrument: instrument.clone(),
+            long: SideConfig {
+                price_low: self.price_low,
+                price_high: self.price_high,
+                max_position: self.max_position,
+                core_ratio: self.core_ratio,
+                batch_count: self.batch_count,
+                grid_spacing: self.grid_spacing,
+                grid_spread: self.grid_spread,
+                throttle_interval,
+            },
+        }
+    }
+}
+
+/// 每一格的金额都要够最低下单金额。
+///
+/// 按两条腿中较低的价格计算：多头侧的最低腿是格子买价，价格最低的一格最严格。
+/// 这里逐格检查，不依赖这条推理；没有网格时 `cells` 是空的，检查自然跳过。
+fn check_cell_notional(
+    cells: &[Cell],
+    side: &NormalizedSide,
+    spec: &InstrumentSpec,
+) -> Result<(), ConfigError> {
+    for cell in cells.iter().rev() {
+        if !meets_minimum_cell_notional(cell.quantity, cell.buy_price, spec) {
+            return Err(ConfigError::CellBelowMinimumOrderNotional {
+                cell_index: cell.index,
+                cell_price: cell.buy_price,
+                cell_quantity: cell.quantity,
+                required_quantity: required_cell_quantity(cell.buy_price, spec),
+                max_cell_count: max_cell_count(
+                    cells.len(),
+                    side.price_high,
+                    side.max_position,
+                    spec,
+                    side.grid_spacing,
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// 每一格的价差要覆盖两条腿的 taker 费率（第 2.3 节）。价格最高的一格最严格。
+fn check_cell_profitability(
+    cells: &[Cell],
+    fees: &Fees,
+    grid_spread: Price,
+    price_tick: Price,
+) -> Result<(), ConfigError> {
+    for cell in cells {
+        if !spread_is_profitable(cell.buy_price, cell.sell_price, fees.taker_rate) {
+            let minimum_grid_spread =
+                minimum_grid_spread(cell.buy_price, fees.taker_rate, price_tick)?;
+            return Err(ConfigError::GridSpreadNotProfitable {
+                grid_spread,
+                minimum_grid_spread,
+                taker_fee_rate: fees.taker_rate,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// 按报价精度规整；规整结果超出可表示范围时是配置错误，不做饱和。
 fn normalize_price(
     field: &'static str,
@@ -370,295 +351,12 @@ fn normalize_price(
         })
 }
 
-/// 规整后的网格形状：划分批次与格子时反复用到的参数。
-struct GridShape {
-    price_low: Price,
-    price_high: Price,
-    max_position: Quantity,
-    core_ratio: Rate,
-    grid_spread: Price,
-}
-
-/// 划分批次，并把每批的网格部分分给跟随它的格子。
-///
-/// `prices` 为空表示这一侧没有网格（`r = 1`）：每批只有主仓，没有格子，
-/// 也就不适用「每批都要有格子」这条规则。
-fn build_batches(
-    prices: &[Price],
-    shape: &GridShape,
-    batch_count: u32,
-    spec: &InstrumentSpec,
-) -> Result<(BatchPlan, Vec<Cell>), ConfigError> {
-    let count = batch_count as usize;
-    let step = spec.quantity_step();
-    let (price_high, price_low) = (shape.price_high, shape.price_low);
-
-    // 批次价：把范围均分后按报价精度规整。
-    let batch_prices: Vec<Price> = (0..count)
-        .map(|index| {
-            batch_price(price_high, price_low, batch_count, index, spec.price_tick()).ok_or(
-                ConfigError::BatchPriceOutOfRange {
-                    batch_index: BatchIndex(index),
-                    price_low,
-                    price_high,
-                },
-            )
-        })
-        .collect::<Result<Vec<Price>, ConfigError>>()?;
-
-    // 每批数量：M 按数量最小单位平均分成 n 份，余数依次多给靠近空隙的批次。
-    let total_steps = shape.max_position.units() / step.units();
-    let quantities: Vec<Quantity> = (0..count)
-        .map(|index| Quantity::from_units(split_steps(total_steps, index, count) * step.units()))
-        .collect();
-
-    // 每个格子跟随价格上最先到达它的那一批，即批次价里不小于格子价的最低那一批。
-    // 第 0 批的批次价就是 H，所以一定找得到。
-    let following: Vec<usize> = prices
-        .iter()
-        .map(|price| {
-            (0..count)
-                .rev()
-                .find(|index| batch_prices[*index] >= *price)
-                .unwrap_or(0)
-        })
-        .collect();
-
-    let mut batches = Vec::with_capacity(count);
-    let mut cells = Vec::with_capacity(prices.len());
-    for index in 0..count {
-        let batch_index = BatchIndex(index);
-        let cells_of_batch: Vec<CellIndex> = following
-            .iter()
-            .enumerate()
-            .filter(|(_, batch)| **batch == index)
-            .map(|(cell, _)| CellIndex(cell))
-            .collect();
-        if cells_of_batch.is_empty() && !prices.is_empty() {
-            return Err(ConfigError::BatchWithoutCell {
-                batch_index,
-                batch_price: batch_prices[index],
-                segment_low: batch_prices.get(index + 1).copied().unwrap_or(price_low),
-                segment_high: batch_prices[index],
-            });
-        }
-
-        let core_quantity = core_quantity(quantities[index], shape.core_ratio, step);
-        if !meets_minimum_core_notional(core_quantity, batch_prices[index], spec) {
-            return Err(ConfigError::BatchCoreBelowMinimumOrderNotional {
-                batch_index,
-                batch_price: batch_prices[index],
-                core_quantity,
-                required_quantity: required_core_quantity(batch_prices[index], spec),
-            });
-        }
-        let grid_quantity = quantities[index].saturating_sub(core_quantity);
-
-        // 网格部分平均分给跟随本批的格子，余下的最小单位依次分给靠近批次价的格子。
-        // `cells_of_batch` 按价格从高到低排列，也就是从靠近批次价的一端开始。
-        let grid_steps = grid_quantity.units() / step.units();
-        for (position, cell_index) in cells_of_batch.iter().enumerate() {
-            let quantity = Quantity::from_units(
-                split_steps(grid_steps, position, cells_of_batch.len()) * step.units(),
-            );
-            cells.push(Cell {
-                index: *cell_index,
-                buy_price: prices[cell_index.0],
-                sell_price: sell_price(prices[cell_index.0], *cell_index, shape)?,
-                quantity,
-                batch: Some(batch_index),
-            });
-        }
-
-        batches.push(Batch {
-            index: batch_index,
-            price: batch_prices[index],
-            quantity: quantities[index],
-            core_quantity,
-            grid_quantity,
-            cells: cells_of_batch,
-        });
-    }
-
-    Ok((BatchPlan::from_batches(batches), cells))
-}
-
-/// 把 `M` 按数量最小单位平均分给各格，余下的最小单位依次给靠近空隙的格子。
-fn build_cells(
-    prices: &[Price],
-    shape: &GridShape,
-    spec: &InstrumentSpec,
-) -> Result<Vec<Cell>, ConfigError> {
-    let step = spec.quantity_step();
-    prices
-        .iter()
-        .enumerate()
-        .map(|(index, price)| {
-            Ok(Cell {
-                index: CellIndex(index),
-                buy_price: *price,
-                sell_price: sell_price(*price, CellIndex(index), shape)?,
-                quantity: cell_quantity(index, prices.len(), shape.max_position, step),
-                batch: None,
-            })
-        })
-        .collect::<Result<Vec<Cell>, ConfigError>>()
-}
-
-/// 格子卖价 = 买价 + 价差；加出来超出可表示范围时是配置错误，不做饱和。
-fn sell_price(
-    buy_price: Price,
-    cell_index: CellIndex,
-    shape: &GridShape,
-) -> Result<Price, ConfigError> {
-    buy_price
-        .checked_add(shape.grid_spread)
-        .ok_or(ConfigError::SellPriceOutOfRange {
-            cell_index,
-            buy_price,
-            grid_spread: shape.grid_spread,
-        })
-}
-
-fn cell_quantity(
-    index: usize,
-    cell_count: usize,
-    max_position: Quantity,
-    step: Quantity,
-) -> Quantity {
-    let total_steps = max_position.units() / step.units();
-    Quantity::from_units(split_steps(total_steps, index, cell_count) * step.units())
-}
-
-/// 一批的主仓数量 `C = ceil(r × q)`，按数量最小单位向上取整。
-///
-/// `quantity` 本身是数量精度的整数倍，所以向上规整的结果不会超过它，
-/// 也就不会超出可表示范围；真越界了也夹回本批数量。
-fn core_quantity(quantity: Quantity, core_ratio: Rate, step: Quantity) -> Quantity {
-    quantity
-        .mul_rate_ceil(core_ratio)
-        .checked_ceil_to_step(step)
-        .unwrap_or(quantity)
-        .min(quantity)
-}
-
-/// 格子数量低于最低订单金额时，这一格至少需要多少数量。
-///
-/// 只用于错误信息。算出的数量超出可表示范围时按上限取值：反正这个配置本来就不合法。
-fn required_cell_quantity(price: Price, spec: &InstrumentSpec) -> Quantity {
-    let step_units = spec.quantity_step().units() as i128;
-    let minimum_raw = 3 * spec.min_order_notional().raw();
-    let price_units = (price.units() as i128).max(1);
-    let units = div_ceil(minimum_raw, price_units) + 2 * step_units;
-    let units = div_ceil(units, step_units) * step_units;
-    Quantity::from_units(i64::try_from(units).unwrap_or(i64::MAX))
-}
-
-fn meets_minimum_cell_notional(quantity: Quantity, price: Price, spec: &InstrumentSpec) -> bool {
-    let Some(three_minimum) = spec.min_order_notional().checked_mul(3) else {
-        return false;
-    };
-    let two_steps = Notional::of(spec.quantity_step(), price)
-        .checked_mul(2)
-        .unwrap_or(Notional::ZERO);
-    Notional::of(quantity, price) >= three_minimum + two_steps
-}
-
-/// 一批主仓买入低于最低订单金额时，这一批至少需要多少数量。
-///
-/// 只用于错误信息。算出的数量超出可表示范围时按上限取值：反正这个配置本来就不合法。
-fn required_core_quantity(price: Price, spec: &InstrumentSpec) -> Quantity {
-    let step_units = spec.quantity_step().units() as i128;
-    let price_units = (price.units() as i128).max(1);
-    let units = div_ceil(spec.min_order_notional().raw(), price_units);
-    let units = div_ceil(units, step_units) * step_units;
-    Quantity::from_units(i64::try_from(units).unwrap_or(i64::MAX))
-}
-
-fn meets_minimum_core_notional(
-    core_quantity: Quantity,
-    batch_price: Price,
-    spec: &InstrumentSpec,
-) -> bool {
-    spec.meets_minimum_order(core_quantity, batch_price)
-}
-
-/// 同样的价格范围与间距下，最多能设多少格。
-///
-/// 格数越少，每格数量越大、最低价的格子也越高，所以最低金额约束随格数单调放松。
-/// 最低价的一格总是最严格的一格，因此只看它。
-fn max_cell_count(
-    cell_count: usize,
-    price_high: Price,
-    max_position: Quantity,
-    spec: &InstrumentSpec,
-    grid_spacing: Price,
-) -> usize {
-    for candidate in (1..=cell_count).rev() {
-        // 用 i128 算这一段的下限价：格数与间距都可能是极端值，i64 相乘会溢出。
-        let offset = (candidate as i128 - 1) * grid_spacing.units() as i128;
-        let price_units = (price_high.units() as i128 - offset).max(1);
-        let price = Price::from_units(price_units as i64);
-        let quantity = cell_quantity(candidate - 1, candidate, max_position, spec.quantity_step());
-        if meets_minimum_cell_notional(quantity, price, spec) {
-            return candidate;
-        }
-    }
-    0
-}
-
-/// 双边都以 taker 成交是否仍然盈利：`(卖价 − 买价) > (卖价 + 买价) × taker 费率`。
-fn spread_is_profitable(buy: Price, sell: Price, taker: Rate) -> bool {
-    let profit = (sell.units() as i128 - buy.units() as i128) * SCALE as i128;
-    let cost = (sell.units() as i128 + buy.units() as i128) * taker.units() as i128;
-    profit > cost
-}
-
-/// 满足扣费后盈利的最小价差，向上取到一个报价单位。
-///
-/// `(卖价 − 买价) × SCALE > (卖价 + 买价) × taker` 等价于
-/// `卖价 > 买价 × (SCALE + taker) / (SCALE − taker)`，所以最小卖价可以直接算出来，
-/// 不需要逐个报价单位试探。
-///
-/// 两种算不出来的情况分开报：费率本身就不可能盈利，和这一格的卖价超出了可表示范围。
-/// 两者的处理方式完全不同——前者要去改费率，后者要去改网格。
-fn minimum_grid_spread(price: Price, taker: Rate, tick: Price) -> Result<Price, ConfigError> {
-    let price_units = price.units() as i128;
-    let taker_units = taker.units() as i128;
-    let denominator = SCALE as i128 - taker_units;
-    if denominator <= 0 {
-        // taker 费率不小于 100%：任何价格上买入再卖出都亏。
-        return Err(ConfigError::TakerFeeRateTooHigh {
-            taker_fee_rate: taker,
-        });
-    }
-    let numerator = price_units * (SCALE as i128 + taker_units);
-    // 向下取整再加一，得到满足严格大于的最小整数卖价。
-    let sell_units = numerator / denominator + 1;
-    let tick_units = tick.units() as i128;
-    let sell_units = div_ceil(sell_units, tick_units) * tick_units;
-    let unreachable = || ConfigError::GridSpreadUnreachable {
-        buy_price: price,
-        taker_fee_rate: taker,
-    };
-    let sell_units = i64::try_from(sell_units).map_err(|_| unreachable())?;
-    let spread = sell_units
-        .checked_sub(price.units())
-        .ok_or_else(unreachable)?;
-    debug_assert!(spread_is_profitable(
-        price,
-        Price::from_units(sell_units),
-        taker
-    ));
-    Ok(Price::from_units(spread))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ConfigError, MAX_CELL_COUNT, SideConfig, StrategyConfig, required_cell_quantity};
+    use super::{ConfigError, MAX_CELL_COUNT, SideConfig, StrategyConfig};
     use crate::batch::BatchIndex;
     use crate::fixtures::{btc_fees, btc_spec, core_only_config, fine_spec, long_grid_config};
-    use crate::grid::CellIndex;
+    use crate::grid::{CellIndex, required_cell_quantity};
     use crate::instrument::{Fees, Instrument, InstrumentSpec};
     use crate::units::{Notional, Price, Quantity, Rate};
     use chrono::Duration;

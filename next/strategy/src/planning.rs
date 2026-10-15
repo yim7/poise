@@ -7,14 +7,18 @@
 //! - 某一侧剩余量不足最低订单金额时，这一侧先不挂单，只挂另一侧（第 4.4 节）；
 //! - 新订单的限价不与本策略在场的反向订单相交（第 6 节）。
 //!
-//! 限速只挡住「新单位的第一次挂单」：已放行单位在场订单的撤销、已启用格子的买卖
-//! 循环都不受限速影响（第 4.3 节），也不会因为等待放行而释放任何预留。
+//! 限速只挡住「新单位的第一次挂单」：已启用格子的买卖循环不受限速影响（第 4.3 节），
+//! 也不会因为等待放行而释放任何预留。运行中改成限速会让还没开始的单位回到未放行
+//! （第 4.1 节），未放行的单位这一步不挂新单，也不撤它在场的订单；已经结束的批次不受
+//! 放行影响，它的主仓买单照撤。
 
 use serde::{Deserialize, Serialize};
 
 use crate::Strategy;
+use crate::batch::{Batch, BatchIndex};
+use crate::grid::Cell;
 use crate::order::{ClientOrderId, OrderPurpose, Side, Unit, WorkingOrder};
-use crate::state::StrategyState;
+use crate::state::{BatchState, CellState, StrategyState};
 use crate::units::{Price, Quantity};
 
 /// 要下的一张订单：身份和客户端订单 ID 由 runtime 生成。
@@ -171,6 +175,209 @@ impl OwnOrderBounds {
     }
 }
 
+/// 一次规划的中间状态。
+///
+/// 主仓和格子两段共用同一份在场订单边界和同一个 [`Plan`]：同一步规划出去的订单也会
+/// 同时挂在市场上，后规划的那一侧必须看得到它，否则两张反向单会相交（第 6 节）。
+struct Planner<'a> {
+    strategy: &'a Strategy,
+    state: &'a StrategyState,
+    working_orders: &'a [WorkingOrder],
+    /// 还没有对完账的单位：这些单位的这一侧不补新单。
+    pending: &'a [PendingUnit],
+    plan: Plan,
+    /// 在场订单给出的限价边界（第 6 节），随规划过程更新。
+    bounds: OwnOrderBounds,
+    /// 一个报价单位；下调限价时用。
+    tick: Price,
+    waiting_for_fills: bool,
+    waiting_for_throttle: bool,
+    waiting_for_batch: bool,
+}
+
+impl<'a> Planner<'a> {
+    fn new(
+        strategy: &'a Strategy,
+        state: &'a StrategyState,
+        working_orders: &'a [WorkingOrder],
+        pending: &'a [PendingUnit],
+        market_price: Price,
+    ) -> Self {
+        Self {
+            strategy,
+            state,
+            working_orders,
+            pending,
+            plan: Plan {
+                market_price,
+                ..Plan::default()
+            },
+            bounds: OwnOrderBounds::of(working_orders),
+            tick: strategy.spec().price_tick(),
+            waiting_for_fills: false,
+            waiting_for_throttle: false,
+            waiting_for_batch: false,
+        }
+    }
+
+    /// 主仓：每批在自己的批次价挂买单，不追高。
+    fn plan_batches(&mut self) {
+        for batch in self.strategy.batches().batches() {
+            let Some(batch_state) = self.state.batch(batch.index) else {
+                continue;
+            };
+            // 已经结束的批次先处理：它不再买入，在场的主仓买单必须撤掉。这一步不能等放行
+            // ——结束的批次不会再成交，等它「重新放行」可能永远等不到，留着那张单就会在
+            // 本批已经决定不再买入之后又买进来。
+            if batch_state.finished {
+                self.cancel_core_buys(batch.index);
+                continue;
+            }
+            // 还没放行的批次不挂单。启动时它本来没有在场订单，但运行中从不限速改成限速
+            // 会让还没开始的批次回到未放行（第 4.1 节），那种情况下它的在场订单留在原地，
+            // 重新放行之后再处理。
+            if !self
+                .strategy
+                .is_released(self.state, Unit::Batch(batch.index))
+            {
+                self.waiting_for_throttle = true;
+                continue;
+            }
+            self.plan_batch(batch, batch_state);
+        }
+    }
+
+    /// 一批主仓的买单：本批最多能在场的数量是 `C − F`，在场订单已经有多少由
+    /// [`Strategy::reconcile`] 判断。
+    fn plan_batch(&mut self, batch: &Batch, batch_state: &BatchState) {
+        let outstanding = batch.core_quantity.saturating_sub(batch_state.filled);
+        if outstanding.is_zero() {
+            return;
+        }
+        let unit = Unit::Batch(batch.index);
+        let limit_price = self.bounds.buy_limit(batch.price, self.tick);
+        let demand = Demand {
+            unit,
+            purpose: OrderPurpose::CoreBuy,
+            limit_price,
+            quantity: outstanding,
+            reduce_only: false,
+            blocked: self.blocked(unit, OrderPurpose::CoreBuy),
+        };
+        match self.reconcile(&demand) {
+            Placement::Blocked => self.waiting_for_fills = true,
+            // 剩余量按批次价足够、只是因为下调才不够：本批不结束，主仓买单暂不挂出，
+            // 等自身卖单成交或价格回到批次价后再补齐（第 4.2.3 节）。
+            Placement::BelowMinimum if limit_price != batch.price => {
+                self.plan.waiting.push(WaitReason::LimitAdjustedByOwnOrder);
+            }
+            _ => {}
+        }
+    }
+
+    /// 本批已经结束：不再挂主仓买单，在场的那张也要撤掉。
+    ///
+    /// 结束可能是迟到成交带来的，而这张单是上一次规划按当时的 `C − F` 挂出来的；
+    /// 留着它就会在本批已经决定不再买入之后又买进来。
+    fn cancel_core_buys(&mut self, index: BatchIndex) {
+        let unit = Unit::Batch(index);
+        self.plan.cancel.extend(
+            self.working_orders
+                .iter()
+                .filter(|order| order.unit == unit && order.purpose == OrderPurpose::CoreBuy)
+                .map(|order| order.client_order_id.clone()),
+        );
+    }
+
+    /// 格子：启用的照常循环，没启用的等所属批次。
+    fn plan_cells(&mut self) {
+        for cell in self.strategy.grid().cells() {
+            let Some(cell_state) = self.state.cell(cell.index) else {
+                continue;
+            };
+            if !cell_state.enabled {
+                // 所属批次已经结束的格子不会再启用，不算在等批次。
+                let batch_running = cell
+                    .batch
+                    .and_then(|batch| self.state.batch(batch))
+                    .is_some_and(|batch_state| !batch_state.finished);
+                self.waiting_for_batch |= batch_running;
+                continue;
+            }
+            self.plan_cell(cell, cell_state);
+        }
+    }
+
+    /// 一个启用格子的两侧：先买回、再卖出。
+    fn plan_cell(&mut self, cell: &Cell, cell_state: &CellState) {
+        let held = cell_state.held(cell.quantity);
+        let unit = Unit::Cell(cell.index);
+        // 没有主仓时格子自成单位（第 4.1 节）：还没放行的格子不挂第一次买回单。
+        // 已经持有仓位的格子一定是放行过的，它的买卖循环不受限速约束（第 4.3 节）。
+        if self.strategy.is_released(self.state, unit) {
+            self.plan_buy_back(cell, cell_state, unit);
+        } else {
+            self.waiting_for_throttle = true;
+        }
+        let sell = Demand {
+            unit,
+            purpose: OrderPurpose::GridSell,
+            // 卖单的限价要用买回之后的最新边界：买回的限价可能刚被下调。
+            limit_price: self.bounds.sell_limit(cell.sell_price, self.tick),
+            quantity: held,
+            reduce_only: true,
+            blocked: self.blocked(unit, OrderPurpose::GridSell),
+        };
+        if let Placement::Blocked = self.reconcile(&sell) {
+            self.waiting_for_fills = true;
+        }
+    }
+
+    /// 格子的买回单：待买回的数量挂在自己的买价上。
+    fn plan_buy_back(&mut self, cell: &Cell, cell_state: &CellState, unit: Unit) {
+        let buy = Demand {
+            unit,
+            purpose: OrderPurpose::GridBuy,
+            limit_price: self.bounds.buy_limit(cell.buy_price, self.tick),
+            quantity: cell_state.to_buy_back,
+            reduce_only: false,
+            blocked: self.blocked(unit, OrderPurpose::GridBuy),
+        };
+        if let Placement::Blocked = self.reconcile(&buy) {
+            self.waiting_for_fills = true;
+        }
+    }
+
+    /// 汇总等待原因。顺序固定：限速放行、所属批次、成交对账。
+    fn finish(mut self) -> Plan {
+        if self.waiting_for_throttle {
+            self.plan.waiting.push(WaitReason::WaitingForThrottle);
+        }
+        if self.waiting_for_batch {
+            self.plan.waiting.push(WaitReason::WaitingForBatch);
+        }
+        if self.waiting_for_fills {
+            self.plan.waiting.push(WaitReason::FillsPending);
+        }
+        self.plan
+    }
+
+    /// 这个单位的这一侧是不是还没对完账。
+    fn blocked(&self, unit: Unit, purpose: OrderPurpose) -> bool {
+        self.pending.contains(&PendingUnit { unit, purpose })
+    }
+
+    /// 让某一侧的在场订单与应当在场的数量一致（见 [`Strategy::reconcile`]）。
+    fn reconcile(&mut self, demand: &Demand) -> Placement {
+        self.strategy.reconcile(
+            self.working_orders,
+            demand,
+            &mut self.plan,
+            &mut self.bounds,
+        )
+    }
+}
+
 impl Strategy {
     /// 规划下一步动作。纯计算，不读写任何外部状态。
     ///
@@ -187,130 +394,10 @@ impl Strategy {
         pending: &[PendingUnit],
         market_price: Price,
     ) -> Plan {
-        let mut plan = Plan {
-            market_price,
-            ..Plan::default()
-        };
-        let mut bounds = OwnOrderBounds::of(working_orders);
-        let tick = self.spec().price_tick();
-        let blocked =
-            |unit: Unit, purpose: OrderPurpose| pending.contains(&PendingUnit { unit, purpose });
-        let mut waiting_for_fills = false;
-        let mut waiting_for_throttle = false;
-
-        // 主仓：每批在自己的批次价挂买单，不追高。
-        for batch in self.batches().batches() {
-            let Some(batch_state) = state.batch(batch.index) else {
-                continue;
-            };
-            // 还没放行的批次不挂单：它不可能有在场订单，也就没有要撤的。
-            if !self.is_released(state, Unit::Batch(batch.index)) {
-                waiting_for_throttle = true;
-                continue;
-            }
-            if batch_state.finished {
-                // 本批已经结束：不再挂主仓买单，在场的那张也要撤掉。
-                // 结束可能是迟到成交带来的，而这张单是上一次规划按当时的 `C − F` 挂出来的；
-                // 留着它就会在本批已经决定不再买入之后又买进来。
-                plan.cancel.extend(
-                    working_orders
-                        .iter()
-                        .filter(|order| {
-                            order.unit == Unit::Batch(batch.index)
-                                && order.purpose == OrderPurpose::CoreBuy
-                        })
-                        .map(|order| order.client_order_id.clone()),
-                );
-                continue;
-            }
-            // 本批最多能在场的数量是 `C − F`；在场订单已经有多少由 reconcile 判断。
-            let outstanding = batch.core_quantity.saturating_sub(batch_state.filled);
-            if outstanding.is_zero() {
-                continue;
-            }
-            let unit = Unit::Batch(batch.index);
-            let limit_price = bounds.buy_limit(batch.price, tick);
-            let demand = Demand {
-                unit,
-                purpose: OrderPurpose::CoreBuy,
-                limit_price,
-                quantity: outstanding,
-                reduce_only: false,
-                blocked: blocked(unit, OrderPurpose::CoreBuy),
-            };
-            match self.reconcile(working_orders, &demand, &mut plan, &mut bounds) {
-                Placement::Blocked => waiting_for_fills = true,
-                // 剩余量按批次价足够、只是因为下调才不够：本批不结束，主仓买单暂不挂出，
-                // 等自身卖单成交或价格回到批次价后再补齐（第 4.2.3 节）。
-                Placement::BelowMinimum if limit_price != batch.price => {
-                    plan.waiting.push(WaitReason::LimitAdjustedByOwnOrder);
-                }
-                _ => {}
-            }
-        }
-
-        // 格子：启用的照常循环，没启用的等所属批次。
-        let mut waiting_for_batch = false;
-        for cell in self.grid().cells() {
-            let Some(cell_state) = state.cell(cell.index) else {
-                continue;
-            };
-            if !cell_state.enabled {
-                // 所属批次已经结束的格子不会再启用，不算在等批次。
-                let batch_running = cell
-                    .batch
-                    .and_then(|batch| state.batch(batch))
-                    .is_some_and(|batch_state| !batch_state.finished);
-                waiting_for_batch |= batch_running;
-                continue;
-            }
-            let held = cell_state.held(cell.quantity);
-            let unit = Unit::Cell(cell.index);
-            // 没有主仓时格子自成单位（第 4.1 节）：还没放行的格子不挂第一次买回单。
-            // 已经持有仓位的格子一定是放行过的，它的买卖循环不受限速约束（第 4.3 节）。
-            if self.is_released(state, unit) {
-                // 先买回、再卖出：卖出看到的边界包含刚规划出去的买回单。
-                let buy = Demand {
-                    unit,
-                    purpose: OrderPurpose::GridBuy,
-                    limit_price: bounds.buy_limit(cell.buy_price, tick),
-                    quantity: cell_state.to_buy_back,
-                    reduce_only: false,
-                    blocked: blocked(unit, OrderPurpose::GridBuy),
-                };
-                if let Placement::Blocked =
-                    self.reconcile(working_orders, &buy, &mut plan, &mut bounds)
-                {
-                    waiting_for_fills = true;
-                }
-            } else {
-                waiting_for_throttle = true;
-            }
-            let sell = Demand {
-                unit,
-                purpose: OrderPurpose::GridSell,
-                // 卖单的限价要用买回之后的最新边界：买回的限价可能刚被下调。
-                limit_price: bounds.sell_limit(cell.sell_price, tick),
-                quantity: held,
-                reduce_only: true,
-                blocked: blocked(unit, OrderPurpose::GridSell),
-            };
-            if let Placement::Blocked =
-                self.reconcile(working_orders, &sell, &mut plan, &mut bounds)
-            {
-                waiting_for_fills = true;
-            }
-        }
-        if waiting_for_throttle {
-            plan.waiting.push(WaitReason::WaitingForThrottle);
-        }
-        if waiting_for_batch {
-            plan.waiting.push(WaitReason::WaitingForBatch);
-        }
-        if waiting_for_fills {
-            plan.waiting.push(WaitReason::FillsPending);
-        }
-        plan
+        let mut planner = Planner::new(self, state, working_orders, pending, market_price);
+        planner.plan_batches();
+        planner.plan_cells();
+        planner.finish()
     }
 
     /// 让某一侧的在场订单与应当在场的数量一致：价格或数量不符的撤掉，缺的补上。
@@ -369,7 +456,7 @@ mod tests {
     use crate::batch::BatchIndex;
     use crate::fixtures::{
         at, core_long_strategy, fine_core_long_strategy, five_cell_strategy,
-        single_batch_core_strategy, single_small_batch_strategy,
+        single_batch_core_strategy, single_small_batch_strategy, throttled_core_long_strategy,
     };
     use crate::grid::CellIndex;
     use crate::order::{
@@ -807,6 +894,42 @@ mod tests {
         ));
         // 其他批次不受影响。
         assert!(has_intent(
+            &plan,
+            Unit::Batch(BatchIndex(1)),
+            OrderPurpose::CoreBuy
+        ));
+    }
+
+    /// 已经结束的批次不受放行影响：还没放行的批次也要撤掉在场的主仓买单。
+    ///
+    /// 放行进度可能落后于批次的真实进度（运行中改成限速、或者旧版本写下的状态），
+    /// 而结束的批次不会再成交：等它放行可能永远等不到，那张单就会一直留在场上买。
+    #[test]
+    fn a_finished_batch_that_is_not_released_still_cancels_its_core_order() {
+        let strategy = throttled_core_long_strategy();
+        let mut state = strategy.initial_state();
+        // 第 1 批成交结束，但放行进度只到第 0 批。
+        state.batch_mut(BatchIndex(1)).unwrap().filled = Quantity::parse("0.175").unwrap();
+        strategy.advance(&mut state, &[]);
+        assert!(state.batch(BatchIndex(1)).unwrap().finished);
+        assert!(!strategy.is_released(&state, Unit::Batch(BatchIndex(1))));
+
+        let working = vec![working_order(
+            "0x01",
+            Unit::Batch(BatchIndex(1)),
+            OrderPurpose::CoreBuy,
+            "90000",
+            "0.105",
+        )];
+
+        let plan = strategy.plan(&state, &working, &[], Price::parse("96000").unwrap());
+
+        assert_eq!(
+            plan.cancel,
+            vec![ClientOrderId::try_new("0x01").unwrap()],
+            "a finished batch must cancel its core order even when it is not released"
+        );
+        assert!(!has_intent(
             &plan,
             Unit::Batch(BatchIndex(1)),
             OrderPurpose::CoreBuy

@@ -9,6 +9,8 @@
 
 pub mod batch;
 pub mod config;
+pub mod decision;
+pub mod error;
 pub mod grid;
 pub mod instrument;
 pub mod ledger;
@@ -23,7 +25,8 @@ pub mod units;
 pub(crate) mod fixtures;
 
 use crate::batch::{Batch, BatchPlan};
-use crate::config::{ConfigError, NormalizedConfig, StrategyConfig};
+use crate::config::{NormalizedConfig, StrategyConfig};
+use crate::error::ConfigError;
 use crate::grid::GridPlan;
 use crate::instrument::{Fees, InstrumentSpec};
 use crate::order::{OrderPurpose, Unit, WorkingOrder};

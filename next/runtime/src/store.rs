@@ -298,12 +298,17 @@ impl Store {
     /// 配置和版本号写在同一个事务里：改了参数却没有版本记录，事后就说不清哪一段时间
     /// 用的是哪套参数（第 2.4 节）。
     ///
-    /// 只给 runtime 用（运行中改参数要经过 [`crate::Runtime::update_config`] 的检查，比如
-    /// 「不限速的策略不能加限速」）。放出去就直接改配置、绕过那些检查了。
+    /// `state` 是要跟着这次改配置一起落盘的状态，没有就传 `None`。加上限速时要重建
+    /// 放行进度，它必须和新配置写在同一笔里：分成两次写，中间崩掉就留下「配置已经限速、
+    /// 进度还是全部放行」，重启后限速静默失效（第 4.1 节）。
+    ///
+    /// 只给 runtime 用（改参数要经过 [`crate::Runtime::update_config`] 的检查：只有限速
+    /// 间隔能改）。放出去就直接改配置、绕过那些检查了。
     pub(crate) fn save_config(
         &self,
         strategy_id: &StrategyId,
         config: &StrategyConfig,
+        state: Option<&StrategyState>,
         at: DateTime<Utc>,
     ) -> Result<i64, StoreError> {
         let mut connection = self.lock();
@@ -322,6 +327,9 @@ impl Store {
             ],
         )?;
         insert_config_version(&transaction, strategy_id, next, config, at)?;
+        if let Some(state) = state {
+            write_state(&transaction, strategy_id, state)?;
+        }
         transaction.commit()?;
         Ok(next)
     }
@@ -588,6 +596,7 @@ impl Store {
         Ok(())
     }
 
+    /// 更新一张订单。`expires_at` 一起写：发送之前可能按当时的时钟重算它。
     pub fn update_order(
         &self,
         strategy_id: &StrategyId,
@@ -597,7 +606,7 @@ impl Store {
         self.lock().execute(
             "UPDATE orders SET
                  cumulative_filled_units = ?3, status = ?4, exchange_order_id = ?5,
-                 fills_reconciled = ?6, updated_at = ?7
+                 fills_reconciled = ?6, expires_at = ?7, updated_at = ?8
              WHERE client_order_id = ?1 AND strategy_id = ?2",
             params![
                 record.client_order_id.as_str(),
@@ -606,8 +615,26 @@ impl Store {
                 record.status.as_str(),
                 order.exchange_order_id,
                 i64::from(order.fills_reconciled),
+                format_time(order.expires_at),
                 format_time(order.updated_at),
             ],
+        )?;
+        Ok(())
+    }
+
+    /// 删掉一张还没发出去的订单。
+    ///
+    /// 发送之前先写库（第 9.1 节），但写库本身也花时间：写完发现有效期已经不够、
+    /// 这一步不发送时，把这条记录删掉，订单回到「还没发送、也可能没发送」之前的样子，
+    /// 下一步重新规划。删除只对从未发出去的订单用，交易所那边没有它。
+    pub fn delete_order(
+        &self,
+        strategy_id: &StrategyId,
+        client_order_id: &ClientOrderId,
+    ) -> Result<(), StoreError> {
+        self.lock().execute(
+            "DELETE FROM orders WHERE client_order_id = ?1 AND strategy_id = ?2",
+            params![client_order_id.as_str(), strategy_id.as_str()],
         )?;
         Ok(())
     }
@@ -671,6 +698,23 @@ impl Store {
     pub fn fail_order_writes_for_test(&self) -> Result<(), StoreError> {
         self.lock().execute_batch(
             "CREATE TRIGGER orders_write_fails BEFORE INSERT ON orders
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )?;
+        Ok(())
+    }
+
+    /// 让之后每一次写策略状态都失败，用来构造存储故障。
+    ///
+    /// 只给集成测试用：集成测试是另一个 crate，看不到 `#[cfg(test)]` 的东西。
+    /// 正式流程不用。
+    #[doc(hidden)]
+    pub fn fail_state_writes_for_test(&self) -> Result<(), StoreError> {
+        // 限速进度是每次写状态都要改的一行（[`write_state`] 里按主键 upsert），
+        // 拦住它的插入和更新就等于拦住整笔状态写入。
+        self.lock().execute_batch(
+            "CREATE TRIGGER throttle_state_insert_fails BEFORE INSERT ON throttle_states
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;
+             CREATE TRIGGER throttle_state_update_fails BEFORE UPDATE ON throttle_states
              BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
         )?;
         Ok(())

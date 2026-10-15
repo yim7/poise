@@ -7,8 +7,8 @@ mod common;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use common::{at, btc_fees, btc_spec, exchange, long_grid_config};
+use chrono::{DateTime, Duration, Utc};
+use common::{at, btc_fees, btc_spec, exchange, long_grid_config, throttled};
 use poise_runtime::{
     Exchange, ExchangeError, ExchangeFill, ExchangeOrder, ManualClock, OrderLookup, OrderReceipt,
     OrderRequest, Runtime, RuntimeError, RuntimeOptions, SimulatedExchange, Store,
@@ -115,4 +115,53 @@ async fn a_strategy_cannot_be_driven_by_two_callers_at_once() {
     let report = runtime.step(&strategy_id).await.unwrap();
     assert!(report.placed.is_empty());
     assert_eq!(report.plan.place.len(), 0);
+}
+
+/// 改配置和走一步也不能同时进行：两者都读同一份状态、都写同一份状态。
+#[tokio::test]
+async fn changing_the_config_cannot_race_a_step() {
+    let store = Store::open_in_memory().unwrap();
+    let exchange = Arc::new(YieldingExchange::new(exchange()));
+    let clock = Arc::new(ManualClock::new(at(0)));
+    let runtime = Runtime::with_clock(
+        exchange.clone(),
+        store,
+        RuntimeOptions::default(),
+        clock.clone(),
+    );
+    let strategy_id = runtime
+        .create_strategy(long_grid_config(), btc_spec(), btc_fees())
+        .unwrap();
+    clock.set(at(1));
+
+    let (step, update) = tokio::join!(runtime.step(&strategy_id), async {
+        runtime.update_config(
+            &strategy_id,
+            throttled(long_grid_config(), Duration::hours(1)),
+        )
+    },);
+
+    // 恰好一个走完，另一个被挡在门外。
+    match (&step, &update) {
+        (Ok(_), Err(RuntimeError::Busy(busy))) | (Err(RuntimeError::Busy(busy)), Ok(_)) => {
+            assert_eq!(busy, &strategy_id);
+        }
+        other => panic!("expected one of the two to be Busy, got {other:?}"),
+    }
+    assert_eq!(exchange.inner.place_count(), 20, "这一步只挂了一遍单");
+    assert_eq!(
+        runtime.config_versions(&strategy_id).unwrap().len(),
+        1,
+        "被挡下的改配置不记版本"
+    );
+
+    // 走完这一步之后驱动权就释放了：改配置照常。
+    clock.set(at(2));
+    let version = runtime
+        .update_config(
+            &strategy_id,
+            throttled(long_grid_config(), Duration::hours(1)),
+        )
+        .unwrap();
+    assert_eq!(version, 2);
 }
