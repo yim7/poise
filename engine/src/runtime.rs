@@ -883,6 +883,13 @@ impl TrackRuntime {
         )
     }
 
+    /// Manual flatten is an explicit end to the current acquisition episode. Resuming it starts
+    /// a normal acquisition episode, so the next decision may use `initial_ratio` instead of the
+    /// conservative fresh-session frontier.
+    pub(crate) fn restart_acquisition_after_manual_resume(&mut self) {
+        self.fresh_acquisition_session = None;
+    }
+
     pub(crate) fn apply_fresh_acquisition_initialization(
         &mut self,
         initialization: Option<FreshAcquisitionInitialization>,

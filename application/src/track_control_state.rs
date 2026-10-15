@@ -44,9 +44,15 @@ impl TrackControlState {
             TrackControlCommand::Pause => Self::Paused {
                 resume_mode: current.resume_mode(),
             },
-            TrackControlCommand::Resume => Self::Enabled {
-                mode: current.resume_mode(),
-            },
+            TrackControlCommand::Resume => {
+                let mode = match &current {
+                    Self::Enabled {
+                        mode: PersistedControlMode::ManualFlatten,
+                    } => PersistedControlMode::Automatic,
+                    _ => current.resume_mode(),
+                };
+                Self::Enabled { mode }
+            }
             TrackControlCommand::Terminate { cause } => Self::Terminated { cause },
             TrackControlCommand::ManualFlatten => Self::Enabled {
                 mode: PersistedControlMode::ManualFlatten,
@@ -177,6 +183,21 @@ mod tests {
             ),
             TrackControlState::Paused {
                 resume_mode: PersistedControlMode::ManualFlatten,
+            }
+        );
+    }
+
+    #[test]
+    fn resume_from_manual_flatten_returns_automatic() {
+        assert_eq!(
+            TrackControlState::from_command(
+                TrackControlState::Enabled {
+                    mode: PersistedControlMode::ManualFlatten,
+                },
+                TrackControlCommand::Resume,
+            ),
+            TrackControlState::Enabled {
+                mode: PersistedControlMode::Automatic,
             }
         );
     }

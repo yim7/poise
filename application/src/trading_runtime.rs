@@ -4248,6 +4248,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resuming_manual_flatten_persists_automatic_control_state() {
+        let repository = Arc::new(MemoryRepository::default());
+        let runtime = test_executor(
+            repository.clone(),
+            Arc::new(RecordingRecoveryAnomalyObserver::default()),
+        );
+        let track_id = TrackId::new("btc-core");
+
+        runtime
+            .handle(&track_id, TrackInput::Command(TrackCommand::Flatten))
+            .await
+            .unwrap();
+        assert_eq!(
+            repository
+                .load_track_control_state(&track_id)
+                .await
+                .unwrap(),
+            Some(TrackControlState::Enabled {
+                mode: crate::PersistedControlMode::ManualFlatten,
+            })
+        );
+
+        runtime
+            .handle(&track_id, TrackInput::Command(TrackCommand::Resume))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repository
+                .load_track_control_state(&track_id)
+                .await
+                .unwrap(),
+            Some(TrackControlState::Enabled {
+                mode: crate::PersistedControlMode::Automatic,
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn configuration_application_persists_before_installing_live_automatic_effects() {
         let repository = Arc::new(MemoryRepository::default());
         let runtime = test_executor(

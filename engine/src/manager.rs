@@ -416,6 +416,7 @@ impl TrackManager {
                     .ok_or_else(|| anyhow::anyhow!("track `{id}` not found"))?;
                 track.track_state = TrackState::WaitingMarketData;
                 Self::clear_targeting_state(track);
+                track.restart_acquisition_after_manual_resume();
                 Self::live_strategy_price_for(track)
             };
 
@@ -3025,6 +3026,40 @@ mod tests {
             track.acquisition_session_view().unwrap().initial_frontier,
             Some(Exposure(2.0))
         );
+    }
+
+    #[test]
+    fn resuming_manual_flatten_starts_initial_ratio_acquisition() {
+        let (mut manager, id) = manager();
+        manager
+            .fresh_start_track(
+                &id,
+                TrackState::Running(ControlState::Manual(ManualState::Flattened)),
+                TrackPnlStats::default(),
+                FreshSessionExternalInputs {
+                    current_exposure: Exposure(0.0),
+                    position_qty: PositionQty::new(0.0).unwrap(),
+                    market_data: Some(CurrentMarketData {
+                        strategy_price: 92.5,
+                        mark_price: Some(92.5),
+                        execution_quote: ExecutionQuote {
+                            best_bid: 92.4,
+                            best_ask: 92.6,
+                        },
+                        observed_at: Utc.with_ymd_and_hms(2026, 4, 22, 9, 1, 0).unwrap(),
+                    }),
+                    instrument_spec: rules(),
+                },
+            )
+            .unwrap();
+
+        manager.resume_track(id.as_str()).unwrap();
+
+        let track = manager.get_track(id.as_str()).unwrap();
+        let decision = track.inventory_decision().unwrap();
+        assert_eq!(decision.risk_approved_target, Exposure(6.0));
+        assert_eq!(decision.execution_target, Exposure(3.0));
+        assert!(!track.fresh_acquisition_pending());
     }
 
     #[test]

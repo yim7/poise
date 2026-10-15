@@ -177,7 +177,7 @@ SQLite 只接受代码当前定义的精确 schema。表结构不匹配时启动
 
 启动恢复是 fresh-session rebuild，不是 warm restart。旧 bindings、执行进度、price gate、recovery anomaly、acquisition frontier、release anchor、stale timer 和当前 session effect queue 全部作废；`track_effects` 中旧 journal 行不会重新入队或重放。交易所仓位和订单始终从交易所重新确认。
 
-fresh session 的第一笔有效策略行情采用保守 acquisition 初始化：如果 risk-approved target 要增加当前真实仓位的风险，acquisition frontier 从当前仓位开始；如果目标降低风险，则立即允许减到 risk-approved target；跨零目标先只允许平到 `0`。这次初始化不使用 `initial_ratio`，也不会因为重启授予新增风险。`initial_ratio` 只用于同一进程 session 中后来形成的普通 acquisition episode。stale 计时从 fresh session 的第一笔有效决策开始，因此进程离线时间不计入 `stale_release_minutes`。
+fresh session 的第一笔有效策略行情采用保守 acquisition 初始化：如果 risk-approved target 要增加当前真实仓位的风险，acquisition frontier 从当前仓位开始；如果目标降低风险，则立即允许减到 risk-approved target；跨零目标先只允许平到 `0`。这次初始化不使用 `initial_ratio`，也不会因为重启授予新增风险。处于人工平仓的 track 必须先执行 `resume`；该命令会结束人工平仓状态并开启新的普通 acquisition episode，此时首轮建仓按 `initial_ratio` 计算。除此之外，`initial_ratio` 只用于当前 session 后来形成的普通 acquisition episode。stale 计时从 fresh session 的第一笔有效决策开始，因此进程离线时间不计入 `stale_release_minutes`。
 
 配置 dry-run 是启动前只读检查，入口是 `poise-server --instance-dir <dir> --dry-run`。它读取同一份 `config.toml`，连接交易所只读 port，加载账户摘要、symbol metadata 和一次性 mark price，然后输出 JSON 格式的 `ConfigDryRunResponse`。四个 adapter 都必须实现这项只读价格查询，不能用默认 `None` 隐藏缺失能力。dry-run 不初始化 SQLite，不执行 startup-only 杠杆设置，不下单，不订阅 market data 或 user data，也不启动 runtime task。输出中的配置解释和容量估算只是当前配置与交易所 metadata/account snapshot 的读模型，不写入持久化，也不作为 engine、PNL 或恢复流程的事实源。
 
@@ -241,7 +241,7 @@ ownership 固定如下：
 风险暴露获取：
 
 - `risk_acquisition` 默认启用，只约束增加风险暴露；降低风险暴露时直接重新评估并优先执行到 risk-approved target。
-- fresh session 的保守初始化不使用 `initial_ratio`；它只承认当前真实仓位或立即降低风险。初始化完成后，同一 session 中后来出现、且没有既有 gate state 的普通 acquisition episode 才计算 initial allowance：目标小于 `min_rebalance_units` 时 allowance 等于目标，否则取 `target_units * initial_ratio` 与 `min_rebalance_units` 的较大值。初始 frontier 再取 allowance 与已有同向仓位的较大值，并受 target 限制；只有 frontier 超出当前仓位的部分才算新增 release，所以已有仓位已经覆盖 allowance 时 release 可以为 `0`。
+- fresh session 的保守初始化不使用 `initial_ratio`；它只承认当前真实仓位或立即降低风险。人工平仓后的 `resume` 会清除这次 fresh-session 初始化并开始普通 acquisition episode。普通 acquisition episode 计算 initial allowance：目标小于 `min_rebalance_units` 时 allowance 等于目标，否则取 `target_units * initial_ratio` 与 `min_rebalance_units` 的较大值。初始 frontier 再取 allowance 与已有同向仓位的较大值，并受 target 限制；只有 frontier 超出当前仓位的部分才算新增 release，所以已有仓位已经覆盖 allowance 时 release 可以为 `0`。
 - 增加风险暴露后，系统记录 `release_anchor_price` 和 `release_anchor_target`。只有 risk-approved target 相对锚点继续走出 `advantage_steps * min_rebalance_units`，才释放一部分 backlog。
 - 如果在线 stale 等待达到 `stale_release_minutes`（默认 60 分钟），即使价格没有走到优势阈值，也允许释放一部分 backlog；设为 `0` 表示关闭时间释放。fresh session 不继承旧 timer，离线时间不参与等待。
 - 每次释放量由 backlog、`catchup_ratio`、`min_release_steps` 和 `max_release_steps` 共同决定：先按 backlog 比例计算，再限制在最小/最大释放单位之间。
@@ -291,7 +291,7 @@ execution_target = +3.9
 人工命令：
 
 - `pause` 暂停自动控制。
-- `resume` 从暂停或手动平仓恢复。
+- `resume` 从暂停或手动平仓恢复；从手动平仓恢复时切回 `Automatic`，并按 `initial_ratio` 开启新的普通 acquisition episode。
 - `flatten` 写入人工目标 `0`，进入 `manual_flattening`，必须用 `resume` 清除。
 - `terminate` 进入终态，目标收敛到 `0`，不会自动恢复。
 
