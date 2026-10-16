@@ -138,7 +138,7 @@ fn write_startup(directory: &Path, private_key: &str) -> PathBuf {
              account_address = \"{ACCOUNT}\"\n\
              api_wallet_private_key = \"{private_key}\"\n\
              data_dir = \"data\"\n\
-             listen = \"127.0.0.1:8000\"\n"
+             listen = \"127.0.0.1:8010\"\n"
         ),
     )
     .unwrap();
@@ -175,7 +175,7 @@ fn reads_every_field_and_resolves_the_data_directory_next_to_the_file() {
         file.database_path(),
         subdirectory.join("data").join("poise.sqlite")
     );
-    assert_eq!(file.listen(), "127.0.0.1:8000");
+    assert_eq!(file.listen(), "127.0.0.1:8010");
     assert_eq!(file.path(), subdirectory.join("poise.toml"));
 }
 
@@ -236,7 +236,7 @@ fn b48_rejects_a_missing_or_empty_private_key_field() {
             "network = \"testnet\"\n\
              account_address = \"{ACCOUNT}\"\n\
              data_dir = \"data\"\n\
-             listen = \"127.0.0.1:8000\"\n"
+             listen = \"127.0.0.1:8010\"\n"
         ),
     )
     .unwrap();
@@ -309,7 +309,7 @@ fn b47_a_toml_error_does_not_echo_the_private_key() {
              account_address = \"{ACCOUNT}\"\n\
              api_wallet_private_key = {KEY}\n\
              data_dir = \"data\"\n\
-             listen = \"127.0.0.1:8000\"\n"
+             listen = \"127.0.0.1:8010\"\n"
         ),
     )
     .unwrap();
@@ -344,7 +344,7 @@ fn rejects_a_startup_file_with_unknown_fields_or_unknown_network() {
              account_address = \"{ACCOUNT}\"\n\
              api_wallet_private_key = \"{KEY}\"\n\
              data_dir = \"data\"\n\
-             listen = \"127.0.0.1:8000\"\n"
+             listen = \"127.0.0.1:8010\"\n"
         ),
     )
     .unwrap();
@@ -361,7 +361,7 @@ fn rejects_a_startup_file_with_unknown_fields_or_unknown_network() {
              account_address = \"{ACCOUNT}\"\n\
              api_wallet_private_key = \"{KEY}\"\n\
              data_dir = \"data\"\n\
-             listen = \"127.0.0.1:8000\"\n\
+             listen = \"127.0.0.1:8010\"\n\
              unexpected = true\n"
         ),
     )
