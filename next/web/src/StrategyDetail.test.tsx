@@ -49,6 +49,24 @@ describe('运行详情', () => {
     expect(screen.getByText('1.23%')).toBeInTheDocument()
   })
 
+  it('显示资金费率：每小时和年化', async () => {
+    detailRoutes()
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    expect(await screen.findByText(/^每小时 0.00125%，年化 10.95%（.+ 读）$/)).toBeInTheDocument()
+  })
+
+  it('负资金费率显示负号：空头付', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({ funding_rate: { hourly: '-0.00027774', annual: '-2.4330532' } }),
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    expect(await screen.findByText(/^每小时 -0.027774%，年化 -243.30532%/)).toBeInTheDocument()
+  })
+
   it('b30_显示今日操作次数和每日上限', async () => {
     detailRoutes()
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)

@@ -757,6 +757,17 @@ async fn mark_price_comes_from_the_asset_contexts() {
     );
 }
 
+/// 资金费率来自同一份行情上下文；交易所给的可能多于 8 位小数，截到 8 位（第 7.6 节）。
+#[tokio::test]
+async fn the_funding_rate_comes_from_the_asset_contexts() {
+    let transport = FakeTransport::new(vec![fixture(fixtures::META_AND_ASSET_CTXS)]);
+    let client = client(transport, fixed_clock(NOW_MS));
+
+    let funding = client.funding_rate(&btc()).await.unwrap();
+    assert_eq!(funding.hourly, Rate::parse("-0.00021102").unwrap());
+    assert_eq!(funding.annual, Rate::parse("-1.84857987").unwrap());
+}
+
 // ── 账户 ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]

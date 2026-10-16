@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use poise_runtime::account::{Account, AccountMode, ApiWallet};
+use poise_runtime::account::{Account, AccountMode, ApiWallet, FundingRate};
 use poise_runtime::exchange::ExchangeError;
 use poise_runtime::secret::{Address, SecretKey};
 use poise_runtime::startup::{
@@ -90,6 +90,10 @@ impl Account for FakeAccount {
             Rate::parse("0.00045").unwrap(),
             Rate::parse("0.00015").unwrap(),
         ))
+    }
+
+    async fn funding_rate(&self, _instrument: &Instrument) -> Result<FundingRate, ExchangeError> {
+        Ok(FundingRate::from_hourly(Rate::parse("0.0000125").unwrap()).unwrap())
     }
 
     async fn instrument_spec(

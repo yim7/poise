@@ -1,4 +1,5 @@
-// 账户风控设置（设计第 7.4、11 节）：保证金率的提醒阈值、停止阈值和行情过期时间。
+// 账户风控设置（设计第 7.4、7.6、11 节）：保证金率的提醒阈值、停止阈值、行情过期时间和
+// 资金费率的提醒阈值。
 //
 // 保证金是整个账户共用的，这几项按账户设，所有策略共用一份。校验在服务端：页面只把
 // 百分比换成比率交上去，不合理的设置由服务端说明原因。
@@ -19,6 +20,7 @@ export function AccountSettingsView({ onBack }: AccountSettingsProps) {
   const [alert, setAlert] = useState('')
   const [stop, setStop] = useState('')
   const [maxAge, setMaxAge] = useState('')
+  const [funding, setFunding] = useState('')
   const [problem, setProblem] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
 
@@ -27,6 +29,7 @@ export function AccountSettingsView({ onBack }: AccountSettingsProps) {
     setAlert(ratioToPercentInput(settings.data.margin_alert_ratio))
     setStop(ratioToPercentInput(settings.data.margin_stop_ratio))
     setMaxAge(String(settings.data.market_data_max_age))
+    setFunding(ratioToPercentInput(settings.data.funding_alert_annual_rate))
   }, [settings.data])
 
   const save = useMutation({
@@ -49,7 +52,8 @@ export function AccountSettingsView({ onBack }: AccountSettingsProps) {
     setSaved(false)
     const alertRatio = percentInputToRatio(alert)
     const stopRatio = percentInputToRatio(stop)
-    if (alertRatio === null || stopRatio === null) {
+    const fundingRatio = percentInputToRatio(funding)
+    if (alertRatio === null || stopRatio === null || fundingRatio === null) {
       setProblem('阈值要填百分比数字，例如 30。')
       return
     }
@@ -64,6 +68,7 @@ export function AccountSettingsView({ onBack }: AccountSettingsProps) {
       margin_alert_ratio: alertRatio,
       margin_stop_ratio: stopRatio,
       market_data_max_age: seconds,
+      funding_alert_annual_rate: fundingRatio,
     })
   }
 
@@ -103,6 +108,15 @@ export function AccountSettingsView({ onBack }: AccountSettingsProps) {
           onChange={(event) => edit(setMaxAge, event.target.value)}
         />
       </label>
+      <label>
+        资金费率提醒阈值（年化 %）
+        <input
+          value={funding}
+          disabled={save.isPending}
+          onChange={(event) => edit(setFunding, event.target.value)}
+        />
+      </label>
+      <p className="hint">资金费率对本策略不利、年化超过这个数时提醒；不自动交易。</p>
       <div className="actions">
         <button type="button" className="primary" onClick={submit} disabled={save.isPending}>
           保存

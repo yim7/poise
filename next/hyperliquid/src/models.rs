@@ -46,6 +46,9 @@ pub(crate) struct AssetMetaResponse {
 pub(crate) struct AssetContext {
     #[serde(rename = "markPx")]
     pub mark_px: String,
+    /// 当前资金费率（每小时），可能多于 8 位小数。
+    #[serde(default)]
+    pub funding: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

@@ -426,3 +426,21 @@ where
     }
     false
 }
+
+/// 常驻服务单独去读资金费率（第 7.6 节），一起来就读一次，不用等交易的一步。
+#[tokio::test]
+async fn the_service_reads_the_funding_rate_on_its_own() {
+    let console = console_with(Store::open_in_memory().unwrap());
+    console.start(long_grid_config()).await;
+
+    let running = serve(&console, Duration::from_secs(3600)).await;
+    for _ in 0..100 {
+        if console.account.funding_rate_reads() > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    running.shutdown().await;
+
+    assert_eq!(console.account.funding_rate_reads(), 1);
+}

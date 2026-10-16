@@ -9,14 +9,19 @@ import { percentInputToRatio, ratioToPercentInput } from './format'
 import { fakeServer } from './test/fakeServer'
 import { renderWithQuery } from './test/render'
 
-const defaults = { margin_alert_ratio: '0.3', margin_stop_ratio: '0.5', market_data_max_age: 10 }
+const defaults = {
+  margin_alert_ratio: '0.3',
+  margin_stop_ratio: '0.5',
+  market_data_max_age: 10,
+  funding_alert_annual_rate: '0.8',
+}
 
 describe('账户风控设置', () => {
   it('显示当前设置，改完保存时把百分比换成比率交给服务端', async () => {
     const server = fakeServer({
       'GET /api/account/settings': { body: defaults },
       'PUT /api/account/settings': {
-        body: { margin_alert_ratio: '0.25', margin_stop_ratio: '0.5', market_data_max_age: 10 },
+        body: { ...defaults, margin_alert_ratio: '0.25' },
       },
     })
     renderWithQuery(<AccountSettingsView onBack={() => {}} />)
@@ -24,6 +29,7 @@ describe('账户风控设置', () => {
     const alert = await screen.findByDisplayValue('30')
     expect(screen.getByDisplayValue('50')).toBeInTheDocument()
     expect(screen.getByDisplayValue('10')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('80')).toBeInTheDocument()
 
     await userEvent.clear(alert)
     await userEvent.type(alert, '25')
@@ -34,6 +40,7 @@ describe('账户风控设置', () => {
       margin_alert_ratio: '0.25',
       margin_stop_ratio: '0.5',
       market_data_max_age: 10,
+      funding_alert_annual_rate: '0.8',
     })
   })
 

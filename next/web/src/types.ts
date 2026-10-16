@@ -285,6 +285,9 @@ export interface StrategyDetail {
   config_versions: StoredConfigVersion[]
   /** 今天（UTC）全账户已经发出的下单、撤单次数；Unified 账户每天上限 5 万次（第 10 节）。 */
   actions_today: number
+  /** 这个标的最近读到的资金费率（正数是多头付）；读不到、或者半小时没读到新的时是 null。 */
+  funding_rate: FundingRate | null
+  funding_rate_read_at: string | null
 }
 
 /** 恢复的结果：一直在跑、等遗留订单过期、遗留订单没收场、或者真的恢复了。 */
@@ -323,4 +326,12 @@ export interface AccountSettings {
   margin_stop_ratio: Decimal
   /** 行情过期时间，秒。 */
   market_data_max_age: number
+  /** 资金费率对本策略不利、年化超过它时提醒（比率，0.5 是 50%）。 */
+  funding_alert_annual_rate: Decimal
+}
+
+/** 资金费率（第 7.6 节）：每小时的费率和年化（按原始精度换算）。 */
+export interface FundingRate {
+  hourly: Decimal
+  annual: Decimal
 }

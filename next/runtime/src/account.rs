@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
 use poise_strategy::stress::MarginTiers;
 use poise_strategy::units::{Notional, Rate, SCALE};
+use serde::{Deserialize, Serialize};
 
 use crate::exchange::ExchangeError;
 use crate::secret::Address;
@@ -93,6 +94,37 @@ pub struct Leverage {
     pub cross: bool,
 }
 
+/// 一年的资金费结算次数：Hyperliquid 每小时结算一次，按 365 天算。
+pub const FUNDING_HOURS_PER_YEAR: i64 = 24 * 365;
+
+/// 资金费率（第 7.6 节）：每小时的费率，和换算出的年化。正数是多头付给空头，负数是空头付给
+/// 多头。
+///
+/// 年化单独存，不由每小时费率现乘：交易所给的每小时费率可能多于 8 位小数，按截断后的
+/// 每小时费率乘出来的年化会在阈值附近漏掉提醒。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FundingRate {
+    /// 每小时的费率（显示用，最多 8 位小数）。
+    pub hourly: Rate,
+    /// 年化：每小时费率 × 24 × 365，按原始精度算。
+    pub annual: Rate,
+}
+
+impl FundingRate {
+    /// 两个数都要能安全取反（判断空头付多少时要取反），否则是 `None`：读数异常，按读不到
+    /// 处理，不能变成「不提醒」。
+    pub fn new(hourly: Rate, annual: Rate) -> Option<Self> {
+        (hourly.units() != i64::MIN && annual.units() != i64::MIN)
+            .then_some(Self { hourly, annual })
+    }
+
+    /// 按每小时费率换算年化；超出能表示的范围时是 `None`。
+    pub fn from_hourly(hourly: Rate) -> Option<Self> {
+        let annual = hourly.units().checked_mul(FUNDING_HOURS_PER_YEAR)?;
+        Self::new(hourly, Rate::from_units(annual))
+    }
+}
+
 #[async_trait]
 pub trait Account: Send + Sync {
     /// 账户模式。不是 Unified 时启动校验会拒绝启动，不替用户切换。
@@ -117,6 +149,9 @@ pub trait Account: Send + Sync {
 
     /// 账户实际费率。
     async fn fees(&self) -> Result<Fees, ExchangeError>;
+
+    /// 这个标的当前的资金费率（第 7.6 节）。
+    async fn funding_rate(&self, instrument: &Instrument) -> Result<FundingRate, ExchangeError>;
 
     /// 一个标的的合约规则：报价精度、数量精度、最低订单金额。
     async fn instrument_spec(

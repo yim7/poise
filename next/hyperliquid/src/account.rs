@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::DateTime;
-use poise_runtime::account::{Leverage, MarginReading};
+use poise_runtime::account::{FUNDING_HOURS_PER_YEAR, FundingRate, Leverage, MarginReading};
 use poise_runtime::{Account, AccountMode, ApiWallet, ExchangeError};
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
 use poise_strategy::stress::{MarginTier, MarginTiers};
@@ -252,6 +252,12 @@ impl Account for Hyperliquid {
         ))
     }
 
+    async fn funding_rate(&self, instrument: &Instrument) -> Result<FundingRate, ExchangeError> {
+        let context = self.asset_context(instrument).await?;
+        let funding = context.funding.ok_or_else(|| unreadable("funding rate"))?;
+        funding_rate(&funding).ok_or_else(|| unreadable("funding rate"))
+    }
+
     async fn instrument_spec(
         &self,
         instrument: &Instrument,
@@ -274,5 +280,73 @@ fn notional(value: Option<&str>, what: &str) -> Result<Notional, ExchangeError> 
 fn unreadable(what: &str) -> ExchangeError {
     ExchangeError::Unavailable {
         reason: format!("the exchange returned an unreadable {what}"),
+    }
+}
+
+/// 交易所给的每小时资金费率（可能多于 8 位小数）换成 [`FundingRate`]。
+///
+/// 年化按原始精度算再取到 8 位，判断阈值用它：先截断每小时费率再乘 8760，在阈值附近会
+/// 漏掉提醒（每小时 0.0000570799 年化 50.0019924%，截断后只有 49.99332%）。每小时费率只
+/// 用来显示，截到 8 位。两者都向零取整。
+fn funding_rate(value: &str) -> Option<FundingRate> {
+    let value = value.trim();
+    let (negative, digits) = match value.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, value),
+    };
+    let (integer, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    if integer.is_empty() && fraction.is_empty()
+        || !integer
+            .chars()
+            .chain(fraction.chars())
+            .all(|c| c.is_ascii_digit())
+        || fraction.len() > 18
+    {
+        return None;
+    }
+    let scale = 10_i128.checked_pow(u32::try_from(fraction.len()).ok()?)?;
+    let mantissa: i128 = format!("{integer}{fraction}").parse().ok()?;
+    let mantissa = if negative { -mantissa } else { mantissa };
+    let to_units = |times: i128| -> Option<Rate> {
+        let units = mantissa
+            .checked_mul(times)?
+            .checked_mul(i128::from(poise_strategy::units::SCALE))?
+            / scale;
+        Some(Rate::from_units(i64::try_from(units).ok()?))
+    };
+    FundingRate::new(to_units(1)?, to_units(i128::from(FUNDING_HOURS_PER_YEAR))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::funding_rate;
+    use poise_strategy::units::Rate;
+
+    fn rate(value: &str) -> Rate {
+        Rate::parse(value).unwrap()
+    }
+
+    /// 年化按原始精度算：截断之后再乘会在阈值附近漏掉提醒。正负两个方向都一样。
+    #[test]
+    fn the_annual_funding_rate_keeps_the_full_precision() {
+        let positive = funding_rate("0.0000570799").unwrap();
+        assert_eq!(positive.hourly, rate("0.00005707"));
+        assert_eq!(positive.annual, rate("0.50001992"));
+        assert!(positive.annual > rate("0.5"));
+
+        let negative = funding_rate(" -0.0000570799").unwrap();
+        assert_eq!(negative.hourly, rate("-0.00005707"));
+        assert_eq!(negative.annual, rate("-0.50001992"));
+    }
+
+    #[test]
+    fn an_unreadable_funding_rate_is_none() {
+        for value in ["", "-", "abc", "1e-5", "0.0000000000000000001"] {
+            assert_eq!(funding_rate(value), None, "{value}");
+        }
+        // 超出能表示的范围也读不出来，不能回绕成别的数。
+        assert_eq!(funding_rate("99999999999999"), None);
+        // 年化正好是 i64::MIN：取反会溢出，同样读不出来。
+        assert_eq!(funding_rate("-10528963.512391296584474886"), None);
     }
 }

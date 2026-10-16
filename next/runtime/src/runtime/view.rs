@@ -4,11 +4,14 @@ use chrono::{DateTime, Utc};
 use poise_strategy::Strategy;
 use poise_strategy::invalidation::invalidation_sold;
 use poise_strategy::order::{OrderRecord, WorkingOrder};
-use poise_strategy::units::{Notional, Rate};
+use poise_strategy::side::Direction;
+use poise_strategy::units::{Notional, Position, Rate};
 
+use crate::account::FundingRate;
+use crate::settings::AccountSettings;
 use crate::store::{StrategyId, StrategyStatus, ViewSnapshot};
 
-use super::{Runtime, RuntimeError, StepReport, StrategyDetail, StrategySummary};
+use super::{Runtime, RuntimeError, StepReport, StrategyDetail, StrategySummary, percent};
 
 impl Runtime {
     /// 策略列表，新建的在前（第 11 节）。
@@ -46,6 +49,18 @@ impl Runtime {
             .filter(|order| order.record.is_working())
             .map(|order| order.record.working_view())
             .collect();
+        // 资金费率按读详情这一刻的读数（常驻服务单独去读，半小时没读到就当读不到），不按快照：
+        // 暂停的策略不走步，快照不会更新，可仓位还在付资金费（第 7.6 节）。归档的策略不提醒。
+        let funding = self.current_funding_rate(&stored.instrument);
+        let funding_alert = if status.is_live() {
+            funding_alert_note(
+                funding.map(|(rate, _)| rate),
+                paying_side(&strategy, view.position),
+                &self.store.load_account_settings()?,
+            )
+        } else {
+            None
+        };
         Ok(StrategyDetail {
             summary,
             taken_at: view.taken_at,
@@ -64,7 +79,10 @@ impl Runtime {
                     })
                 }
                 _ => view.note,
-            },
+            }
+            .into_iter()
+            .chain(funding_alert)
+            .reduce(|note, alert| format!("{note}{alert}")),
             batches: strategy.batch_summaries(&state),
             cells: strategy.cell_summaries(&state, &working),
             orders: orders
@@ -74,6 +92,8 @@ impl Runtime {
             waiting: view.waiting,
             config_versions: self.store.load_config_versions(strategy_id)?,
             actions_today: self.actions_today()?,
+            funding_rate: funding.map(|(rate, _)| rate),
+            funding_rate_read_at: funding.map(|(_, read_at)| read_at),
         })
     }
 
@@ -160,4 +180,37 @@ impl Runtime {
         self.store.save_view(strategy_id, &view)?;
         Ok(())
     }
+}
+
+/// 资金费由哪一侧付才算对本策略不利：按实际净仓位的方向；还没有仓位时按单侧网格的方向，
+/// 中性网格没有仓位时谁都不付。
+pub(super) fn paying_side(strategy: &Strategy, position: Position) -> Option<Direction> {
+    match position.units() {
+        units if units > 0 => Some(Direction::Long),
+        units if units < 0 => Some(Direction::Short),
+        _ if strategy.is_neutral() => None,
+        _ => strategy.sides().first().map(|side| side.direction()),
+    }
+}
+
+/// 资金费率对本策略不利、年化超过提醒阈值时的提醒（第 7.6 节）：正费率多头付，负费率
+/// 空头付。不自动交易，是否调整由用户决定。
+pub(super) fn funding_alert_note(
+    rate: Option<FundingRate>,
+    side: Option<Direction>,
+    settings: &AccountSettings,
+) -> Option<String> {
+    let annual = rate?.annual.units();
+    // 多头付正费率、空头付负费率：换成「本策略付出的年化」再和阈值比。
+    let paid = Rate::from_units(match side? {
+        Direction::Long => annual,
+        Direction::Short => annual.checked_neg()?,
+    });
+    (paid > settings.funding_alert_annual_rate).then(|| {
+        format!(
+            "资金费率对本策略不利：年化 {}，超过提醒阈值 {}。不自动调整，是否减仓或改参数由你决定。",
+            percent(paid),
+            percent(settings.funding_alert_annual_rate)
+        )
+    })
 }

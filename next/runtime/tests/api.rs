@@ -693,21 +693,36 @@ async fn the_account_settings_can_be_read_and_changed() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        json!({"margin_alert_ratio": "0.3", "margin_stop_ratio": "0.5", "market_data_max_age": 10})
+        json!({
+            "margin_alert_ratio": "0.3",
+            "margin_stop_ratio": "0.5",
+            "market_data_max_age": 10,
+            "funding_alert_annual_rate": "0.5",
+        })
     );
 
     let (status, body) = call(
         &router,
         Method::PUT,
         "/api/account/settings",
-        Some(json!({"margin_alert_ratio": "0.25", "margin_stop_ratio": "0.4", "market_data_max_age": 15})),
+        Some(json!({
+            "margin_alert_ratio": "0.25",
+            "margin_stop_ratio": "0.4",
+            "market_data_max_age": 15,
+            "funding_alert_annual_rate": "0.8",
+        })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let (_, body) = call(&router, Method::GET, "/api/account/settings", None).await;
     assert_eq!(
         body,
-        json!({"margin_alert_ratio": "0.25", "margin_stop_ratio": "0.4", "market_data_max_age": 15})
+        json!({
+            "margin_alert_ratio": "0.25",
+            "margin_stop_ratio": "0.4",
+            "market_data_max_age": 15,
+            "funding_alert_annual_rate": "0.8",
+        })
     );
 
     let (status, body) = call(

@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use chrono::Duration;
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
 use poise_strategy::stress::MarginTiers;
-use poise_strategy::units::Notional;
+use poise_strategy::units::{Notional, Rate};
 
-use crate::account::{Account, AccountMode, ApiWallet, Leverage, MarginReading};
+use crate::account::{Account, AccountMode, ApiWallet, FundingRate, Leverage, MarginReading};
 use crate::clock::ManualClock;
 use crate::exchange::ExchangeError;
 
@@ -34,6 +34,12 @@ struct SimAccount {
     fail_next_collateral: Option<String>,
     /// 下一次查可用资金时，这个时钟往前走多久（账户接口响应很慢）。
     slow_next_collateral: Option<(Arc<ManualClock>, Duration)>,
+    /// 当前资金费率（每小时）；默认是基础利率 0.00125%。
+    funding_rate: Rate,
+    /// 读过几次资金费率。
+    funding_rate_reads: usize,
+    /// 下一次读资金费率失败的原因。
+    fail_next_funding_rate: Option<String>,
     /// 保证金读数：默认没有任何占用，账户比率为 0。
     margin: MarginReading,
     /// 还要让几次保证金读数失败。
@@ -61,6 +67,9 @@ impl SimulatedAccount {
                 collateral: Notional::parse(DEFAULT_COLLATERAL).expect("a valid default"),
                 fail_next_collateral: None,
                 slow_next_collateral: None,
+                funding_rate: Rate::from_units(1_250),
+                funding_rate_reads: 0,
+                fail_next_funding_rate: None,
                 margin: MarginReading {
                     balance: Notional::parse(DEFAULT_COLLATERAL).expect("a valid default"),
                     available_after_maintenance: Notional::parse(DEFAULT_COLLATERAL)
@@ -150,6 +159,21 @@ impl SimulatedAccount {
         self.lock().fees = fees;
     }
 
+    /// 资金费率变了（每小时）。
+    pub fn set_funding_rate(&self, rate: Rate) {
+        self.lock().funding_rate = rate;
+    }
+
+    /// 让下一次读资金费率失败。
+    pub fn fail_next_funding_rate(&self, reason: &str) {
+        self.lock().fail_next_funding_rate = Some(reason.to_string());
+    }
+
+    /// 读过几次资金费率。
+    pub fn funding_rate_reads(&self) -> usize {
+        self.lock().funding_rate_reads
+    }
+
     pub fn set_mode(&self, mode: AccountMode) {
         self.lock().mode = mode;
     }
@@ -171,6 +195,17 @@ impl Account for SimulatedAccount {
 
     async fn authorized_api_wallets(&self) -> Result<Vec<ApiWallet>, ExchangeError> {
         Ok(self.lock().wallets.clone())
+    }
+
+    async fn funding_rate(&self, _instrument: &Instrument) -> Result<FundingRate, ExchangeError> {
+        let mut state = self.lock();
+        state.funding_rate_reads += 1;
+        if let Some(reason) = state.fail_next_funding_rate.take() {
+            return Err(ExchangeError::Unavailable { reason });
+        }
+        FundingRate::from_hourly(state.funding_rate).ok_or_else(|| ExchangeError::Unavailable {
+            reason: "the funding rate is out of range".to_string(),
+        })
     }
 
     async fn available_collateral(&self) -> Result<Notional, ExchangeError> {

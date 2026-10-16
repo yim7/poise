@@ -176,6 +176,15 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
           <dt>读数时刻</dt>
           <dd>{timestamp(strategy.taken_at)}</dd>
         </div>
+        {/* 资金费每小时结算一次：费率按每小时给，年化只是换算，方便和阈值对照。 */}
+        <div>
+          <dt>资金费率</dt>
+          <dd>
+            {strategy.funding_rate === null || strategy.funding_rate_read_at === null
+              ? '读不到'
+              : `每小时 ${percent(strategy.funding_rate.hourly)}，年化 ${percent(strategy.funding_rate.annual)}（${timestamp(strategy.funding_rate_read_at)} 读）`}
+          </dd>
+        </div>
         {/* 全账户的计数：同一账户的所有策略共用每天 5 万次的上限，超过 80% 时说明里会提醒。 */}
         <div>
           <dt>今日操作次数</dt>

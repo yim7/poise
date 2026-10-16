@@ -16,7 +16,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::api;
 use crate::lock::InstanceLock;
-use crate::runtime::{Runtime, RuntimeError};
+use crate::runtime::{FUNDING_RATE_REFRESH, Runtime, RuntimeError};
 use crate::store::StrategyId;
 
 /// 常驻服务的参数。
@@ -104,11 +104,29 @@ impl Server {
             None => api::router(self.runtime.clone()),
         };
         let restoring = tokio::spawn(async move { restore(runtime, interval).await });
+        let funding = tokio::spawn(refresh_funding(self.runtime.clone()));
         let served = axum::serve(self.listener, router)
             .with_graceful_shutdown(shutdown)
             .await;
         restoring.abort();
+        funding.abort();
         Ok(served?)
+    }
+}
+
+/// 定时重读资金费率（第 7.6 节），和交易的驱动分开跑：读接口慢或者超时，不能拖住撤单和
+/// 止损检查。成不成功都按同一个节拍，失败了下一轮再读。
+async fn refresh_funding(runtime: Arc<Runtime>) {
+    let period = FUNDING_RATE_REFRESH
+        .to_std()
+        .expect("the funding refresh period is positive");
+    let mut ticker = tokio::time::interval(period);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        if let Err(error) = runtime.refresh_funding_rates().await {
+            tracing::warn!(%error, "cannot refresh the funding rates");
+        }
     }
 }
 

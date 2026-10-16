@@ -215,7 +215,7 @@ pub(crate) const META: &str = r#"{
 /// `{"type":"metaAndAssetCtxs"}`。
 pub(crate) const META_AND_ASSET_CTXS: &str = r#"[
   {"universe": [{"name": "ETH", "szDecimals": 4}, {"name": "BTC", "szDecimals": 5}]},
-  [{"markPx": "2500.5"}, {"markPx": "95000.0"}]
+  [{"markPx": "2500.5", "funding": "0.0000125"}, {"markPx": "95000.0", "funding": "-0.0002110251"}]
 ]"#;
 
 /// 下单成功：挂在盘口上。

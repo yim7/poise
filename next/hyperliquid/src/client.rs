@@ -164,6 +164,20 @@ impl Hyperliquid {
     }
 
     pub(crate) async fn mark_price(&self, instrument: &Instrument) -> Result<Price, ExchangeError> {
+        let context = self.asset_context(instrument).await?;
+        Price::parse(&context.mark_px).map_err(|_| ExchangeError::Unavailable {
+            reason: format!(
+                "the exchange returned an invalid mark price for `{}`",
+                instrument.symbol()
+            ),
+        })
+    }
+
+    /// 一个标的当前的行情上下文（`metaAndAssetCtxs` 里它那一项）。
+    pub(crate) async fn asset_context(
+        &self,
+        instrument: &Instrument,
+    ) -> Result<AssetContext, ExchangeError> {
         let (meta, contexts): (MetaResponse, Vec<AssetContext>) = self
             .info(&json!({ "type": "metaAndAssetCtxs" }), "metaAndAssetCtxs")
             .await?;
@@ -172,20 +186,15 @@ impl Hyperliquid {
             .iter()
             .position(|asset| asset.name == instrument.symbol())
             .ok_or_else(|| unknown_instrument(instrument))?;
-        let context = contexts
-            .get(index)
+        contexts
+            .into_iter()
+            .nth(index)
             .ok_or_else(|| ExchangeError::Unavailable {
                 reason: format!(
                     "the exchange did not return market data for `{}`",
                     instrument.symbol()
                 ),
-            })?;
-        Price::parse(&context.mark_px).map_err(|_| ExchangeError::Unavailable {
-            reason: format!(
-                "the exchange returned an invalid mark price for `{}`",
-                instrument.symbol()
-            ),
-        })
+            })
     }
 
     /// 一个标的的合约规则，按需取一次。

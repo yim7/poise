@@ -25,7 +25,7 @@
 //! 时间全部来自注入的时钟（[`crate::clock::Clock`]）：订单的 `expiresAfter` 按实际
 //! 发送时刻算，限速按实际成交时刻算（第 4.1、9.1 节）。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, Utc};
@@ -43,7 +43,7 @@ use poise_strategy::takeover::TakeoverError;
 use poise_strategy::units::{Notional, Position, Price, Quantity, Rate};
 use serde::{Deserialize, Serialize};
 
-use crate::account::Account;
+use crate::account::{Account, FundingRate};
 use crate::clock::{Clock, SystemClock};
 use crate::exchange::{Exchange, ExchangeError, ExchangeOrder};
 use crate::settings::SettingsError;
@@ -438,7 +438,17 @@ pub struct StrategyDetail {
     pub config_versions: Vec<StoredConfigVersion>,
     /// 今天（UTC）全账户已经发出的下单、撤单次数，上限 [`DAILY_ACTION_LIMIT`]。
     pub actions_today: u64,
+    /// 这个标的最近读到的资金费率（正数是多头付）和读到的时刻；读不到、或者半小时没读到
+    /// 新的时是 `None`。
+    pub funding_rate: Option<FundingRate>,
+    pub funding_rate_read_at: Option<DateTime<Utc>>,
 }
+
+/// 资金费率隔多久重读一次。
+pub const FUNDING_RATE_REFRESH: Duration = Duration::minutes(10);
+
+/// 资金费率读数多久之后不再算数：连着三次没读到。
+const FUNDING_RATE_MAX_AGE: Duration = Duration::minutes(30);
 
 /// Unified 账户每天最多的用户操作次数（第 10 节）。来源：Hyperliquid 文档「Account
 /// abstraction modes」。超过 80% 提醒。
@@ -460,6 +470,8 @@ pub struct Runtime {
     stepping: Mutex<HashSet<StrategyId>>,
     /// 资金预检的锁和保证金不足的退避表（第 10 节）：同一账户的所有策略共用一份。
     funds: funds::Funds,
+    /// 各标的最近读到的资金费率和读到的时刻（第 7.6 节）。
+    funding_rates: Mutex<HashMap<Instrument, (FundingRate, DateTime<Utc>)>>,
 }
 
 /// 一次驱动期间持有的占用标记，离开作用域就释放。
@@ -507,6 +519,7 @@ impl Runtime {
             clock,
             stepping: Mutex::new(HashSet::new()),
             funds: funds::Funds::default(),
+            funding_rates: Mutex::new(HashMap::new()),
         }
     }
 
@@ -547,6 +560,51 @@ impl Runtime {
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// 重读所有活动策略所在标的的资金费率（第 7.6 节）。
+    ///
+    /// 常驻服务单独跑这件事，每 [`FUNDING_RATE_REFRESH`] 一次，不管上一次成没成功：资金费每
+    /// 小时才结算一次，读接口的权重又高；放在交易的一步里等它，超时会拖住撤单和别的策略的
+    /// 止损检查。交易的一步只读这里存下的读数（[`Runtime::current_funding_rate`]）。
+    pub async fn refresh_funding_rates(&self) -> Result<(), RuntimeError> {
+        let mut instruments: Vec<Instrument> = Vec::new();
+        for strategy_id in self.store.load_all_strategy_ids()? {
+            let stored = self.store.load_strategy(&strategy_id)?;
+            if stored.status.is_live() && !instruments.contains(&stored.instrument) {
+                instruments.push(stored.instrument);
+            }
+        }
+        for instrument in instruments {
+            match self.account.funding_rate(&instrument).await {
+                Ok(rate) => {
+                    self.funding_rates
+                        .lock()
+                        .expect("funding lock poisoned")
+                        .insert(instrument, (rate, self.clock.now()));
+                }
+                Err(error) => {
+                    tracing::warn!(%instrument, %error, "the funding rate is unavailable");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 这个标的最近读到的资金费率和读到的时刻。超过 [`FUNDING_RATE_MAX_AGE`] 没读到新的就当
+    /// 读不到：旧费率低于阈值、实际已经升高时，接着用它只会让提醒失真。
+    pub(super) fn current_funding_rate(
+        &self,
+        instrument: &Instrument,
+    ) -> Option<(FundingRate, DateTime<Utc>)> {
+        let (rate, read_at) = self
+            .funding_rates
+            .lock()
+            .expect("funding lock poisoned")
+            .get(instrument)
+            .copied()?;
+        (self.clock.now().signed_duration_since(read_at) <= FUNDING_RATE_MAX_AGE)
+            .then_some((rate, read_at))
     }
 
     /// 今天（UTC）已经发出的下单、撤单请求次数（第 10 节）。

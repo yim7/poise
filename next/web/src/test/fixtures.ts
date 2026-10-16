@@ -180,6 +180,8 @@ export function detail(overrides: Partial<StrategyDetail> = {}): StrategyDetail 
     waiting: ['waiting_for_batch', 'price_not_reached'],
     config_versions: configVersions,
     actions_today: 12,
+    funding_rate: { hourly: '0.0000125', annual: '0.1095' },
+    funding_rate_read_at: '2026-10-15T00:00:00Z',
     ...overrides,
   }
 }

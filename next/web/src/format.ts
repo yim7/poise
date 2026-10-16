@@ -15,6 +15,11 @@ export function decimal(value: string | null | undefined): string {
  */
 export function percent(value: string | null): string {
   if (value === null) return '读不到'
+  // 符号单独处理：资金费率可以是负的，`Number('-000')` 会把负号吞掉。
+  if (value.startsWith('-')) {
+    const magnitude = percent(value.slice(1))
+    return magnitude === '0%' ? magnitude : `-${magnitude}`
+  }
   const [whole, fraction = ''] = value.split('.')
   const padded = fraction.padEnd(2, '0')
   const integer = String(Number(`${whole}${padded.slice(0, 2)}`))
