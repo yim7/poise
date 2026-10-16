@@ -127,7 +127,12 @@ async fn every_order_expires_from_its_own_send_time() {
         slow,
         account(),
         store,
-        RuntimeOptions::default(),
+        // 这里只看到期时刻：发单故意放慢到每张 1 秒，行情有效期放宽，免得
+        // 发到一半因为行情过期停下来。
+        RuntimeOptions {
+            market_data_max_age: Duration::minutes(10),
+            ..RuntimeOptions::default()
+        },
         clock.clone(),
     );
 
@@ -211,7 +216,12 @@ async fn an_order_is_sent_with_a_fresh_expiry_after_the_write() {
         exchange(),
         account(),
         store,
-        RuntimeOptions::default(),
+        // 这里只看到期时刻：发单故意放慢到每张 1 秒，行情有效期放宽，免得
+        // 发到一半因为行情过期停下来。
+        RuntimeOptions {
+            market_data_max_age: Duration::minutes(10),
+            ..RuntimeOptions::default()
+        },
         clock.clone(),
     );
     let strategy_id = start_strategy(&runtime, long_grid_config()).await;

@@ -8,14 +8,15 @@
 //! 不会自动撤销过期挂单（撤销由 runtime 负责）。
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use poise_strategy::instrument::Instrument;
 use poise_strategy::order::{ClientOrderId, OrderStatus, Side};
 use poise_strategy::units::{Position, Price, Quantity};
 
+use crate::clock::ManualClock;
 use crate::exchange::{
     Exchange, ExchangeError, ExchangeFill, ExchangeOrder, OrderLookup, OrderReceipt, OrderRequest,
 };
@@ -40,6 +41,16 @@ struct SimState {
     next_trade_id: u64,
     reject_next_place: Option<String>,
     unknown_next_place: Option<String>,
+    /// 下一张单照常挂上，但回执丢在路上（发送方只看到超时）。
+    lose_next_place_response: Option<String>,
+    /// 按 `cloid` 查询和挂单列表都暂时看不到的订单（交易所查询滞后）。
+    hidden_from_queries: Vec<ClientOrderId>,
+    /// 查标记价时，这个时钟往前走多久（行情响应很慢）。
+    slow_mark_price: Option<(Arc<ManualClock>, Duration)>,
+    /// 下一次查仓位时，把延迟的成交放出来。
+    deliver_fills_on_next_position: bool,
+    /// 每发一张单，这个时钟往前走多久（下单很慢）。
+    slow_places: Option<(Arc<ManualClock>, Duration)>,
     /// 下一次查标记价失败的原因。行情只用于展示和判定，拿不到它不该挡住撤单。
     fail_next_mark_price: Option<String>,
     /// 接下来几次查挂单列表失败。撤哪几张单靠库里存着的 `cloid` 就够，问不到挂单
@@ -145,6 +156,11 @@ impl SimulatedExchange {
                 next_trade_id: 0,
                 reject_next_place: None,
                 unknown_next_place: None,
+                lose_next_place_response: None,
+                hidden_from_queries: Vec::new(),
+                slow_places: None,
+                deliver_fills_on_next_position: false,
+                slow_mark_price: None,
                 fail_next_mark_price: None,
                 fail_working_orders: 0,
                 fail_working_orders_reason: String::new(),
@@ -326,6 +342,11 @@ impl SimulatedExchange {
         self.lock().delay_next_fills = count;
     }
 
+    /// 下一次查仓位时把延迟的成交放出来：用来构造「这一步前半段没查到、仓位核对时才到」。
+    pub fn deliver_delayed_fills_on_next_position(&self) {
+        self.lock().deliver_fills_on_next_position = true;
+    }
+
     /// 延迟的成交现在可以查到了。
     pub fn deliver_delayed_fills(&self) {
         let mut state = self.lock();
@@ -421,6 +442,39 @@ impl SimulatedExchange {
     /// 让下一次下单结果未知：交易所没有收到这张单，也没有明确拒绝。
     pub fn unknown_next_place(&self, reason: &str) {
         self.lock().unknown_next_place = Some(reason.to_string());
+    }
+
+    /// 让下一张单照常挂上（可能当场成交），但发送方收到的是结果未知。
+    ///
+    /// 用来构造「请求落地了、回执丢了」：按 `cloid` 查询能查到它。
+    pub fn lose_next_place_response(&self, reason: &str) {
+        self.lock().lose_next_place_response = Some(reason.to_string());
+    }
+
+    /// 让这张单从按 `cloid` 查询和挂单列表里消失，成交和仓位照常变化。
+    ///
+    /// 用来构造「交易所查不到它，可它其实落过地」。
+    pub fn hide_from_queries(&self, client_order_id: &ClientOrderId) {
+        self.lock()
+            .hidden_from_queries
+            .push(client_order_id.clone());
+    }
+
+    /// 让被 [`SimulatedExchange::hide_from_queries`] 藏起来的订单重新查得到。
+    pub fn show_in_queries(&self, client_order_id: &ClientOrderId) {
+        self.lock()
+            .hidden_from_queries
+            .retain(|hidden| hidden != client_order_id);
+    }
+
+    /// 每查一次标记价，让 `clock` 往前走 `by`：用来构造「行情响应在路上耽搁了」。
+    pub fn slow_mark_price(&self, clock: Arc<ManualClock>, by: Duration) {
+        self.lock().slow_mark_price = Some((clock, by));
+    }
+
+    /// 每发一张单，让 `clock` 往前走 `by`：用来构造「一步还没发完，行情已经旧了」。
+    pub fn slow_places(&self, clock: Arc<ManualClock>, by: Duration) {
+        self.lock().slow_places = Some((clock, by));
     }
 
     /// 让下一次查标记价失败：行情源暂时不可用。
@@ -525,6 +579,9 @@ impl Exchange for SimulatedExchange {
         let mut state = self.lock();
         state.place_count += 1;
         state.call_count += 1;
+        if let Some((clock, by)) = &state.slow_places {
+            clock.advance(*by);
+        }
         if request.instrument != self.instrument {
             return Err(ExchangeError::Rejected {
                 reason: format!(
@@ -570,6 +627,9 @@ impl Exchange for SimulatedExchange {
             let quantity = state.orders[index].remaining();
             let now = state.now;
             record_fill(&mut state, index, quantity, now);
+        }
+        if let Some(reason) = state.lose_next_place_response.take() {
+            return Err(ExchangeError::Unknown { reason });
         }
         let order = &state.orders[index];
         Ok(OrderReceipt {
@@ -641,6 +701,11 @@ impl Exchange for SimulatedExchange {
             .orders
             .iter()
             .filter(|order| order.is_working())
+            .filter(|order| {
+                !state
+                    .hidden_from_queries
+                    .contains(&order.request.client_order_id)
+            })
             .map(SimOrder::view)
             .collect())
     }
@@ -656,6 +721,9 @@ impl Exchange for SimulatedExchange {
             return Err(ExchangeError::Rejected {
                 reason: format!("instrument `{instrument}` does not belong to this exchange"),
             });
+        }
+        if state.hidden_from_queries.contains(client_order_id) {
+            return Ok(OrderLookup::Unknown);
         }
         Ok(
             match state
@@ -710,6 +778,10 @@ impl Exchange for SimulatedExchange {
         }
         // 这一笔要等到下一次查成交时才成交：查到的仓位里还没有它。
         state.pending_fill = state.fill_after_next_position.take();
+        if std::mem::take(&mut state.deliver_fills_on_next_position) {
+            let mut delayed = std::mem::take(&mut state.delayed_fills);
+            state.fills.append(&mut delayed);
+        }
         if let Some(stale) = state.stale_positions.pop_front() {
             return Ok(stale);
         }
@@ -719,6 +791,9 @@ impl Exchange for SimulatedExchange {
     async fn mark_price(&self, instrument: &Instrument) -> Result<Price, ExchangeError> {
         let mut state = self.lock();
         state.call_count += 1;
+        if let Some((clock, by)) = &state.slow_mark_price {
+            clock.advance(*by);
+        }
         if instrument != &self.instrument {
             return Err(ExchangeError::Rejected {
                 reason: format!("instrument `{instrument}` does not belong to this exchange"),

@@ -104,6 +104,7 @@ export type OrderStatus =
   | 'filled'
   | 'canceled'
   | 'rejected'
+  | 'void'
   | 'unknown'
 
 export interface OrderRecord {

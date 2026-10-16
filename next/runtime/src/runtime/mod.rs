@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Duration, Utc};
 use poise_strategy::Strategy;
 use poise_strategy::config::StrategyConfig;
-use poise_strategy::decision::{OrderState, PositionCheck, PositionReading};
+use poise_strategy::decision::{OrderState, Permits, PositionCheck, PositionReading};
 use poise_strategy::error::ConfigError;
 use poise_strategy::instrument::Instrument;
 use poise_strategy::order::ClientOrderId;
@@ -52,6 +52,7 @@ mod cancel_only;
 mod lifecycle;
 mod reconcile;
 mod step;
+mod unknown;
 mod view;
 
 /// 运行参数。
@@ -68,6 +69,16 @@ pub struct RuntimeOptions {
     /// 只按同步点查询就会永久漏掉它。多查一段是安全的，因为重复的成交会被去重。
     /// 具体长度需要在测试网确认（第 9.2 节）。
     pub fills_lookback: Duration,
+    /// 结果未知的订单在 `expiresAfter` 之后再等多久，才按三项核对判定它没有影响（第 9.2 节）。
+    ///
+    /// `expiresAfter` 只保证超过时间戳的请求会被拒绝；交易所的挂单和成交查询可能比撮合
+    /// 晚一点才看得到，余量就是留给这段延迟的。具体长度需要在测试网确认。
+    pub unknown_order_grace: Duration,
+    /// 行情读回来之后多久算过期（第 7.2 节）：过期之后这一步不再发新单。
+    ///
+    /// 一步里要核对订单、核对仓位、逐张发单，慢的时候会花掉不少时间；行情是这一步开头
+    /// 读的，发单时已经旧了，按它判断「会不会立即成交」「会不会和自己的单相交」就不可靠。
+    pub market_data_max_age: Duration,
 }
 
 impl Default for RuntimeOptions {
@@ -75,6 +86,8 @@ impl Default for RuntimeOptions {
         Self {
             order_expires_after: Duration::seconds(5),
             fills_lookback: Duration::seconds(60),
+            unknown_order_grace: Duration::seconds(30),
+            market_data_max_age: Duration::seconds(10),
         }
     }
 }
@@ -150,8 +163,6 @@ impl StepReport {
 struct ReconcileOutcome {
     /// 交易所报的累计成交量快照，供仓位核对使用。
     reported: Vec<(ClientOrderId, Quantity)>,
-    /// 是否有订单的结果不明。
-    unknown_result: bool,
     /// 这次核对从交易所的订单状态里补记的成交笔数。
     applied_fills: usize,
     /// 成交流水与订单累计成交量对不上的订单（见 [`Runtime::inconsistent_fill_records`]）。
@@ -184,6 +195,8 @@ const POSITION_CHECK_ROUNDS: usize = 3;
 /// 读取阶段读回来的快照：判定需要的全部输入，加这一步报出的仓位。
 struct Snapshot {
     market_price: Price,
+    /// 标记价是什么时候读到的：发新单前按它判断行情有没有过期（第 7.2 节）。
+    priced_at: DateTime<Utc>,
     /// 账户的可用抵押。和标记价一样在读取阶段读：视图快照要显示它，而读取之后
     /// 这一步已经可能下过单、撤过单，那时候再读失败，就等于把做成的一步报成失败。
     available_collateral: Notional,
@@ -192,8 +205,6 @@ struct Snapshot {
     reading: PositionReading,
     /// 仓位核对的结论。读取阶段的循环里已经算过，判定直接用，不重算一遍。
     check: PositionCheck,
-    /// 是否有订单的结果不明。
-    unknown_result: bool,
     /// 成交流水与订单累计成交量对不上的订单。
     inconsistent: Option<ClientOrderId>,
     /// 这一步从交易所补记的成交笔数。
@@ -234,8 +245,6 @@ struct Synced {
     since: DateTime<Utc>,
     /// 交易所报的累计成交量快照。
     reported: Vec<(ClientOrderId, Quantity)>,
-    /// 是否有订单的结果不明。
-    unknown_result: bool,
     /// 成交流水与订单累计成交量对不上的订单。
     inconsistent: Option<ClientOrderId>,
     /// 这一步补记的成交笔数。
@@ -248,16 +257,22 @@ struct Synced {
 /// 读数」处理，而不是把已经做成的事报成失败。
 struct Reading {
     market_price: Price,
+    priced_at: DateTime<Utc>,
     available_collateral: Notional,
     /// 仓位核对的数据与结论。
     reading: PositionReading,
     check: PositionCheck,
     /// 核对循环里补记的成交笔数。
     applied_fills: usize,
-    /// 核对循环里新发现的「订单结果不明」。
-    unknown_result: bool,
     /// 核对循环里新发现的「成交流水与订单累计成交量对不上」。
     inconsistent: Option<ClientOrderId>,
+}
+
+/// 执行阶段发新单的条件：判定给出的许可，加上行情的读取时刻（第 7.2 节）。
+#[derive(Clone, Copy)]
+struct NewOrders {
+    permits: Permits,
+    priced_at: DateTime<Utc>,
 }
 
 /// 执行阶段报出的两个列表。

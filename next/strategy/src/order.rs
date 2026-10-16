@@ -149,8 +149,11 @@ pub enum OrderStatus {
     Canceled,
     /// 交易所明确拒绝。
     Rejected,
-    /// 结果未知：超时、断连或含义不明的错误。
+    /// 结果未知：超时、断连或含义不明的错误，或者交易所查不到它（`unknownOid`）。
     Unknown,
+    /// 作废：交易所查不到它，期限过后核对挂单、成交、仓位三项一致，判定它没有任何影响，
+    /// 释放预留（第 9.2 节第 3 条）。
+    Void,
 }
 
 impl OrderStatus {
@@ -171,6 +174,7 @@ impl OrderStatus {
             Self::Canceled => "canceled",
             Self::Rejected => "rejected",
             Self::Unknown => "unknown",
+            Self::Void => "void",
         }
     }
 }

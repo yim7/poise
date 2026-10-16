@@ -49,6 +49,7 @@ export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   filled: '已成交',
   canceled: '已撤销',
   rejected: '被拒绝',
+  void: '作废（核对为没有影响）',
   unknown: '结果待查',
 }
 

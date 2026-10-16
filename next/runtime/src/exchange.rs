@@ -1,7 +1,7 @@
 //! 交易所接口。
 //!
 //! 这是 runtime 唯一与外部世界打交道的出口。测试用模拟交易所实现，
-//! Hyperliquid 适配属于后续任务。
+//! 真实交易所的实现在 `poise-hyperliquid`。
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

@@ -7,7 +7,6 @@ use poise_strategy::units::Notional;
 
 use crate::store::{StrategyId, StrategyStatus, ViewSnapshot};
 
-use super::cancel_only::cancel_only_note;
 use super::{Runtime, RuntimeError, StepReport, StrategyDetail, StrategySummary};
 
 impl Runtime {
@@ -95,20 +94,18 @@ impl Runtime {
     /// 读数全部来自这一步读取阶段的那份快照，这里不再问交易所：走到这里单已经下出去、
     /// 撤回来了，再补一次查询失败，就会把做成的一步报成失败，用户看到「暂停失败」而
     /// 单其实已经撤了。
+    ///
+    /// `note` 是这个策略为什么还没走完当前状态的说明，由调用方给：只撤单的状态说还差
+    /// 哪几张单没撤、没对完账，运行中说哪几张单结果未知。页面上只有状态名的话，用户
+    /// 看不出它在等什么，也不知道该不该等下去。
     pub(super) async fn save_view(
         &self,
         strategy_id: &StrategyId,
         report: &StepReport,
         available_collateral: Notional,
+        note: Option<String>,
         now: DateTime<Utc>,
     ) -> Result<(), RuntimeError> {
-        // 只撤单的状态还没走完，原因要写清楚：页面上只有状态名的话，用户看不出它是在
-        // 重试撤单、还是在等成交对账，也不知道该不该等下去。
-        let note = if report.status.is_cancel_only() {
-            cancel_only_note(&self.store.load_orders(strategy_id)?, report.status)
-        } else {
-            None
-        };
         let view = ViewSnapshot {
             taken_at: now,
             status: report.status,

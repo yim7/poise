@@ -3,7 +3,7 @@
 use chrono::{DateTime, Duration, Utc};
 use poise_strategy::Strategy;
 use poise_strategy::decision::{
-    Decision, PauseReason, PositionCheck, PositionReading, Verdict,
+    PauseReason, Permits, PositionCheck, PositionReading, SystemState,
     expected_position as expected_from, judge, pending_units, position_check,
 };
 use poise_strategy::instrument::Instrument;
@@ -15,9 +15,10 @@ use poise_strategy::units::{Position, Price, Quantity};
 use crate::exchange::{ExchangeError, OrderRequest};
 use crate::store::{StoredOrder, StoredStrategy, StrategyId, StrategyStatus};
 
+use super::cancel_only::cancel_only_note;
 use super::{
-    Cancels, Executed, POSITION_CHECK_ROUNDS, Reading, Runtime, RuntimeError, Snapshot, StepReport,
-    Synced, order_states,
+    Cancels, Executed, NewOrders, POSITION_CHECK_ROUNDS, Reading, Runtime, RuntimeError, Snapshot,
+    StepReport, Synced, order_states,
 };
 
 impl Runtime {
@@ -83,26 +84,48 @@ impl Runtime {
                 now,
             )
             .await?;
+        // 结果未知的订单：三项核对都有了就作废、释放预留（第 9.2 节）。放在判定之前：
+        // 作废之后，闸门在这一步就能打开。
+        let unknown = self.settle_unknown_orders(strategy_id, &mut orders, snapshot.check, now)?;
         let decision = judge(
             snapshot.check,
             snapshot.inconsistent.as_ref(),
             &order_states(&orders),
+            SystemState {
+                unknown_orders: unknown.any_pending(),
+            },
         );
-        if let Some(report) = self
-            .stop_if_blocked(
+        if let Some(reason) = decision.pause {
+            let report = self
+                .pause_for(
+                    strategy_id,
+                    &strategy,
+                    &mut state,
+                    &mut orders,
+                    &snapshot,
+                    reason,
+                    now,
+                )
+                .await?;
+            let note = cancel_only_note(&orders, report.status, None);
+            self.save_view(
                 strategy_id,
-                &strategy,
-                &mut state,
-                &mut orders,
-                &snapshot,
-                &decision,
+                &report,
+                snapshot.available_collateral,
+                note,
                 now,
             )
-            .await?
-        {
-            self.save_view(strategy_id, &report, snapshot.available_collateral, now)
-                .await?;
+            .await?;
             return Ok(report);
+        }
+        if decision.permits != Permits::ALL {
+            tracing::info!(
+                strategy = %strategy_id,
+                waiting = ?decision.waiting,
+                actual = %snapshot.reading.actual,
+                expected = %snapshot.reading.expected,
+                "the gate is closed: no new orders this step, planned cancels still go out"
+            );
         }
 
         let mut plan = self.plan_step(
@@ -111,8 +134,12 @@ impl Runtime {
             &orders,
             &decision.blocked,
             snapshot.market_price,
-            snapshot.unknown_result,
         );
+        for reason in &decision.waiting {
+            if !plan.waiting.contains(reason) {
+                plan.waiting.push(*reason);
+            }
+        }
         let executed = self
             .execute_plan(
                 strategy_id,
@@ -120,6 +147,10 @@ impl Runtime {
                 &mut state,
                 &mut orders,
                 &mut plan,
+                NewOrders {
+                    permits: decision.permits,
+                    priced_at: snapshot.priced_at,
+                },
                 now,
             )
             .await?;
@@ -146,79 +177,64 @@ impl Runtime {
             position: snapshot.reading.actual,
             expected_position: snapshot.reading.expected,
         };
-        self.save_view(strategy_id, &report, snapshot.available_collateral, now)
-            .await?;
+        self.save_view(
+            strategy_id,
+            &report,
+            snapshot.available_collateral,
+            unknown.note(),
+            now,
+        )
+        .await?;
         Ok(report)
     }
 
-    /// 判定说要停下来时，收尾并返回报告；可以继续下单时返回 `None`。
+    /// 判定要暂停时收尾：先落「暂停中」，撤单、对账，返回这一步的报告。
     ///
-    /// 等待只是「这一步的数据说明不了问题」，状态不变、下一步再核对；暂停是「继续自动
-    /// 重试没有意义」，撤销全部挂单交给用户处理（第 9.2 节）。
+    /// 暂停是「继续自动重试没有意义」：撤销全部挂单交给用户处理（第 9.2 节）。只是不能
+    /// 下新单的情况（仓位数据还在变、有订单结果未知）不走这里，见 [`judge`]。
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn stop_if_blocked(
+    pub(super) async fn pause_for(
         &self,
         strategy_id: &StrategyId,
         strategy: &Strategy,
         state: &mut StrategyState,
         orders: &mut Vec<StoredOrder>,
         snapshot: &Snapshot,
-        decision: &Decision,
+        reason: PauseReason,
         now: DateTime<Utc>,
-    ) -> Result<Option<StepReport>, RuntimeError> {
-        match decision.verdict {
-            Verdict::Proceed => Ok(None),
-            Verdict::Wait(reason) => {
-                // 每一轮读到的数据都不一样：还在变，这一轮说明不了问题。
-                tracing::info!(
+    ) -> Result<StepReport, RuntimeError> {
+        // 日志按真正的暂停原因分：仓位对不上和成交记录对不上要查的东西不一样。
+        match reason {
+            PauseReason::FillRecordsInconsistent => {
+                // 成交流水与订单累计成交量对不上：这不是「数据还在变」，多出来的
+                // 流水永远对不平，订单会一直占着 pending、这一格再也挂不出新单。
+                // 继续自动重试没有意义，暂停交给用户处理。
+                let client_order_id = snapshot
+                    .inconsistent
+                    .as_ref()
+                    .map_or("", ClientOrderId::as_str);
+                tracing::error!(
+                    strategy = %strategy_id,
+                    client_order_id = %client_order_id,
+                    "fill records do not add up to the order's cumulative filled quantity, pausing the strategy"
+                );
+            }
+            PauseReason::PositionCheckFailed => {
+                // 连续两轮读到同一份数据，仍然解释不了差额：仓位真的对不上。
+                tracing::warn!(
                     strategy = %strategy_id,
                     actual = %snapshot.reading.actual,
                     expected = %snapshot.reading.expected,
-                    "position data is still moving, checking again next step"
+                    "position check failed, pausing the strategy"
                 );
-                Ok(Some(snapshot.stop(
-                    strategy_id,
-                    StrategyStatus::Running,
-                    reason,
-                    Vec::new(),
-                )))
-            }
-            Verdict::Pause(reason) => {
-                // 日志按真正的暂停原因分：仓位对不上和成交记录对不上要查的东西不一样。
-                match reason {
-                    PauseReason::FillRecordsInconsistent => {
-                        // 成交流水与订单累计成交量对不上：这不是「数据还在变」，多出来的
-                        // 流水永远对不平，订单会一直占着 pending、这一格再也挂不出新单。
-                        // 继续自动重试没有意义，暂停交给用户处理。
-                        let client_order_id = snapshot
-                            .inconsistent
-                            .as_ref()
-                            .map_or("", ClientOrderId::as_str);
-                        tracing::error!(
-                            strategy = %strategy_id,
-                            client_order_id = %client_order_id,
-                            "fill records do not add up to the order's cumulative filled quantity, pausing the strategy"
-                        );
-                    }
-                    PauseReason::PositionCheckFailed => {
-                        // 连续两轮读到同一份数据，仍然解释不了差额：仓位真的对不上。
-                        tracing::warn!(
-                            strategy = %strategy_id,
-                            actual = %snapshot.reading.actual,
-                            expected = %snapshot.reading.expected,
-                            "position check failed, pausing the strategy"
-                        );
-                    }
-                }
-                let (status, round) = self
-                    .pause_inner(strategy_id, strategy, state, orders, now)
-                    .await?;
-                let mut report =
-                    snapshot.stop(strategy_id, status, reason.wait_reason(), round.canceled);
-                report.applied_fills += round.applied_fills;
-                Ok(Some(report))
             }
         }
+        let (status, round) = self
+            .pause_inner(strategy_id, strategy, state, orders, now)
+            .await?;
+        let mut report = snapshot.stop(strategy_id, status, reason.wait_reason(), round.canceled);
+        report.applied_fills += round.applied_fills;
+        Ok(report)
     }
 
     /// 读取阶段：向交易所取数，把这一步需要的快照读回来。
@@ -257,10 +273,10 @@ impl Runtime {
             .await?;
         Ok(Snapshot {
             market_price: reading.market_price,
+            priced_at: reading.priced_at,
             available_collateral: reading.available_collateral,
             reading: reading.reading,
             check: reading.check,
-            unknown_result: synced.unknown_result || reading.unknown_result,
             inconsistent: synced.inconsistent.clone().or(reading.inconsistent),
             applied_fills: synced.applied_fills + reading.applied_fills,
         })
@@ -294,7 +310,6 @@ impl Runtime {
         Ok(Synced {
             since,
             reported: reconciled.reported,
-            unknown_result: reconciled.unknown_result,
             inconsistent: reconciled.inconsistent,
             applied_fills,
         })
@@ -316,13 +331,15 @@ impl Runtime {
         let instrument = strategy.spec().instrument();
         // 标记价：只进 `Plan` 供展示和日志使用，提前读出来是为了让仓位核对的提前返回
         // 也能报出当时的标记价，而不是一个零值。
+        // 行情的年龄从发出请求那一刻算起：交易所的标记价没有时间戳，响应在路上耽搁多久，
+        // 都只能算在它的头上，不能拿收到的时刻当成它的时刻。
+        let priced_at = self.clock.now();
         let market_price = self.exchange.mark_price(instrument).await?;
         let available_collateral = self.account.available_collateral().await?;
 
         let since = synced.since;
         let mut reported = synced.reported.clone();
         let mut applied_fills = 0;
-        let mut unknown_result = false;
         let mut inconsistent = None;
         let mut position = self.exchange.position(instrument).await?;
         let mut expected = expected_position(strategy, state, &reported, orders);
@@ -345,7 +362,6 @@ impl Runtime {
                 .await?;
             applied_fills += again.applied_fills;
             reported = again.reported;
-            unknown_result |= again.unknown_result;
             inconsistent = inconsistent.or(again.inconsistent);
             self.advance_progress(strategy_id, strategy, state, orders, now)?;
             position = self.exchange.position(instrument).await?;
@@ -362,11 +378,11 @@ impl Runtime {
         let check = position_check(&reading, previous.as_ref());
         Ok(Reading {
             market_price,
+            priced_at,
             available_collateral,
             reading,
             check,
             applied_fills,
-            unknown_result,
             inconsistent,
         })
     }
@@ -379,26 +395,23 @@ impl Runtime {
         orders: &[StoredOrder],
         blocked: &[PendingUnit],
         market_price: Price,
-        unknown_result: bool,
     ) -> Plan {
         let working_views: Vec<WorkingOrder> = orders
             .iter()
             .filter(|order| order.record.is_working())
             .map(|order| order.record.working_view())
             .collect();
-        let mut plan = strategy.plan(state, &working_views, blocked, market_price);
-        if unknown_result {
-            plan.waiting.push(WaitReason::OrderResultUnknown);
-        }
-        plan
+        strategy.plan(state, &working_views, blocked, market_price)
     }
 
     /// 执行阶段：撤单、下单、记账。
     ///
+    /// 撤单始终执行；新单只发判定允许的那几种（`permits`，第 7.2 节）。规划出来的单都留在
+    /// `plan.place` 里，页面上看得到闸门打开之后会发什么。
+    ///
     /// 撤不掉的订单保留预留；有撤单结果不确定时这一步不下任何新单，避免同一侧出现两张
-    /// 都会成交的订单。读取阶段里结果未知的订单同样保住了预留，规划时它仍然算在场订单，
-    /// 所以也不会为同一格重复下单。（第 7.2 节的系统状态闸门——有订单结果未知时本策略
-    /// 不发任何新订单——属于后续任务。）
+    /// 都会成交的订单。
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_plan(
         &self,
         strategy_id: &StrategyId,
@@ -406,6 +419,7 @@ impl Runtime {
         state: &mut StrategyState,
         orders: &mut Vec<StoredOrder>,
         plan: &mut Plan,
+        new_orders: NewOrders,
         now: DateTime<Utc>,
     ) -> Result<Executed, RuntimeError> {
         let cancels = self
@@ -420,15 +434,55 @@ impl Runtime {
             }
             Vec::new()
         } else {
+            let intents: Vec<OrderIntent> = plan
+                .place
+                .iter()
+                .filter(|intent| new_orders.permits.allows(intent.reduce_only))
+                .cloned()
+                .collect();
             let mut placed = Vec::new();
-            for intent in &plan.place {
-                // 没发出去的单不进报告：报告说的是这一步做过的动作。
-                if let Some(client_order_id) = self
-                    .place_one(strategy_id, strategy, state, orders, intent)
+            let mut stopped = None;
+            for intent in &intents {
+                // 行情是这一步开头读的：核对、发单花掉的时间里它会变旧。过期之后不再发新单，
+                // 剩下的下一步按新行情重新规划（第 7.2 节）。
+                if self.market_is_stale(strategy_id, new_orders.priced_at) {
+                    stopped = Some(WaitReason::StaleMarketData);
+                    break;
+                }
+                let client_order_id = match self
+                    .place_one(
+                        strategy_id,
+                        strategy,
+                        state,
+                        orders,
+                        intent,
+                        new_orders.priced_at,
+                    )
                     .await?
                 {
-                    placed.push(client_order_id);
+                    Placement::Sent(client_order_id) => client_order_id,
+                    // 没发出去的单不进报告：报告说的是这一步做过的动作。
+                    Placement::NotSent => continue,
+                    Placement::StaleMarket => {
+                        stopped = Some(WaitReason::StaleMarketData);
+                        break;
+                    }
+                };
+                placed.push(client_order_id.clone());
+                // 这张单结果未知：有结论之前本策略不发任何新订单（第 7.2 节），这一步剩下的
+                // 单也不发。
+                if orders.iter().any(|order| {
+                    order.record.client_order_id == client_order_id
+                        && order.record.status == OrderStatus::Unknown
+                }) {
+                    stopped = Some(WaitReason::OrderResultUnknown);
+                    break;
                 }
+            }
+            if let Some(reason) = stopped
+                && !plan.waiting.contains(&reason)
+            {
+                plan.waiting.push(reason);
             }
             placed
         };
@@ -485,9 +539,9 @@ impl Runtime {
 
     /// 下一张单：先写数据库，再发送（第 9.1 节）。
     ///
-    /// 被拒绝和结果未知的订单也照常报出：它们都已经落库，是这一步尝试过的动作。
-    /// 返回 `None` 表示这张单这一步根本没发出去（写完库发现有效期已经不够），
-    /// 它也没有留在库里。
+    /// 被拒绝和结果未知的订单也照常报出（[`Placement::Sent`]）：它们都已经落库，是这一步
+    /// 尝试过的动作。写完库发现有效期已经不够、或者行情已经过期时，这张单不发，记录也删掉，
+    /// 回到「还没发送」之前的样子。
     pub(super) async fn place_one(
         &self,
         strategy_id: &StrategyId,
@@ -495,7 +549,8 @@ impl Runtime {
         state: &mut StrategyState,
         orders: &mut Vec<StoredOrder>,
         intent: &OrderIntent,
-    ) -> Result<Option<ClientOrderId>, RuntimeError> {
+        priced_at: DateTime<Utc>,
+    ) -> Result<Placement, RuntimeError> {
         let mut order = new_order(intent, self.clock.now(), self.options.order_expires_after);
         let client_order_id = order.record.client_order_id.clone();
         // 先写库、后发送（第 9.1 节）：订单在发出去之前必须已经落盘，
@@ -525,8 +580,13 @@ impl Runtime {
                     expires_after = ?self.options.order_expires_after,
                     "order not sent: the refreshed expiry is already used up"
                 );
-                return Ok(None);
+                return Ok(Placement::NotSent);
             }
+        }
+        // 写库同样花时间：发送前最后看一眼行情，过期了就不发。
+        if self.market_is_stale(strategy_id, priced_at) {
+            self.store.delete_order(strategy_id, &client_order_id)?;
+            return Ok(Placement::StaleMarket);
         }
 
         match self
@@ -547,7 +607,24 @@ impl Runtime {
             None => self.store.update_order(strategy_id, &order)?,
         }
         orders.push(order);
-        Ok(Some(client_order_id))
+        Ok(Placement::Sent(client_order_id))
+    }
+
+    /// 行情是不是已经过期：从读行情的请求发出那一刻算起，超过
+    /// [`RuntimeOptions::market_data_max_age`] 就算（第 7.2 节）。
+    ///
+    /// [`RuntimeOptions::market_data_max_age`]: super::RuntimeOptions::market_data_max_age
+    fn market_is_stale(&self, strategy_id: &StrategyId, priced_at: DateTime<Utc>) -> bool {
+        let age = self.clock.now().signed_duration_since(priced_at);
+        let stale = age > self.options.market_data_max_age;
+        if stale {
+            tracing::warn!(
+                strategy = %strategy_id,
+                age_ms = age.num_milliseconds(),
+                "the market price is stale, no more new orders this step"
+            );
+        }
+        stale
     }
 
     /// 把订单发出去，按交易所的回答更新本地记录。
@@ -631,6 +708,16 @@ impl Runtime {
         }
         Ok(())
     }
+}
+
+/// 发一张单的结果。
+pub(super) enum Placement {
+    /// 发出去了（含被拒绝和结果未知的）：记录留在库里。
+    Sent(ClientOrderId),
+    /// 写完库发现有效期已经不够，没发；记录已删掉。
+    NotSent,
+    /// 写完库发现行情已经过期，没发；记录已删掉。这一步剩下的单也不该再发。
+    StaleMarket,
 }
 
 /// 一张还没发出去的订单。

@@ -3,9 +3,10 @@
 //! 纯计算，不读时钟、不访问网络（第 12 节）。向交易所取数的 I/O 在 runtime 的读取
 //! 阶段，这里只处理读回来的数据，所以可以直接用数据测试。
 //!
-//! 输入有三样：仓位核对的结论、成交流水与订单累计成交量是否对得上、本地订单快照。
-//! 输出是一个 [`Decision`]：暂停原因、等待原因，以及哪些单位的哪些用途不能下单
-//! （第 7.1、9.2 节）。
+//! 输入有四样：仓位核对的结论、成交流水与订单累计成交量是否对得上、本地订单快照、
+//! 系统状态（第 7.2 节的闸门）。输出是一个 [`Decision`]：暂停原因、这一步允许发出的
+//! 新订单（加仓、减仓分开给，撤单始终允许）、等待原因，以及哪些单位的哪些用途不能
+//! 下单（第 7.1、7.2、9.2 节）。
 //!
 //! 判定只回答「能不能下单」，不产生订单：要下什么单仍然由 [`crate::planning`] 决定。
 
@@ -63,49 +64,157 @@ impl PauseReason {
     }
 }
 
-/// 这一步的结论。
+/// 系统状态闸门的输入（第 7.2 节）：这一步读到的、和单个单位无关的系统状态。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SystemState {
+    /// 本策略有订单结果未知：交易所查不到它，又还不能判定它没有任何影响（第 9.2 节）。
+    pub unknown_orders: bool,
+}
+
+/// 这一步允许发出哪些新订单（第 7.2 节）。
+///
+/// 撤单不在这里：撤单始终允许。闸门关上时只是不发新单，已经规划好的撤单照常执行——
+/// 用一个「等待」提前结束这一步，就会把该撤的单也一起跳过。
+///
+/// 加仓和减仓分开给：保证金率超过停止阈值时只能发只减仓单（第 7.4 节），系统状态不对
+/// 时两种都不能发。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verdict {
-    /// 可以继续规划并下单。
-    Proceed,
-    /// 这一步不下新单，下一步再核对。
-    Wait(WaitReason),
-    /// 暂停策略。
-    Pause(PauseReason),
+pub struct Permits {
+    /// 不是只减仓的订单：主仓买入、格子的买回或开仓，以及中性网格里可能让净仓位穿越零的
+    /// 格子单。
+    pub increase: bool,
+    /// 只减仓的订单。
+    pub reduce: bool,
+}
+
+impl Permits {
+    pub const ALL: Self = Self {
+        increase: true,
+        reduce: true,
+    };
+    pub const NONE: Self = Self {
+        increase: false,
+        reduce: false,
+    };
+
+    /// 这一步能不能发出这样一张新订单。
+    pub const fn allows(self, reduce_only: bool) -> bool {
+        if reduce_only {
+            self.reduce
+        } else {
+            self.increase
+        }
+    }
 }
 
 /// 一次判定的完整结果。
 ///
-/// 除了「能不能下单」，还带上所有没对完账的单位与用途：撤单也会让订单失去对账，
+/// 除了「能发哪些新单」，还带上所有没对完账的单位与用途：撤单也会让订单失去对账，
 /// 撤单之后要按这一份重新过滤规划出来的订单。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
-    pub verdict: Verdict,
+    /// 要暂停策略时的原因：撤销全部挂单，交回用户。
+    pub pause: Option<PauseReason>,
+    /// 这一步允许发出的新订单。暂停时两种都不允许。
+    pub permits: Permits,
+    /// 这一步为什么不能（全部）照常下单，记进规划的等待原因。
+    pub waiting: Vec<WaitReason>,
     /// 还没有对完账、这一侧不能下新单的单位与用途。
     pub blocked: Vec<PendingUnit>,
 }
 
-/// 判定这一步能不能继续下单。
+/// 判定这一步能发哪些新订单。
 ///
 /// 仓位核对的问题优先于成交记录：数据还在变的时候，成交记录对不上可能只是流水还没到；
 /// 仓位已经稳定且对不上时，再报成交记录的问题只会把注意力引偏。
+///
+/// 暂停之外的情况都不提前结束这一步：仓位数据还在变、有订单结果未知时只是不发新单，
+/// 规划出来的撤单照常执行（第 7.2 节）。
 pub fn judge(
     position: PositionCheck,
     inconsistent: Option<&ClientOrderId>,
     orders: &[OrderState],
+    system: SystemState,
 ) -> Decision {
-    let verdict = match position {
-        PositionCheck::Mismatch => Verdict::Pause(PauseReason::PositionCheckFailed),
-        PositionCheck::Unstable => Verdict::Wait(WaitReason::PositionUnstable),
-        PositionCheck::Consistent => match inconsistent {
-            Some(_) => Verdict::Pause(PauseReason::FillRecordsInconsistent),
-            None => Verdict::Proceed,
-        },
+    let blocked = pending_units(orders);
+    let pause = match position {
+        PositionCheck::Mismatch => Some(PauseReason::PositionCheckFailed),
+        PositionCheck::Consistent if inconsistent.is_some() => {
+            Some(PauseReason::FillRecordsInconsistent)
+        }
+        _ => None,
     };
-    Decision {
-        verdict,
-        blocked: pending_units(orders),
+    if let Some(reason) = pause {
+        return Decision {
+            pause,
+            permits: Permits::NONE,
+            waiting: vec![reason.wait_reason()],
+            blocked,
+        };
     }
+
+    let mut waiting = Vec::new();
+    if position == PositionCheck::Unstable {
+        waiting.push(WaitReason::PositionUnstable);
+    }
+    if system.unknown_orders {
+        waiting.push(WaitReason::OrderResultUnknown);
+    }
+    Decision {
+        pause: None,
+        permits: if waiting.is_empty() {
+            Permits::ALL
+        } else {
+            Permits::NONE
+        },
+        waiting,
+        blocked,
+    }
+}
+
+/// 一张结果未知的订单还缺哪些事实，才能判定它没有任何影响（第 9.2 节第 3 条）。
+///
+/// 交易所查不到它（`unknownOid`）之后，要同时满足三项：期限（`expiresAfter` 加安全余量）
+/// 已过、从发送到现在的完整成交里没有它的成交、仓位与应有持仓一致。「当前挂单中没有它」
+/// 由调用方保证：只有挂单列表和按 `cloid` 查询都找不到的订单才会走到这里。
+///
+/// 这条规则只适用于交易所从没确认过的订单（下单超时、写库后没来得及发送）。`expiresAfter`
+/// 只限制请求送达的时间，不会撤销已经挂上的单：交易所确认过它在场、后来又查不到的，
+/// 可能只是查询滞后，它仍然可能成交，只能等交易所给出明确的终态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingFact {
+    /// 交易所确认过它在场（拿到过交易所的订单编号）：它落过地，不是「从没生效」。
+    NeverConfirmed,
+    /// 还没过期限：请求可能还在路上，随时可能落地。
+    Deadline,
+    /// 它有成交记录，或者本地已经记过它的成交：它落过地。
+    Fills,
+    /// 仓位与应有持仓不一致，或者还没核对出结论。
+    Position,
+}
+
+/// 列出一张查不到的订单还缺的事实；返回空表示可以判定它没有任何影响、释放预留。
+pub fn missing_facts(
+    confirmed_by_exchange: bool,
+    deadline_passed: bool,
+    recorded: Quantity,
+    saved_fills: Quantity,
+    position: PositionCheck,
+) -> Vec<MissingFact> {
+    let mut missing = Vec::new();
+    if confirmed_by_exchange {
+        missing.push(MissingFact::NeverConfirmed);
+    }
+    if !deadline_passed {
+        missing.push(MissingFact::Deadline);
+    }
+    if !recorded.is_zero() || !saved_fills.is_zero() {
+        missing.push(MissingFact::Fills);
+    }
+    if position != PositionCheck::Consistent {
+        missing.push(MissingFact::Position);
+    }
+    missing
 }
 
 /// 一轮仓位核对读到的数据：交易所的实际仓位、我们推算的应有仓位，以及每张订单
@@ -255,9 +364,9 @@ pub fn signed_delta(side: Side, quantity: Quantity) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        OrderState, PauseReason, PositionCheck, PositionReading, Verdict, expected_position,
-        fills_settled, inconsistent_fill_records, judge, pending_units, position_check,
-        unbooked_quantity,
+        Decision, MissingFact, OrderState, PauseReason, Permits, PositionCheck, PositionReading,
+        SystemState, expected_position, fills_settled, inconsistent_fill_records, judge,
+        missing_facts, pending_units, position_check, unbooked_quantity,
     };
     use crate::batch::BatchIndex;
     use crate::grid::CellIndex;
@@ -539,83 +648,199 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_matching_position_with_no_inconsistency_proceeds() {
-        let decision = judge(PositionCheck::Consistent, None, &[cell_order("0.02", true)]);
+    fn judge_plain(position: PositionCheck, inconsistent: Option<&ClientOrderId>) -> Decision {
+        judge(position, inconsistent, &[], SystemState::default())
+    }
 
-        assert_eq!(decision.verdict, Verdict::Proceed);
+    #[test]
+    fn a_matching_position_with_no_inconsistency_permits_everything() {
+        let decision = judge(
+            PositionCheck::Consistent,
+            None,
+            &[cell_order("0.02", true)],
+            SystemState::default(),
+        );
+
+        assert_eq!(decision.pause, None);
+        assert_eq!(decision.permits, Permits::ALL);
+        assert!(decision.waiting.is_empty());
         assert!(decision.blocked.is_empty());
     }
 
     #[test]
     fn a_stable_mismatch_pauses_the_strategy() {
-        let decision = judge(PositionCheck::Mismatch, None, &[]);
+        let decision = judge_plain(PositionCheck::Mismatch, None);
 
-        assert_eq!(
-            decision.verdict,
-            Verdict::Pause(PauseReason::PositionCheckFailed)
-        );
-        assert_eq!(
-            PauseReason::PositionCheckFailed.wait_reason(),
-            WaitReason::PositionCheckFailed
-        );
+        assert_eq!(decision.pause, Some(PauseReason::PositionCheckFailed));
+        assert_eq!(decision.permits, Permits::NONE);
+        assert_eq!(decision.waiting, vec![WaitReason::PositionCheckFailed]);
     }
 
+    /// 数据还在变：这一步不发新单，但不暂停——规划出来的撤单照常执行。
     #[test]
-    fn data_that_is_still_moving_waits_for_the_next_step() {
-        let decision = judge(PositionCheck::Unstable, None, &[]);
+    fn data_that_is_still_moving_permits_no_new_orders() {
+        let decision = judge_plain(PositionCheck::Unstable, None);
 
-        assert_eq!(
-            decision.verdict,
-            Verdict::Wait(WaitReason::PositionUnstable)
-        );
+        assert_eq!(decision.pause, None);
+        assert_eq!(decision.permits, Permits::NONE);
+        assert_eq!(decision.waiting, vec![WaitReason::PositionUnstable]);
     }
 
     #[test]
     fn inconsistent_fill_records_pause_the_strategy() {
-        let decision = judge(PositionCheck::Consistent, Some(&cloid("0x01")), &[]);
+        let decision = judge_plain(PositionCheck::Consistent, Some(&cloid("0x01")));
 
-        assert_eq!(
-            decision.verdict,
-            Verdict::Pause(PauseReason::FillRecordsInconsistent)
-        );
-        assert_eq!(
-            PauseReason::FillRecordsInconsistent.wait_reason(),
-            WaitReason::FillRecordsInconsistent
-        );
+        assert_eq!(decision.pause, Some(PauseReason::FillRecordsInconsistent));
+        assert_eq!(decision.waiting, vec![WaitReason::FillRecordsInconsistent]);
     }
 
     /// 数据还在变的时候，成交记录对不上可能只是流水还没到：先按「等待」处理。
     #[test]
     fn a_position_that_is_still_moving_hides_the_inconsistency() {
-        let decision = judge(PositionCheck::Unstable, Some(&cloid("0x01")), &[]);
+        let decision = judge_plain(PositionCheck::Unstable, Some(&cloid("0x01")));
 
-        assert_eq!(
-            decision.verdict,
-            Verdict::Wait(WaitReason::PositionUnstable)
+        assert_eq!(decision.pause, None);
+        assert_eq!(decision.waiting, vec![WaitReason::PositionUnstable]);
+    }
+
+    /// B36：有订单结果未知时本策略不发任何新订单，加仓、减仓都不行；但不暂停，
+    /// 已在场的挂单保留（第 7.2 节）。
+    #[test]
+    fn b36_an_unknown_order_closes_the_gate_without_pausing() {
+        let decision = judge(
+            PositionCheck::Consistent,
+            None,
+            &[],
+            SystemState {
+                unknown_orders: true,
+            },
         );
+
+        assert_eq!(decision.pause, None);
+        assert_eq!(decision.permits, Permits::NONE);
+        assert_eq!(decision.waiting, vec![WaitReason::OrderResultUnknown]);
+    }
+
+    /// 仓位对不上时暂停优先：闸门只是不发新单，仓位核对失败要撤掉全部挂单。
+    #[test]
+    fn a_mismatch_pauses_even_when_the_gate_is_closed() {
+        let decision = judge(
+            PositionCheck::Mismatch,
+            None,
+            &[],
+            SystemState {
+                unknown_orders: true,
+            },
+        );
+
+        assert_eq!(decision.pause, Some(PauseReason::PositionCheckFailed));
+    }
+
+    #[test]
+    fn permits_tell_reduce_only_orders_apart() {
+        let reduce_only = Permits {
+            increase: false,
+            reduce: true,
+        };
+
+        assert!(reduce_only.allows(true));
+        assert!(!reduce_only.allows(false));
+        assert!(Permits::ALL.allows(false));
+        assert!(!Permits::NONE.allows(true));
     }
 
     /// 结论里始终带着被阻塞的单位：暂停和等待的路径也一样。
     #[test]
-    fn every_verdict_carries_the_blocked_units() {
+    fn every_decision_carries_the_blocked_units() {
         let orders = [cell_order("0.02", false)];
         let blocked = vec![PendingUnit {
             unit: Unit::Cell(Direction::Long, CellIndex(0)),
             purpose: OrderPurpose::GridEntry,
         }];
 
+        for position in [
+            PositionCheck::Consistent,
+            PositionCheck::Unstable,
+            PositionCheck::Mismatch,
+        ] {
+            assert_eq!(
+                judge(position, None, &orders, SystemState::default()).blocked,
+                blocked
+            );
+        }
+    }
+
+    /// B15：期限已过、没有成交、仓位一致，三项都有了才能判定没有影响。
+    #[test]
+    fn b15_an_order_with_all_three_facts_has_no_effect() {
+        assert!(
+            missing_facts(
+                false,
+                true,
+                Quantity::ZERO,
+                Quantity::ZERO,
+                PositionCheck::Consistent
+            )
+            .is_empty()
+        );
+    }
+
+    /// B16：任一项不满足就不能释放，并说清楚缺的是哪一项。
+    #[test]
+    fn b16_each_missing_fact_is_reported() {
+        let some = Quantity::parse("0.01").unwrap();
+
         assert_eq!(
-            judge(PositionCheck::Consistent, None, &orders).blocked,
-            blocked
+            missing_facts(
+                false,
+                false,
+                Quantity::ZERO,
+                Quantity::ZERO,
+                PositionCheck::Consistent
+            ),
+            vec![MissingFact::Deadline]
         );
         assert_eq!(
-            judge(PositionCheck::Unstable, None, &orders).blocked,
-            blocked
+            missing_facts(false, true, Quantity::ZERO, some, PositionCheck::Consistent),
+            vec![MissingFact::Fills]
         );
         assert_eq!(
-            judge(PositionCheck::Mismatch, None, &orders).blocked,
-            blocked
+            missing_facts(false, true, some, Quantity::ZERO, PositionCheck::Consistent),
+            vec![MissingFact::Fills]
+        );
+        assert_eq!(
+            missing_facts(
+                false,
+                true,
+                Quantity::ZERO,
+                Quantity::ZERO,
+                PositionCheck::Unstable
+            ),
+            vec![MissingFact::Position]
+        );
+        assert_eq!(
+            missing_facts(false, false, some, Quantity::ZERO, PositionCheck::Mismatch),
+            vec![
+                MissingFact::Deadline,
+                MissingFact::Fills,
+                MissingFact::Position
+            ]
+        );
+    }
+
+    /// 交易所确认过在场的订单不按「从没生效」作废：`expiresAfter` 不撤销已经挂上的单，
+    /// 后来查不到可能只是查询滞后。
+    #[test]
+    fn an_order_the_exchange_once_confirmed_is_never_voided() {
+        assert_eq!(
+            missing_facts(
+                true,
+                true,
+                Quantity::ZERO,
+                Quantity::ZERO,
+                PositionCheck::Consistent
+            ),
+            vec![MissingFact::NeverConfirmed]
         );
     }
 }

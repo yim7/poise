@@ -730,6 +730,50 @@ async fn a_failed_fill_write_after_the_cancels_is_not_carried_into_the_readings(
     );
 }
 
+/// 停止时，读数阶段的仓位核对循环里又对了一次账，写库却失败了：收场要按库里的状态判断，
+/// 不能按内存里那份宣告归档。
+///
+/// 撤单请求在路上时成交了一部分，流水晚到：撤完之后这张单记了成交，可流水还没对上。读数时
+/// 仓位接口先报旧值，核对循环再对一遍账，流水正好在这时到，这张单在内存里对完了账——写库
+/// 那一下失败了。按内存归档的话，库里这张单永远停在「没对完账」，后台也不会再推进它。
+#[tokio::test]
+async fn a_stop_is_not_archived_when_the_readings_fail_to_store_a_reconciliation() {
+    let harness = harness().await;
+    harness.step(0).await;
+    let entry = harness.working_cloid(0, OrderPurpose::GridEntry);
+    let filled = Quantity::parse("0.02").unwrap();
+    let position_before = harness.exchange.current_position();
+
+    harness.exchange.delay_next_fills(1);
+    harness
+        .exchange
+        .fill_before_next_cancel(1, entry.clone(), filled, at(5));
+    harness.exchange.report_stale_positions(1, position_before);
+    harness.exchange.deliver_delayed_fills_on_next_position();
+    let target = entry.clone();
+    harness
+        .runtime
+        .store()
+        .fail_next_order_update(move |order| {
+            order.record.client_order_id == target
+                && order.fills_reconciled
+                && !order.record.cumulative_filled.is_zero()
+        });
+    harness.stop(6).await;
+
+    assert_eq!(
+        harness.runtime.status(&harness.strategy_id).unwrap(),
+        StrategyStatus::Stopping
+    );
+    assert!(!harness.order(&entry).fills_reconciled);
+
+    // 下一步把账对完，才归档。
+    let report = harness.step(7).await;
+    assert_eq!(report.status, StrategyStatus::Stopped);
+    assert!(harness.order(&entry).fills_reconciled);
+    assert_eq!(harness.order(&entry).record.cumulative_filled, filled);
+}
+
 /// 恢复也不能被订单查询卡住：成交和挂单一直查不到，遗留挂单照样撤。
 ///
 /// 撤哪几张单只靠库里存着的 `cloid`，撤销请求发出去不需要先问到订单状态。查询失败只说明

@@ -9,6 +9,7 @@ use poise_strategy::units::{Position, Price};
 
 use crate::store::{StoredOrder, StoredStrategy, StrategyId, StrategyStatus};
 
+use super::unknown::UnknownOrders;
 use super::{CancelOnly, CancelOnlyRound, ResumeOutcome, Runtime, RuntimeError, StepReport};
 
 impl Runtime {
@@ -146,6 +147,45 @@ impl Runtime {
             .cancel_only_round(strategy_id, stored, &strategy, &mut state, &mut orders, now)
             .await?;
 
+        // 展示用的读数失败不算这一步失败：撤销已经发出去、终态也已经核对，这时候报错只会
+        // 让用户看到「暂停失败」而单其实已经撤了。拿不到读数就沿用上一份快照，并在说明里
+        // 写清楚为什么没更新（第 11 节）。
+        //
+        // 这一轮没走通就不取展示读数了：仓位核对要拿交易所报的累计成交量当输入，缺了它
+        // 算出来的「应有持仓」是错的；而且核对循环里还会再记账、再写库，内存刚从库里
+        // 重新加载过，这一轮的结论本来就不算数。报出去还不如沿用上一份。
+        let reading = match (&round.synced, &round.cancel_error) {
+            (Err(error), _) => Err(format!("成交流水和订单状态（{error}）")),
+            (Ok(_), Some(error)) => Err(format!("撤单或撤单后的订单核对（{error}）")),
+            (Ok(synced), None) => match self
+                .reading_step(strategy_id, &strategy, &mut state, &mut orders, synced, now)
+                .await
+            {
+                Ok(reading) => Ok(reading),
+                Err(error) => {
+                    tracing::warn!(
+                        strategy = %strategy_id,
+                        %error,
+                        "the display readings are unavailable, keeping the previous view"
+                    );
+                    // 读数的仓位核对循环里还会再对账、再记账：失败的可能正是写库那一下，内存
+                    // 里的订单已经改过了。重新加载落盘的那一份，下面的收场判断按库里的
+                    // 状态来——库里还没对完账的单，这一步就不能归档。
+                    orders = self.store.load_orders(strategy_id)?;
+                    Err(format!("行情、可用资金或仓位（{error}）"))
+                }
+            },
+        };
+
+        // 结果未知的订单撤不掉（交易所只会回答「查无此单」），要靠三项核对作废才能收场
+        // （第 9.2 节）。仓位核对要用这一轮刚读到的结论，没读到就等下一轮。
+        let unknown = match &reading {
+            Ok(reading) => {
+                Some(self.settle_unknown_orders(strategy_id, &mut orders, reading.check, now)?)
+            }
+            Err(_) => None,
+        };
+
         // 收场：撤销和核对都走通，而且没有还在场的订单、成交也对完了账。任何一样没做到
         // 都留在「暂停中」「停止中」，由后台继续推（第 9.2 节）。
         let settled = round.is_clean() && cancel_only_settled(&orders);
@@ -169,32 +209,6 @@ impl Runtime {
                 "cancel-only step is not finished yet"
             );
             stored.status
-        };
-
-        // 展示用的读数放在最后，而且失败不算这一步失败：撤销已经发出去、终态也已经核对，
-        // 这时候报错只会让用户看到「暂停失败」而单其实已经撤了。拿不到读数就沿用上一份
-        // 快照，并在说明里写清楚为什么没更新（第 11 节）。
-        //
-        // 这一轮没走通就不取展示读数了：仓位核对要拿交易所报的累计成交量当输入，缺了它
-        // 算出来的「应有持仓」是错的；而且核对循环里还会再记账、再写库，内存刚从库里
-        // 重新加载过，这一轮的结论本来就不算数。报出去还不如沿用上一份。
-        let reading = match (&round.synced, &round.cancel_error) {
-            (Err(error), _) => Err(format!("成交流水和订单状态（{error}）")),
-            (Ok(_), Some(error)) => Err(format!("撤单或撤单后的订单核对（{error}）")),
-            (Ok(synced), None) => match self
-                .reading_step(strategy_id, &strategy, &mut state, &mut orders, synced, now)
-                .await
-            {
-                Ok(reading) => Ok(reading),
-                Err(error) => {
-                    tracing::warn!(
-                        strategy = %strategy_id,
-                        %error,
-                        "the display readings are unavailable, keeping the previous view"
-                    );
-                    Err(format!("行情、可用资金或仓位（{error}）"))
-                }
-            },
         };
 
         let (position, expected_position, market_price) = match &reading {
@@ -223,13 +237,20 @@ impl Runtime {
             expected_position,
         };
 
+        let progress = cancel_only_note(&orders, status, unknown.as_ref());
         match reading {
             Ok(reading) => {
-                self.save_view(strategy_id, &report, reading.available_collateral, now)
-                    .await?;
+                self.save_view(
+                    strategy_id,
+                    &report,
+                    reading.available_collateral,
+                    progress,
+                    now,
+                )
+                .await?;
             }
             Err(what) => {
-                let note = stale_reading_note(&what, cancel_only_note(&orders, status));
+                let note = stale_reading_note(&what, progress);
                 self.annotate_view(strategy_id, status, note).await?;
             }
         }
@@ -572,13 +593,34 @@ impl Runtime {
         // 视图），下一轮再试。撤销本身照常做了，已经撤掉的单不会因为这一步报错而重挂。
         //
         // 同步出错时更不能往下走：内存里的格子和订单可能停在没落盘的那一份上，按它判定
-        // 出来的「该下什么单」是错的。同步的结果本身这里不用——第 4 步的读数会重新取一遍。
-        synced?;
+        // 出来的「该下什么单」是错的。
+        let synced = synced?;
         if let Some(error) = cancel_error {
             return Err(error);
         }
 
-        // 3. 没收场就不进「运行中」：撤销没确认、终态没核对出来，留下的都是还会成交的单。
+        // 3. 结果未知的遗留订单撤不掉，交易所只会回答「查无此单」：期限过后按挂单、成交、
+        //    仓位三项核对，一致就作废、释放预留（第 9.2 节）。仓位核对要一份新读数。
+        let mut unknown = None;
+        if orders
+            .iter()
+            .any(|order| order.record.status == OrderStatus::Unknown)
+        {
+            let reading = self
+                .reading_step(
+                    strategy_id,
+                    &strategy,
+                    &mut state,
+                    &mut orders,
+                    &synced,
+                    now,
+                )
+                .await?;
+            unknown =
+                Some(self.settle_unknown_orders(strategy_id, &mut orders, reading.check, now)?);
+        }
+
+        // 4. 没收场就不进「运行中」：撤销没确认、结果还不知道，留下的都是还可能成交的单。
         //    状态留在「恢复中」，后台下一轮继续推进。
         if !leftovers_settled(&orders) {
             let working = orders
@@ -590,12 +632,16 @@ impl Runtime {
                 working,
                 "the leftover orders are not settled yet, staying in restoring"
             );
-            self.annotate_view(strategy_id, StrategyStatus::Restoring, settle_note(&orders))
-                .await?;
+            self.annotate_view(
+                strategy_id,
+                StrategyStatus::Restoring,
+                settle_note(&orders, unknown.as_ref()),
+            )
+            .await?;
             return Ok(ResumeOutcome::WaitingForSettle { working });
         }
 
-        // 4. 收干净了：转「运行中」，按状态重新挂单。补拉成交、仓位核对和判定都在这一步
+        // 5. 收干净了：转「运行中」，按状态重新挂单。补拉成交、仓位核对和判定都在这一步
         //    里——仓位对不上时它照常暂停，不会先下出一批单。
         self.store
             .save_strategy_status(strategy_id, StrategyStatus::Running, now)?;
@@ -628,7 +674,8 @@ pub(super) fn cancel_only_settled(orders: &[StoredOrder]) -> bool {
 ///
 /// 结果从来没拿到过的订单（`Unknown`、`Submitting`）也算在场。交易所对它们只会回答
 /// 「查无此单」，撤销问不出结局（第 9.2 节）：它可能已经成交，这时候重新挂单，同一个
-/// 单位上就会多出一张会成交的单。预留一直保留，等三方核对做完再放行（任务 08）。
+/// 单位上就会多出一张会成交的单。预留一直保留，等期限过后三项核对把它作废再放行
+/// （[`Runtime::settle_unknown_orders`]）。
 pub(super) fn leftovers_settled(orders: &[StoredOrder]) -> bool {
     orders.iter().all(|order| !order.record.is_working())
 }
@@ -643,38 +690,35 @@ pub(super) fn outcome_unknown(status: OrderStatus) -> bool {
 
 /// 恢复中为什么还没转成「运行中」，写给用户看的一句话。
 ///
-/// 两种原因分开说：撤销没确认的要重试；结果从来没拿到过的，重试也问不出结局——交易所只会
-/// 回答「查无此单」，得等三方核对（任务 08）才能放行。混在一起说「正在重试」，用户会以为
-/// 等下去就能好。
-pub(super) fn settle_note(orders: &[StoredOrder]) -> String {
-    let unknown = orders
-        .iter()
-        .filter(|order| order.record.is_working() && outcome_unknown(order.record.status))
-        .count();
+/// 两种原因分开说：撤销没确认的要重试；结果未知的撤销也问不出结局——交易所只会回答
+/// 「查无此单」，要等三项核对作废。混在一起说「正在重试」，用户会以为等下去就能好。
+pub(super) fn settle_note(orders: &[StoredOrder], unknown: Option<&UnknownOrders>) -> String {
     let working = orders
         .iter()
         .filter(|order| order.record.is_working() && !outcome_unknown(order.record.status))
         .count();
-    match (working, unknown) {
-        (0, count) => format!(
-            "还有 {count} 张遗留订单的结果没查出来（交易所只回答「查无此单」），撤销问不出结局，\
-             预留先留着；后台会继续按 cloid 核对。"
-        ),
-        (count, 0) => format!("还有 {count} 张遗留订单没撤掉，正在重试。"),
-        (working, unknown) => format!(
-            "还有 {working} 张遗留订单没撤掉、{unknown} 张的结果没查出来；后台会继续撤、继续核对。"
-        ),
-    }
+    let parts: Vec<String> = [
+        (working > 0).then(|| format!("还有 {working} 张遗留订单没撤掉，正在重试。")),
+        unknown_note(orders, unknown),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    parts.concat()
 }
 
 /// 「暂停中」「停止中」为什么还没走完，写给用户看的一句话。
 ///
-/// 只说还差什么：撤单撤不掉要重试，成交没对完账要等流水。没有这两种情况时是 `None`——
-/// 那一刻状态马上就会转成「已暂停」或「已归档」，不需要解释。
-pub(super) fn cancel_only_note(orders: &[StoredOrder], status: StrategyStatus) -> Option<String> {
+/// 只说还差什么：撤单撤不掉要重试，成交没对完账要等流水，结果未知的要等三项核对。没有
+/// 这些情况时是 `None`——那一刻状态马上就会转成「已暂停」或「已归档」，不需要解释。
+pub(super) fn cancel_only_note(
+    orders: &[StoredOrder],
+    status: StrategyStatus,
+    unknown: Option<&UnknownOrders>,
+) -> Option<String> {
     let working = orders
         .iter()
-        .filter(|order| order.record.is_working())
+        .filter(|order| order.record.is_working() && !outcome_unknown(order.record.status))
         .count();
     let unreconciled = orders
         .iter()
@@ -685,14 +729,34 @@ pub(super) fn cancel_only_note(orders: &[StoredOrder], status: StrategyStatus) -
     } else {
         "归档"
     };
-    match (working, unreconciled) {
-        (0, 0) => None,
-        (0, count) => Some(format!("还有 {count} 张订单的成交没对完账，对完才{done}。")),
-        (count, 0) => Some(format!("还有 {count} 张订单没撤掉，正在重试。")),
-        (working, unreconciled) => Some(format!(
-            "还有 {working} 张订单没撤掉、{unreconciled} 张订单的成交没对完账。"
-        )),
+    let parts: Vec<String> = [
+        (working > 0).then(|| format!("还有 {working} 张订单没撤掉，正在重试。")),
+        (unreconciled > 0)
+            .then(|| format!("还有 {unreconciled} 张订单的成交没对完账，对完才{done}。")),
+        unknown_note(orders, unknown),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!parts.is_empty()).then(|| parts.concat())
+}
+
+/// 结果未知那几张单的说明。这一轮做过三项核对时用它给出的明细（缺哪一项）；没做成
+/// （这一轮没读到仓位）时只报张数。
+fn unknown_note(orders: &[StoredOrder], unknown: Option<&UnknownOrders>) -> Option<String> {
+    if let Some(unknown) = unknown {
+        return unknown.note();
     }
+    let count = orders
+        .iter()
+        .filter(|order| order.record.is_working() && outcome_unknown(order.record.status))
+        .count();
+    (count > 0).then(|| {
+        format!(
+            "有 {count} 张订单结果未知（交易所查无此单），撤销问不出结局；这一轮没读到仓位，\
+             下一轮再按挂单、成交、仓位三项核对。"
+        )
+    })
 }
 
 /// 只撤单的步骤没拿到展示读数时的说明。

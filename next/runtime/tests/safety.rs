@@ -46,7 +46,15 @@ async fn an_order_the_exchange_does_not_know_keeps_its_reservation() {
 
     let report = harness.step(0).await;
 
-    assert_eq!(report.placed.len(), 20);
+    // 第一张单结果未知：有结论之前本策略不发任何新订单，这一步剩下的单也不发（第 7.2 节）。
+    assert_eq!(report.placed.len(), 1);
+    assert_eq!(harness.exchange.place_count(), 1);
+    assert!(
+        report
+            .plan
+            .waiting
+            .contains(&WaitReason::OrderResultUnknown)
+    );
     let unknown = harness
         .orders()
         .into_iter()
@@ -57,10 +65,11 @@ async fn an_order_the_exchange_does_not_know_keeps_its_reservation() {
     let report = harness.step(1).await;
 
     assert!(report.placed.is_empty());
-    assert_eq!(harness.working().len(), 20);
+    assert_eq!(harness.working().len(), 1);
 
     // 过了 expiresAfter 也一样：交易所查不到这张单，凭过期就断定它没有影响是不安全的，
-    // 所以预留照旧保留、不重发，只在规划里说明原因（第 9.2 节）。
+    // 所以预留照旧保留、不重发，只在规划里说明原因；还要再等一段安全余量，才按三项核对
+    // 作废（第 9.2 节，见 `gate.rs`）。
     let report = harness.step(6).await;
 
     assert!(report.placed.is_empty());
@@ -70,7 +79,7 @@ async fn an_order_the_exchange_does_not_know_keeps_its_reservation() {
             .waiting
             .contains(&WaitReason::OrderResultUnknown)
     );
-    assert_eq!(harness.working().len(), 20);
+    assert_eq!(harness.working().len(), 1);
     assert_eq!(
         harness
             .orders()
@@ -442,10 +451,11 @@ async fn a_cancel_of_an_order_the_exchange_never_saw_keeps_the_reservation() {
     let place_count = harness.exchange.place_count();
 
     // 过了 expiresAfter 撤它，交易所只会回答「查无此单」：这分不出它是已成交、
-    // 已撤销还是压根没落地，所以和挂单列表里消失时一样保留预留、不释放。
+    // 已撤销还是压根没落地，所以和挂单列表里消失时一样保留预留、不释放。（第一张单结果
+    // 未知，这一步就没再发别的单，所以只有它一张。）
     let canceled = harness.pause(6).await;
 
-    assert_eq!(canceled.len(), 19);
+    assert!(canceled.is_empty());
     assert_eq!(harness.exchange.place_count(), place_count);
     assert_eq!(
         harness
@@ -460,7 +470,8 @@ async fn a_cancel_of_an_order_the_exchange_never_saw_keeps_the_reservation() {
 
     // 预留还在，恢复也不下新单：这一张的结果我们从来没拿到过，撤销只会得到「查无此单」
     // ——它可能已经成交，这时候重新挂单就会在同一格上多出一张会成交的单。状态留在
-    // 「恢复中」，等三方核对（任务 08）问得出结局再放行。
+    // 「恢复中」，等期限过后挂单、成交、仓位三项核对把它作废再放行
+    // （见 `unknown_orders.rs`）。
     let outcome = harness.resume(7).await;
     assert_eq!(
         outcome,

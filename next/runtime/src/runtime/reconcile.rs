@@ -16,8 +16,8 @@ use super::{ExchangeFacts, ReconcileOutcome, Runtime, RuntimeError, order_states
 impl Runtime {
     /// 与交易所核对订单：收尾不在挂单列表里的订单、吸收它们已经成交的部分。
     ///
-    /// 返回交易所报的累计成交量快照、是否有订单结果不明、以及这次从订单状态里
-    /// 补记了几笔成交。快照供仓位核对使用：成交记录可能比挂单状态晚到，
+    /// 返回交易所报的累计成交量快照，以及这次从订单状态里补记了几笔成交；查不到的在场
+    /// 订单记成 [`OrderStatus::Unknown`]。快照供仓位核对使用：成交记录可能比挂单状态晚到，
     /// 这段差额是能解释的（第 7.1.3 节）。
     ///
     /// 一张单完全成交后同样会消失，所以不能只凭「过了 `expiresAfter`」判它撤销，
@@ -40,7 +40,6 @@ impl Runtime {
         let working_observed_at = self.clock.now();
         let saved_fills = self.store.fills_totals(strategy_id)?;
         let mut reported: Vec<(ClientOrderId, Quantity)> = Vec::new();
-        let mut unknown_result = false;
         let mut applied_fills = 0;
 
         for order in orders
@@ -60,11 +59,19 @@ impl Runtime {
                         .await?
                     {
                         OrderLookup::Found(found) => (found, self.clock.now()),
-                        // 交易所查不到这张单。凭过期就断定它没有影响是不安全的：
-                        // 保持预留、不释放、不重发，并说明原因（第 9.2 节）。
+                        // 交易所查不到这张单。凭过期就断定它没有影响是不安全的：保持预留、
+                        // 不释放、不重发，记成「结果未知」。下单超时、写库后没来得及发送、
+                        // 或者原来在场的单查不到了，都是这一类；期限过后由三项核对决定能不能
+                        // 作废（[`Runtime::settle_unknown_orders`]，第 9.2 节）。
+                        //
+                        // 已经终态的单不改：它的结局我们知道，只是成交还没对完账。
                         OrderLookup::Unknown => {
-                            if now >= order.expires_at {
-                                unknown_result = true;
+                            if order.record.is_working()
+                                && order.record.status != OrderStatus::Unknown
+                            {
+                                order.record.status = OrderStatus::Unknown;
+                                order.updated_at = now;
+                                self.store.update_order(strategy_id, order)?;
                             }
                             continue;
                         }
@@ -92,7 +99,6 @@ impl Runtime {
         }
         Ok(ReconcileOutcome {
             reported,
-            unknown_result,
             applied_fills,
             inconsistent: inconsistent_fill_records(&saved_fills, &order_states(orders)),
         })
@@ -136,8 +142,16 @@ impl Runtime {
         }
 
         // 已成交，但成交记录还没到齐：保留预留等它补齐，不释放剩余量、也不重发。
-        // 核对没完成，回查起点继续保留。（第 9.2.3 节的三项核对属于后续任务。）
+        // 核对没完成，回查起点继续保留。
+        //
+        // 交易所的订单编号要记下来：它证明这张单落过地。下单超时的单这时状态还是「结果
+        // 未知」，不记下来就会被当成「从没生效」按期限作废、重新下单（第 9.2 节）。
         if exchange_view.status == OrderStatus::Filled && !unbooked.is_zero() {
+            if order.exchange_order_id.is_none() {
+                order.exchange_order_id = Some(exchange_view.exchange_order_id.clone());
+                order.updated_at = now;
+                self.store.update_order(strategy_id, order)?;
+            }
             return Ok(false);
         }
 
@@ -330,7 +344,8 @@ impl Runtime {
             }
             // 交易所不认识这张单：它可能已经成交、可能早就撤销、也可能压根没落地。
             // 「查不到」分不出是哪一种，成交记录也可能还没到，所以即使过了
-            // `expiresAfter` 也保留预留、不释放（第 9.2 节）。完整的三项核对属于后续任务。
+            // `expiresAfter` 也保留预留、不释放；接下来的对账会按 `cloid` 查它，查不到就
+            // 记成结果未知，期限过后由三项核对决定（第 9.2 节）。
             Err(ExchangeError::UnknownOrder { .. }) => {
                 tracing::warn!(
                     client_order_id = %client_order_id,
