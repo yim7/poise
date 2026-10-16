@@ -22,6 +22,7 @@ use super::{
     Cancels, Executed, NewOrders, POSITION_CHECK_ROUNDS, Reading, Runtime, RuntimeError, Snapshot,
     StepReport, Synced, order_states,
 };
+use super::{fresh, percent};
 
 impl Runtime {
     /// 走一步。
@@ -235,16 +236,15 @@ impl Runtime {
                 return None;
             }
         };
-        if let Some(as_of) = margin.as_of {
-            let age = self.clock.now().signed_duration_since(as_of);
-            if age > max_age {
-                tracing::warn!(
-                    strategy = %strategy_id,
-                    age_ms = age.num_milliseconds(),
-                    "the margin reading is stale"
-                );
-                return None;
-            }
+        if let Some(as_of) = margin.as_of
+            && !fresh(as_of, self.clock.now(), max_age)
+        {
+            tracing::warn!(
+                strategy = %strategy_id,
+                %as_of,
+                "the margin reading is stale or from the future"
+            );
+            return None;
         }
         Some((margin.ratio(), margin.as_of))
     }
@@ -922,12 +922,6 @@ fn margin_alert_note(ratio: Option<Rate>, settings: &AccountSettings) -> Option<
     } else {
         None
     }
-}
-
-/// 比率按百分比写，保留两位小数。
-fn percent(ratio: Rate) -> String {
-    let hundredths = i128::from(ratio.units()) * 10_000 / i128::from(poise_strategy::units::SCALE);
-    format!("{}.{:02}%", hundredths / 100, hundredths % 100)
 }
 
 /// 把几句说明接成一段；一句都没有时是 `None`。

@@ -8,6 +8,7 @@ import {
   ForeignOrderTable,
   ImmediateFillTable,
   PlannedOrderTable,
+  StressTable,
 } from './tables'
 import type { DraftPreview } from './types'
 
@@ -38,6 +39,12 @@ export function PreviewPanel({ preview }: { preview: DraftPreview }) {
       ) : (
         <p className="error">参数校验不通过：{preview.validation.reason}</p>
       )}
+      {preview.warnings.map((warning) => (
+        <p key={warning} className="warning">
+          提醒：{warning}
+        </p>
+      ))}
+      <StressTable sides={preview.stress} />
       {preview.validation.valid ? (
         <>
           {Number(preview.position) !== 0 ? (

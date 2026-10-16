@@ -8,9 +8,10 @@ use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
+use poise_strategy::stress::MarginTiers;
 use poise_strategy::units::Notional;
 
-use crate::account::{Account, AccountMode, ApiWallet, MarginReading};
+use crate::account::{Account, AccountMode, ApiWallet, Leverage, MarginReading};
 use crate::exchange::ExchangeError;
 
 /// 默认的可用抵押：足够大，不会意外挡住配置。
@@ -33,10 +34,12 @@ struct SimAccount {
     margin: MarginReading,
     /// 还要让几次保证金读数失败。
     fail_margin: usize,
-    /// 各标的的杠杆倍数；没设过的标的按 [`DEFAULT_LEVERAGE`] 算。
-    leverage: u32,
+    /// 杠杆设置；默认 [`DEFAULT_LEVERAGE`] 倍全仓。
+    leverage: Leverage,
     /// 还要让几次杠杆读数失败。
     fail_leverage: usize,
+    /// 保证金分档表：默认只有一档 40 倍。
+    margin_tiers: MarginTiers,
     fees: Fees,
     /// 各标的的合约规则，按标的符号索引。
     specs: HashMap<String, InstrumentSpec>,
@@ -62,8 +65,12 @@ impl SimulatedAccount {
                     as_of: None,
                 },
                 fail_margin: 0,
-                leverage: DEFAULT_LEVERAGE,
+                leverage: Leverage {
+                    value: DEFAULT_LEVERAGE,
+                    cross: true,
+                },
                 fail_leverage: 0,
+                margin_tiers: MarginTiers::single(40),
                 fees,
                 specs,
             }),
@@ -118,8 +125,13 @@ impl SimulatedAccount {
         self.lock().fail_leverage = count;
     }
 
-    /// 杠杆倍数变了。
-    pub fn set_leverage(&self, leverage: u32) {
+    /// 换一张保证金分档表。
+    pub fn set_margin_tiers(&self, tiers: MarginTiers) {
+        self.lock().margin_tiers = tiers;
+    }
+
+    /// 杠杆设置变了（倍数或者全仓、逐仓）。
+    pub fn set_leverage(&self, leverage: Leverage) {
         self.lock().leverage = leverage;
     }
 
@@ -170,7 +182,7 @@ impl Account for SimulatedAccount {
         Ok(state.margin)
     }
 
-    async fn leverage(&self, _instrument: &Instrument) -> Result<u32, ExchangeError> {
+    async fn leverage(&self, _instrument: &Instrument) -> Result<Leverage, ExchangeError> {
         let mut state = self.lock();
         if state.fail_leverage > 0 {
             state.fail_leverage -= 1;
@@ -179,6 +191,10 @@ impl Account for SimulatedAccount {
             });
         }
         Ok(state.leverage)
+    }
+
+    async fn margin_tiers(&self, _instrument: &Instrument) -> Result<MarginTiers, ExchangeError> {
+        Ok(self.lock().margin_tiers.clone())
     }
 
     async fn fees(&self) -> Result<Fees, ExchangeError> {

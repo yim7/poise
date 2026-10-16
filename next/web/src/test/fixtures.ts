@@ -193,6 +193,17 @@ export function preview(overrides: Partial<DraftPreview> = {}): DraftPreview {
     cells,
     immediate_fills: [],
     planned_orders: [],
+    stress: [
+      {
+        direction: 'long',
+        adverse_price: '75000',
+        position: '1',
+        average_entry: '86900',
+        margin_ratio: '0.01064131',
+        liquidation: { kind: 'never' },
+      },
+    ],
+    warnings: [],
     foreign_orders: [],
     token: 'token-1',
     ...overrides,

@@ -10,6 +10,24 @@ use serde::Deserialize;
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct MetaResponse {
     pub universe: Vec<AssetMetaResponse>,
+    /// 保证金分档表：`[[表编号, 表], …]`。
+    #[serde(rename = "marginTables", default)]
+    pub margin_tables: Vec<(u32, MarginTableResponse)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct MarginTableResponse {
+    #[serde(rename = "marginTiers")]
+    pub margin_tiers: Vec<MarginTierResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct MarginTierResponse {
+    /// 这一档的名义价值下限（美元）。
+    #[serde(rename = "lowerBound")]
+    pub lower_bound: String,
+    #[serde(rename = "maxLeverage")]
+    pub max_leverage: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -17,6 +35,11 @@ pub(crate) struct AssetMetaResponse {
     pub name: String,
     #[serde(rename = "szDecimals")]
     pub sz_decimals: u32,
+    #[serde(rename = "maxLeverage", default)]
+    pub max_leverage: Option<u32>,
+    /// 这个标的用哪张保证金分档表；分档表里找不到时只有一档，按 `maxLeverage` 算。
+    #[serde(rename = "marginTableId", default)]
+    pub margin_table_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -168,5 +191,8 @@ pub(crate) struct ActiveAssetData {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct ActiveLeverage {
+    /// `cross` 或 `isolated`。
+    #[serde(rename = "type")]
+    pub kind: String,
     pub value: u32,
 }

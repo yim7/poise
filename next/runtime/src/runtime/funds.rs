@@ -79,7 +79,7 @@ impl Runtime {
     ) -> Result<FundsCheck, RuntimeError> {
         let instrument = strategy.spec().instrument();
         let mut leverages: HashMap<Instrument, u32> = HashMap::new();
-        let leverage = self.account.leverage(instrument).await?;
+        let leverage = self.account.leverage(instrument).await?.value;
         leverages.insert(instrument.clone(), leverage);
 
         // 先算已占用、后读可用资金。对账不拿这把锁：两次读取之间别的策略可能有单成交。
@@ -100,7 +100,7 @@ impl Runtime {
             let leverage = match leverages.get(&stored.instrument) {
                 Some(leverage) => *leverage,
                 None => {
-                    let leverage = self.account.leverage(&stored.instrument).await?;
+                    let leverage = self.account.leverage(&stored.instrument).await?.value;
                     leverages.insert(stored.instrument.clone(), leverage);
                     leverage
                 }

@@ -5,16 +5,19 @@ use poise_strategy::Strategy;
 use poise_strategy::config::StrategyConfig;
 use poise_strategy::instrument::{Fees, InstrumentSpec};
 use poise_strategy::side::Direction;
-use poise_strategy::units::Notional;
+use poise_strategy::state::StrategyState;
+use poise_strategy::stress::{AccountBasis, Liquidation, SideStress, Suggestion};
+use poise_strategy::units::{Notional, Position, Price, Quantity, Rate, SCALE};
 use sha3::{Digest, Sha3_256};
 
+use crate::exchange::ExchangeError;
 use crate::settings::AccountSettings;
 use crate::store::{
     DraftId, StoreError, StoredConfigVersion, StoredDraft, StoredStrategy, StrategyId,
     StrategyStatus, ViewSnapshot,
 };
 
-use super::{DraftPreview, Runtime, RuntimeError, Validation};
+use super::{DraftPreview, Runtime, RuntimeError, Validation, fresh, percent};
 
 impl Runtime {
     /// 新建草稿：只保存参数，不下任何单（第 2.4 节）。
@@ -104,6 +107,8 @@ impl Runtime {
             cells: Vec::new(),
             immediate_fills: Vec::new(),
             planned_orders: Vec::new(),
+            stress: Vec::new(),
+            warnings: Vec::new(),
             foreign_orders,
             token: None,
         };
@@ -132,6 +137,32 @@ impl Runtime {
         preview.cells = strategy.cell_summaries(&state, &[]);
         preview.immediate_fills = strategy.immediate_fills(&state, market_price);
         preview.planned_orders = strategy.plan(&state, &[], &[], market_price).place;
+
+        // 满仓压力测试（第 7.3 节）：达到停止阈值就拒绝这份配置，超过提醒阈值给出提醒。
+        let stress = match self
+            .stress_preview(&strategy, &state, position, market_price)
+            .await
+        {
+            Ok(stress) => stress,
+            Err(error) => {
+                preview.validation = Validation {
+                    valid: false,
+                    reason: Some(format!(
+                        "读不到保证金数据，做不了满仓压力测试（{error}）；稍后重新预览。"
+                    )),
+                };
+                return Ok(preview);
+            }
+        };
+        preview.stress = stress.sides;
+        preview.warnings = stress.warnings;
+        if let Some(reason) = stress.refusal {
+            preview.validation = Validation {
+                valid: false,
+                reason: Some(reason),
+            };
+            return Ok(preview);
+        }
         preview.token = Some(preview_token(
             &preview,
             strategy.config(),
@@ -140,6 +171,117 @@ impl Runtime {
             now,
         )?);
         Ok(preview)
+    }
+
+    /// 满仓压力测试（第 7.3 节）：每一侧满仓、价格到最不利位置时的账户保证金率和强平价。
+    ///
+    /// 账户底数按现在读到的：余额、逐仓保证金，以及这个标的之外的全仓维持保证金占用
+    /// （账户全仓占用减去这个标的当前仓位的维持保证金——标的上已有的仓位接管之后算在本策略
+    /// 的满仓里，不能再算一遍）。
+    async fn stress_preview(
+        &self,
+        strategy: &Strategy,
+        start: &StrategyState,
+        position: Position,
+        market_price: Price,
+    ) -> Result<StressOutcome, RuntimeError> {
+        let settings = self.store.load_account_settings()?;
+        let instrument = strategy.spec().instrument();
+        // 只支持全仓：压力测试和保证金率都按整个账户共用余额来算，逐仓仓位有自己的强平线。
+        if !self.account.leverage(instrument).await?.cross {
+            return Ok(StressOutcome {
+                sides: Vec::new(),
+                warnings: Vec::new(),
+                refusal: Some(format!(
+                    "`{instrument}` 在交易所上设成了逐仓。本系统只支持全仓：请在交易所把它改成全仓后重新预览。"
+                )),
+            });
+        }
+        let margin = self.account.margin().await?;
+        // 读数和运行时一样要新鲜：拿一份旧的高余额读数做压力测试，结论会偏乐观。
+        if let Some(as_of) = margin.as_of
+            && !fresh(as_of, self.clock.now(), settings.market_data_max_age)
+        {
+            return Err(RuntimeError::Exchange(ExchangeError::Unavailable {
+                reason: format!("the margin reading taken at {as_of} is not fresh"),
+            }));
+        }
+        let tiers = self.account.margin_tiers(instrument).await?;
+        let used = margin.cross_maintenance.max(Notional::from_scaled(
+            margin.balance.scaled_floor() - margin.available_after_maintenance.scaled_floor(),
+        ));
+        let current = tiers.maintenance_margin(Notional::of(
+            Quantity::from_units(position.units().abs()),
+            market_price,
+        ));
+        let basis = AccountBasis {
+            balance: margin.balance,
+            isolated_margin: margin.isolated_margin,
+            other_maintenance: Notional::from_scaled(
+                (used.scaled_floor() - current.scaled_floor()).max(0),
+            ),
+        };
+        let sides = strategy.stress_test(start, market_price, &basis, &tiers);
+        let mut warnings = Vec::new();
+        let mut refusal = None;
+        for side in &sides {
+            if side.margin_ratio < settings.margin_alert_ratio {
+                continue;
+            }
+            // 建议：保证金率在提醒阈值以内的最大仓位；已有仓位本身就超过时给不出建议。
+            let suggestion = match strategy.suggest_max_position(
+                side.direction,
+                position,
+                market_price,
+                &basis,
+                &tiers,
+                settings.margin_alert_ratio,
+            ) {
+                Suggestion::Max(suggested) => format!(
+                    "保证金率在提醒阈值 {} 以内的最大仓位约 {suggested}。",
+                    percent(settings.margin_alert_ratio)
+                ),
+                Suggestion::HeldPositionTooLarge => "标的上已有的仓位本身就超过提醒阈值，缩小还没成交的部分也达不到；请先处理已有仓位或增加资金。".to_string(),
+                Suggestion::NoFeasiblePosition => "按现在的批次和格子设置，找不到既够最低下单金额、又在提醒阈值以内的仓位上限；请调整价格范围、间距或主仓比例，或者增加资金。".to_string(),
+            };
+            let side_name = match side.direction {
+                Direction::Long => "多头侧",
+                Direction::Short => "空头侧",
+            };
+            // 保证金率到了 100% 就是强平：这时报强平价比报一个封顶的比率更有用。
+            let what = match side.liquidation {
+                Liquidation::At { price: liquidation }
+                    if side.margin_ratio >= Rate::from_units(SCALE) =>
+                {
+                    format!(
+                        "{side_name}满仓 {}、价格到 {} 之前就会强平（强平价约 {liquidation}）",
+                        side.position, side.adverse_price
+                    )
+                }
+                _ => format!(
+                    "{side_name}满仓 {}、价格到 {} 时，预计账户保证金率 {}",
+                    side.position,
+                    side.adverse_price,
+                    percent(side.margin_ratio)
+                ),
+            };
+            if side.margin_ratio >= settings.margin_stop_ratio {
+                refusal.get_or_insert(format!(
+                    "{what}，达到停止阈值 {}：运行中会在加满之前被停住，这份配置做不到。{suggestion}",
+                    percent(settings.margin_stop_ratio)
+                ));
+            } else {
+                warnings.push(format!(
+                    "{what}，超过提醒阈值 {}。{suggestion}",
+                    percent(settings.margin_alert_ratio)
+                ));
+            }
+        }
+        Ok(StressOutcome {
+            sides,
+            warnings,
+            refusal,
+        })
     }
 
     /// 确认启动：校验令牌、检查同一标的是否已有策略，然后写入策略记录（B42、B43、B46）。
@@ -424,6 +566,9 @@ pub(super) fn preview_fingerprint(
         serde_json::to_string(&preview.immediate_fills)?,
         serde_json::to_string(&preview.planned_orders)?,
         preview.position.to_string(),
+        // 提醒的条数：确认前从「没有提醒」变成「有提醒」，用户没看到这条提醒，要重新预览。
+        // 不放提醒的原文：里面的比率随账户每时每刻都在变。
+        preview.warnings.len().to_string(),
     ];
     let mut hasher = Sha3_256::new();
     for part in parts {
@@ -509,4 +654,12 @@ pub(super) fn gained_throttle(
             .and_then(|side| side.throttle_interval)
     };
     interval(previous).is_none() && interval(next).is_some()
+}
+
+/// 预览里的满仓压力测试结果。
+struct StressOutcome {
+    sides: Vec<SideStress>,
+    warnings: Vec<String>,
+    /// 达到停止阈值时拒绝这份配置的原因。
+    refusal: Option<String>,
 }

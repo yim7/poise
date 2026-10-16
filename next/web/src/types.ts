@@ -158,6 +158,24 @@ export interface ExchangeOrder {
   status: OrderStatus
 }
 
+/** 一侧的满仓压力测试（第 7.3 节）。 */
+export interface SideStress {
+  direction: Direction
+  /** 最不利的价格：做多是范围下沿，做空是范围上沿。 */
+  adverse_price: Decimal
+  position: Decimal
+  average_entry: Decimal
+  margin_ratio: Decimal
+  /** 满仓时会不会强平、在哪里强平。 */
+  liquidation: Liquidation
+}
+
+/** 满仓时的强平结果：不会强平、在某个价格强平，或者强平价远到算不出来。 */
+export type Liquidation =
+  | { kind: 'never' }
+  | { kind: 'at'; price: Decimal }
+  | { kind: 'out_of_range' }
+
 export interface DraftPreview {
   draft_id: string
   instrument: string
@@ -171,6 +189,10 @@ export interface DraftPreview {
   immediate_fills: ImmediateFill[]
   /** 启动后第一步会挂出的订单；标的上已有仓位时就是接管之后要挂的单（第 8 节）。 */
   planned_orders: OrderIntent[]
+  /** 满仓压力测试：每一侧满仓、价格到最不利位置时的保证金率和强平价。 */
+  stress: SideStress[]
+  /** 满仓保证金率超过提醒阈值时的提醒。 */
+  warnings: string[]
   /** 交易所上这个标的已有的挂单：都不是本策略的，本系统不撤销（第 8 节）。 */
   foreign_orders: ExchangeOrder[]
   /** 校验不过时是 null：没有令牌就确认不了。 */

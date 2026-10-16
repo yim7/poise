@@ -10,13 +10,15 @@ import {
   SIDE_LABELS,
   unitLabel,
 } from './labels'
-import { configSummary, decimal, timestamp } from './format'
+import { configSummary, decimal, percent, timestamp } from './format'
 import type {
   BatchSummary,
   CellSummary,
   ExchangeOrder,
   ImmediateFill,
+  Liquidation,
   OrderIntent,
+  SideStress,
   StoredConfigVersion,
   StoredOrder,
   StrategyConfig,
@@ -231,6 +233,49 @@ export function ForeignOrderTable({ orders }: { orders: ExchangeOrder[] }) {
             <td>{decimal(order.limit_price)}</td>
             <td>{decimal(order.quantity)}</td>
             <td>{decimal(order.cumulative_filled)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+function liquidationText(liquidation: Liquidation): string {
+  switch (liquidation.kind) {
+    case 'never':
+      return '不会强平'
+    case 'at':
+      return decimal(liquidation.price)
+    case 'out_of_range':
+      return '超出计算范围'
+  }
+}
+
+/** 满仓压力测试（第 7.3 节）：每一侧满仓、价格到最不利位置时的账户保证金率和强平价。 */
+export function StressTable({ sides }: { sides: SideStress[] }) {
+  if (sides.length === 0) return null
+  return (
+    <table>
+      <caption>满仓压力测试</caption>
+      <thead>
+        <tr>
+          <th>方向</th>
+          <th>最不利价格</th>
+          <th>满仓数量</th>
+          <th>持仓均价</th>
+          <th>预计保证金率</th>
+          <th>强平价</th>
+        </tr>
+      </thead>
+      <tbody>
+        {sides.map((side) => (
+          <tr key={side.direction}>
+            <td>{DIRECTION_LABELS[side.direction]}</td>
+            <td>{decimal(side.adverse_price)}</td>
+            <td>{decimal(side.position)}</td>
+            <td>{decimal(side.average_entry)}</td>
+            <td>{percent(side.margin_ratio)}</td>
+            <td>{liquidationText(side.liquidation)}</td>
           </tr>
         ))}
       </tbody>

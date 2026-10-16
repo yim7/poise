@@ -2,15 +2,17 @@
 
 use async_trait::async_trait;
 use chrono::DateTime;
-use poise_runtime::account::MarginReading;
+use poise_runtime::account::{Leverage, MarginReading};
 use poise_runtime::{Account, AccountMode, ApiWallet, ExchangeError};
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
+use poise_strategy::stress::{MarginTier, MarginTiers};
 use poise_strategy::units::{Notional, Rate};
 use serde_json::{Value, json};
 
 use crate::client::Hyperliquid;
 use crate::models::{
-    ActiveAssetData, AgentResponse, ClearinghouseState, SpotClearinghouseState, UserFees,
+    ActiveAssetData, AgentResponse, ClearinghouseState, MetaResponse, SpotClearinghouseState,
+    UserFees,
 };
 
 /// USDC 在统一账户里的 token 序号。
@@ -176,7 +178,7 @@ impl Account for Hyperliquid {
 
     /// 这个标的上设置的杠杆（`activeAssetData`）。用户在交易所页面改过杠杆，下一次预检就
     /// 按新的算。
-    async fn leverage(&self, instrument: &Instrument) -> Result<u32, ExchangeError> {
+    async fn leverage(&self, instrument: &Instrument) -> Result<Leverage, ExchangeError> {
         let data: ActiveAssetData = self
             .info(
                 &json!({"type": "activeAssetData", "user": self.user(), "coin": instrument.symbol()}),
@@ -186,7 +188,56 @@ impl Account for Hyperliquid {
         if data.leverage.value == 0 {
             return Err(unreadable("leverage"));
         }
-        Ok(data.leverage.value)
+        let cross = match data.leverage.kind.as_str() {
+            "cross" => true,
+            "isolated" => false,
+            _ => return Err(unreadable("leverage type")),
+        };
+        Ok(Leverage {
+            value: data.leverage.value,
+            cross,
+        })
+    }
+
+    /// 保证金分档表（`meta` 的 `marginTables`，按标的的 `marginTableId` 找）。分档表里找不到
+    /// 这张表时只有一档，按标的的 `maxLeverage` 算（测试网实测：小编号的表不在列表里）。
+    async fn margin_tiers(&self, instrument: &Instrument) -> Result<MarginTiers, ExchangeError> {
+        let meta: MetaResponse = self.info(&json!({"type": "meta"}), "meta").await?;
+        let asset = meta
+            .universe
+            .iter()
+            .find(|asset| asset.name == instrument.symbol())
+            .ok_or_else(|| ExchangeError::Unavailable {
+                reason: format!("`{instrument}` is not listed by the exchange"),
+            })?;
+        let table = asset.margin_table_id.and_then(|id| {
+            meta.margin_tables
+                .iter()
+                .find(|(table_id, _)| *table_id == id)
+                .map(|(_, table)| table)
+        });
+        match table {
+            Some(table) => {
+                let tiers = table
+                    .margin_tiers
+                    .iter()
+                    .map(|tier| {
+                        Ok(MarginTier {
+                            lower_bound: Notional::parse(&tier.lower_bound)
+                                .map_err(|_| unreadable("margin tier lower bound"))?,
+                            max_leverage: tier.max_leverage,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ExchangeError>>()?;
+                MarginTiers::new(tiers).map_err(|_| unreadable("margin tier table"))
+            }
+            None => Ok(MarginTiers::single(
+                asset
+                    .max_leverage
+                    .filter(|leverage| *leverage > 0)
+                    .ok_or_else(|| unreadable("max leverage"))?,
+            )),
+        }
     }
 
     async fn fees(&self) -> Result<Fees, ExchangeError> {

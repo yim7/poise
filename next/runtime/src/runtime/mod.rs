@@ -37,6 +37,7 @@ use poise_strategy::order::ClientOrderId;
 use poise_strategy::planning::{OrderIntent, Plan, WaitReason};
 use poise_strategy::preview::{BatchSummary, CellSummary, ImmediateFill};
 use poise_strategy::state::{StateError, StrategyState};
+use poise_strategy::stress::SideStress;
 use poise_strategy::takeover::TakeoverError;
 use poise_strategy::units::{Notional, Position, Price, Quantity, Rate};
 use serde::{Deserialize, Serialize};
@@ -377,6 +378,10 @@ pub struct DraftPreview {
     /// 启动后第一步会挂出的订单：限价已经按第 6 节避开本策略自己的反向订单。接管已有
     /// 仓位时，用户靠它确认持有格子的平仓单和没买完的主仓买单（第 8 节）。
     pub planned_orders: Vec<OrderIntent>,
+    /// 满仓压力测试（第 7.3 节）：每一侧满仓、价格到最不利位置时的保证金率和强平价。
+    pub stress: Vec<SideStress>,
+    /// 提醒：满仓保证金率超过提醒阈值时说明建议的最大仓位。
+    pub warnings: Vec<String>,
     /// 交易所上这个标的已有的挂单。启动前它们都不属于本策略：本系统不撤销，由用户处理
     /// （第 8 节第 4 条）。
     pub foreign_orders: Vec<ExchangeOrder>,
@@ -594,4 +599,17 @@ fn order_states(orders: &[StoredOrder]) -> Vec<OrderState> {
         .iter()
         .map(|order| OrderState::of(&order.record, order.fills_reconciled))
         .collect()
+}
+
+/// 比率按百分比写，保留两位小数：网页和说明文字里给人看的写法。
+pub(super) fn percent(ratio: Rate) -> String {
+    let hundredths = i128::from(ratio.units()) * 10_000 / i128::from(poise_strategy::units::SCALE);
+    format!("{}.{:02}%", hundredths / 100, hundredths % 100)
+}
+
+/// 交易所给出的读数时刻新不新鲜：比现在早超过 `max_age` 算过期；比现在晚超过 `max_age`
+/// 也不算数——本机时钟被回拨或者读数时刻异常，都证明不了它是新的。
+pub(super) fn fresh(as_of: DateTime<Utc>, now: DateTime<Utc>, max_age: Duration) -> bool {
+    let age = now.signed_duration_since(as_of);
+    age <= max_age && age >= -max_age
 }

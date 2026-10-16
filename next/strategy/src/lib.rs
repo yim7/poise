@@ -21,6 +21,7 @@ pub mod planning;
 pub mod preview;
 pub mod side;
 pub mod state;
+pub mod stress;
 pub mod takeover;
 pub mod throttle;
 pub mod units;

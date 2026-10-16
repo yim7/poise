@@ -24,6 +24,7 @@ small { color: #7c8695; font-size: 11px; }
 .hint { color: #8b95a3; font-size: 12px; }
 .notice { color: #a8dec0; }
 .error { color: #ef9a96; }
+.warning { color: #e8c26a; }
 .ok { color: #a8dec0; }
 
 .actions { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0; }

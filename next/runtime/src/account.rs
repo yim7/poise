@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
+use poise_strategy::stress::MarginTiers;
 use poise_strategy::units::{Notional, Rate, SCALE};
 
 use crate::exchange::ExchangeError;
@@ -83,6 +84,15 @@ impl MarginReading {
     }
 }
 
+/// 一个标的上的杠杆设置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Leverage {
+    /// 杠杆倍数。
+    pub value: u32,
+    /// 全仓还是逐仓。本系统只支持全仓：压力测试和保证金率都按整个账户共用余额来算。
+    pub cross: bool,
+}
+
 #[async_trait]
 pub trait Account: Send + Sync {
     /// 账户模式。不是 Unified 时启动校验会拒绝启动，不替用户切换。
@@ -99,8 +109,11 @@ pub trait Account: Send + Sync {
     /// 账户保证金读数，用来算账户比率（第 7.4 节）。
     async fn margin(&self) -> Result<MarginReading, ExchangeError>;
 
-    /// 这个标的上设置的杠杆倍数（资金预检用，第 10 节）。
-    async fn leverage(&self, instrument: &Instrument) -> Result<u32, ExchangeError>;
+    /// 这个标的上的杠杆设置：倍数和保证金模式（资金预检、满仓压力测试用，第 7.3、10 节）。
+    async fn leverage(&self, instrument: &Instrument) -> Result<Leverage, ExchangeError>;
+
+    /// 这个标的的保证金分档表（满仓压力测试用，第 7.3 节）。
+    async fn margin_tiers(&self, instrument: &Instrument) -> Result<MarginTiers, ExchangeError>;
 
     /// 账户实际费率。
     async fn fees(&self) -> Result<Fees, ExchangeError>;

@@ -238,6 +238,61 @@ describe('新建与确认启动', () => {
     expect(within(foreign).getByText('777（手动下单）')).toBeInTheDocument()
   })
 
+  it('b34_预览显示满仓压力测试，超过提醒阈值时给出提醒但仍可确认', async () => {
+    const server = editorRoutes({
+      'POST /api/drafts/s-1/preview': {
+        body: preview({
+          stress: [
+            {
+              direction: 'long',
+              adverse_price: '75000',
+              position: '1',
+              average_entry: '86900',
+              margin_ratio: '0.36057692',
+              liquidation: { kind: 'at', price: '67747.6' },
+            },
+          ],
+          warnings: ['多头侧满仓 1、价格到 75000 时，预计账户保证金率 36.05%，超过提醒阈值 30.00%。'],
+        }),
+      },
+    })
+    renderEditor(server)
+
+    await saveAndPreview()
+
+    const table = screen.getByRole('table', { name: '满仓压力测试' })
+    expect(within(table).getByText('36.057692%')).toBeInTheDocument()
+    expect(within(table).getByText('67747.6')).toBeInTheDocument()
+    expect(screen.getByText(/提醒：多头侧满仓/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '确认启动' })).toBeEnabled()
+  })
+
+  it('b34_强平价远到算不出来时说超出计算范围，不说不会强平', async () => {
+    const server = editorRoutes({
+      'POST /api/drafts/s-1/preview': {
+        body: preview({
+          stress: [
+            {
+              direction: 'short',
+              adverse_price: '95000',
+              position: '0.0001',
+              average_entry: '85000',
+              margin_ratio: '0.00001',
+              liquidation: { kind: 'out_of_range' },
+            },
+          ],
+        }),
+      },
+    })
+    renderEditor(server)
+
+    await saveAndPreview()
+
+    const table = screen.getByRole('table', { name: '满仓压力测试' })
+    expect(within(table).getByText('超出计算范围')).toBeInTheDocument()
+    expect(within(table).queryByText('不会强平')).not.toBeInTheDocument()
+  })
+
   it('参数校验不通过时只显示原因，不给确认启动的机会', async () => {
     const server = editorRoutes({
       'POST /api/drafts/s-1/preview': {

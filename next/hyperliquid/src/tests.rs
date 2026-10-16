@@ -835,11 +835,48 @@ async fn the_leverage_comes_from_active_asset_data() {
     })]);
     let client = client(transport.clone(), fixed_clock(NOW_MS));
 
-    assert_eq!(client.leverage(&btc()).await.unwrap(), 20);
+    assert_eq!(
+        client.leverage(&btc()).await.unwrap(),
+        poise_runtime::account::Leverage {
+            value: 20,
+            cross: true
+        }
+    );
     assert_eq!(
         transport.request(0).body,
         json!({"type": "activeAssetData", "user": ACCOUNT, "coin": "BTC"})
     );
+}
+
+/// 保证金分档表从 `meta` 里按标的的表编号找；找不到时按最大杠杆只有一档。
+#[tokio::test]
+async fn the_margin_tiers_come_from_the_meta() {
+    let meta = json!({
+        "universe": [
+            {"name": "ETH", "szDecimals": 4, "maxLeverage": 25, "marginTableId": 25},
+            {"name": "BTC", "szDecimals": 5, "maxLeverage": 40, "marginTableId": 54}
+        ],
+        "marginTables": [
+            [54, {"description": "tiered 40x", "marginTiers": [
+                {"lowerBound": "0.0", "maxLeverage": 40},
+                {"lowerBound": "10000.0", "maxLeverage": 25}
+            ]}]
+        ]
+    });
+    let transport = FakeTransport::new(vec![meta.clone(), meta]);
+    let client = client(transport, fixed_clock(NOW_MS));
+
+    let btc_tiers = client.margin_tiers(&btc()).await.unwrap();
+    // 75000 的名义价值：75000 × 2% − 10000 × (2% − 1.25%) = 1425。
+    assert_eq!(
+        btc_tiers.maintenance_margin(Notional::parse("75000").unwrap()),
+        Notional::parse("1425").unwrap()
+    );
+    let eth_tiers = client
+        .margin_tiers(&Instrument::try_new("ETH").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(eth_tiers, poise_strategy::stress::MarginTiers::single(25));
 }
 
 #[tokio::test]

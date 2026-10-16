@@ -68,8 +68,21 @@ impl Account for FakeAccount {
         })
     }
 
-    async fn leverage(&self, _instrument: &Instrument) -> Result<u32, ExchangeError> {
-        Ok(10)
+    async fn leverage(
+        &self,
+        _instrument: &Instrument,
+    ) -> Result<poise_runtime::account::Leverage, ExchangeError> {
+        Ok(poise_runtime::account::Leverage {
+            value: 10,
+            cross: true,
+        })
+    }
+
+    async fn margin_tiers(
+        &self,
+        _instrument: &Instrument,
+    ) -> Result<poise_strategy::stress::MarginTiers, ExchangeError> {
+        Ok(poise_strategy::stress::MarginTiers::single(40))
     }
 
     async fn fees(&self) -> Result<Fees, ExchangeError> {
