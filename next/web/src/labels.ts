@@ -22,6 +22,8 @@ export const STATUS_LABELS: Record<StrategyStatus, string> = {
   stopping: '停止中',
   // 停止就是归档（第 2.4 节）：命令行和这一页的只读提示都叫「已归档」。
   stopped: '已归档',
+  invalidating: '失效中',
+  invalidated: '已失效',
 }
 
 export const CELL_STATUS_LABELS: Record<CellStatus, string> = {

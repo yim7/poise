@@ -16,6 +16,7 @@
 //! - `lifecycle`：草稿、预览、确认启动、运行中修改参数；
 //! - `step`：运行中的一步；
 //! - `cancel_only`：暂停中、停止中、恢复中这几个只撤单的状态；
+//! - `invalidation`：观点失效之后的撤单和减仓；
 //! - `reconcile`：补记成交、按 `cloid` 核对订单、撤单；
 //! - `view`：网页读的列表、详情和视图快照。
 //!
@@ -53,6 +54,7 @@ use crate::store::{
 
 mod cancel_only;
 mod funds;
+mod invalidation;
 mod lifecycle;
 mod reconcile;
 mod step;
@@ -576,7 +578,7 @@ impl Runtime {
 
     /// 归档的策略只读：写操作一律拒绝（第 2.4 节）。
     fn refuse_archived(&self, strategy_id: &StrategyId) -> Result<(), RuntimeError> {
-        if self.store.load_strategy(strategy_id)?.status == StrategyStatus::Stopped {
+        if self.store.load_strategy(strategy_id)?.status.is_archived() {
             return Err(RuntimeError::Archived(strategy_id.clone()));
         }
         Ok(())

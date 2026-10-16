@@ -96,15 +96,17 @@ impl Runtime {
         let now = self.clock.now();
         let status = self.store.load_strategy(strategy_id)?.status;
         match status {
-            StrategyStatus::Stopped => return Ok(Vec::new()),
+            StrategyStatus::Stopped | StrategyStatus::Invalidated => return Ok(Vec::new()),
             StrategyStatus::Draft => {
                 return Err(RuntimeError::NotRunning(strategy_id.clone(), status));
             }
+            // 失效中也能停：用户决定不再减仓、剩下的仓位自己处理。撤单收尾之后归档。
             StrategyStatus::Running
             | StrategyStatus::Restoring
             | StrategyStatus::Pausing
             | StrategyStatus::Paused
-            | StrategyStatus::Stopping => {}
+            | StrategyStatus::Stopping
+            | StrategyStatus::Invalidating => {}
         }
         if status != StrategyStatus::Stopping {
             self.store
@@ -426,9 +428,12 @@ impl Runtime {
                 self.resume_inner(strategy_id, now).await
             }
             StrategyStatus::Running => Ok(ResumeOutcome::AlreadyRunning),
-            StrategyStatus::Stopped => Err(RuntimeError::Archived(strategy_id.clone())),
-            // 已经点了停止：撤单收尾由常驻服务推进，不再接受恢复。
-            StrategyStatus::Stopping | StrategyStatus::Draft => {
+            StrategyStatus::Stopped | StrategyStatus::Invalidated => {
+                Err(RuntimeError::Archived(strategy_id.clone()))
+            }
+            // 已经点了停止：撤单收尾由常驻服务推进，不再接受恢复。失效中的策略正在减仓，
+            // 恢复会让它重新挂出增仓单（第 7.5 节）。
+            StrategyStatus::Stopping | StrategyStatus::Draft | StrategyStatus::Invalidating => {
                 Err(RuntimeError::NotRunning(strategy_id.clone(), status))
             }
         }
@@ -469,6 +474,7 @@ impl Runtime {
             StrategyStatus::Restoring,
             StrategyStatus::Pausing,
             StrategyStatus::Stopping,
+            StrategyStatus::Invalidating,
         ])
     }
 
@@ -735,10 +741,10 @@ pub(super) fn cancel_only_note(
         .iter()
         .filter(|order| !order.record.is_working() && !order.fills_reconciled)
         .count();
-    let done = if status == StrategyStatus::Pausing {
-        "暂停"
-    } else {
-        "归档"
+    let done = match status {
+        StrategyStatus::Pausing => "暂停",
+        StrategyStatus::Invalidating => "转为已失效",
+        _ => "归档",
     };
     let parts: Vec<String> = [
         (working > 0).then(|| format!("还有 {working} 张订单没撤掉，正在重试。")),

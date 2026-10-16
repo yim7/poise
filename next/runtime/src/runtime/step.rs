@@ -7,12 +7,12 @@ use poise_strategy::decision::{
     expected_position as expected_from, judge, pending_units, position_check,
 };
 use poise_strategy::instrument::Instrument;
-use poise_strategy::order::{ClientOrderId, OrderRecord, OrderStatus, WorkingOrder};
+use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, WorkingOrder};
 use poise_strategy::planning::{OrderIntent, PendingUnit, Plan, WaitReason};
 use poise_strategy::state::StrategyState;
 use poise_strategy::units::{Position, Price, Quantity, Rate};
 
-use crate::exchange::{ExchangeError, OrderRequest};
+use crate::exchange::{ExchangeError, OrderRequest, TimeInForce};
 use crate::settings::AccountSettings;
 use crate::store::{StoredOrder, StoredStrategy, StrategyId, StrategyStatus};
 
@@ -50,7 +50,8 @@ impl Runtime {
             }
             StrategyStatus::Restoring => self.restore_step(strategy_id, now).await,
             StrategyStatus::Running => self.running_step(strategy_id, now).await,
-            StrategyStatus::Stopped => Err(RuntimeError::Archived(strategy_id.clone())),
+            StrategyStatus::Invalidating => self.invalidation_step(strategy_id, now).await,
+            status if status.is_archived() => Err(RuntimeError::Archived(strategy_id.clone())),
             other => Err(RuntimeError::NotRunning(strategy_id.clone(), other)),
         }
     }
@@ -75,6 +76,10 @@ impl Runtime {
         }
         let strategy = Strategy::new(stored.config.clone(), stored.spec.clone(), stored.fees)?;
         let mut state = self.load_state(strategy_id, &strategy)?;
+        // 失效价最先看：越过了就不再按常规下单，撤单、减仓（第 7.5 节）。
+        if let Some(report) = self.check_invalidation(strategy_id, &strategy, now).await? {
+            return Ok(report);
+        }
         let mut orders = self.store.load_orders(strategy_id)?;
         let settings = self.store.load_account_settings()?;
 
@@ -94,16 +99,40 @@ impl Runtime {
             Vec::new()
         };
 
-        let snapshot = self
+        let snapshot = match self
             .read_step(
                 strategy_id,
                 &stored,
                 &strategy,
                 &mut state,
                 &mut orders,
+                settings.market_data_max_age,
                 now,
             )
-            .await?;
+            .await
+        {
+            Ok(Read::Snapshot(snapshot)) => snapshot,
+            // 常规读取读到的标记价越过了失效价：后面的读取都不做，当场进入失效（第 7.5 节）。
+            Ok(Read::Crossed(mark)) => {
+                let mut report = self
+                    .invalidate_if_crossed(strategy_id, &strategy, mark, now)
+                    .await?
+                    .expect("read_step only reports a crossing it has checked");
+                report.canceled.splice(0..0, withdrawn);
+                return Ok(report);
+            }
+            Err(error) => {
+                // 读取阶段没走通，可能连标记价都没读到：再单独看一次失效价，越过了就当场进入
+                // 失效。别的读数失败不能耽误止损（第 7.5 节）。
+                if let Some(mut report) =
+                    self.check_invalidation(strategy_id, &strategy, now).await?
+                {
+                    report.canceled.splice(0..0, withdrawn);
+                    return Ok(report);
+                }
+                return Err(error);
+            }
+        };
         // 结果未知的订单：三项核对都有了就作废、释放预留（第 9.2 节）。放在判定之前：
         // 作废之后，闸门在这一步就能打开。
         let unknown = self.settle_unknown_orders(strategy_id, &mut orders, snapshot.check, now)?;
@@ -360,6 +389,11 @@ impl Runtime {
     /// 沿用旧快照会把「刚成交、还没入账」算成仓位对不上，误暂停一个正常运行的策略。
     /// 稳定性也不能只看净仓位：同一轮里一买一卖相抵时，净仓位和预计仓位都可能一模一样，
     /// 但订单快照已经变了，数据显然还在动。
+    ///
+    /// 标记价一拿到就看失效价：收到时还新鲜、越过了失效价，就不再做后面的读取，直接报
+    /// [`Read::Crossed`]。后面的读取可能失败、也可能拖到行情过期，都不能抹掉已经看到的
+    /// 越界（第 7.5 节）。
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn read_step(
         &self,
         strategy_id: &StrategyId,
@@ -367,15 +401,34 @@ impl Runtime {
         strategy: &Strategy,
         state: &mut StrategyState,
         orders: &mut [StoredOrder],
+        max_age: Duration,
         now: DateTime<Utc>,
-    ) -> Result<Snapshot, RuntimeError> {
+    ) -> Result<Read, RuntimeError> {
         let synced = self
             .sync_step(strategy_id, stored, strategy, state, orders, now)
             .await?;
-        let reading = self
-            .reading_step(strategy_id, strategy, state, orders, &synced, now)
+        let priced_at = self.clock.now();
+        let market_price = self
+            .exchange
+            .mark_price(strategy.spec().instrument())
             .await?;
-        Ok(Snapshot {
+        if fresh(priced_at, self.clock.now(), max_age)
+            && strategy.invalidation_triggered(market_price).is_some()
+        {
+            return Ok(Read::Crossed(market_price));
+        }
+        let reading = self
+            .reading_at(
+                strategy_id,
+                strategy,
+                state,
+                orders,
+                &synced,
+                (market_price, priced_at),
+                now,
+            )
+            .await?;
+        Ok(Read::Snapshot(Snapshot {
             market_price: reading.market_price,
             priced_at: reading.priced_at,
             available_collateral: reading.available_collateral,
@@ -383,7 +436,7 @@ impl Runtime {
             check: reading.check,
             inconsistent: synced.inconsistent.clone().or(reading.inconsistent),
             applied_fills: synced.applied_fills + reading.applied_fills,
-        })
+        }))
     }
 
     /// 订单相关的读取：补记成交、核对挂单、推进批次与限速（[`Runtime::read_step`] 的前半段）。
@@ -432,13 +485,40 @@ impl Runtime {
         synced: &Synced,
         now: DateTime<Utc>,
     ) -> Result<Reading, RuntimeError> {
-        let instrument = strategy.spec().instrument();
         // 标记价：只进 `Plan` 供展示和日志使用，提前读出来是为了让仓位核对的提前返回
         // 也能报出当时的标记价，而不是一个零值。
         // 行情的年龄从发出请求那一刻算起：交易所的标记价没有时间戳，响应在路上耽搁多久，
         // 都只能算在它的头上，不能拿收到的时刻当成它的时刻。
         let priced_at = self.clock.now();
-        let market_price = self.exchange.mark_price(instrument).await?;
+        let market_price = self
+            .exchange
+            .mark_price(strategy.spec().instrument())
+            .await?;
+        self.reading_at(
+            strategy_id,
+            strategy,
+            state,
+            orders,
+            synced,
+            (market_price, priced_at),
+            now,
+        )
+        .await
+    }
+
+    /// [`Runtime::reading_step`] 读完标记价之后的部分：可用资金和仓位核对。
+    #[allow(clippy::too_many_arguments)]
+    async fn reading_at(
+        &self,
+        strategy_id: &StrategyId,
+        strategy: &Strategy,
+        state: &mut StrategyState,
+        orders: &mut [StoredOrder],
+        synced: &Synced,
+        (market_price, priced_at): (Price, DateTime<Utc>),
+        now: DateTime<Utc>,
+    ) -> Result<Reading, RuntimeError> {
+        let instrument = strategy.spec().instrument();
         let available_collateral = self.account.available_collateral().await?;
 
         let since = synced.since;
@@ -816,6 +896,13 @@ impl Runtime {
             limit_price: intent.limit_price,
             quantity: intent.quantity,
             reduce_only: intent.reduce_only,
+            // 失效减仓按标记价让出滑点上限去成交，没成交的部分不能留在场上：下一步按新的
+            // 标记价重新算（B38）。
+            time_in_force: if intent.purpose == OrderPurpose::Invalidation {
+                TimeInForce::ImmediateOrCancel
+            } else {
+                TimeInForce::GoodTillCanceled
+            },
             expires_at: order.expires_at,
         };
         match self.exchange.place_order(&request).await {
@@ -943,6 +1030,14 @@ fn withdraw_increasing(plan: &mut Plan, orders: &[StoredOrder]) {
             plan.cancel.push(order.record.client_order_id.clone());
         }
     }
+}
+
+/// 运行中一步的读取结果。
+pub(super) enum Read {
+    /// 判定需要的全部读数。
+    Snapshot(Snapshot),
+    /// 读到的标记价收到时还新鲜，已经越过了失效价：这一步改走失效。
+    Crossed(Price),
 }
 
 /// 交易所对一张单的回答。

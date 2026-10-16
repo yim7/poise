@@ -88,7 +88,6 @@ impl<'de> Deserialize<'de> for StrategyId {
 /// 先落状态再动手，是为了让「不再下新单」这件事在崩溃后依然成立——只存在内存里的
 /// 意图，重启就没了。
 ///
-/// 设计里还有「已失效」，它由风控触发，属于后续任务。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrategyStatus {
     /// 草稿：参数已保存，还没有开始下单。草稿不在 `strategies` 表里。
@@ -107,6 +106,12 @@ pub enum StrategyStatus {
     Stopping,
     /// 已停止：订单已撤销、仓位保留，策略归档只读。
     Stopped,
+    /// 失效中：标记价越过了失效价，正在撤单、用只减仓单减到剩余数量（第 7.5 节）。
+    /// 不下任何别的单，也不能暂停、恢复。
+    Invalidating,
+    /// 已失效：所有订单都有了结论，仓位不超过剩余数量（或只剩下不了单的尾量）。和
+    /// 「已停止」一样归档只读：价格回来也不自动恢复，剩余仓位由新策略接管（第 8 节）。
+    Invalidated,
 }
 
 impl StrategyStatus {
@@ -119,7 +124,14 @@ impl StrategyStatus {
             Self::Paused => "paused",
             Self::Stopping => "stopping",
             Self::Stopped => "stopped",
+            Self::Invalidating => "invalidating",
+            Self::Invalidated => "invalidated",
         }
+    }
+
+    /// 归档只读：不能再驱动、不能改参数，也不能恢复（第 2.4、7.5 节）。
+    pub const fn is_archived(self) -> bool {
+        matches!(self, Self::Stopped | Self::Invalidated)
     }
 
     /// 这个状态下策略还在交易所里活动（在场订单由它负责）。
@@ -128,7 +140,12 @@ impl StrategyStatus {
     pub const fn is_live(self) -> bool {
         matches!(
             self,
-            Self::Running | Self::Restoring | Self::Pausing | Self::Paused | Self::Stopping
+            Self::Running
+                | Self::Restoring
+                | Self::Pausing
+                | Self::Paused
+                | Self::Stopping
+                | Self::Invalidating
         )
     }
 
@@ -146,6 +163,8 @@ impl StrategyStatus {
             "paused" => Ok(Self::Paused),
             "stopping" => Ok(Self::Stopping),
             "stopped" => Ok(Self::Stopped),
+            "invalidating" => Ok(Self::Invalidating),
+            "invalidated" => Ok(Self::Invalidated),
             other => Err(StoreError::UnknownStatus {
                 value: other.to_string(),
             }),
@@ -1309,6 +1328,7 @@ fn parse_purpose(value: &str) -> Result<OrderPurpose, StoreError> {
         "core" => Ok(OrderPurpose::Core),
         "grid_entry" => Ok(OrderPurpose::GridEntry),
         "grid_exit" => Ok(OrderPurpose::GridExit),
+        "invalidation" => Ok(OrderPurpose::Invalidation),
         other => Err(StoreError::UnknownPurpose {
             value: other.to_string(),
         }),
@@ -1331,6 +1351,7 @@ fn unit_columns(unit: Unit) -> (&'static str, &'static str, i64) {
     match unit {
         Unit::Batch(_, BatchIndex(index)) => ("batch", direction, index as i64),
         Unit::Cell(_, CellIndex(index)) => ("cell", direction, index as i64),
+        Unit::Side(_) => ("side", direction, 0),
     }
 }
 
@@ -1343,6 +1364,7 @@ fn parse_unit(kind: &str, direction: &str, index: i64) -> Result<Unit, StoreErro
     match kind {
         "batch" => Ok(Unit::Batch(direction, BatchIndex(index))),
         "cell" => Ok(Unit::Cell(direction, CellIndex(index))),
+        "side" => Ok(Unit::Side(direction)),
         _ => Err(unknown()),
     }
 }

@@ -69,6 +69,7 @@ impl Strategy {
         match unit {
             Unit::Batch(..) => batches_are_units,
             Unit::Cell(..) => !batches_are_units,
+            Unit::Side(_) => false,
         }
     }
 

@@ -88,10 +88,16 @@ impl Strategy {
                                     .saturating_add(applied)
                                     .min(cell_quantity);
                             }
-                            OrderPurpose::Core => {}
+                            OrderPurpose::Core | OrderPurpose::Invalidation => {}
                         }
                     }
                 }
+                // 失效减仓的成交不改批次和格子：它按交易所实时仓位卖，可能卖掉账上还没记入的
+                // 成交；先记账就会把那部分丢掉，之后迟到的成交再补记，账就永远对不上了。应有
+                // 持仓直接扣掉它的累计成交量（[`crate::decision::expected_position`]），批次表和
+                // 格子表按总量现算「先网格、后主仓」（[`Strategy::after_invalidation`]），
+                // 结果和成交到达的先后无关。
+                Unit::Side(_) => {}
             }
             // 限速的放行时刻从「最近放行单位的第一笔成交」算起。
             self.record_fill_time(state, order.unit, filled_at);
@@ -343,5 +349,29 @@ mod tests {
             strategy.expected_position(&state),
             crate::units::Position::parse("0.175").unwrap()
         );
+    }
+
+    /// 失效减仓的成交只记在订单上，不改批次和格子（见 [`Strategy::apply_fill`]）。
+    #[test]
+    fn invalidation_fills_leave_the_batches_and_cells_alone() {
+        let strategy = core_long_strategy();
+        let mut state = strategy.initial_state();
+        long_state_mut(&mut state)
+            .batch_mut(BatchIndex(0))
+            .unwrap()
+            .filled = Quantity::parse("0.175").unwrap();
+        let before = state.clone();
+        let mut order = OrderRecord {
+            unit: Unit::Side(Direction::Long),
+            purpose: OrderPurpose::Invalidation,
+            reduce_only: true,
+            ..order(OrderPurpose::Invalidation, "0.1")
+        };
+
+        let applied = fill(&strategy, &mut state, &mut order, "0.1");
+
+        assert_eq!(applied, Quantity::parse("0.1").unwrap());
+        assert_eq!(order.status, OrderStatus::Filled);
+        assert_eq!(state, before);
     }
 }

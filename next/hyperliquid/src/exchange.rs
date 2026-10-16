@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use poise_runtime::{
     Exchange, ExchangeError, ExchangeFill, ExchangeOrder, OrderLookup, OrderReceipt, OrderRequest,
+    TimeInForce,
 };
 use poise_strategy::instrument::Instrument;
 use poise_strategy::order::{ClientOrderId, OrderStatus, Side};
@@ -41,7 +42,12 @@ impl Exchange for Hyperliquid {
                 limit_px: request.limit_price.to_string(),
                 sz: request.quantity.to_string(),
                 reduce_only: request.reduce_only,
-                order_type: OrderType::Limit(LimitOrderType { tif: "Gtc" }),
+                order_type: OrderType::Limit(LimitOrderType {
+                    tif: match request.time_in_force {
+                        TimeInForce::GoodTillCanceled => "Gtc",
+                        TimeInForce::ImmediateOrCancel => "Ioc",
+                    },
+                }),
                 cloid,
             }],
             grouping: "na",
@@ -53,7 +59,16 @@ impl Exchange for Hyperliquid {
                 Some(request.expires_at.timestamp_millis().max(0) as u64),
             )
             .await?;
-        order_receipt(&response)
+        let mut receipt = order_receipt(&response)?;
+        // 立即成交否则撤销的单只成交了一部分时，交易所同样回 `filled`，`totalSz` 是成交的
+        // 那部分：剩下的已经撤掉了，记成已撤销，不能当成全部成交。
+        if request.time_in_force == TimeInForce::ImmediateOrCancel
+            && receipt.status == OrderStatus::Filled
+            && receipt.cumulative_filled < request.quantity
+        {
+            receipt.status = OrderStatus::Canceled;
+        }
+        Ok(receipt)
     }
 
     async fn cancel_order(

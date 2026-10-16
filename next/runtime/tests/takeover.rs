@@ -5,7 +5,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{Console, account, at, console_over, core_long_config, exchange};
-use poise_runtime::{Exchange, ManualClock, OrderRequest, Store, StrategyStatus};
+use poise_runtime::{Exchange, ManualClock, OrderRequest, Store, StrategyStatus, TimeInForce};
 use poise_strategy::batch::BatchIndex;
 use poise_strategy::order::{ClientOrderId, OrderPurpose, Side, Unit};
 use poise_strategy::side::Direction;
@@ -128,6 +128,7 @@ async fn orders_that_are_not_ours_are_listed_and_left_alone() {
             limit_price: Price::parse("120000").unwrap(),
             quantity: quantity("0.01"),
             reduce_only: false,
+            time_in_force: TimeInForce::GoodTillCanceled,
             expires_at: at(10),
         })
         .await

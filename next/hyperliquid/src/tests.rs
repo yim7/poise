@@ -3,6 +3,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use poise_runtime::{
     Account, AccountMode, Exchange, ExchangeError, Network, OrderLookup, OrderRequest, SecretKey,
+    TimeInForce,
 };
 use poise_strategy::instrument::{Fees, Instrument, PriceRule};
 use poise_strategy::order::{ClientOrderId, OrderStatus, Side};
@@ -41,6 +42,7 @@ fn request(quantity: &str, price: &str) -> OrderRequest {
         limit_price: Price::parse(price).unwrap(),
         quantity: Quantity::parse(quantity).unwrap(),
         reduce_only: false,
+        time_in_force: TimeInForce::GoodTillCanceled,
         expires_at: at(NOW_MS as i64 + 5_000),
     }
 }
@@ -160,6 +162,31 @@ async fn place_order_reports_an_immediate_fill_with_its_size() {
 
     assert_eq!(receipt.status, OrderStatus::Filled);
     assert_eq!(receipt.cumulative_filled, Quantity::parse("0.001").unwrap());
+}
+
+/// 观点失效的减仓单（第 7.5 节）：按 `Ioc` 发出；只成交了一部分时剩下的已经撤掉，记成
+/// 已撤销，不能当成全部成交。
+#[tokio::test]
+async fn an_immediate_or_cancel_order_is_sent_as_ioc_and_a_partial_fill_is_canceled() {
+    let transport = FakeTransport::new(vec![
+        fixture(fixtures::META),
+        fixture(fixtures::ORDER_FILLED),
+    ]);
+    let client = client(transport.clone(), fixed_clock(NOW_MS));
+    let request = OrderRequest {
+        reduce_only: true,
+        time_in_force: TimeInForce::ImmediateOrCancel,
+        side: Side::Sell,
+        ..request("0.002", "94000")
+    };
+
+    let receipt = client.place_order(&request).await.unwrap();
+
+    let order = &transport.request(1).body["action"]["orders"][0];
+    assert_eq!(order["t"], json!({"limit": {"tif": "Ioc"}}));
+    assert_eq!(order["r"], true);
+    assert_eq!(receipt.cumulative_filled, Quantity::parse("0.001").unwrap());
+    assert_eq!(receipt.status, OrderStatus::Canceled);
 }
 
 #[tokio::test]

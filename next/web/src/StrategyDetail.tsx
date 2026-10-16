@@ -60,11 +60,17 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
   const strategy = detail.data
   const summary = strategy.summary
   const status = summary.status
-  const archived = status === 'stopped'
+  // 已失效和已归档一样只读：价格回来也不自动恢复（第 7.5 节）。
+  const archived = status === 'stopped' || status === 'invalidated'
   const running = status === 'running'
-  // 过渡状态：后台正在撤单、按 cloid 查终态、补记成交，一张新单都不下，走完自己转成
-  // 「已暂停」「已归档」或「运行中」。用户要能看到它还在走，以及为什么还没走完。
-  const settling = status === 'restoring' || status === 'pausing' || status === 'stopping'
+  // 过渡状态：后台正在撤单、按 cloid 查终态、补记成交，走完自己转成「已暂停」「已归档」
+  // 「运行中」或「已失效」。失效中除了撤单还在用只减仓单减仓。用户要能看到它还在走，
+  // 以及为什么还没走完。
+  const settling =
+    status === 'restoring' ||
+    status === 'pausing' ||
+    status === 'stopping' ||
+    status === 'invalidating'
   // 「会被暂停」只在服务端真的给出了暂停原因时才算数。仓位和应有持仓对不上但数据还在变
   // 的时候，服务端说的是「下一步再核对」，不会暂停：按对不上就报暂停会吓着用户。
   const willPause = running && strategy.waiting.includes('position_check_failed')
@@ -183,6 +189,9 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
         )
       ) : settling ? (
         <p>{strategy.note ?? `${statusLabel(status)}：后台正在撤单和对账，期间不会下新单。`}</p>
+      ) : status === 'invalidated' && strategy.note !== null ? (
+        // 已失效的说明里有没减掉的尾量，要让用户看到。
+        <p>{strategy.note}</p>
       ) : (
         <p>策略{statusLabel(status)}，没有在等的事。</p>
       )}
@@ -192,8 +201,12 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
       <OrdersTable orders={strategy.orders} />
       <ConfigVersionTable versions={strategy.config_versions} />
 
-      {archived ? (
+      {status === 'invalidated' ? (
+        <p className="hint">策略已失效，只能只读查看；要继续做，新建一个策略接管剩下的仓位。</p>
+      ) : archived ? (
         <p className="hint">策略已归档，只能只读查看。</p>
+      ) : status === 'invalidating' ? (
+        <p className="hint">失效减仓中，参数改不了；要放弃减仓，点停止，剩下的仓位自己处理。</p>
       ) : running ? (
         <RunningEditor
           key={summary.config_version}

@@ -2,7 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use poise_strategy::Strategy;
-use poise_strategy::order::WorkingOrder;
+use poise_strategy::invalidation::invalidation_sold;
+use poise_strategy::order::{OrderRecord, WorkingOrder};
 use poise_strategy::units::{Notional, Rate};
 
 use crate::store::{StrategyId, StrategyStatus, ViewSnapshot};
@@ -33,8 +34,12 @@ impl Runtime {
         let stored = self.store.load_strategy(strategy_id)?;
         let view = self.store.load_view(strategy_id)?;
         let strategy = Strategy::new(stored.config.clone(), stored.spec.clone(), stored.fees)?;
-        let state = self.load_state(strategy_id, &strategy)?;
         let orders = self.store.load_orders(strategy_id)?;
+        // 观点失效卖出的数量不进账本：批次表和格子表按「先网格、后主仓」把它扣掉再显示
+        // （第 7.5 节，见 [`Strategy::after_invalidation`]）。
+        let records: Vec<OrderRecord> = orders.iter().map(|order| order.record.clone()).collect();
+        let sold = invalidation_sold(&records);
+        let state = strategy.after_invalidation(&self.load_state(strategy_id, &strategy)?, &sold);
         let working: Vec<WorkingOrder> = orders
             .iter()
             .filter(|order| order.record.is_working())

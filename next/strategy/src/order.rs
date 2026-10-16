@@ -18,22 +18,28 @@ use crate::units::{Price, Quantity};
 pub enum Unit {
     Batch(Direction, BatchIndex),
     Cell(Direction, CellIndex),
+    /// 整个一侧：观点失效时的减仓单不属于哪一批、哪一格，成交按「先网格、后主仓」
+    /// 记到这一侧上（第 7.5 节）。
+    Side(Direction),
 }
 
 impl Unit {
     /// 这个单位属于哪一侧。
     pub const fn direction(self) -> Direction {
         match self {
-            Self::Batch(direction, _) | Self::Cell(direction, _) => direction,
+            Self::Batch(direction, _) | Self::Cell(direction, _) | Self::Side(direction) => {
+                direction
+            }
         }
     }
 
     /// 这个单位在启动顺序上的下标：批次的顺序就是批次下标，格子的顺序就是格子下标
-    /// （两者都是从靠近空隙的一端开始）。
+    /// （两者都是从靠近空隙的一端开始）。整个一侧不参与启动顺序，是 0。
     pub const fn index(self) -> usize {
         match self {
             Self::Batch(_, index) => index.0,
             Self::Cell(_, index) => index.0,
+            Self::Side(_) => 0,
         }
     }
 
@@ -48,6 +54,7 @@ impl std::fmt::Display for Unit {
         match self {
             Self::Batch(direction, index) => write!(formatter, "{direction} batch {index}"),
             Self::Cell(direction, index) => write!(formatter, "{direction} cell {index}"),
+            Self::Side(direction) => write!(formatter, "{direction} side"),
         }
     }
 }
@@ -118,6 +125,8 @@ pub enum OrderPurpose {
     GridEntry,
     /// 格子的平仓腿：多头侧卖出，空头侧买入平仓。
     GridExit,
+    /// 观点失效后的减仓单：只减仓、立即成交否则撤销，方向和平仓腿相同（第 7.5 节）。
+    Invalidation,
 }
 
 impl OrderPurpose {
@@ -125,7 +134,7 @@ impl OrderPurpose {
     pub const fn side(self, direction: Direction) -> Side {
         match self {
             Self::Core | Self::GridEntry => direction.entry_side(),
-            Self::GridExit => direction.exit_side(),
+            Self::GridExit | Self::Invalidation => direction.exit_side(),
         }
     }
 
@@ -134,6 +143,7 @@ impl OrderPurpose {
             Self::Core => "core",
             Self::GridEntry => "grid_entry",
             Self::GridExit => "grid_exit",
+            Self::Invalidation => "invalidation",
         }
     }
 }

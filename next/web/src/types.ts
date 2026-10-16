@@ -19,6 +19,10 @@ export type StrategyStatus =
   | 'paused'
   | 'stopping'
   | 'stopped'
+  /** 失效中：标记价越过失效价，正在撤单、用只减仓单减到剩余数量（第 7.5 节）。 */
+  | 'invalidating'
+  /** 已失效：和已归档一样只读；价格回来也不自动恢复。 */
+  | 'invalidated'
 
 /** 限速间隔按 `[秒, 纳秒]` 传（chrono 的 Duration）。 */
 export type ThrottleInterval = [number, number] | null

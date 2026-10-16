@@ -164,6 +164,43 @@ describe('运行详情', () => {
     expect(screen.queryByText('应有持仓')).not.toBeInTheDocument()
   })
 
+  it('b37_失效中只能停止：显示减仓进度，没有暂停、恢复和改参数', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({
+          summary: summary({ status: 'invalidating' }),
+          note: '失效减仓中：标记价越过了失效价，正在用只减仓单减仓，还要减 0.2。',
+        }),
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    expect(await screen.findByText(/还要减 0.2/)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('失效中')
+    expect(screen.getByRole('button', { name: '停止' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '暂停' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '恢复' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '保存运行参数' })).not.toBeInTheDocument()
+  })
+
+  it('b39d_已失效只读，说明里显示没减掉的尾量', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({
+          summary: summary({ status: 'invalidated', working_orders: 0 }),
+          orders: [],
+          note: '已失效：……超出剩余数量的 0.0005 不足最低下单金额，下不了单，由你决定是否手动处理。',
+        }),
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    expect(await screen.findByText(/0.0005 不足最低下单金额/)).toBeInTheDocument()
+    expect(screen.getByText(/新建一个策略接管剩下的仓位/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '恢复' })).not.toBeInTheDocument()
+  })
+
   it('不在运行时没有在等的事，也不拿仓位和应有持仓比', async () => {
     // 服务端只在运行中才算应有持仓：不在运行时这一项是 0，拿它比较会一直报不一致。
     detailRoutes({

@@ -8,7 +8,10 @@ use chrono::Utc;
 use poise_runtime::{
     Exchange, StartupCheck, StartupWarning, StoredOrder, StrategyStatus, validate_startup,
 };
+use poise_strategy::Strategy;
 use poise_strategy::instrument::{Instrument, PriceRule};
+use poise_strategy::invalidation::invalidation_sold;
+use poise_strategy::order::OrderRecord;
 use poise_strategy::side::Direction;
 
 use crate::instance::Instance;
@@ -89,7 +92,14 @@ pub async fn status(instance: &Instance, instrument: &Instrument) -> Result<()> 
         stored.spec.quantity_step(),
         stored.spec.min_order_notional()
     );
-    let state = store.load_state(strategy_id)?;
+    let orders = store.load_orders(strategy_id)?;
+    // 观点失效卖出的数量不进账本：和网页的格子表一样，按「先网格、后主仓」扣掉再显示。
+    let records: Vec<OrderRecord> = orders.iter().map(|order| order.record.clone()).collect();
+    let strategy = Strategy::new(stored.config.clone(), stored.spec.clone(), stored.fees)?;
+    let state = strategy.after_invalidation(
+        &store.load_state(strategy_id)?,
+        &invalidation_sold(&records),
+    );
     for direction in Direction::ALL {
         let Some(side) = stored.config.side(direction) else {
             continue;
@@ -119,7 +129,6 @@ pub async fn status(instance: &Instance, instrument: &Instrument) -> Result<()> 
         }
     }
 
-    let orders = store.load_orders(strategy_id)?;
     println!("本策略的订单 {} 张", orders.len());
     for order in &orders {
         print_order(order);
@@ -223,8 +232,11 @@ enum Action {
 
 fn action_for(status: StrategyStatus) -> Action {
     match status {
-        StrategyStatus::Stopped | StrategyStatus::Draft => Action::Skip,
-        StrategyStatus::Stopping => Action::Stop,
+        StrategyStatus::Stopped | StrategyStatus::Invalidated | StrategyStatus::Draft => {
+            Action::Skip
+        }
+        // 失效中不接受暂停（它正在减仓）：要它停下只能走停止，撤单之后归档。
+        StrategyStatus::Stopping | StrategyStatus::Invalidating => Action::Stop,
         StrategyStatus::Running
         | StrategyStatus::Restoring
         | StrategyStatus::Pausing
@@ -242,6 +254,8 @@ fn status_name(status: StrategyStatus) -> &'static str {
         StrategyStatus::Paused => "已暂停",
         StrategyStatus::Stopping => "停止中",
         StrategyStatus::Stopped => "已归档",
+        StrategyStatus::Invalidating => "失效中",
+        StrategyStatus::Invalidated => "已失效",
     }
 }
 

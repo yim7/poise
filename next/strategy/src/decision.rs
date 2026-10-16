@@ -289,14 +289,19 @@ pub fn position_check(
 
 /// 仓位核对时我们预计交易所会有的仓位。
 ///
-/// 由格子状态算出的应有持仓，加上交易所已经成交、我们还没记入的数量：成交记录可能
-/// 比挂单状态晚到，这段差额是能解释的（第 7.1.3 节）。
+/// 由格子状态算出的应有持仓，减去观点失效已经记入的减仓成交（它们不改格子状态，见
+/// [`crate::Strategy::apply_fill`]），再加上交易所已经成交、我们还没记入的数量：成交记录
+/// 可能比挂单状态晚到，这段差额是能解释的（第 7.1.3 节）。
 pub fn expected_position(
     base: Position,
     reported: &[(ClientOrderId, Quantity)],
     orders: &[OrderState],
 ) -> Position {
-    let mut unrecorded = 0_i64;
+    let mut unrecorded: i64 = orders
+        .iter()
+        .filter(|order| order.purpose == OrderPurpose::Invalidation)
+        .map(|order| signed_delta(order.unit.side(order.purpose), order.cumulative_filled))
+        .sum();
     for (client_order_id, cumulative) in reported {
         let Some(order) = orders
             .iter()
@@ -539,6 +544,50 @@ mod tests {
         assert_eq!(
             expected_position(Position::parse("0.05").unwrap(), &reported, &orders),
             Position::parse("0.07").unwrap()
+        );
+    }
+
+    /// 观点失效的减仓成交不进账本（见 `Strategy::apply_fill`）：应有持仓直接扣掉它记入的
+    /// 累计成交量。迟到的增仓成交先记还是后记，结果都一样。
+    #[test]
+    fn recorded_invalidation_fills_come_off_the_expected_position() {
+        let sold = OrderState {
+            client_order_id: ClientOrderId::try_new("0xinv").unwrap(),
+            unit: Unit::Side(crate::side::Direction::Long),
+            purpose: OrderPurpose::Invalidation,
+            cumulative_filled: Quantity::parse("1").unwrap(),
+            fills_reconciled: true,
+        };
+
+        // 账上 .6、迟到的 .4 还没记入：交易所报了它的累计量，按未记入计入。
+        let late = OrderState {
+            client_order_id: ClientOrderId::try_new("0xlate").unwrap(),
+            unit: Unit::Batch(crate::side::Direction::Long, crate::batch::BatchIndex(1)),
+            purpose: OrderPurpose::Core,
+            cumulative_filled: Quantity::ZERO,
+            fills_reconciled: false,
+        };
+        let reported = [(
+            late.client_order_id.clone(),
+            Quantity::parse("0.4").unwrap(),
+        )];
+        assert_eq!(
+            expected_position(
+                Position::parse("0.6").unwrap(),
+                &reported,
+                &[sold.clone(), late.clone()]
+            ),
+            Position::ZERO
+        );
+        // 迟到的 .4 记入之后：账上 1，同样是 0。
+        let booked = OrderState {
+            cumulative_filled: Quantity::parse("0.4").unwrap(),
+            fills_reconciled: true,
+            ..late
+        };
+        assert_eq!(
+            expected_position(Position::parse("1").unwrap(), &reported, &[sold, booked]),
+            Position::ZERO
         );
     }
 

@@ -19,8 +19,18 @@ pub struct OrderRequest {
     pub limit_price: Price,
     pub quantity: Quantity,
     pub reduce_only: bool,
+    pub time_in_force: TimeInForce,
     /// 超过这个时间戳的动作会被交易所拒绝。
     pub expires_at: DateTime<Utc>,
+}
+
+/// 订单的有效期策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeInForce {
+    /// 一直挂到成交或撤销：网格和主仓的挂单。
+    GoodTillCanceled,
+    /// 能成交的部分立即成交，剩下的立即撤销：观点失效的减仓单（第 7.5 节）。
+    ImmediateOrCancel,
 }
 
 /// 下单结果。

@@ -4,14 +4,16 @@
 //! 合约规则都由测试直接给出，也由测试随时改动（用来构造「预览之后账户变了」）。
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
+use chrono::Duration;
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
 use poise_strategy::stress::MarginTiers;
 use poise_strategy::units::Notional;
 
 use crate::account::{Account, AccountMode, ApiWallet, Leverage, MarginReading};
+use crate::clock::ManualClock;
 use crate::exchange::ExchangeError;
 
 /// 默认的可用抵押：足够大，不会意外挡住配置。
@@ -30,6 +32,8 @@ struct SimAccount {
     collateral: Notional,
     /// 下一次查可用资金失败的原因。可用资金只用于展示，拿不到它不该挡住撤单。
     fail_next_collateral: Option<String>,
+    /// 下一次查可用资金时，这个时钟往前走多久（账户接口响应很慢）。
+    slow_next_collateral: Option<(Arc<ManualClock>, Duration)>,
     /// 保证金读数：默认没有任何占用，账户比率为 0。
     margin: MarginReading,
     /// 还要让几次保证金读数失败。
@@ -56,6 +60,7 @@ impl SimulatedAccount {
                 wallets: Vec::new(),
                 collateral: Notional::parse(DEFAULT_COLLATERAL).expect("a valid default"),
                 fail_next_collateral: None,
+                slow_next_collateral: None,
                 margin: MarginReading {
                     balance: Notional::parse(DEFAULT_COLLATERAL).expect("a valid default"),
                     available_after_maintenance: Notional::parse(DEFAULT_COLLATERAL)
@@ -108,6 +113,11 @@ impl SimulatedAccount {
     /// 让下一次查可用资金失败：账户接口暂时不可用。
     pub fn fail_next_collateral(&self, reason: &str) {
         self.lock().fail_next_collateral = Some(reason.to_string());
+    }
+
+    /// 下一次查可用资金让 `clock` 往前走 `by`：用来构造「后面的读取拖到行情过期」。
+    pub fn slow_next_collateral(&self, clock: Arc<ManualClock>, by: Duration) {
+        self.lock().slow_next_collateral = Some((clock, by));
     }
 
     /// 保证金读数变了（例如用户在别的标的上加了仓）。
@@ -165,6 +175,9 @@ impl Account for SimulatedAccount {
 
     async fn available_collateral(&self) -> Result<Notional, ExchangeError> {
         let mut state = self.lock();
+        if let Some((clock, by)) = state.slow_next_collateral.take() {
+            clock.advance(by);
+        }
         if let Some(reason) = state.fail_next_collateral.take() {
             return Err(ExchangeError::Unavailable { reason });
         }

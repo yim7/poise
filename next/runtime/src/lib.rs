@@ -25,6 +25,7 @@ pub use crate::account::{Account, AccountMode, ApiWallet};
 pub use crate::clock::{Clock, ManualClock, SystemClock};
 pub use crate::exchange::{
     Exchange, ExchangeError, ExchangeFill, ExchangeOrder, OrderLookup, OrderReceipt, OrderRequest,
+    TimeInForce,
 };
 pub use crate::lock::{InstanceLock, LockError};
 pub use crate::runtime::{

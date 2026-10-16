@@ -15,6 +15,7 @@ pub mod error;
 pub mod funds;
 pub mod grid;
 pub mod instrument;
+pub mod invalidation;
 pub mod ledger;
 pub mod order;
 pub mod planning;

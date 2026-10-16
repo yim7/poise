@@ -19,6 +19,7 @@ use poise_strategy::units::{Position, Price, Quantity};
 use crate::clock::ManualClock;
 use crate::exchange::{
     Exchange, ExchangeError, ExchangeFill, ExchangeOrder, OrderLookup, OrderReceipt, OrderRequest,
+    TimeInForce,
 };
 use crate::store::Store;
 
@@ -45,6 +46,13 @@ struct SimState {
     reject_for_margin: usize,
     /// 下一张单照常挂上，但回执丢在路上（发送方只看到超时）。
     lose_next_place_response: Option<String>,
+    /// 下一张立即成交否则撤销的单最多成交多少：用来构造「滑点上限内没成交完」（B38）。
+    ioc_fill_cap: Option<Quantity>,
+    /// 下一张只减仓标记等于它的单，请求还在路上：发送方收到结果未知，交易所还没收到
+    /// （B39b、B39c）。
+    hold_next_place: Option<bool>,
+    /// 还在路上的请求，[`SimulatedExchange::deliver_held_places`] 时才到达交易所。
+    held_places: Vec<OrderRequest>,
     /// 按 `cloid` 查询和挂单列表都暂时看不到的订单（交易所查询滞后）。
     hidden_from_queries: Vec<ClientOrderId>,
     /// 查标记价时，这个时钟往前走多久（行情响应很慢）。
@@ -55,6 +63,9 @@ struct SimState {
     slow_places: Option<(Arc<ManualClock>, Duration)>,
     /// 下一次查标记价失败的原因。行情只用于展示和判定，拿不到它不该挡住撤单。
     fail_next_mark_price: Option<String>,
+    /// 接下来几次查标记价依次拿到的结果：`Ok` 是这一次读到的价格（不改撮合用的行情），
+    /// `Err` 是这一次失败的原因。用来构造「两次读数之间价格变了、或者第二次读不到」。
+    scripted_mark_prices: std::collections::VecDeque<Result<Price, String>>,
     /// 接下来几次查挂单列表失败。撤哪几张单靠库里存着的 `cloid` 就够，问不到挂单
     /// 列表不该挡住撤单。
     fail_working_orders: usize,
@@ -160,12 +171,16 @@ impl SimulatedExchange {
                 reject_next_place: None,
                 unknown_next_place: None,
                 lose_next_place_response: None,
+                ioc_fill_cap: None,
+                hold_next_place: None,
+                held_places: Vec::new(),
                 reject_for_margin: 0,
                 hidden_from_queries: Vec::new(),
                 slow_places: None,
                 deliver_fills_on_next_position: false,
                 slow_mark_price: None,
                 fail_next_mark_price: None,
+                scripted_mark_prices: std::collections::VecDeque::new(),
                 fail_working_orders: 0,
                 fail_working_orders_reason: String::new(),
                 fail_fills_since: 0,
@@ -460,6 +475,35 @@ impl SimulatedExchange {
         self.lock().lose_next_place_response = Some(reason.to_string());
     }
 
+    /// 下一张增仓单（不是只减仓的单）的请求在路上耽搁：发送方收到结果未知，交易所这时
+    /// 还不知道它，查不到、撤不掉，要等 [`SimulatedExchange::deliver_held_places`] 才到达。
+    pub fn hold_next_increasing_place(&self) {
+        self.lock().hold_next_place = Some(false);
+    }
+
+    /// 同上，耽搁的是下一张只减仓单。
+    pub fn hold_next_reducing_place(&self) {
+        self.lock().hold_next_place = Some(true);
+    }
+
+    /// 在路上的请求在 `now` 这一刻到达交易所：没过 `expiresAfter` 的照常挂上、穿过行情的
+    /// 当场成交；过了的被拒绝，没有任何影响（第 9.1 节）。
+    pub fn deliver_held_places(&self, now: DateTime<Utc>) {
+        let mut state = self.lock();
+        state.now = now;
+        for request in std::mem::take(&mut state.held_places) {
+            if request.expires_at > now {
+                // 到达之后的结局只能靠查询知道：发送方早就收到了「结果未知」。
+                let _ = admit(&mut state, &request);
+            }
+        }
+    }
+
+    /// 下一张立即成交否则撤销的单最多成交 `quantity`，剩下的撤销（B38）。
+    pub fn cap_next_ioc_fill(&self, quantity: Quantity) {
+        self.lock().ioc_fill_cap = Some(quantity);
+    }
+
     /// 让这张单从按 `cloid` 查询和挂单列表里消失，成交和仓位照常变化。
     ///
     /// 用来构造「交易所查不到它，可它其实落过地」。
@@ -491,6 +535,14 @@ impl SimulatedExchange {
     /// 行情、可用资金、仓位都是展示用的读数，拿不到它们不该影响撤单。
     pub fn fail_next_mark_price(&self, reason: &str) {
         self.lock().fail_next_mark_price = Some(reason.to_string());
+    }
+
+    /// 接下来几次查标记价依次返回 `results`，用完之后照常返回当前行情。
+    pub fn script_mark_prices(&self, results: Vec<Result<Price, &str>>) {
+        self.lock().scripted_mark_prices = results
+            .into_iter()
+            .map(|result| result.map_err(str::to_string))
+            .collect();
     }
 
     /// 让接下来 `count` 次查挂单列表失败：交易所的订单接口暂时不可用。
@@ -619,7 +671,9 @@ impl Exchange for SimulatedExchange {
         if state
             .orders
             .iter()
-            .any(|order| order.request.client_order_id == request.client_order_id)
+            .map(|order| &order.request)
+            .chain(&state.held_places)
+            .any(|held| held.client_order_id == request.client_order_id)
         {
             return Err(ExchangeError::Rejected {
                 reason: format!(
@@ -629,20 +683,15 @@ impl Exchange for SimulatedExchange {
             });
         }
 
-        state.next_order_id += 1;
-        let order = SimOrder {
-            request: request.clone(),
-            exchange_order_id: format!("sim-order-{}", state.next_order_id),
-            cumulative_filled: Quantity::ZERO,
-            status: OrderStatus::Open,
-        };
-        state.orders.push(order);
-        let index = state.orders.len() - 1;
-        if state.orders[index].is_crossed(state.market_price) {
-            let quantity = state.orders[index].remaining();
-            let now = state.now;
-            record_fill(&mut state, index, quantity, now);
+        if state.hold_next_place == Some(request.reduce_only) {
+            state.hold_next_place = None;
+            state.held_places.push(request.clone());
+            return Err(ExchangeError::Unknown {
+                reason: "the request is still in flight".to_string(),
+            });
         }
+
+        let index = admit(&mut state, request)?;
         if let Some(reason) = state.lose_next_place_response.take() {
             return Err(ExchangeError::Unknown { reason });
         }
@@ -817,11 +866,46 @@ impl Exchange for SimulatedExchange {
         if let Some(reason) = state.fail_next_mark_price.take() {
             return Err(ExchangeError::Unavailable { reason });
         }
+        if let Some(scripted) = state.scripted_mark_prices.pop_front() {
+            return scripted.map_err(|reason| ExchangeError::Unavailable { reason });
+        }
         Ok(state.market_price)
     }
 }
 
 /// 让所有穿过最新价的挂单按各自限价全部成交。
+/// 一张单落到交易所：挂上，穿过行情的当场成交；立即成交否则撤销的单剩下的撤销，
+/// 一点都没成交时和 Hyperliquid 一样整张拒绝。返回它在挂单表里的下标。
+fn admit(state: &mut SimState, request: &OrderRequest) -> Result<usize, ExchangeError> {
+    state.next_order_id += 1;
+    let order = SimOrder {
+        request: request.clone(),
+        exchange_order_id: format!("sim-order-{}", state.next_order_id),
+        cumulative_filled: Quantity::ZERO,
+        status: OrderStatus::Open,
+    };
+    state.orders.push(order);
+    let index = state.orders.len() - 1;
+    let immediate = request.time_in_force == TimeInForce::ImmediateOrCancel;
+    if state.orders[index].is_crossed(state.market_price) {
+        let mut quantity = state.orders[index].remaining();
+        if immediate && let Some(cap) = state.ioc_fill_cap.take() {
+            quantity = quantity.min(cap);
+        }
+        let now = state.now;
+        record_fill(state, index, quantity, now);
+    }
+    if immediate && state.orders[index].is_working() {
+        state.orders[index].status = OrderStatus::Canceled;
+        if state.orders[index].cumulative_filled.is_zero() {
+            return Err(ExchangeError::Rejected {
+                reason: "Order could not immediately match against any resting orders.".to_string(),
+            });
+        }
+    }
+    Ok(index)
+}
+
 fn match_crossed_orders(state: &mut SimState, now: DateTime<Utc>) {
     loop {
         let market_price = state.market_price;

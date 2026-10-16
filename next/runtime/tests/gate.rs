@@ -12,7 +12,7 @@ mod common;
 
 use chrono::Duration;
 use common::{Harness, at, harness, long_cell};
-use poise_runtime::{Exchange, OrderRequest, StoredOrder, StrategyStatus};
+use poise_runtime::{Exchange, OrderRequest, StoredOrder, StrategyStatus, TimeInForce};
 use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, Side};
 use poise_strategy::planning::WaitReason;
 use poise_strategy::units::{Price, Quantity};
@@ -403,6 +403,7 @@ async fn planned_cancels_still_go_out_while_the_gate_is_closed() {
             limit_price: record.limit_price,
             quantity: record.quantity,
             reduce_only: false,
+            time_in_force: TimeInForce::GoodTillCanceled,
             expires_at: at(10),
         })
         .await
