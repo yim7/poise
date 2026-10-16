@@ -378,6 +378,7 @@ export function DraftForm({
           disabled={disabled}
           onChange={(event) => onInstrument(event.target.value)}
         />
+        <small>加密货币直接写，例如 BTC；黄金、原油、美股写 xyz:GOLD、xyz:CL、xyz:TSLA</small>
       </label>
       <div className="sides">
         <SideFields

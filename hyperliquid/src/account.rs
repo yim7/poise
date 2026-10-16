@@ -11,14 +11,12 @@ use poise_strategy::stress::{MarginTier, MarginTiers};
 use poise_strategy::units::{Notional, Rate};
 use serde_json::{Value, json};
 
-use crate::client::Hyperliquid;
+use crate::client::{Hyperliquid, USDC_TOKEN, with_dex};
+use crate::meta::hip3_fees;
 use crate::models::{
     ActiveAssetData, AgentResponse, ClearinghouseState, FundingEntry, MetaResponse,
     SpotClearinghouseState, UserFees,
 };
-
-/// USDC 在统一账户里的 token 序号。
-const USDC_TOKEN: u32 = 0;
 
 #[async_trait]
 impl Account for Hyperliquid {
@@ -105,22 +103,17 @@ impl Account for Hyperliquid {
     }
 
     /// 账户比率的组成部分（第 7.4 节，附录 A）：现货账户状态里的 USDC 余额和维持保证金之后
-    /// 的可用量（覆盖整个账户），以及默认 DEX 合约账户状态里的全仓维持保证金占用、逐仓仓位
-    /// 占用的保证金。
+    /// 的可用量（覆盖整个账户），以及合约账户状态里的全仓维持保证金占用、逐仓仓位占用的
+    /// 保证金。合约账户状态按市场分开：查默认市场，加上 `instruments` 所在的第三方市场
+    /// （HIP-3），几处相加；读数时刻取最旧的那一处。
     ///
     /// 任何一项读不出来都报「读不到」，闸门随之关上：拿一份缺了一块的读数当正常比率，只会
     /// 低估风险。
-    async fn margin(&self) -> Result<MarginReading, ExchangeError> {
+    async fn margin(&self, instruments: &[Instrument]) -> Result<MarginReading, ExchangeError> {
         let spot: SpotClearinghouseState = self
             .info(
                 &json!({"type": "spotClearinghouseState", "user": self.user()}),
                 "spotClearinghouseState",
-            )
-            .await?;
-        let perp: ClearinghouseState = self
-            .info(
-                &json!({"type": "clearinghouseState", "user": self.user()}),
-                "clearinghouseState",
             )
             .await?;
         let balance = spot
@@ -142,39 +135,61 @@ impl Account for Hyperliquid {
                 Notional::parse(available)
                     .map_err(|_| unreadable("available balance after maintenance"))
             })?;
-        let cross_maintenance = notional(
-            perp.cross_maintenance_margin_used.as_deref(),
-            "cross maintenance margin",
-        )?;
-        let mut isolated_margin = Notional::ZERO;
-        for position in &perp.asset_positions {
-            let position = &position.position;
-            let kind = position
-                .leverage
-                .as_ref()
-                .map(|leverage| leverage.kind.as_str());
-            match kind {
-                Some("cross") => {}
-                Some("isolated") => {
-                    let used = notional(position.margin_used.as_deref(), "isolated margin")?;
-                    isolated_margin =
-                        Notional::from_scaled(isolated_margin.scaled_floor() + used.scaled_floor());
-                }
-                // 不知道是全仓还是逐仓，就不知道要不要从分母里扣掉它的保证金。
-                _ => return Err(unreadable("position margin mode")),
+
+        let mut dexes: Vec<Option<&str>> = vec![None];
+        for instrument in instruments {
+            if let Some(dex) = instrument.dex()
+                && !dexes.contains(&Some(dex))
+            {
+                dexes.push(Some(dex));
             }
+        }
+        let mut cross_maintenance = Notional::ZERO;
+        let mut isolated_margin = Notional::ZERO;
+        let mut as_of: Option<DateTime<Utc>> = None;
+        for dex in dexes {
+            let mut body = json!({"type": "clearinghouseState", "user": self.user()});
+            if let Some(dex) = dex {
+                body["dex"] = json!(dex);
+            }
+            let perp: ClearinghouseState = self.info(&body, "clearinghouseState").await?;
+            let cross = notional(
+                perp.cross_maintenance_margin_used.as_deref(),
+                "cross maintenance margin",
+            )?;
+            cross_maintenance =
+                Notional::from_scaled(cross_maintenance.scaled_floor() + cross.scaled_floor());
+            for position in &perp.asset_positions {
+                let position = &position.position;
+                let kind = position
+                    .leverage
+                    .as_ref()
+                    .map(|leverage| leverage.kind.as_str());
+                match kind {
+                    Some("cross") => {}
+                    Some("isolated") => {
+                        let used = notional(position.margin_used.as_deref(), "isolated margin")?;
+                        isolated_margin = Notional::from_scaled(
+                            isolated_margin.scaled_floor() + used.scaled_floor(),
+                        );
+                    }
+                    // 不知道是全仓还是逐仓，就不知道要不要从分母里扣掉它的保证金。
+                    _ => return Err(unreadable("position margin mode")),
+                }
+            }
+            // 没有时刻就判断不了读数有没有过期：当成读不到，不能当成刚读的。
+            let time = perp
+                .time
+                .and_then(DateTime::from_timestamp_millis)
+                .ok_or_else(|| unreadable("margin reading time"))?;
+            as_of = Some(as_of.map_or(time, |oldest| oldest.min(time)));
         }
         Ok(MarginReading {
             balance,
             available_after_maintenance,
             cross_maintenance,
             isolated_margin,
-            // 没有时刻就判断不了读数有没有过期：当成读不到，不能当成刚读的。
-            as_of: Some(
-                perp.time
-                    .and_then(DateTime::from_timestamp_millis)
-                    .ok_or_else(|| unreadable("margin reading time"))?,
-            ),
+            as_of,
         })
     }
 
@@ -204,7 +219,9 @@ impl Account for Hyperliquid {
     /// 保证金分档表（`meta` 的 `marginTables`，按标的的 `marginTableId` 找）。分档表里找不到
     /// 这张表时只有一档，按标的的 `maxLeverage` 算（测试网实测：小编号的表不在列表里）。
     async fn margin_tiers(&self, instrument: &Instrument) -> Result<MarginTiers, ExchangeError> {
-        let meta: MetaResponse = self.info(&json!({"type": "meta"}), "meta").await?;
+        let meta: MetaResponse = self
+            .info(&with_dex(json!({"type": "meta"}), instrument), "meta")
+            .await?;
         let asset = meta
             .universe
             .iter()
@@ -242,16 +259,40 @@ impl Account for Hyperliquid {
         }
     }
 
-    async fn fees(&self) -> Result<Fees, ExchangeError> {
+    /// 账户费率（`userFees`），第三方市场的标的再按部署者的费用系数和增长模式调整
+    /// （[`AssetMeta::fees`](crate::meta::AssetMeta::fees)）。
+    async fn fees(&self, instrument: &Instrument) -> Result<Fees, ExchangeError> {
         let body = json!({
             "type": "userFees",
             "user": self.user(),
         });
         let fees: UserFees = self.info(&body, "userFees").await?;
-        Ok(Fees::new(
+        let account = Fees::new(
             Rate::parse(&fees.user_cross_rate).map_err(|_| unreadable("taker rate"))?,
             Rate::parse(&fees.user_add_rate).map_err(|_| unreadable("maker rate"))?,
-        ))
+        );
+        let Some(_) = instrument.dex() else {
+            return Ok(account);
+        };
+        // 第三方市场的费用系数和增长模式是部署者随时能改的设置：每次都现取，不用合约规则
+        // 的缓存。取不到或读不懂就报读不到，不能按主市场的费率算（会少算手续费）。
+        self.asset(instrument).await?;
+        let meta: MetaResponse = self
+            .info(&with_dex(json!({"type": "meta"}), instrument), "meta")
+            .await?;
+        let asset = meta
+            .universe
+            .iter()
+            .find(|asset| asset.name == instrument.symbol())
+            .ok_or_else(|| unreadable("deployer fee settings"))?;
+        let scale = asset
+            .deployer_fee_scale
+            .as_deref()
+            .and_then(|scale| Rate::parse(scale).ok())
+            .filter(|scale| *scale >= Rate::ZERO)
+            .ok_or_else(|| unreadable("deployer fee scale"))?;
+        let growth_mode = asset.growth_mode.as_deref() == Some("enabled");
+        Ok(hip3_fees(account, scale, growth_mode))
     }
 
     async fn funding_rate(&self, instrument: &Instrument) -> Result<FundingRate, ExchangeError> {

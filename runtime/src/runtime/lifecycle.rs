@@ -84,7 +84,7 @@ impl Runtime {
         let draft = self.store.load_draft(draft_id)?;
         let instrument = draft.config.instrument.clone();
         let spec = self.account.instrument_spec(&instrument).await?;
-        let fees = self.account.fees().await?;
+        let fees = self.account.fees(&instrument).await?;
         let market_price = self.exchange.mark_price(&instrument).await?;
         let position = self.exchange.position(&instrument).await?;
         let foreign_orders = self.exchange.working_orders(&instrument).await?;
@@ -197,7 +197,10 @@ impl Runtime {
                 )),
             });
         }
-        let margin = self.account.margin().await?;
+        let margin = self
+            .account
+            .margin(&self.margin_instruments(Some(instrument))?)
+            .await?;
         // 读数和运行时一样要新鲜：拿一份旧的高余额读数做压力测试，结论会偏乐观。
         if let Some(as_of) = margin.as_of
             && !fresh(as_of, self.clock.now(), settings.market_data_max_age)
@@ -301,7 +304,7 @@ impl Runtime {
         let draft = self.store.load_draft(draft_id)?;
         let instrument = draft.config.instrument.clone();
         let spec = self.account.instrument_spec(&instrument).await?;
-        let fees = self.account.fees().await?;
+        let fees = self.account.fees(&instrument).await?;
         let strategy = Strategy::new(draft.config, spec, fees)?;
 
         let (previewed_at, previewed_collateral, fingerprint) = parse_token(token).ok_or(

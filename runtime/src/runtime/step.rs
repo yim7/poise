@@ -337,6 +337,22 @@ impl Runtime {
         Ok(report)
     }
 
+    /// 算账户保证金率要看的标的：所有活动策略的标的，加上 `extra`（预览中的草稿）。
+    /// 第三方市场的占用按这些标的所在的市场查（第 7.4 节）。
+    pub(super) fn margin_instruments(
+        &self,
+        extra: Option<&Instrument>,
+    ) -> Result<Vec<Instrument>, RuntimeError> {
+        let mut instruments: Vec<Instrument> = extra.into_iter().cloned().collect();
+        for strategy_id in self.store.load_all_strategy_ids()? {
+            let stored = self.store.load_strategy(&strategy_id)?;
+            if stored.status.is_live() && !instruments.contains(&stored.instrument) {
+                instruments.push(stored.instrument);
+            }
+        }
+        Ok(instruments)
+    }
+
     /// 读账户保证金率（第 7.2、7.4 节），连同交易所给出这份读数的时刻。读不到，或者读数
     /// 比 `max_age` 还旧，都是 `None`：闸门按「读不到」关上，不发新单，已在场的挂单保留。
     /// 读不到不让这一步失败。
@@ -345,7 +361,14 @@ impl Runtime {
         strategy_id: &StrategyId,
         max_age: Duration,
     ) -> Option<(Rate, Option<DateTime<Utc>>)> {
-        let margin = match self.account.margin().await {
+        let instruments = match self.margin_instruments(None) {
+            Ok(instruments) => instruments,
+            Err(error) => {
+                tracing::warn!(strategy = %strategy_id, %error, "cannot list the instruments in use");
+                return None;
+            }
+        };
+        let margin = match self.account.margin(&instruments).await {
             Ok(margin) => margin,
             Err(error) => {
                 tracing::warn!(strategy = %strategy_id, %error, "the margin ratio is unavailable");

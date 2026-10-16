@@ -148,7 +148,10 @@ pub trait Account: Send + Sync {
     async fn available_collateral(&self) -> Result<Notional, ExchangeError>;
 
     /// 账户保证金读数，用来算账户比率（第 7.4 节）。
-    async fn margin(&self) -> Result<MarginReading, ExchangeError>;
+    ///
+    /// `instruments` 是本系统在用的标的：主市场之外，它们所在的第三方市场（HIP-3）的占用
+    /// 也要算进来；别的市场不单独查。
+    async fn margin(&self, instruments: &[Instrument]) -> Result<MarginReading, ExchangeError>;
 
     /// 这个标的上的杠杆设置：倍数和保证金模式（资金预检、满仓压力测试用，第 7.3、10 节）。
     async fn leverage(&self, instrument: &Instrument) -> Result<Leverage, ExchangeError>;
@@ -156,8 +159,8 @@ pub trait Account: Send + Sync {
     /// 这个标的的保证金分档表（满仓压力测试用，第 7.3 节）。
     async fn margin_tiers(&self, instrument: &Instrument) -> Result<MarginTiers, ExchangeError>;
 
-    /// 账户实际费率。
-    async fn fees(&self) -> Result<Fees, ExchangeError>;
+    /// 这个标的上的实际费率：账户费率，第三方市场的标的再按市场部署者的费用设置调整。
+    async fn fees(&self, instrument: &Instrument) -> Result<Fees, ExchangeError>;
 
     /// 这个标的当前的资金费率（第 7.6 节）。
     async fn funding_rate(&self, instrument: &Instrument) -> Result<FundingRate, ExchangeError>;

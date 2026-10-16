@@ -13,6 +13,9 @@ pub(crate) struct MetaResponse {
     /// 保证金分档表：`[[表编号, 表], …]`。
     #[serde(rename = "marginTables", default)]
     pub margin_tables: Vec<(u32, MarginTableResponse)>,
+    /// 这个市场的抵押币（token 编号）；主市场的 `meta` 没有这一项，是 USDC。
+    #[serde(rename = "collateralToken", default)]
+    pub collateral_token: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -40,6 +43,18 @@ pub(crate) struct AssetMetaResponse {
     /// 这个标的用哪张保证金分档表；分档表里找不到时只有一档，按 `maxLeverage` 算。
     #[serde(rename = "marginTableId", default)]
     pub margin_table_id: Option<u32>,
+    /// 第三方市场（HIP-3）部署者的费用系数，例如 `"1.0"`；主市场没有。
+    #[serde(rename = "deployerFeeScale", default)]
+    pub deployer_fee_scale: Option<String>,
+    /// 第三方市场的增长模式：`"enabled"` 时手续费打一折；主市场没有。
+    #[serde(rename = "growthMode", default)]
+    pub growth_mode: Option<String>,
+}
+
+/// `perpDexs` 的一项：第三方市场（HIP-3）。主市场那一项是 `null`。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct PerpDexResponse {
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

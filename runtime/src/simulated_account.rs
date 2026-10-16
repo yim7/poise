@@ -44,6 +44,8 @@ struct SimAccount {
     fail_next_funding_rate: Option<String>,
     /// 已经结算的资金费，按时间先后。
     funding_payments: Vec<FundingPayment>,
+    /// 上一次读保证金时传进来的标的。
+    margin_instruments: Vec<Instrument>,
     /// 保证金读数：默认没有任何占用，账户比率为 0。
     margin: MarginReading,
     /// 还要让几次保证金读数失败。
@@ -75,6 +77,7 @@ impl SimulatedAccount {
                 funding_rate_reads: 0,
                 fail_next_funding_rate: None,
                 funding_payments: Vec::new(),
+                margin_instruments: Vec::new(),
                 margin: MarginReading {
                     balance: Notional::parse(DEFAULT_COLLATERAL).expect("a valid default"),
                     available_after_maintenance: Notional::parse(DEFAULT_COLLATERAL)
@@ -169,6 +172,11 @@ impl SimulatedAccount {
         self.lock().funding_rate = rate;
     }
 
+    /// 上一次读保证金时传进来的标的。
+    pub fn margin_instruments(&self) -> Vec<Instrument> {
+        self.lock().margin_instruments.clone()
+    }
+
     /// 结算一次资金费：正数是收到，负数是付出。
     pub fn add_funding_payment(&self, time: DateTime<Utc>, amount: Notional) {
         let mut state = self.lock();
@@ -245,8 +253,9 @@ impl Account for SimulatedAccount {
         Ok(state.collateral)
     }
 
-    async fn margin(&self) -> Result<MarginReading, ExchangeError> {
+    async fn margin(&self, instruments: &[Instrument]) -> Result<MarginReading, ExchangeError> {
         let mut state = self.lock();
+        state.margin_instruments = instruments.to_vec();
         if state.fail_margin > 0 {
             state.fail_margin -= 1;
             return Err(ExchangeError::Unavailable {
@@ -271,7 +280,7 @@ impl Account for SimulatedAccount {
         Ok(self.lock().margin_tiers.clone())
     }
 
-    async fn fees(&self) -> Result<Fees, ExchangeError> {
+    async fn fees(&self, _instrument: &Instrument) -> Result<Fees, ExchangeError> {
         Ok(self.lock().fees)
     }
 

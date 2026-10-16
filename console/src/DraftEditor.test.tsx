@@ -182,6 +182,17 @@ describe('新建与确认启动', () => {
     })
   })
 
+  it('第三方市场的标的照原样提交，例如黄金 xyz:GOLD', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+
+    await userEvent.clear(screen.getByLabelText('标的'))
+    await userEvent.type(screen.getByLabelText('标的'), 'xyz:GOLD')
+    await saveAndPreview()
+
+    expect(server.lastBody('POST', '/api/drafts')).toMatchObject({ instrument: 'xyz:GOLD' })
+  })
+
   it('b43_服务端说预览过期时，要求重新预览而不是照旧启动', async () => {
     const server = editorRoutes({
       'POST /api/drafts/s-1/start': {

@@ -913,7 +913,7 @@ async fn the_margin_reading_combines_spot_and_perp_state() {
     ]);
     let client = client(transport.clone(), fixed_clock(NOW_MS));
 
-    let margin = client.margin().await.unwrap();
+    let margin = client.margin(&[]).await.unwrap();
 
     assert_eq!(margin.balance, Notional::parse("1000").unwrap());
     assert_eq!(
@@ -948,7 +948,7 @@ async fn a_position_without_a_margin_mode_is_unreadable() {
     let client = client(transport, fixed_clock(NOW_MS));
 
     assert!(matches!(
-        client.margin().await,
+        client.margin(&[]).await,
         Err(ExchangeError::Unavailable { .. })
     ));
 }
@@ -963,7 +963,7 @@ async fn a_margin_reading_without_a_time_is_unreadable() {
     let client = client(transport, fixed_clock(NOW_MS));
 
     assert!(matches!(
-        client.margin().await,
+        client.margin(&[]).await,
         Err(ExchangeError::Unavailable { .. })
     ));
 }
@@ -978,7 +978,7 @@ async fn a_missing_cross_maintenance_margin_is_unreadable() {
     let client = client(transport, fixed_clock(NOW_MS));
 
     assert!(matches!(
-        client.margin().await,
+        client.margin(&[]).await,
         Err(ExchangeError::Unavailable { .. })
     ));
 }
@@ -1042,11 +1042,11 @@ async fn the_margin_tiers_come_from_the_meta() {
 
 #[tokio::test]
 async fn fees_come_from_user_fees() {
-    let transport = FakeTransport::new(vec![fixture(fixtures::USER_FEES)]);
+    let transport = FakeTransport::new(vec![fixture(fixtures::USER_FEES), fixture(fixtures::META)]);
     let client = client(transport, fixed_clock(NOW_MS));
 
     assert_eq!(
-        client.fees().await.unwrap(),
+        client.fees(&btc()).await.unwrap(),
         Fees::new(
             Rate::parse("0.00045").unwrap(),
             Rate::parse("0.00015").unwrap()
@@ -1092,5 +1092,190 @@ async fn an_instrument_the_exchange_does_not_list_is_refused() {
     assert!(
         matches!(&error, ExchangeError::Unavailable { reason } if reason.contains("DOGE")),
         "unexpected error: {error}"
+    );
+}
+
+// ── 第三方市场（HIP-3）────────────────────────────────────────────────────────
+
+fn gold() -> Instrument {
+    Instrument::try_new("xyz:GOLD").unwrap()
+}
+
+/// 第三方市场的资产编号是 `100000 + 市场序号 × 10000 + 下标`；合约规则按市场查（带 `dex`）。
+#[tokio::test]
+async fn a_hip3_order_uses_the_builder_asset_id() {
+    let transport = FakeTransport::new(vec![
+        fixture(fixtures::PERP_DEXS),
+        fixture(fixtures::META_XYZ),
+        fixture(fixtures::ORDER_RESTING),
+    ]);
+    let client = client(transport.clone(), fixed_clock(NOW_MS));
+    let request = OrderRequest {
+        instrument: gold(),
+        ..request("0.01", "4183.9")
+    };
+
+    client.place_order(&request).await.unwrap();
+
+    assert_eq!(transport.request(0).body, json!({"type": "perpDexs"}));
+    assert_eq!(
+        transport.request(1).body,
+        json!({"type": "meta", "dex": "xyz"})
+    );
+    // xyz 在第 2 项，GOLD 是第 3 个：100000 + 2 × 10000 + 3。
+    assert_eq!(
+        transport.request(2).body["action"]["orders"][0]["a"],
+        120003
+    );
+}
+
+/// 第三方市场的费率按官方公式调整：费用系数 1.0 时乘 2；增长模式再乘 0.1。
+#[tokio::test]
+async fn hip3_fees_follow_the_deployer_settings() {
+    // 费用设置每次现取（部署者随时能改）：第一次还要先取合约规则算资产编号。
+    let transport = FakeTransport::new(vec![
+        fixture(fixtures::USER_FEES),
+        fixture(fixtures::PERP_DEXS),
+        fixture(fixtures::META_XYZ),
+        fixture(fixtures::META_XYZ),
+        fixture(fixtures::USER_FEES),
+        fixture(fixtures::META_XYZ),
+    ]);
+    let client = client(transport, fixed_clock(NOW_MS));
+
+    // 黄金没开增长模式：0.045% × 2、0.015% × 2。
+    assert_eq!(
+        client.fees(&gold()).await.unwrap(),
+        Fees::new(
+            Rate::parse("0.0009").unwrap(),
+            Rate::parse("0.0003").unwrap()
+        )
+    );
+    // 美股开了增长模式：再打一折。
+    assert_eq!(
+        client
+            .fees(&Instrument::try_new("xyz:TSLA").unwrap())
+            .await
+            .unwrap(),
+        Fees::new(
+            Rate::parse("0.00009").unwrap(),
+            Rate::parse("0.00003").unwrap()
+        )
+    );
+}
+
+/// 仓位、挂单、行情按标的所在的市场查（带 `dex`），按完整名字 `xyz:GOLD` 认。
+#[tokio::test]
+async fn hip3_positions_and_orders_are_read_from_their_dex() {
+    let transport = FakeTransport::new(vec![
+        json!({
+            "time": 1_792_000_000_000_i64,
+            "assetPositions": [
+                {"type": "oneWay", "position": {"coin": "xyz:GOLD", "szi": "0.02",
+                    "leverage": {"type": "cross", "value": 10}, "marginUsed": "8.0"}}
+            ]
+        }),
+        json!([]),
+    ]);
+    let client = client(transport.clone(), fixed_clock(NOW_MS));
+
+    assert_eq!(
+        client.position(&gold()).await.unwrap(),
+        Position::parse("0.02").unwrap()
+    );
+    assert!(client.working_orders(&gold()).await.unwrap().is_empty());
+    assert_eq!(
+        transport.request(0).body,
+        json!({"type": "clearinghouseState", "user": ACCOUNT, "dex": "xyz"})
+    );
+    assert_eq!(
+        transport.request(1).body,
+        json!({"type": "openOrders", "user": ACCOUNT, "dex": "xyz"})
+    );
+}
+
+/// 保证金读数加上在用标的所在的第三方市场：两处的全仓占用、逐仓保证金相加，时刻取较旧的。
+#[tokio::test]
+async fn the_margin_reading_adds_the_dexes_in_use() {
+    let transport = FakeTransport::new(vec![
+        fixture(fixtures::SPOT_CLEARINGHOUSE_STATE),
+        json!({"crossMaintenanceMarginUsed": "12.5", "time": 1_792_000_000_500_i64, "assetPositions": []}),
+        json!({
+            "crossMaintenanceMarginUsed": "7.5",
+            "time": 1_792_000_000_000_i64,
+            "assetPositions": [
+                {"type": "oneWay", "position": {"coin": "xyz:TSLA", "szi": "1",
+                    "leverage": {"type": "isolated", "value": 5, "rawUsd": "100"}, "marginUsed": "30.0"}}
+            ]
+        }),
+    ]);
+    let client = client(transport.clone(), fixed_clock(NOW_MS));
+
+    let margin = client.margin(&[btc(), gold(), gold()]).await.unwrap();
+
+    assert_eq!(margin.cross_maintenance, Notional::parse("20").unwrap());
+    assert_eq!(margin.isolated_margin, Notional::parse("30").unwrap());
+    assert_eq!(
+        margin.as_of,
+        DateTime::from_timestamp_millis(1_792_000_000_000)
+    );
+    assert_eq!(
+        transport.request(2).body,
+        json!({"type": "clearinghouseState", "user": ACCOUNT, "dex": "xyz"})
+    );
+    assert_eq!(transport.requests().len(), 3, "同一个市场只查一次");
+}
+
+/// 费用系数缺失时报读不到，不能按主市场的费率算（会少算手续费）。
+#[tokio::test]
+async fn a_missing_hip3_fee_scale_is_unreadable() {
+    let without_scale = fixtures::META_XYZ.replace(
+        r#"{"szDecimals": 4, "name": "xyz:GOLD", "maxLeverage": 25, "marginTableId": 25, "deployerFeeScale": "1.0"}"#,
+        r#"{"szDecimals": 4, "name": "xyz:GOLD", "maxLeverage": 25, "marginTableId": 25}"#,
+    );
+    assert_ne!(without_scale, fixtures::META_XYZ);
+    let transport = FakeTransport::new(vec![
+        fixture(fixtures::USER_FEES),
+        fixture(fixtures::PERP_DEXS),
+        fixture(fixtures::META_XYZ),
+        fixture(&without_scale),
+    ]);
+    let client = client(transport, fixed_clock(NOW_MS));
+
+    let error = client.fees(&gold()).await.unwrap_err();
+
+    assert!(
+        matches!(error, ExchangeError::Unavailable { .. }),
+        "{error:?}"
+    );
+}
+
+/// 抵押币不是 USDC 的第三方市场不支持：资金预检和保证金率都按 USDC 算。
+#[tokio::test]
+async fn a_dex_with_another_collateral_is_refused() {
+    let usdt = fixtures::META_XYZ.replace(r#""collateralToken": 0"#, r#""collateralToken": 268"#);
+    assert_ne!(usdt, fixtures::META_XYZ);
+    let transport = FakeTransport::new(vec![fixture(fixtures::PERP_DEXS), fixture(&usdt)]);
+    let client = client(transport, fixed_clock(NOW_MS));
+
+    let error = client.instrument_spec(&gold()).await.unwrap_err();
+
+    assert!(error.to_string().contains("not USDC"), "{error}");
+
+    // 没说抵押币：同样不认。
+    let unknown = fixtures::META_XYZ.replace(
+        r#",
+  "collateralToken": 0"#,
+        "",
+    );
+    assert_ne!(unknown, fixtures::META_XYZ);
+    let transport = FakeTransport::new(vec![fixture(fixtures::PERP_DEXS), fixture(&unknown)]);
+    let unknown_client = crate::testing::client(transport, fixed_clock(NOW_MS));
+
+    let error = unknown_client.instrument_spec(&gold()).await.unwrap_err();
+
+    assert!(
+        error.to_string().contains("not known to be USDC"),
+        "{error}"
     );
 }

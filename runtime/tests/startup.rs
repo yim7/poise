@@ -58,7 +58,10 @@ impl Account for FakeAccount {
         Ok(self.available)
     }
 
-    async fn margin(&self) -> Result<poise_runtime::account::MarginReading, ExchangeError> {
+    async fn margin(
+        &self,
+        _instruments: &[Instrument],
+    ) -> Result<poise_runtime::account::MarginReading, ExchangeError> {
         Ok(poise_runtime::account::MarginReading {
             balance: self.available,
             available_after_maintenance: self.available,
@@ -85,7 +88,7 @@ impl Account for FakeAccount {
         Ok(poise_strategy::stress::MarginTiers::single(40))
     }
 
-    async fn fees(&self) -> Result<Fees, ExchangeError> {
+    async fn fees(&self, _instrument: &Instrument) -> Result<Fees, ExchangeError> {
         Ok(Fees::new(
             Rate::parse("0.00045").unwrap(),
             Rate::parse("0.00015").unwrap(),

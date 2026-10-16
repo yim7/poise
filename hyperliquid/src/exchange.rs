@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use crate::actions::{
     CancelByCloid, CancelByCloidAction, ExchangeAction, LimitOrderType, OrderAction, OrderType,
 };
-use crate::client::Hyperliquid;
+use crate::client::{Hyperliquid, with_dex};
 use crate::ids::{client_order_id_of, cloid_of};
 use crate::models::{ClearinghouseState, FillResponse, OpenOrderResponse, OrderStatusResponse};
 
@@ -93,10 +93,13 @@ impl Exchange for Hyperliquid {
         &self,
         instrument: &Instrument,
     ) -> Result<Vec<ExchangeOrder>, ExchangeError> {
-        let body = json!({
-            "type": "openOrders",
-            "user": self.user(),
-        });
+        let body = with_dex(
+            json!({
+                "type": "openOrders",
+                "user": self.user(),
+            }),
+            instrument,
+        );
         let orders: Vec<OpenOrderResponse> = self.info(&body, "openOrders").await?;
         orders
             .into_iter()
@@ -214,10 +217,13 @@ impl Exchange for Hyperliquid {
     }
 
     async fn position(&self, instrument: &Instrument) -> Result<Position, ExchangeError> {
-        let body = json!({
-            "type": "clearinghouseState",
-            "user": self.user(),
-        });
+        let body = with_dex(
+            json!({
+                "type": "clearinghouseState",
+                "user": self.user(),
+            }),
+            instrument,
+        );
         let state: ClearinghouseState = self.info(&body, "clearinghouseState").await?;
         let szi = state
             .asset_positions

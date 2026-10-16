@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::actions::ExchangeAction;
 use crate::meta::AssetMeta;
-use crate::models::{AssetContext, MetaResponse};
+use crate::models::{AssetContext, MetaResponse, PerpDexResponse};
 use crate::signing::{action_hash, sign_l1_action};
 use crate::transport::{EXCHANGE_PATH, HttpTransport, INFO_PATH, Transport, build_http_client};
 
@@ -44,8 +44,8 @@ pub struct Hyperliquid {
     clock: Clock,
     /// 上一个用过的 nonce。同一毫秒内连下几单时必须仍然递增，否则会被判重复。
     nonce: Mutex<u64>,
-    /// 合约规则。一个进程内不变，取一次就够。
-    assets: Mutex<Option<HashMap<String, AssetMeta>>>,
+    /// 合约规则，按市场分开缓存（主市场的键是空串）。一个进程内不变，每个市场取一次就够。
+    assets: Mutex<HashMap<String, HashMap<String, AssetMeta>>>,
 }
 
 impl Hyperliquid {
@@ -60,7 +60,7 @@ impl Hyperliquid {
             api_wallet_private_key: config.api_wallet_private_key,
             clock: Arc::new(|| Utc::now().timestamp_millis().max(0) as u64),
             nonce: Mutex::new(0),
-            assets: Mutex::new(None),
+            assets: Mutex::new(HashMap::new()),
         })
     }
 
@@ -79,7 +79,7 @@ impl Hyperliquid {
             api_wallet_private_key,
             clock,
             nonce: Mutex::new(0),
-            assets: Mutex::new(None),
+            assets: Mutex::new(HashMap::new()),
         }
     }
 
@@ -179,7 +179,10 @@ impl Hyperliquid {
         instrument: &Instrument,
     ) -> Result<AssetContext, ExchangeError> {
         let (meta, contexts): (MetaResponse, Vec<AssetContext>) = self
-            .info(&json!({ "type": "metaAndAssetCtxs" }), "metaAndAssetCtxs")
+            .info(
+                &with_dex(json!({ "type": "metaAndAssetCtxs" }), instrument),
+                "metaAndAssetCtxs",
+            )
             .await?;
         let index = meta
             .universe
@@ -197,19 +200,43 @@ impl Hyperliquid {
             })
     }
 
-    /// 一个标的的合约规则，按需取一次。
+    /// 一个标的的合约规则，每个市场按需取一次。
+    ///
+    /// 第三方市场（HIP-3）的资产编号是 `100000 + 市场序号 × 10000 + 下标`，市场序号是它在
+    /// `perpDexs` 里的位置（官方「Asset IDs」）。
     pub(crate) async fn asset(&self, instrument: &Instrument) -> Result<AssetMeta, ExchangeError> {
+        let dex = instrument.dex().unwrap_or_default();
         let cached = {
             let assets = self.assets.lock().expect("asset lock poisoned");
             assets
-                .as_ref()
-                .and_then(|assets| assets.get(instrument.symbol()).copied())
+                .get(dex)
+                .map(|assets| assets.get(instrument.symbol()).copied())
         };
-        if let Some(asset) = cached {
-            return Ok(asset);
+        if let Some(found) = cached {
+            return found.ok_or_else(|| unknown_instrument(instrument));
         }
 
-        let meta: MetaResponse = self.info(&json!({ "type": "meta" }), "meta").await?;
+        let offset = match instrument.dex() {
+            None => 0,
+            Some(dex) => 100_000 + self.perp_dex_index(dex).await? * 10_000,
+        };
+        let meta: MetaResponse = self
+            .info(&with_dex(json!({ "type": "meta" }), instrument), "meta")
+            .await?;
+        // 资金预检、保证金率都按 USDC 算：第三方市场必须明确是 USDC 抵押，不是或者没说，
+        // 整个市场都不认，下单前就拒绝。主市场的 `meta` 没有这一项，本来就是 USDC。
+        if instrument.dex().is_some() && meta.collateral_token != Some(USDC_TOKEN) {
+            return Err(ExchangeError::Unavailable {
+                reason: match meta.collateral_token {
+                    Some(token) => format!(
+                        "the perp dex `{dex}` uses collateral token {token}, not USDC; only USDC markets are supported"
+                    ),
+                    None => format!(
+                        "the perp dex `{dex}` does not say its collateral token, so it is not known to be USDC"
+                    ),
+                },
+            });
+        }
         let index: HashMap<String, AssetMeta> = meta
             .universe
             .iter()
@@ -217,14 +244,41 @@ impl Hyperliquid {
             .map(|(index, asset)| {
                 (
                     asset.name.clone(),
-                    AssetMeta::from_response(index as u32, asset),
+                    AssetMeta::from_response(offset + index as u32, asset),
                 )
             })
             .collect();
         let found = index.get(instrument.symbol()).copied();
-        *self.assets.lock().expect("asset lock poisoned") = Some(index);
+        self.assets
+            .lock()
+            .expect("asset lock poisoned")
+            .insert(dex.to_string(), index);
         found.ok_or_else(|| unknown_instrument(instrument))
     }
+
+    /// 第三方市场在 `perpDexs` 里的位置（第 0 项是主市场，返回 `null`）。
+    async fn perp_dex_index(&self, dex: &str) -> Result<u32, ExchangeError> {
+        let dexs: Vec<Option<PerpDexResponse>> = self
+            .info(&json!({ "type": "perpDexs" }), "perpDexs")
+            .await?;
+        dexs.iter()
+            .position(|entry| entry.as_ref().is_some_and(|entry| entry.name == dex))
+            .map(|index| index as u32)
+            .ok_or_else(|| ExchangeError::Unavailable {
+                reason: format!("the exchange does not list the perp dex `{dex}`"),
+            })
+    }
+}
+
+/// USDC 在统一账户里的 token 编号。
+pub(crate) const USDC_TOKEN: u32 = 0;
+
+/// 读接口按市场查时带上 `dex`：第三方市场（HIP-3）的标的才带，主市场不带。
+pub(crate) fn with_dex(mut body: Value, instrument: &Instrument) -> Value {
+    if let Some(dex) = instrument.dex() {
+        body["dex"] = json!(dex);
+    }
+    body
 }
 
 fn base_url_of(network: Network) -> &'static str {

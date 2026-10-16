@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::units::{Notional, Price, PriceRounding, Quantity, Rate, SCALE};
 
-/// 标的，例如 Hyperliquid 上的 `BTC`。
+/// 标的，例如 Hyperliquid 主市场上的 `BTC`，或者第三方市场（HIP-3）上的 `xyz:GOLD`：
+/// 冒号前是市场名，后面是这个市场里的标的。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Instrument(String);
@@ -18,11 +19,21 @@ impl Instrument {
         if symbol.is_empty() {
             return Err(SpecError::EmptySymbol);
         }
+        if let Some((dex, coin)) = symbol.split_once(':')
+            && (dex.is_empty() || coin.is_empty() || coin.contains(':'))
+        {
+            return Err(SpecError::InvalidSymbol(symbol.to_string()));
+        }
         Ok(Self(symbol.to_string()))
     }
 
     pub fn symbol(&self) -> &str {
         &self.0
+    }
+
+    /// 第三方市场（HIP-3）的市场名，例如 `xyz:GOLD` 的 `xyz`；主市场的标的是 `None`。
+    pub fn dex(&self) -> Option<&str> {
+        self.0.split_once(':').map(|(dex, _)| dex)
     }
 }
 
@@ -104,6 +115,8 @@ impl PriceRule {
 pub enum SpecError {
     #[error("instrument symbol must not be empty")]
     EmptySymbol,
+    #[error("instrument `{0}` must be `COIN` or `dex:COIN`")]
+    InvalidSymbol(String),
     #[error("price tick must be positive, got {0}")]
     InvalidPriceTick(Price),
     #[error("a significant-figures price rule needs at least one figure and a positive step floor")]
@@ -272,6 +285,21 @@ mod tests {
             Instrument::try_new("  ").unwrap_err(),
             SpecError::EmptySymbol
         );
+    }
+
+    /// 第三方市场的标的写成 `dex:COIN`；冒号两边都不能空，也只能有一个冒号。
+    #[test]
+    fn a_third_party_market_is_written_before_a_colon() {
+        assert_eq!(Instrument::try_new("BTC").unwrap().dex(), None);
+        let gold = Instrument::try_new("xyz:GOLD").unwrap();
+        assert_eq!(gold.dex(), Some("xyz"));
+        assert_eq!(gold.symbol(), "xyz:GOLD");
+        for bad in [":GOLD", "xyz:", "xyz:GOLD:X"] {
+            assert!(
+                matches!(Instrument::try_new(bad), Err(SpecError::InvalidSymbol(_))),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

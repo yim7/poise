@@ -268,3 +268,23 @@ pub(crate) const CANCEL_ALREADY_DONE_OLD_WORDING: &str = r#"{
   "status": "ok",
   "response": {"type": "cancel", "data": {"statuses": [{"error": "Order has already been canceled or filled."}]}}
 }"#;
+
+/// `{"type":"perpDexs"}`：第 0 项是主市场（`null`），之后是第三方市场（HIP-3）。按测试网和
+/// 正式网的真实响应裁剪，`xyz` 放在第 2 项。
+pub(crate) const PERP_DEXS: &str = r#"[
+  null,
+  {"name": "test", "fullName": "test dex", "deployer": "0x0000000000000000000000000000000000000001"},
+  {"name": "xyz", "fullName": "XYZ", "deployer": "0x0000000000000000000000000000000000000002"}
+]"#;
+
+/// `{"type":"meta","dex":"xyz"}`：美股开了增长模式，黄金没开（按正式网 2026-10-16 的元数据裁剪）。
+pub(crate) const META_XYZ: &str = r#"{
+  "universe": [
+    {"szDecimals": 4, "name": "xyz:XYZ100", "maxLeverage": 30, "marginTableId": 50, "growthMode": "enabled", "deployerFeeScale": "1.0"},
+    {"szDecimals": 3, "name": "xyz:TSLA", "maxLeverage": 20, "marginTableId": 20, "growthMode": "enabled", "deployerFeeScale": "1.0"},
+    {"szDecimals": 3, "name": "xyz:NVDA", "maxLeverage": 20, "marginTableId": 20, "growthMode": "enabled", "deployerFeeScale": "1.0"},
+    {"szDecimals": 4, "name": "xyz:GOLD", "maxLeverage": 25, "marginTableId": 25, "deployerFeeScale": "1.0"}
+  ],
+  "marginTables": [[50, {"description": "", "marginTiers": [{"lowerBound": "0.0", "maxLeverage": 30}]}]],
+  "collateralToken": 0
+}"#;

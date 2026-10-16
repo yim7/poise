@@ -8,8 +8,8 @@
 //! 不必按某个标记价猜一个步长出来。下单前仍按这条规则再验一次，不合规就本地拒绝，
 //! 不静默改成别的价格。
 
-use poise_strategy::instrument::{Instrument, InstrumentSpec, PriceRule};
-use poise_strategy::units::{Notional, Price, Quantity};
+use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec, PriceRule};
+use poise_strategy::units::{Notional, Price, Quantity, Rate, SCALE};
 
 use crate::models::AssetMetaResponse;
 
@@ -21,10 +21,40 @@ const MAX_SIGNIFICANT_FIGURES: usize = 5;
 /// 价格小数位不超过 `6 - szDecimals`。
 const MAX_PRICE_DECIMALS_BASE: i32 = 6;
 
+/// 第三方市场（HIP-3）标的的实际费率（官方「Fees」页的 Fee formula for developers）：
+/// - 费用系数 s 小于 1 时乘 `s + 1`，否则乘 `2s`；
+/// - 增长模式：再乘 0.1；
+/// - 挂单返佣（maker 费率为负）只乘增长模式的 0.1。
+///
+/// 没有算推荐折扣和对齐稳定币折扣：少算折扣只会把费率估高，盈利校验和预检偏保守。
+/// 向上取整，同样偏保守。
+pub(crate) fn hip3_fees(account: Fees, deployer_fee_scale: Rate, growth_mode: bool) -> Fees {
+    let scale = i128::from(deployer_fee_scale.units());
+    let unit = i128::from(SCALE);
+    let hip3 = if scale < unit {
+        scale + unit
+    } else {
+        scale * 2
+    };
+    let growth = if growth_mode { 10 } else { 1 };
+    let scaled = |rate: Rate, with_hip3: bool| {
+        let units = i128::from(rate.units()) * if with_hip3 { hip3 } else { unit };
+        let divisor = unit * growth;
+        Rate::from_units(
+            units.div_euclid(divisor) as i64 + i64::from(units.rem_euclid(divisor) != 0),
+        )
+    };
+    Fees::new(
+        scaled(account.taker_rate, true),
+        scaled(account.maker_rate, account.maker_rate > Rate::ZERO),
+    )
+}
+
 /// 一个标的的合约规则，来自 `/info` 的 `meta`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AssetMeta {
-    /// 下单时用的资产序号（`meta.universe` 里的下标）。
+    /// 下单时用的资产编号：主市场是 `meta.universe` 里的下标；第三方市场（HIP-3）是
+    /// `100000 + 市场序号 × 10000 + 下标`（官方「Asset IDs」）。
     pub index: u32,
     pub sz_decimals: u32,
 }
@@ -144,7 +174,7 @@ mod tests {
         assert_eq!(
             AssetMeta {
                 index: 0,
-                sz_decimals: 8
+                sz_decimals: 8,
             }
             .price_rule(),
             PriceRule::SignificantFigures {
@@ -304,6 +334,35 @@ mod tests {
                 .check_quantity(Quantity::ZERO)
                 .unwrap_err()
                 .contains("must be positive")
+        );
+    }
+
+    /// 官方公式的另两条分支：费用系数小于 1 时乘 `s + 1`；挂单返佣（maker 为负）只乘
+    /// 增长模式的 0.1。
+    #[test]
+    fn hip3_fees_cover_small_scales_and_rebates() {
+        use super::hip3_fees;
+        use poise_strategy::instrument::Fees;
+        use poise_strategy::units::Rate;
+        let rate = |value: &str| Rate::parse(value).unwrap();
+
+        // 系数 0.5：乘 1.5。
+        assert_eq!(
+            hip3_fees(
+                Fees::new(rate("0.00045"), rate("0.00015")),
+                rate("0.5"),
+                false
+            ),
+            Fees::new(rate("0.000675"), rate("0.000225"))
+        );
+        // 返佣 −0.002%：只乘增长模式的 0.1，不乘系数。
+        assert_eq!(
+            hip3_fees(
+                Fees::new(rate("0.00045"), rate("-0.00002")),
+                rate("1.0"),
+                true
+            ),
+            Fees::new(rate("0.00009"), rate("-0.000002"))
         );
     }
 }
