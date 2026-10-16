@@ -176,7 +176,7 @@ async fn place_order_reports_a_rejection_with_the_exchange_reason() {
         .unwrap_err();
 
     assert!(
-        matches!(&error, ExchangeError::Rejected { reason } if reason.contains("Insufficient margin")),
+        matches!(&error, ExchangeError::InsufficientMargin { reason } if reason.contains("Insufficient margin")),
         "unexpected error: {error}"
     );
 }
@@ -820,6 +820,26 @@ async fn a_missing_cross_maintenance_margin_is_unreadable() {
         client.margin().await,
         Err(ExchangeError::Unavailable { .. })
     ));
+}
+
+/// 杠杆来自 `activeAssetData`（测试网实测的返回格式）。
+#[tokio::test]
+async fn the_leverage_comes_from_active_asset_data() {
+    let transport = FakeTransport::new(vec![json!({
+        "user": ACCOUNT,
+        "coin": "BTC",
+        "leverage": {"type": "cross", "value": 20},
+        "maxTradeSzs": ["0.24452", "0.24452"],
+        "availableToTrade": ["998.903866", "998.903866"],
+        "markPx": "81703.0"
+    })]);
+    let client = client(transport.clone(), fixed_clock(NOW_MS));
+
+    assert_eq!(client.leverage(&btc()).await.unwrap(), 20);
+    assert_eq!(
+        transport.request(0).body,
+        json!({"type": "activeAssetData", "user": ACCOUNT, "coin": "BTC"})
+    );
 }
 
 #[tokio::test]

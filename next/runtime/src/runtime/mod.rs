@@ -51,6 +51,7 @@ use crate::store::{
 };
 
 mod cancel_only;
+mod funds;
 mod lifecycle;
 mod reconcile;
 mod step;
@@ -442,6 +443,8 @@ pub struct Runtime {
     clock: Arc<dyn Clock>,
     /// 正在被驱动的策略。同一个策略并发走两步会用同一份状态各下一遍单。
     stepping: Mutex<HashSet<StrategyId>>,
+    /// 资金预检的锁和保证金不足的退避表（第 10 节）：同一账户的所有策略共用一份。
+    funds: funds::Funds,
 }
 
 /// 一次驱动期间持有的占用标记，离开作用域就释放。
@@ -488,6 +491,7 @@ impl Runtime {
             options,
             clock,
             stepping: Mutex::new(HashSet::new()),
+            funds: funds::Funds::default(),
         }
     }
 

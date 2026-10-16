@@ -381,6 +381,12 @@ fn order_receipt(response: &Value) -> Result<OrderReceipt, ExchangeError> {
         })?;
     let status = &statuses[0];
     if let Some(error) = status.get("error").and_then(Value::as_str) {
+        // 交易所的原话是 `Insufficient margin to place order.`：按关键词认，措辞小改也认得出。
+        if error.to_ascii_lowercase().contains("insufficient margin") {
+            return Err(ExchangeError::InsufficientMargin {
+                reason: error.to_string(),
+            });
+        }
         return Err(ExchangeError::Rejected {
             reason: error.to_string(),
         });

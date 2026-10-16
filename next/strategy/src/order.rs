@@ -109,7 +109,7 @@ pub enum Side {
 ///
 /// 建仓腿与平仓腿在各侧上的买卖方向相反（设计第 5.1 节），所以这里只记「哪条腿」，
 /// 具体买卖由 [`OrderPurpose::side`] 按方向算。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderPurpose {
     /// 主仓建仓腿：本批主仓部分，策略永不为它下平仓单。

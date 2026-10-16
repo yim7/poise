@@ -12,6 +12,7 @@ pub mod batch;
 pub mod config;
 pub mod decision;
 pub mod error;
+pub mod funds;
 pub mod grid;
 pub mod instrument;
 pub mod ledger;

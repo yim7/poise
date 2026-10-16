@@ -77,6 +77,10 @@ pub enum ExchangeError {
     /// 交易所明确拒绝。
     #[error("exchange rejected the order: {reason}")]
     Rejected { reason: String },
+    /// 交易所以保证金不足拒绝下单（第 10 节）：和 [`ExchangeError::Rejected`] 一样是明确
+    /// 拒绝，单独列出来，调用方据此退避重试，不要每一步都再撞一次。
+    #[error("exchange rejected the order for insufficient margin: {reason}")]
+    InsufficientMargin { reason: String },
     /// 交易所不认识这个客户端订单 ID。
     #[error("exchange does not know client order id `{client_order_id}`")]
     UnknownOrder { client_order_id: ClientOrderId },

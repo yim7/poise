@@ -9,7 +9,9 @@ use poise_strategy::units::{Notional, Rate};
 use serde_json::{Value, json};
 
 use crate::client::Hyperliquid;
-use crate::models::{AgentResponse, ClearinghouseState, SpotClearinghouseState, UserFees};
+use crate::models::{
+    ActiveAssetData, AgentResponse, ClearinghouseState, SpotClearinghouseState, UserFees,
+};
 
 /// USDC 在统一账户里的 token 序号。
 const USDC_TOKEN: u32 = 0;
@@ -170,6 +172,21 @@ impl Account for Hyperliquid {
                     .ok_or_else(|| unreadable("margin reading time"))?,
             ),
         })
+    }
+
+    /// 这个标的上设置的杠杆（`activeAssetData`）。用户在交易所页面改过杠杆，下一次预检就
+    /// 按新的算。
+    async fn leverage(&self, instrument: &Instrument) -> Result<u32, ExchangeError> {
+        let data: ActiveAssetData = self
+            .info(
+                &json!({"type": "activeAssetData", "user": self.user(), "coin": instrument.symbol()}),
+                "activeAssetData",
+            )
+            .await?;
+        if data.leverage.value == 0 {
+            return Err(unreadable("leverage"));
+        }
+        Ok(data.leverage.value)
     }
 
     async fn fees(&self) -> Result<Fees, ExchangeError> {

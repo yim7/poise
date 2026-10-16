@@ -16,6 +16,9 @@ use crate::exchange::ExchangeError;
 /// 默认的可用抵押：足够大，不会意外挡住配置。
 const DEFAULT_COLLATERAL: &str = "100000";
 
+/// 默认的杠杆倍数。
+const DEFAULT_LEVERAGE: u32 = 10;
+
 pub struct SimulatedAccount {
     state: Mutex<SimAccount>,
 }
@@ -30,6 +33,10 @@ struct SimAccount {
     margin: MarginReading,
     /// 还要让几次保证金读数失败。
     fail_margin: usize,
+    /// 各标的的杠杆倍数；没设过的标的按 [`DEFAULT_LEVERAGE`] 算。
+    leverage: u32,
+    /// 还要让几次杠杆读数失败。
+    fail_leverage: usize,
     fees: Fees,
     /// 各标的的合约规则，按标的符号索引。
     specs: HashMap<String, InstrumentSpec>,
@@ -55,6 +62,8 @@ impl SimulatedAccount {
                     as_of: None,
                 },
                 fail_margin: 0,
+                leverage: DEFAULT_LEVERAGE,
+                fail_leverage: 0,
                 fees,
                 specs,
             }),
@@ -104,6 +113,16 @@ impl SimulatedAccount {
         self.lock().fail_margin = count;
     }
 
+    /// 让接下来 `count` 次杠杆读数失败。
+    pub fn fail_leverage(&self, count: usize) {
+        self.lock().fail_leverage = count;
+    }
+
+    /// 杠杆倍数变了。
+    pub fn set_leverage(&self, leverage: u32) {
+        self.lock().leverage = leverage;
+    }
+
     /// 费率变了。
     pub fn set_fees(&self, fees: Fees) {
         self.lock().fees = fees;
@@ -149,6 +168,17 @@ impl Account for SimulatedAccount {
             });
         }
         Ok(state.margin)
+    }
+
+    async fn leverage(&self, _instrument: &Instrument) -> Result<u32, ExchangeError> {
+        let mut state = self.lock();
+        if state.fail_leverage > 0 {
+            state.fail_leverage -= 1;
+            return Err(ExchangeError::Unavailable {
+                reason: "the leverage is unavailable".to_string(),
+            });
+        }
+        Ok(state.leverage)
     }
 
     async fn fees(&self) -> Result<Fees, ExchangeError> {

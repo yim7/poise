@@ -41,6 +41,8 @@ struct SimState {
     next_trade_id: u64,
     reject_next_place: Option<String>,
     unknown_next_place: Option<String>,
+    /// 还要以保证金不足拒绝几张会增加敞口的单（非只减仓）。
+    reject_for_margin: usize,
     /// 下一张单照常挂上，但回执丢在路上（发送方只看到超时）。
     lose_next_place_response: Option<String>,
     /// 按 `cloid` 查询和挂单列表都暂时看不到的订单（交易所查询滞后）。
@@ -158,6 +160,7 @@ impl SimulatedExchange {
                 reject_next_place: None,
                 unknown_next_place: None,
                 lose_next_place_response: None,
+                reject_for_margin: 0,
                 hidden_from_queries: Vec::new(),
                 slow_places: None,
                 deliver_fills_on_next_position: false,
@@ -445,6 +448,11 @@ impl SimulatedExchange {
         self.lock().unknown_next_place = Some(reason.to_string());
     }
 
+    /// 让接下来 `count` 张会增加敞口的单（非只减仓）以保证金不足被拒；只减仓单照常挂。
+    pub fn reject_for_margin(&self, count: usize) {
+        self.lock().reject_for_margin = count;
+    }
+
     /// 让下一张单照常挂上（可能当场成交），但发送方收到的是结果未知。
     ///
     /// 用来构造「请求落地了、回执丢了」：按 `cloid` 查询能查到它。
@@ -596,6 +604,12 @@ impl Exchange for SimulatedExchange {
         }
         if let Some(reason) = state.unknown_next_place.take() {
             return Err(ExchangeError::Unknown { reason });
+        }
+        if !request.reduce_only && state.reject_for_margin > 0 {
+            state.reject_for_margin -= 1;
+            return Err(ExchangeError::InsufficientMargin {
+                reason: "Insufficient margin to place order.".to_string(),
+            });
         }
         if request.expires_at <= state.now {
             return Err(ExchangeError::Rejected {

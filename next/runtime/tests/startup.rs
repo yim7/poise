@@ -68,6 +68,10 @@ impl Account for FakeAccount {
         })
     }
 
+    async fn leverage(&self, _instrument: &Instrument) -> Result<u32, ExchangeError> {
+        Ok(10)
+    }
+
     async fn fees(&self) -> Result<Fees, ExchangeError> {
         Ok(Fees::new(
             Rate::parse("0.00045").unwrap(),

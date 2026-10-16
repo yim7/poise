@@ -17,6 +17,7 @@ use crate::settings::AccountSettings;
 use crate::store::{StoredOrder, StoredStrategy, StrategyId, StrategyStatus};
 
 use super::cancel_only::cancel_only_note;
+use super::funds::FundsCheck;
 use super::{
     Cancels, Executed, NewOrders, POSITION_CHECK_ROUNDS, Reading, Runtime, RuntimeError, Snapshot,
     StepReport, Synced, order_states,
@@ -537,14 +538,23 @@ impl Runtime {
             }
             Vec::new()
         } else {
-            let intents: Vec<OrderIntent> = plan
+            // 只减仓单排在前面先发：它们不占保证金，不预检、也不受保证金不足退避的影响（B20），
+            // 不该被资金锁和额度查询拖住。同一类里保持规划的顺序。
+            let mut intents: Vec<OrderIntent> = plan
                 .place
                 .iter()
                 .filter(|intent| new_orders.permits.allows(intent.reduce_only))
                 .cloned()
                 .collect();
+            intents.sort_by_key(|intent| !intent.reduce_only);
+            // 会增加敞口的单要做资金预检（第 10 节）：轮到第一张不在退避里的增仓单时才拿锁、
+            // 读一次额度，锁一直持有到这一步发完。读不到额度就做不了预检：增仓单这一步不发。
+            let mut _funds_guard = None;
+            let mut funds: Option<FundsCheck> = None;
+            let mut funds_read = false;
             let mut placed = Vec::new();
             let mut stopped = None;
+            let mut short_of_funds = false;
             for intent in &intents {
                 // 行情是这一步开头读的：核对、发单花掉的时间里它会变旧。过期之后不再发新单，
                 // 剩下的下一步按新行情重新规划（第 7.2 节）。
@@ -552,14 +562,72 @@ impl Runtime {
                     stopped = Some(WaitReason::StaleMarketData);
                     break;
                 }
-                let client_order_id = match self
+                let reserved = if intent.reduce_only {
+                    None
+                } else {
+                    if self.in_backoff(strategy_id, intent.unit, intent.purpose, self.clock.now()) {
+                        short_of_funds = true;
+                        continue;
+                    }
+                    if !funds_read {
+                        funds_read = true;
+                        _funds_guard = Some(self.lock_funds().await);
+                        funds = match self.funds_check(strategy).await {
+                            Ok(check) => Some(check),
+                            Err(error) => {
+                                tracing::warn!(strategy = %strategy_id, %error, "funds pre-check unavailable");
+                                None
+                            }
+                        };
+                    }
+                    match funds
+                        .as_mut()
+                        .and_then(|funds| funds.reserve(intent.quantity, intent.limit_price))
+                    {
+                        Some(required) => Some(required),
+                        None => {
+                            short_of_funds = true;
+                            continue;
+                        }
+                    }
+                };
+                let placement = self
                     .place_one(strategy_id, strategy, state, orders, intent, &new_orders)
-                    .await?
-                {
-                    Placement::Sent(client_order_id) => client_order_id,
+                    .await?;
+                // 没发出去、或者被拒绝的单不占额度：还回去，后面的单还能用。
+                let give_back = |funds: &mut Option<FundsCheck>| {
+                    if let (Some(funds), Some(required)) = (funds.as_mut(), reserved) {
+                        funds.release(required);
+                    }
+                };
+                let client_order_id = match placement {
+                    Placement::Sent(client_order_id) => {
+                        if !intent.reduce_only {
+                            self.clear_backoff(strategy_id, intent.unit, intent.purpose);
+                        }
+                        client_order_id
+                    }
+                    Placement::MarginRejected(client_order_id) => {
+                        give_back(&mut funds);
+                        // 从收到拒绝的这一刻起算：这一步前面花掉的时间不能算进退避里。
+                        self.back_off(strategy_id, intent.unit, intent.purpose, self.clock.now());
+                        short_of_funds = true;
+                        placed.push(client_order_id);
+                        continue;
+                    }
+                    // 明确拒绝：单没有落地，不占额度，后面的单还能用。
+                    Placement::Rejected(client_order_id) => {
+                        give_back(&mut funds);
+                        placed.push(client_order_id);
+                        continue;
+                    }
                     // 没发出去的单不进报告：报告说的是这一步做过的动作。
-                    Placement::NotSent => continue,
+                    Placement::NotSent => {
+                        give_back(&mut funds);
+                        continue;
+                    }
                     Placement::StaleMarket => {
+                        give_back(&mut funds);
                         stopped = Some(WaitReason::StaleMarketData);
                         break;
                     }
@@ -574,6 +642,9 @@ impl Runtime {
                     stopped = Some(WaitReason::OrderResultUnknown);
                     break;
                 }
+            }
+            if short_of_funds && !plan.waiting.contains(&WaitReason::InsufficientFunds) {
+                plan.waiting.push(WaitReason::InsufficientFunds);
             }
             if let Some(reason) = stopped
                 && !plan.waiting.contains(&reason)
@@ -685,25 +756,32 @@ impl Runtime {
             return Ok(Placement::StaleMarket);
         }
 
-        match self
+        let outcome = self
             .send_order(strategy_id, strategy, intent, &mut order)
-            .await?
-        {
+            .await?;
+        match outcome {
             // 下单即成交：当场记账，避免这一步结束时仓位对不上。
             // 格子状态和订单记录写在同一个事务里。
             //
             // 成交时刻取收到回执的时刻：交易所的回执没有时间戳，这是唯一已知的时刻。
             // 成交发生在发送之后、收到回执之前，所以它一定不早于真实成交时刻，是保守的
             // 那个上界；真实流水到了会把它改回实际成交时刻（第 4.1 节）。
-            Some(filled) => {
+            SendOutcome::Accepted(Some(filled)) => {
                 strategy.apply_fill(state, &mut order.record, filled, self.clock.now());
                 self.store
                     .save_applied_fills(strategy_id, state, &[&order])?;
             }
-            None => self.store.update_order(strategy_id, &order)?,
+            SendOutcome::Accepted(None)
+            | SendOutcome::Rejected
+            | SendOutcome::MarginRejected
+            | SendOutcome::Unknown => self.store.update_order(strategy_id, &order)?,
         }
         orders.push(order);
-        Ok(Placement::Sent(client_order_id))
+        Ok(match outcome {
+            SendOutcome::MarginRejected => Placement::MarginRejected(client_order_id),
+            SendOutcome::Rejected => Placement::Rejected(client_order_id),
+            SendOutcome::Accepted(_) | SendOutcome::Unknown => Placement::Sent(client_order_id),
+        })
     }
 
     /// 行情是不是已经过期：从读行情的请求发出那一刻算起，超过账户风控设置里的行情过期
@@ -730,7 +808,7 @@ impl Runtime {
         strategy: &Strategy,
         intent: &OrderIntent,
         order: &mut StoredOrder,
-    ) -> Result<Option<Quantity>, RuntimeError> {
+    ) -> Result<SendOutcome, RuntimeError> {
         let request = OrderRequest {
             instrument: strategy.spec().instrument().clone(),
             client_order_id: order.record.client_order_id.clone(),
@@ -745,9 +823,9 @@ impl Runtime {
                 order.exchange_order_id = Some(receipt.exchange_order_id);
                 order.record.status = receipt.status;
                 if receipt.cumulative_filled.is_zero() {
-                    return Ok(None);
+                    return Ok(SendOutcome::Accepted(None));
                 }
-                Ok(Some(receipt.cumulative_filled))
+                Ok(SendOutcome::Accepted(Some(receipt.cumulative_filled)))
             }
             Err(ExchangeError::Rejected { reason }) => {
                 order.record.status = OrderStatus::Rejected;
@@ -759,7 +837,19 @@ impl Runtime {
                     reason = %reason,
                     "order rejected"
                 );
-                Ok(None)
+                Ok(SendOutcome::Rejected)
+            }
+            // 保证金不足同样是明确拒绝：按拒绝记，调用方据此退避（第 10 节）。
+            Err(ExchangeError::InsufficientMargin { reason }) => {
+                order.record.status = OrderStatus::Rejected;
+                order.fills_reconciled = true;
+                tracing::warn!(
+                    strategy = %strategy_id,
+                    client_order_id = %order.record.client_order_id,
+                    reason = %reason,
+                    "order rejected for insufficient margin, backing off"
+                );
+                Ok(SendOutcome::MarginRejected)
             }
             Err(error) => {
                 order.record.status = OrderStatus::Unknown;
@@ -769,7 +859,7 @@ impl Runtime {
                     error = %error,
                     "order result unknown"
                 );
-                Ok(None)
+                Ok(SendOutcome::Unknown)
             }
         }
     }
@@ -861,10 +951,26 @@ fn withdraw_increasing(plan: &mut Plan, orders: &[StoredOrder]) {
     }
 }
 
+/// 交易所对一张单的回答。
+pub(super) enum SendOutcome {
+    /// 收下了；带着当场成交的累计数量（没有成交是 `None`）。
+    Accepted(Option<Quantity>),
+    /// 明确拒绝。
+    Rejected,
+    /// 以保证金不足明确拒绝：调用方要退避（第 10 节）。
+    MarginRejected,
+    /// 结果未知。
+    Unknown,
+}
+
 /// 发一张单的结果。
 pub(super) enum Placement {
-    /// 发出去了（含被拒绝和结果未知的）：记录留在库里。
+    /// 发出去了，交易所收下了或者结果未知：记录留在库里。
     Sent(ClientOrderId),
+    /// 发出去了，交易所明确拒绝：记录留在库里，单没有落地。
+    Rejected(ClientOrderId),
+    /// 发出去了，交易所以保证金不足拒绝：记录留在库里，这个单位要退避。
+    MarginRejected(ClientOrderId),
     /// 写完库发现有效期已经不够，没发；记录已删掉。
     NotSent,
     /// 写完库发现行情已经过期，没发；记录已删掉。这一步剩下的单也不该再发。

@@ -159,3 +159,14 @@ pub(crate) struct OrderStatusOrder {
     #[serde(rename = "reduceOnly", default)]
     pub reduce_only: Option<bool>,
 }
+
+/// `activeAssetData` 里用得到的部分：这个标的上设置的杠杆。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct ActiveAssetData {
+    pub leverage: ActiveLeverage,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct ActiveLeverage {
+    pub value: u32,
+}

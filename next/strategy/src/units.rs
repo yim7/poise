@@ -449,6 +449,18 @@ impl Notional {
         debug_assert!(rate.0 >= 0, "rate must be non-negative");
         Self(self.0 * rate.0 as i128 / SCALE_RAW)
     }
+
+    /// 按费率取一部分，向上取整：估算要预留多少时宁可多算。
+    pub fn mul_rate_ceil(self, rate: Rate) -> Self {
+        debug_assert!(rate.0 >= 0, "rate must be non-negative");
+        Self(div_ceil(self.0 * rate.0 as i128, SCALE_RAW))
+    }
+
+    /// 除以一个正整数，向上取整：估算要预留多少时宁可多算。
+    pub fn div_ceil(self, divisor: u32) -> Self {
+        debug_assert!(divisor > 0, "divisor must be positive");
+        Self(div_ceil(self.0, i128::from(divisor.max(1))))
+    }
 }
 
 impl Add for Notional {
