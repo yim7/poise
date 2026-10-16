@@ -4,7 +4,7 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api, resumeSummary } from './api'
+import { api, pauseSummary, resumeSummary, stopSummary } from './api'
 import { decimal, timestamp } from './format'
 import { kindLabel, statusLabel, waitReasonLabel } from './labels'
 import { BatchTable, CellTable, ConfigVersionTable, OrdersTable } from './tables'
@@ -80,10 +80,7 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
             type="button"
             disabled={busy}
             onClick={() =>
-              run(async () => {
-                const canceled = await api.pause(strategyId)
-                return `已暂停，撤销 ${canceled.canceled.length} 张订单。`
-              })
+              run(async () => pauseSummary(await api.pause(strategyId)))
             }
           >
             暂停
@@ -108,10 +105,7 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
               className="danger"
               disabled={busy}
               onClick={() =>
-                run(async () => {
-                  const canceled = await api.stop(strategyId)
-                  return `已停止并归档，撤销 ${canceled.canceled.length} 张订单；仓位保留。`
-                })
+                run(async () => stopSummary(await api.stop(strategyId)))
               }
             >
               确认停止

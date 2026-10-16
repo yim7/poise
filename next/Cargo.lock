@@ -1104,6 +1104,7 @@ dependencies = [
  "poise-hyperliquid",
  "poise-runtime",
  "poise-strategy",
+ "rusqlite",
  "tempfile",
  "tokio",
  "tracing",

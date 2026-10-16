@@ -55,7 +55,7 @@ fn main() {
     println!(
         "预览        {status} 校验 {} 格子 {} 立即成交 {} 标记价 {}",
         field(&body, "valid").unwrap_or_default(),
-        count(&body, "\"buy_price\""),
+        count(&body, "\"entry_price\""),
         count(&body, "\"limit_price\""),
         field(&body, "market_price").unwrap_or_default(),
     );

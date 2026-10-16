@@ -24,6 +24,8 @@ struct SimAccount {
     mode: AccountMode,
     wallets: Vec<ApiWallet>,
     collateral: Notional,
+    /// 下一次查可用资金失败的原因。可用资金只用于展示，拿不到它不该挡住撤单。
+    fail_next_collateral: Option<String>,
     fees: Fees,
     /// 各标的的合约规则，按标的符号索引。
     specs: HashMap<String, InstrumentSpec>,
@@ -39,6 +41,7 @@ impl SimulatedAccount {
                 mode: AccountMode::Unified,
                 wallets: Vec::new(),
                 collateral: Notional::parse(DEFAULT_COLLATERAL).expect("a valid default"),
+                fail_next_collateral: None,
                 fees,
                 specs,
             }),
@@ -73,6 +76,11 @@ impl SimulatedAccount {
         self.lock().collateral = collateral;
     }
 
+    /// 让下一次查可用资金失败：账户接口暂时不可用。
+    pub fn fail_next_collateral(&self, reason: &str) {
+        self.lock().fail_next_collateral = Some(reason.to_string());
+    }
+
     /// 费率变了。
     pub fn set_fees(&self, fees: Fees) {
         self.lock().fees = fees;
@@ -102,7 +110,11 @@ impl Account for SimulatedAccount {
     }
 
     async fn available_collateral(&self) -> Result<Notional, ExchangeError> {
-        Ok(self.lock().collateral)
+        let mut state = self.lock();
+        if let Some(reason) = state.fail_next_collateral.take() {
+            return Err(ExchangeError::Unavailable { reason });
+        }
+        Ok(state.collateral)
     }
 
     async fn fees(&self) -> Result<Fees, ExchangeError> {

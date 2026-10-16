@@ -12,11 +12,11 @@ import { renderWithQuery } from './test/render'
 function detailRoutes(extra: Routes = {}) {
   return fakeServer({
     'GET /api/strategies/s-1': { body: detail() },
-    'POST /api/strategies/s-1/pause': { body: { canceled: ['0x1', '0x2'] } },
+    'POST /api/strategies/s-1/pause': { body: { canceled: ['0x1', '0x2'], status: 'paused' } },
     'POST /api/strategies/s-1/resume': {
       body: { Resumed: { strategy_id: 's-1', status: 'running', placed: ['0x3'], canceled: [], applied_fills: 0, position: '0.015', expected_position: '0.015' } },
     },
-    'POST /api/strategies/s-1/stop': { body: { canceled: ['0x1'] } },
+    'POST /api/strategies/s-1/stop': { body: { canceled: ['0x1'], status: 'stopped' } },
     'PUT /api/strategies/s-1/config': { body: { version: 3 } },
     ...extra,
   })
@@ -54,6 +54,72 @@ describe('运行详情', () => {
       expect(server.count('POST', '/api/strategies/s-1/stop')).toBe(1)
     })
     expect(await screen.findByText(/仓位保留/)).toBeInTheDocument()
+  })
+
+  it('b45_暂停还没撤完时按接口返回的状态说正在撤单', async () => {
+    // 撤单回执丢了、成交还没对完账的时候，接口回的是「暂停中」：订单还在交易所上，
+    // 后台每一轮继续撤。这时候说「已暂停」，用户以为挂单已经撤掉了。
+    detailRoutes({
+      'POST /api/strategies/s-1/pause': {
+        body: { canceled: ['0x1', '0x2'], status: 'pausing' },
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.click(screen.getByRole('button', { name: '暂停' }))
+
+    expect(await screen.findByText(/正在撤单/)).toBeInTheDocument()
+    expect(screen.queryByText(/已暂停/)).not.toBeInTheDocument()
+  })
+
+  it('b45_暂停确认收尾之后才说已暂停', async () => {
+    detailRoutes({
+      'POST /api/strategies/s-1/pause': {
+        body: { canceled: ['0x1', '0x2'], status: 'paused' },
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.click(screen.getByRole('button', { name: '暂停' }))
+
+    expect(await screen.findByText('已暂停，撤销 2 张订单。')).toBeInTheDocument()
+  })
+
+  it('b45_停止还没撤完时按接口返回的状态说正在撤单，不说已归档', async () => {
+    detailRoutes({
+      'POST /api/strategies/s-1/stop': {
+        body: { canceled: ['0x1'], status: 'stopping' },
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.click(screen.getByRole('button', { name: '停止' }))
+    await userEvent.click(screen.getByRole('button', { name: '确认停止' }))
+
+    expect(await screen.findByText(/正在撤单/)).toBeInTheDocument()
+    expect(screen.queryByText(/已停止并归档/)).not.toBeInTheDocument()
+    // 仓位照旧保留，说清楚。
+    expect(screen.getByText(/仓位保留/)).toBeInTheDocument()
+  })
+
+  it('b19_恢复还没收尾时说明还有遗留订单没收场', async () => {
+    // 恢复也先撤遗留订单：收不了场就留在「恢复中」，一张新单都不下。
+    // 收不了场不等于没撤掉——结果没查出来的订单也在里面，所以不说「会继续撤」。
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({ summary: summary({ status: 'restoring' }) }),
+      },
+      'POST /api/strategies/s-1/resume': { body: { WaitingForSettle: { working: 3 } } },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.click(screen.getByRole('button', { name: '恢复' }))
+
+    expect(await screen.findByText(/3 张遗留订单没收场/)).toBeInTheDocument()
   })
 
   it('b45_已归档的策略只读：没有暂停、恢复、停止，也没有改参数的入口', async () => {

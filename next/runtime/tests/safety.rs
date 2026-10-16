@@ -458,18 +458,33 @@ async fn a_cancel_of_an_order_the_exchange_never_saw_keeps_the_reservation() {
         OrderStatus::Unknown
     );
 
-    // 预留还在：恢复后只为被撤掉的那 19 格补单，这一格不会补挂新的买单。
+    // 预留还在，恢复也不下新单：这一张的结果我们从来没拿到过，撤销只会得到「查无此单」
+    // ——它可能已经成交，这时候重新挂单就会在同一格上多出一张会成交的单。状态留在
+    // 「恢复中」，等三方核对（任务 08）问得出结局再放行。
     let outcome = harness.resume(7).await;
-    let ResumeOutcome::Resumed(report) = outcome else {
-        panic!("expected a step, got {outcome:?}");
-    };
-    assert_eq!(report.placed.len(), 19);
-    assert!(
-        report
-            .plan
-            .waiting
-            .contains(&WaitReason::OrderResultUnknown)
+    assert_eq!(
+        outcome,
+        ResumeOutcome::WaitingForSettle { working: 1 },
+        "结果未知的订单不算收场"
     );
+    assert_eq!(harness.exchange.place_count(), place_count, "不下任何新单");
+    assert_eq!(
+        harness.runtime.status(&harness.strategy_id).unwrap(),
+        StrategyStatus::Restoring
+    );
+
+    // 后台每一轮继续按 `cloid` 核对，可它问不出结局：状态一直停在「恢复中」。
+    let report = harness.step(8).await;
+    assert_eq!(report.status, StrategyStatus::Restoring);
+    assert!(report.placed.is_empty());
+    assert_eq!(harness.exchange.place_count(), place_count);
+
+    // 页面上写清楚为什么恢复不了：不是「正在重试」，是问不出结局。
+    let detail = harness.runtime.detail(&harness.strategy_id).unwrap();
+    let note = detail.note.unwrap_or_default();
+    assert!(note.contains("查无此单"), "unexpected note: {note}");
+
+    // 预留还在：这一格没有补挂新的买单。
     let buys: Vec<_> = harness
         .orders()
         .into_iter()

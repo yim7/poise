@@ -216,14 +216,22 @@ export interface StrategyDetail {
   config_versions: StoredConfigVersion[]
 }
 
-/** 恢复的结果：一直在跑、等遗留订单过期、或者真的恢复了。 */
+/** 恢复的结果：一直在跑、等遗留订单过期、遗留订单没收场、或者真的恢复了。 */
 export type ResumeOutcome =
   | 'AlreadyRunning'
   | { WaitingForExpiry: { until: string } }
+  | { WaitingForSettle: { working: number } }
   | { Resumed: StepReport }
 
+/**
+ * 暂停、停止的结果：撤销了哪些单，以及策略最后落在哪个状态。
+ *
+ * `status` 不一定就是「已暂停」「已停止」：撤单回执丢了、成交还没对完账时它停在
+ * `pausing`／`stopping`，订单还在交易所上，后台每一轮继续撤。页面照它说话。
+ */
 export interface CanceledOrders {
   canceled: string[]
+  status: StrategyStatus
 }
 
 export interface VersionBody {

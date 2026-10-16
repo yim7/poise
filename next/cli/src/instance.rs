@@ -53,7 +53,12 @@ impl Instance {
             database = %startup.database_path().display(),
             "instance loaded"
         );
-        Ok(Self { startup, exchange })
+        let instance = Self { startup, exchange };
+        // 打开一次数据库确认结构版本：对不上就在这里打住，`check`、`status`、`serve`
+        // 都走这条启动路径。等写库那一刻才失败太晚——用户已经以为策略在跑了，
+        // 而且报出来的是「少了一列」这种看不出该怎么办的话（第 12 节）。
+        instance.open_store()?;
+        Ok(instance)
     }
 
     pub fn startup(&self) -> &StartupFile {
@@ -164,6 +169,41 @@ mod tests {
         assert!(
             format!("{error:#}").contains("600"),
             "unexpected error: {error:#}"
+        );
+    }
+
+    /// 结构版本对不上的旧库在启动时就报出来：`check`、`status`、`serve` 都会看到。
+    ///
+    /// 拖到写库那一刻才失败的话，用户已经以为策略在跑了（实测报的是「少了一列」）。
+    #[test]
+    fn refuses_a_database_whose_schema_version_is_not_this_one() {
+        let directory = tempfile::tempdir().unwrap();
+        write_startup(directory.path(), "testnet");
+        // 一个建于「记结构版本」之前的旧库：有表，没有版本记录。
+        let database = directory.path().join("data").join("poise.sqlite");
+        std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch("CREATE TABLE batch_states (strategy_id TEXT NOT NULL);")
+            .unwrap();
+        drop(connection);
+
+        let Err(error) = Instance::load(directory.path()) else {
+            panic!("an old database must be refused");
+        };
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&database.display().to_string()),
+            "错误里要写明库路径: {message}"
+        );
+        assert!(
+            message.contains("schema version 0"),
+            "错误里要写明库版本: {message}"
+        );
+        assert!(
+            message.contains("move the old database away"),
+            "错误里要说明怎么办: {message}"
         );
     }
 }

@@ -21,7 +21,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::runtime::{
     DraftPreview, ResumeOutcome, Runtime, RuntimeError, StrategyDetail, StrategySummary,
 };
-use crate::store::{DraftId, StoreError, StoredDraft, StrategyId};
+use crate::store::{DraftId, StoreError, StoredDraft, StrategyId, StrategyStatus};
 
 /// 只有接口，没有网页：测试用这个。
 pub fn router(runtime: Arc<Runtime>) -> Router {
@@ -90,8 +90,10 @@ async fn pause_strategy(
     State(runtime): State<Arc<Runtime>>,
     Path(id): Path<String>,
 ) -> Result<Json<CanceledBody>, ApiError> {
-    let canceled = runtime.pause(&strategy_id(id)?).await?;
-    Ok(Json(CanceledBody { canceled }))
+    let strategy_id = strategy_id(id)?;
+    let canceled = runtime.pause(&strategy_id).await?;
+    let status = runtime.status(&strategy_id)?;
+    Ok(Json(CanceledBody { canceled, status }))
 }
 
 async fn resume_strategy(
@@ -105,8 +107,10 @@ async fn stop_strategy(
     State(runtime): State<Arc<Runtime>>,
     Path(id): Path<String>,
 ) -> Result<Json<CanceledBody>, ApiError> {
-    let canceled = runtime.stop(&strategy_id(id)?).await?;
-    Ok(Json(CanceledBody { canceled }))
+    let strategy_id = strategy_id(id)?;
+    let canceled = runtime.stop(&strategy_id).await?;
+    let status = runtime.status(&strategy_id)?;
+    Ok(Json(CanceledBody { canceled, status }))
 }
 
 async fn update_config(
@@ -182,9 +186,15 @@ struct StartBody {
     token: String,
 }
 
+/// 暂停、停止的结果：撤销了哪些单，以及策略最后落在哪个状态。
+///
+/// 带上状态是因为撤单不一定收得了尾：撤单回执丢了、成交还没对完账时，策略停在
+/// 「暂停中」「停止中」，后台每一轮继续撤。只回一个撤销列表的话，页面只能一律说
+/// 「已暂停」「已停止」，用户以为挂单已经撤掉了。
 #[derive(Serialize)]
 struct CanceledBody {
     canceled: Vec<ClientOrderId>,
+    status: StrategyStatus,
 }
 
 #[derive(Serialize)]

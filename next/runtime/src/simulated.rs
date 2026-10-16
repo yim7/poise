@@ -40,6 +40,15 @@ struct SimState {
     next_trade_id: u64,
     reject_next_place: Option<String>,
     unknown_next_place: Option<String>,
+    /// 下一次查标记价失败的原因。行情只用于展示和判定，拿不到它不该挡住撤单。
+    fail_next_mark_price: Option<String>,
+    /// 接下来几次查挂单列表失败。撤哪几张单靠库里存着的 `cloid` 就够，问不到挂单
+    /// 列表不该挡住撤单。
+    fail_working_orders: usize,
+    fail_working_orders_reason: String,
+    /// 接下来几次查成交流水失败。
+    fail_fills_since: usize,
+    fail_fills_since_reason: String,
     unknown_cancels: usize,
     unknown_cancel_reason: String,
     reject_cancels: usize,
@@ -50,6 +59,8 @@ struct SimState {
     fill_before_next_cancel: VecDeque<(ClientOrderId, Quantity, DateTime<Utc>)>,
     /// 已经过了查仓位、等着在下一次查成交时成交的那一笔。
     fill_after_next_position: Option<(ClientOrderId, Quantity)>,
+    /// 接下来几次仓位查询报出的旧值（仓位接口滞后）。
+    stale_positions: VecDeque<Position>,
     pending_fill: Option<(ClientOrderId, Quantity)>,
     place_count: usize,
     /// 收到的全部请求次数（见 [`SimulatedExchange::call_count`]）。
@@ -134,6 +145,11 @@ impl SimulatedExchange {
                 next_trade_id: 0,
                 reject_next_place: None,
                 unknown_next_place: None,
+                fail_next_mark_price: None,
+                fail_working_orders: 0,
+                fail_working_orders_reason: String::new(),
+                fail_fills_since: 0,
+                fail_fills_since_reason: String::new(),
                 unknown_cancels: 0,
                 unknown_cancel_reason: String::new(),
                 reject_cancels: 0,
@@ -141,6 +157,7 @@ impl SimulatedExchange {
                 fill_before_next_position: VecDeque::new(),
                 fill_before_next_cancel: VecDeque::new(),
                 fill_after_next_position: None,
+                stale_positions: VecDeque::new(),
                 pending_fill: None,
                 place_count: 0,
                 call_count: 0,
@@ -359,6 +376,16 @@ impl SimulatedExchange {
         self.lock().fill_after_next_position = Some((client_order_id, quantity));
     }
 
+    /// 让接下来 `count` 次仓位查询都报 `position`，而不是真实仓位（仓位接口滞后）。
+    ///
+    /// 成交和挂单状态照常变化，只有仓位查询停在旧值上。
+    pub fn report_stale_positions(&self, count: usize, position: Position) {
+        let mut state = self.lock();
+        for _ in 0..count {
+            state.stale_positions.push_back(position);
+        }
+    }
+
     /// 用户在交易所手动交易，直接改变仓位，不产生属于本策略的订单。
     pub fn manual_trade(&self, quantity: Quantity) {
         let mut state = self.lock();
@@ -394,6 +421,30 @@ impl SimulatedExchange {
     /// 让下一次下单结果未知：交易所没有收到这张单，也没有明确拒绝。
     pub fn unknown_next_place(&self, reason: &str) {
         self.lock().unknown_next_place = Some(reason.to_string());
+    }
+
+    /// 让下一次查标记价失败：行情源暂时不可用。
+    ///
+    /// 行情、可用资金、仓位都是展示用的读数，拿不到它们不该影响撤单。
+    pub fn fail_next_mark_price(&self, reason: &str) {
+        self.lock().fail_next_mark_price = Some(reason.to_string());
+    }
+
+    /// 让接下来 `count` 次查挂单列表失败：交易所的订单接口暂时不可用。
+    ///
+    /// 挂单列表是用来核对订单的，撤单本身只按库里存着的 `cloid` 发请求，问不到列表
+    /// 不该让挂单留在交易所上。
+    pub fn fail_working_orders(&self, count: usize, reason: &str) {
+        let mut state = self.lock();
+        state.fail_working_orders = count;
+        state.fail_working_orders_reason = reason.to_string();
+    }
+
+    /// 让接下来 `count` 次查成交流水失败。
+    pub fn fail_fills_since(&self, count: usize, reason: &str) {
+        let mut state = self.lock();
+        state.fail_fills_since = count;
+        state.fail_fills_since_reason = reason.to_string();
     }
 
     /// 让下一次撤单结果未知：请求超时，订单还在交易所。
@@ -581,6 +632,11 @@ impl Exchange for SimulatedExchange {
                 reason: format!("instrument `{instrument}` does not belong to this exchange"),
             });
         }
+        if state.fail_working_orders > 0 {
+            state.fail_working_orders -= 1;
+            let reason = state.fail_working_orders_reason.clone();
+            return Err(ExchangeError::Unavailable { reason });
+        }
         Ok(state
             .orders
             .iter()
@@ -628,6 +684,11 @@ impl Exchange for SimulatedExchange {
         if let Some((client_order_id, quantity)) = state.pending_fill.take() {
             fill_order(&mut state, &client_order_id, quantity);
         }
+        if state.fail_fills_since > 0 {
+            state.fail_fills_since -= 1;
+            let reason = state.fail_fills_since_reason.clone();
+            return Err(ExchangeError::Unavailable { reason });
+        }
         Ok(state
             .fills
             .iter()
@@ -649,6 +710,9 @@ impl Exchange for SimulatedExchange {
         }
         // 这一笔要等到下一次查成交时才成交：查到的仓位里还没有它。
         state.pending_fill = state.fill_after_next_position.take();
+        if let Some(stale) = state.stale_positions.pop_front() {
+            return Ok(stale);
+        }
         Ok(state.position)
     }
 
@@ -659,6 +723,9 @@ impl Exchange for SimulatedExchange {
             return Err(ExchangeError::Rejected {
                 reason: format!("instrument `{instrument}` does not belong to this exchange"),
             });
+        }
+        if let Some(reason) = state.fail_next_mark_price.take() {
+            return Err(ExchangeError::Unavailable { reason });
         }
         Ok(state.market_price)
     }

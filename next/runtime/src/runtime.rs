@@ -217,6 +217,40 @@ impl Snapshot {
     }
 }
 
+/// 订单相关的读取结果：补记成交、核对挂单、推进批次与限速。
+///
+/// 判定和撤单都靠这三样算出的在场订单，所以它们失败时这一步就到此为止。
+struct Synced {
+    /// 补拉成交的回查起点。仓位核对的循环里还要用它再拉一次。
+    since: DateTime<Utc>,
+    /// 交易所报的累计成交量快照。
+    reported: Vec<(ClientOrderId, Quantity)>,
+    /// 是否有订单的结果不明。
+    unknown_result: bool,
+    /// 成交流水与订单累计成交量对不上的订单。
+    inconsistent: Option<ClientOrderId>,
+    /// 这一步补记的成交笔数。
+    applied_fills: usize,
+}
+
+/// 展示用的读数：标记价、可用资金、仓位核对。
+///
+/// 这三样只进视图快照和仓位核对，不影响订单本身。拿不到它们时调用方按「这一步没拿到
+/// 读数」处理，而不是把已经做成的事报成失败。
+struct Reading {
+    market_price: Price,
+    available_collateral: Notional,
+    /// 仓位核对的数据与结论。
+    reading: PositionReading,
+    check: PositionCheck,
+    /// 核对循环里补记的成交笔数。
+    applied_fills: usize,
+    /// 核对循环里新发现的「订单结果不明」。
+    unknown_result: bool,
+    /// 核对循环里新发现的「成交流水与订单累计成交量对不上」。
+    inconsistent: Option<ClientOrderId>,
+}
+
 /// 执行阶段报出的两个列表。
 struct Executed {
     placed: Vec<ClientOrderId>,
@@ -230,11 +264,42 @@ struct Cancels {
     uncertain: bool,
 }
 
-/// 只撤单的一步的结果。
+/// 只撤单的一步里「撤销 + 按 `cloid` 核对终态」这一段的结果。
+///
+/// 撤销和核对各自的失败都记在这里，不往外抛：撤销请求已经发出去、单可能已经撤掉了，
+/// 把整步报成失败只会让用户看到「暂停失败」而单其实撤了。失败由调用方用来判定这一步
+/// 能不能宣告收场——核对没走通就一律不能（第 9.2 节）。
 struct CancelOnly {
     canceled: Vec<ClientOrderId>,
     /// 撤单之后重新核对时补记的成交笔数。
     applied_fills: usize,
+    /// 撤销这一段没走通的原因（交易所拒收、数据库写不进去）。
+    cancel_error: Option<RuntimeError>,
+    /// 按 `cloid` 核对终态这一段没走通的原因。
+    reconcile_error: Option<RuntimeError>,
+}
+
+/// 只撤单的一轮（[`Runtime::cancel_only_round`]）的结果。
+///
+/// 三处调用各自用它决定收场之后进入哪个状态，判定口径不同（见
+/// [`cancel_only_settled`] 与 [`leftovers_settled`]），所以这里不替它们下结论，
+/// 只把「这一轮有没有没走通的地方」报出来。
+struct CancelOnlyRound {
+    canceled: Vec<ClientOrderId>,
+    /// 这一轮一共补记了几笔成交：同步那一段的和撤完之后核对那一段的都算。
+    applied_fills: usize,
+    /// 同步（补记成交、核对订单）的结果。失败时带着原因：撤单照做，但这一轮不能算
+    /// 收场，展示读数也取不成了。
+    synced: Result<Synced, RuntimeError>,
+    /// 撤销、按 `cloid` 核对终态这两段没走通的原因。
+    cancel_error: Option<RuntimeError>,
+}
+
+impl CancelOnlyRound {
+    /// 这一轮有没有没走通的地方。有的话，订单看起来再干净也不能宣告完成。
+    fn is_clean(&self) -> bool {
+        self.synced.is_ok() && self.cancel_error.is_none()
+    }
 }
 
 /// 恢复流程的结果。
@@ -242,6 +307,12 @@ struct CancelOnly {
 pub enum ResumeOutcome {
     /// 还有可能落地的订单，等到这个时间点之后再来。
     WaitingForExpiry { until: DateTime<Utc> },
+    /// 遗留订单还没收场（撤销没确认、终态没核对出来）：状态留在「恢复中」，
+    /// 后台下一轮继续撤、继续核对。
+    WaitingForSettle {
+        /// 还在场、撤销还没确认的订单张数。
+        working: usize,
+    },
     /// 已经撤销遗留挂单并走了一步；这一步也可能又把它暂停了。
     Resumed(StepReport),
     /// 这个策略一直在运行，没有停过：挂单还是对的，什么都没做（第 2.4 节）。
@@ -936,7 +1007,7 @@ impl Runtime {
         strategy_id: &StrategyId,
         strategy: &Strategy,
         state: &mut StrategyState,
-        orders: &mut [StoredOrder],
+        orders: &mut Vec<StoredOrder>,
         snapshot: &Snapshot,
         decision: &Decision,
         now: DateTime<Utc>,
@@ -985,16 +1056,12 @@ impl Runtime {
                         );
                     }
                 }
-                let (status, cancel_only) = self
+                let (status, round) = self
                     .pause_inner(strategy_id, strategy, state, orders, now)
                     .await?;
-                let mut report = snapshot.stop(
-                    strategy_id,
-                    status,
-                    reason.wait_reason(),
-                    cancel_only.canceled,
-                );
-                report.applied_fills += cancel_only.applied_fills;
+                let mut report =
+                    snapshot.stop(strategy_id, status, reason.wait_reason(), round.canceled);
+                report.applied_fills += round.applied_fills;
                 Ok(Some(report))
             }
         }
@@ -1028,7 +1095,36 @@ impl Runtime {
         orders: &mut [StoredOrder],
         now: DateTime<Utc>,
     ) -> Result<Snapshot, RuntimeError> {
-        let instrument = stored.spec.instrument();
+        let synced = self
+            .sync_step(strategy_id, stored, strategy, state, orders, now)
+            .await?;
+        let reading = self
+            .reading_step(strategy_id, strategy, state, orders, &synced, now)
+            .await?;
+        Ok(Snapshot {
+            market_price: reading.market_price,
+            available_collateral: reading.available_collateral,
+            reading: reading.reading,
+            check: reading.check,
+            unknown_result: synced.unknown_result || reading.unknown_result,
+            inconsistent: synced.inconsistent.clone().or(reading.inconsistent),
+            applied_fills: synced.applied_fills + reading.applied_fills,
+        })
+    }
+
+    /// 订单相关的读取：补记成交、核对挂单、推进批次与限速（[`Runtime::read_step`] 的前半段）。
+    ///
+    /// 判定和撤单都靠这三样算出的在场订单：撤单要么撤错、要么漏撤，所以它们失败时这一步
+    /// 不能继续。行情、可用资金、仓位是另一回事，见 [`Runtime::reading_step`]。
+    async fn sync_step(
+        &self,
+        strategy_id: &StrategyId,
+        stored: &StoredStrategy,
+        strategy: &Strategy,
+        state: &mut StrategyState,
+        orders: &mut [StoredOrder],
+        now: DateTime<Utc>,
+    ) -> Result<Synced, RuntimeError> {
         let since = self.fills_since(stored, orders);
         let mut applied_fills = self
             .sync_fills(strategy_id, strategy, state, orders, since, now)
@@ -1038,17 +1134,42 @@ impl Runtime {
             .reconcile_orders(strategy_id, strategy, state, orders, now)
             .await?;
         applied_fills += reconciled.applied_fills;
-        let mut reported = reconciled.reported;
-        let mut unknown_result = reconciled.unknown_result;
-        let mut inconsistent = reconciled.inconsistent;
 
         self.advance_progress(strategy_id, strategy, state, orders, now)?;
 
+        Ok(Synced {
+            since,
+            reported: reconciled.reported,
+            unknown_result: reconciled.unknown_result,
+            inconsistent: reconciled.inconsistent,
+            applied_fills,
+        })
+    }
+
+    /// 展示用的读数：标记价、可用资金、仓位核对（[`Runtime::read_step`] 的后半段）。
+    ///
+    /// 这些读数只进视图快照和仓位核对，不影响订单本身：拿不到时调用方保留上一份快照
+    /// 并说明原因，而不是把已经做成的一步报成失败。
+    async fn reading_step(
+        &self,
+        strategy_id: &StrategyId,
+        strategy: &Strategy,
+        state: &mut StrategyState,
+        orders: &mut [StoredOrder],
+        synced: &Synced,
+        now: DateTime<Utc>,
+    ) -> Result<Reading, RuntimeError> {
+        let instrument = strategy.spec().instrument();
         // 标记价：只进 `Plan` 供展示和日志使用，提前读出来是为了让仓位核对的提前返回
         // 也能报出当时的标记价，而不是一个零值。
         let market_price = self.exchange.mark_price(instrument).await?;
         let available_collateral = self.account.available_collateral().await?;
 
+        let since = synced.since;
+        let mut reported = synced.reported.clone();
+        let mut applied_fills = 0;
+        let mut unknown_result = false;
+        let mut inconsistent = None;
         let mut position = self.exchange.position(instrument).await?;
         let mut expected = expected_position(strategy, state, &reported, orders);
         let mut previous: Option<PositionReading> = None;
@@ -1085,14 +1206,14 @@ impl Runtime {
         // 循环里每一轮的结论都用来决定「还要不要再看一轮」，最后一份数据的结论就是这
         // 一步的结论：交给判定直接用，判定不必再拼一遍输入。
         let check = position_check(&reading, previous.as_ref());
-        Ok(Snapshot {
+        Ok(Reading {
             market_price,
             available_collateral,
             reading,
             check,
+            applied_fills,
             unknown_result,
             inconsistent,
-            applied_fills,
         })
     }
 
@@ -1366,34 +1487,37 @@ impl Runtime {
         strategy_id: &StrategyId,
         strategy: &Strategy,
         state: &mut StrategyState,
-        orders: &mut [StoredOrder],
+        orders: &mut Vec<StoredOrder>,
         now: DateTime<Utc>,
-    ) -> Result<(StrategyStatus, CancelOnly), RuntimeError> {
+    ) -> Result<(StrategyStatus, CancelOnlyRound), RuntimeError> {
+        let stored = self.store.load_strategy(strategy_id)?;
         // 先落「暂停中」：从这里开始这个策略不再下任何新单，即使这一步之后进程崩了，
         // 重启后驱动的也是只撤单的那条路。
         self.store
             .save_strategy_status(strategy_id, StrategyStatus::Pausing, now)?;
-        let cancel_only = self
-            .cancel_only(strategy_id, strategy, state, orders, now)
+        // 走的是和「暂停中」的驱动、恢复一样的那一轮：撤单只看库里的 `cloid`，
+        // 同步失败就丢掉内存、重新加载再撤（[`Runtime::cancel_only_round`]）。
+        let round = self
+            .cancel_only_round(strategy_id, &stored, strategy, state, orders, now)
             .await?;
-        let status = if cancel_only_settled(orders) {
+        let status = if round.is_clean() && cancel_only_settled(orders) {
             self.store
                 .save_strategy_status(strategy_id, StrategyStatus::Paused, now)?;
             tracing::warn!(
                 strategy = %strategy_id,
-                canceled = cancel_only.canceled.len(),
+                canceled = round.canceled.len(),
                 "strategy paused"
             );
             StrategyStatus::Paused
         } else {
             tracing::warn!(
                 strategy = %strategy_id,
-                canceled = cancel_only.canceled.len(),
+                canceled = round.canceled.len(),
                 "strategy pausing: some orders are not settled yet"
             );
             StrategyStatus::Pausing
         };
-        Ok((status, cancel_only))
+        Ok((status, round))
     }
 
     /// 停止：先落「停止中」，撤单收尾之后再归档（第 2.4 节，B45）。
@@ -1454,22 +1578,20 @@ impl Runtime {
         let mut state = self.load_state(strategy_id, &strategy)?;
         let mut orders = self.store.load_orders(strategy_id)?;
 
-        // 读取：补记成交、核对订单、核对仓位。判定不参与——这一步只撤单，判定出来的
-        // 「该下什么单」在这里没有意义。
-        let snapshot = self
-            .read_step(strategy_id, stored, &strategy, &mut state, &mut orders, now)
-            .await?;
-        let cancel_only = self
-            .cancel_only(strategy_id, &strategy, &mut state, &mut orders, now)
+        // 判定不参与：这一步只撤单，判定出来的「该下什么单」在这里没有意义。
+        let round = self
+            .cancel_only_round(strategy_id, stored, &strategy, &mut state, &mut orders, now)
             .await?;
 
-        let settled = cancel_only_settled(&orders);
+        // 收场：撤销和核对都走通，而且没有还在场的订单、成交也对完了账。任何一样没做到
+        // 都留在「暂停中」「停止中」，由后台继续推（第 9.2 节）。
+        let settled = round.is_clean() && cancel_only_settled(&orders);
         let status = if settled {
             self.store.save_strategy_status(strategy_id, target, now)?;
             tracing::warn!(
                 strategy = %strategy_id,
                 status = target.as_str(),
-                canceled = cancel_only.canceled.len(),
+                canceled = round.canceled.len(),
                 "cancel-only step finished"
             );
             target
@@ -1486,22 +1608,135 @@ impl Runtime {
             stored.status
         };
 
+        // 展示用的读数放在最后，而且失败不算这一步失败：撤销已经发出去、终态也已经核对，
+        // 这时候报错只会让用户看到「暂停失败」而单其实已经撤了。拿不到读数就沿用上一份
+        // 快照，并在说明里写清楚为什么没更新（第 11 节）。
+        //
+        // 这一轮没走通就不取展示读数了：仓位核对要拿交易所报的累计成交量当输入，缺了它
+        // 算出来的「应有持仓」是错的；而且核对循环里还会再记账、再写库，内存刚从库里
+        // 重新加载过，这一轮的结论本来就不算数。报出去还不如沿用上一份。
+        let reading = match (&round.synced, &round.cancel_error) {
+            (Err(error), _) => Err(format!("成交流水和订单状态（{error}）")),
+            (Ok(_), Some(error)) => Err(format!("撤单或撤单后的订单核对（{error}）")),
+            (Ok(synced), None) => match self
+                .reading_step(strategy_id, &strategy, &mut state, &mut orders, synced, now)
+                .await
+            {
+                Ok(reading) => Ok(reading),
+                Err(error) => {
+                    tracing::warn!(
+                        strategy = %strategy_id,
+                        %error,
+                        "the display readings are unavailable, keeping the previous view"
+                    );
+                    Err(format!("行情、可用资金或仓位（{error}）"))
+                }
+            },
+        };
+
+        let (position, expected_position, market_price) = match &reading {
+            Ok(reading) => (
+                reading.reading.actual,
+                reading.reading.expected,
+                reading.market_price,
+            ),
+            Err(_) => {
+                let previous = self.store.load_view(strategy_id)?;
+                (previous.position, previous.expected_position, Price::ZERO)
+            }
+        };
         let report = StepReport {
             strategy_id: strategy_id.clone(),
             status,
             plan: Plan {
-                market_price: snapshot.market_price,
+                market_price,
                 ..Plan::default()
             },
             placed: Vec::new(),
-            canceled: cancel_only.canceled,
-            applied_fills: snapshot.applied_fills + cancel_only.applied_fills,
-            position: snapshot.reading.actual,
-            expected_position: snapshot.reading.expected,
+            canceled: round.canceled,
+            applied_fills: round.applied_fills
+                + reading.as_ref().map_or(0, |reading| reading.applied_fills),
+            position,
+            expected_position,
         };
-        self.save_view(strategy_id, &report, snapshot.available_collateral, now)
-            .await?;
+
+        match reading {
+            Ok(reading) => {
+                self.save_view(strategy_id, &report, reading.available_collateral, now)
+                    .await?;
+            }
+            Err(what) => {
+                let note = stale_reading_note(&what, cancel_only_note(&orders, status));
+                self.annotate_view(strategy_id, status, note).await?;
+            }
+        }
         Ok(report)
+    }
+
+    /// 只撤单的一轮：同步（补记成交、核对订单）→ 出错就丢弃本轮内存、从库里重新加载
+    /// → 按持久化下来的 `cloid` 撤单 → 按 `cloid` 核对终态。
+    ///
+    /// 暂停、停止、恢复共用这一段：三处对「撤哪几张单」的要求是一样的，差别只在收场之后
+    /// 进入哪个状态。各写一份的话，同步那一步的失败处理迟早会漏掉一处——恢复那一处就漏过
+    /// 一次，结果是订单查询一直失败时遗留挂单一张都不撤（第 9.2 节）。
+    ///
+    /// 撤单只靠库里存着的 `cloid`，不需要先问到订单状态，所以同步失败也要照撤。
+    async fn cancel_only_round(
+        &self,
+        strategy_id: &StrategyId,
+        stored: &StoredStrategy,
+        strategy: &Strategy,
+        state: &mut StrategyState,
+        orders: &mut Vec<StoredOrder>,
+        now: DateTime<Utc>,
+    ) -> Result<CancelOnlyRound, RuntimeError> {
+        let mut applied_fills = 0;
+        let synced = match self
+            .sync_step(strategy_id, stored, strategy, state, orders, now)
+            .await
+        {
+            Ok(synced) => {
+                applied_fills += synced.applied_fills;
+                Ok(synced)
+            }
+            Err(sync_error) => {
+                tracing::warn!(
+                    strategy = %strategy_id,
+                    %sync_error,
+                    "the order reads failed, canceling the orders anyway"
+                );
+                // 丢弃这一轮改过的内存，重新加载落盘的那一份。补记成交先写流水、再写格子
+                // 和订单的累计成交量，两步不是一个事务：写第二步失败时内存里已经改过了，
+                // 继续拿它撤单，订单那一笔会被单独写进库、格子却停在原处——下一轮核对时
+                // 累计量已经相等，永远不会补记，这一格就永久对不上了。
+                //
+                // 重新加载的是库里的那份，撤单接着用它：撤哪几张单只认 `cloid`，不需要
+                // 刚才那几次没成功的查询。但这一轮算没走通，调用方不能宣告完成——同步失败
+                // 意味着成交没核对完，这一轮报出来的收场结论不算数。
+                *state = self.load_state(strategy_id, strategy)?;
+                *orders = self.store.load_orders(strategy_id)?;
+                Err(sync_error)
+            }
+        };
+
+        let cancel_only = self
+            .cancel_only(strategy_id, strategy, state, orders, now)
+            .await;
+        applied_fills += cancel_only.applied_fills;
+        let cancel_error = cancel_only.cancel_error.or(cancel_only.reconcile_error);
+        if cancel_error.is_some() {
+            // 撤完之后的核对同样会记账：写库失败时内存里的格子和订单已经改过了，道理和
+            // 上面同步失败一样，丢掉内存、重新加载落盘的那一份。撤销本身已经逐张落库，
+            // 重新加载不会丢掉它们。
+            *state = self.load_state(strategy_id, strategy)?;
+            *orders = self.store.load_orders(strategy_id)?;
+        }
+        Ok(CancelOnlyRound {
+            canceled: cancel_only.canceled,
+            applied_fills,
+            synced,
+            cancel_error,
+        })
     }
 
     /// 撤掉全部在场订单，再按 `cloid` 核对一遍终态、补记成交。
@@ -1510,6 +1745,9 @@ impl Runtime {
     /// 回执还可能丢在路上。只重发撤销是问不出结局的——交易所会说「不认识这张单」，
     /// 而它可能早就成交或者早就撤掉了。所以撤完必须再核对一遍，由交易所给出终态
     /// （第 9.2 节）。
+    ///
+    /// 撤销只要库里存着的 `cloid`，不需要先问到订单状态，所以订单读取失败也不影响它。
+    /// 两段各自的失败都记在返回值里，由调用方决定这一步能不能宣告收场。
     async fn cancel_only(
         &self,
         strategy_id: &StrategyId,
@@ -1517,32 +1755,57 @@ impl Runtime {
         state: &mut StrategyState,
         orders: &mut [StoredOrder],
         now: DateTime<Utc>,
-    ) -> Result<CancelOnly, RuntimeError> {
+    ) -> CancelOnly {
         let instrument = strategy.spec().instrument().clone();
         let mut canceled = Vec::new();
+        let mut cancel_error = None;
         for order in orders.iter_mut().filter(|order| order.record.is_working()) {
-            // 撤不掉的订单保持原状，下一次驱动继续尝试。
-            if self.cancel_order(&instrument, order, now).await? {
-                order.updated_at = now;
-                self.store.update_order(strategy_id, order)?;
-                canceled.push(order.record.client_order_id.clone());
+            match self.cancel_order(&instrument, order, now).await {
+                Ok(true) => {
+                    order.updated_at = now;
+                    if let Err(error) = self.store.update_order(strategy_id, order) {
+                        // 库写不进去是本地的问题，再撤下去也没有意义：撤销结果记不下来，
+                        // 下一轮会把已经撤掉的单再撤一遍。
+                        cancel_error.get_or_insert(error.into());
+                        break;
+                    }
+                    canceled.push(order.record.client_order_id.clone());
+                }
+                // 撤销没确认：保持原状，下一次驱动继续尝试。
+                Ok(false) => {}
+                // 一张单被拒收不该让后面的单跟着不撤：能撤的都要撤掉，撤不掉的下一轮再来。
+                Err(error) => {
+                    cancel_error.get_or_insert(error);
+                }
             }
         }
 
-        let reconciled = self
+        let mut applied_fills = 0;
+        let mut reconcile_error = None;
+        match self
             .reconcile_orders(strategy_id, strategy, state, orders, now)
-            .await?;
-        self.store.save_fills_synced_through(strategy_id, now)?;
+            .await
+        {
+            Ok(reconciled) => {
+                applied_fills = reconciled.applied_fills;
+                if let Err(error) = self.store.save_fills_synced_through(strategy_id, now) {
+                    reconcile_error = Some(error.into());
+                }
+            }
+            Err(error) => reconcile_error = Some(error),
+        }
         tracing::info!(
             strategy = %strategy_id,
             canceled = canceled.len(),
-            applied_fills = reconciled.applied_fills,
+            applied_fills,
             "cancel-only round done"
         );
-        Ok(CancelOnly {
+        CancelOnly {
             canceled,
-            applied_fills: reconciled.applied_fills,
-        })
+            applied_fills,
+            cancel_error,
+            reconcile_error,
+        }
     }
 
     /// 恢复：暂停之后接着跑（第 9.4 节）。
@@ -1559,7 +1822,12 @@ impl Runtime {
             // 与其等它撤完再恢复，不如现在就按恢复的流程走一遍。
             //
             // 恢复中的也走这里：用户点「恢复」就是让后台立刻再试一次，而不是等下一轮。
+            //
+            // 三条路都先落到「恢复中」：用户点的恢复和常驻服务的启动恢复走的是同一条
+            // 规则——遗留订单收干净之前一张新单都不下（[`Runtime::resume_inner`]）。
             StrategyStatus::Paused | StrategyStatus::Pausing | StrategyStatus::Restoring => {
+                self.store
+                    .save_strategy_status(strategy_id, StrategyStatus::Restoring, now)?;
                 self.resume_inner(strategy_id, now).await
             }
             StrategyStatus::Running => Ok(ResumeOutcome::AlreadyRunning),
@@ -1591,13 +1859,8 @@ impl Runtime {
         let now = self.clock.now();
         self.store
             .save_strategy_status(strategy_id, StrategyStatus::Restoring, now)?;
-        self.annotate_view(
-            strategy_id,
-            StrategyStatus::Restoring,
-            note.to_string(),
-            now,
-        )
-        .await
+        self.annotate_view(strategy_id, StrategyStatus::Restoring, note.to_string())
+            .await
     }
 
     /// 常驻循环每一轮要驱动的策略（第 12 节）。
@@ -1630,52 +1893,23 @@ impl Runtime {
     ///
     /// 调用方必须已经通过 [`Runtime::begin`] 取得这个策略的驱动权。
     ///
-    /// 一轮只做能做完的那部分：遗留订单还没过期就什么都不做，等下一轮。常驻循环每几秒
-    /// 一轮，比在恢复里睡一觉更好——睡着的时候别的策略也驱动不了。
+    /// 一轮只做能做完的那部分：遗留订单还没过期、还没撤掉就什么都不做，等下一轮。常驻循环
+    /// 每几秒一轮，比在恢复里睡一觉更好——睡着的时候别的策略也驱动不了。
     async fn restore_step(
         &self,
         strategy_id: &StrategyId,
         now: DateTime<Utc>,
     ) -> Result<StepReport, RuntimeError> {
-        match self.resume_inner(strategy_id, now).await {
-            Ok(ResumeOutcome::Resumed(report)) => Ok(report),
-            Ok(ResumeOutcome::WaitingForExpiry { until }) => {
-                tracing::info!(
-                    strategy = %strategy_id,
-                    %until,
-                    "still waiting for leftover orders to expire"
-                );
-                self.annotate_view(
-                    strategy_id,
-                    StrategyStatus::Restoring,
-                    format!("等重启前挂出去的单过期（{until}）之后再重新挂单。"),
-                    now,
-                )
-                .await?;
+        match self.resume_inner(strategy_id, now).await? {
+            ResumeOutcome::Resumed(report) => Ok(report),
+            // 这一轮什么都没做成：状态留在「恢复中」，视图上已经写清楚了在等什么。
+            ResumeOutcome::WaitingForExpiry { .. } | ResumeOutcome::WaitingForSettle { .. } => {
                 Ok(self.nothing_happened(strategy_id, StrategyStatus::Restoring))
             }
-            Ok(ResumeOutcome::AlreadyRunning) => Err(RuntimeError::NotRunning(
+            ResumeOutcome::AlreadyRunning => Err(RuntimeError::NotRunning(
                 strategy_id.clone(),
                 StrategyStatus::Restoring,
             )),
-            Err(error) => {
-                // 恢复的那一段没走通（交易所连不上、账户查不到）：状态留在「恢复中」，
-                // 网页上看得到原因，下一轮再试。
-                //
-                // 但状态已经不是「恢复中」时说明遗留订单已经收干净、策略已经转成运行中，
-                // 这就是普通的一步失败，不该把它退回「恢复中」——那会让它再撤一遍刚挂
-                // 出去的单。
-                if self.store.load_strategy(strategy_id)?.status == StrategyStatus::Restoring {
-                    self.annotate_view(
-                        strategy_id,
-                        StrategyStatus::Restoring,
-                        format!("恢复失败：{error}。后台会继续重试。"),
-                        now,
-                    )
-                    .await?;
-                }
-                Err(error)
-            }
         }
     }
 
@@ -1693,16 +1927,49 @@ impl Runtime {
         }
     }
 
-    /// 恢复：等遗留订单过期、撤销它们，再按状态重新挂单。
+    /// 恢复：等遗留订单过期、撤销它们、按 `cloid` 核对出终态、补记成交，收干净了才
+    /// 转成「运行中」重新挂单。
     ///
-    /// 调用方必须已经通过 [`Runtime::begin`] 取得这个策略的驱动权。
+    /// 用户点的恢复和常驻服务的启动恢复都走这里：两条路要的规则是一样的——遗留订单还在场
+    /// 时就开始下单，同一个单位就可能有两张都会成交的单。收不干净时状态留在「恢复中」，
+    /// 由驱动循环一轮一轮推进（[`Runtime::drivable`]）。
+    ///
+    /// 调用方必须已经通过 [`Runtime::begin`] 取得这个策略的驱动权，并把它落到「恢复中」。
     async fn resume_inner(
         &self,
         strategy_id: &StrategyId,
         now: DateTime<Utc>,
     ) -> Result<ResumeOutcome, RuntimeError> {
+        match self.resume_once(strategy_id, now).await {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                // 恢复的那一段没走通（交易所连不上、账户查不到）：状态留在「恢复中」，
+                // 网页上看得到原因，下一轮再试。
+                //
+                // 但状态已经不是「恢复中」时说明遗留订单已经收干净、策略已经转成运行中，
+                // 这就是普通的一步失败，不该把它退回「恢复中」——那会让它再撤一遍刚挂
+                // 出去的单。
+                if self.store.load_strategy(strategy_id)?.status == StrategyStatus::Restoring {
+                    self.annotate_view(
+                        strategy_id,
+                        StrategyStatus::Restoring,
+                        format!("恢复失败：{error}。后台会继续重试。"),
+                    )
+                    .await?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn resume_once(
+        &self,
+        strategy_id: &StrategyId,
+        now: DateTime<Utc>,
+    ) -> Result<ResumeOutcome, RuntimeError> {
         let stored = self.store.load_strategy(strategy_id)?;
-        let instrument = stored.spec.instrument().clone();
+        let strategy = Strategy::new(stored.config.clone(), stored.spec.clone(), stored.fees)?;
+        let mut state = self.load_state(strategy_id, &strategy)?;
         let mut orders = self.store.load_orders(strategy_id)?;
 
         // 1. 还有可能落地的订单：等它们过期，否则可能重复下单。
@@ -1713,25 +1980,74 @@ impl Runtime {
             .max();
         if let Some(until) = pending.filter(|until| *until > now) {
             tracing::info!(strategy = %strategy_id, %until, "waiting for order expiry before resuming");
+            self.annotate_view(
+                strategy_id,
+                StrategyStatus::Restoring,
+                format!("等重启前挂出去的单过期（{until}）之后再重新挂单。"),
+            )
+            .await?;
             return Ok(ResumeOutcome::WaitingForExpiry { until });
         }
 
-        // 2. 撤销遗留挂单。撤不掉的订单保持在场，下一步的规划会再撤一次。
+        // 2. 只撤单的一轮：先补拉成交、核对挂单，再撤销遗留挂单、按 `cloid` 核对终态。
         //
         //    撤销只把它变成终态，成交还没有核对：撤销前可能已经有成交、成交记录也可能
-        //    还没到。这些订单继续保持 `fills_reconciled = false`，第 3 步补拉成交时
-        //    的回查起点才会一直追到它们挂出去的时间，不会漏掉成交。
-        for order in orders.iter_mut().filter(|order| order.record.is_working()) {
-            if self.cancel_order(&instrument, order, now).await? {
-                order.updated_at = now;
-                self.store.update_order(strategy_id, order)?;
-            }
+        //    还没到。这些订单继续保持 `fills_reconciled = false`，补拉成交的回查起点才会
+        //    一直追到它们挂出去的时间，不会漏掉成交。
+        //
+        //    查询失败也照撤：撤哪几张单只靠库里存着的 `cloid`（[`Runtime::cancel_only_round`]）。
+        //    以前这里先做一次同步、失败就直接返回，结果是成交流水或挂单列表一直查不到时，
+        //    遗留挂单一轮都不撤，它们继续留在交易所上。
+        let CancelOnlyRound {
+            applied_fills,
+            synced,
+            cancel_error,
+            ..
+        } = self
+            .cancel_only_round(
+                strategy_id,
+                &stored,
+                &strategy,
+                &mut state,
+                &mut orders,
+                now,
+            )
+            .await?;
+        // 这一轮有没走通的地方：状态留在「恢复中」，把原因报出去（`resume_inner` 会写进
+        // 视图），下一轮再试。撤销本身照常做了，已经撤掉的单不会因为这一步报错而重挂。
+        //
+        // 同步出错时更不能往下走：内存里的格子和订单可能停在没落盘的那一份上，按它判定
+        // 出来的「该下什么单」是错的。同步的结果本身这里不用——第 4 步的读数会重新取一遍。
+        synced?;
+        if let Some(error) = cancel_error {
+            return Err(error);
         }
 
-        // 3. 按状态重新挂单：走一步会补拉成交、核对仓位，再重新规划。
+        // 3. 没收场就不进「运行中」：撤销没确认、终态没核对出来，留下的都是还会成交的单。
+        //    状态留在「恢复中」，后台下一轮继续推进。
+        if !leftovers_settled(&orders) {
+            let working = orders
+                .iter()
+                .filter(|order| order.record.is_working())
+                .count();
+            tracing::info!(
+                strategy = %strategy_id,
+                working,
+                "the leftover orders are not settled yet, staying in restoring"
+            );
+            self.annotate_view(strategy_id, StrategyStatus::Restoring, settle_note(&orders))
+                .await?;
+            return Ok(ResumeOutcome::WaitingForSettle { working });
+        }
+
+        // 4. 收干净了：转「运行中」，按状态重新挂单。补拉成交、仓位核对和判定都在这一步
+        //    里——仓位对不上时它照常暂停，不会先下出一批单。
         self.store
             .save_strategy_status(strategy_id, StrategyStatus::Running, now)?;
-        let report = self.running_step(strategy_id, now).await?;
+        let mut report = self.running_step(strategy_id, now).await?;
+        // 这一步的读数重新取过一遍，只有成交笔数要算上收尾时补记的那几笔：报告说的是
+        // 「这次恢复一共记下了多少笔成交」，收尾补的和重新挂单时补的都是这次恢复做的。
+        report.applied_fills += applied_fills;
         Ok(ResumeOutcome::Resumed(report))
     }
 
@@ -1761,7 +2077,7 @@ impl Runtime {
         // 只撤单的状态还没走完，原因要写清楚：页面上只有状态名的话，用户看不出它是在
         // 重试撤单、还是在等成交对账，也不知道该不该等下去。
         let note = if report.status.is_cancel_only() {
-            cancel_only_note(&self.store.load_orders(strategy_id)?)
+            cancel_only_note(&self.store.load_orders(strategy_id)?, report.status)
         } else {
             None
         };
@@ -1783,15 +2099,17 @@ impl Runtime {
     ///
     /// 恢复没走通、还在等订单过期时用：这一刻本来就没有新读数（读取这一步本身就没做成），
     /// 但网页要能看到它在恢复、卡在哪。
+    ///
+    /// `taken_at` 原样保留：它说的是「这份读数是什么时候取的」。改成现在，用户就会把一份
+    /// 十分钟前的仓位当成刚取的——说明文字补不回丢掉的时间（第 11 节）。状态什么时候变的
+    /// 另有一处：`strategies.updated_at` 由 [`Store::save_strategy_status`] 写。
     async fn annotate_view(
         &self,
         strategy_id: &StrategyId,
         status: StrategyStatus,
         note: String,
-        now: DateTime<Utc>,
     ) -> Result<(), RuntimeError> {
         let mut view = self.store.load_view(strategy_id)?;
-        view.taken_at = now;
         view.status = status;
         view.note = Some(note);
         self.store.save_view(strategy_id, &view)?;
@@ -2381,11 +2699,58 @@ fn cancel_only_settled(orders: &[StoredOrder]) -> bool {
         .all(|order| !order.record.is_working() && order.fills_reconciled)
 }
 
+/// 恢复的遗留订单是不是都收场了：没有还可能在场的订单。
+///
+/// 不看成交对没对完账：恢复之后策略继续跑，流水还会再来，这一格的预留由规划按
+/// `FillsPending` 挡住，不会按旧数量补单。归档不一样——归档之后没有人再驱动这个策略，
+/// 所以「停止中」必须等到流水到齐（[`cancel_only_settled`]）。
+///
+/// 结果从来没拿到过的订单（`Unknown`、`Submitting`）也算在场。交易所对它们只会回答
+/// 「查无此单」，撤销问不出结局（第 9.2 节）：它可能已经成交，这时候重新挂单，同一个
+/// 单位上就会多出一张会成交的单。预留一直保留，等三方核对做完再放行（任务 08）。
+fn leftovers_settled(orders: &[StoredOrder]) -> bool {
+    orders.iter().all(|order| !order.record.is_working())
+}
+
+/// 这张订单的结果我们从来没拿到过。
+///
+/// 下单超时（`Unknown`）和写库之后、发送之前崩溃（`Submitting`）都是这一类：交易所可能
+/// 压根没收到这张单，撤销只会得到「查无此单」。
+fn outcome_unknown(status: OrderStatus) -> bool {
+    matches!(status, OrderStatus::Unknown | OrderStatus::Submitting)
+}
+
+/// 恢复中为什么还没转成「运行中」，写给用户看的一句话。
+///
+/// 两种原因分开说：撤销没确认的要重试；结果从来没拿到过的，重试也问不出结局——交易所只会
+/// 回答「查无此单」，得等三方核对（任务 08）才能放行。混在一起说「正在重试」，用户会以为
+/// 等下去就能好。
+fn settle_note(orders: &[StoredOrder]) -> String {
+    let unknown = orders
+        .iter()
+        .filter(|order| order.record.is_working() && outcome_unknown(order.record.status))
+        .count();
+    let working = orders
+        .iter()
+        .filter(|order| order.record.is_working() && !outcome_unknown(order.record.status))
+        .count();
+    match (working, unknown) {
+        (0, count) => format!(
+            "还有 {count} 张遗留订单的结果没查出来（交易所只回答「查无此单」），撤销问不出结局，\
+             预留先留着；后台会继续按 cloid 核对。"
+        ),
+        (count, 0) => format!("还有 {count} 张遗留订单没撤掉，正在重试。"),
+        (working, unknown) => format!(
+            "还有 {working} 张遗留订单没撤掉、{unknown} 张的结果没查出来；后台会继续撤、继续核对。"
+        ),
+    }
+}
+
 /// 「暂停中」「停止中」为什么还没走完，写给用户看的一句话。
 ///
 /// 只说还差什么：撤单撤不掉要重试，成交没对完账要等流水。没有这两种情况时是 `None`——
 /// 那一刻状态马上就会转成「已暂停」或「已归档」，不需要解释。
-fn cancel_only_note(orders: &[StoredOrder]) -> Option<String> {
+fn cancel_only_note(orders: &[StoredOrder], status: StrategyStatus) -> Option<String> {
     let working = orders
         .iter()
         .filter(|order| order.record.is_working())
@@ -2394,13 +2759,30 @@ fn cancel_only_note(orders: &[StoredOrder]) -> Option<String> {
         .iter()
         .filter(|order| !order.record.is_working() && !order.fills_reconciled)
         .count();
+    let done = if status == StrategyStatus::Pausing {
+        "暂停"
+    } else {
+        "归档"
+    };
     match (working, unreconciled) {
         (0, 0) => None,
-        (0, count) => Some(format!("还有 {count} 张订单的成交没对完账，对完才归档。")),
+        (0, count) => Some(format!("还有 {count} 张订单的成交没对完账，对完才{done}。")),
         (count, 0) => Some(format!("还有 {count} 张订单没撤掉，正在重试。")),
         (working, unreconciled) => Some(format!(
             "还有 {working} 张订单没撤掉、{unreconciled} 张订单的成交没对完账。"
         )),
+    }
+}
+
+/// 只撤单的步骤没拿到展示读数时的说明。
+///
+/// 读数沿用上一份，用户看到的可能是一份几分钟前的行情；不写清楚原因，它看起来和
+/// 刚取回来的没什么两样。撤单和成交对账没受影响，也要说一句，免得用户以为整步都失败了。
+fn stale_reading_note(what: &str, progress: Option<String>) -> String {
+    let stale = format!("这一步没读到{what}，读数沿用上一份。");
+    match progress {
+        Some(progress) => format!("{stale}{progress}"),
+        None => stale,
     }
 }
 

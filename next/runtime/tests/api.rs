@@ -283,6 +283,85 @@ async fn b46_a_busy_instrument_is_a_conflict() {
     );
 }
 
+/// 暂停、停止的接口报出策略真正落到的状态，页面照着它说话。
+///
+/// 撤单回执丢在路上的时候，「暂停中」「停止中」是真实存在的状态：订单还在交易所上，
+/// 后台每一轮继续撤。接口只回一个撤销列表的话，页面只能一律说「已暂停」「已停止」，
+/// 用户以为挂单已经撤掉了（第 2.4 节）。
+#[tokio::test]
+async fn a_pause_or_stop_reports_the_status_it_actually_reached() {
+    let console = console();
+    let router = api::router(console.runtime.clone());
+    let strategy_id = create_draft(&router, &long_grid_config()).await;
+    start(&router, &strategy_id).await;
+    // 挂上单再暂停。
+    console.clock.set(at(1));
+    console
+        .runtime
+        .step(&console.runtime.drivable().unwrap()[0])
+        .await
+        .unwrap();
+
+    // 撤单回执丢了：交易所那边订单还在，状态停在「暂停中」。
+    console.exchange.unknown_next_cancel("timed out");
+    let (status, body) = call(
+        &router,
+        Method::POST,
+        &format!("/api/strategies/{strategy_id}/pause"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "pausing");
+    assert_eq!(body["canceled"].as_array().unwrap().len(), 19);
+
+    // 再点一次：这一轮撤得掉，才转「已暂停」。
+    let (status, body) = call(
+        &router,
+        Method::POST,
+        &format!("/api/strategies/{strategy_id}/pause"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "paused");
+    assert_eq!(body["canceled"].as_array().unwrap().len(), 1);
+
+    // 停止也一样：先「停止中」，收尾之后才是「已停止」。先恢复起来，好有挂单可撤。
+    console.clock.set(at(10));
+    let (status, body) = call(
+        &router,
+        Method::POST,
+        &format!("/api/strategies/{strategy_id}/resume"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    console.exchange.unknown_next_cancel("timed out");
+    let (status, body) = call(
+        &router,
+        Method::POST,
+        &format!("/api/strategies/{strategy_id}/stop"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "stopping");
+    assert_eq!(body["canceled"].as_array().unwrap().len(), 19);
+
+    let (status, body) = call(
+        &router,
+        Method::POST,
+        &format!("/api/strategies/{strategy_id}/stop"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "stopped");
+    assert_eq!(body["canceled"].as_array().unwrap().len(), 1);
+}
+
 /// 归档的策略不能再驱动，接口回答 409。
 #[tokio::test]
 async fn an_archived_strategy_refuses_further_commands() {

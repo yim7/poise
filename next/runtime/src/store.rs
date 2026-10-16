@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -286,29 +287,121 @@ pub enum StoreError {
     UnknownDirection { value: String },
     #[error("unknown order status `{value}`")]
     UnknownOrderStatus { value: String },
+    #[error("write failure injected by the test hook")]
+    InjectedWriteFailure,
     #[error("column `{column}` holds an invalid value `{value}`")]
     InvalidColumn { column: &'static str, value: String },
+    #[error(
+        "database `{location}` has schema version {found}, but this build needs version {expected}; \
+         this project does not migrate old databases — move the old database away and restart"
+    )]
+    SchemaVersion {
+        /// 库的位置，或者 `in-memory`。
+        location: String,
+        /// 库里记的结构版本。
+        found: i32,
+        /// 这个版本期望的结构版本。
+        expected: i32,
+    },
+}
+
+/// 数据库结构版本，记在 SQLite 的 `user_version` 里。
+///
+/// 改表结构就加一。打开库时版本对不上直接拒绝，而不是等写到一半才发现少了一列——
+/// 那时候用户已经以为策略在跑了（第 12 节：不兼容旧数据库，也不迁移旧库）。
+const SCHEMA_VERSION: i32 = 1;
+
+/// 库里已经有表了吗。
+///
+/// 有表就说明这不是一个刚打开的空文件，而是别人建好的库：它没有版本记录，是因为它
+/// 建于「记版本」这件事之前。
+fn has_tables(connection: &Connection) -> Result<bool, rusqlite::Error> {
+    let count: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 /// 一个进程内的数据库句柄。克隆出来的句柄共用同一条连接。
 #[derive(Clone)]
 pub struct Store {
     connection: Arc<Mutex<Connection>>,
+    /// 还要让几次成交记账写库失败，见 [`Store::fail_applied_fills`]。
+    injected_write_failures: Arc<AtomicUsize>,
 }
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        Self::from_connection(Connection::open(path)?)
+        let path = path.as_ref();
+        let connection = Connection::open(path)?;
+        Self::from_connection(connection, &path.display().to_string())
     }
 
     pub fn open_in_memory() -> Result<Self, StoreError> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::from_connection(Connection::open_in_memory()?, "in-memory")
     }
 
-    fn from_connection(connection: Connection) -> Result<Self, StoreError> {
+    /// 建表（新库）或者核对结构版本（已有库），`source` 只用在错误信息里。
+    fn from_connection(mut connection: Connection, source: &str) -> Result<Self, StoreError> {
+        let found: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        // 0 是「没有记过版本」：全新的空库，或者这个版本之前建的旧库。前者正是接下来
+        // 要建表的那个，后者要拒绝——旧库有没有这一版要的列，只有建表时才知道，
+        // 而「表已经在了，`CREATE TABLE IF NOT EXISTS` 什么都不会做」。
+        if found != SCHEMA_VERSION && (found != 0 || has_tables(&connection)?) {
+            return Err(StoreError::SchemaVersion {
+                location: source.to_string(),
+                found,
+                expected: SCHEMA_VERSION,
+            });
+        }
+        // 这两条只能在事务外设：`journal_mode` 在事务里改不了，`foreign_keys` 在事务里
+        // 是空操作。
         connection.execute_batch(
             "PRAGMA journal_mode = WAL;
-             PRAGMA foreign_keys = ON;
+             PRAGMA foreign_keys = ON;",
+        )?;
+        // 建表和写版本在同一个事务里。分成两步的话，建表成功之后、版本写下去之前进程退出，
+        // 会留下一个「版本 0、有表」的库：下一次打开被当成旧库拒绝，而它其实是这一版的库，
+        // 只是没建完。放进事务，中途失败就一起回滚，重开还能从零建起来。
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(TABLES)?;
+        // 表建好了才写版本：写在前头、建表失败的话，这个库会被当成「已经是这一版」，
+        // 下一次打开就少了一张表却查不出原因。
+        transaction.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        transaction.commit()?;
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+            injected_write_failures: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    /// 让接下来 `count` 次成交记账写库失败（[`Store::save_applied_fills`]）。
+    ///
+    /// 只给测试用：磁盘满、库被别的进程锁住这类真实的写失败没法按需造出来，而「写失败
+    /// 之后内存里那份改动还算不算数」正是要验的东西。失败点在事务之前，所以流水那一笔
+    /// 已经写进去了——这正是要复现的中间态：流水在，格子和订单的累计成交量没跟上。
+    pub fn fail_applied_fills(&self, count: usize) {
+        self.injected_write_failures.store(count, Ordering::SeqCst);
+    }
+
+    /// 取走一次注入的写失败。
+    fn take_injected_write_failure(&self) -> bool {
+        self.injected_write_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                (left > 0).then(|| left - 1)
+            })
+            .is_ok()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Connection> {
+        self.connection.lock().expect("store lock poisoned")
+    }
+}
+
+/// 这一版的建表语句，整体跑在一个事务里（见 [`Store::from_connection`]）。
+const TABLES: &str = "
              CREATE TABLE IF NOT EXISTS strategies (
                  strategy_id TEXT PRIMARY KEY,
                  instrument TEXT NOT NULL,
@@ -391,17 +484,9 @@ impl Store {
                  strategy_id TEXT PRIMARY KEY,
                  taken_at TEXT NOT NULL,
                  view_json TEXT NOT NULL
-             );",
-        )?;
-        Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
-        })
-    }
+             );";
 
-    fn lock(&self) -> MutexGuard<'_, Connection> {
-        self.connection.lock().expect("store lock poisoned")
-    }
-
+impl Store {
     /// 建策略：策略记录、初始状态、一个参数版本和第一份视图快照写在同一个事务里。
     ///
     /// 分开写就可能留下「策略已存在、格子状态是空的」的记录，这种策略既跑不起来
@@ -824,6 +909,9 @@ impl Store {
         state: &StrategyState,
         orders: &[&StoredOrder],
     ) -> Result<(), StoreError> {
+        if self.take_injected_write_failure() {
+            return Err(StoreError::InjectedWriteFailure);
+        }
         let mut connection = self.lock();
         let transaction = connection.transaction()?;
         write_state(&transaction, strategy_id, state)?;
@@ -1544,8 +1632,8 @@ fn parse_time(value: &str) -> Result<DateTime<Utc>, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Store, StoreError, StoredDraft, StoredFill, StoredOrder, StoredStrategy, StrategyId,
-        StrategyStatus, ViewSnapshot,
+        SCHEMA_VERSION, Store, StoreError, StoredDraft, StoredFill, StoredOrder, StoredStrategy,
+        StrategyId, StrategyStatus, ViewSnapshot,
     };
     use chrono::{DateTime, TimeZone, Utc};
     use poise_strategy::batch::BatchIndex;
@@ -1579,6 +1667,124 @@ mod tests {
             placed_at: at(0),
             updated_at: at(0),
         }
+    }
+
+    /// 读一个库文件里的结构版本。
+    fn schema_version(path: &std::path::Path) -> i32 {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// 一个「这个版本之前建的」旧库：有表，但没有版本记录。
+    fn write_an_old_database(path: &std::path::Path) {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection
+            .execute_batch("CREATE TABLE strategies (strategy_id TEXT PRIMARY KEY);")
+            .unwrap();
+    }
+
+    /// 新建的库把结构版本写进 `user_version`，再打开时不会把自己认成旧库。
+    #[test]
+    fn a_new_database_records_the_schema_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("poise.sqlite");
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(schema_version(&path), SCHEMA_VERSION);
+        drop(store);
+
+        // 关掉再打开：版本对得上，照常打开。
+        Store::open(&path).unwrap();
+    }
+
+    /// 结构版本对不上的旧库直接拒绝，错误里写清楚库路径、库版本、期望版本和该怎么做。
+    ///
+    /// 只在写入时才发现少了一列太晚了：那时候用户已经以为策略在跑了（第 12 节）。
+    #[test]
+    fn a_database_with_another_schema_version_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("poise.sqlite");
+        write_an_old_database(&path);
+
+        let Err(error) = Store::open(&path) else {
+            panic!("an old database must be refused");
+        };
+
+        let message = error.to_string();
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(message.contains("version 0"), "{message}");
+        assert!(
+            message.contains(&format!("version {SCHEMA_VERSION}")),
+            "{message}"
+        );
+        assert!(message.contains("move the old database away"), "{message}");
+        // 拒绝就是拒绝：没有顺手把旧库改掉。
+        assert_eq!(schema_version(&path), 0);
+    }
+
+    /// 比这个版本新的库也拒绝：新版本可能加了这个版本读不懂的东西。
+    #[test]
+    fn a_database_from_a_newer_build_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("poise.sqlite");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION + 1))
+            .unwrap();
+        drop(connection);
+
+        let Err(error) = Store::open(&path) else {
+            panic!("a newer database must be refused");
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("version {}", SCHEMA_VERSION + 1)),
+            "{error}"
+        );
+    }
+
+    /// 建表中途失败不留半成品：重开还能从零建起来。
+    ///
+    /// 建表和写版本分成两步的话，建表成功之后、版本写下去之前进程退出，会留下一个
+    /// 「版本 0、有表」的库。下一次打开被当成旧库拒绝，可它其实是这一版的库，只是没建完，
+    /// 用户只能删库重来。放进同一个事务，中途失败就一起回滚。
+    #[test]
+    fn a_table_creation_that_fails_partway_leaves_the_database_untouched() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("poise.sqlite");
+        // 一个不是表的对象占住 `orders_by_strategy` 这个名字：建到那一条语句就会失败，
+        // 前面的表都已经建过了。视图不算表，所以它不会在版本核对那一步被当成旧库挡下来。
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("CREATE VIEW orders_by_strategy AS SELECT 1 AS x;")
+            .unwrap();
+        drop(connection);
+
+        assert!(Store::open(&path).is_err(), "建表失败要报出来");
+
+        // 失败那一次建的表全部回滚，版本也没写：它还是那个「全新的空库」。
+        assert_eq!(schema_version(&path), 0);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let tables: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0, "建了一半的表要一起回滚");
+        // 挡路的对象挪走之后重开：正常建起来，版本也写上了。
+        connection
+            .execute_batch("DROP VIEW orders_by_strategy;")
+            .unwrap();
+        drop(connection);
+
+        Store::open(&path).unwrap();
+        assert_eq!(schema_version(&path), SCHEMA_VERSION);
     }
 
     #[test]
