@@ -14,10 +14,11 @@
 1. **在 Hyperliquid 上自动运行网格**。HL 官方订单类型有 Scale（区间内多张限价单）和 TWAP，但没有网格；“买成挂卖、卖成挂回买”需要程序完成。来源：[Hyperliquid 订单类型](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/order-types)。
 2. **可选的限速**：单边快速行情中不一次加满。HL 的 TWAP 子单是市价单，最大滑点 3%，到达最高价时整单终止，不能做到“只在认可价位、按时间慢慢建仓”。
 
-**本期范围**：只做 Hyperliquid 默认永续市场（主流加密货币），用户使用的 Unified 账户，单向持仓；支持做多、做空、中性三种网格。
+**本期范围**：只做 Hyperliquid 永续，用户使用的 Unified 账户，单向持仓；支持做多、做空、中性三种网格。品种是主市场上的主流加密货币，加上第三方市场（HIP-3）`xyz` 上的黄金、原油、美股，标的写成 `xyz:GOLD`、`xyz:CL`、`xyz:TSLA`。第三方市场只支持明确用 USDC 抵押的；标的必须是全仓（正式网 `xyz` 的这些标的都支持全仓）。
 
 **后续事项**：
-- HIP-3 市场 `xyz` 上的黄金、原油、美股（任务 14，待排期）；
+- 第三方市场部署者在策略运行中改了费率时自动重新校验（现在运行中的策略沿用启动时的费率）；
+- 美股、原油休市时段的处理（没有实测过）；
 - Binance、Bybit、OKX 适配；
 - 自动远期退出；
 - 自定义每批数量或每格数量。
@@ -107,7 +108,7 @@
 
 **满仓压力测试**：按第 7.3 节计算，满仓时的预计保证金率达到停止阈值就拒绝配置，超过提醒阈值时警告。
 
-**扣费后盈利**：每格的 `(卖价 − 买价)` 必须大于 `(卖价 + 买价) × taker 费率`，即双边都以 taker 成交仍然盈利；否则拒绝配置。预览同时显示按 maker 成交的收益。费率取账户实际费率。
+**扣费后盈利**：每格的 `(卖价 − 买价)` 必须大于 `(卖价 + 买价) × taker 费率`，即双边都以 taker 成交仍然盈利；否则拒绝配置。预览同时显示按 maker 成交的收益。费率以账户费率（`userFees`）为基础；第三方市场的标的再按部署者的费用设置调整（附录 A），每次预览现取，读不到就拒绝。推荐折扣和对齐稳定币折扣没有算，结果向上取整，都是偏保守的方向。
 
 ### 2.4 策略生命周期
 
@@ -288,7 +289,7 @@
 
 ### 7.4 保证金率限制（运行时）
 
-- **指标**：Hyperliquid Unified 账户比率，按官方账户模式页面给出的计算方式：全仓维持保证金占用（取 `crossMaintenanceMarginUsed` 与「余额 − 维持后可用量」中较大的那个），除以 USDC 余额减去逐仓保证金；分母不是正数时按 100% 算。逐个市场只查本系统用到的：目前是默认永续市场，接入 HIP-3 时加上标的所在的市场，其他市场不单独查询。但「余额 − 维持后可用量」是整个账户的数，其他市场的占用会通过它计入：Unified 账户的余额本来就共用，这样不会低估风险。读数过期（超过行情过期时间）按读不到处理。
+- **指标**：Hyperliquid Unified 账户比率，按官方账户模式页面给出的计算方式：全仓维持保证金占用（取 `crossMaintenanceMarginUsed` 与「余额 − 维持后可用量」中较大的那个），除以 USDC 余额减去逐仓保证金；分母不是正数时按 100% 算。逐个市场只查本系统用到的：主市场，加上活动策略（预览时加上草稿）的标的所在的第三方市场，各处的全仓占用和逐仓保证金相加，读数时刻取最旧的；其他市场不单独查询。但「余额 − 维持后可用量」是整个账户的数，其他市场的占用会通过它计入：Unified 账户的余额本来就共用，这样不会低估风险。读数过期（超过行情过期时间）按读不到处理。
 - 超过**提醒阈值**（默认 30%）：提醒用户。
 - 超过**停止阈值**（默认 50%）：同一账户所有策略只发、只保留交易所只减仓单（成交只会减少该标的的净仓位），其余挂单全部撤销。单侧网格的格子卖单本来就是只减仓单，照常运行；中性网格的格子单可能让净仓位穿越零，在此期间撤销。失效平仓照常运行。比率回落到停止阈值以下后自动恢复。
 
@@ -483,7 +484,7 @@
 
 - 正式网还没有做过端到端验证：要用户新建正式网实例、写入正式网私钥，并授权小金额测试。
 - Unified 每日操作上限被拒的原话、计数方式和按哪个时区算一天，官方文档没有给出；实测要在测试网上真打满 5 万次，评估后认为正常运行碰不到，暂不实测。
-- 后续事项：按“同一格反复撤挂且没有成交”检测程序缺陷造成的反复撤挂（比按总次数更准）；HIP-3 市场（任务 14）。
+- 后续事项：按“同一格反复撤挂且没有成交”检测程序缺陷造成的反复撤挂（比按总次数更准）；第三方市场运行中改费率时重新校验；美股、原油休市时段（第 1 节）。
 
 自动远期退出列为后续事项（第 1 节）；首版退出由用户手动处理，处理后按第 8 节重新接管。
 
@@ -507,6 +508,7 @@
 | 请求次数 | `userRateLimit` 返回 `cumVlm`、`nRequestsUsed`、`nRequestsCap`、`nRequestsSurplus`；`nRequestsCap` = 累计成交额 + 1 万，是按地址的累计上限，**不是** Unified 账户每天 5 万次的操作上限。累计上限被拒的原话是 `Too many cumulative requests sent (…) for cumulative volume traded $…`（顶层 `"status": "err"`）；每日上限的原话未见出处。下单撤单接口没有错误码，只有原话 | [限额说明](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits)、[账户模式](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes)；原话来自 ccxt 的错误映射 |
 | 资金费 | 每小时结算；`metaAndAssetCtxs` 的 `funding` 是当前每小时费率，可能多于 8 位小数；`userFunding` 按时间返回整个账户各标的的结算（`usdc` 负数是付出，可能带前导空格），一次最多 500 条，下一页用上一页最后一条的时刻作起点（含） | [资金费](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding)、info endpoint；测试网实测 |
 | 立即成交否则撤销 | IOC 单部分成交时回执是 `filled`、`totalSz` 为成交部分；一点都没成交时整张拒绝（`Order could not immediately match…`） | 错误说明；测试网实测 |
+| 第三方市场（HIP-3） | 标的名形如 `xyz:GOLD`；资产编号 = 100000 + 市场在 `perpDexs` 里的位置 × 10000 + 下标；`meta`、`metaAndAssetCtxs`、`clearinghouseState`、`openOrders` 带 `dex` 参数，成交和资金费结算不分市场、按完整标的名过滤；订单状态按账户和订单编号查询，也不带 `dex`；`meta` 的 `collateralToken` 是抵押币（`xyz` 是 0，即 USDC）。手续费：费用系数 s（`deployerFeeScale`）小于 1 时乘 s+1，否则乘 2s；开了增长模式（`growthMode: enabled`）再乘 0.1；挂单返佣（maker 为负）不乘系数，只在开了增长模式时乘 0.1。正式网 `xyz` 的系数都是 1.0，美股开了增长模式，黄金没开。全仓由部署者按标的开启：正式网 `xyz` 的黄金、原油、白银、美股都支持全仓，测试网的原油、白银只能逐仓 | [Asset IDs](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/asset-ids)、[HIP-3](https://hyperliquid.gitbook.io/hyperliquid-docs/hyperliquid-improvement-proposals-hips/hip-3-builder-deployed-perpetuals)、[Fees](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees)；正式网公开元数据只读、测试网实测 `xyz:TSLA` |
 | API 钱包能否提现 | 不能转账或提现（用户确认）。与文档一致：API 钱包只用于代为签名，转账、提现属于用户签名动作，需要主钱包签名 | 用户确认；[Nonces and API wallets](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets) |
 
 由此对设计的补充：
