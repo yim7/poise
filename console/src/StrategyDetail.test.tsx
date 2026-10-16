@@ -241,6 +241,32 @@ describe('运行详情', () => {
     expect(screen.queryByRole('button', { name: '保存运行参数' })).not.toBeInTheDocument()
   })
 
+  it('b37_失效中的减仓单在挂单表里显示为整侧的失效减仓', async () => {
+    const base = detail()
+    const reduction = {
+      ...base.orders[0],
+      record: {
+        ...base.orders[0].record,
+        unit: { side: 'long' as const },
+        purpose: 'invalidation' as const,
+        limit_price: '69000',
+        quantity: '0.4',
+        reduce_only: true,
+        status: 'submitting' as const,
+      },
+    }
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({ summary: summary({ status: 'invalidating' }), orders: [reduction] }),
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    const table = (await screen.findByText('在场挂单')).closest('section') ?? document.body
+    expect(within(table as HTMLElement).getByText('做多整侧')).toBeInTheDocument()
+    expect(within(table as HTMLElement).getByText('失效减仓')).toBeInTheDocument()
+  })
+
   it('b39d_已失效只读，说明里显示没减掉的尾量', async () => {
     detailRoutes({
       'GET /api/strategies/s-1': {

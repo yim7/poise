@@ -107,10 +107,14 @@ export interface CellSummary {
 }
 
 /** 订单归属：某一侧的一批主仓或一个格子。 */
-export type Unit = { batch: [Direction, number] } | { cell: [Direction, number] }
+export type Unit =
+  | { batch: [Direction, number] }
+  | { cell: [Direction, number] }
+  /** 整个一侧：观点失效的减仓单不属于哪一批、哪一格（第 7.5 节）。 */
+  | { side: Direction }
 
 /** 订单用途：主仓建仓腿、格子的建仓腿和平仓腿。买卖方向由服务端按侧算。 */
-export type OrderPurpose = 'core' | 'grid_entry' | 'grid_exit'
+export type OrderPurpose = 'core' | 'grid_entry' | 'grid_exit' | 'invalidation'
 
 export type OrderStatus =
   | 'submitting'

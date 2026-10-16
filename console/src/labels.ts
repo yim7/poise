@@ -43,6 +43,7 @@ export const PURPOSE_LABELS: Record<OrderPurpose, string> = {
   core: '主仓建仓',
   grid_entry: '格子建仓',
   grid_exit: '格子平仓',
+  invalidation: '失效减仓',
 }
 
 export const SIDE_LABELS: Record<Side, string> = {
@@ -82,9 +83,9 @@ export const WAIT_REASON_LABELS: Record<WaitReason, string> = {
 
 /** 订单归属：中性网格两侧都有批次和格子，归属里必须带上方向才分得清。 */
 export function unitLabel(unit: Unit): string {
-  return 'batch' in unit
-    ? `${DIRECTION_LABELS[unit.batch[0]]}第 ${unit.batch[1]} 批主仓`
-    : `${DIRECTION_LABELS[unit.cell[0]]}第 ${unit.cell[1]} 格`
+  if ('batch' in unit) return `${DIRECTION_LABELS[unit.batch[0]]}第 ${unit.batch[1]} 批主仓`
+  if ('cell' in unit) return `${DIRECTION_LABELS[unit.cell[0]]}第 ${unit.cell[1]} 格`
+  return `${DIRECTION_LABELS[unit.side]}整侧`
 }
 
 /** 策略类型：只有多头侧是做多，只有空头侧是做空，两侧都有是中性网格。 */
