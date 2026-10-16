@@ -683,6 +683,46 @@ async fn unknown_ids_are_not_found() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// 账户风控设置：读到默认值，改了之后读回来是新的；不合理的设置回 400 并说明原因。
+#[tokio::test]
+async fn the_account_settings_can_be_read_and_changed() {
+    let console = console();
+    let router = api::router(console.runtime.clone());
+
+    let (status, body) = call(&router, Method::GET, "/api/account/settings", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({"margin_alert_ratio": "0.3", "margin_stop_ratio": "0.5", "market_data_max_age": 10})
+    );
+
+    let (status, body) = call(
+        &router,
+        Method::PUT,
+        "/api/account/settings",
+        Some(json!({"margin_alert_ratio": "0.25", "margin_stop_ratio": "0.4", "market_data_max_age": 15})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = call(&router, Method::GET, "/api/account/settings", None).await;
+    assert_eq!(
+        body,
+        json!({"margin_alert_ratio": "0.25", "margin_stop_ratio": "0.4", "market_data_max_age": 15})
+    );
+
+    let (status, body) = call(
+        &router,
+        Method::PUT,
+        "/api/account/settings",
+        Some(json!({"margin_alert_ratio": "0.6", "margin_stop_ratio": "0.5", "market_data_max_age": 10})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["kind"], "invalid_config");
+    let (_, body) = call(&router, Method::GET, "/api/account/settings", None).await;
+    assert_eq!(body["margin_stop_ratio"], "0.4", "被拒的设置没有保存");
+}
+
 /// 删草稿：删掉之后就没有了，再删一次也不报错。
 #[tokio::test]
 async fn a_draft_can_be_deleted() {

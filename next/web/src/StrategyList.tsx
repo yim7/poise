@@ -14,9 +14,15 @@ interface StrategyListProps {
   onOpenStrategy: (id: string) => void
   onOpenDraft: (id: string) => void
   onNew: () => void
+  onOpenSettings: () => void
 }
 
-export function StrategyList({ onOpenStrategy, onOpenDraft, onNew }: StrategyListProps) {
+export function StrategyList({
+  onOpenStrategy,
+  onOpenDraft,
+  onNew,
+  onOpenSettings,
+}: StrategyListProps) {
   const strategies = useQuery({
     queryKey: ['strategies'],
     queryFn: api.strategies,
@@ -35,6 +41,9 @@ export function StrategyList({ onOpenStrategy, onOpenDraft, onNew }: StrategyLis
       <div className="actions">
         <button type="button" className="primary" onClick={onNew}>
           新建策略
+        </button>
+        <button type="button" onClick={onOpenSettings}>
+          账户风控设置
         </button>
       </div>
       {failure === null || failure === undefined ? null : (

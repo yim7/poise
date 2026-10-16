@@ -21,6 +21,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::runtime::{
     DraftPreview, ResumeOutcome, Runtime, RuntimeError, StrategyDetail, StrategySummary,
 };
+use crate::settings::AccountSettings;
 use crate::store::{DraftId, StoreError, StoredDraft, StrategyId, StrategyStatus};
 
 /// 只有接口，没有网页：测试用这个。
@@ -58,6 +59,10 @@ fn api_routes() -> Router<Arc<Runtime>> {
         )
         .route("/drafts/:id/preview", post(preview_draft))
         .route("/drafts/:id/start", post(start_draft))
+        .route(
+            "/account/settings",
+            get(account_settings).put(update_account_settings),
+        )
 }
 
 /// `/api` 下没有的路径：接口自己的 404，不走网页的静态文件。
@@ -120,6 +125,22 @@ async fn update_config(
 ) -> Result<Json<VersionBody>, ApiError> {
     let version = runtime.update_config(&strategy_id(id)?, config)?;
     Ok(Json(VersionBody { version }))
+}
+
+/// 账户风控设置：保证金率的提醒阈值、停止阈值和行情过期时间（第 11 节）。
+async fn account_settings(
+    State(runtime): State<Arc<Runtime>>,
+) -> Result<Json<AccountSettings>, ApiError> {
+    Ok(Json(runtime.account_settings()?))
+}
+
+/// 修改账户风控设置。不合理的设置回 400，原样说明原因。
+async fn update_account_settings(
+    State(runtime): State<Arc<Runtime>>,
+    Json(settings): Json<AccountSettings>,
+) -> Result<Json<AccountSettings>, ApiError> {
+    runtime.update_account_settings(settings)?;
+    Ok(Json(runtime.account_settings()?))
 }
 
 async fn list_drafts(

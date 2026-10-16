@@ -74,7 +74,9 @@ mod seconds {
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
-        Ok(Duration::seconds(i64::deserialize(deserializer)?))
+        let seconds = i64::deserialize(deserializer)?;
+        Duration::try_seconds(seconds)
+            .ok_or_else(|| serde::de::Error::custom(format!("{seconds} seconds is out of range")))
     }
 }
 
@@ -123,6 +125,14 @@ mod tests {
             settings.validate(),
             Err(SettingsError::StopNotBelowOne(rate("1")))
         );
+    }
+
+    /// 秒数超出能表示的范围：报解析错误，不能让服务端崩掉。
+    #[test]
+    fn an_out_of_range_max_age_is_a_parse_error() {
+        let json = r#"{"margin_alert_ratio":"0.3","margin_stop_ratio":"0.5","market_data_max_age":10000000000000000}"#;
+
+        assert!(serde_json::from_str::<AccountSettings>(json).is_err());
     }
 
     #[test]

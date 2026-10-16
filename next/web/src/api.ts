@@ -3,6 +3,7 @@
 // 只走这一层：页面不直接碰交易所，也不自己算交易数量。
 
 import type {
+  AccountSettings,
   CanceledOrders,
   DraftIdBody,
   DraftPreview,
@@ -77,6 +78,10 @@ export const api = {
   previewDraft: (id: string) => request<DraftPreview>(`/api/drafts/${id}/preview`, send('POST')),
   startDraft: (id: string, token: string) =>
     request<StrategyIdBody>(`/api/drafts/${id}/start`, send('POST', { token })),
+
+  accountSettings: () => request<AccountSettings>('/api/account/settings'),
+  updateAccountSettings: (settings: AccountSettings) =>
+    request<AccountSettings>('/api/account/settings', send('PUT', settings)),
 }
 
 /** 恢复的结果里能看出发生了什么，页面只关心「在跑」还是「要等」。 */

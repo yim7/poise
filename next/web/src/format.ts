@@ -22,6 +22,27 @@ export function percent(value: string | null): string {
   return rest === '' ? `${integer}%` : `${integer}.${rest}%`
 }
 
+/**
+ * 比率换成百分比输入框里的数，例如 0.3 → 30。只移动小数点，不做浮点运算。
+ */
+export function ratioToPercentInput(ratio: string): string {
+  return percent(ratio).replace('%', '')
+}
+
+/**
+ * 百分比输入换回比率，例如 30 → 0.3、12.5 → 0.125。只移动小数点，不做浮点运算；
+ * 不是非负小数时返回 null。
+ */
+export function percentInputToRatio(input: string): string | null {
+  const text = input.trim()
+  if (!/^\d+(\.\d+)?$/.test(text)) return null
+  const [whole, fraction = ''] = text.split('.')
+  const padded = whole.padStart(3, '0')
+  const integer = padded.slice(0, padded.length - 2).replace(/^0+(?=\d)/, '')
+  const decimals = `${padded.slice(padded.length - 2)}${fraction}`.replace(/0+$/, '')
+  return decimals === '' ? integer : `${integer}.${decimals}`
+}
+
 /** 本地时间；服务端给的是 UTC 的 ISO 串。 */
 export function timestamp(iso: string): string {
   const at = new Date(iso)

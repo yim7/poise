@@ -34,7 +34,7 @@ describe('策略列表', () => {
   it('显示标的、状态、净仓位和在场挂单，草稿单独一栏', async () => {
     listRoutes()
     renderWithQuery(
-      <StrategyList onNew={() => {}} onOpenDraft={() => {}} onOpenStrategy={() => {}} />,
+      <StrategyList onNew={() => {}} onOpenDraft={() => {}} onOpenStrategy={() => {}} onOpenSettings={() => {}} />,
     )
 
     expect(await screen.findByText('运行中')).toBeInTheDocument()
@@ -58,7 +58,7 @@ describe('策略列表', () => {
       'GET /api/drafts': { body: [] },
     })
     renderWithQuery(
-      <StrategyList onNew={() => {}} onOpenDraft={() => {}} onOpenStrategy={() => {}} />,
+      <StrategyList onNew={() => {}} onOpenDraft={() => {}} onOpenStrategy={() => {}} onOpenSettings={() => {}} />,
     )
 
     const table = (await screen.findByText('做空')).closest('table') as HTMLTableElement
@@ -71,7 +71,12 @@ describe('策略列表', () => {
     const openStrategy = vi.fn()
     const onNew = vi.fn()
     renderWithQuery(
-      <StrategyList onNew={onNew} onOpenDraft={() => {}} onOpenStrategy={openStrategy} />,
+      <StrategyList
+        onNew={onNew}
+        onOpenDraft={() => {}}
+        onOpenStrategy={openStrategy}
+        onOpenSettings={() => {}}
+      />,
     )
 
     await userEvent.click((await screen.findAllByRole('button', { name: '查看' }))[0])
@@ -87,7 +92,7 @@ describe('策略列表', () => {
       'GET /api/drafts': { body: [] },
     })
     renderWithQuery(
-      <StrategyList onNew={() => {}} onOpenDraft={() => {}} onOpenStrategy={() => {}} />,
+      <StrategyList onNew={() => {}} onOpenDraft={() => {}} onOpenStrategy={() => {}} onOpenSettings={() => {}} />,
     )
 
     await waitFor(() => {

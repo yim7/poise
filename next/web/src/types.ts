@@ -299,3 +299,11 @@ export interface DraftIdBody {
 export interface StrategyIdBody {
   strategy_id: string
 }
+
+/** 账户风控设置（第 7.4、11 节）：比率是小数，例如 0.3 表示 30%。 */
+export interface AccountSettings {
+  margin_alert_ratio: Decimal
+  margin_stop_ratio: Decimal
+  /** 行情过期时间，秒。 */
+  market_data_max_age: number
+}
