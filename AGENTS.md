@@ -8,11 +8,12 @@ alwaysApply: true
 - 测试先行：先定义或补齐验收测试，再实现功能；本地测试通过才算完成
 - 默认先跑与改动直接相关的最小测试，不要把 `cargo test`、`cargo test --workspace` 或其他全量检查当作默认起手式
 - 只有在改动跨多个 crate、需要最终验收、用户明确要求，或局部测试不足以覆盖影响面时，才扩大到 crate 级或 workspace 级测试
-- 改 `server` 时优先用这些最小入口：
-  - `server/src/exchange_startup.rs`：`cargo test -p poise-server exchange_startup::tests::`
-  - `server/src/assembly.rs`：`cargo test -p poise-server assembly::tests::`
-  - `server/src/config.rs`：`cargo test -p poise-server config::tests::`
-  - `server/src/main.rs`：先用 `cargo test -p poise-server -- --list | rg '^tests::'` 找到根测试名，再按具体测试名过滤；不要直接用 `tests::`，它会命中过多模块
+- 按改动的位置用这些最小入口：
+  - `strategy/src/<模块>.rs`：`cargo test -p poise-strategy <模块>::`
+  - `runtime/tests/<主题>.rs`（验收测试按主题分文件）：`cargo test -p poise-runtime --test <主题>`；库内单元测试：`cargo test -p poise-runtime --lib <模块>::`
+  - `hyperliquid/src`：`cargo test -p poise-hyperliquid <测试名关键词>`
+  - `cli/src`：`cargo test -p poise-cli`
+  - `console/src`（网页）：在 `console/` 下 `npx vitest run <文件名>`，改完再 `npm run build`
 - 只改脚本、README、spec、plan 等非 Rust 代码时，先做最小验证；不要默认触发全量 Rust 测试
 - 探索阶段优先保持实现干净，废弃方案直接删除，不保留过渡文档和代码
 - markdown 使用相对路径
