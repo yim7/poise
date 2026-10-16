@@ -1,8 +1,5 @@
-//! 交易所响应的脱敏样本。
-//!
-//! 内容是 `.scratch/layered-grid/fixtures/hyperliquid/` 那份样本的副本（地址、订单号
-//! 都已经换成占位值）。放在 crate 里是为了让适配测试不依赖仓库里的临时目录，
-//! 也不依赖网络。
+//! 交易所响应的脱敏样本：按正式网和测试网的真实响应录下来，地址、订单号都已经换成
+//! 占位值。适配测试只用它们，不依赖网络。
 
 /// `{"type":"userAbstraction"}`。
 pub(crate) const USER_ABSTRACTION: &str = r#""unifiedAccount""#;
