@@ -87,6 +87,18 @@ describe('运行详情', () => {
     expect(await screen.findByText(/^每小时 -0.027774%，年化 -243.30532%/)).toBeInTheDocument()
   })
 
+  it('暂停时说明设了失效价的照样会减仓', async () => {
+    const paused = summary({ status: 'paused' })
+    paused.config = {
+      ...paused.config,
+      long: { ...longSide, invalidation: { price: '70000', remaining: '0', max_slippage: '0.01' } },
+    }
+    detailRoutes({ 'GET /api/strategies/s-1': { body: detail({ summary: paused }) } })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    expect(await screen.findByText(/暂停期间越过失效价照样减仓/)).toBeInTheDocument()
+  })
+
   it('b30_显示今日操作次数和每日上限', async () => {
     detailRoutes()
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)

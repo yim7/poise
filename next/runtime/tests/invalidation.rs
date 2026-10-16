@@ -546,3 +546,84 @@ async fn an_invalidating_strategy_keeps_reducing_after_a_restart() {
             .contains(&harness.strategy_id)
     );
 }
+
+/// 已暂停的策略越过失效价同样减仓：失效价是止损，暂停只是先别做网格（第 7.5 节）。
+#[tokio::test]
+async fn a_paused_strategy_is_still_invalidated() {
+    let harness = crossed("0.3").await;
+    harness.pause(1).await;
+    assert_eq!(
+        harness.runtime.status(&harness.strategy_id).unwrap(),
+        StrategyStatus::Paused
+    );
+    assert!(
+        harness
+            .runtime
+            .drivable()
+            .unwrap()
+            .contains(&harness.strategy_id)
+    );
+
+    assert_eq!(harness.step(2).await.status, StrategyStatus::Invalidating);
+    assert_eq!(harness.exchange.current_position(), position("0.3"));
+    assert_eq!(harness.step(3).await.status, StrategyStatus::Invalidated);
+}
+
+/// 挂好单之后点暂停或停止，一张撤单结果不明：状态停在暂停中或停止中。之后价格跌到 69000。
+async fn interrupted(stop: bool) -> Harness {
+    let harness = harness_with(
+        core_long_with(Some(invalidation("70000", "0.3"))),
+        Store::open_in_memory().unwrap(),
+    )
+    .await;
+    harness.step(0).await;
+    harness.exchange.unknown_next_cancel("timed out");
+    if stop {
+        harness.stop(0).await;
+    } else {
+        harness.pause(0).await;
+    }
+    harness.exchange.set_market_price(price("69000"), at(1));
+    harness
+}
+
+/// 暂停中（撤单还没确认）、恢复中（进程重启后）的策略越过失效价也进入失效。
+#[tokio::test]
+async fn pausing_and_restoring_strategies_are_invalidated_too() {
+    let pausing = interrupted(false).await;
+    assert_eq!(
+        pausing.runtime.status(&pausing.strategy_id).unwrap(),
+        StrategyStatus::Pausing
+    );
+    // 暂停时只剩一张没撤掉的买单，跌下来成交 .175，本来就不超过 R：这一步直接收场。
+    let status = pausing.step(2).await.status;
+    assert!(
+        matches!(
+            status,
+            StrategyStatus::Invalidating | StrategyStatus::Invalidated
+        ),
+        "{status:?}"
+    );
+
+    let restoring = crossed("0.3").await;
+    let report = restoring.recover(1).await;
+    assert_eq!(report.status, StrategyStatus::Invalidating);
+    assert_eq!(restoring.exchange.current_position(), position("0.3"));
+}
+
+/// 停止中不进入失效：点了停止就是用户决定自己接管仓位。
+#[tokio::test]
+async fn a_stopping_strategy_is_not_invalidated() {
+    let harness = interrupted(true).await;
+    assert_eq!(
+        harness.runtime.status(&harness.strategy_id).unwrap(),
+        StrategyStatus::Stopping
+    );
+    let held = harness.exchange.current_position();
+
+    let report = harness.step(2).await;
+
+    assert_eq!(report.status, StrategyStatus::Stopped);
+    assert!(invalidation_orders(&harness).is_empty());
+    assert_eq!(harness.exchange.current_position(), held);
+}

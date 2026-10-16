@@ -604,12 +604,12 @@ async fn b18_a_position_mismatch_pauses_the_strategy_and_cancels_its_orders() {
         StrategyStatus::Paused
     );
 
-    // 暂停后不再走步。
-    harness.clock.set(at(2));
-    assert!(matches!(
-        harness.runtime.step(&harness.strategy_id).await,
-        Err(RuntimeError::NotRunning(_, StrategyStatus::Paused))
-    ));
+    // 暂停后的一步只看失效价（这个策略没设），不下单、不撤单，仍是已暂停。
+    let placed = harness.exchange.place_count();
+    let report = harness.step(2).await;
+    assert_eq!(report.status, StrategyStatus::Paused);
+    assert!(report.placed.is_empty() && report.canceled.is_empty());
+    assert_eq!(harness.exchange.place_count(), placed);
 
     // 仓位没修好之前，恢复会立刻再次暂停。
     let outcome = harness.resume(3).await;

@@ -44,9 +44,24 @@ impl Runtime {
         now: DateTime<Utc>,
     ) -> Result<StepReport, RuntimeError> {
         let stored = self.store.load_strategy(strategy_id)?;
+        // 失效价是用户声明的止损，暂停只是「先别做网格」：已暂停、暂停中、恢复中的策略越过
+        // 失效价同样进入失效（第 7.5 节）。停止中不算：停止就是用户决定自己接管仓位。
+        if matches!(
+            stored.status,
+            StrategyStatus::Paused | StrategyStatus::Pausing | StrategyStatus::Restoring
+        ) {
+            let strategy = Strategy::new(stored.config.clone(), stored.spec.clone(), stored.fees)?;
+            if let Some(report) = self.check_invalidation(strategy_id, &strategy, now).await? {
+                return Ok(report);
+            }
+        }
         match stored.status {
             status if status.is_cancel_only() => {
                 self.cancel_only_step(strategy_id, &stored, now).await
+            }
+            // 已暂停的策略只看失效价，别的什么都不做。
+            StrategyStatus::Paused => {
+                Ok(self.nothing_happened(strategy_id, StrategyStatus::Paused))
             }
             StrategyStatus::Restoring => self.restore_step(strategy_id, now).await,
             StrategyStatus::Running => self.running_step(strategy_id, now).await,

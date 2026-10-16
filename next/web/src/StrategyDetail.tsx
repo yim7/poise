@@ -66,6 +66,8 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
   // 已失效和已归档一样只读：价格回来也不自动恢复（第 7.5 节）。
   const archived = status === 'stopped' || status === 'invalidated'
   const running = status === 'running'
+  const hasInvalidation =
+    summary.config.long?.invalidation != null || summary.config.short?.invalidation != null
   // 过渡状态：后台正在撤单、按 cloid 查终态、补记成交，走完自己转成「已暂停」「已归档」
   // 「运行中」或「已失效」。失效中除了撤单还在用只减仓单减仓。用户要能看到它还在走，
   // 以及为什么还没走完。
@@ -252,7 +254,12 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
         />
       ) : (
         // 服务端只让运行中的策略改参数：过渡状态还在收尾，已暂停的改了也不会生效。
-        <p className="hint">策略{statusLabel(status)}，现在改不了参数；恢复之后可以改限速间隔和观点失效设置。</p>
+        <p className="hint">
+          策略{statusLabel(status)}，现在改不了参数；恢复之后可以改限速间隔和观点失效设置。
+          {hasInvalidation && status !== 'stopping'
+            ? '设了观点失效价的，暂停期间越过失效价照样减仓。'
+            : null}
+        </p>
       )}
     </section>
   )

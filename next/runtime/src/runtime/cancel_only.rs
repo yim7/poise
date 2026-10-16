@@ -472,12 +472,14 @@ impl Runtime {
     ///
     /// 除了运行中的，还有「恢复中」「暂停中」「停止中」：恢复中还没把遗留订单收干净，
     /// 暂停中/停止中还没撤干净，撤单、按 `cloid` 查终态、补记成交都靠驱动推进。
-    /// 不驱动它们，恢复、暂停和停止就永远停在半路上。
+    /// 不驱动它们，恢复、暂停和停止就永远停在半路上。「已暂停」也驱动，但只看失效价：
+    /// 仓位还在，越过失效价照样要减仓（第 7.5 节）。
     pub fn drivable(&self) -> Result<Vec<StrategyId>, RuntimeError> {
         self.with_status(&[
             StrategyStatus::Running,
             StrategyStatus::Restoring,
             StrategyStatus::Pausing,
+            StrategyStatus::Paused,
             StrategyStatus::Stopping,
             StrategyStatus::Invalidating,
         ])
