@@ -62,7 +62,7 @@ export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   unknown: '结果待查',
 }
 
-/** 设计第 11 节列的等待原因，加上实现里新增的两条。 */
+/** 等待原因，和设计第 11 节列的一一对应。 */
 export const WAIT_REASON_LABELS: Record<WaitReason, string> = {
   price_not_reached: '价格未到',
   waiting_for_throttle: '等待限速放行',
@@ -72,7 +72,6 @@ export const WAIT_REASON_LABELS: Record<WaitReason, string> = {
   margin_ratio_above_stop_threshold: '保证金率超过停止阈值',
   margin_ratio_unavailable: '保证金率读不到',
   stale_market_data: '行情过期',
-  fill_stream_disconnected: '成交推送断开',
   order_result_unknown: '订单结果待查',
   position_check_failed: '仓位核对失败已暂停',
   invalidated: '观点已失效',

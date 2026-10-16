@@ -603,6 +603,14 @@ async fn b18_a_position_mismatch_pauses_the_strategy_and_cancels_its_orders() {
         harness.runtime.status(&harness.strategy_id).unwrap(),
         StrategyStatus::Paused
     );
+    // 暂停之后页面不再显示等待原因：暂停原因要写在说明里，一直留到恢复。
+    let note = harness
+        .runtime
+        .detail(&harness.strategy_id)
+        .unwrap()
+        .note
+        .unwrap_or_default();
+    assert!(note.contains("仓位和应有持仓对不上"), "{note}");
 
     // 暂停后的一步只看失效价（这个策略没设），不下单、不撤单，仍是已暂停。
     let placed = harness.exchange.place_count();

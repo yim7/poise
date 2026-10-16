@@ -454,6 +454,10 @@ impl Runtime {
                 );
             }
         }
+        // 暂停原因单独存：撤单收尾的进度说明会覆盖视图里的说明，暂停之后页面也不再显示
+        // 等待原因，不存下来用户就不知道为什么停了。恢复时清掉。
+        self.store
+            .save_pause_reason(strategy_id, pause_reason_note(reason))?;
         let (status, round) = self
             .pause_inner(strategy_id, strategy, state, orders, now)
             .await?;
@@ -1124,6 +1128,18 @@ fn margin_alert_note(ratio: Option<Rate>, settings: &AccountSettings) -> Option<
         ))
     } else {
         None
+    }
+}
+
+/// 判定要求暂停时写给用户看的原因（第 7.1 节，B18）。
+fn pause_reason_note(reason: PauseReason) -> &'static str {
+    match reason {
+        PauseReason::PositionCheckFailed => {
+            "交易所仓位和应有持仓对不上，策略已暂停：先核对交易所上的仓位（例如是否手动交易过），处理好再恢复。"
+        }
+        PauseReason::FillRecordsInconsistent => {
+            "成交记录和订单的累计成交量对不上，策略已暂停：先核对这张订单的成交，处理好再恢复。"
+        }
     }
 }
 

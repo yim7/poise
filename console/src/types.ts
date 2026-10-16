@@ -252,7 +252,6 @@ export type WaitReason =
   | 'margin_ratio_above_stop_threshold'
   | 'margin_ratio_unavailable'
   | 'stale_market_data'
-  | 'fill_stream_disconnected'
   | 'order_result_unknown'
   | 'position_check_failed'
   | 'invalidated'

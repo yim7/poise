@@ -26,10 +26,9 @@ import type {
 } from './types'
 
 /**
- * 批次状态。
+ * 批次状态：还没放行的、已经放行的、已经结束的（设计第 11 节）。
  *
- * 服务端给的是「已买入多少、有几个格子已启用、是否结束」，设计第 11 节的四个状态
- * 里有三个能由它们确定：还没放行的、已经放行的、已经结束的。
+ * 服务端给的是「已买入多少、有几个格子已启用、是否结束」，状态由它们确定。
  */
 function batchState(batch: BatchSummary): string {
   if (batch.finished) return '已结束'
@@ -52,6 +51,7 @@ export function BatchTable({ batches }: { batches: BatchSummary[] }) {
           <th>已建仓</th>
           <th>格子（已启用）</th>
           <th>状态</th>
+          <th>少建（主仓 / 网格）</th>
         </tr>
       </thead>
       <tbody>
@@ -68,6 +68,12 @@ export function BatchTable({ batches }: { batches: BatchSummary[] }) {
               {batch.cell_count}（{batch.enabled_cell_count}）
             </td>
             <td>{batchState(batch)}</td>
+            {/* 剩余不足最低下单金额而提前结束的批次，少建了多少主仓和网格（第 4.4 节，B05）。 */}
+            <td>
+              {Number(batch.core_shortfall) === 0 && Number(batch.grid_shortfall) === 0
+                ? '—'
+                : `${decimal(batch.core_shortfall)} / ${decimal(batch.grid_shortfall)}`}
+            </td>
           </tr>
         ))}
       </tbody>

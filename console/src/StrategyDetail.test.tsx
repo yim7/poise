@@ -99,6 +99,47 @@ describe('运行详情', () => {
     expect(await screen.findByText(/暂停期间越过失效价照样减仓/)).toBeInTheDocument()
   })
 
+  it('运行中也显示说明：保证金率、资金费率、操作次数这些提醒在说明里', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({ note: '资金费率对本策略不利：年化 87.6%，超过提醒阈值 50%。' }),
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    expect(await screen.findByText(/资金费率对本策略不利/)).toBeInTheDocument()
+    expect(screen.getByText('价格未到')).toBeInTheDocument()
+  })
+
+  it('b30_已暂停时显示暂停原因', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({
+          summary: summary({ status: 'paused' }),
+          note: '交易所以操作次数超限拒绝了请求，策略已暂停：减少格子或加大间距，确认额度恢复后再恢复。',
+        }),
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    expect(await screen.findByText(/以操作次数超限拒绝/)).toBeInTheDocument()
+  })
+
+  it('b05_提前结束的批次显示少建的主仓和网格', async () => {
+    const base = detail()
+    const ended = {
+      ...base.batches[0],
+      finished: true,
+      core_shortfall: '0.00001',
+      grid_shortfall: '0.00002',
+    }
+    detailRoutes({ 'GET /api/strategies/s-1': { body: detail({ batches: [ended] }) } })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    expect(await screen.findByText('0.00001 / 0.00002')).toBeInTheDocument()
+    expect(screen.getByText('已结束')).toBeInTheDocument()
+  })
+
   it('b30_显示今日操作次数和每日上限', async () => {
     detailRoutes()
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)

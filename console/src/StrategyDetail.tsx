@@ -217,19 +217,23 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
 
       <h3>这一步在等什么</h3>
       {running ? (
-        strategy.waiting.length === 0 ? (
-          <p>没有等待：该挂的单都挂上了。</p>
-        ) : (
-          <ul className="waiting">
-            {strategy.waiting.map((reason) => (
-              <li key={reason}>{waitReasonLabel(reason)}</li>
-            ))}
-          </ul>
-        )
+        <>
+          {strategy.waiting.length === 0 ? (
+            <p>没有等待：该挂的单都挂上了。</p>
+          ) : (
+            <ul className="waiting">
+              {strategy.waiting.map((reason) => (
+                <li key={reason}>{waitReasonLabel(reason)}</li>
+              ))}
+            </ul>
+          )}
+          {/* 运行中的说明：结果未知订单缺什么、保证金率、资金费率、操作次数的提醒。 */}
+          {strategy.note === null ? null : <p className="notice">{strategy.note}</p>}
+        </>
       ) : settling ? (
         <p>{strategy.note ?? `${statusLabel(status)}：后台正在撤单和对账，期间不会下新单。`}</p>
-      ) : status === 'invalidated' && strategy.note !== null ? (
-        // 已失效的说明里有没减掉的尾量，要让用户看到。
+      ) : strategy.note !== null ? (
+        // 已暂停的说明里有暂停原因和资金费提醒，已失效的说明里有没减掉的尾量，都要让用户看到。
         <p>{strategy.note}</p>
       ) : (
         <p>策略{statusLabel(status)}，没有在等的事。</p>
