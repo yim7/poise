@@ -1,6 +1,6 @@
 # Poise 分批主仓与网格术语
 
-本文统一 Poise 策略使用的领域用语。以下是目标设计的术语，尚不代表相关行为已经实现；设计见[分批主仓与网格设计](docs/layered-grid-design.md)。
+本文统一 Poise 策略使用的领域用语；设计见[分批主仓与网格设计](docs/layered-grid-design.md)。
 
 ## 观点与结构
 

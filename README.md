@@ -1,361 +1,81 @@
 # Poise
 
-`Poise` 是一个面向 Binance / Bybit USDⓈ-M Futures、Hyperliquid Perps 和 OKX SWAP 永续合约的探索型策略运行项目。每个 track 由价格曲线产生 `policy_target`，经风险约束形成 `risk_approved_target`，新增风险再由 gate 释放 `acquisition_frontier`，最终得到 executor 追随的 `execution_target`。
+Poise 在 Hyperliquid 上自动运行分批主仓加网格的策略：按价格范围分批挂单积累主仓并保留，网格部分低买高卖循环；可以做多、做空或中性，可选按时间限速积累。交易所原生工具能做到的部分不重复造，系统只补交易所做不到的：在 Hyperliquid 上自动运行网格、限速积累，以及围绕它们的风控。
 
-## 项目状态
+设计见 [分批主仓与网格设计](docs/layered-grid-design.md)，术语见 [GLOSSARY.md](GLOSSARY.md)，架构和运行语义见 [系统说明](docs/system-overview.md)。
 
-Poise 是个人策略运行实验项目。源码公开主要为了透明记录和自用复现；项目不承诺稳定接口、兼容旧配置或响应外部需求。旧方案可能随时被删除，使用者需要自行阅读代码、配置和测试来判断是否适合自己的账户。
+## 当前状态
 
-本项目可能连接真实合约账户并自动下单。它不构成投资建议，也不保证收益、风控效果或可用性。默认建议只在 testnet、只使用独立低权限 API key 或 Hyperliquid API wallet、只投入可以承受全部损失的资金。不要给 API key 开启提现权限，不要把 Hyperliquid 主钱包私钥交给 Poise，不要把实例目录、真实配置、SQLite 数据库、日志或密钥提交到仓库。
+- 只支持 Hyperliquid，账户必须是 Unified 模式。
+- **本版本只连测试网**：启动文件写 `network = "mainnet"` 时直接拒绝运行，一个请求都不发。
+- 测试网上验证过：新建、预览、确认启动、接管已有仓位、暂停恢复停止、观点失效减仓、资金预检、保证金率读取、资金费读取。
 
-项目仍在快速探索，旧方案不会保留兼容层。当前文档只保留这些长期入口：
+## 实例目录与启动文件
 
-- 本文件：启动、配置和常用开发入口。
-- [docs/system-overview.md](docs/system-overview.md)：唯一长期系统文档，记录从零构建路径、当前系统边界、运行语义和事实源。
-- [SECURITY.md](SECURITY.md)：安全边界、密钥使用和漏洞报告方式。
-- [LICENSE](LICENSE)：源码许可证。
-
-下一版策略设计见 [分批主仓与网格设计](docs/layered-grid-design.md)：在 Hyperliquid 上用分批挂单和网格表达做多、做空或中性的仓位观点，主仓分批买入并保留，网格仓位循环做 T，可选限速。相关用语见 [GLOSSARY.md](GLOSSARY.md)。设计尚未实现，不替代下文及系统文档对当前行为的说明。
-
-## 工作区结构
-
-- [core/](core/)：领域模型、策略参数、风险规则、领域事件和 curve-immediate benchmark。
-- [engine/](engine/)：track 运行时、状态机、目标计算、决策回放、执行规划和恢复。
-- [application/](application/)：`TradingRuntime`、提交协议、session effect queue、交易所与持久化 port、查询和读模型。
-- [storage/](storage/)：SQLite 持久化适配。
-- [protocol/](protocol/)：server-owned 本地 Web 控制台的 HTTP / WebSocket DTO。
-- [exchanges/binance/](exchanges/binance/)：Binance USDⓈ-M Futures 适配。
-- [exchanges/bybit/](exchanges/bybit/)：Bybit USDⓈ-M Futures 适配。
-- [exchanges/hyperliquid/](exchanges/hyperliquid/)：Hyperliquid Perps 适配。
-- [exchanges/okx/](exchanges/okx/)：OKX SWAP 永续合约适配。
-- [server/](server/)：配置、装配、HTTP / WebSocket、runtime task、同源本地 Web 控制台和交易所接入。
-- [web/](web/)：由 server 以同源静态资源提供的本地控制台前端；只展示和提交 server DTO，不重算策略、风险、数量、名义价值或 PNL。
-
-## 当前约束
-
-- 一个服务实例只连接一个交易所。
-- `track_id` 是显式配置的稳定业务标识，不由 `symbol` 派生。
-- 同一实例内 `track_id` 必须唯一。
-- 同一实例内 `venue + symbol` 必须唯一。
-- HTTP / WebSocket 以 `track_id` 作为一等标识。
-- SQLite 默认路径是 `<instance-dir>/.data/poise-server.sqlite`。
-- SQLite 只接受当前代码定义的精确 schema；旧 schema 不迁移或推断，启动失败时需要重新初始化实例数据库。
-
-## 快速开始
-
-### 1. 准备实例目录
-
-服务端必须通过 `--instance-dir <path>` 启动，并从实例目录读取 `config.toml`。
-
-```bash
-mkdir -p "$HOME/poise-instances/testnet"
-cp configs/demo.toml "$HOME/poise-instances/testnet/config.toml"
-chmod 700 "$HOME/poise-instances/testnet"
-chmod 600 "$HOME/poise-instances/testnet/config.toml"
-```
-
-把实例目录里的 `[exchange]` 改成当前实例要连接的交易所和凭证。一个实例只能选择一个交易所。
-实例目录还会保存 SQLite 和日志；运行前应确保实例目录及其子目录为 `700`、其中的配置、数据库和日志文件为 `600`。
-
-### 2. 选择交易所
-
-四个 venue 都有配置分支和 adapter，但启动前仍必须具备 recent PNL 完整覆盖能力。Binance、Hyperliquid 和 OKX 返回带 covered window 与 completeness 的 recent PNL records；Bybit 当前明确返回 `Unsupported`，正常启动会在交易 runtime task 启动前失败。完整能力矩阵见 [系统构建说明](docs/system-overview.md#持久化与读模型)。
-
-Binance USDⓈ-M Futures：
+每个实例一个目录，里面放启动文件 `poise.toml`（权限必须是 600，程序只读不写）：
 
 ```toml
-[exchange]
-venue = "binance"
-deployment = "testnet"
-api_key = ""
-api_secret = ""
+network = "testnet"
+account_address = "0x…"          # 主账户地址
+api_wallet_private_key = "0x…"   # 在 Hyperliquid 网页上为这个账户授权的 API 钱包私钥
+data_dir = "data"                # 数据库放在这里（相对实例目录）
+listen = "127.0.0.1:8010"        # 网页控制台地址，只接受本机地址
 ```
 
-Bybit USDⓈ-M Futures：
+- 私钥由你自己写进文件；程序不生成、不保存、不打印私钥。API 钱包只能代为签名交易，不能转账或提现。
+- 启动时逐项校验：文件权限、私钥格式、由私钥推出的地址是否在这个账户已授权且未过期的 API 钱包里、账户模式是否 Unified。API 钱包剩余有效期少于 14 天时提醒续期。
+- 同一个实例目录同时只能有一个进程（实例锁）。
 
-```toml
-[exchange]
-venue = "bybit"
-deployment = "testnet"
-api_key = ""
-api_secret = ""
-```
-
-Hyperliquid Perps：
-
-```toml
-[exchange]
-venue = "hyperliquid"
-deployment = "testnet"
-private_key = "0x..."
-wallet_address = "0x..."
-# vault_address = "0x..."
-```
-
-Hyperliquid 默认 perpetuals 和 HIP-3 builder-deployed perpetuals 可以在同一实例中混配。默认 perpetuals 使用 `BTC`、`ETH` 这类 coin 名称；HIP-3 使用交易所 wire name，例如 `xyz:CBRS`。
-
-OKX SWAP 永续合约：
-
-```toml
-[exchange]
-venue = "okx"
-deployment = "demo"
-api_key = ""
-api_secret = ""
-passphrase = ""
-```
-
-### 3. 配置 track
-
-一份最小可读的配置形状如下。示例刻意不列出默认项，完整可调字段见后面的配置参考。
-
-```toml
-bind_address = "127.0.0.1:8000"
-
-[exchange]
-venue = "binance"
-deployment = "testnet"
-api_key = ""
-api_secret = ""
-
-[[tracks]]
-track_id = "btc-core"
-symbol = "BTCUSDT"
-lower_price = 65500.0
-upper_price = 67500.0
-long_exposure_units = 10.0
-short_exposure_units = 10.0
-notional_per_unit = 375.0
-daily_loss_limit = 375.0
-total_loss_limit = 750.0
-```
-
-配置由一个 `[exchange]`、一个或多个 `[[tracks]]`，以及可选的 `[account_monitor]` 组成。`[tracks.risk_acquisition]` 是某个 track 的子表，必须紧跟它所属的 `[[tracks]]` 后面；不需要调默认值时不要写。
-
-顶层配置：
-
-| 字段 | 默认 | 说明 |
-| --- | --- | --- |
-| `bind_address` | `127.0.0.1:8000` | HTTP / WebSocket 监听地址。 |
-| `[exchange]` | 必填 | 当前实例连接的交易所；一个实例只能连接一个交易所。 |
-| `[[tracks]]` | 必填 | 策略 track 列表；同一实例内 `track_id` 必须唯一，`venue + symbol` 必须唯一。 |
-| `[account_monitor]` | 全部字段有默认值 | 账户级风险提示阈值。 |
-
-`[exchange]` 配置：
-
-| 字段 | 默认 | 说明 |
-| --- | --- | --- |
-| `venue` | 必填 | 支持 `binance`、`bybit`、`hyperliquid`、`okx`。 |
-| `deployment` | Binance / Bybit / Hyperliquid 默认 `testnet`；OKX 默认 `demo` | Binance / Bybit / Hyperliquid 支持 `testnet`、`mainnet`；OKX 支持 `demo`、`mainnet`。Binance 还支持 `{ custom = { rest_base_url = "...", ws_root_base_url = "..." } }`。 |
-| `api_key` | 无 | Binance / Bybit / OKX 必填，空字符串会被视为缺失。 |
-| `api_secret` | 无 | Binance / Bybit / OKX 必填，空字符串会被视为缺失。 |
-| `passphrase` | 无 | OKX 必填。 |
-| `private_key` | 无 | Hyperliquid 必填，必须是 `0x` 加 64 个 hex 字符。 |
-| `wallet_address` | 无 | Hyperliquid 必填，必须是 `0x` 加 40 个 hex 字符。 |
-| `vault_address` | 无 | Hyperliquid 可选，必须是 `0x` 加 40 个 hex 字符。 |
-
-`[[tracks]]` 配置：
-
-| 字段 | 默认 | 说明 |
-| --- | --- | --- |
-| `track_id` | 必填 | 稳定业务标识，不由 `symbol` 派生。 |
-| `symbol` | 必填 | Binance / Bybit 使用 `BTCUSDT` 这类合约符号；Hyperliquid 默认 perpetuals 使用 `BTC`、`ETH` 这类 coin 名称，HIP-3 perpetuals 使用 `xyz:CBRS` 这类 `{dex}:{coin}` wire name；OKX SWAP 使用 `BTC-USDT-SWAP` 这类 instrument id。 |
-| `lower_price` | 必填 | 价格带下沿，必须为有限正数且小于 `upper_price`。 |
-| `upper_price` | 必填 | 价格带上沿，必须为有限正数。 |
-| `long_exposure_units` | 必填 | 价格到达下沿时的多头目标容量，必须有限且非负。 |
-| `short_exposure_units` | 必填 | 价格到达上沿时的空头目标容量，必须有限且非负；多空容量不能同时为 `0`。 |
-| `notional_per_unit` | 必填 | 每个 exposure unit 对应的名义金额，必须为有限正数。 |
-| `daily_loss_limit` | 必填 | 当日亏损终止阈值，必须为有限正数。 |
-| `total_loss_limit` | 必填 | 累计亏损终止阈值，必须为有限正数。 |
-| `min_rebalance_units` | `0.5` | 有限正数；目标变化小于该值时不触发新的执行动作。 |
-| `shape_family` | `linear` | 曲线形状，支持 `linear`、`inertial`、`responsive`。 |
-| `out_of_band_policy` | `freeze` | 价格离开主价格带后的处理策略，见下面的带外配置。 |
-| `max_notional` | `max(long_exposure_units, short_exposure_units) * notional_per_unit` | track 最大绝对名义金额，必须为有限正数。 |
-| `leverage` | `10` | 启动时按 track 下发到交易所；这是 server-owned startup-only 配置，不进入策略曲线。 |
-| `tick_timeout_secs` | `30` | 策略价格超过该秒数未更新时视为 stale，自动执行会等待新价格。 |
-| `[tracks.risk_acquisition]` | 全部字段有默认值 | 增加风险暴露时的延迟获取参数，见下面的风险暴露获取配置。 |
-
-`out_of_band_policy` 是单字段枚举，支持三种策略：
-
-- `freeze`：离开主价格带后冻结目标，价格回到主带后恢复跟随曲线。
-- `flatten`：离开主价格带后自动降到 `0`，可配置触发和恢复确认。
-- `terminate`：离开主价格带后进入终态，目标收敛到 `0`，不会自动恢复。
-
-常用写法：
-
-```toml
-out_of_band_policy = "freeze"
-out_of_band_policy = "terminate"
-
-# flatten 简写等价于 trigger/recover 都使用 500 bps 确认
-out_of_band_policy = "flatten"
-
-# flatten 完整对象形式
-out_of_band_policy = { flatten = { trigger = { flatten_confirm = { bps = 500 } }, recover = { reentry_confirm = { bps = 500 } } } }
-
-# 也可以使用立即触发和回到主带即恢复
-out_of_band_policy = { flatten = { trigger = "immediate", recover = "back_in_band" } }
-```
-
-`flatten.trigger` 支持 `immediate` 和 `{ flatten_confirm = { bps = <整数> } }`。确认距离按价格带宽度计算，例如 `bps = 500` 表示离开边界后再走出价格带宽度的 `5%` 才触发 flatten。
-
-`flatten.recover` 支持 `back_in_band` 和 `{ reentry_confirm = { bps = <整数> } }`。`back_in_band` 是回到主价格带就恢复；`reentry_confirm` 是回到主带后还要再进入价格带宽度的对应比例才恢复。
-
-`[tracks.risk_acquisition]` 默认启用，但默认值不需要写进配置。它只影响增加风险暴露：增加时允许等待价格优势，降低风险暴露时优先执行。
-
-```toml
-[[tracks]]
-track_id = "btc-core"
-# ...这个 track 的其他字段...
-
-[tracks.risk_acquisition]
-initial_ratio = 0.5
-advantage_steps = 2.0
-min_release_steps = 1.0
-max_release_steps = 4.0
-catchup_ratio = 0.25
-stale_release_minutes = 60.0
-```
-
-| 字段 | 默认 | 说明 |
-| --- | --- | --- |
-| `initial_ratio` | `0.5` | 同一运行 session 内普通 acquisition episode 的初始 allowance 比例。目标小于 `min_rebalance_units` 时 allowance 等于目标，否则取 `目标 × 比例` 与最小调仓单位的较大值；初始 frontier 还不能低于已有同向仓位。只有超出当前仓位的部分算新增 release，因此新增量可以为 `0`。取值范围是 `(0, 1]`。 |
-| `advantage_steps` | `2.0` | 等待曲线目标相对锚点多走多少个 `min_rebalance_units` 后释放 backlog。 |
-| `min_release_steps` | `1.0` | 每次释放 backlog 的最小单位倍数。 |
-| `max_release_steps` | `4.0` | 每次释放 backlog 的最大单位倍数，必须大于等于 `min_release_steps`。 |
-| `catchup_ratio` | `0.25` | backlog 较大时，每次按 backlog 的这个比例尝试追赶，再受最小/最大释放单位限制。取值范围是 `(0, 1]`。 |
-| `stale_release_minutes` | `60.0` | stale 等待达到这个分钟数后，即使价格还没走到优势阈值，也按同一套释放数量规则释放一批 backlog。设为 `0` 表示关闭时间释放。 |
-
-注意 `risk_acquisition` 必须写成 `[tracks.risk_acquisition]` 子表，不要写成 `risk_acquisition = { ... }` 行内对象。多个 `[[tracks]]` 时，每个 track 都可以有自己的 `[tracks.risk_acquisition]`，子表归属于它前面最近的那个 `[[tracks]]`。
-
-进程启动会建立 fresh-session。第一笔有效行情只允许保持或降低当前风险，不使用 `initial_ratio` 授予新增风险；stale 等待也从这笔行情开始计时，停机期间的离线时间不计入等待。`initial_ratio` 仍用于同一 session 内随后出现的新 acquisition episode。
-
-`[account_monitor]` 可选配置：
-
-| 字段 | 默认 | 说明 |
-| --- | --- | --- |
-| `day_change_attention_pct` | `-3.0` | 当日权益变化比例低于该值时进入 attention。 |
-| `day_change_critical_pct` | `-5.0` | 当日权益变化比例低于该值时进入 critical。 |
-| `available_ratio_attention_pct` | `30.0` | 可用保证金比例低于该值时进入 attention。 |
-| `available_ratio_critical_pct` | `15.0` | 可用保证金比例低于该值时进入 critical。 |
-| `unrealized_loss_attention_pct` | `-5.0` | 未实现盈亏比例低于该值时进入 attention。 |
-| `unrealized_loss_critical_pct` | `-10.0` | 未实现盈亏比例低于该值时进入 critical。 |
-
-每组 account monitor 阈值都要求 attention 大于等于 critical。
-
-当前交易所边界：
-
-- Hyperliquid 当前只接入 perpetuals，不支持 spot、提现、划转、TWAP 或 vault 运维功能。unified account / portfolio margin 下，Poise 使用 `spotClearinghouseState` 的 USDC 可用余额作为启动保证金口径；standard mode 下使用 perps `clearinghouseState.withdrawable`。
-- OKX 当前只接入 `SWAP` 永续合约，只支持 `cross` 保证金模式和 `net` 持仓模式，不支持 spot、期权、划转、提现或资金账户操作。
-
-详细边界见 [docs/system-overview.md](docs/system-overview.md)。
-
-### 4. 启动服务端
-
-真实启动前可以先做配置 dry-run。它会读取配置、加载交易所 metadata、账户摘要和可用 mark price，输出配置解释与容量估算；不会初始化 SQLite、下单、订阅实时任务或启动 runtime。
+## 运行
 
 ```bash
-cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet" --dry-run
+cargo build --release
+(cd console && npm ci && npm run build)
 ```
 
 ```bash
-cargo run -p poise-server -- --instance-dir "$HOME/poise-instances/testnet"
+target/release/poise --instance <实例目录> check     # 只做启动校验
+target/release/poise --instance <实例目录> serve     # 常驻服务 + 网页控制台
+target/release/poise --instance <实例目录> status    # 策略、订单、仓位、可用余额
+target/release/poise --instance <实例目录> stop      # 紧急用：暂停这个标的上的策略、撤掉本系统的全部挂单
 ```
 
-启动后服务端会读取配置、初始化 SQLite、连接交易所、执行 startup-only 杠杆设置并加载可跨进程恢复的控制状态和 PNL 明细。启动交易 runtime task 前会验证 recent PNL 恢复能力，再以交易所当前仓位、订单和新行情建立 fresh-session。旧 effect journal 只作为诊断历史，不会被恢复或重放。随后服务端启动 HTTP / WebSocket 控制面。
+`serve` 启动后：
 
-### 5. 使用本地 Web 控制台
+- 把重启前还在运行的策略落到「恢复中」，遗留订单过期、撤掉、对完账之后才重新挂单；
+- 按节拍（`--step-interval-secs`，默认 5 秒）驱动策略；
+- 每 10 分钟单独读一次资金费率和资金费结算；
+- 在 `listen` 地址提供网页控制台（静态文件默认取 `console/dist`）。
 
-启动 server 后，在同一台机器打开 `http://127.0.0.1:8000/`。控制台是唯一用户界面，server 同源提供静态资源、HTTP API 和 WebSocket；不配置远程 Base URL，也不应把 `bind_address` 暴露到不受信任网络。
+## 网页控制台
 
-控制台分为总览、Track 和系统：总览展示 readiness、账户和 Track 摘要；Track 展示运行状态、配置、活动与人工命令；系统展示实例诊断。配置编辑以 server 当前 active 配置为起点，先请求预览，再以版本号保存并应用；应用会保留可见状态，必要时可恢复或放弃中断的应用。人工命令、配置预览和应用都由 server 验证、持久化并进入既有 runtime 路径，前端不直接访问交易所或写入实例文件。
+- **新建**：填价格范围、最大仓位、主仓比例和批数、网格间距和价差、限速间隔、观点失效价，保存成草稿。
+- **预览**：批次表、格子表、第一步会挂出的订单和会立即成交的订单、满仓压力测试（保证金率、强平价、建议最大仓位）、交易所上已有的其他挂单。标的上已有仓位时按接管规则分配。
+- **确认启动**：带着预览令牌确认；仓位、可用资金或立即成交的订单变了，预览作废要重新看。
+- **详情**：状态和在等什么、批次表、格子表、在场挂单、参数版本、保证金率、资金费率与累计资金费、今日操作次数。
+- **操作**：暂停、恢复、停止；运行中可以改限速间隔和观点失效设置。
+- **账户风控设置**：保证金率提醒和停止阈值、行情过期时间、资金费率提醒阈值。
 
-侧栏的「新增 Track」支持为当前交易所添加合约。填写稳定 ID、完整合约名称、策略和杠杆后，先预览交易所已有净仓位、策略目标、首次执行目标估算、容量和重启时会撤销的挂单，再确认保存。预览与保存均不下单、不撤单、不设置杠杆；保存仅向实例 `config.toml` 追加 track，侧栏会显示「待重启」。当前进程不会管理该合约，重启后才由正常启动流程读取当时的仓位并接管整个净仓位。重启会重新初始化所有已配置 Tracks、设置各自杠杆并清理已有挂单，接管后可能减仓。
-
-新增保存前会重新读取交易所事实；配置、仓位、挂单或归一化目标变化时要求重新预览。金额单位来自合约 metadata，预览不替代重启时的行情、PNL 和启动校验。已有 track 可继续在线编辑，新增待重启配置会保留；正在进行的在线配置应用会阻止新的追加写入。
-
-### 6. HTTP 快速确认
+## 开发
 
 ```bash
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/readiness
-curl http://127.0.0.1:8000/account
-curl http://127.0.0.1:8000/tracks
-curl http://127.0.0.1:8000/tracks/btc-core
-curl http://127.0.0.1:8000/debug/tracks/btc-core/recent-fills-audit
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+(cd console && npx tsc --noEmit && npx vitest run && npm run build)
 ```
 
-当前公开入口：
-
-- `GET /health`
-- `GET /readiness`
-- `GET /account`
-- `GET /tracks`
-- `GET /track-creation`：配置版本与已保存、待重启的 tracks。
-- `POST /track-creation/preview`：只读预览新增 track 的接管影响。
-- `POST /tracks`：核验预览并追加配置，重启后生效。
-- `GET /tracks/:id`
-- `POST /tracks/:id/commands`
-- `GET /debug/tracks/:id/diagnostics`
-- `GET /debug/tracks/:id/recent-fills-audit`
-- `GET /ws`
-
-控制台还使用 `GET` / `POST` / `PUT` / `DELETE` 的 `/tracks/:id/configuration`、`/tracks/:id/configuration/preview` 与配置应用状态入口；路由和 DTO 的精确形状以 [server/src/http.rs](server/src/http.rs) 与 [protocol/src/lib.rs](protocol/src/lib.rs) 为准。
-
-协议 DTO 以 [protocol/src/lib.rs](protocol/src/lib.rs) 和序列化测试为准，不再维护单独协议文档。
-
-`/health` 用于查看进程、track 和 runtime task 的观测状态；`/readiness` 判断当前实例是否具备交易条件，并明确返回 blockers 与 warnings。两者语义不同，HTTP 200 不能互相替代。
-
-## zellij 值守
-
-本地连续跑测试网实例时，可以用仓库里的 zellij 脚本托管 server 和 trading readiness probe；控制台由 server 同源提供。
+前端开发服务器把 `/api` 转给 `POISE_API`（默认 `http://127.0.0.1:8010`）：
 
 ```bash
-export POISE_INSTANCE_DIR="$HOME/poise-instances/testnet"
-./scripts/start-instance-zellij.sh
+(cd console && npm run dev)
 ```
 
-常用环境变量：
+## 目录
 
-```bash
-export POISE_INSTANCE_DIR="$HOME/poise-instances/testnet"
-export POISE_BASE_URL=http://127.0.0.1:8000
-export POISE_LOG_DIR="$HOME/poise-instances/testnet/.logs"
-export POISE_HEALTH_FAILURE_THRESHOLD=3
-export POISE_ZELLIJ_SESSION_NAME=poise-testnet
-./scripts/start-instance-zellij.sh
-```
-
-脚本默认每次都会重建同名 zellij session：先删除同名 session，再 `--forget` 旧保存态，并按当前 layout 新建。这样可以避免电脑重启后复活旧 pane 命令。若只是想附加到当前活跃 session：
-
-```bash
-./scripts/start-instance-zellij.sh --attach
-# 或
-POISE_ZELLIJ_ATTACH=1 ./scripts/start-instance-zellij.sh
-```
-
-日志默认写到 `<instance-dir>/.logs/`：
-
-- `poise-server.log`
-- `health-probe.log`
-
-只看脚本参数，不启动：
-
-```bash
-POISE_INSTANCE_DIR="$HOME/poise-instances/testnet" ./scripts/start-instance-zellij.sh --dry-run
-POISE_INSTANCE_DIR="$HOME/poise-instances/testnet" ./scripts/run-instance-server.sh --dry-run
-POISE_BASE_URL=http://127.0.0.1:8000 ./scripts/probe-health.sh --check health --dry-run
-POISE_BASE_URL=http://127.0.0.1:8000 ./scripts/probe-health.sh --check readiness --dry-run
-```
-
-## 开发与验证
-
-默认优先跑与改动直接相关的最小测试。常用入口：
-
-```bash
-cargo test -p poise-core
-cargo test -p poise-engine
-cargo test -p poise-application
-cargo test -p poise-hyperliquid
-cargo test -p poise-server
-```
+- [strategy/](strategy/)：纯计算。参数与校验、批次和格子划分、规划、判定、记账、限速、接管、资金预检、满仓压力测试、观点失效。不碰网络和数据库。
+- [runtime/](runtime/)：唯一写入入口。驱动策略一步一步走（读取、判定、执行），SQLite 存储，网页接口，常驻服务，交易所和账户接口，以及测试用的模拟交易所。
+- [hyperliquid/](hyperliquid/)：Hyperliquid 适配：签名、下单撤单、订单与成交查询、账户读数。
+- [cli/](cli/)：命令行 `poise`。
+- [console/](console/)：网页控制台（React + Vite）。
+- [docs/](docs/)：设计与系统说明。
