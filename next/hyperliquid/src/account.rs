@@ -1,8 +1,10 @@
 //! [`Account`] 的 Hyperliquid 实现：账户模式、API 钱包、可用资金、费率、合约规则。
 
 use async_trait::async_trait;
-use chrono::DateTime;
-use poise_runtime::account::{FUNDING_HOURS_PER_YEAR, FundingRate, Leverage, MarginReading};
+use chrono::{DateTime, Utc};
+use poise_runtime::account::{
+    FUNDING_HOURS_PER_YEAR, FundingPayment, FundingRate, Leverage, MarginReading,
+};
 use poise_runtime::{Account, AccountMode, ApiWallet, ExchangeError};
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
 use poise_strategy::stress::{MarginTier, MarginTiers};
@@ -11,8 +13,8 @@ use serde_json::{Value, json};
 
 use crate::client::Hyperliquid;
 use crate::models::{
-    ActiveAssetData, AgentResponse, ClearinghouseState, MetaResponse, SpotClearinghouseState,
-    UserFees,
+    ActiveAssetData, AgentResponse, ClearinghouseState, FundingEntry, MetaResponse,
+    SpotClearinghouseState, UserFees,
 };
 
 /// USDC 在统一账户里的 token 序号。
@@ -258,6 +260,54 @@ impl Account for Hyperliquid {
         funding_rate(&funding).ok_or_else(|| unreadable("funding rate"))
     }
 
+    /// `userFunding` 一次最多返回 500 条，下一页从上一页最后一条的时刻（含）接着查，所以
+    /// 页与页之间会重一条，按时刻去重。返回的是整个账户所有标的的结算，只留这个标的的。
+    async fn funding_payments(
+        &self,
+        instrument: &Instrument,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<FundingPayment>, ExchangeError> {
+        let mut payments: Vec<FundingPayment> = Vec::new();
+        let mut start = since.timestamp_millis();
+        for _ in 0..FUNDING_PAGES {
+            let body = json!({"type": "userFunding", "user": self.user(), "startTime": start});
+            let page: Vec<FundingEntry> = self.info(&body, "userFunding").await?;
+            let Some(last) = page.last().map(|entry| entry.time) else {
+                return Ok(payments);
+            };
+            for entry in &page {
+                if entry.delta.coin != instrument.symbol() {
+                    continue;
+                }
+                let time = DateTime::from_timestamp_millis(entry.time)
+                    .ok_or_else(|| unreadable("funding time"))?;
+                if payments.iter().any(|payment| payment.time == time) {
+                    continue;
+                }
+                payments.push(FundingPayment {
+                    time,
+                    amount: Notional::parse(&entry.delta.usdc)
+                        .map_err(|_| unreadable("funding amount"))?,
+                });
+            }
+            // 不满一页就是查完了。满页、最后一条的时刻却没往前走：同一时刻的记录多于一页，
+            // 后面的翻不到，不能当成查完了——报读不全，调用方不推进同步点。
+            if page.len() < FUNDING_PAGE_SIZE {
+                return Ok(payments);
+            }
+            if last <= start {
+                return Err(ExchangeError::Unavailable {
+                    reason: "a full page of funding payments at one time; the rest cannot be paged"
+                        .to_string(),
+                });
+            }
+            start = last;
+        }
+        Err(ExchangeError::Unavailable {
+            reason: format!("more than {FUNDING_PAGES} pages of funding payments"),
+        })
+    }
+
     async fn instrument_spec(
         &self,
         instrument: &Instrument,
@@ -282,6 +332,12 @@ fn unreadable(what: &str) -> ExchangeError {
         reason: format!("the exchange returned an unreadable {what}"),
     }
 }
+
+/// `userFunding` 一页的条数上限（文档「Pagination」：按时间范围查的接口最多返回 500 条）。
+const FUNDING_PAGE_SIZE: usize = 500;
+
+/// 一次最多翻几页：每页 500 条、每小时结算一次，100 页够查好几年的单个账户全部标的。
+const FUNDING_PAGES: usize = 100;
 
 /// 交易所给的每小时资金费率（可能多于 8 位小数）换成 [`FundingRate`]。
 ///

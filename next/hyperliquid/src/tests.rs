@@ -768,6 +768,68 @@ async fn the_funding_rate_comes_from_the_asset_contexts() {
     assert_eq!(funding.annual, Rate::parse("-1.84857987").unwrap());
 }
 
+/// 资金费结算按页取：满 500 条就从最后一条的时刻接着查，页与页之间重的那条只算一次；
+/// 只留这个标的的，金额里的前导空格照样读得出（第 7.6 节）。
+#[tokio::test]
+async fn funding_payments_are_paged_and_deduplicated() {
+    let entry = |coin: &str, usdc: &str, time: i64| {
+        json!({"delta": {"type": "funding", "coin": coin, "usdc": usdc, "szi": "0.1",
+                         "fundingRate": "0.0000125", "nSamples": null},
+               "hash": "0x00", "time": time})
+    };
+    // 第一页正好 500 条：BTC、ETH 交替，每小时一次。
+    let first: Vec<Value> = (0..500)
+        .map(|index| {
+            let coin = if index % 2 == 0 { "BTC" } else { "ETH" };
+            entry(coin, " -0.5", NOW_MS as i64 + index * 3_600_000)
+        })
+        .collect();
+    let last = NOW_MS as i64 + 499 * 3_600_000;
+    // 第二页从最后一条（ETH）的时刻接着查：它重复一次，后面是两条新的 BTC。
+    let second = vec![
+        entry("ETH", "-0.5", last),
+        entry("BTC", "0.25", last + 3_600_000),
+        entry("BTC", "0.25", last + 7_200_000),
+    ];
+    let transport = FakeTransport::new(vec![Value::Array(first), Value::Array(second)]);
+    let client = client(transport.clone(), fixed_clock(NOW_MS));
+
+    let payments = client
+        .funding_payments(&btc(), at(NOW_MS as i64))
+        .await
+        .unwrap();
+
+    assert_eq!(payments.len(), 252);
+    assert_eq!(payments[0].amount, Notional::parse("-0.5").unwrap());
+    assert_eq!(payments[251].amount, Notional::parse("0.25").unwrap());
+    assert_eq!(transport.request(0).body["startTime"], NOW_MS);
+    assert_eq!(transport.request(1).body["startTime"], last);
+}
+
+/// 满页、最后一条的时刻却没往前走：后面的翻不到，报读不全，不能当成查完了。
+#[tokio::test]
+async fn a_full_page_at_one_time_is_reported_as_incomplete() {
+    let page: Vec<Value> = (0..500)
+        .map(|index| {
+            json!({"delta": {"type": "funding", "coin": format!("C{index}"), "usdc": "-0.1",
+                             "szi": "0.1", "fundingRate": "0.0000125", "nSamples": null},
+                   "hash": "0x00", "time": NOW_MS})
+        })
+        .collect();
+    let transport = FakeTransport::new(vec![Value::Array(page)]);
+    let client = client(transport, fixed_clock(NOW_MS));
+
+    let error = client
+        .funding_payments(&btc(), at(NOW_MS as i64))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, ExchangeError::Unavailable { .. }),
+        "{error:?}"
+    );
+}
+
 // ── 账户 ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]

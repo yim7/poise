@@ -213,7 +213,8 @@ impl Runtime {
             && cancel_only_settled(&orders);
         let status = if done {
             self.store
-                .save_strategy_status(strategy_id, StrategyStatus::Invalidated, now)?;
+                // 收场时刻按此刻的时钟记，理由同停止归档（资金费按它截止）。
+                .save_strategy_status(strategy_id, StrategyStatus::Invalidated, self.clock.now())?;
             tracing::warn!(
                 strategy = %strategy_id,
                 position = %readings.position,

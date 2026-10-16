@@ -442,10 +442,21 @@ pub struct StrategyDetail {
     /// 新的时是 `None`。
     pub funding_rate: Option<FundingRate>,
     pub funding_rate_read_at: Option<DateTime<Utc>>,
+    /// 策略建立以来（归档的到归档为止）这个标的结算的资金费合计：正数是收到，负数是付出。
+    pub funding_total: Notional,
+    /// 资金费结算同步到了哪一刻；`funding_total` 算到这一刻为止。还没同步过时是 `None`。
+    pub funding_synced_through: Option<DateTime<Utc>>,
+    /// 网格已实现利润的估算：平仓腿的成交量按计划价和 maker 费率算（第 7.6 节）。
+    pub grid_realized_profit: Notional,
+    /// 资金费占网格已实现利润的比例（带符号，付出去是负的）；还没有利润时是 `None`。
+    pub funding_share: Option<Rate>,
 }
 
 /// 资金费率隔多久重读一次。
 pub const FUNDING_RATE_REFRESH: Duration = Duration::minutes(10);
+
+/// 同步资金费结算时往前多查多久：结算记录可能晚一点才查得到。
+const FUNDING_SYNC_OVERLAP: Duration = Duration::hours(2);
 
 /// 资金费率读数多久之后不再算数：连着三次没读到。
 const FUNDING_RATE_MAX_AGE: Duration = Duration::minutes(30);
@@ -567,15 +578,54 @@ impl Runtime {
     /// 常驻服务单独跑这件事，每 [`FUNDING_RATE_REFRESH`] 一次，不管上一次成没成功：资金费每
     /// 小时才结算一次，读接口的权重又高；放在交易的一步里等它，超时会拖住撤单和别的策略的
     /// 止损检查。交易的一步只读这里存下的读数（[`Runtime::current_funding_rate`]）。
+    ///
+    /// 同时同步资金费结算：从上次同步到的时刻往前多查 [`FUNDING_SYNC_OVERLAP`]（结算记录可能
+    /// 晚一点才查得到），还没同步过的从这个标的上最早的策略建立时开始。重复的按时刻覆盖，
+    /// 不会重复计入。
     pub async fn refresh_funding_rates(&self) -> Result<(), RuntimeError> {
-        let mut instruments: Vec<Instrument> = Vec::new();
+        // 要同步结算的标的和它上面最早的那个策略建立的时刻，以及要读费率的活动标的。归档的
+        // 策略在同步点越过「归档时刻 + 重查窗口」之前也要同步：归档前几分钟结算的那笔，可能
+        // 这时才查得到。
+        let mut to_sync: Vec<(Instrument, DateTime<Utc>)> = Vec::new();
+        let mut live: Vec<Instrument> = Vec::new();
         for strategy_id in self.store.load_all_strategy_ids()? {
             let stored = self.store.load_strategy(&strategy_id)?;
-            if stored.status.is_live() && !instruments.contains(&stored.instrument) {
-                instruments.push(stored.instrument);
+            if stored.status.is_live() && !live.contains(&stored.instrument) {
+                live.push(stored.instrument.clone());
+            }
+            let needs_sync = stored.status.is_live()
+                || stored.status.is_archived()
+                    && self
+                        .store
+                        .funding_synced_through(&stored.instrument)?
+                        .is_none_or(|synced| synced < stored.updated_at + FUNDING_SYNC_OVERLAP);
+            if !needs_sync {
+                continue;
+            }
+            match to_sync
+                .iter_mut()
+                .find(|(instrument, _)| *instrument == stored.instrument)
+            {
+                Some((_, earliest)) => *earliest = (*earliest).min(stored.created_at),
+                None => to_sync.push((stored.instrument, stored.created_at)),
             }
         }
-        for instrument in instruments {
+        for (instrument, earliest) in to_sync {
+            let now = self.clock.now();
+            let since = self
+                .store
+                .funding_synced_through(&instrument)?
+                .map_or(earliest, |through| through - FUNDING_SYNC_OVERLAP);
+            match self.account.funding_payments(&instrument, since).await {
+                Ok(payments) => self
+                    .store
+                    .save_funding_payments(&instrument, &payments, now)?,
+                Err(error) => {
+                    tracing::warn!(%instrument, %error, "the funding payments are unavailable");
+                }
+            }
+        }
+        for instrument in live {
             match self.account.funding_rate(&instrument).await {
                 Ok(rate) => {
                     self.funding_rates

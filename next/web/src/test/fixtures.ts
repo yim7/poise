@@ -182,6 +182,10 @@ export function detail(overrides: Partial<StrategyDetail> = {}): StrategyDetail 
     actions_today: 12,
     funding_rate: { hourly: '0.0000125', annual: '0.1095' },
     funding_rate_read_at: '2026-10-15T00:00:00Z',
+    funding_total: '-1.5',
+    funding_synced_through: '2026-10-15T00:00:00Z',
+    grid_realized_profit: '30',
+    funding_share: '-0.05',
     ...overrides,
   }
 }

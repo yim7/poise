@@ -192,7 +192,10 @@ impl Runtime {
         // 都留在「暂停中」「停止中」，由后台继续推（第 9.2 节）。
         let settled = round.is_clean() && cancel_only_settled(&orders);
         let status = if settled {
-            self.store.save_strategy_status(strategy_id, target, now)?;
+            // 收场时刻按此刻的时钟记：归档的策略按它截止资金费（第 7.6 节），用这一轮开始的
+            // 时刻会把撤单、对账期间结算的那笔排除在外。
+            self.store
+                .save_strategy_status(strategy_id, target, self.clock.now())?;
             tracing::warn!(
                 strategy = %strategy_id,
                 status = target.as_str(),

@@ -21,6 +21,7 @@ use poise_strategy::state::{BatchState, CellState, SideState, StrategyState};
 use poise_strategy::throttle::ThrottleState;
 use poise_strategy::units::{Notional, Position, Price, Quantity, Rate};
 
+use crate::account::FundingPayment;
 use crate::settings::AccountSettings;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -533,6 +534,16 @@ const TABLES: &str = "
                  id INTEGER PRIMARY KEY CHECK (id = 1),
                  settings_json TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS funding_payments (
+                 instrument TEXT NOT NULL,
+                 time TEXT NOT NULL,
+                 amount TEXT NOT NULL,
+                 PRIMARY KEY (instrument, time)
+             );
+             CREATE TABLE IF NOT EXISTS funding_syncs (
+                 instrument TEXT PRIMARY KEY,
+                 synced_through TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS pause_reasons (
                  strategy_id TEXT PRIMARY KEY,
                  reason TEXT NOT NULL
@@ -931,6 +942,82 @@ impl Store {
             params![serde_json::to_string(settings)?],
         )?;
         Ok(())
+    }
+
+    /// 存下一批资金费结算，并记下同步到了哪一刻（第 7.6 节）。同一个标的同一时刻只结算一次：
+    /// 重复同步时按时刻覆盖，不会重复计入。两件事写在同一个事务里。
+    pub fn save_funding_payments(
+        &self,
+        instrument: &Instrument,
+        payments: &[FundingPayment],
+        synced_through: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        for payment in payments {
+            transaction.execute(
+                "INSERT INTO funding_payments (instrument, time, amount) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (instrument, time) DO UPDATE SET amount = excluded.amount",
+                params![
+                    instrument.symbol(),
+                    format_time(payment.time),
+                    payment.amount.to_string()
+                ],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO funding_syncs (instrument, synced_through) VALUES (?1, ?2)
+             ON CONFLICT (instrument) DO UPDATE SET synced_through = excluded.synced_through",
+            params![instrument.symbol(), format_time(synced_through)],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// 这个标的的资金费结算同步到了哪一刻；还没同步过时是 `None`。
+    pub fn funding_synced_through(
+        &self,
+        instrument: &Instrument,
+    ) -> Result<Option<DateTime<Utc>>, StoreError> {
+        let value = self
+            .lock()
+            .query_row(
+                "SELECT synced_through FROM funding_syncs WHERE instrument = ?1",
+                params![instrument.symbol()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        value.as_deref().map(parse_time).transpose()
+    }
+
+    /// 这个标的在 `[from, to)` 之间结算的资金费合计：正数是收到，负数是付出。`to` 是
+    /// `None` 时算到最新。
+    pub fn funding_total(
+        &self,
+        instrument: &Instrument,
+        from: DateTime<Utc>,
+        to: Option<DateTime<Utc>>,
+    ) -> Result<Notional, StoreError> {
+        let connection = self.lock();
+        let mut statement = connection.prepare(
+            "SELECT time, amount FROM funding_payments WHERE instrument = ?1 AND time >= ?2",
+        )?;
+        let rows = statement.query_map(params![instrument.symbol(), format_time(from)], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut total = Notional::ZERO;
+        for row in rows {
+            let (time, amount) = row?;
+            if to.is_some_and(|to| parse_time(&time).is_ok_and(|time| time >= to)) {
+                continue;
+            }
+            total = total
+                + Notional::parse(&amount).map_err(|_| StoreError::InvalidColumn {
+                    column: "funding amount",
+                    value: amount.clone(),
+                })?;
+        }
+        Ok(total)
     }
 
     /// 记下策略为什么被暂停：撤单收尾要好几轮，每轮的进度说明会覆盖视图里的说明，暂停原因
@@ -2502,5 +2589,40 @@ mod tests {
 
         let store = Store::open(&path).unwrap();
         assert_eq!(store.load_state(&strategy_id).unwrap(), state);
+    }
+
+    /// 资金费合计按 `[from, to)` 取；同一时刻重复存只算一次（第 7.6 节）。
+    #[test]
+    fn the_funding_total_covers_the_strategy_period_once() {
+        let store = Store::open_in_memory().unwrap();
+        let start = Utc.with_ymd_and_hms(2026, 10, 15, 0, 0, 0).unwrap();
+        let hour = |hours: i64| start + chrono::Duration::hours(hours);
+        let payment = |hours: i64, amount: &str| crate::account::FundingPayment {
+            time: hour(hours),
+            amount: Notional::parse(amount).unwrap(),
+        };
+        let payments = [
+            payment(-1, "-9"),
+            payment(1, "-1.5"),
+            payment(2, "0.5"),
+            payment(3, "-4"),
+        ];
+        store
+            .save_funding_payments(&btc(), &payments, hour(3))
+            .unwrap();
+        // 重叠同步：同一时刻再存一次，不重复计入。
+        store
+            .save_funding_payments(&btc(), &payments[1..2], hour(4))
+            .unwrap();
+
+        assert_eq!(
+            store.funding_total(&btc(), start, None).unwrap(),
+            Notional::parse("-5").unwrap()
+        );
+        assert_eq!(
+            store.funding_total(&btc(), start, Some(hour(3))).unwrap(),
+            Notional::parse("-1").unwrap()
+        );
+        assert_eq!(store.funding_synced_through(&btc()).unwrap(), Some(hour(4)));
     }
 }

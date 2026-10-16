@@ -56,6 +56,26 @@ describe('运行详情', () => {
     expect(await screen.findByText(/^每小时 0.00125%，年化 10.95%（.+ 读）$/)).toBeInTheDocument()
   })
 
+  it('显示累计资金费、网格已实现利润和资金费占的比例', async () => {
+    detailRoutes()
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    expect(await screen.findByText(/^-1.5（截至 .+）$/)).toBeInTheDocument()
+    expect(screen.getByText('网格已实现利润（估算）')).toBeInTheDocument()
+    expect(screen.getByText('-5%')).toBeInTheDocument()
+  })
+
+  it('还没有网格利润时不算比例', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({ funding_share: null, grid_realized_profit: '0' }),
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    expect(await screen.findByText('还没有网格利润')).toBeInTheDocument()
+  })
+
   it('负资金费率显示负号：空头付', async () => {
     detailRoutes({
       'GET /api/strategies/s-1': {

@@ -185,6 +185,24 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
               : `每小时 ${percent(strategy.funding_rate.hourly)}，年化 ${percent(strategy.funding_rate.annual)}（${timestamp(strategy.funding_rate_read_at)} 读）`}
           </dd>
         </div>
+        {/* 资金费只算策略建立之后这个标的结算的；利润是按计划价的估算，比例只用来看资金费
+            吃掉了多少利润（第 7.6 节）。 */}
+        <div>
+          <dt>累计资金费</dt>
+          <dd>
+            {strategy.funding_synced_through === null
+              ? '还没同步'
+              : `${decimal(strategy.funding_total)}（截至 ${timestamp(strategy.funding_synced_through)}）`}
+          </dd>
+        </div>
+        <div>
+          <dt>网格已实现利润（估算）</dt>
+          <dd>{decimal(strategy.grid_realized_profit)}</dd>
+        </div>
+        <div>
+          <dt>资金费占网格利润</dt>
+          <dd>{strategy.funding_share === null ? '还没有网格利润' : percent(strategy.funding_share)}</dd>
+        </div>
         {/* 全账户的计数：同一账户的所有策略共用每天 5 万次的上限，超过 80% 时说明里会提醒。 */}
         <div>
           <dt>今日操作次数</dt>

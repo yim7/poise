@@ -6,7 +6,12 @@ mod common;
 
 use common::{Harness, at, harness, short_harness};
 use poise_runtime::settings::AccountSettings;
-use poise_strategy::units::Rate;
+use poise_strategy::order::OrderPurpose;
+use poise_strategy::units::{Notional, Rate};
+
+fn notional(value: &str) -> Notional {
+    Notional::parse(value).unwrap()
+}
 
 fn rate(value: &str) -> Rate {
     Rate::parse(value).unwrap()
@@ -150,4 +155,103 @@ async fn a_paused_strategy_still_shows_the_funding_rate() {
     let detail = harness.runtime.detail(&harness.strategy_id).unwrap();
     assert_eq!(detail.funding_rate.unwrap().hourly, rate("0.0001"));
     assert!(note(&harness).contains("资金费率"), "{}", note(&harness));
+}
+
+/// 累计资金费只算策略建立之后的；网格已实现利润按平仓腿成交量和计划价估算；比例是
+/// 资金费 ÷ 利润，带符号（付出去是负的）。
+#[tokio::test]
+async fn the_funding_is_compared_with_the_realized_grid_profit() {
+    let harness = harness().await;
+    harness.step(0).await;
+    let quantity = harness.runtime.detail(&harness.strategy_id).unwrap().cells[0].quantity;
+    let entry = harness.working_cloid(0, OrderPurpose::GridEntry);
+    harness.exchange.fill(&entry, quantity, at(1)).unwrap();
+    harness.step(2).await;
+    let exit = harness.working_cloid(0, OrderPurpose::GridExit);
+    harness.exchange.fill(&exit, quantity, at(3)).unwrap();
+    harness.step(4).await;
+
+    // 建立之前的那笔不算。
+    harness
+        .account
+        .add_funding_payment(at(-3600), notional("-9"));
+    harness
+        .account
+        .add_funding_payment(at(3600), notional("-1.5"));
+    harness
+        .account
+        .add_funding_payment(at(7200), notional("0.5"));
+    harness.clock.set(at(7300));
+    harness.runtime.refresh_funding_rates().await.unwrap();
+
+    let detail = harness.runtime.detail(&harness.strategy_id).unwrap();
+    let profit = detail.cells[0].profit_maker;
+    assert_eq!(detail.funding_total, notional("-1"));
+    assert_eq!(detail.funding_synced_through, Some(at(7300)));
+    assert_eq!(detail.grid_realized_profit, profit);
+    let share = notional("-1").raw() * 100_000_000 / profit.raw();
+    assert_eq!(detail.funding_share, Some(Rate::from_units(share as i64)));
+
+    // 再同步一次：重叠的那段不会重复计入。
+    harness.clock.set(at(7400));
+    harness.runtime.refresh_funding_rates().await.unwrap();
+    assert_eq!(
+        harness
+            .runtime
+            .detail(&harness.strategy_id)
+            .unwrap()
+            .funding_total,
+        notional("-1")
+    );
+}
+
+/// 还没有网格利润时没有比例可算。
+#[tokio::test]
+async fn there_is_no_share_without_a_realized_profit() {
+    let harness = harness().await;
+    harness.step(0).await;
+    harness
+        .account
+        .add_funding_payment(at(3600), notional("-1"));
+    harness.clock.set(at(3700));
+    harness.runtime.refresh_funding_rates().await.unwrap();
+
+    let detail = harness.runtime.detail(&harness.strategy_id).unwrap();
+    assert_eq!(detail.funding_total, notional("-1"));
+    assert_eq!(detail.grid_realized_profit, Notional::ZERO);
+    assert_eq!(detail.funding_share, None);
+}
+
+/// 归档的策略按实际收场时刻截止资金费：撤单、对账跨过了结算时刻，那一笔也算这个策略的；
+/// 归档之后同步点越过「归档时刻 + 重查窗口」之前还会补同步，归档前结算、晚到的那笔不会丢。
+/// 归档之后的结算不算。
+#[tokio::test]
+async fn an_archived_strategy_keeps_the_funding_up_to_when_it_was_archived() {
+    let harness = harness().await;
+    harness.step(0).await;
+    harness.runtime.refresh_funding_rates().await.unwrap();
+
+    // 第 3595 秒点停止；这一轮读行情花了 10 秒，第 3605 秒才收场。
+    harness
+        .account
+        .add_funding_payment(at(3600), notional("-1.5"));
+    harness
+        .exchange
+        .slow_mark_price(harness.clock.clone(), chrono::Duration::seconds(10));
+    harness.stop(3595).await;
+    assert_eq!(
+        harness.runtime.status(&harness.strategy_id).unwrap(),
+        poise_runtime::StrategyStatus::Stopped
+    );
+
+    // 归档之后的那笔不算；归档前那笔这时才同步到，照样算进去。
+    harness
+        .account
+        .add_funding_payment(at(7200), notional("-4"));
+    harness.clock.set(at(7300));
+    harness.runtime.refresh_funding_rates().await.unwrap();
+
+    let detail = harness.runtime.detail(&harness.strategy_id).unwrap();
+    assert_eq!(detail.funding_total, notional("-1.5"));
+    assert_eq!(detail.funding_synced_through, Some(at(7300)));
 }

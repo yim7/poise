@@ -199,3 +199,18 @@ pub(crate) struct ActiveLeverage {
     pub kind: String,
     pub value: u32,
 }
+
+/// `userFunding` 的一条：一次资金费结算。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct FundingEntry {
+    pub delta: FundingDelta,
+    /// 结算时刻（毫秒）。
+    pub time: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct FundingDelta {
+    pub coin: String,
+    /// 这个账户收到的 USDC：负数是付出。文档样例里带前导空格。
+    pub usdc: String,
+}

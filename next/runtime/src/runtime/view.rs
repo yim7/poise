@@ -3,9 +3,9 @@
 use chrono::{DateTime, Utc};
 use poise_strategy::Strategy;
 use poise_strategy::invalidation::invalidation_sold;
-use poise_strategy::order::{OrderRecord, WorkingOrder};
+use poise_strategy::order::{OrderPurpose, OrderRecord, Unit, WorkingOrder};
 use poise_strategy::side::Direction;
-use poise_strategy::units::{Notional, Position, Rate};
+use poise_strategy::units::{Notional, Position, Quantity, Rate, SCALE};
 
 use crate::account::FundingRate;
 use crate::settings::AccountSettings;
@@ -61,6 +61,17 @@ impl Runtime {
         } else {
             None
         };
+        // 资金费只算这个策略的那一段：建立之后，归档的到归档为止（第 7.6 节）。
+        let funding_end = status.is_archived().then_some(summary.updated_at);
+        let funding_total =
+            self.store
+                .funding_total(&stored.instrument, stored.created_at, funding_end)?;
+        let exits: Vec<(Unit, Quantity)> = orders
+            .iter()
+            .filter(|order| order.record.purpose == OrderPurpose::GridExit)
+            .map(|order| (order.record.unit, order.record.cumulative_filled))
+            .collect();
+        let grid_realized_profit = strategy.grid_realized_profit(&exits);
         Ok(StrategyDetail {
             summary,
             taken_at: view.taken_at,
@@ -94,6 +105,10 @@ impl Runtime {
             actions_today: self.actions_today()?,
             funding_rate: funding.map(|(rate, _)| rate),
             funding_rate_read_at: funding.map(|(_, read_at)| read_at),
+            funding_total,
+            funding_synced_through: self.store.funding_synced_through(&stored.instrument)?,
+            grid_realized_profit,
+            funding_share: share_of(funding_total, grid_realized_profit),
         })
     }
 
@@ -213,4 +228,13 @@ pub(super) fn funding_alert_note(
             percent(settings.funding_alert_annual_rate)
         )
     })
+}
+
+/// `part` 占 `whole` 的比例（带符号）；`whole` 不是正数、或者算出来超出范围时是 `None`。
+fn share_of(part: Notional, whole: Notional) -> Option<Rate> {
+    if whole <= Notional::ZERO {
+        return None;
+    }
+    let units = part.raw().checked_mul(i128::from(SCALE))? / whole.raw();
+    i64::try_from(units).ok().map(Rate::from_units)
 }

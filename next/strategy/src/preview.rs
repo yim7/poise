@@ -195,6 +195,31 @@ impl Strategy {
             .collect()
     }
 
+    /// 网格已实现利润的估算（第 7.6 节）：每个格子平仓腿已经成交的数量，按这一格的计划
+    /// 建仓价、平仓价和 maker 费率算扣费后收益，加起来。
+    ///
+    /// 是估算：实际成交价可能比计划价好（下单即成交时），手续费也可能有一条腿是 taker。
+    /// 它和预览里「每格扣费后收益」是同一个口径，用来看资金费占了多少利润。
+    /// `exits` 是每个单位平仓腿已经记入的成交量；不是格子的单位不算。
+    pub fn grid_realized_profit(&self, exits: &[(Unit, Quantity)]) -> Notional {
+        exits
+            .iter()
+            .filter_map(|(unit, quantity)| {
+                let Unit::Cell(direction, index) = *unit else {
+                    return None;
+                };
+                let cell = self.side(direction)?.grid().cell(index)?;
+                Some(self.cell_profit(
+                    direction,
+                    cell.entry_price,
+                    cell.exit_price,
+                    *quantity,
+                    self.fees().maker_rate,
+                ))
+            })
+            .fold(Notional::ZERO, |total, profit| total + profit)
+    }
+
     /// 整格买卖一次的扣费后收益：`|平仓价 − 建仓价| × 数量 − (平仓价 + 建仓价) × 数量 × 费率`。
     ///
     /// 多头侧买进卖出、空头侧卖出买回，买卖两条腿对调；两侧的收益算法相同。
@@ -922,5 +947,28 @@ mod tests {
         assert_eq!(batches[0].enabled_cell_count, 2);
         assert_eq!(batches[0].cell_count, 5);
         assert_eq!(batches[1].enabled_cell_count, 0);
+    }
+
+    /// 网格已实现利润：平仓腿成交了整格，就是这一格的 maker 扣费后收益；两格相加；主仓
+    /// 和整侧的单位不算。
+    #[test]
+    fn the_realized_grid_profit_adds_up_the_closed_cells() {
+        let strategy = long_grid_strategy();
+        let cells = strategy.cell_summaries(&strategy.initial_state(), &[]);
+        let exits = [
+            (Unit::Cell(Direction::Long, CellIndex(0)), cells[0].quantity),
+            (Unit::Cell(Direction::Long, CellIndex(1)), cells[1].quantity),
+            (
+                Unit::Batch(Direction::Long, BatchIndex(0)),
+                Quantity::parse("1").unwrap(),
+            ),
+            (Unit::Side(Direction::Long), Quantity::parse("1").unwrap()),
+        ];
+
+        assert_eq!(
+            strategy.grid_realized_profit(&exits),
+            cells[0].profit_maker + cells[1].profit_maker
+        );
+        assert_eq!(strategy.grid_realized_profit(&[]), Notional::ZERO);
     }
 }

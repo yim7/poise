@@ -7,12 +7,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
 use poise_strategy::stress::MarginTiers;
 use poise_strategy::units::{Notional, Rate};
 
-use crate::account::{Account, AccountMode, ApiWallet, FundingRate, Leverage, MarginReading};
+use crate::account::{
+    Account, AccountMode, ApiWallet, FundingPayment, FundingRate, Leverage, MarginReading,
+};
 use crate::clock::ManualClock;
 use crate::exchange::ExchangeError;
 
@@ -40,6 +42,8 @@ struct SimAccount {
     funding_rate_reads: usize,
     /// 下一次读资金费率失败的原因。
     fail_next_funding_rate: Option<String>,
+    /// 已经结算的资金费，按时间先后。
+    funding_payments: Vec<FundingPayment>,
     /// 保证金读数：默认没有任何占用，账户比率为 0。
     margin: MarginReading,
     /// 还要让几次保证金读数失败。
@@ -70,6 +74,7 @@ impl SimulatedAccount {
                 funding_rate: Rate::from_units(1_250),
                 funding_rate_reads: 0,
                 fail_next_funding_rate: None,
+                funding_payments: Vec::new(),
                 margin: MarginReading {
                     balance: Notional::parse(DEFAULT_COLLATERAL).expect("a valid default"),
                     available_after_maintenance: Notional::parse(DEFAULT_COLLATERAL)
@@ -164,6 +169,13 @@ impl SimulatedAccount {
         self.lock().funding_rate = rate;
     }
 
+    /// 结算一次资金费：正数是收到，负数是付出。
+    pub fn add_funding_payment(&self, time: DateTime<Utc>, amount: Notional) {
+        let mut state = self.lock();
+        state.funding_payments.push(FundingPayment { time, amount });
+        state.funding_payments.sort_by_key(|payment| payment.time);
+    }
+
     /// 让下一次读资金费率失败。
     pub fn fail_next_funding_rate(&self, reason: &str) {
         self.lock().fail_next_funding_rate = Some(reason.to_string());
@@ -206,6 +218,20 @@ impl Account for SimulatedAccount {
         FundingRate::from_hourly(state.funding_rate).ok_or_else(|| ExchangeError::Unavailable {
             reason: "the funding rate is out of range".to_string(),
         })
+    }
+
+    async fn funding_payments(
+        &self,
+        _instrument: &Instrument,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<FundingPayment>, ExchangeError> {
+        Ok(self
+            .lock()
+            .funding_payments
+            .iter()
+            .filter(|payment| payment.time >= since)
+            .copied()
+            .collect())
     }
 
     async fn available_collateral(&self) -> Result<Notional, ExchangeError> {

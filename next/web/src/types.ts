@@ -288,6 +288,14 @@ export interface StrategyDetail {
   /** 这个标的最近读到的资金费率（正数是多头付）；读不到、或者半小时没读到新的时是 null。 */
   funding_rate: FundingRate | null
   funding_rate_read_at: string | null
+  /** 策略建立以来这个标的结算的资金费合计：正数是收到，负数是付出。 */
+  funding_total: Decimal
+  /** 资金费结算同步到了哪一刻；还没同步过时是 null。 */
+  funding_synced_through: string | null
+  /** 网格已实现利润的估算：平仓腿成交量按计划价和 maker 费率算。 */
+  grid_realized_profit: Decimal
+  /** 资金费占网格已实现利润的比例（带符号）；还没有利润时是 null。 */
+  funding_share: Decimal | null
 }
 
 /** 恢复的结果：一直在跑、等遗留订单过期、遗留订单没收场、或者真的恢复了。 */

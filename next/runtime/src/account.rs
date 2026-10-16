@@ -125,6 +125,15 @@ impl FundingRate {
     }
 }
 
+/// 一次资金费结算（第 7.6 节）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FundingPayment {
+    /// 结算时刻。同一个标的每个时刻只结算一次。
+    pub time: DateTime<Utc>,
+    /// 这个账户收到的资金费：正数是收到，负数是付出。
+    pub amount: Notional,
+}
+
 #[async_trait]
 pub trait Account: Send + Sync {
     /// 账户模式。不是 Unified 时启动校验会拒绝启动，不替用户切换。
@@ -152,6 +161,13 @@ pub trait Account: Send + Sync {
 
     /// 这个标的当前的资金费率（第 7.6 节）。
     async fn funding_rate(&self, instrument: &Instrument) -> Result<FundingRate, ExchangeError>;
+
+    /// 这个标的从 `since`（含）开始的每一次资金费结算，按时间先后（第 7.6 节）。
+    async fn funding_payments(
+        &self,
+        instrument: &Instrument,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<FundingPayment>, ExchangeError>;
 
     /// 一个标的的合约规则：报价精度、数量精度、最低订单金额。
     async fn instrument_spec(
