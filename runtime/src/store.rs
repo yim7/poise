@@ -288,6 +288,22 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("strategy id must not be empty")]
     EmptyStrategyId,
+    /// 数据库属于另一个网络或账户：同一个数据目录换了网络或账户（第 12 节）。
+    #[error(
+        "this database belongs to {stored_network} account {stored_account}, not {network} account {account}; use a separate data directory"
+    )]
+    IdentityMismatch {
+        stored_network: String,
+        stored_account: String,
+        network: String,
+        account: String,
+    },
+    /// 没有归属记录、里面已经有数据的旧库：加归属之前正式网一直被拒绝，这种库只可能是
+    /// 测试网的，不能拿来跑正式网。
+    #[error(
+        "this database has data but no network on record, so it can only be a testnet database; use a separate data directory for mainnet"
+    )]
+    UnboundDataOnMainnet,
     #[error("strategy `{0}` is not stored")]
     UnknownStrategy(StrategyId),
     #[error("strategy `{0}` has no view snapshot")]
@@ -361,6 +377,26 @@ pub struct Store {
 
 /// 测试用：挑出要让写库失败的那一次订单写入。
 type OrderMatcher = Box<dyn Fn(&StoredOrder) -> bool + Send + Sync>;
+
+/// 存业务数据的表：没有归属记录的库里只要有一张不是空的，就只能给测试网用
+/// （[`Store::bind_identity`]）。加表时要一起加进来。
+const BUSINESS_TABLES: [&str; 15] = [
+    "strategies",
+    "drafts",
+    "batch_states",
+    "cell_states",
+    "orders",
+    "fills",
+    "throttle_states",
+    "config_versions",
+    "strategy_views",
+    "account_settings",
+    "funding_payments",
+    "funding_syncs",
+    "pause_reasons",
+    "action_counts",
+    "instance_identity",
+];
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
@@ -533,6 +569,11 @@ const TABLES: &str = "
              CREATE TABLE IF NOT EXISTS account_settings (
                  id INTEGER PRIMARY KEY CHECK (id = 1),
                  settings_json TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS instance_identity (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 network TEXT NOT NULL,
+                 account_address TEXT NOT NULL
              );
              CREATE TABLE IF NOT EXISTS funding_payments (
                  instrument TEXT NOT NULL,
@@ -941,6 +982,56 @@ impl Store {
              ON CONFLICT (id) DO UPDATE SET settings_json = excluded.settings_json",
             params![serde_json::to_string(settings)?],
         )?;
+        Ok(())
+    }
+
+    /// 确认数据库属于这个网络和账户；第一次用时记下来（第 12 节）。
+    ///
+    /// 同一个数据目录换了网络或账户就拒绝：测试网的策略、参数、合约规则和费率不能拿到
+    /// 正式网上恢复运行。还没有归属记录、里面已经有策略或草稿的旧库，只可能是测试网的
+    /// （加归属之前正式网一直被拒绝），只允许测试网认领。
+    pub fn bind_identity(&self, network: &str, account: &str) -> Result<(), StoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        let stored = transaction
+            .query_row(
+                "SELECT network, account_address FROM instance_identity WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        match stored {
+            Some((stored_network, stored_account)) => {
+                if stored_network != network || !stored_account.eq_ignore_ascii_case(account) {
+                    return Err(StoreError::IdentityMismatch {
+                        stored_network,
+                        stored_account,
+                        network: network.to_string(),
+                        account: account.to_string(),
+                    });
+                }
+            }
+            None => {
+                // 任何一张业务表里有东西都算旧库：账户风控设置、操作次数、资金费记录同样会被
+                // 沿用。
+                let mut has_data = false;
+                for table in BUSINESS_TABLES {
+                    has_data |= transaction.query_row(
+                        &format!("SELECT EXISTS (SELECT 1 FROM {table})"),
+                        [],
+                        |row| row.get::<_, bool>(0),
+                    )?;
+                }
+                if has_data && network != "testnet" {
+                    return Err(StoreError::UnboundDataOnMainnet);
+                }
+                transaction.execute(
+                    "INSERT INTO instance_identity (id, network, account_address) VALUES (1, ?1, ?2)",
+                    params![network, account],
+                )?;
+            }
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -2624,5 +2715,58 @@ mod tests {
             Notional::parse("-1").unwrap()
         );
         assert_eq!(store.funding_synced_through(&btc()).unwrap(), Some(hour(4)));
+    }
+
+    /// 数据库第一次用时记下网络和账户；之后换网络或账户就拒绝。没有归属记录的旧库里
+    /// 已经有策略时，只允许测试网认领。
+    #[test]
+    fn a_database_belongs_to_one_network_and_account() {
+        let account = "0x2222222222222222222222222222222222222222";
+        let other = "0x3333333333333333333333333333333333333333";
+
+        let store = Store::open_in_memory().unwrap();
+        store.bind_identity("testnet", account).unwrap();
+        store
+            .bind_identity("testnet", &account.to_uppercase().replace("0X", "0x"))
+            .unwrap();
+        assert!(matches!(
+            store.bind_identity("mainnet", account),
+            Err(StoreError::IdentityMismatch { .. })
+        ));
+        assert!(matches!(
+            store.bind_identity("testnet", other),
+            Err(StoreError::IdentityMismatch { .. })
+        ));
+
+        // 没有归属记录、已经有策略的旧库：正式网不能认领，测试网可以。
+        let old = Store::open_in_memory().unwrap();
+        old.insert_draft(&StoredDraft {
+            draft_id: StrategyId::try_from("s-old".to_string()).unwrap(),
+            config: long_grid_config(),
+            created_at: at(0),
+            updated_at: at(0),
+        })
+        .unwrap();
+        assert!(matches!(
+            old.bind_identity("mainnet", account),
+            Err(StoreError::UnboundDataOnMainnet)
+        ));
+        old.bind_identity("testnet", account).unwrap();
+
+        // 只改过账户风控设置的旧库同样不能给正式网用：测试时放宽的阈值会被沿用。
+        let settings_only = Store::open_in_memory().unwrap();
+        settings_only
+            .save_account_settings(&crate::settings::AccountSettings::default())
+            .unwrap();
+        assert!(matches!(
+            settings_only.bind_identity("mainnet", account),
+            Err(StoreError::UnboundDataOnMainnet)
+        ));
+
+        // 空库可以给正式网用。
+        Store::open_in_memory()
+            .unwrap()
+            .bind_identity("mainnet", account)
+            .unwrap();
     }
 }

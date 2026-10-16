@@ -1,16 +1,15 @@
 //! 实例目录：启动文件、数据库和交易所客户端。
 //!
 //! 实例目录由启动参数指定，里面只有一个程序读、用户写的 `poise.toml`。
-//! 本期的命令只连测试网：读到 `network = "mainnet"` 就拒绝运行，任何请求都不发。
+//! 连哪个网络由启动文件决定：正式网要用户自己把正式网 API 钱包私钥写进去，这就是
+//! 正式网的门槛，程序里不再另设一道。
 
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use poise_hyperliquid::{Hyperliquid, HyperliquidConfig};
-use poise_runtime::{
-    Account, Exchange, InstanceLock, Network, Runtime, RuntimeOptions, StartupFile, Store,
-};
+use poise_runtime::{Account, Exchange, InstanceLock, Runtime, RuntimeOptions, StartupFile, Store};
 
 /// 启动文件名，固定放在实例目录下。
 pub const STARTUP_FILE_NAME: &str = "poise.toml";
@@ -21,18 +20,11 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// 读启动文件、检查网络、准备数据目录和交易所客户端。
+    /// 读启动文件、准备数据目录和交易所客户端。不发任何请求。
     pub fn load(directory: &Path) -> Result<Self> {
         let path = directory.join(STARTUP_FILE_NAME);
         let startup = StartupFile::load(&path)
             .with_context(|| format!("cannot load the startup file `{}`", path.display()))?;
-        if startup.network() == Network::Mainnet {
-            bail!(
-                "`{}` says `network = \"mainnet\"`; this build only talks to the testnet, so nothing was sent",
-                path.display()
-            );
-        }
-
         std::fs::create_dir_all(startup.data_dir()).with_context(|| {
             format!(
                 "cannot create the data directory `{}`",
@@ -57,7 +49,21 @@ impl Instance {
         // 打开一次数据库确认结构版本：对不上就在这里打住，`check`、`status`、`serve`
         // 都走这条启动路径。等写库那一刻才失败太晚——用户已经以为策略在跑了，
         // 而且报出来的是「少了一列」这种看不出该怎么办的话（第 12 节）。
-        instance.open_store()?;
+        //
+        // 同时确认数据库属于这个网络和账户：同一个数据目录换了网络或账户，测试网的策略
+        // 不能拿到正式网上恢复运行。
+        instance
+            .open_store()?
+            .bind_identity(
+                instance.startup.network().as_str(),
+                &instance.startup.account_address().to_string(),
+            )
+            .with_context(|| {
+                format!(
+                    "the database `{}` does not belong to this instance",
+                    instance.startup.database_path().display()
+                )
+            })?;
         Ok(instance)
     }
 
@@ -126,22 +132,35 @@ mod tests {
         path
     }
 
+    /// 正式网和测试网一样加载：网络按启动文件，交易所客户端指向正式网。加载不发请求。
     #[test]
-    fn refuses_a_mainnet_instance_before_anything_else() {
+    fn accepts_a_mainnet_instance() {
         let directory = tempfile::tempdir().unwrap();
         write_startup(directory.path(), "mainnet");
 
+        let instance = Instance::load(directory.path()).unwrap();
+
+        assert_eq!(
+            instance.startup().network(),
+            poise_runtime::Network::Mainnet
+        );
+    }
+
+    /// 同一个数据目录换了网络：拒绝加载，测试网的策略不能拿到正式网上恢复运行。
+    #[test]
+    fn refuses_to_reuse_a_testnet_database_on_mainnet() {
+        let directory = tempfile::tempdir().unwrap();
+        write_startup(directory.path(), "testnet");
+        Instance::load(directory.path()).unwrap();
+
+        write_startup(directory.path(), "mainnet");
         let Err(error) = Instance::load(directory.path()) else {
-            panic!("a mainnet instance must be refused");
+            panic!("a testnet database must not be reused on mainnet");
         };
 
         assert!(
-            error.to_string().contains("mainnet"),
-            "unexpected error: {error}"
-        );
-        assert!(
-            !directory.path().join("data").exists(),
-            "拒绝运行时不该动实例目录"
+            format!("{error:#}").contains("separate data directory"),
+            "{error:#}"
         );
     }
 
