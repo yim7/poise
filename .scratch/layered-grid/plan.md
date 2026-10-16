@@ -48,5 +48,6 @@
 | 11 | [观点失效价](issues/11-invalidation.md) | 08、09 |
 | 12 | [操作次数与资金费提醒](issues/12-action-limit-and-funding.md) | 04 |
 | 13 | [切换到新系统](issues/13-switch-over.md) | 02–12 |
+| 14 | [HIP-3 市场：黄金、原油、美股](issues/14-hip3-markets.md) | 13 |
 
 可以并行的任务：01 和 02 可以同时开始；02 完成后 03、05 可以开始；04 要等 01、02 都完成；08 和 12 都只依赖 04。
