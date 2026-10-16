@@ -6,8 +6,8 @@
 // 必定被拒的值没有意义。
 
 import { DIRECTION_LABELS } from './labels'
-import { parseThrottle, throttleMinutes } from './format'
-import type { Direction, SideConfig, StrategyConfig } from './types'
+import { invalidationInput, parseInvalidation, parseThrottle, throttleMinutes } from './format'
+import type { Direction, Invalidation, SideConfig, StrategyConfig } from './types'
 
 /** 一侧的表单值。 */
 export interface SideFormValues {
@@ -20,6 +20,12 @@ export interface SideFormValues {
   gridSpacing: string
   gridSpread: string
   throttleMinutes: string
+  /** 失效价；留空表示不启用观点失效。 */
+  invalidationPrice: string
+  /** 失效后剩余数量；留空按 0。 */
+  invalidationRemaining: string
+  /** 失效平仓滑点上限（%）。 */
+  invalidationSlippage: string
 }
 
 /** 一侧表单里能编辑的字段：`enabled` 是单独的开关，不走这些输入框。 */
@@ -44,6 +50,9 @@ export const DEFAULT_FORM: FormValues = {
     gridSpacing: '1000',
     gridSpread: '1000',
     throttleMinutes: '',
+    invalidationPrice: '',
+    invalidationRemaining: '',
+    invalidationSlippage: '1',
   },
   short: {
     enabled: false,
@@ -55,6 +64,9 @@ export const DEFAULT_FORM: FormValues = {
     gridSpacing: '1000',
     gridSpread: '1000',
     throttleMinutes: '',
+    invalidationPrice: '',
+    invalidationRemaining: '',
+    invalidationSlippage: '1',
   },
 }
 
@@ -96,6 +108,8 @@ function sideConfig(
     return { problem: `${DIRECTION_LABELS[direction]}侧：${throttle.problem}` }
   }
   const batchCount = values.batchCount.trim()
+  const invalidation = invalidationConfig(direction, values, neutral)
+  if ('problem' in invalidation) return invalidation
   return {
     config: {
       price_low: values.priceLow.trim(),
@@ -107,8 +121,26 @@ function sideConfig(
       grid_spacing: values.gridSpacing.trim(),
       grid_spread: values.gridSpread.trim(),
       throttle_interval: throttle.interval,
+      invalidation: invalidation.invalidation,
     },
   }
+}
+
+/** 失效设置：解析规则见 `parseInvalidation`。 */
+function invalidationConfig(
+  direction: Direction,
+  values: SideFormValues,
+  neutral: boolean,
+): { invalidation: Invalidation | null } | { problem: string } {
+  const parsed = parseInvalidation(
+    {
+      price: values.invalidationPrice,
+      remaining: values.invalidationRemaining,
+      slippage: values.invalidationSlippage,
+    },
+    neutral,
+  )
+  return 'problem' in parsed ? { problem: `${DIRECTION_LABELS[direction]}侧：${parsed.problem}` } : parsed
 }
 
 export function fromConfig(config: StrategyConfig): FormValues {
@@ -116,6 +148,18 @@ export function fromConfig(config: StrategyConfig): FormValues {
     instrument: config.instrument,
     long: sideValues(config.long, DEFAULT_FORM.long),
     short: sideValues(config.short, DEFAULT_FORM.short),
+  }
+}
+
+/** 失效设置换回表单里的三个输入框。 */
+function invalidationFields(
+  invalidation: Invalidation | null,
+): Pick<SideFormValues, 'invalidationPrice' | 'invalidationRemaining' | 'invalidationSlippage'> {
+  const input = invalidationInput(invalidation)
+  return {
+    invalidationPrice: input.price,
+    invalidationRemaining: input.remaining,
+    invalidationSlippage: input.slippage,
   }
 }
 
@@ -132,6 +176,7 @@ function sideValues(side: SideConfig | null, fallback: SideFormValues): SideForm
     gridSpacing: side.grid_spacing,
     gridSpread: side.grid_spread,
     throttleMinutes: throttleMinutes(side.throttle_interval),
+    ...invalidationFields(side.invalidation),
   }
 }
 
@@ -183,6 +228,11 @@ function SideFields({
   // 没启用的这一侧：值留着（勾回来还在），但改不了。
   const off = disabled || !values.enabled
   const coreDisabled = off || neutral
+  // 中性网格固定按「无主仓、全部平仓」提交：输入框显示要提交的值，不显示改成中性之前
+  // 填的那个——否则看到的和存下的不是一份参数。原来的值留着，取消中性时还在。
+  const shown = neutral
+    ? { ...values, coreRatio: '0', batchCount: '', invalidationRemaining: '0' }
+    : values
   return (
     <fieldset className="side">
       <legend>{label}侧</legend>
@@ -201,7 +251,7 @@ function SideFields({
         name="priceLow"
         label="价格下限 L"
         disabled={off}
-        values={values}
+        values={shown}
         onChange={onChange}
       />
       <Field
@@ -209,7 +259,7 @@ function SideFields({
         name="priceHigh"
         label="价格上限 H"
         disabled={off}
-        values={values}
+        values={shown}
         onChange={onChange}
       />
       <Field
@@ -217,7 +267,7 @@ function SideFields({
         name="maxPosition"
         label="最大仓位 M"
         disabled={off}
-        values={values}
+        values={shown}
         onChange={onChange}
       />
       <Field
@@ -230,7 +280,7 @@ function SideFields({
             : '0 表示没有主仓，1 表示只积累主仓'
         }
         disabled={coreDisabled}
-        values={values}
+        values={shown}
         onChange={onChange}
       />
       <Field
@@ -239,7 +289,7 @@ function SideFields({
         label="主仓批数 n"
         hint="r = 0 时留空"
         disabled={coreDisabled}
-        values={values}
+        values={shown}
         onChange={onChange}
       />
       <Field
@@ -247,7 +297,7 @@ function SideFields({
         name="gridSpacing"
         label="网格间距 d"
         disabled={off}
-        values={values}
+        values={shown}
         onChange={onChange}
       />
       <Field
@@ -255,7 +305,7 @@ function SideFields({
         name="gridSpread"
         label="网格价差 g"
         disabled={off}
-        values={values}
+        values={shown}
         onChange={onChange}
       />
       <Field
@@ -264,7 +314,37 @@ function SideFields({
         label="限速间隔 τ（分钟）"
         hint="留空表示不限速"
         disabled={off}
-        values={values}
+        values={shown}
+        onChange={onChange}
+      />
+      <Field
+        direction={direction}
+        name="invalidationPrice"
+        label="观点失效价"
+        hint={
+          direction === 'long'
+            ? '留空表示不启用自动止损；必须低于 L'
+            : '留空表示不启用自动止损；必须高于 H'
+        }
+        disabled={off}
+        values={shown}
+        onChange={onChange}
+      />
+      <Field
+        direction={direction}
+        name="invalidationRemaining"
+        label="失效后剩余数量 R"
+        hint={neutral ? '中性网格失效时全部平仓，固定为 0' : '0 表示全部平仓；不超过本侧主仓总量'}
+        disabled={off || neutral}
+        values={shown}
+        onChange={onChange}
+      />
+      <Field
+        direction={direction}
+        name="invalidationSlippage"
+        label="失效平仓滑点上限（%）"
+        disabled={off}
+        values={shown}
         onChange={onChange}
       />
     </fieldset>

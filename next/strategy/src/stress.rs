@@ -446,8 +446,12 @@ fn doubled(high: i64) -> Option<i64> {
     }
 }
 
-/// 最不利的价格：做多是范围下沿，做空是范围上沿（第 7.3 节）。观点失效价属于后续任务。
+/// 最不利的价格（第 7.3 节）：设了失效价就是失效价——价格到那里就会减仓，不会再往下扛；
+/// 没设就是范围的不利边缘，做多是下沿，做空是上沿。
 fn adverse_price(side: &SidePlan) -> Price {
+    if let Some(invalidation) = side.config().invalidation {
+        return invalidation.price;
+    }
     match side.direction() {
         Direction::Long => side.config().price_low,
         Direction::Short => side.config().price_high,
@@ -725,6 +729,7 @@ mod tests {
                 grid_spacing: Price::parse("1").unwrap(),
                 grid_spread: Price::parse("1").unwrap(),
                 throttle_interval: None,
+                invalidation: None,
             }),
         };
         let strategy = crate::Strategy::new(config, cheap_spec(), btc_fees()).unwrap();
@@ -807,6 +812,7 @@ mod tests {
                 grid_spacing: Price::parse("1000").unwrap(),
                 grid_spread: Price::parse("1000").unwrap(),
                 throttle_interval: None,
+                invalidation: None,
             }),
             short: None,
         };

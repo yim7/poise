@@ -157,7 +157,7 @@ describe('运行详情', () => {
     expect(await screen.findByText('策略已归档，只能只读查看。')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '暂停' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '保存限速间隔' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '保存运行参数' })).not.toBeInTheDocument()
     expect(screen.getByText('没有在场挂单。')).toBeInTheDocument()
     // 不在运行：没有在等的事，也没有「应有持仓」可比。
     expect(screen.getByText('策略已归档，没有在等的事。')).toBeInTheDocument()
@@ -279,7 +279,7 @@ describe('运行详情', () => {
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
     expect(await screen.findByText(/策略已暂停，现在改不了参数/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '保存限速间隔' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '保存运行参数' })).not.toBeInTheDocument()
   })
 
   it('暂停中的策略可以恢复，恢复后说明挂了几张单', async () => {
@@ -301,7 +301,7 @@ describe('运行详情', () => {
     await screen.findByText('主仓批次表')
 
     await userEvent.type(screen.getByLabelText('做多侧限速间隔 τ（分钟）'), '30')
-    await userEvent.click(screen.getByRole('button', { name: '保存限速间隔' }))
+    await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
 
     expect(await screen.findByText(/第 3 版/)).toBeInTheDocument()
     expect(server.lastBody('PUT', '/api/strategies/s-1/config')).toMatchObject({
@@ -311,6 +311,41 @@ describe('运行详情', () => {
     })
   })
 
+  it('b44_运行中改观点失效设置会提交整份参数，限速间隔保持原样', async () => {
+    const server = detailRoutes()
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.type(screen.getByLabelText('做多侧观点失效价'), '70000')
+    await userEvent.type(screen.getByLabelText('做多侧失效后剩余数量 R'), '0.3')
+    await userEvent.clear(screen.getByLabelText('做多侧失效平仓滑点上限（%）'))
+    await userEvent.type(screen.getByLabelText('做多侧失效平仓滑点上限（%）'), '0.5')
+    await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
+
+    expect(await screen.findByText(/第 3 版/)).toBeInTheDocument()
+    expect(server.lastBody('PUT', '/api/strategies/s-1/config')).toMatchObject({
+      long: {
+        throttle_interval: null,
+        invalidation: { price: '70000', remaining: '0.3', max_slippage: '0.005' },
+      },
+      short: null,
+    })
+  })
+
+  it('b44_失效滑点上限不是数字时不提交', async () => {
+    const server = detailRoutes()
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.type(screen.getByLabelText('做多侧观点失效价'), '70000')
+    await userEvent.clear(screen.getByLabelText('做多侧失效平仓滑点上限（%）'))
+    await userEvent.type(screen.getByLabelText('做多侧失效平仓滑点上限（%）'), '一点')
+    await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
+
+    expect(await screen.findByText(/要填百分比数字/)).toBeInTheDocument()
+    expect(server.count('PUT', '/api/strategies/s-1/config')).toBe(0)
+  })
+
   it('b44_限速填的不是正数时不提交，也不把它当成不限速', async () => {
     // 把「写错了」当成「不限速」提交上去，用户以为限了速，实际提交的是另一份参数。
     const server = detailRoutes()
@@ -318,7 +353,7 @@ describe('运行详情', () => {
     await screen.findByText('主仓批次表')
 
     await userEvent.type(screen.getByLabelText('做多侧限速间隔 τ（分钟）'), '十分钟')
-    await userEvent.click(screen.getByRole('button', { name: '保存限速间隔' }))
+    await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
 
     expect(await screen.findByText(/要填一个正数/)).toBeInTheDocument()
     expect(server.count('PUT', '/api/strategies/s-1/config')).toBe(0)
@@ -339,7 +374,7 @@ describe('运行详情', () => {
     await screen.findByText('主仓批次表')
 
     expect(screen.getByLabelText('做多侧限速间隔 τ（分钟）')).toHaveValue('1.5')
-    await userEvent.click(screen.getByRole('button', { name: '保存限速间隔' }))
+    await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
 
     expect(await screen.findByText(/第 3 版/)).toBeInTheDocument()
     expect(server.lastBody('PUT', '/api/strategies/s-1/config')).toMatchObject({
@@ -358,7 +393,7 @@ describe('运行详情', () => {
     await screen.findByText('主仓批次表')
 
     await userEvent.type(screen.getByLabelText('做多侧限速间隔 τ（分钟）'), '30')
-    await userEvent.click(screen.getByRole('button', { name: '保存限速间隔' }))
+    await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
 
     expect(await screen.findByText(/稍等一下再点保存/)).toBeInTheDocument()
   })
@@ -373,7 +408,7 @@ describe('运行详情', () => {
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
     await screen.findByText('主仓批次表')
 
-    await userEvent.click(screen.getByRole('button', { name: '保存限速间隔' }))
+    await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
 
     expect(await screen.findByText(/grid_spacing/)).toBeInTheDocument()
   })
@@ -442,7 +477,7 @@ describe('运行详情', () => {
     expect(rows[2]).toHaveTextContent('做空')
 
     await userEvent.type(screen.getByLabelText('做空侧限速间隔 τ（分钟）'), '30')
-    await userEvent.click(screen.getByRole('button', { name: '保存限速间隔' }))
+    await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
 
     expect(await screen.findByText(/第 3 版/)).toBeInTheDocument()
     // 提交的是整份参数：没改的那一侧原样带回去，两侧的限速各归各。

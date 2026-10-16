@@ -114,6 +114,7 @@ pub(crate) fn long_grid_config() -> StrategyConfig {
             grid_spacing: Price::parse("1000").unwrap(),
             grid_spread: Price::parse("1000").unwrap(),
             throttle_interval: None,
+            invalidation: None,
         }),
         short: None,
     }
@@ -188,6 +189,7 @@ pub(crate) fn neutral_grid_config() -> StrategyConfig {
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,
+            invalidation: None,
         }),
         short: Some(SideConfig {
             price_low: Price::parse("91").unwrap(),
@@ -198,6 +200,7 @@ pub(crate) fn neutral_grid_config() -> StrategyConfig {
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,
+            invalidation: None,
         }),
     }
 }
@@ -245,6 +248,7 @@ pub(crate) fn single_small_batch_strategy() -> Strategy {
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,
+            invalidation: None,
         }),
         short: None,
     };
@@ -266,6 +270,7 @@ pub(crate) fn single_batch_core_strategy() -> Strategy {
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,
+            invalidation: None,
         }),
         short: None,
     };

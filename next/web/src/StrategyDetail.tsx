@@ -8,7 +8,7 @@ import { api, pauseSummary, resumeSummary, stopSummary } from './api'
 import { decimal, percent, timestamp } from './format'
 import { kindLabel, statusLabel, waitReasonLabel } from './labels'
 import { BatchTable, CellTable, ConfigVersionTable, OrdersTable } from './tables'
-import { ThrottleEditor } from './ThrottleEditor'
+import { RunningEditor } from './RunningEditor'
 
 const REFRESH_MS = 3000
 
@@ -195,14 +195,14 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
       {archived ? (
         <p className="hint">策略已归档，只能只读查看。</p>
       ) : running ? (
-        <ThrottleEditor
+        <RunningEditor
           key={summary.config_version}
           strategyId={strategyId}
           config={summary.config}
         />
       ) : (
         // 服务端只让运行中的策略改参数：过渡状态还在收尾，已暂停的改了也不会生效。
-        <p className="hint">策略{statusLabel(status)}，现在改不了参数；恢复之后可以改限速间隔。</p>
+        <p className="hint">策略{statusLabel(status)}，现在改不了参数；恢复之后可以改限速间隔和观点失效设置。</p>
       )}
     </section>
   )

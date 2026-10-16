@@ -28,7 +28,6 @@ pub const MAX_CELL_COUNT: usize = 10_000;
 /// 一侧的配置。
 ///
 /// 多头侧在价格下方，空头侧在价格上方；空头侧是多头侧的镜像（第 5.1 节）。
-/// 观点失效价属于后续任务，这里还没有对应的字段。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SideConfig {
     /// 本侧建仓的价格范围下限 `L`。
@@ -51,6 +50,23 @@ pub struct SideConfig {
     ///
     /// 它是运行中可以修改的参数（第 2.4 节），所以在配置里而不是状态里。
     pub throttle_interval: Option<Duration>,
+    /// 观点失效（可选，第 7.5 节）：`None` 表示这一侧不启用自动止损，由用户自己管理。
+    ///
+    /// 和限速一样是运行中可以修改的参数（第 2.4 节）。
+    #[serde(default)]
+    pub invalidation: Option<Invalidation>,
+}
+
+/// 观点失效（第 7.5 节）：标记价越过失效价，说明这一侧的观点不成立。撤销本策略全部挂单，
+/// 用只减仓单把本侧仓位减到剩余数量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Invalidation {
+    /// 失效价：多头侧必须低于 `L`，空头侧必须高于 `H`。
+    pub price: Price,
+    /// 失效后剩余数量 `R`：0 表示全部平仓；不超过本侧主仓总量；中性网格必须是 0。
+    pub remaining: Quantity,
+    /// 失效平仓单相对标记价最多让出多少，例如 0.01 是 1%。
+    pub max_slippage: Rate,
 }
 
 /// 策略配置：标的与最多两侧。
@@ -185,6 +201,7 @@ fn normalize_side(
     let normalized = NormalizedSide::new(direction, side, spec)?;
     let prices = normalized.cell_prices(spec)?;
     let (batches, cells) = normalized.build_plan(&prices, spec)?;
+    check_invalidation_remaining(direction, normalized.invalidation, &batches)?;
     check_cell_notional(&cells, &normalized, spec)?;
     check_cell_profitability(&cells, fees, &normalized)?;
     Ok(SidePlan::new(
@@ -223,6 +240,15 @@ fn check_sides_apart(sides: &[SidePlan]) -> Result<(), ConfigError> {
                 core_ratio: side.config().core_ratio,
             });
         }
+        // 中性网格任一侧失效都全部平仓（第 7.5 节），剩余数量只能是 0。
+        if let Some(invalidation) = side.config().invalidation
+            && !invalidation.remaining.is_zero()
+        {
+            return Err(ConfigError::InvalidationRemainingInNeutralGrid {
+                direction: side.direction(),
+                remaining: invalidation.remaining,
+            });
+        }
     }
     Ok(())
 }
@@ -251,6 +277,8 @@ struct NormalizedSide {
     batch_count: Option<u32>,
     /// 限速间隔不参与规整，原样带到最终配置里。
     throttle_interval: Option<Duration>,
+    /// 失效设置：剩余数量已按数量精度向下规整；失效价是触发线，不按报价精度规整。
+    invalidation: Option<Invalidation>,
 }
 
 impl NormalizedSide {
@@ -321,6 +349,7 @@ impl NormalizedSide {
             core_ratio,
             batch_count,
             throttle_interval: side.throttle_interval,
+            invalidation: normalize_invalidation(direction, side, price_low, price_high, spec)?,
         })
     }
 
@@ -414,8 +443,78 @@ impl NormalizedSide {
             grid_spacing: self.grid_spacing,
             grid_spread: self.grid_spread,
             throttle_interval: self.throttle_interval,
+            invalidation: self.invalidation,
         }
     }
+}
+
+/// 检查并规整失效设置（第 2.2、7.5 节，B41）：失效价在范围之外（多头侧低于 `L`，空头侧
+/// 高于 `H`），滑点上限在 0 和 100% 之间。剩余数量按数量精度向下规整；它和主仓总量的比较
+/// 要等批次划分出来（[`check_invalidation_remaining`]）。
+fn normalize_invalidation(
+    direction: Direction,
+    side: &SideConfig,
+    price_low: Price,
+    price_high: Price,
+    spec: &InstrumentSpec,
+) -> Result<Option<Invalidation>, ConfigError> {
+    let Some(invalidation) = side.invalidation else {
+        return Ok(None);
+    };
+    let outside = match direction {
+        Direction::Long => invalidation.price < price_low && invalidation.price.units() > 0,
+        Direction::Short => invalidation.price > price_high,
+    };
+    if !outside {
+        return Err(ConfigError::InvalidationPriceInsideRange {
+            direction,
+            price: invalidation.price,
+            edge: match direction {
+                Direction::Long => price_low,
+                Direction::Short => price_high,
+            },
+        });
+    }
+    if invalidation.max_slippage.units() <= 0 || invalidation.max_slippage.units() >= SCALE {
+        return Err(ConfigError::InvalidationSlippageOutOfRange {
+            direction,
+            max_slippage: invalidation.max_slippage,
+        });
+    }
+    if invalidation.remaining.units() < 0 {
+        return Err(ConfigError::NegativeMaxPosition {
+            direction,
+            max_position: invalidation.remaining,
+        });
+    }
+    Ok(Some(Invalidation {
+        remaining: spec.normalize_quantity(invalidation.remaining),
+        ..invalidation
+    }))
+}
+
+/// 失效后剩余数量不超过本侧主仓总量（第 2.2 节，B41）：失效之后留下的应当是主仓，网格
+/// 仓位先减掉。
+fn check_invalidation_remaining(
+    direction: Direction,
+    invalidation: Option<Invalidation>,
+    batches: &BatchPlan,
+) -> Result<(), ConfigError> {
+    let Some(invalidation) = invalidation else {
+        return Ok(());
+    };
+    let core_total = batches
+        .batches()
+        .iter()
+        .fold(Quantity::ZERO, |total, batch| total + batch.core_quantity);
+    if invalidation.remaining > core_total {
+        return Err(ConfigError::InvalidationRemainingAboveCore {
+            direction,
+            remaining: invalidation.remaining,
+            core_total,
+        });
+    }
+    Ok(())
 }
 
 /// 每一格的金额都要够最低下单金额。
@@ -567,6 +666,7 @@ mod tests {
             grid_spacing: Price::parse("1000").unwrap(),
             grid_spread: Price::parse("1000").unwrap(),
             throttle_interval: None,
+            invalidation: None,
         })
     }
 
@@ -605,6 +705,7 @@ mod tests {
             grid_spacing: Price::parse(grid_spacing).unwrap(),
             grid_spread: Price::parse(grid_spread).unwrap(),
             throttle_interval: None,
+            invalidation: None,
         })
     }
 
@@ -986,6 +1087,7 @@ mod tests {
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,
+            invalidation: None,
         });
 
         assert_eq!(
@@ -1020,6 +1122,7 @@ mod tests {
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,
+            invalidation: None,
         });
 
         let normalized = raw.normalize(&spec, &btc_fees()).unwrap();
@@ -1198,6 +1301,7 @@ mod tests {
                 grid_spacing: Price::parse("1").unwrap(),
                 grid_spread: Price::parse("68").unwrap(),
                 throttle_interval: None,
+                invalidation: None,
             }),
             ..long_grid_config()
         };
@@ -1401,6 +1505,7 @@ mod tests {
                 grid_spacing: Price::parse("0.01").unwrap(),
                 grid_spread: Price::parse("0.1").unwrap(),
                 throttle_interval: None,
+                invalidation: None,
             }),
             ..long_grid_config()
         };
@@ -1486,6 +1591,7 @@ mod tests {
                 grid_spacing: Price::parse("1000").unwrap(),
                 grid_spread: Price::parse("1000").unwrap(),
                 throttle_interval: None,
+                invalidation: None,
             }),
             ..long_grid_config()
         };
@@ -1664,5 +1770,104 @@ mod tests {
             empty.normalize(&btc_spec(), &btc_fees()).unwrap_err(),
             ConfigError::NoSidesConfigured
         );
+    }
+
+    fn invalidation(price: &str, remaining: &str) -> Option<super::Invalidation> {
+        Some(super::Invalidation {
+            price: Price::parse(price).unwrap(),
+            remaining: Quantity::parse(remaining).unwrap(),
+            max_slippage: Rate::parse("0.01").unwrap(),
+        })
+    }
+
+    fn core_long_with(invalidation: Option<super::Invalidation>) -> StrategyConfig {
+        let mut config = crate::fixtures::core_long_config();
+        long_side_mut(&mut config).invalidation = invalidation;
+        config
+    }
+
+    /// B41：多头侧失效价不低于 L 时拒绝。
+    #[test]
+    fn b41_a_long_invalidation_price_inside_the_range_is_refused() {
+        let error = core_long_with(invalidation("75000", "0"))
+            .normalize(&btc_spec(), &btc_fees())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidationPriceInsideRange { .. }
+        ));
+    }
+
+    /// B41：空头侧失效价不高于 H 时拒绝。
+    #[test]
+    fn b41_a_short_invalidation_price_inside_the_range_is_refused() {
+        let mut config = crate::fixtures::core_short_config();
+        config.short.as_mut().unwrap().invalidation = invalidation("95000", "0");
+
+        let error = config.normalize(&btc_spec(), &btc_fees()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidationPriceInsideRange { .. }
+        ));
+    }
+
+    /// B41：剩余数量超过本侧主仓总量（.175 × 4 = .7）时拒绝。
+    #[test]
+    fn b41_a_remaining_above_the_core_total_is_refused() {
+        let error = core_long_with(invalidation("70000", "0.701"))
+            .normalize(&btc_spec(), &btc_fees())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidationRemainingAboveCore { .. }
+        ));
+    }
+
+    /// 合法的失效设置原样保留，剩余数量按数量精度向下规整。
+    #[test]
+    fn a_valid_invalidation_is_kept_with_the_remaining_rounded_down() {
+        let normalized = core_long_with(invalidation("70000", "0.3009"))
+            .normalize(&btc_spec(), &btc_fees())
+            .unwrap();
+
+        let kept = long_side(&normalized.config).invalidation.unwrap();
+        assert_eq!(kept.price, Price::parse("70000").unwrap());
+        assert_eq!(kept.remaining, Quantity::parse("0.3").unwrap());
+    }
+
+    /// 中性网格任一侧失效都全部平仓，剩余数量只能是 0。
+    #[test]
+    fn a_neutral_grid_must_close_everything_on_invalidation() {
+        let mut config = crate::fixtures::neutral_grid_config();
+        config.long.as_mut().unwrap().invalidation = invalidation("78", "0.1");
+
+        let error = config
+            .normalize(&crate::fixtures::cheap_spec(), &btc_fees())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidationRemainingInNeutralGrid { .. }
+                | ConfigError::InvalidationRemainingAboveCore { .. }
+        ));
+    }
+
+    /// 滑点上限要在 0 和 100% 之间。
+    #[test]
+    fn the_invalidation_slippage_must_be_positive_and_below_one() {
+        let mut bad = invalidation("70000", "0");
+        bad.as_mut().unwrap().max_slippage = Rate::ZERO;
+
+        let error = core_long_with(bad)
+            .normalize(&btc_spec(), &btc_fees())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidationSlippageOutOfRange { .. }
+        ));
     }
 }

@@ -36,6 +36,17 @@ export interface SideConfig {
   grid_spacing: Decimal
   grid_spread: Decimal
   throttle_interval: ThrottleInterval
+  /** 观点失效（可选，第 7.5 节）；null 表示这一侧不启用自动止损。 */
+  invalidation: Invalidation | null
+}
+
+/** 观点失效：价格越过失效价时撤单，把本侧仓位减到剩余数量。 */
+export interface Invalidation {
+  price: Decimal
+  /** 失效后剩余数量 R：0 表示全部平仓。 */
+  remaining: Decimal
+  /** 失效平仓单相对标记价最多让出多少（比率，0.01 是 1%）。 */
+  max_slippage: Decimal
 }
 
 /**

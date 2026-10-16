@@ -22,6 +22,7 @@ export const longSide: SideConfig = {
   grid_spacing: '1000',
   grid_spread: '1000',
   throttle_interval: null,
+  invalidation: null,
 }
 
 /** 同一份划分、方向相反：做空网格。 */
@@ -51,6 +52,7 @@ export const neutralConfig: StrategyConfig = {
     grid_spacing: '1',
     grid_spread: '1',
     throttle_interval: null,
+    invalidation: null,
   },
   short: {
     price_low: '91',
@@ -61,6 +63,7 @@ export const neutralConfig: StrategyConfig = {
     grid_spacing: '1',
     grid_spread: '1',
     throttle_interval: null,
+    invalidation: null,
   },
 }
 

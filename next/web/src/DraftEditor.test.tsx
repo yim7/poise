@@ -135,6 +135,53 @@ describe('新建与确认启动', () => {
     expect(rows[2]).toHaveTextContent('91')
   })
 
+  it('b37_填了观点失效价时，滑点上限的百分比换成比率提交', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+
+    await userEvent.type(side('做多侧').getByLabelText('观点失效价'), '70000')
+    await userEvent.type(side('做多侧').getByLabelText('失效后剩余数量 R'), '0.3')
+    await userEvent.clear(side('做多侧').getByLabelText('失效平仓滑点上限（%）'))
+    await userEvent.type(side('做多侧').getByLabelText('失效平仓滑点上限（%）'), '2')
+    await saveAndPreview()
+
+    expect(server.lastBody('POST', '/api/drafts')).toMatchObject({
+      long: { invalidation: { price: '70000', remaining: '0.3', max_slippage: '0.02' } },
+    })
+  })
+
+  it('b37_失效价留空就是不启用：提交 null，滑点写错了也不拦', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+
+    await userEvent.clear(side('做多侧').getByLabelText('失效平仓滑点上限（%）'))
+    await saveAndPreview()
+
+    expect(server.lastBody('POST', '/api/drafts')).toMatchObject({
+      long: { invalidation: null },
+    })
+  })
+
+  it('b40_改成中性网格后，剩余数量和主仓比例显示成要提交的 0', async () => {
+    const server = editorRoutes({
+      'POST /api/drafts/s-1/preview': { body: neutralPreview() },
+    })
+    renderEditor(server)
+
+    await userEvent.clear(side('做多侧').getByLabelText('主仓比例 r'))
+    await userEvent.type(side('做多侧').getByLabelText('主仓比例 r'), '0.5')
+    await userEvent.type(side('做多侧').getByLabelText('观点失效价'), '70000')
+    await userEvent.type(side('做多侧').getByLabelText('失效后剩余数量 R'), '0.3')
+    await userEvent.click(screen.getByLabelText('启用做空侧'))
+
+    expect(side('做多侧').getByLabelText('失效后剩余数量 R')).toHaveValue('0')
+    expect(side('做多侧').getByLabelText('主仓比例 r')).toHaveValue('0')
+    await saveAndPreview()
+    expect(server.lastBody('POST', '/api/drafts')).toMatchObject({
+      long: { core_ratio: '0', invalidation: { price: '70000', remaining: '0' } },
+    })
+  })
+
   it('b43_服务端说预览过期时，要求重新预览而不是照旧启动', async () => {
     const server = editorRoutes({
       'POST /api/drafts/s-1/start': {

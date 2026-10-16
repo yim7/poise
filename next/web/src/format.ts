@@ -2,7 +2,7 @@
 //
 // 小数是服务端算好的定点数，这里只做显示：不加、不减、不四舍五入成另一个数量。
 
-import type { Direction, SideConfig, StrategyConfig, ThrottleInterval } from './types'
+import type { Direction, Invalidation, SideConfig, StrategyConfig, ThrottleInterval } from './types'
 
 /** 原样显示服务端的定点小数。 */
 export function decimal(value: string | null | undefined): string {
@@ -79,13 +79,58 @@ export function parseThrottle(minutes: string): ThrottleInput {
   return { interval: [Math.round(parsed * 60), 0] }
 }
 
+/** 失效设置输入框里的三个值。 */
+export interface InvalidationInput {
+  price: string
+  remaining: string
+  /** 滑点上限，百分比。 */
+  slippage: string
+}
+
+/** 失效设置在输入框里的写法；没启用时滑点上限给默认的 1%。 */
+export function invalidationInput(invalidation: Invalidation | null): InvalidationInput {
+  if (invalidation === null) return { price: '', remaining: '', slippage: '1' }
+  return {
+    price: invalidation.price,
+    remaining: invalidation.remaining,
+    slippage: ratioToPercentInput(invalidation.max_slippage),
+  }
+}
+
+/**
+ * 输入框里的失效设置换成提交的参数。失效价留空就是不启用；剩余数量留空按 0；中性网格
+ * 剩余数量按 0 提交（任一侧失效都全部平仓，第 7.5 节）。滑点上限填的是百分比，只移动
+ * 小数点换成比率。价格和数量是否合理由服务端校验。
+ */
+export function parseInvalidation(
+  input: InvalidationInput,
+  neutral: boolean,
+): { invalidation: Invalidation | null } | { problem: string } {
+  const price = input.price.trim()
+  if (price === '') return { invalidation: null }
+  const slippage = percentInputToRatio(input.slippage)
+  if (slippage === null) return { problem: '失效平仓滑点上限要填百分比数字，例如 1。' }
+  const remaining = input.remaining.trim()
+  return {
+    invalidation: {
+      price,
+      remaining: neutral || remaining === '' ? '0' : remaining,
+      max_slippage: slippage,
+    },
+  }
+}
+
 /** 一侧参数的摘要。 */
 export function sideSummary(side: SideConfig): string {
   const core =
     side.batch_count === null || Number(side.core_ratio) === 0
       ? '无主仓'
       : `主仓 ${side.core_ratio}×${side.batch_count} 批`
-  return `${side.price_low}–${side.price_high}，间距 ${side.grid_spacing}，价差 ${side.grid_spread}，上限 ${side.max_position}，${core}`
+  const invalidation =
+    side.invalidation === null
+      ? ''
+      : `，失效价 ${side.invalidation.price}（剩 ${side.invalidation.remaining}，滑点 ≤${percent(side.invalidation.max_slippage)}）`
+  return `${side.price_low}–${side.price_high}，间距 ${side.grid_spacing}，价差 ${side.grid_spread}，上限 ${side.max_position}，${core}${invalidation}`
 }
 
 /** 参数摘要：列表和版本记录里用一句话说清两侧的关键参数。 */

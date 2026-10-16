@@ -634,6 +634,8 @@ pub(super) fn without_throttle(config: &StrategyConfig) -> StrategyConfig {
         .flatten()
     {
         side.throttle_interval = None;
+        // 失效设置和限速一样随时可以改（第 2.4 节），不参与「有没有改了不能改的参数」。
+        side.invalidation = None;
     }
     cleared
 }

@@ -2342,6 +2342,7 @@ mod tests {
                 grid_spacing: Price::parse("1000").unwrap(),
                 grid_spread: Price::parse("1000").unwrap(),
                 throttle_interval: None,
+                invalidation: None,
             }),
             short: None,
         }

@@ -30,6 +30,34 @@ pub enum ConfigError {
         direction: Direction,
         core_ratio: Rate,
     },
+    #[error(
+        "the {direction} invalidation price {price} must lie outside the range: below the low {edge} for the long side, above the high {edge} for the short side"
+    )]
+    InvalidationPriceInsideRange {
+        direction: Direction,
+        price: Price,
+        edge: Price,
+    },
+    #[error(
+        "the {direction} invalidation keeps {remaining}, above the side's total core {core_total}"
+    )]
+    InvalidationRemainingAboveCore {
+        direction: Direction,
+        remaining: Quantity,
+        core_total: Quantity,
+    },
+    #[error(
+        "a neutral grid closes everything when a side is invalidated, but the {direction} side keeps {remaining}"
+    )]
+    InvalidationRemainingInNeutralGrid {
+        direction: Direction,
+        remaining: Quantity,
+    },
+    #[error("the {direction} invalidation slippage {max_slippage} must be above 0 and below 100%")]
+    InvalidationSlippageOutOfRange {
+        direction: Direction,
+        max_slippage: Rate,
+    },
     #[error("{direction} {field} must not be negative, got {price}")]
     NegativePrice {
         direction: Direction,

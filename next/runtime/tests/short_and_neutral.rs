@@ -61,6 +61,7 @@ fn throttled_short_across_a_decade() -> StrategyConfig {
             grid_spacing: Price::parse("0.01").unwrap(),
             grid_spread: Price::parse("0.1").unwrap(),
             throttle_interval: Some(Duration::hours(1)),
+            invalidation: None,
         }),
         ..common::long_grid_config()
     }
