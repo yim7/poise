@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::Strategy;
 use crate::batch::BatchIndex;
 use crate::grid::{Cell, CellIndex};
-use crate::order::{OrderPurpose, Unit, WorkingOrder};
+use crate::order::{OrderPurpose, Side, Unit, WorkingOrder};
+use crate::planning::OrderIntent;
 use crate::side::{Direction, SidePlan};
 use crate::state::{CellState, StrategyState};
 use crate::units::{Notional, Price, Quantity};
@@ -214,70 +215,121 @@ impl Strategy {
         (sold - bought) - (sold + bought).mul_rate(fee_rate)
     }
 
-    /// 启动后会立即成交的订单，两侧按 [`Direction::ALL`] 的顺序接在一起。
-    pub fn immediate_fills(&self, market_price: Price) -> Vec<ImmediateFill> {
-        let state = self.initial_state();
+    /// 从 `state` 启动后会立即成交的订单，两侧按 [`Direction::ALL`] 的顺序接在一起。
+    ///
+    /// `state` 是启动时的状态：没有已有仓位时是 [`Strategy::initial_state`]，接管已有仓位时
+    /// 是 [`Strategy::takeover_state`]。
+    ///
+    /// 按第一步实际规划出的订单判断，不按原价：限价可能已经避开本策略自己的反向订单
+    /// （第 6 节），够不上最低金额的单根本不挂——原价能成交的，避让后的价格未必。
+    pub fn immediate_fills(
+        &self,
+        state: &StrategyState,
+        market_price: Price,
+    ) -> Vec<ImmediateFill> {
+        let planned = self.plan(state, &[], &[], market_price).place;
         self.sides()
             .iter()
-            .flat_map(|side| self.side_immediate_fills(side, &state, market_price))
+            .flat_map(|side| self.side_immediate_fills(side, state, &planned, market_price))
             .collect()
     }
 
     /// 一侧启动后会立即成交的订单。
     ///
-    /// 假设主仓建仓单一旦成交就整批成交（限价单挂在批次价上，成交即全部成交），
-    /// 因此这一批的格子会全部启用；格子建仓价还没到当前价的那些格子不建仓。
+    /// 第一步挂出的单里，限价已经到达当前价的会立即成交。主仓建仓单成交时假设整批成交
+    /// （限价单挂在批次价上，成交即全部成交），这一批的格子随之全部启用：原来没启用的格子
+    /// 第一步还没挂单，按建仓价判断，到了当前价的也会立即建仓。
     ///
     /// 开启限速时启动只放行第一个单位（第 4.1 节），后面那些还没放行的单位这一步根本
-    /// 不会挂单，所以也不会立即成交：预览不能把它们算进来。
+    /// 不会挂单，所以也不会立即成交。
     fn side_immediate_fills(
         &self,
         side: &SidePlan,
         state: &StrategyState,
+        planned: &[OrderIntent],
         market_price: Price,
     ) -> Vec<ImmediateFill> {
         let direction = side.direction();
+        let side_state = state.side(direction);
+        let enabled = |cell: &Cell| {
+            side_state
+                .and_then(|side| side.cell(cell.index))
+                .is_some_and(|cell_state| cell_state.enabled)
+        };
+        let planned_cell = |cell: &Cell| {
+            let unit = Unit::Cell(direction, cell.index);
+            [OrderPurpose::GridEntry, OrderPurpose::GridExit]
+                .into_iter()
+                .filter_map(move |purpose| planned_fill(planned, unit, purpose, market_price))
+        };
         let mut fills = Vec::new();
         if side.batches().is_empty() {
-            // 没有主仓：格子就是限速单位，只有已放行的格子会挂单。
             for cell in side.grid().cells() {
-                let unit = Unit::Cell(direction, cell.index);
-                if !self.is_released(state, unit) {
-                    break;
-                }
-                if let Some(fill) = cell_entry_fill(direction, cell, market_price) {
-                    fills.push(fill);
-                }
+                fills.extend(planned_cell(cell));
             }
             return fills;
         }
 
-        // 批次价按启动顺序排列：某一批已经到不了当前价时，后面的批次更到不了，都不会成交。
         for batch in side.batches().batches() {
-            let unit = Unit::Batch(direction, batch.index);
-            if !direction.reached(batch.price, market_price) {
-                break;
-            }
-            if !self.is_released(state, unit) {
-                break;
-            }
-            fills.push(ImmediateFill {
-                unit,
-                purpose: OrderPurpose::Core,
-                limit_price: batch.price,
-                quantity: batch.core_quantity,
-            });
-            for cell_index in &batch.cells {
-                let Some(cell) = side.grid().cell(*cell_index) else {
-                    continue;
-                };
-                if let Some(fill) = cell_entry_fill(direction, cell, market_price) {
-                    fills.push(fill);
+            let cells: Vec<&Cell> = batch
+                .cells
+                .iter()
+                .filter_map(|index| side.grid().cell(*index))
+                .collect();
+            let core = planned_fill(
+                planned,
+                Unit::Batch(direction, batch.index),
+                OrderPurpose::Core,
+                market_price,
+            );
+            match core {
+                Some(core) => {
+                    fills.push(core);
+                    // 主仓买完，本批格子全部启用：已经启用的按第一步的单，没启用的按建仓价。
+                    for cell in cells {
+                        if enabled(cell) {
+                            fills.extend(planned_cell(cell));
+                        } else if let Some(fill) = cell_entry_fill(direction, cell, market_price) {
+                            fills.push(fill);
+                        }
+                    }
+                }
+                // 主仓这一步不立即成交（已经结束、还没放行、价格没到、避让后不够最低金额）：
+                // 只有已经启用的格子在场上。后面的批次照样逐批看——这一批不挂单不说明后面的
+                // 也不挂：避让只压低靠近自身卖单的那一批，更远的批次照原价挂出。
+                None => {
+                    for cell in cells {
+                        if enabled(cell) {
+                            fills.extend(planned_cell(cell));
+                        }
+                    }
                 }
             }
         }
         fills
     }
+}
+
+/// 第一步规划出的这张单会不会立即成交：买单限价不低于当前价，卖单限价不高于当前价。
+fn planned_fill(
+    planned: &[OrderIntent],
+    unit: Unit,
+    purpose: OrderPurpose,
+    market_price: Price,
+) -> Option<ImmediateFill> {
+    let intent = planned
+        .iter()
+        .find(|intent| intent.unit == unit && intent.purpose == purpose)?;
+    let crosses = match intent.side {
+        Side::Buy => market_price <= intent.limit_price,
+        Side::Sell => market_price >= intent.limit_price,
+    };
+    crosses.then_some(ImmediateFill {
+        unit,
+        purpose,
+        limit_price: intent.limit_price,
+        quantity: intent.quantity,
+    })
 }
 
 /// 一侧的批次表。
@@ -331,7 +383,7 @@ fn batch_summaries_of(side: &SidePlan, state: &StrategyState) -> Vec<BatchSummar
         .collect()
 }
 
-/// 一格在启动时会不会立即建仓：它的建仓价已经到达当前价。
+/// 一格从空仓开始时会不会立即建仓：它的建仓价已经到达当前价。
 fn cell_entry_fill(
     direction: Direction,
     cell: &Cell,
@@ -387,6 +439,10 @@ mod tests {
         Unit::Cell(Direction::Long, CellIndex(index))
     }
 
+    fn long_batch(index: usize) -> Unit {
+        Unit::Batch(Direction::Long, BatchIndex(index))
+    }
+
     fn short_cell(index: usize) -> Unit {
         Unit::Cell(Direction::Short, CellIndex(index))
     }
@@ -428,7 +484,8 @@ mod tests {
 
         // 价格 90000：95 和 90 两批的主仓立即买入；这两批的格子买价不低于
         // 当前价的也立即买入（95 到 91，以及 90）。
-        let preview = strategy.immediate_fills(Price::parse("90000").unwrap());
+        let preview =
+            strategy.immediate_fills(&strategy.initial_state(), Price::parse("90000").unwrap());
 
         let expected = vec![
             core_fill(0, "95000", "0.175"),
@@ -447,7 +504,8 @@ mod tests {
     fn nothing_fills_immediately_when_the_price_is_above_the_range() {
         let strategy = core_long_strategy();
 
-        let preview = strategy.immediate_fills(Price::parse("96000").unwrap());
+        let preview =
+            strategy.immediate_fills(&strategy.initial_state(), Price::parse("96000").unwrap());
 
         assert!(preview.is_empty());
     }
@@ -456,13 +514,104 @@ mod tests {
     fn every_batch_fills_immediately_when_the_price_is_at_the_bottom() {
         let strategy = core_long_strategy();
 
-        let preview = strategy.immediate_fills(Price::parse("75000").unwrap());
+        let preview =
+            strategy.immediate_fills(&strategy.initial_state(), Price::parse("75000").unwrap());
 
         // 四批主仓加全部 20 格。
         assert_eq!(preview.len(), 24);
         assert_eq!(
             preview.last().unwrap(),
             &fill(long_cell(19), "76000", "0.015")
+        );
+    }
+
+    /// 接管 .37 之后价格在 88（第 8 节例子）：95 批已经买完，不再买；90 批只买还差的
+    /// 主仓 .091，按避让后的 88999 挂出；88 格补回待买回的 .009。持有的格子平仓价都在
+    /// 上方，不会立即卖出。
+    #[test]
+    fn b21_a_takeover_preview_lists_only_what_is_still_missing() {
+        let strategy = core_long_strategy();
+        let state = strategy
+            .takeover_state(crate::units::Position::parse("0.37").unwrap())
+            .unwrap();
+
+        let preview = strategy.immediate_fills(&state, Price::parse("88000").unwrap());
+
+        assert_eq!(
+            preview,
+            vec![
+                ImmediateFill {
+                    unit: long_batch(1),
+                    purpose: OrderPurpose::Core,
+                    // 第一步实际挂出的价格：避开自身最低卖价 89000 下方一个报价单位。
+                    limit_price: Price::parse("88999").unwrap(),
+                    quantity: Quantity::parse("0.091").unwrap(),
+                },
+                fill(long_cell(7), "88000", "0.009"),
+            ]
+        );
+
+        // 价格在 89000：原价 90000 会成交，可实际挂出的 88999 不会。
+        let preview = strategy.immediate_fills(&state, Price::parse("89000").unwrap());
+        assert!(
+            preview
+                .iter()
+                .all(|fill| fill.purpose != OrderPurpose::Core),
+            "{preview:?}"
+        );
+    }
+
+    /// 一批主仓避让后不够最低金额、这一步不挂：后面的批次照原价挂出，到价一样立即成交。
+    ///
+    /// 数量精度 .00001，接管 .74982：前两批完整；第三批主仓记 .17488、还差 .00012，按
+    /// 85000 有 10.2 美元，本批不结束；可避开自身最低卖价 82000 后挂在 81999，只有 9.84
+    /// 美元，这一步不挂。第四批 .175 照常挂在 80000。
+    #[test]
+    fn a_later_batch_still_fills_when_an_earlier_core_order_is_withheld() {
+        let strategy = crate::fixtures::fine_core_long_strategy();
+        let state = strategy
+            .takeover_state(crate::units::Position::parse("0.74982").unwrap())
+            .unwrap();
+
+        assert!(
+            strategy
+                .immediate_fills(&state, Price::parse("80500").unwrap())
+                .iter()
+                .all(|fill| fill.purpose != OrderPurpose::Core)
+        );
+        let preview = strategy.immediate_fills(&state, Price::parse("79999").unwrap());
+        assert!(
+            preview.contains(&ImmediateFill {
+                unit: long_batch(3),
+                purpose: OrderPurpose::Core,
+                limit_price: Price::parse("80000").unwrap(),
+                quantity: Quantity::parse("0.175").unwrap(),
+            }),
+            "{preview:?}"
+        );
+        assert!(preview.iter().all(|fill| fill.unit != long_batch(2)));
+    }
+
+    /// 接管后价格已经涨过持有格子的平仓价：这些平仓单一挂上就会成交。
+    #[test]
+    fn a_takeover_preview_lists_exits_that_are_already_reached() {
+        let strategy = core_long_strategy();
+        let state = strategy
+            .takeover_state(crate::units::Position::parse("0.37").unwrap())
+            .unwrap();
+
+        let preview = strategy.immediate_fills(&state, Price::parse("95500").unwrap());
+
+        let exits: Vec<&ImmediateFill> = preview
+            .iter()
+            .filter(|fill| fill.purpose == OrderPurpose::GridExit)
+            .collect();
+        // 持有的是 95 到 88 八格，平仓价 96 到 89：除了 95 格（96），其余七格都不高于 95.5。
+        assert_eq!(exits.len(), 7);
+        assert!(
+            exits
+                .iter()
+                .all(|fill| fill.limit_price <= Price::parse("95500").unwrap())
         );
     }
 
@@ -473,13 +622,17 @@ mod tests {
         // 价格在全部批次价之下：没有限速时四批主仓会一起成交。
         assert_eq!(
             core_long_strategy()
-                .immediate_fills(Price::parse("75000").unwrap())
+                .immediate_fills(
+                    &core_long_strategy().initial_state(),
+                    Price::parse("75000").unwrap()
+                )
                 .len(),
             24
         );
 
         // 开启限速：启动只放行 95 批，其余三批不会挂单，也就不会立即成交。
-        let preview = strategy.immediate_fills(Price::parse("75000").unwrap());
+        let preview =
+            strategy.immediate_fills(&strategy.initial_state(), Price::parse("75000").unwrap());
         assert_eq!(
             preview,
             vec![
@@ -497,7 +650,8 @@ mod tests {
     fn a_throttled_grid_without_core_starts_with_the_first_cell_only() {
         let strategy = throttled_long_grid_strategy();
 
-        let preview = strategy.immediate_fills(Price::parse("92000").unwrap());
+        let preview =
+            strategy.immediate_fills(&strategy.initial_state(), Price::parse("92000").unwrap());
 
         // `r = 0`：格子就是单位，启动只放行最高的那一格。
         assert_eq!(preview, vec![fill(long_cell(0), "95000", "0.05")]);
@@ -507,7 +661,8 @@ mod tests {
     fn a_grid_without_core_lists_the_cells_that_fill_immediately() {
         let strategy = long_grid_strategy();
 
-        let preview = strategy.immediate_fills(Price::parse("92000").unwrap());
+        let preview =
+            strategy.immediate_fills(&strategy.initial_state(), Price::parse("92000").unwrap());
 
         assert!(
             strategy
@@ -530,7 +685,8 @@ mod tests {
 
         // 价格 76000：75000 那一批的主仓立即开空，跟随它的 75、76 两格也立即开空；
         // 80 及以上的批次价格还没到。
-        let preview = strategy.immediate_fills(Price::parse("76000").unwrap());
+        let preview =
+            strategy.immediate_fills(&strategy.initial_state(), Price::parse("76000").unwrap());
 
         let expected = vec![
             ImmediateFill {
@@ -562,12 +718,13 @@ mod tests {
         // 价格在范围下方时一张也不会立即成交：空头侧的开空价都还没到。
         assert!(
             strategy
-                .immediate_fills(Price::parse("74000").unwrap())
+                .immediate_fills(&strategy.initial_state(), Price::parse("74000").unwrap())
                 .is_empty()
         );
 
         // 价格越过整个范围时反过来：四批主仓和二十格全部立即开空。
-        let all = strategy.immediate_fills(Price::parse("96000").unwrap());
+        let all =
+            strategy.immediate_fills(&strategy.initial_state(), Price::parse("96000").unwrap());
         assert_eq!(all.len(), 24);
         assert_eq!(all.last().unwrap(), &fill(short_cell(19), "94000", "0.015"));
     }
@@ -577,7 +734,8 @@ mod tests {
     fn b12_the_preview_shows_the_short_cells_that_open_immediately() {
         let strategy = neutral_grid_strategy();
 
-        let preview = strategy.immediate_fills(Price::parse("93").unwrap());
+        let preview =
+            strategy.immediate_fills(&strategy.initial_state(), Price::parse("93").unwrap());
 
         // 空头侧 91–96 五格各 .05，91、92、93 三格立即开空；多头侧最高买价 89，够不着。
         assert_eq!(
@@ -606,7 +764,8 @@ mod tests {
         });
         let strategy = Strategy::new(config, cheap_spec(), btc_fees()).unwrap();
 
-        let preview = strategy.immediate_fills(Price::parse("93").unwrap());
+        let preview =
+            strategy.immediate_fills(&strategy.initial_state(), Price::parse("93").unwrap());
 
         // 空头侧只放行 91 那一格；92、93 还没放行，这一步根本不挂单。
         assert_eq!(preview, vec![fill(short_cell(0), "91", "0.05")]);

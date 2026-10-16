@@ -191,6 +191,8 @@ export function preview(overrides: Partial<DraftPreview> = {}): DraftPreview {
     batches,
     cells,
     immediate_fills: [],
+    planned_orders: [],
+    foreign_orders: [],
     token: 'token-1',
     ...overrides,
   }

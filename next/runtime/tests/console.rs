@@ -241,6 +241,43 @@ async fn b43_an_account_change_requires_a_new_preview() {
         .unwrap();
 }
 
+/// B43：可用抵押小幅波动不让预览过期。标的上有仓位时，统一账户的可用抵押随浮动盈亏
+/// 每时每刻都在变；只有明显变少（低于预览时的 99%）才要求重新预览。多了没关系。
+#[tokio::test]
+async fn b43_a_small_collateral_move_keeps_the_preview_valid() {
+    let console = console();
+    let draft_id = console.runtime.create_draft(long_grid_config()).unwrap();
+    let preview = console.runtime.preview_draft(&draft_id).await.unwrap();
+    let previewed = preview.available_collateral;
+
+    // 少了 0.5%：还在容差之内。
+    console
+        .account
+        .set_collateral(Notional::from_scaled(previewed.scaled_floor() / 1000 * 995));
+    console
+        .runtime
+        .start_draft(&draft_id, preview.token.as_deref().unwrap())
+        .await
+        .unwrap();
+}
+
+/// B43：可用抵押多了，预览说明的那些单照样下得出去。
+#[tokio::test]
+async fn b43_more_collateral_keeps_the_preview_valid() {
+    let console = console();
+    let draft_id = console.runtime.create_draft(long_grid_config()).unwrap();
+    let preview = console.runtime.preview_draft(&draft_id).await.unwrap();
+
+    console.account.set_collateral(Notional::from_scaled(
+        preview.available_collateral.scaled_floor() * 2,
+    ));
+    console
+        .runtime
+        .start_draft(&draft_id, preview.token.as_deref().unwrap())
+        .await
+        .unwrap();
+}
+
 /// B43：预览之后仓位变了，旧预览也不能再确认。
 #[tokio::test]
 async fn b43_a_position_change_requires_a_new_preview() {

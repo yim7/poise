@@ -158,7 +158,7 @@ async fn b19_the_server_restores_running_strategies_before_driving_them() {
     let old: Vec<_> = exchange
         .orders()
         .into_iter()
-        .map(|order| order.client_order_id)
+        .filter_map(|order| order.client_order_id)
         .collect();
     drop(first);
 
@@ -183,7 +183,11 @@ async fn b19_the_server_restores_running_strategies_before_driving_them() {
         async move {
             exchange.place_count() > 20
                 && exchange.orders().iter().all(|order| {
-                    !old.contains(&order.client_order_id) || !order.status.is_working()
+                    order
+                        .client_order_id
+                        .as_ref()
+                        .is_none_or(|client_order_id| !old.contains(client_order_id))
+                        || !order.status.is_working()
                 })
         }
     })
@@ -237,8 +241,9 @@ async fn b19_a_strategy_that_cannot_be_restored_stays_visible_and_keeps_retrying
     assert_eq!(exchange.place_count(), 20);
     drop(first);
 
-    // 第二个进程：交易所拒收第一次撤单，恢复的这一轮走不通。
-    exchange.reject_next_cancels(1, "rate limited");
+    // 第二个进程：交易所一直拒收撤单，恢复走不通。拒收要一直持续到下面看完「恢复中」
+    // 为止：后台每 20 毫秒重试一次，只拒一次的话，GET 赶到之前它可能已经恢复了。
+    exchange.reject_next_cancels(usize::MAX, "rate limited");
     let runtime = Arc::new(Runtime::with_clock(
         exchange.clone(),
         account,
@@ -275,7 +280,8 @@ async fn b19_a_strategy_that_cannot_be_restored_stays_visible_and_keeps_retrying
     assert!(response.contains("\"status\":\"restoring\""), "{response}");
     assert!(response.contains("恢复失败"), "{response}");
 
-    // 后台继续重试：这一轮撤单成功，遗留挂单换掉，策略接着跑。
+    // 交易所恢复正常，后台继续重试：撤单成功，遗留挂单换掉，策略接着跑。
+    exchange.reject_next_cancels(0, "");
     let recovered = wait_for(|| {
         let exchange = exchange.clone();
         let runtime = runtime.clone();

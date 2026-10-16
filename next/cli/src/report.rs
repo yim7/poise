@@ -126,11 +126,12 @@ pub async fn status(instance: &Instance, instrument: &Instrument) -> Result<()> 
     }
 
     let working = instance.exchange().working_orders(instrument).await?;
-    println!("交易所上属于本系统的挂单 {} 张", working.len());
+    println!("交易所上这个标的的挂单 {} 张", working.len());
     for order in &working {
         println!(
-            "  {} 价 {} 量 {} 已成交 {} 状态 {:?}",
-            order.client_order_id,
+            "  {} {:?} 价 {} 量 {} 已成交 {} 状态 {:?}",
+            cloid_label(order),
+            order.side,
             order.limit_price,
             order.quantity,
             order.cumulative_filled,
@@ -182,12 +183,22 @@ pub async fn stop(instance: &Instance, instrument: &Instrument) -> Result<()> {
     }
 
     // 收尾核对：交易所上不该再剩本系统的挂单。
-    let working = instance.exchange().working_orders(instrument).await?;
+    // 只看本系统下的单（带 cloid）：用户手动下的单不归 `stop` 管。
+    let working: Vec<_> = instance
+        .exchange()
+        .working_orders(instrument)
+        .await?
+        .into_iter()
+        .filter(|order| order.client_order_id.is_some())
+        .collect();
     println!("交易所上还有 {} 张属于本系统这个标的的挂单", working.len());
-    for order in working {
+    for order in &working {
         println!(
             "  {} 价 {} 量 {} 状态 {:?}",
-            order.client_order_id, order.limit_price, order.quantity, order.status
+            cloid_label(order),
+            order.limit_price,
+            order.quantity,
+            order.status
         );
     }
     let position = instance.exchange().position(instrument).await?;
@@ -257,6 +268,14 @@ fn print_order(order: &StoredOrder) {
         order.record.status,
         order.exchange_order_id.as_deref().unwrap_or("-"),
     );
+}
+
+/// 挂单的客户端订单 ID；用户手动下的单没有它。
+fn cloid_label(order: &poise_runtime::ExchangeOrder) -> String {
+    order
+        .client_order_id
+        .as_ref()
+        .map_or_else(|| "（手动下单）".to_string(), ToString::to_string)
 }
 
 #[cfg(test)]

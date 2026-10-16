@@ -48,7 +48,9 @@ impl Runtime {
         {
             let (exchange_view, observed_at) = match exchange_working
                 .iter()
-                .find(|working| working.client_order_id == order.record.client_order_id)
+                .find(|working| {
+                    working.client_order_id.as_ref() == Some(&order.record.client_order_id)
+                })
                 .cloned()
             {
                 Some(working) => (working, working_observed_at),

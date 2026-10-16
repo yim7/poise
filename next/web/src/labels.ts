@@ -5,6 +5,7 @@ import type {
   Direction,
   OrderPurpose,
   OrderStatus,
+  Side,
   StrategyConfig,
   StrategyStatus,
   Unit,
@@ -40,6 +41,11 @@ export const PURPOSE_LABELS: Record<OrderPurpose, string> = {
   core: '主仓建仓',
   grid_entry: '格子建仓',
   grid_exit: '格子平仓',
+}
+
+export const SIDE_LABELS: Record<Side, string> = {
+  buy: '买',
+  sell: '卖',
 }
 
 export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {

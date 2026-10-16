@@ -452,13 +452,13 @@ async fn recovering_a_running_strategy_cancels_the_leftover_orders() {
         .collect();
     assert!(after.iter().all(|id| !before.contains(id)));
     // 遗留挂单在交易所上也真的撤掉了。
-    assert!(
-        harness
-            .exchange
-            .orders()
-            .iter()
-            .all(|order| !before.contains(&order.client_order_id) || !order.status.is_working())
-    );
+    assert!(harness.exchange.orders().iter().all(|order| {
+        order
+            .client_order_id
+            .as_ref()
+            .is_none_or(|client_order_id| !before.contains(client_order_id))
+            || !order.status.is_working()
+    }));
 }
 
 /// 遗留订单的撤销没确认就不进「运行中」：停在「恢复中」，一张新单都不下。

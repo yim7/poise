@@ -187,6 +187,57 @@ describe('新建与确认启动', () => {
     expect(screen.getByRole('button', { name: '确认启动' })).toBeEnabled()
   })
 
+  it('b21_标的上已有仓位时，预览列出第一步挂出的订单和交易所上已有的其他挂单', async () => {
+    const server = editorRoutes({
+      'POST /api/drafts/s-1/preview': {
+        body: preview({
+          position: '0.37',
+          planned_orders: [
+            {
+              unit: { batch: ['long', 1] },
+              purpose: 'core',
+              side: 'buy',
+              limit_price: '88999',
+              quantity: '0.091',
+              reduce_only: false,
+            },
+            {
+              unit: { cell: ['long', 7] },
+              purpose: 'grid_exit',
+              side: 'sell',
+              limit_price: '89000',
+              quantity: '0.006',
+              reduce_only: true,
+            },
+          ],
+          foreign_orders: [
+            {
+              client_order_id: null,
+              exchange_order_id: '777',
+              side: 'sell',
+              limit_price: '120000',
+              quantity: '0.01',
+              cumulative_filled: '0',
+              reduce_only: false,
+              status: 'open',
+            },
+          ],
+        }),
+      },
+    })
+    renderEditor(server)
+
+    await saveAndPreview()
+
+    expect(screen.getByText(/标的上已有仓位/)).toBeInTheDocument()
+    const planned = screen.getByRole('table', { name: '启动后第一步挂出的订单' })
+    // 限价由服务端算好（已避开自己的卖单），页面原样显示。
+    expect(within(planned).getByText('88999')).toBeInTheDocument()
+    expect(within(planned).getByText('0.091')).toBeInTheDocument()
+    const foreign = screen.getByRole('table', { name: '交易所上已有的其他挂单（本系统不撤销）' })
+    expect(within(foreign).getByText('777（手动下单）')).toBeInTheDocument()
+  })
+
   it('参数校验不通过时只显示原因，不给确认启动的机会', async () => {
     const server = editorRoutes({
       'POST /api/drafts/s-1/preview': {

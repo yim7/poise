@@ -8,7 +8,7 @@ use poise_runtime::{
     Exchange, ExchangeError, ExchangeFill, ExchangeOrder, OrderLookup, OrderReceipt, OrderRequest,
 };
 use poise_strategy::instrument::Instrument;
-use poise_strategy::order::{ClientOrderId, OrderStatus};
+use poise_strategy::order::{ClientOrderId, OrderStatus, Side};
 use poise_strategy::units::{Position, Price, Quantity};
 use serde_json::{Value, json};
 
@@ -86,8 +86,8 @@ impl Exchange for Hyperliquid {
         orders
             .into_iter()
             .filter(|order| order.coin == instrument.symbol())
-            // 没有 `cloid` 的挂单不是本系统下的，运行时按客户端订单 ID 对账，忽略即可。
-            .filter(|order| order.cloid.is_some())
+            // 没有 `cloid` 的挂单不是本系统下的：照样列出，预览要给用户看（第 8 节第 4 条）；
+            // 运行时按客户端订单 ID 对账，自然不会碰它。
             .map(open_order)
             .collect()
     }
@@ -255,6 +255,15 @@ fn order_status_of(status: &str) -> OrderStatus {
     }
 }
 
+/// 买卖方向：Hyperliquid 用 `B` 表示买、`A` 表示卖。
+fn side_of(side: &str) -> Result<Side, ExchangeError> {
+    match side {
+        "B" => Ok(Side::Buy),
+        "A" => Ok(Side::Sell),
+        _ => Err(malformed("a side")),
+    }
+}
+
 /// 累计成交量 = 原始数量 − 剩余数量。
 ///
 /// 交易所不给原始数量时只能按 0 算：宁可少报（仓位核对会兜住），也不猜。
@@ -273,8 +282,9 @@ fn exchange_order(
 ) -> Result<ExchangeOrder, ExchangeError> {
     let data = order.order;
     Ok(ExchangeOrder {
-        client_order_id,
+        client_order_id: Some(client_order_id),
         exchange_order_id: data.oid.to_string(),
+        side: side_of(&data.side)?,
         limit_price: Price::parse(&data.limit_px).map_err(|_| malformed("a limit price"))?,
         quantity: Quantity::parse(data.orig_sz.as_deref().unwrap_or(&data.sz))
             .map_err(|_| malformed("a size"))?,
@@ -285,12 +295,16 @@ fn exchange_order(
 }
 
 fn open_order(order: OpenOrderResponse) -> Result<ExchangeOrder, ExchangeError> {
-    let cloid = order.cloid.as_deref().unwrap_or_default();
-    let client_order_id =
-        client_order_id_of(cloid).ok_or_else(|| malformed("a client order id"))?;
+    let client_order_id = match order.cloid.as_deref() {
+        Some(cloid) => {
+            Some(client_order_id_of(cloid).ok_or_else(|| malformed("a client order id"))?)
+        }
+        None => None,
+    };
     Ok(ExchangeOrder {
         client_order_id,
         exchange_order_id: order.oid.to_string(),
+        side: side_of(&order.side)?,
         limit_price: Price::parse(&order.limit_px).map_err(|_| malformed("a limit price"))?,
         quantity: Quantity::parse(order.orig_sz.as_deref().unwrap_or(&order.sz))
             .map_err(|_| malformed("a size"))?,

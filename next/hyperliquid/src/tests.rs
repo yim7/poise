@@ -307,7 +307,7 @@ async fn cancel_order_of_an_order_that_is_already_gone_is_not_a_rejection() {
 // ── 挂单与订单状态 ────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn working_orders_keep_only_our_orders_on_this_instrument() {
+async fn working_orders_list_every_order_on_this_instrument() {
     let transport = FakeTransport::new(vec![
         fixture(fixtures::OPEN_ORDERS_OURS),
         fixture(fixtures::OPEN_ORDERS),
@@ -319,8 +319,9 @@ async fn working_orders_keep_only_our_orders_on_this_instrument() {
 
     assert_eq!(ours.len(), 1);
     let order = &ours[0];
-    assert_eq!(order.client_order_id, cloid(CLOID));
+    assert_eq!(order.client_order_id, Some(cloid(CLOID)));
     assert_eq!(order.exchange_order_id, "1004");
+    assert_eq!(order.side, Side::Buy);
     assert_eq!(order.limit_price, Price::parse("94000").unwrap());
     assert_eq!(order.quantity, Quantity::parse("0.001").unwrap());
     assert_eq!(
@@ -329,7 +330,9 @@ async fn working_orders_keep_only_our_orders_on_this_instrument() {
         "累计成交量 = 原始数量 − 剩余数量"
     );
     assert_eq!(order.status, OrderStatus::Open);
-    assert!(foreign.is_empty(), "没有 cloid 的挂单不是本系统下的");
+    // 没有 cloid 的挂单不是本系统下的：照样列出（预览要给用户看），对账时按 cloid 自然忽略。
+    assert_eq!(foreign.len(), 1);
+    assert_eq!(foreign[0].client_order_id, None);
 
     let sent = transport.request(0);
     assert_eq!(sent.body, json!({"type": "openOrders", "user": ACCOUNT}));
@@ -364,7 +367,7 @@ async fn order_status_reports_the_current_state_of_a_known_order() {
         panic!("expected a found order");
     };
     assert_eq!(open.status, OrderStatus::Open);
-    assert_eq!(open.client_order_id, cloid(CLOID));
+    assert_eq!(open.client_order_id, Some(cloid(CLOID)));
     assert_eq!(open.limit_price, Price::parse("94000").unwrap());
     let OrderLookup::Found(canceled) = canceled else {
         panic!("expected a found order");

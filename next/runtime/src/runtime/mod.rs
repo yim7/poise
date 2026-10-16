@@ -34,9 +34,10 @@ use poise_strategy::decision::{OrderState, Permits, PositionCheck, PositionReadi
 use poise_strategy::error::ConfigError;
 use poise_strategy::instrument::Instrument;
 use poise_strategy::order::ClientOrderId;
-use poise_strategy::planning::{Plan, WaitReason};
+use poise_strategy::planning::{OrderIntent, Plan, WaitReason};
 use poise_strategy::preview::{BatchSummary, CellSummary, ImmediateFill};
 use poise_strategy::state::{StateError, StrategyState};
+use poise_strategy::takeover::TakeoverError;
 use poise_strategy::units::{Notional, Position, Price, Quantity};
 use serde::{Deserialize, Serialize};
 
@@ -114,6 +115,9 @@ pub enum RuntimeError {
     ConfigChangeNotAllowed { field: &'static str },
     /// 预览过期、或者预览之后仓位、可用抵押和会立即成交的订单变了：
     /// 旧预览说明不了现在会发生什么（B43）。
+    /// 已有仓位接管不了（第 8 节第 1 条）。
+    #[error("the existing position cannot be taken over: {0}")]
+    Takeover(#[from] TakeoverError),
     #[error("the preview is out of date: {0}; preview again")]
     PreviewStale(&'static str),
     /// 一个标的同一时间只能有一个运行中的策略（B46）。
@@ -369,6 +373,12 @@ pub struct DraftPreview {
     pub batches: Vec<BatchSummary>,
     pub cells: Vec<CellSummary>,
     pub immediate_fills: Vec<ImmediateFill>,
+    /// 启动后第一步会挂出的订单：限价已经按第 6 节避开本策略自己的反向订单。接管已有
+    /// 仓位时，用户靠它确认持有格子的平仓单和没买完的主仓买单（第 8 节）。
+    pub planned_orders: Vec<OrderIntent>,
+    /// 交易所上这个标的已有的挂单。启动前它们都不属于本策略：本系统不撤销，由用户处理
+    /// （第 8 节第 4 条）。
+    pub foreign_orders: Vec<ExchangeOrder>,
     /// 确认启动时要原样带回来的令牌；校验不过时是 `None`。
     pub token: Option<String>,
 }

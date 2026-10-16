@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use poise_strategy::instrument::Instrument;
 use poise_strategy::order::{ClientOrderId, OrderStatus, Side};
 use poise_strategy::units::{Position, Price, Quantity};
+use serde::{Deserialize, Serialize};
 
 /// 下单请求。客户端订单 ID 由 runtime 生成并先写入数据库。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,10 +32,13 @@ pub struct OrderReceipt {
 }
 
 /// 交易所上的一张挂单。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExchangeOrder {
-    pub client_order_id: ClientOrderId,
+    /// 客户端订单 ID。用户手动下的单没有它：这样的单不属于任何策略，只在预览里列出
+    /// （第 8 节第 4 条），对账时一律忽略。
+    pub client_order_id: Option<ClientOrderId>,
     pub exchange_order_id: String,
+    pub side: Side,
     pub limit_price: Price,
     pub quantity: Quantity,
     pub cumulative_filled: Quantity,

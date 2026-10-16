@@ -248,6 +248,8 @@ impl From<RuntimeError> for ApiError {
             // 现在这个状态下行不通，但状态会变：重新预览、等它停、或者换个标的。
             RuntimeError::PreviewStale(_) => (StatusCode::CONFLICT, "preview_stale"),
             RuntimeError::InstrumentBusy { .. } => (StatusCode::CONFLICT, "instrument_busy"),
+            // 标的上的仓位接管不了：用户先处理仓位，或者改参数。
+            RuntimeError::Takeover(_) => (StatusCode::CONFLICT, "takeover_refused"),
             RuntimeError::NotRunning(..) => (StatusCode::CONFLICT, "not_running"),
             RuntimeError::Busy(_) => (StatusCode::CONFLICT, "busy"),
             RuntimeError::Archived(_) => (StatusCode::CONFLICT, "archived"),

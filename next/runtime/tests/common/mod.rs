@@ -660,6 +660,6 @@ impl Harness {
         self.exchange
             .orders()
             .into_iter()
-            .find(|order| &order.client_order_id == client_order_id)
+            .find(|order| order.client_order_id.as_ref() == Some(client_order_id))
     }
 }

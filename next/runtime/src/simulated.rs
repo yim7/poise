@@ -129,8 +129,9 @@ impl SimOrder {
 
     fn view(&self) -> ExchangeOrder {
         ExchangeOrder {
-            client_order_id: self.request.client_order_id.clone(),
+            client_order_id: Some(self.request.client_order_id.clone()),
             exchange_order_id: self.exchange_order_id.clone(),
+            side: self.request.side,
             limit_price: self.request.limit_price,
             quantity: self.request.quantity,
             cumulative_filled: self.cumulative_filled,

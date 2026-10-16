@@ -230,11 +230,16 @@ impl<'a> Planner<'a> {
         }
     }
 
-    /// 两侧：先主仓、后格子。顺序不影响结果，只影响 `waiting` 的排列。
+    /// 两侧：先格子、后主仓。
+    ///
+    /// 顺序决定同一步里反向订单谁让谁：先规划的单按原价挂，后规划的单避开它（第 6 节）。
+    /// 格子在前，持有格子的平仓单留在平仓价上——那是网格的利润所在；主仓建仓单在后，
+    /// 和它们相交时往外让，晚一点买到没关系。接管已有仓位之后正是这种情形：持有的格子
+    /// 卖单在场，本批主仓还没买完（第 6 节的例子）。
     fn plan_sides(&mut self) {
         for side in self.strategy.sides() {
-            self.plan_batches(side);
             self.plan_cells(side);
+            self.plan_batches(side);
         }
     }
 

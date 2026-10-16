@@ -105,6 +105,17 @@ impl Direction {
         }
     }
 
+    /// 行情 `market` 是否已经到达平仓价 `level`：到了就会让挂在那里的平仓单成交。
+    ///
+    /// 和 [`Direction::reached`] 方向相反：多头侧的卖单在价格涨到挂单价或更高时成交，
+    /// 空头侧的买平单在价格跌到挂单价或更低时成交。
+    pub const fn exit_reached(self, level: Price, market: Price) -> bool {
+        match self {
+            Self::Long => market.units() >= level.units(),
+            Self::Short => market.units() <= level.units(),
+        }
+    }
+
     /// 平仓价：多头侧在建仓价上加价差，空头侧减价差。超出可表示范围时返回 `None`。
     pub const fn exit_price(self, entry_price: Price, grid_spread: Price) -> Option<Price> {
         match self {

@@ -5,6 +5,7 @@ use poise_strategy::Strategy;
 use poise_strategy::config::StrategyConfig;
 use poise_strategy::instrument::{Fees, InstrumentSpec};
 use poise_strategy::side::Direction;
+use poise_strategy::units::Notional;
 use sha3::{Digest, Sha3_256};
 
 use crate::store::{
@@ -70,6 +71,10 @@ impl Runtime {
     /// 不落库、不下单。合约规则和费率按现在问到的值算；校验不过时只有原因，
     /// 没有表格也没有令牌。
     ///
+    /// 标的上已有仓位时，表格是接管之后的样子（第 8 节）：仓位从靠近空隙的一端分给批次和
+    /// 格子，并列出启动后第一步会挂出的订单。接管不了（方向没有对应的一侧、数量超过上限）
+    /// 时校验不过。交易所上这个标的已有的挂单都不是本策略的，一并列出、不撤销。
+    ///
     /// 令牌带上预览时刻，确认启动时按它判断这份预览有多旧（[`PREVIEW_TTL`]）。
     pub async fn preview_draft(&self, draft_id: &DraftId) -> Result<DraftPreview, RuntimeError> {
         let draft = self.store.load_draft(draft_id)?;
@@ -78,6 +83,7 @@ impl Runtime {
         let fees = self.account.fees().await?;
         let market_price = self.exchange.mark_price(&instrument).await?;
         let position = self.exchange.position(&instrument).await?;
+        let foreign_orders = self.exchange.working_orders(&instrument).await?;
         let available_collateral = self.account.available_collateral().await?;
         let now = self.clock.now();
 
@@ -96,6 +102,8 @@ impl Runtime {
             batches: Vec::new(),
             cells: Vec::new(),
             immediate_fills: Vec::new(),
+            planned_orders: Vec::new(),
+            foreign_orders,
             token: None,
         };
 
@@ -109,10 +117,20 @@ impl Runtime {
                 return Ok(preview);
             }
         };
-        let state = strategy.initial_state();
+        let state = match strategy.takeover_state(position) {
+            Ok(state) => state,
+            Err(error) => {
+                preview.validation = Validation {
+                    valid: false,
+                    reason: Some(error.to_string()),
+                };
+                return Ok(preview);
+            }
+        };
         preview.batches = strategy.batch_summaries(&state);
         preview.cells = strategy.cell_summaries(&state, &[]);
-        preview.immediate_fills = strategy.immediate_fills(market_price);
+        preview.immediate_fills = strategy.immediate_fills(&state, market_price);
+        preview.planned_orders = strategy.plan(&state, &[], &[], market_price).place;
         preview.token = Some(preview_token(
             &preview,
             strategy.config(),
@@ -143,9 +161,9 @@ impl Runtime {
         let fees = self.account.fees().await?;
         let strategy = Strategy::new(draft.config, spec, fees)?;
 
-        let (previewed_at, fingerprint) = parse_token(token).ok_or(RuntimeError::PreviewStale(
-            "the confirm token is not readable",
-        ))?;
+        let (previewed_at, previewed_collateral, fingerprint) = parse_token(token).ok_or(
+            RuntimeError::PreviewStale("the confirm token is not readable"),
+        )?;
         let fresh = self.preview_draft(draft_id).await?;
         let fresh_fingerprint =
             preview_fingerprint(&fresh, strategy.config(), strategy.spec(), strategy.fees())?;
@@ -156,7 +174,12 @@ impl Runtime {
         }
         if fresh_fingerprint != fingerprint {
             return Err(RuntimeError::PreviewStale(
-                "the position, the available collateral or the orders that would fill immediately changed",
+                "the position or the orders that would fill immediately changed",
+            ));
+        }
+        if collateral_dropped(previewed_collateral, fresh.available_collateral) {
+            return Err(RuntimeError::PreviewStale(
+                "the available collateral dropped since the preview",
             ));
         }
         // 时长落在未来（时钟被回拨，或者令牌里的时刻是编的）也算过期：只判「大于 60 秒」
@@ -168,7 +191,9 @@ impl Runtime {
             ));
         }
 
-        let initial_state = strategy.initial_state();
+        // 和预览同一份起始状态：标的上已有仓位时就是接管之后的状态（第 8 节）。预览校验
+        // 已经通过，指纹也对上了，这里不会再接管失败。
+        let initial_state = strategy.takeover_state(fresh.position)?;
         self.store
             .start_draft(
                 draft_id,
@@ -300,10 +325,14 @@ impl Runtime {
 /// 算出来的结果，也就是会立即成交的那份名单。
 pub(super) const PREVIEW_TTL: Duration = Duration::seconds(60);
 
-/// 确认令牌：这次预览说明的那些事实的指纹，加上预览的时刻。
+/// 确认令牌：这次预览说明的那些事实的指纹，加上预览的时刻和当时的可用抵押。
 ///
-/// 指纹覆盖参数、合约规则、费率、算出来的表格、仓位和可用抵押——它们里的任何一个变了，
-/// 旧预览就不再说明现在会发生什么，确认启动会被要求重新预览（B43）。
+/// 指纹覆盖参数、合约规则、费率、算出来的表格、第一步要挂的单和仓位——它们里的任何
+/// 一个变了，旧预览就不再说明现在会发生什么，确认启动会被要求重新预览（B43）。
+///
+/// 可用抵押不进指纹，单独比（[`collateral_dropped`]）：标的上有仓位时，统一账户的可用
+/// 抵押随浮动盈亏每时每刻都在变，进指纹就等于有仓位时永远确认不了——接管已有仓位正是
+/// 这种情形。
 ///
 /// 标记价本身不进指纹：它每时每刻都在动，进指纹就等于永远要求重新预览。要看的是它
 /// 算出来的结果——哪些订单会立即成交。标记价变了但这份名单没变，预览仍然是准的。
@@ -317,20 +346,44 @@ pub(super) fn preview_token(
     previewed_at: DateTime<Utc>,
 ) -> Result<String, StoreError> {
     let fingerprint = preview_fingerprint(preview, config, spec, fees)?;
-    Ok(format!("{}.{fingerprint}", previewed_at.timestamp_millis()))
+    Ok(format!(
+        "{}.{}.{fingerprint}",
+        previewed_at.timestamp_millis(),
+        preview.available_collateral.scaled_floor()
+    ))
 }
 
-/// 从令牌里取出预览时刻和指纹。
+/// 从令牌里取出预览时刻、当时的可用抵押和指纹。
 ///
 /// 令牌是网页原样传回来的，解析不出来就当过期处理：重新预览一次没有代价，
 /// 拿一个看不懂的令牌去启动才是问题。
-pub(super) fn parse_token(token: &str) -> Option<(DateTime<Utc>, &str)> {
-    let (millis, fingerprint) = token.split_once('.')?;
-    let millis: i64 = millis.parse().ok()?;
+pub(super) fn parse_token(token: &str) -> Option<(DateTime<Utc>, Notional, &str)> {
+    let mut parts = token.splitn(3, '.');
+    let millis: i64 = parts.next()?.parse().ok()?;
+    let collateral: i64 = parts.next()?.parse().ok()?;
+    let fingerprint = parts.next()?;
     if fingerprint.is_empty() {
         return None;
     }
-    Some((DateTime::from_timestamp_millis(millis)?, fingerprint))
+    Some((
+        DateTime::from_timestamp_millis(millis)?,
+        Notional::from_scaled(collateral),
+        fingerprint,
+    ))
+}
+
+/// 预览之后可用抵押少了多少才算预览过期：少于预览时的 99%。
+///
+/// 多了没关系，预览说明的那些单照样下得出去；小幅波动是有仓位时的常态（浮动盈亏）。
+/// 明显变少——用户在别处用掉了资金、或者仓位亏损扩大——预览时看到的资金状况就不再成立，
+/// 要重新预览（B43）。
+const COLLATERAL_TOLERANCE_PERCENT: i128 = 1;
+
+fn collateral_dropped(previewed: Notional, fresh: Notional) -> bool {
+    // 令牌里存的是按 1e-8 取整的值，两边按同一精度比。
+    let fresh = i128::from(fresh.scaled_floor());
+    let previewed = i128::from(previewed.scaled_floor());
+    fresh * 100 < previewed * (100 - COLLATERAL_TOLERANCE_PERCENT)
 }
 
 /// 预览说明的那些事实的指纹。
@@ -349,8 +402,8 @@ pub(super) fn preview_fingerprint(
         serde_json::to_string(&preview.batches)?,
         serde_json::to_string(&preview.cells)?,
         serde_json::to_string(&preview.immediate_fills)?,
+        serde_json::to_string(&preview.planned_orders)?,
         preview.position.to_string(),
-        preview.available_collateral.to_string(),
     ];
     let mut hasher = Sha3_256::new();
     for part in parts {

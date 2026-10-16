@@ -134,6 +134,30 @@ export interface ImmediateFill {
   quantity: Decimal
 }
 
+export type Side = 'buy' | 'sell'
+
+/** 启动后第一步会挂出的一张单：限价已经避开本策略自己的反向订单。 */
+export interface OrderIntent {
+  unit: Unit
+  purpose: OrderPurpose
+  side: Side
+  limit_price: Decimal
+  quantity: Decimal
+  reduce_only: boolean
+}
+
+/** 交易所上的一张挂单。用户手动下的单没有客户端订单 ID。 */
+export interface ExchangeOrder {
+  client_order_id: string | null
+  exchange_order_id: string
+  side: Side
+  limit_price: Decimal
+  quantity: Decimal
+  cumulative_filled: Decimal
+  reduce_only: boolean
+  status: OrderStatus
+}
+
 export interface DraftPreview {
   draft_id: string
   instrument: string
@@ -145,6 +169,10 @@ export interface DraftPreview {
   batches: BatchSummary[]
   cells: CellSummary[]
   immediate_fills: ImmediateFill[]
+  /** 启动后第一步会挂出的订单；标的上已有仓位时就是接管之后要挂的单（第 8 节）。 */
+  planned_orders: OrderIntent[]
+  /** 交易所上这个标的已有的挂单：都不是本策略的，本系统不撤销（第 8 节）。 */
+  foreign_orders: ExchangeOrder[]
   /** 校验不过时是 null：没有令牌就确认不了。 */
   token: string | null
 }

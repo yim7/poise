@@ -7,13 +7,16 @@ import {
   DIRECTION_LABELS,
   ORDER_STATUS_LABELS,
   PURPOSE_LABELS,
+  SIDE_LABELS,
   unitLabel,
 } from './labels'
 import { configSummary, decimal, timestamp } from './format'
 import type {
   BatchSummary,
   CellSummary,
+  ExchangeOrder,
   ImmediateFill,
+  OrderIntent,
   StoredConfigVersion,
   StoredOrder,
   StrategyConfig,
@@ -166,6 +169,68 @@ export function ImmediateFillTable({ fills }: { fills: ImmediateFill[] }) {
             <td>{PURPOSE_LABELS[fill.purpose]}</td>
             <td>{decimal(fill.limit_price)}</td>
             <td>{decimal(fill.quantity)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+/** 启动后第一步会挂出的订单（第 8 节：接管已有仓位时，持有格子的平仓单和没买完的主仓单）。 */
+export function PlannedOrderTable({ orders }: { orders: OrderIntent[] }) {
+  if (orders.length === 0) return <p>启动后第一步不会挂出订单。</p>
+  return (
+    <table>
+      <caption>启动后第一步挂出的订单</caption>
+      <thead>
+        <tr>
+          <th>归属</th>
+          <th>用途</th>
+          <th>买卖</th>
+          <th>限价</th>
+          <th>数量</th>
+          <th>只减仓</th>
+        </tr>
+      </thead>
+      <tbody>
+        {orders.map((order, index) => (
+          <tr key={`${unitLabel(order.unit)}-${order.purpose}-${index}`}>
+            <td>{unitLabel(order.unit)}</td>
+            <td>{PURPOSE_LABELS[order.purpose]}</td>
+            <td>{SIDE_LABELS[order.side]}</td>
+            <td>{decimal(order.limit_price)}</td>
+            <td>{decimal(order.quantity)}</td>
+            <td>{order.reduce_only ? '是' : '否'}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+/** 交易所上这个标的已有的挂单：不是本策略的，本系统不撤销，由用户自己处理（第 8 节）。 */
+export function ForeignOrderTable({ orders }: { orders: ExchangeOrder[] }) {
+  if (orders.length === 0) return null
+  return (
+    <table>
+      <caption>交易所上已有的其他挂单（本系统不撤销）</caption>
+      <thead>
+        <tr>
+          <th>订单</th>
+          <th>买卖</th>
+          <th>限价</th>
+          <th>数量</th>
+          <th>已成交</th>
+        </tr>
+      </thead>
+      <tbody>
+        {orders.map((order) => (
+          <tr key={order.exchange_order_id}>
+            <td>{order.client_order_id ?? `${order.exchange_order_id}（手动下单）`}</td>
+            <td>{SIDE_LABELS[order.side]}</td>
+            <td>{decimal(order.limit_price)}</td>
+            <td>{decimal(order.quantity)}</td>
+            <td>{decimal(order.cumulative_filled)}</td>
           </tr>
         ))}
       </tbody>
