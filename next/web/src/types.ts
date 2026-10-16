@@ -209,6 +209,7 @@ export type WaitReason =
   | 'limit_adjusted_by_own_order'
   | 'insufficient_funds'
   | 'margin_ratio_above_stop_threshold'
+  | 'margin_ratio_unavailable'
   | 'stale_market_data'
   | 'fill_stream_disconnected'
   | 'order_result_unknown'
@@ -234,6 +235,8 @@ export interface StrategyDetail {
   taken_at: string
   market_price: Decimal
   available_collateral: Decimal
+  /** 账户保证金率（第 7.4 节）；那一步没读到时是 null。 */
+  margin_ratio: Decimal | null
   position: Decimal
   expected_position: Decimal
   /** 策略为什么还没走完当前状态；没有特殊情况时是 null。 */

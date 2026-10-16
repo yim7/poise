@@ -2,13 +2,14 @@
 
 use async_trait::async_trait;
 use chrono::DateTime;
+use poise_runtime::account::MarginReading;
 use poise_runtime::{Account, AccountMode, ApiWallet, ExchangeError};
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
 use poise_strategy::units::{Notional, Rate};
 use serde_json::{Value, json};
 
 use crate::client::Hyperliquid;
-use crate::models::{AgentResponse, SpotClearinghouseState, UserFees};
+use crate::models::{AgentResponse, ClearinghouseState, SpotClearinghouseState, UserFees};
 
 /// USDC 在统一账户里的 token 序号。
 const USDC_TOKEN: u32 = 0;
@@ -97,6 +98,80 @@ impl Account for Hyperliquid {
         ))
     }
 
+    /// 账户比率的组成部分（第 7.4 节，附录 A）：现货账户状态里的 USDC 余额和维持保证金之后
+    /// 的可用量（覆盖整个账户），以及默认 DEX 合约账户状态里的全仓维持保证金占用、逐仓仓位
+    /// 占用的保证金。
+    ///
+    /// 任何一项读不出来都报「读不到」，闸门随之关上：拿一份缺了一块的读数当正常比率，只会
+    /// 低估风险。
+    async fn margin(&self) -> Result<MarginReading, ExchangeError> {
+        let spot: SpotClearinghouseState = self
+            .info(
+                &json!({"type": "spotClearinghouseState", "user": self.user()}),
+                "spotClearinghouseState",
+            )
+            .await?;
+        let perp: ClearinghouseState = self
+            .info(
+                &json!({"type": "clearinghouseState", "user": self.user()}),
+                "clearinghouseState",
+            )
+            .await?;
+        let balance = spot
+            .balances
+            .iter()
+            .find(|balance| {
+                balance.coin == "USDC" && balance.token.is_none_or(|token| token == USDC_TOKEN)
+            })
+            .ok_or_else(|| ExchangeError::Unavailable {
+                reason: "the exchange did not return a USDC balance".to_string(),
+            })?;
+        let balance = Notional::parse(&balance.total).map_err(|_| unreadable("balance"))?;
+        let available_after_maintenance = spot
+            .token_to_available_after_maintenance
+            .iter()
+            .find(|(token, _)| *token == USDC_TOKEN)
+            .ok_or_else(|| unreadable("available balance after maintenance"))
+            .and_then(|(_, available)| {
+                Notional::parse(available)
+                    .map_err(|_| unreadable("available balance after maintenance"))
+            })?;
+        let cross_maintenance = notional(
+            perp.cross_maintenance_margin_used.as_deref(),
+            "cross maintenance margin",
+        )?;
+        let mut isolated_margin = Notional::ZERO;
+        for position in &perp.asset_positions {
+            let position = &position.position;
+            let kind = position
+                .leverage
+                .as_ref()
+                .map(|leverage| leverage.kind.as_str());
+            match kind {
+                Some("cross") => {}
+                Some("isolated") => {
+                    let used = notional(position.margin_used.as_deref(), "isolated margin")?;
+                    isolated_margin =
+                        Notional::from_scaled(isolated_margin.scaled_floor() + used.scaled_floor());
+                }
+                // 不知道是全仓还是逐仓，就不知道要不要从分母里扣掉它的保证金。
+                _ => return Err(unreadable("position margin mode")),
+            }
+        }
+        Ok(MarginReading {
+            balance,
+            available_after_maintenance,
+            cross_maintenance,
+            isolated_margin,
+            // 没有时刻就判断不了读数有没有过期：当成读不到，不能当成刚读的。
+            as_of: Some(
+                perp.time
+                    .and_then(DateTime::from_timestamp_millis)
+                    .ok_or_else(|| unreadable("margin reading time"))?,
+            ),
+        })
+    }
+
     async fn fees(&self) -> Result<Fees, ExchangeError> {
         let body = json!({
             "type": "userFees",
@@ -119,6 +194,13 @@ impl Account for Hyperliquid {
             .instrument_spec(instrument.clone())
             .map_err(|reason| ExchangeError::Unavailable { reason })
     }
+}
+
+/// 读一个必须有的金额字段。
+fn notional(value: Option<&str>, what: &str) -> Result<Notional, ExchangeError> {
+    value
+        .ok_or_else(|| unreadable(what))
+        .and_then(|value| Notional::parse(value).map_err(|_| unreadable(what)))
 }
 
 fn unreadable(what: &str) -> ExchangeError {

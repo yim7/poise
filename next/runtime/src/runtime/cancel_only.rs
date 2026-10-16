@@ -237,6 +237,16 @@ impl Runtime {
             expected_position,
         };
 
+        // 保证金率只进视图快照：只撤单的状态不发新单，闸门管不着它。
+        let margin_ratio = match &reading {
+            Ok(_) => {
+                let settings = self.store.load_account_settings()?;
+                self.margin_ratio(strategy_id, settings.market_data_max_age)
+                    .await
+                    .map(|(ratio, _)| ratio)
+            }
+            Err(_) => None,
+        };
         let progress = cancel_only_note(&orders, status, unknown.as_ref());
         match reading {
             Ok(reading) => {
@@ -244,6 +254,7 @@ impl Runtime {
                     strategy_id,
                     &report,
                     reading.available_collateral,
+                    margin_ratio,
                     progress,
                     now,
                 )

@@ -58,6 +58,16 @@ impl Account for FakeAccount {
         Ok(self.available)
     }
 
+    async fn margin(&self) -> Result<poise_runtime::account::MarginReading, ExchangeError> {
+        Ok(poise_runtime::account::MarginReading {
+            balance: self.available,
+            available_after_maintenance: self.available,
+            cross_maintenance: Notional::ZERO,
+            isolated_margin: Notional::ZERO,
+            as_of: None,
+        })
+    }
+
     async fn fees(&self) -> Result<Fees, ExchangeError> {
         Ok(Fees::new(
             Rate::parse("0.00045").unwrap(),

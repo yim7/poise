@@ -127,14 +127,10 @@ async fn every_order_expires_from_its_own_send_time() {
         slow,
         account(),
         store,
-        // 这里只看到期时刻：发单故意放慢到每张 1 秒，行情有效期放宽，免得
-        // 发到一半因为行情过期停下来。
-        RuntimeOptions {
-            market_data_max_age: Duration::minutes(10),
-            ..RuntimeOptions::default()
-        },
+        RuntimeOptions::default(),
         clock.clone(),
     );
+    relax_market_data_max_age(&runtime);
 
     // runtime 的当前时间就是注入时钟的时间。
     assert_eq!(runtime.now(), at(0));
@@ -216,14 +212,10 @@ async fn an_order_is_sent_with_a_fresh_expiry_after_the_write() {
         exchange(),
         account(),
         store,
-        // 这里只看到期时刻：发单故意放慢到每张 1 秒，行情有效期放宽，免得
-        // 发到一半因为行情过期停下来。
-        RuntimeOptions {
-            market_data_max_age: Duration::minutes(10),
-            ..RuntimeOptions::default()
-        },
+        RuntimeOptions::default(),
         clock.clone(),
     );
+    relax_market_data_max_age(&runtime);
     let strategy_id = start_strategy(&runtime, long_grid_config()).await;
 
     let report = runtime.step(&strategy_id).await.unwrap();
@@ -374,4 +366,15 @@ async fn a_terminal_fill_is_dated_by_the_query_receipt_not_the_step_start() {
 
     let state = runtime.state(&strategy_id).unwrap();
     assert_eq!(long_state(&state).throttle().first_fill_at, Some(at(95)));
+}
+
+/// 这里只看到期时刻：发单故意放慢到每张 1 秒，行情过期时间放宽，免得发到一半因为
+/// 行情过期停下来。
+fn relax_market_data_max_age(runtime: &Runtime) {
+    runtime
+        .update_account_settings(poise_runtime::settings::AccountSettings {
+            market_data_max_age: Duration::minutes(10),
+            ..poise_runtime::settings::AccountSettings::default()
+        })
+        .unwrap();
 }

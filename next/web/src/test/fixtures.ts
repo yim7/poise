@@ -167,6 +167,7 @@ export function detail(overrides: Partial<StrategyDetail> = {}): StrategyDetail 
     taken_at: '2026-10-15T00:00:01Z',
     market_price: '95500',
     available_collateral: '100000',
+    margin_ratio: '0.0123',
     position: '0.015',
     expected_position: '0.015',
     note: null,

@@ -8,6 +8,7 @@ use poise_strategy::side::Direction;
 use poise_strategy::units::Notional;
 use sha3::{Digest, Sha3_256};
 
+use crate::settings::AccountSettings;
 use crate::store::{
     DraftId, StoreError, StoredConfigVersion, StoredDraft, StoredStrategy, StrategyId,
     StrategyStatus, ViewSnapshot,
@@ -219,6 +220,7 @@ impl Runtime {
                     position: fresh.position,
                     expected_position: strategy.expected_position(&initial_state),
                     available_collateral: fresh.available_collateral,
+                    margin_ratio: None,
                     waiting: Vec::new(),
                 },
             )
@@ -307,6 +309,24 @@ impl Runtime {
             "config updated"
         );
         Ok(version)
+    }
+
+    /// 账户风控设置：保证金率的提醒阈值与停止阈值、行情过期时间（第 7.4、11 节）。
+    pub fn account_settings(&self) -> Result<AccountSettings, RuntimeError> {
+        Ok(self.store.load_account_settings()?)
+    }
+
+    /// 修改账户风控设置。校验不过时拒绝；保存之后下一步就按新设置判断。
+    pub fn update_account_settings(&self, settings: AccountSettings) -> Result<(), RuntimeError> {
+        settings.validate()?;
+        self.store.save_account_settings(&settings)?;
+        tracing::info!(
+            alert = %settings.margin_alert_ratio,
+            stop = %settings.margin_stop_ratio,
+            market_data_max_age = settings.market_data_max_age.num_seconds(),
+            "account settings updated"
+        );
+        Ok(())
     }
 
     /// 一个策略的参数版本，按版本号从小到大。

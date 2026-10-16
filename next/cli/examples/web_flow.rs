@@ -56,7 +56,9 @@ fn main() {
         "预览        {status} 校验 {} 格子 {} 立即成交 {} 标记价 {}",
         field(&body, "valid").unwrap_or_default(),
         count(&body, "\"entry_price\""),
-        count(&body, "\"limit_price\""),
+        // 只数立即成交那一段：预览里的「第一步挂出的订单」也带限价。
+        section(&body, "\"immediate_fills\"", "\"planned_orders\"")
+            .map_or(0, |part| count(part, "\"limit_price\"")),
         field(&body, "market_price").unwrap_or_default(),
     );
     let token = field(&body, "token").expect("no confirm token");
@@ -173,6 +175,15 @@ fn field(body: &str, name: &str) -> Option<String> {
 }
 
 /// 数一个键出现了几次，用来数列表里的元素。
+/// `body` 里从 `start` 到 `end` 之间的那一段。
+fn section<'a>(body: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let from = body.find(start)?;
+    let to = body[from..]
+        .find(end)
+        .map_or(body.len(), |offset| from + offset);
+    Some(&body[from..to])
+}
+
 fn count(body: &str, key: &str) -> usize {
     body.matches(key).count()
 }

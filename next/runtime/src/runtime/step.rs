@@ -3,16 +3,17 @@
 use chrono::{DateTime, Duration, Utc};
 use poise_strategy::Strategy;
 use poise_strategy::decision::{
-    PauseReason, Permits, PositionCheck, PositionReading, SystemState,
+    MarginState, PauseReason, Permits, PositionCheck, PositionReading, SystemState,
     expected_position as expected_from, judge, pending_units, position_check,
 };
 use poise_strategy::instrument::Instrument;
 use poise_strategy::order::{ClientOrderId, OrderRecord, OrderStatus, WorkingOrder};
 use poise_strategy::planning::{OrderIntent, PendingUnit, Plan, WaitReason};
 use poise_strategy::state::StrategyState;
-use poise_strategy::units::{Position, Price, Quantity};
+use poise_strategy::units::{Position, Price, Quantity, Rate};
 
 use crate::exchange::{ExchangeError, OrderRequest};
+use crate::settings::AccountSettings;
 use crate::store::{StoredOrder, StoredStrategy, StrategyId, StrategyStatus};
 
 use super::cancel_only::cancel_only_note;
@@ -73,6 +74,23 @@ impl Runtime {
         let strategy = Strategy::new(stored.config.clone(), stored.spec.clone(), stored.fees)?;
         let mut state = self.load_state(strategy_id, &strategy)?;
         let mut orders = self.store.load_orders(strategy_id)?;
+        let settings = self.store.load_account_settings()?;
+
+        // 保证金率最先读：超过停止阈值时增仓单必须撤掉，后面哪一项读取失败都不能让它们
+        // 留在场上（第 7.4 节）。读到的时刻也是这一步读数的起点：发新单前按它判断读数有没有
+        // 过期（第 7.2 节）。
+        let reads_started_at = self.clock.now();
+        let margin_reading = self
+            .margin_ratio(strategy_id, settings.market_data_max_age)
+            .await;
+        let margin_ratio = margin_reading.map(|(ratio, _)| ratio);
+        let margin = margin_state(margin_ratio, &settings);
+        let withdrawn = if margin == MarginState::AboveStop {
+            self.withdraw_increasing_now(strategy_id, &strategy, &mut orders, now)
+                .await?
+        } else {
+            Vec::new()
+        };
 
         let snapshot = self
             .read_step(
@@ -93,10 +111,11 @@ impl Runtime {
             &order_states(&orders),
             SystemState {
                 unknown_orders: unknown.any_pending(),
+                margin,
             },
         );
         if let Some(reason) = decision.pause {
-            let report = self
+            let mut report = self
                 .pause_for(
                     strategy_id,
                     &strategy,
@@ -107,11 +126,13 @@ impl Runtime {
                     now,
                 )
                 .await?;
+            report.canceled.splice(0..0, withdrawn);
             let note = cancel_only_note(&orders, report.status, None);
             self.save_view(
                 strategy_id,
                 &report,
                 snapshot.available_collateral,
+                margin_ratio,
                 note,
                 now,
             )
@@ -140,6 +161,9 @@ impl Runtime {
                 plan.waiting.push(*reason);
             }
         }
+        if decision.withdraw_increasing {
+            withdraw_increasing(&mut plan, &orders);
+        }
         let executed = self
             .execute_plan(
                 strategy_id,
@@ -149,7 +173,12 @@ impl Runtime {
                 &mut plan,
                 NewOrders {
                     permits: decision.permits,
-                    priced_at: snapshot.priced_at,
+                    // 读数里最旧的那个时刻：保证金读数本身可能早于这一步开始（第 7.2 节）。
+                    priced_at: margin_reading
+                        .and_then(|(_, as_of)| as_of)
+                        .map_or(reads_started_at, |as_of| as_of.min(reads_started_at))
+                        .min(snapshot.priced_at),
+                    max_age: settings.market_data_max_age,
                 },
                 now,
             )
@@ -172,20 +201,94 @@ impl Runtime {
             status: StrategyStatus::Running,
             plan,
             placed: executed.placed,
-            canceled: executed.canceled,
+            canceled: withdrawn.into_iter().chain(executed.canceled).collect(),
             applied_fills: snapshot.applied_fills,
             position: snapshot.reading.actual,
             expected_position: snapshot.reading.expected,
         };
+        let note = join_notes([unknown.note(), margin_alert_note(margin_ratio, &settings)]);
         self.save_view(
             strategy_id,
             &report,
             snapshot.available_collateral,
-            unknown.note(),
+            margin_ratio,
+            note,
             now,
         )
         .await?;
         Ok(report)
+    }
+
+    /// 读账户保证金率（第 7.2、7.4 节），连同交易所给出这份读数的时刻。读不到，或者读数
+    /// 比 `max_age` 还旧，都是 `None`：闸门按「读不到」关上，不发新单，已在场的挂单保留。
+    /// 读不到不让这一步失败。
+    pub(super) async fn margin_ratio(
+        &self,
+        strategy_id: &StrategyId,
+        max_age: Duration,
+    ) -> Option<(Rate, Option<DateTime<Utc>>)> {
+        let margin = match self.account.margin().await {
+            Ok(margin) => margin,
+            Err(error) => {
+                tracing::warn!(strategy = %strategy_id, %error, "the margin ratio is unavailable");
+                return None;
+            }
+        };
+        if let Some(as_of) = margin.as_of {
+            let age = self.clock.now().signed_duration_since(as_of);
+            if age > max_age {
+                tracing::warn!(
+                    strategy = %strategy_id,
+                    age_ms = age.num_milliseconds(),
+                    "the margin reading is stale"
+                );
+                return None;
+            }
+        }
+        Some((margin.ratio(), margin.as_of))
+    }
+
+    /// 保证金率超过停止阈值：马上按库里的 `cloid` 撤掉在场的非只减仓单（第 7.4 节）。
+    ///
+    /// 放在这一步的其他读取之前：撤单不需要先问到订单状态，后面哪一项读取失败都不能让
+    /// 增仓单留在场上。撤不掉的单不报错，下一步规划里还会再撤；写库失败才报错——撤销已经
+    /// 发出去了，下一步对账会从交易所读到它的结局。
+    async fn withdraw_increasing_now(
+        &self,
+        strategy_id: &StrategyId,
+        strategy: &Strategy,
+        orders: &mut [StoredOrder],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ClientOrderId>, RuntimeError> {
+        let instrument = strategy.spec().instrument().clone();
+        let mut canceled = Vec::new();
+        for order in orders
+            .iter_mut()
+            .filter(|order| order.record.is_working() && !order.record.reduce_only)
+        {
+            match self.cancel_order(&instrument, order, now).await {
+                Ok(true) => {
+                    order.updated_at = now;
+                    self.store.update_order(strategy_id, order)?;
+                    canceled.push(order.record.client_order_id.clone());
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    strategy = %strategy_id,
+                    client_order_id = %order.record.client_order_id,
+                    %error,
+                    "could not withdraw an increasing order, retrying in the plan"
+                ),
+            }
+        }
+        if !canceled.is_empty() {
+            tracing::warn!(
+                strategy = %strategy_id,
+                canceled = canceled.len(),
+                "margin ratio above the stop threshold, withdrew the increasing orders"
+            );
+        }
+        Ok(canceled)
     }
 
     /// 判定要暂停时收尾：先落「暂停中」，撤单、对账，返回这一步的报告。
@@ -445,19 +548,12 @@ impl Runtime {
             for intent in &intents {
                 // 行情是这一步开头读的：核对、发单花掉的时间里它会变旧。过期之后不再发新单，
                 // 剩下的下一步按新行情重新规划（第 7.2 节）。
-                if self.market_is_stale(strategy_id, new_orders.priced_at) {
+                if self.market_is_stale(strategy_id, &new_orders) {
                     stopped = Some(WaitReason::StaleMarketData);
                     break;
                 }
                 let client_order_id = match self
-                    .place_one(
-                        strategy_id,
-                        strategy,
-                        state,
-                        orders,
-                        intent,
-                        new_orders.priced_at,
-                    )
+                    .place_one(strategy_id, strategy, state, orders, intent, &new_orders)
                     .await?
                 {
                     Placement::Sent(client_order_id) => client_order_id,
@@ -549,7 +645,7 @@ impl Runtime {
         state: &mut StrategyState,
         orders: &mut Vec<StoredOrder>,
         intent: &OrderIntent,
-        priced_at: DateTime<Utc>,
+        new_orders: &NewOrders,
     ) -> Result<Placement, RuntimeError> {
         let mut order = new_order(intent, self.clock.now(), self.options.order_expires_after);
         let client_order_id = order.record.client_order_id.clone();
@@ -584,7 +680,7 @@ impl Runtime {
             }
         }
         // 写库同样花时间：发送前最后看一眼行情，过期了就不发。
-        if self.market_is_stale(strategy_id, priced_at) {
+        if self.market_is_stale(strategy_id, new_orders) {
             self.store.delete_order(strategy_id, &client_order_id)?;
             return Ok(Placement::StaleMarket);
         }
@@ -610,13 +706,11 @@ impl Runtime {
         Ok(Placement::Sent(client_order_id))
     }
 
-    /// 行情是不是已经过期：从读行情的请求发出那一刻算起，超过
-    /// [`RuntimeOptions::market_data_max_age`] 就算（第 7.2 节）。
-    ///
-    /// [`RuntimeOptions::market_data_max_age`]: super::RuntimeOptions::market_data_max_age
-    fn market_is_stale(&self, strategy_id: &StrategyId, priced_at: DateTime<Utc>) -> bool {
-        let age = self.clock.now().signed_duration_since(priced_at);
-        let stale = age > self.options.market_data_max_age;
+    /// 行情是不是已经过期：从读行情的请求发出那一刻算起，超过账户风控设置里的行情过期
+    /// 时间就算（第 7.2 节）。
+    fn market_is_stale(&self, strategy_id: &StrategyId, new_orders: &NewOrders) -> bool {
+        let age = self.clock.now().signed_duration_since(new_orders.priced_at);
+        let stale = age > new_orders.max_age;
         if stale {
             tracing::warn!(
                 strategy = %strategy_id,
@@ -707,6 +801,63 @@ impl Runtime {
             self.store.save_applied_fills(strategy_id, state, &[])?;
         }
         Ok(())
+    }
+}
+
+/// 账户保证金率换成闸门的输入（第 7.2、7.4 节）：读不到就是「读不到」，达到停止阈值就是
+/// 「超过停止阈值」。
+fn margin_state(ratio: Option<Rate>, settings: &AccountSettings) -> MarginState {
+    match ratio {
+        None => MarginState::Unavailable,
+        Some(ratio) if ratio >= settings.margin_stop_ratio => MarginState::AboveStop,
+        Some(_) => MarginState::Normal,
+    }
+}
+
+/// 保证金率达到提醒阈值时的提醒（第 7.4 节）。达到停止阈值时说明只减仓的处理。
+fn margin_alert_note(ratio: Option<Rate>, settings: &AccountSettings) -> Option<String> {
+    let ratio = ratio?;
+    if ratio >= settings.margin_stop_ratio {
+        Some(format!(
+            "账户保证金率 {} 达到停止阈值 {}：同一账户所有策略只发、只保留只减仓单，回落后自动恢复。",
+            percent(ratio),
+            percent(settings.margin_stop_ratio)
+        ))
+    } else if ratio >= settings.margin_alert_ratio {
+        Some(format!(
+            "账户保证金率 {} 超过提醒阈值 {}。",
+            percent(ratio),
+            percent(settings.margin_alert_ratio)
+        ))
+    } else {
+        None
+    }
+}
+
+/// 比率按百分比写，保留两位小数。
+fn percent(ratio: Rate) -> String {
+    let hundredths = i128::from(ratio.units()) * 10_000 / i128::from(poise_strategy::units::SCALE);
+    format!("{}.{:02}%", hundredths / 100, hundredths % 100)
+}
+
+/// 把几句说明接成一段；一句都没有时是 `None`。
+fn join_notes<const N: usize>(notes: [Option<String>; N]) -> Option<String> {
+    let notes: Vec<String> = notes.into_iter().flatten().collect();
+    (!notes.is_empty()).then(|| notes.concat())
+}
+
+/// 保证金率超过停止阈值：在场的非只减仓单全部撤掉，账户只保留只减仓单（第 7.4 节）。
+///
+/// 单侧网格的格子平仓单本来就是只减仓单，照常留着；主仓买单、格子建仓单和中性网格的
+/// 格子单（可能让净仓位穿越零）都撤。规划里本来就要撤的单不重复撤。
+fn withdraw_increasing(plan: &mut Plan, orders: &[StoredOrder]) {
+    for order in orders
+        .iter()
+        .filter(|order| order.record.is_working() && !order.record.reduce_only)
+    {
+        if !plan.cancel.contains(&order.record.client_order_id) {
+            plan.cancel.push(order.record.client_order_id.clone());
+        }
     }
 }
 

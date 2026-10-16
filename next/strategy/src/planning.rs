@@ -67,6 +67,10 @@ pub enum WaitReason {
     InsufficientFunds,
     /// 保证金率超过停止阈值。
     MarginRatioAboveStopThreshold,
+    /// 保证金率读不到或数据过期：不发新单，已在场的挂单保留（第 7.2 节）。
+    ///
+    /// 设计第 11 节没有列这一条，这里是新增的。
+    MarginRatioUnavailable,
     /// 行情过期。
     StaleMarketData,
     /// 成交推送断开。

@@ -9,6 +9,19 @@ export function decimal(value: string | null | undefined): string {
   return value === null || value === undefined || value === '' ? '—' : value
 }
 
+/**
+ * 比率按百分比显示，例如 0.3 显示成 30%。只换写法，不改数：小数点右移两位。
+ * 没读到时（null）显示「读不到」。
+ */
+export function percent(value: string | null): string {
+  if (value === null) return '读不到'
+  const [whole, fraction = ''] = value.split('.')
+  const padded = fraction.padEnd(2, '0')
+  const integer = String(Number(`${whole}${padded.slice(0, 2)}`))
+  const rest = padded.slice(2).replace(/0+$/, '')
+  return rest === '' ? `${integer}%` : `${integer}.${rest}%`
+}
+
 /** 本地时间；服务端给的是 UTC 的 ISO 串。 */
 export function timestamp(iso: string): string {
   const at = new Date(iso)

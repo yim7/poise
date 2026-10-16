@@ -15,6 +15,7 @@ pub mod lock;
 pub mod runtime;
 pub mod secret;
 pub mod serve;
+pub mod settings;
 pub mod simulated;
 pub mod simulated_account;
 pub mod startup;

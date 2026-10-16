@@ -67,6 +67,7 @@ export const WAIT_REASON_LABELS: Record<WaitReason, string> = {
   limit_adjusted_by_own_order: '限价因自身反向订单下调',
   insufficient_funds: '资金不足或退避中',
   margin_ratio_above_stop_threshold: '保证金率超过停止阈值',
+  margin_ratio_unavailable: '保证金率读不到',
   stale_market_data: '行情过期',
   fill_stream_disconnected: '成交推送断开',
   order_result_unknown: '订单结果待查',

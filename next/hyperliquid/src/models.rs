@@ -27,8 +27,15 @@ pub(crate) struct AssetContext {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(crate) struct ClearinghouseState {
-    #[serde(rename = "assetPositions", default)]
+    /// 交易所没给仓位列表就是读不出仓位：不能当成空仓。
+    #[serde(rename = "assetPositions")]
     pub asset_positions: Vec<AssetPosition>,
+    /// 交易所生成这份状态的时刻（毫秒）。
+    #[serde(default)]
+    pub time: Option<i64>,
+    /// 全仓仓位的维持保证金占用合计。缺了就读不出账户比率。
+    #[serde(rename = "crossMaintenanceMarginUsed", default)]
+    pub cross_maintenance_margin_used: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -41,6 +48,18 @@ pub(crate) struct PositionData {
     pub coin: String,
     /// 带符号的持仓数量，多头为正。
     pub szi: String,
+    #[serde(default)]
+    pub leverage: Option<LeverageData>,
+    /// 这个仓位占用的保证金。逐仓仓位按它从余额里扣（账户比率的分母）。
+    #[serde(rename = "marginUsed", default)]
+    pub margin_used: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct LeverageData {
+    /// `cross` 或 `isolated`。
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

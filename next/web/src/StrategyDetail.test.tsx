@@ -40,6 +40,27 @@ describe('运行详情', () => {
     expect(screen.queryByText(/仓位与应有持仓不一致/)).not.toBeInTheDocument()
   })
 
+  it('b35_显示账户保证金率；读不到时如实说读不到', async () => {
+    detailRoutes()
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    expect(await screen.findByText('账户保证金率')).toBeInTheDocument()
+    // 服务端给的是比率 0.0123，页面只换成百分比写法。
+    expect(screen.getByText('1.23%')).toBeInTheDocument()
+  })
+
+  it('b36_保证金率读不到时显示读不到和对应的等待原因', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({ margin_ratio: null, waiting: ['margin_ratio_unavailable'] }),
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    expect(await screen.findByText('读不到')).toBeInTheDocument()
+    expect(screen.getByText('保证金率读不到')).toBeInTheDocument()
+  })
+
   it('b45_停止要二次确认，确认后调用停止接口并提示仓位保留', async () => {
     const server = detailRoutes()
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)

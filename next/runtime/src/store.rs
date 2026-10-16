@@ -19,7 +19,9 @@ use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatu
 use poise_strategy::side::Direction;
 use poise_strategy::state::{BatchState, CellState, SideState, StrategyState};
 use poise_strategy::throttle::ThrottleState;
-use poise_strategy::units::{Notional, Position, Price, Quantity};
+use poise_strategy::units::{Notional, Position, Price, Quantity, Rate};
+
+use crate::settings::AccountSettings;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -251,6 +253,9 @@ pub struct ViewSnapshot {
     /// 按状态算出的应有持仓。
     pub expected_position: Position,
     pub available_collateral: Notional,
+    /// 账户保证金率（第 7.4 节）；这一步没读到时是 `None`。
+    #[serde(default)]
+    pub margin_ratio: Option<Rate>,
     /// 最近一步在等什么。
     pub waiting: Vec<WaitReason>,
 }
@@ -309,7 +314,7 @@ pub enum StoreError {
 ///
 /// 改表结构就加一。打开库时版本对不上直接拒绝，而不是等写到一半才发现少了一列——
 /// 那时候用户已经以为策略在跑了（第 12 节：不兼容旧数据库，也不迁移旧库）。
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 /// 库里已经有表了吗。
 ///
@@ -504,6 +509,10 @@ const TABLES: &str = "
                  strategy_id TEXT PRIMARY KEY,
                  taken_at TEXT NOT NULL,
                  view_json TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS account_settings (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 settings_json TEXT NOT NULL
              );";
 
 impl Store {
@@ -868,6 +877,32 @@ impl Store {
         let transaction = connection.transaction()?;
         write_view(&transaction, strategy_id, view)?;
         transaction.commit()?;
+        Ok(())
+    }
+
+    /// 账户风控设置；还没保存过时是默认值（第 7.4 节）。
+    pub fn load_account_settings(&self) -> Result<AccountSettings, StoreError> {
+        let connection = self.lock();
+        let json = connection
+            .query_row(
+                "SELECT settings_json FROM account_settings WHERE id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match json {
+            Some(json) => Ok(serde_json::from_str(&json)?),
+            None => Ok(AccountSettings::default()),
+        }
+    }
+
+    /// 保存账户风控设置。调用方负责先校验（[`AccountSettings::validate`]）。
+    pub fn save_account_settings(&self, settings: &AccountSettings) -> Result<(), StoreError> {
+        self.lock().execute(
+            "INSERT INTO account_settings (id, settings_json) VALUES (1, ?1)
+             ON CONFLICT (id) DO UPDATE SET settings_json = excluded.settings_json",
+            params![serde_json::to_string(settings)?],
+        )?;
         Ok(())
     }
 
@@ -2269,6 +2304,7 @@ mod tests {
             position: Position::ZERO,
             expected_position: Position::ZERO,
             available_collateral: Notional::parse("100000").unwrap(),
+            margin_ratio: None,
             waiting: Vec::new(),
         }
     }

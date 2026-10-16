@@ -241,6 +241,7 @@ impl From<RuntimeError> for ApiError {
             }
             // 参数本身不行：改完再提交。
             RuntimeError::Config(_)
+            | RuntimeError::Settings(_)
             | RuntimeError::ConfigChangeNotAllowed { .. }
             | RuntimeError::Store(StoreError::EmptyStrategyId) => {
                 (StatusCode::BAD_REQUEST, "invalid_config")

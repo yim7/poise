@@ -38,12 +38,13 @@ use poise_strategy::planning::{OrderIntent, Plan, WaitReason};
 use poise_strategy::preview::{BatchSummary, CellSummary, ImmediateFill};
 use poise_strategy::state::{StateError, StrategyState};
 use poise_strategy::takeover::TakeoverError;
-use poise_strategy::units::{Notional, Position, Price, Quantity};
+use poise_strategy::units::{Notional, Position, Price, Quantity, Rate};
 use serde::{Deserialize, Serialize};
 
 use crate::account::Account;
 use crate::clock::{Clock, SystemClock};
 use crate::exchange::{Exchange, ExchangeError, ExchangeOrder};
+use crate::settings::SettingsError;
 use crate::store::{
     DraftId, Store, StoreError, StoredConfigVersion, StoredFill, StoredOrder, StrategyId,
     StrategyStatus,
@@ -75,11 +76,6 @@ pub struct RuntimeOptions {
     /// `expiresAfter` 只保证超过时间戳的请求会被拒绝；交易所的挂单和成交查询可能比撮合
     /// 晚一点才看得到，余量就是留给这段延迟的。具体长度需要在测试网确认。
     pub unknown_order_grace: Duration,
-    /// 行情读回来之后多久算过期（第 7.2 节）：过期之后这一步不再发新单。
-    ///
-    /// 一步里要核对订单、核对仓位、逐张发单，慢的时候会花掉不少时间；行情是这一步开头
-    /// 读的，发单时已经旧了，按它判断「会不会立即成交」「会不会和自己的单相交」就不可靠。
-    pub market_data_max_age: Duration,
 }
 
 impl Default for RuntimeOptions {
@@ -88,7 +84,6 @@ impl Default for RuntimeOptions {
             order_expires_after: Duration::seconds(5),
             fills_lookback: Duration::seconds(60),
             unknown_order_grace: Duration::seconds(30),
-            market_data_max_age: Duration::seconds(10),
         }
     }
 }
@@ -115,6 +110,9 @@ pub enum RuntimeError {
     ConfigChangeNotAllowed { field: &'static str },
     /// 预览过期、或者预览之后仓位、可用抵押和会立即成交的订单变了：
     /// 旧预览说明不了现在会发生什么（B43）。
+    /// 账户风控设置不合理（第 7.4 节）。
+    #[error("the account settings are invalid: {0}")]
+    Settings(#[from] SettingsError),
     /// 已有仓位接管不了（第 8 节第 1 条）。
     #[error("the existing position cannot be taken over: {0}")]
     Takeover(#[from] TakeoverError),
@@ -277,6 +275,8 @@ struct Reading {
 struct NewOrders {
     permits: Permits,
     priced_at: DateTime<Utc>,
+    /// 行情读回来之后多久算过期：账户风控设置里的行情过期时间。
+    max_age: Duration,
 }
 
 /// 执行阶段报出的两个列表。
@@ -412,6 +412,8 @@ pub struct StrategyDetail {
     pub taken_at: DateTime<Utc>,
     pub market_price: Price,
     pub available_collateral: Notional,
+    /// 账户保证金率（第 7.4 节）；那一步没读到时是 `None`。
+    pub margin_ratio: Option<Rate>,
     /// 交易所上的仓位与按状态算出的应有持仓；对不上时策略会被暂停。
     pub position: Position,
     pub expected_position: Position,

@@ -734,6 +734,94 @@ async fn available_collateral_uses_the_amount_left_after_maintenance() {
     );
 }
 
+/// 账户比率的组成：现货 USDC 余额、全仓维持保证金占用、逐仓仓位的保证金。
+#[tokio::test]
+async fn the_margin_reading_combines_spot_and_perp_state() {
+    let transport = FakeTransport::new(vec![
+        fixture(fixtures::SPOT_CLEARINGHOUSE_STATE),
+        json!({
+            "crossMaintenanceMarginUsed": "12.5",
+            "time": 1_792_000_000_000_i64,
+            "assetPositions": [
+                {"type": "oneWay", "position": {"coin": "BTC", "szi": "0.005",
+                    "leverage": {"type": "cross", "value": 10}, "marginUsed": "50.0"}},
+                {"type": "oneWay", "position": {"coin": "ETH", "szi": "-0.1",
+                    "leverage": {"type": "isolated", "value": 5, "rawUsd": "100"}, "marginUsed": "40.0"}}
+            ]
+        }),
+    ]);
+    let client = client(transport.clone(), fixed_clock(NOW_MS));
+
+    let margin = client.margin().await.unwrap();
+
+    assert_eq!(margin.balance, Notional::parse("1000").unwrap());
+    assert_eq!(
+        margin.available_after_maintenance,
+        Notional::parse("870.25").unwrap()
+    );
+    assert_eq!(margin.cross_maintenance, Notional::parse("12.5").unwrap());
+    assert_eq!(margin.isolated_margin, Notional::parse("40").unwrap());
+    assert_eq!(
+        margin.as_of,
+        DateTime::from_timestamp_millis(1_792_000_000_000)
+    );
+    // 整个账户的占用 1000 − 870.25 = 129.75 比默认 DEX 的 12.5 大：129.75 ÷ (1000 − 40)。
+    assert_eq!(margin.ratio(), Rate::parse("0.13515625").unwrap());
+    assert_eq!(
+        transport.request(1).body,
+        json!({"type": "clearinghouseState", "user": ACCOUNT})
+    );
+}
+
+/// 仓位没说是全仓还是逐仓：不知道要不要扣它的保证金，报「读不到」。
+#[tokio::test]
+async fn a_position_without_a_margin_mode_is_unreadable() {
+    let transport = FakeTransport::new(vec![
+        fixture(fixtures::SPOT_CLEARINGHOUSE_STATE),
+        json!({
+            "crossMaintenanceMarginUsed": "12.5",
+            "time": 1_792_000_000_000_i64,
+            "assetPositions": [{"type": "oneWay", "position": {"coin": "ETH", "szi": "-0.1", "marginUsed": "40.0"}}]
+        }),
+    ]);
+    let client = client(transport, fixed_clock(NOW_MS));
+
+    assert!(matches!(
+        client.margin().await,
+        Err(ExchangeError::Unavailable { .. })
+    ));
+}
+
+/// 交易所没给读数时刻：判断不了有没有过期，报「读不到」。
+#[tokio::test]
+async fn a_margin_reading_without_a_time_is_unreadable() {
+    let transport = FakeTransport::new(vec![
+        fixture(fixtures::SPOT_CLEARINGHOUSE_STATE),
+        json!({"crossMaintenanceMarginUsed": "12.5", "assetPositions": []}),
+    ]);
+    let client = client(transport, fixed_clock(NOW_MS));
+
+    assert!(matches!(
+        client.margin().await,
+        Err(ExchangeError::Unavailable { .. })
+    ));
+}
+
+/// 交易所没给全仓维持保证金时读不出账户比率：报「读不到」，闸门关上，而不是当成 0。
+#[tokio::test]
+async fn a_missing_cross_maintenance_margin_is_unreadable() {
+    let transport = FakeTransport::new(vec![
+        fixture(fixtures::SPOT_CLEARINGHOUSE_STATE),
+        json!({"assetPositions": []}),
+    ]);
+    let client = client(transport, fixed_clock(NOW_MS));
+
+    assert!(matches!(
+        client.margin().await,
+        Err(ExchangeError::Unavailable { .. })
+    ));
+}
+
 #[tokio::test]
 async fn fees_come_from_user_fees() {
     let transport = FakeTransport::new(vec![fixture(fixtures::USER_FEES)]);

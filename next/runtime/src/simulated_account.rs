@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
 use poise_strategy::units::Notional;
 
-use crate::account::{Account, AccountMode, ApiWallet};
+use crate::account::{Account, AccountMode, ApiWallet, MarginReading};
 use crate::exchange::ExchangeError;
 
 /// 默认的可用抵押：足够大，不会意外挡住配置。
@@ -26,6 +26,10 @@ struct SimAccount {
     collateral: Notional,
     /// 下一次查可用资金失败的原因。可用资金只用于展示，拿不到它不该挡住撤单。
     fail_next_collateral: Option<String>,
+    /// 保证金读数：默认没有任何占用，账户比率为 0。
+    margin: MarginReading,
+    /// 还要让几次保证金读数失败。
+    fail_margin: usize,
     fees: Fees,
     /// 各标的的合约规则，按标的符号索引。
     specs: HashMap<String, InstrumentSpec>,
@@ -42,6 +46,15 @@ impl SimulatedAccount {
                 wallets: Vec::new(),
                 collateral: Notional::parse(DEFAULT_COLLATERAL).expect("a valid default"),
                 fail_next_collateral: None,
+                margin: MarginReading {
+                    balance: Notional::parse(DEFAULT_COLLATERAL).expect("a valid default"),
+                    available_after_maintenance: Notional::parse(DEFAULT_COLLATERAL)
+                        .expect("a valid default"),
+                    cross_maintenance: Notional::ZERO,
+                    isolated_margin: Notional::ZERO,
+                    as_of: None,
+                },
+                fail_margin: 0,
                 fees,
                 specs,
             }),
@@ -81,6 +94,16 @@ impl SimulatedAccount {
         self.lock().fail_next_collateral = Some(reason.to_string());
     }
 
+    /// 保证金读数变了（例如用户在别的标的上加了仓）。
+    pub fn set_margin(&self, margin: MarginReading) {
+        self.lock().margin = margin;
+    }
+
+    /// 让接下来 `count` 次保证金读数失败：账户接口暂时不可用。
+    pub fn fail_margin(&self, count: usize) {
+        self.lock().fail_margin = count;
+    }
+
     /// 费率变了。
     pub fn set_fees(&self, fees: Fees) {
         self.lock().fees = fees;
@@ -115,6 +138,17 @@ impl Account for SimulatedAccount {
             return Err(ExchangeError::Unavailable { reason });
         }
         Ok(state.collateral)
+    }
+
+    async fn margin(&self) -> Result<MarginReading, ExchangeError> {
+        let mut state = self.lock();
+        if state.fail_margin > 0 {
+            state.fail_margin -= 1;
+            return Err(ExchangeError::Unavailable {
+                reason: "the margin summary is unavailable".to_string(),
+            });
+        }
+        Ok(state.margin)
     }
 
     async fn fees(&self) -> Result<Fees, ExchangeError> {

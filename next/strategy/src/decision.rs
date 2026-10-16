@@ -69,6 +69,20 @@ impl PauseReason {
 pub struct SystemState {
     /// 本策略有订单结果未知：交易所查不到它，又还不能判定它没有任何影响（第 9.2 节）。
     pub unknown_orders: bool,
+    /// 账户保证金率的状态（第 7.2、7.4 节）。
+    pub margin: MarginState,
+}
+
+/// 账户保证金率的状态。保证金是整个账户共用的，同一账户的所有策略看到的是同一个状态。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MarginState {
+    /// 读到了，没有超过停止阈值。
+    #[default]
+    Normal,
+    /// 读不到或数据过期：不发任何新单，已在场的挂单保留（第 7.2 节）。
+    Unavailable,
+    /// 超过停止阈值：只发、只保留只减仓单，其余挂单撤掉；回落后自动恢复（第 7.4 节）。
+    AboveStop,
 }
 
 /// 这一步允许发出哪些新订单（第 7.2 节）。
@@ -119,6 +133,9 @@ pub struct Decision {
     pub permits: Permits,
     /// 这一步为什么不能（全部）照常下单，记进规划的等待原因。
     pub waiting: Vec<WaitReason>,
+    /// 在场的非只减仓单要不要撤掉：保证金率超过停止阈值时，账户只保留只减仓单（第 7.4 节）。
+    /// 其他关闸的情况只是不发新单，在场的挂单保留。
+    pub withdraw_increasing: bool,
     /// 还没有对完账、这一侧不能下新单的单位与用途。
     pub blocked: Vec<PendingUnit>,
 }
@@ -149,10 +166,12 @@ pub fn judge(
             pause,
             permits: Permits::NONE,
             waiting: vec![reason.wait_reason()],
+            withdraw_increasing: false,
             blocked,
         };
     }
 
+    // 数据还在变、有订单结果未知、保证金率读不到：两种新单都不发。
     let mut waiting = Vec::new();
     if position == PositionCheck::Unstable {
         waiting.push(WaitReason::PositionUnstable);
@@ -160,14 +179,25 @@ pub fn judge(
     if system.unknown_orders {
         waiting.push(WaitReason::OrderResultUnknown);
     }
+    if system.margin == MarginState::Unavailable {
+        waiting.push(WaitReason::MarginRatioUnavailable);
+    }
+    let mut permits = if waiting.is_empty() {
+        Permits::ALL
+    } else {
+        Permits::NONE
+    };
+    // 保证金率超过停止阈值：只减仓单照常（单侧网格的格子平仓单就是），其余的不发也不留。
+    let withdraw_increasing = system.margin == MarginState::AboveStop;
+    if withdraw_increasing {
+        waiting.push(WaitReason::MarginRatioAboveStopThreshold);
+        permits.increase = false;
+    }
     Decision {
         pause: None,
-        permits: if waiting.is_empty() {
-            Permits::ALL
-        } else {
-            Permits::NONE
-        },
+        permits,
         waiting,
+        withdraw_increasing,
         blocked,
     }
 }
@@ -364,9 +394,9 @@ pub fn signed_delta(side: Side, quantity: Quantity) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Decision, MissingFact, OrderState, PauseReason, Permits, PositionCheck, PositionReading,
-        SystemState, expected_position, fills_settled, inconsistent_fill_records, judge,
-        missing_facts, pending_units, position_check, unbooked_quantity,
+        Decision, MarginState, MissingFact, OrderState, PauseReason, Permits, PositionCheck,
+        PositionReading, SystemState, expected_position, fills_settled, inconsistent_fill_records,
+        judge, missing_facts, pending_units, position_check, unbooked_quantity,
     };
     use crate::batch::BatchIndex;
     use crate::grid::CellIndex;
@@ -713,6 +743,7 @@ mod tests {
             &[],
             SystemState {
                 unknown_orders: true,
+                ..SystemState::default()
             },
         );
 
@@ -730,6 +761,7 @@ mod tests {
             &[],
             SystemState {
                 unknown_orders: true,
+                ..SystemState::default()
             },
         );
 
@@ -783,6 +815,68 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    /// B36：保证金率读不到时不发任何新单，已在场的挂单保留。
+    #[test]
+    fn b36_an_unreadable_margin_ratio_closes_the_gate() {
+        let decision = judge(
+            PositionCheck::Consistent,
+            None,
+            &[],
+            SystemState {
+                margin: MarginState::Unavailable,
+                ..SystemState::default()
+            },
+        );
+
+        assert_eq!(decision.permits, Permits::NONE);
+        assert!(!decision.withdraw_increasing);
+        assert_eq!(decision.waiting, vec![WaitReason::MarginRatioUnavailable]);
+    }
+
+    /// B35：保证金率超过停止阈值时只发、只保留只减仓单。
+    #[test]
+    fn b35_a_margin_ratio_above_the_stop_threshold_keeps_only_reduce_only_orders() {
+        let decision = judge(
+            PositionCheck::Consistent,
+            None,
+            &[],
+            SystemState {
+                margin: MarginState::AboveStop,
+                ..SystemState::default()
+            },
+        );
+
+        assert_eq!(
+            decision.permits,
+            Permits {
+                increase: false,
+                reduce: true,
+            }
+        );
+        assert!(decision.withdraw_increasing);
+        assert_eq!(
+            decision.waiting,
+            vec![WaitReason::MarginRatioAboveStopThreshold]
+        );
+    }
+
+    /// 超过停止阈值又有订单结果未知：只减仓单也不发，但非只减仓单照样撤。
+    #[test]
+    fn an_unknown_order_also_stops_reduce_only_orders_above_the_stop_threshold() {
+        let decision = judge(
+            PositionCheck::Consistent,
+            None,
+            &[],
+            SystemState {
+                unknown_orders: true,
+                margin: MarginState::AboveStop,
+            },
+        );
+
+        assert_eq!(decision.permits, Permits::NONE);
+        assert!(decision.withdraw_increasing);
     }
 
     /// B16：任一项不满足就不能释放，并说清楚缺的是哪一项。

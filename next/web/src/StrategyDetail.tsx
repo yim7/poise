@@ -5,7 +5,7 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, pauseSummary, resumeSummary, stopSummary } from './api'
-import { decimal, timestamp } from './format'
+import { decimal, percent, timestamp } from './format'
 import { kindLabel, statusLabel, waitReasonLabel } from './labels'
 import { BatchTable, CellTable, ConfigVersionTable, OrdersTable } from './tables'
 import { ThrottleEditor } from './ThrottleEditor'
@@ -146,6 +146,10 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
         <div>
           <dt>可用 USDC</dt>
           <dd>{decimal(strategy.available_collateral)}</dd>
+        </div>
+        <div>
+          <dt>账户保证金率</dt>
+          <dd>{percent(strategy.margin_ratio)}</dd>
         </div>
         <div>
           <dt>交易所仓位</dt>

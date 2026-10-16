@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use poise_strategy::Strategy;
 use poise_strategy::order::WorkingOrder;
-use poise_strategy::units::Notional;
+use poise_strategy::units::{Notional, Rate};
 
 use crate::store::{StrategyId, StrategyStatus, ViewSnapshot};
 
@@ -45,6 +45,7 @@ impl Runtime {
             taken_at: view.taken_at,
             market_price: view.market_price,
             available_collateral: view.available_collateral,
+            margin_ratio: view.margin_ratio,
             position: view.position,
             expected_position: view.expected_position,
             note: view.note,
@@ -103,6 +104,7 @@ impl Runtime {
         strategy_id: &StrategyId,
         report: &StepReport,
         available_collateral: Notional,
+        margin_ratio: Option<Rate>,
         note: Option<String>,
         now: DateTime<Utc>,
     ) -> Result<(), RuntimeError> {
@@ -114,6 +116,7 @@ impl Runtime {
             position: report.position,
             expected_position: report.expected_position,
             available_collateral,
+            margin_ratio,
             waiting: report.plan.waiting.clone(),
         };
         self.store.save_view(strategy_id, &view)?;
