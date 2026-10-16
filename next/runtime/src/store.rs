@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use poise_strategy::batch::BatchIndex;
 use poise_strategy::config::StrategyConfig;
 use poise_strategy::planning::WaitReason;
@@ -532,6 +532,14 @@ const TABLES: &str = "
              CREATE TABLE IF NOT EXISTS account_settings (
                  id INTEGER PRIMARY KEY CHECK (id = 1),
                  settings_json TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS pause_reasons (
+                 strategy_id TEXT PRIMARY KEY,
+                 reason TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS action_counts (
+                 day TEXT PRIMARY KEY,
+                 count INTEGER NOT NULL
              );";
 
 impl Store {
@@ -923,6 +931,67 @@ impl Store {
             params![serde_json::to_string(settings)?],
         )?;
         Ok(())
+    }
+
+    /// 记下策略为什么被暂停：撤单收尾要好几轮，每轮的进度说明会覆盖视图里的说明，暂停原因
+    /// 单独存，一直显示到恢复（B30）。
+    pub fn save_pause_reason(
+        &self,
+        strategy_id: &StrategyId,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        self.lock().execute(
+            "INSERT INTO pause_reasons (strategy_id, reason) VALUES (?1, ?2)
+             ON CONFLICT (strategy_id) DO UPDATE SET reason = excluded.reason",
+            params![strategy_id.as_str(), reason],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_pause_reason(
+        &self,
+        strategy_id: &StrategyId,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT reason FROM pause_reasons WHERE strategy_id = ?1",
+                params![strategy_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    /// 恢复时清掉暂停原因。
+    pub fn clear_pause_reason(&self, strategy_id: &StrategyId) -> Result<(), StoreError> {
+        self.lock().execute(
+            "DELETE FROM pause_reasons WHERE strategy_id = ?1",
+            params![strategy_id.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// 给某个 UTC 日的操作次数加上 `count`（第 10 节）：每次下单、撤单记一次。
+    pub fn record_actions(&self, day: NaiveDate, count: u64) -> Result<(), StoreError> {
+        self.lock().execute(
+            "INSERT INTO action_counts (day, count) VALUES (?1, ?2)
+             ON CONFLICT (day) DO UPDATE SET count = count + excluded.count",
+            params![day.to_string(), count as i64],
+        )?;
+        Ok(())
+    }
+
+    /// 某个 UTC 日已经记下的操作次数；还没有记录时是 0。
+    pub fn action_count(&self, day: NaiveDate) -> Result<u64, StoreError> {
+        let count = self
+            .lock()
+            .query_row(
+                "SELECT count FROM action_counts WHERE day = ?1",
+                params![day.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(count.map_or(0, |count| count.max(0) as u64))
     }
 
     /// 读一个策略最近一份视图快照。

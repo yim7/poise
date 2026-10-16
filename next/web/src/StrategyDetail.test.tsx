@@ -49,6 +49,14 @@ describe('运行详情', () => {
     expect(screen.getByText('1.23%')).toBeInTheDocument()
   })
 
+  it('b30_显示今日操作次数和每日上限', async () => {
+    detailRoutes()
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    expect(await screen.findByText('今日操作次数')).toBeInTheDocument()
+    expect(screen.getByText('12 / 50000')).toBeInTheDocument()
+  })
+
   it('b36_保证金率读不到时显示读不到和对应的等待原因', async () => {
     detailRoutes({
       'GET /api/strategies/s-1': {

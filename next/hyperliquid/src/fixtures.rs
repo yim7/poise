@@ -230,6 +230,12 @@ pub(crate) const ORDER_FILLED: &str = r#"{
   "response": {"type": "order", "data": {"statuses": [{"filled": {"oid": 1005, "totalSz": "0.001", "avgPx": "95000.0"}}]}}
 }"#;
 
+/// 下单因为按地址的累计请求上限被拒（原话格式来自社区报告，文档没有给出）。
+pub(crate) const ORDER_RATE_LIMITED: &str = r#"{
+  "status": "ok",
+  "response": {"type": "order", "data": {"statuses": [{"error": "Too many cumulative requests sent (10001 > 10000) for cumulative volume traded $0.00. Place taker orders to free up 1 request per USDC traded."}]}}
+}"#;
+
 /// 下单被拒。
 pub(crate) const ORDER_REJECTED: &str = r#"{
   "status": "ok",

@@ -17,6 +17,9 @@ interface StrategyDetailViewProps {
   onBack: () => void
 }
 
+/** Unified 账户每天最多的用户操作次数（第 10 节），和服务端的上限一致。 */
+const DAILY_ACTION_LIMIT = 50000
+
 export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewProps) {
   const detail = useQuery({
     queryKey: ['strategy', strategyId],
@@ -172,6 +175,13 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
         <div>
           <dt>读数时刻</dt>
           <dd>{timestamp(strategy.taken_at)}</dd>
+        </div>
+        {/* 全账户的计数：同一账户的所有策略共用每天 5 万次的上限，超过 80% 时说明里会提醒。 */}
+        <div>
+          <dt>今日操作次数</dt>
+          <dd>
+            {strategy.actions_today} / {DAILY_ACTION_LIMIT}
+          </dd>
         </div>
       </dl>
       {willPause ? <p className="error">仓位核对失败：策略会被暂停，先核对再恢复。</p> : null}

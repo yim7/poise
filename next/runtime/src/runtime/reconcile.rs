@@ -331,6 +331,7 @@ impl Runtime {
         now: DateTime<Utc>,
     ) -> Result<bool, RuntimeError> {
         let client_order_id = order.record.client_order_id.clone();
+        self.count_action();
         let outcome = self
             .exchange
             .cancel_order(instrument, &client_order_id)
@@ -363,6 +364,15 @@ impl Runtime {
                     "cancel rejected"
                 );
                 Err(ExchangeError::Rejected { reason }.into())
+            }
+            // 操作次数超限：撤销没有发生，订单还在场。报给调用方暂停策略（B30）。
+            Err(ExchangeError::RateLimited { reason }) => {
+                tracing::error!(
+                    client_order_id = %client_order_id,
+                    reason = %reason,
+                    "cancel rejected for too many requests"
+                );
+                Err(ExchangeError::RateLimited { reason }.into())
             }
             Err(error) => {
                 tracing::warn!(

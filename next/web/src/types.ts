@@ -283,6 +283,8 @@ export interface StrategyDetail {
   orders: StoredOrder[]
   waiting: WaitReason[]
   config_versions: StoredConfigVersion[]
+  /** 今天（UTC）全账户已经发出的下单、撤单次数；Unified 账户每天上限 5 万次（第 10 节）。 */
+  actions_today: number
 }
 
 /** 恢复的结果：一直在跑、等遗留订单过期、遗留订单没收场、或者真的恢复了。 */

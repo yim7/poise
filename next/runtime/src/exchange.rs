@@ -91,6 +91,10 @@ pub enum ExchangeError {
     /// 拒绝，单独列出来，调用方据此退避重试，不要每一步都再撞一次。
     #[error("exchange rejected the order for insufficient margin: {reason}")]
     InsufficientMargin { reason: String },
+    /// 交易所以操作次数超限拒绝（第 10 节，B30）：Unified 账户每天的用户操作上限，或者
+    /// 按地址的累计请求上限。和明确拒绝一样没有落地；单独列出来，调用方据此暂停策略。
+    #[error("exchange rejected the action for too many requests: {reason}")]
+    RateLimited { reason: String },
     /// 交易所不认识这个客户端订单 ID。
     #[error("exchange does not know client order id `{client_order_id}`")]
     UnknownOrder { client_order_id: ClientOrderId },

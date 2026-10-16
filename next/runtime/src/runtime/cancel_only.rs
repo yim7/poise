@@ -423,6 +423,8 @@ impl Runtime {
             // 三条路都先落到「恢复中」：用户点的恢复和常驻服务的启动恢复走的是同一条
             // 规则——遗留订单收干净之前一张新单都不下（[`Runtime::resume_inner`]）。
             StrategyStatus::Paused | StrategyStatus::Pausing | StrategyStatus::Restoring => {
+                // 用户点了恢复，就是处理过暂停原因了。
+                self.store.clear_pause_reason(strategy_id)?;
                 self.store
                     .save_strategy_status(strategy_id, StrategyStatus::Restoring, now)?;
                 self.resume_inner(strategy_id, now).await

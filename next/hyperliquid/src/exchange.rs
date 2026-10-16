@@ -373,11 +373,7 @@ fn ordered_fills(unique: HashMap<u64, FillResponse>) -> Vec<ExchangeFill> {
 fn order_receipt(response: &Value) -> Result<OrderReceipt, ExchangeError> {
     match response.get("status").and_then(Value::as_str) {
         Some("ok") => {}
-        Some("err") => {
-            return Err(ExchangeError::Rejected {
-                reason: exchange_message(response),
-            });
-        }
+        Some("err") => return Err(rejection(exchange_message(response))),
         other => {
             return Err(ExchangeError::Unknown {
                 reason: format!(
@@ -396,15 +392,7 @@ fn order_receipt(response: &Value) -> Result<OrderReceipt, ExchangeError> {
         })?;
     let status = &statuses[0];
     if let Some(error) = status.get("error").and_then(Value::as_str) {
-        // 交易所的原话是 `Insufficient margin to place order.`：按关键词认，措辞小改也认得出。
-        if error.to_ascii_lowercase().contains("insufficient margin") {
-            return Err(ExchangeError::InsufficientMargin {
-                reason: error.to_string(),
-            });
-        }
-        return Err(ExchangeError::Rejected {
-            reason: error.to_string(),
-        });
+        return Err(rejection(error.to_string()));
     }
     if let Some(resting) = status.get("resting") {
         return Ok(OrderReceipt {
@@ -427,16 +415,30 @@ fn order_receipt(response: &Value) -> Result<OrderReceipt, ExchangeError> {
     })
 }
 
+/// 交易所拒绝下单时按原话分类。
+///
+/// - 保证金不足：原话是 `Insufficient margin to place order.`，按关键词认，措辞小改也认得出。
+/// - 操作次数超限（B30）：只认有出处的那一种，按地址的累计上限，原话以
+///   `Too many cumulative requests sent` 开头。Unified 账户每天 5 万次上限的原话文档没有
+///   给出、测试网也打不满，认不出来就按普通拒绝处理；`Too many open orders` 这类别的上限
+///   也是普通拒绝，不能因此暂停策略。
+fn rejection(reason: String) -> ExchangeError {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("insufficient margin") {
+        ExchangeError::InsufficientMargin { reason }
+    } else if lower.contains("too many cumulative requests") {
+        ExchangeError::RateLimited { reason }
+    } else {
+        ExchangeError::Rejected { reason }
+    }
+}
+
 /// 撤单回执。交易所说「已经撤过或已成交」时，这张单的结局只能靠查状态定，
 /// 所以要报「不认识这张单」而不是「拒绝」——后者会让调用方释放预留。
 fn cancel_outcome(response: &Value, client_order_id: &ClientOrderId) -> Result<(), ExchangeError> {
     match response.get("status").and_then(Value::as_str) {
         Some("ok") => {}
-        Some("err") => {
-            return Err(ExchangeError::Rejected {
-                reason: exchange_message(response),
-            });
-        }
+        Some("err") => return Err(rejection(exchange_message(response))),
         other => {
             return Err(ExchangeError::Unknown {
                 reason: format!(
@@ -465,20 +467,19 @@ fn cancel_outcome(response: &Value, client_order_id: &ClientOrderId) -> Result<(
             // 它以前也说过 `Order has already been canceled or filled.`。
             // 所以按「撤掉 / 成交 / 压根没落地 / 不认识」这几个词判，而不是认整句——
             // 措辞一变就漏判，会把「已经不在场」说成「拒绝」。
-            let error = error.to_ascii_lowercase();
-            if error.contains("never placed")
-                || error.contains("canceled")
-                || error.contains("cancelled")
-                || error.contains("filled")
-                || error.contains("unknown")
+            let lower = error.to_ascii_lowercase();
+            if lower.contains("never placed")
+                || lower.contains("canceled")
+                || lower.contains("cancelled")
+                || lower.contains("filled")
+                || lower.contains("unknown")
             {
                 return Err(ExchangeError::UnknownOrder {
                     client_order_id: client_order_id.clone(),
                 });
             }
-            Err(ExchangeError::Rejected {
-                reason: exchange_message(response),
-            })
+            // 分类要看这张单自己的原话：顶层 `response` 在这里不是字符串，读不出原话。
+            Err(rejection(error.to_string()))
         }
         _ => Err(ExchangeError::Unknown {
             reason: "the exchange returned a cancel status this adapter does not know".to_string(),

@@ -41,6 +41,10 @@ struct SimState {
     next_order_id: u64,
     next_trade_id: u64,
     reject_next_place: Option<String>,
+    /// 下一次下单以操作次数超限被拒的原因。
+    rate_limit_next_place: Option<String>,
+    /// 还要让几次撤单以操作次数超限被拒。
+    rate_limit_cancels: usize,
     unknown_next_place: Option<String>,
     /// 还要以保证金不足拒绝几张会增加敞口的单（非只减仓）。
     reject_for_margin: usize,
@@ -168,6 +172,8 @@ impl SimulatedExchange {
                 delay_next_fills: 0,
                 next_order_id: 0,
                 next_trade_id: 0,
+                rate_limit_next_place: None,
+                rate_limit_cancels: 0,
                 reject_next_place: None,
                 unknown_next_place: None,
                 lose_next_place_response: None,
@@ -458,6 +464,16 @@ impl SimulatedExchange {
         self.lock().reject_next_place = Some(reason.to_string());
     }
 
+    /// 让接下来 `count` 次撤单以操作次数超限被拒（B30）。
+    pub fn rate_limit_cancels(&self, count: usize) {
+        self.lock().rate_limit_cancels = count;
+    }
+
+    /// 让下一次下单以操作次数超限被拒（B30）。
+    pub fn rate_limit_next_place(&self, reason: &str) {
+        self.lock().rate_limit_next_place = Some(reason.to_string());
+    }
+
     /// 让下一次下单结果未知：交易所没有收到这张单，也没有明确拒绝。
     pub fn unknown_next_place(&self, reason: &str) {
         self.lock().unknown_next_place = Some(reason.to_string());
@@ -654,6 +670,9 @@ impl Exchange for SimulatedExchange {
         if let Some(reason) = state.reject_next_place.take() {
             return Err(ExchangeError::Rejected { reason });
         }
+        if let Some(reason) = state.rate_limit_next_place.take() {
+            return Err(ExchangeError::RateLimited { reason });
+        }
         if let Some(reason) = state.unknown_next_place.take() {
             return Err(ExchangeError::Unknown { reason });
         }
@@ -724,6 +743,12 @@ impl Exchange for SimulatedExchange {
             state.unknown_cancels -= 1;
             let reason = state.unknown_cancel_reason.clone();
             return Err(ExchangeError::Unknown { reason });
+        }
+        if state.rate_limit_cancels > 0 {
+            state.rate_limit_cancels -= 1;
+            return Err(ExchangeError::RateLimited {
+                reason: "Too many cumulative requests sent".to_string(),
+            });
         }
         if state.reject_cancels > 0 {
             state.reject_cancels -= 1;

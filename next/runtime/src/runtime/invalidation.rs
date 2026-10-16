@@ -181,9 +181,12 @@ impl Runtime {
                 )
                 .await?
             {
+                // 失效中不因为操作次数超限暂停：止损要继续，超限后交易所仍然每 10 秒放行一次，
+                // 下一步照常重试。
                 Placement::Sent(client_order_id)
                 | Placement::Rejected(client_order_id)
-                | Placement::MarginRejected(client_order_id) => placed.push(client_order_id),
+                | Placement::MarginRejected(client_order_id)
+                | Placement::RateLimited(client_order_id) => placed.push(client_order_id),
                 Placement::NotSent => {}
                 Placement::StaleMarket => stale = true,
             }

@@ -22,7 +22,7 @@ use super::{
     Cancels, Executed, NewOrders, POSITION_CHECK_ROUNDS, Reading, Runtime, RuntimeError, Snapshot,
     StepReport, Synced, order_states,
 };
-use super::{fresh, percent};
+use super::{DAILY_ACTION_LIMIT, fresh, percent};
 
 impl Runtime {
     /// 走一步。
@@ -92,12 +92,31 @@ impl Runtime {
             .await;
         let margin_ratio = margin_reading.map(|(ratio, _)| ratio);
         let margin = margin_state(margin_ratio, &settings);
-        let withdrawn = if margin == MarginState::AboveStop {
+        let (withdrawn, withdraw_rate_limited) = if margin == MarginState::AboveStop {
             self.withdraw_increasing_now(strategy_id, &strategy, &mut orders, now)
                 .await?
         } else {
-            Vec::new()
+            (Vec::new(), false)
         };
+        // 提前撤单就被以操作次数超限拒绝：后面的读取和规划不做了，直接暂停（B30）。暂停的
+        // 撤单轮会把每张单都再试一遍。
+        if withdraw_rate_limited {
+            self.store
+                .save_pause_reason(strategy_id, RATE_LIMITED_NOTE)?;
+            let (status, round) = self
+                .pause_inner(strategy_id, &strategy, &mut state, &mut orders, now)
+                .await?;
+            let mut report = self.nothing_happened(strategy_id, status);
+            report.canceled = withdrawn.into_iter().chain(round.canceled).collect();
+            report.applied_fills = round.applied_fills;
+            let note = join_notes([
+                Some(RATE_LIMITED_NOTE.to_string()),
+                cancel_only_note(&orders, status, None),
+            ])
+            .unwrap_or_default();
+            self.annotate_view(strategy_id, status, note).await?;
+            return Ok(report);
+        }
 
         let snapshot = match self
             .read_step(
@@ -213,7 +232,56 @@ impl Runtime {
                 },
                 now,
             )
+            .await;
+        let executed = match executed {
+            Ok(executed) => executed,
+            // 撤单被以操作次数超限拒绝：这一步剩下的撤单、下单都不做，同样暂停。已经撤掉的
+            // 单都已逐张落库。
+            Err(RuntimeError::Exchange(ExchangeError::RateLimited { .. })) => Executed {
+                placed: Vec::new(),
+                canceled: Vec::new(),
+                rate_limited: true,
+            },
+            Err(error) => return Err(error),
+        };
+
+        // 被交易所以操作次数超限拒绝：继续自动重试只会一直被拒，暂停交给用户处理（第 10 节，
+        // B30）。暂停的撤单还会继续发：交易所给撤单的额度比别的操作高。
+        if executed.rate_limited {
+            self.store
+                .save_pause_reason(strategy_id, RATE_LIMITED_NOTE)?;
+            let (status, round) = self
+                .pause_inner(strategy_id, &strategy, &mut state, &mut orders, now)
+                .await?;
+            let report = StepReport {
+                strategy_id: strategy_id.clone(),
+                status,
+                plan,
+                placed: executed.placed,
+                canceled: withdrawn
+                    .into_iter()
+                    .chain(executed.canceled)
+                    .chain(round.canceled)
+                    .collect(),
+                applied_fills: snapshot.applied_fills + round.applied_fills,
+                position: snapshot.reading.actual,
+                expected_position: snapshot.reading.expected,
+            };
+            let note = join_notes([
+                Some(RATE_LIMITED_NOTE.to_string()),
+                cancel_only_note(&orders, status, None),
+            ]);
+            self.save_view(
+                strategy_id,
+                &report,
+                snapshot.available_collateral,
+                margin_ratio,
+                note,
+                now,
+            )
             .await?;
+            return Ok(report);
+        }
 
         // 格子状态在每次记账时就已经和订单记录一起落盘了。
         self.store.save_fills_synced_through(strategy_id, now)?;
@@ -237,7 +305,11 @@ impl Runtime {
             position: snapshot.reading.actual,
             expected_position: snapshot.reading.expected,
         };
-        let note = join_notes([unknown.note(), margin_alert_note(margin_ratio, &settings)]);
+        let note = join_notes([
+            unknown.note(),
+            margin_alert_note(margin_ratio, &settings),
+            self.actions_today().ok().and_then(action_alert_note),
+        ]);
         self.save_view(
             strategy_id,
             &report,
@@ -289,9 +361,10 @@ impl Runtime {
         strategy: &Strategy,
         orders: &mut [StoredOrder],
         now: DateTime<Utc>,
-    ) -> Result<Vec<ClientOrderId>, RuntimeError> {
+    ) -> Result<(Vec<ClientOrderId>, bool), RuntimeError> {
         let instrument = strategy.spec().instrument().clone();
         let mut canceled = Vec::new();
+        let mut rate_limited = false;
         for order in orders
             .iter_mut()
             .filter(|order| order.record.is_working() && !order.record.reduce_only)
@@ -303,6 +376,10 @@ impl Runtime {
                     canceled.push(order.record.client_order_id.clone());
                 }
                 Ok(false) => {}
+                // 超限：其余的单照样试，撤完再报给调用方暂停（B30）。
+                Err(RuntimeError::Exchange(ExchangeError::RateLimited { .. })) => {
+                    rate_limited = true;
+                }
                 Err(error) => tracing::warn!(
                     strategy = %strategy_id,
                     client_order_id = %order.record.client_order_id,
@@ -318,7 +395,7 @@ impl Runtime {
                 "margin ratio above the stop threshold, withdrew the increasing orders"
             );
         }
-        Ok(canceled)
+        Ok((canceled, rate_limited))
     }
 
     /// 判定要暂停时收尾：先落「暂停中」，撤单、对账，返回这一步的报告。
@@ -611,6 +688,7 @@ impl Runtime {
             .await?;
         drop_blocked_places(plan, orders);
 
+        let mut rate_limited = false;
         let placed = if cancels.uncertain {
             // 同一步里既有可能过期的未知订单、又有撤销结果不明时，这条原因只报一次。
             if !plan.waiting.contains(&WaitReason::OrderResultUnknown) {
@@ -711,6 +789,13 @@ impl Runtime {
                         stopped = Some(WaitReason::StaleMarketData);
                         break;
                     }
+                    // 操作次数超限：后面的单发了也一样被拒，这一步到此为止，调用方暂停策略。
+                    Placement::RateLimited(client_order_id) => {
+                        give_back(&mut funds);
+                        placed.push(client_order_id);
+                        rate_limited = true;
+                        break;
+                    }
                 };
                 placed.push(client_order_id.clone());
                 // 这张单结果未知：有结论之前本策略不发任何新订单（第 7.2 节），这一步剩下的
@@ -736,6 +821,7 @@ impl Runtime {
         Ok(Executed {
             placed,
             canceled: cancels.canceled,
+            rate_limited,
         })
     }
 
@@ -854,12 +940,14 @@ impl Runtime {
             SendOutcome::Accepted(None)
             | SendOutcome::Rejected
             | SendOutcome::MarginRejected
+            | SendOutcome::RateLimited
             | SendOutcome::Unknown => self.store.update_order(strategy_id, &order)?,
         }
         orders.push(order);
         Ok(match outcome {
             SendOutcome::MarginRejected => Placement::MarginRejected(client_order_id),
             SendOutcome::Rejected => Placement::Rejected(client_order_id),
+            SendOutcome::RateLimited => Placement::RateLimited(client_order_id),
             SendOutcome::Accepted(_) | SendOutcome::Unknown => Placement::Sent(client_order_id),
         })
     }
@@ -905,6 +993,7 @@ impl Runtime {
             },
             expires_at: order.expires_at,
         };
+        self.count_action();
         match self.exchange.place_order(&request).await {
             Ok(receipt) => {
                 order.exchange_order_id = Some(receipt.exchange_order_id);
@@ -937,6 +1026,18 @@ impl Runtime {
                     "order rejected for insufficient margin, backing off"
                 );
                 Ok(SendOutcome::MarginRejected)
+            }
+            // 操作次数超限同样是明确拒绝：单没有落地（第 10 节，B30）。
+            Err(ExchangeError::RateLimited { reason }) => {
+                order.record.status = OrderStatus::Rejected;
+                order.fills_reconciled = true;
+                tracing::error!(
+                    strategy = %strategy_id,
+                    client_order_id = %order.record.client_order_id,
+                    reason = %reason,
+                    "order rejected for too many requests, pausing the strategy"
+                );
+                Ok(SendOutcome::RateLimited)
             }
             Err(error) => {
                 order.record.status = OrderStatus::Unknown;
@@ -1011,6 +1112,19 @@ fn margin_alert_note(ratio: Option<Rate>, settings: &AccountSettings) -> Option<
     }
 }
 
+/// 被交易所以操作次数超限拒绝之后暂停的原因（B30）。
+const RATE_LIMITED_NOTE: &str =
+    "交易所以操作次数超限拒绝了请求，策略已暂停：减少格子或加大间距，确认额度恢复后再恢复。";
+
+/// 当日操作次数超过上限的 80% 时的提醒（第 10 节，B30）。
+fn action_alert_note(actions: u64) -> Option<String> {
+    (actions * 10 > DAILY_ACTION_LIMIT * 8).then(|| {
+        format!(
+            "今日操作次数 {actions}，超过每日上限 {DAILY_ACTION_LIMIT} 次的 80%：考虑减少格子或加大间距。"
+        )
+    })
+}
+
 /// 把几句说明接成一段；一句都没有时是 `None`。
 fn join_notes<const N: usize>(notes: [Option<String>; N]) -> Option<String> {
     let notes: Vec<String> = notes.into_iter().flatten().collect();
@@ -1048,6 +1162,8 @@ pub(super) enum SendOutcome {
     Rejected,
     /// 以保证金不足明确拒绝：调用方要退避（第 10 节）。
     MarginRejected,
+    /// 以操作次数超限明确拒绝：调用方要暂停策略（B30）。
+    RateLimited,
     /// 结果未知。
     Unknown,
 }
@@ -1060,6 +1176,8 @@ pub(super) enum Placement {
     Rejected(ClientOrderId),
     /// 发出去了，交易所以保证金不足拒绝：记录留在库里，这个单位要退避。
     MarginRejected(ClientOrderId),
+    /// 发出去了，交易所以操作次数超限拒绝：记录留在库里，单没有落地，策略要暂停。
+    RateLimited(ClientOrderId),
     /// 写完库发现有效期已经不够，没发；记录已删掉。
     NotSent,
     /// 写完库发现行情已经过期，没发；记录已删掉。这一步剩下的单也不该再发。

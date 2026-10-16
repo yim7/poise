@@ -189,6 +189,45 @@ async fn an_immediate_or_cancel_order_is_sent_as_ioc_and_a_partial_fill_is_cance
     assert_eq!(receipt.status, OrderStatus::Canceled);
 }
 
+/// B30：操作次数超限的拒绝单独认出来，运行时据此暂停策略。
+#[tokio::test]
+async fn place_order_reports_a_rate_limit_rejection() {
+    let transport = FakeTransport::new(vec![
+        fixture(fixtures::META),
+        fixture(fixtures::ORDER_RATE_LIMITED),
+    ]);
+    let client = client(transport, fixed_clock(NOW_MS));
+
+    let error = client
+        .place_order(&request("0.001", "94000"))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, ExchangeError::RateLimited { .. }),
+        "{error:?}"
+    );
+}
+
+/// 别的上限（例如挂单数）不是操作次数超限：按普通拒绝处理，不能让策略暂停。
+#[tokio::test]
+async fn other_limits_are_ordinary_rejections() {
+    let transport = FakeTransport::new(vec![
+        fixture(fixtures::META),
+        fixture(
+            r#"{"status": "ok", "response": {"type": "order", "data": {"statuses": [{"error": "Too many open orders."}]}}}"#,
+        ),
+    ]);
+    let client = client(transport, fixed_clock(NOW_MS));
+
+    let error = client
+        .place_order(&request("0.001", "94000"))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ExchangeError::Rejected { .. }), "{error:?}");
+}
+
 #[tokio::test]
 async fn place_order_reports_a_rejection_with_the_exchange_reason() {
     let transport = FakeTransport::new(vec![
@@ -326,6 +365,28 @@ async fn cancel_order_of_an_order_that_is_already_gone_is_not_a_rejection() {
         // 报「拒绝」会让调用方按「这单没了」处理；这张单可能已经成交，必须说「不认识」。
         assert!(
             matches!(error, ExchangeError::UnknownOrder { .. }),
+            "unexpected error for {response}: {error}"
+        );
+    }
+}
+
+/// B30：撤单被以操作次数超限拒绝，顶层 `err` 和单张 `error` 两种回执都要认出来。
+#[tokio::test]
+async fn cancel_order_reports_a_rate_limit_rejection() {
+    for response in [
+        r#"{"status": "err", "response": "Too many cumulative requests sent (10001 > 10000) for cumulative volume traded $0.00."}"#,
+        r#"{"status": "ok", "response": {"type": "cancel", "data": {"statuses": [{"error": "Too many cumulative requests sent (10001 > 10000) for cumulative volume traded $0.00."}]}}}"#,
+    ] {
+        let transport = FakeTransport::new(vec![fixture(fixtures::META), fixture(response)]);
+        let client = client(transport, fixed_clock(NOW_MS));
+
+        let error = client
+            .cancel_order(&btc(), &cloid(CLOID))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, ExchangeError::RateLimited { .. }),
             "unexpected error for {response}: {error}"
         );
     }

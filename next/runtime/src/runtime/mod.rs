@@ -287,6 +287,8 @@ struct NewOrders {
 struct Executed {
     placed: Vec<ClientOrderId>,
     canceled: Vec<ClientOrderId>,
+    /// 有单被交易所以操作次数超限拒绝：调用方暂停策略（B30）。
+    rate_limited: bool,
 }
 
 /// 撤单的结果。
@@ -434,7 +436,13 @@ pub struct StrategyDetail {
     /// 最近一步在等什么。运行中的策略才有；暂停和归档的策略不在下单，没有什么可等的。
     pub waiting: Vec<WaitReason>,
     pub config_versions: Vec<StoredConfigVersion>,
+    /// 今天（UTC）全账户已经发出的下单、撤单次数，上限 [`DAILY_ACTION_LIMIT`]。
+    pub actions_today: u64,
 }
+
+/// Unified 账户每天最多的用户操作次数（第 10 节）。来源：Hyperliquid 文档「Account
+/// abstraction modes」。超过 80% 提醒。
+pub const DAILY_ACTION_LIMIT: u64 = 50_000;
 
 /// 等正在走的那一步时，每轮之间歇多久、最多等几轮（合起来约 3 秒）。
 const WAIT_STEP_MS: u64 = 200;
@@ -539,6 +547,18 @@ impl Runtime {
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// 今天（UTC）已经发出的下单、撤单请求次数（第 10 节）。
+    pub fn actions_today(&self) -> Result<u64, RuntimeError> {
+        Ok(self.store.action_count(self.clock.now().date_naive())?)
+    }
+
+    /// 记一次操作。只用于显示和提醒：记不下来不能挡住下单、撤单，尤其是撤单。
+    fn count_action(&self) {
+        if let Err(error) = self.store.record_actions(self.clock.now().date_naive(), 1) {
+            tracing::warn!(%error, "could not count an exchange action");
+        }
     }
 
     pub fn options(&self) -> &RuntimeOptions {

@@ -31,6 +31,7 @@ impl Runtime {
     /// 也不会挡住正在走的那一步。
     pub fn detail(&self, strategy_id: &StrategyId) -> Result<StrategyDetail, RuntimeError> {
         let summary = self.summary(strategy_id)?;
+        let status = summary.status;
         let stored = self.store.load_strategy(strategy_id)?;
         let view = self.store.load_view(strategy_id)?;
         let strategy = Strategy::new(stored.config.clone(), stored.spec.clone(), stored.fees)?;
@@ -53,7 +54,17 @@ impl Runtime {
             margin_ratio: view.margin_ratio,
             position: view.position,
             expected_position: view.expected_position,
-            note: view.note,
+            // 暂停原因单独存：撤单收尾的进度说明会覆盖视图里的说明（B30）。
+            note: match (status, self.store.load_pause_reason(strategy_id)?) {
+                (StrategyStatus::Pausing | StrategyStatus::Paused, Some(reason)) => {
+                    Some(match view.note {
+                        Some(note) if !note.starts_with(&reason) => format!("{reason}{note}"),
+                        Some(note) => note,
+                        None => reason,
+                    })
+                }
+                _ => view.note,
+            },
             batches: strategy.batch_summaries(&state),
             cells: strategy.cell_summaries(&state, &working),
             orders: orders
@@ -62,6 +73,7 @@ impl Runtime {
                 .collect(),
             waiting: view.waiting,
             config_versions: self.store.load_config_versions(strategy_id)?,
+            actions_today: self.actions_today()?,
         })
     }
 

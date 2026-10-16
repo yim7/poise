@@ -179,6 +179,7 @@ export function detail(overrides: Partial<StrategyDetail> = {}): StrategyDetail 
     orders,
     waiting: ['waiting_for_batch', 'price_not_reached'],
     config_versions: configVersions,
+    actions_today: 12,
     ...overrides,
   }
 }
