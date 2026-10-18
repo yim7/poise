@@ -323,7 +323,15 @@ impl Runtime {
             .cancel_only(strategy_id, strategy, state, orders, now)
             .await;
         applied_fills += cancel_only.applied_fills;
-        let cancel_error = cancel_only.cancel_error.or(cancel_only.reconcile_error);
+        let mut cancel_error = cancel_only.cancel_error.or(cancel_only.reconcile_error);
+        // 同步点只在这一轮补拉流水走通之后才往前推：流水起点只看它（第 9.3 节），补拉
+        // 失败还推的话，这段时间的流水就再也拉不到了。
+        if synced.is_ok()
+            && cancel_error.is_none()
+            && let Err(error) = self.store.save_fills_synced_through(strategy_id, now)
+        {
+            cancel_error = Some(error.into());
+        }
         if cancel_error.is_some() {
             // 撤完之后的核对同样会记账：写库失败时内存里的格子和订单已经改过了，道理和
             // 上面同步失败一样，丢掉内存、重新加载落盘的那一份。撤销本身已经逐张落库，
@@ -386,12 +394,7 @@ impl Runtime {
             .reconcile_orders(strategy_id, strategy, state, orders, now)
             .await
         {
-            Ok(reconciled) => {
-                applied_fills = reconciled.applied_fills;
-                if let Err(error) = self.store.save_fills_synced_through(strategy_id, now) {
-                    reconcile_error = Some(error.into());
-                }
-            }
+            Ok(reconciled) => applied_fills = reconciled.applied_fills,
             Err(error) => reconcile_error = Some(error),
         }
         tracing::info!(
@@ -679,11 +682,9 @@ impl Runtime {
 
 /// 只撤单的一步是否已经收尾：没有在场订单，而且每张订单的成交都对完了账。
 ///
-/// 只看「没有在场订单」是不够的：撤销只把订单变成终态，撤销前可能已经有成交、成交
-/// 记录也可能还没到。这时候归档，那段成交就再也没人补记了（第 9.2 节）。
-///
-/// 代价是：成交流水始终不到齐时，策略会一直停在「暂停中」「停止中」。这正是要的——
-/// 停在半路能被看见，静默归档会把差额藏起来。
+/// 只看「没有在场订单」是不够的：撤销只把订单变成终态，撤销前可能已经有成交。要等
+/// 交易所给出这张单的最终累计量、记进格子，才能归档，否则那段成交再也没人补记了
+/// （第 9.2 节）。成交流水不在这里等：它只是审计记录（第 9.3 节）。
 pub(super) fn cancel_only_settled(orders: &[StoredOrder]) -> bool {
     orders
         .iter()
@@ -692,9 +693,9 @@ pub(super) fn cancel_only_settled(orders: &[StoredOrder]) -> bool {
 
 /// 恢复的遗留订单是不是都收场了：没有还可能在场的订单。
 ///
-/// 不看成交对没对完账：恢复之后策略继续跑，流水还会再来，这一格的预留由规划按
-/// `FillsPending` 挡住，不会按旧数量补单。归档不一样——归档之后没有人再驱动这个策略，
-/// 所以「停止中」必须等到流水到齐（[`cancel_only_settled`]）。
+/// 不看成交对没对完账：恢复之后策略继续跑，下一步还会按交易所的说法记账，这一格的
+/// 预留由规划按 `FillsPending` 挡住，不会按旧数量补单。归档不一样——归档之后没有人再
+/// 驱动这个策略，所以「停止中」必须等到记完账（[`cancel_only_settled`]）。
 ///
 /// 结果从来没拿到过的订单（`Unknown`、`Submitting`）也算在场。交易所对它们只会回答
 /// 「查无此单」，撤销问不出结局（第 9.2 节）：它可能已经成交，这时候重新挂单，同一个
@@ -733,7 +734,8 @@ pub(super) fn settle_note(orders: &[StoredOrder], unknown: Option<&UnknownOrders
 
 /// 「暂停中」「停止中」为什么还没走完，写给用户看的一句话。
 ///
-/// 只说还差什么：撤单撤不掉要重试，成交没对完账要等流水，结果未知的要等三项核对。没有
+/// 只说还差什么：撤单撤不掉要重试，撤销后的最终成交量还没问到要等交易所，结果未知的要
+/// 等三项核对。没有
 /// 这些情况时是 `None`——那一刻状态马上就会转成「已暂停」或「已归档」，不需要解释。
 pub(super) fn cancel_only_note(
     orders: &[StoredOrder],

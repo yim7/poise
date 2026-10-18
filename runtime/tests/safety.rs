@@ -163,8 +163,8 @@ async fn a_position_mismatch_explained_by_an_unrecorded_fill_does_not_pause() {
     harness.step(0).await;
     let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
 
-    // 交易所已经成交 0.02，但这笔成交的时间戳早于拉取窗口，我们还没记入。
-    // 挂单快照里带着这个累计量，仓位差额能由它解释（第 7.1.3 节）。
+    // 交易所已经成交 0.02，但这笔成交的时间戳早于拉取窗口，流水拉不到。
+    // 挂单列表里带着这个累计量：按它记账，仓位对得上（第 7.1.3、9.3 节）。
     harness
         .exchange
         .inject_fill(
@@ -179,14 +179,18 @@ async fn a_position_mismatch_explained_by_an_unrecorded_fill_does_not_pause() {
     let report = harness.step(1).await;
 
     assert!(!report.is_paused());
-    assert_eq!(report.applied_fills, 0);
+    assert_eq!(report.applied_fills, 1);
     assert_eq!(report.position, Position::parse("0.02").unwrap());
     assert_eq!(report.expected_position, Position::parse("0.02").unwrap());
-    // 状态没有变：这一步照常挂单，不会因为差额而下单或撤单。
-    assert!(report.placed.is_empty());
     assert_eq!(
         harness.cell(0).to_buy_back,
-        Quantity::parse("0.05").unwrap()
+        Quantity::parse("0.03").unwrap()
+    );
+    // 买到的 .02 挂出卖单，买单剩下的 .03 留在场上。
+    assert_eq!(report.placed.len(), 1);
+    assert_eq!(
+        harness.at_exchange(&report.placed[0]).unwrap().quantity,
+        Quantity::parse("0.02").unwrap()
     );
 }
 
@@ -231,22 +235,26 @@ async fn pausing_absorbs_a_late_fill_older_than_the_fills_lookback() {
         .exchange
         .fill(&buy, Quantity::parse("0.02").unwrap(), at(0))
         .unwrap();
-    // 又走了很久：同步点被推到 at(120)，拉取窗口的下限因此高过这笔成交的时间。
+    // 又走了很久：这一步按挂单列表的累计量记账，挂出 .02 的卖单。
     harness.step(120).await;
     harness.exchange.deliver_delayed_fills();
 
     let canceled = harness.pause(121).await;
 
-    // 暂停要吸收最终成交（第 9.4 节）：这笔成交比同步点早得多，但订单是那时挂出去的，
-    // 所以它仍然在拉取范围内，不能漏掉。
-    assert_eq!(canceled.len(), 20);
+    // 暂停吸收最终成交（第 9.4 节）：成交早就按订单状态记了账，流水晚到不影响，
+    // 二十张买单和那张卖单都撤掉，格子不重复记账。
+    assert_eq!(canceled.len(), 21);
+    assert_eq!(
+        harness.runtime.status(&harness.strategy_id).unwrap(),
+        poise_runtime::StrategyStatus::Paused
+    );
     assert_eq!(
         harness.cell(0).to_buy_back,
         Quantity::parse("0.03").unwrap()
     );
 }
 
-/// 暂停后流水才到，而且已经超出回看窗口：恢复时要能补记。
+/// 暂停后流水才到，而且已经超出回看窗口：成交早就按订单状态记了账，恢复照常，不重复记账。
 #[tokio::test]
 async fn a_fill_delivered_after_the_pause_is_still_recorded_on_resume() {
     let harness = harness().await;
@@ -258,12 +266,10 @@ async fn a_fill_delivered_after_the_pause_is_still_recorded_on_resume() {
         .exchange
         .fill(&buy, Quantity::parse("0.02").unwrap(), at(0))
         .unwrap();
-    // 走到 t=120：挂单累计量解释了仓位差额，同步点推到 120。
+    // 走到 t=120：按挂单列表的累计量记入 .02，挂出它的卖单。
     harness.step(120).await;
-    // 暂停先撤单，再按订单状态核对：格子按订单累计量记入 .02，但流水还查不到，
-    // 这一格的成交没有对完账。
     let canceled = harness.pause(120).await;
-    assert_eq!(canceled.len(), 20);
+    assert_eq!(canceled.len(), 21);
     assert_eq!(
         harness.cell(0).to_buy_back,
         Quantity::parse("0.03").unwrap(),
@@ -284,14 +290,8 @@ async fn a_fill_delivered_after_the_pause_is_still_recorded_on_resume() {
         panic!("expected a resumed step, got {outcome:?}");
     };
 
-    // 流水到了：时间戳早于同步点，回查起点仍然追到它挂出去的时刻，流水照样补进表里，
-    // 而且不重复记账。
+    // 记过的账不重记。t=0 的流水早于回看窗口，不再去追：流水只是审计记录。
     assert_eq!(report.applied_fills, 0, "the fill was already booked");
-    assert_eq!(
-        harness.runtime.fills(&harness.strategy_id).unwrap().len(),
-        1,
-        "the late fill must be recorded"
-    );
     assert_eq!(
         harness.cell(0).to_buy_back,
         Quantity::parse("0.03").unwrap()
@@ -320,18 +320,21 @@ async fn a_fill_hidden_from_the_fills_query_does_not_pause_the_strategy() {
 
     let report = harness.step(1).await;
 
-    // 二次核对重新取挂单快照，累计量 0.02 解释了仓位差额。
+    // 二次核对重新取挂单快照，按累计量 0.02 记账，仓位对得上。
     assert!(!report.is_paused());
-    assert_eq!(report.applied_fills, 0, "the fill record is still hidden");
+    assert_eq!(
+        report.applied_fills, 1,
+        "booked from the fresh working list"
+    );
     assert_eq!(report.position, Position::parse("0.02").unwrap());
     assert_eq!(report.expected_position, Position::parse("0.02").unwrap());
 
-    // 流水到手后照常入账。
+    // 流水到手：只进流水表，不重复记账。
     harness.exchange.deliver_delayed_fills();
     let report = harness.step(2).await;
 
     assert!(!report.is_paused());
-    assert_eq!(report.applied_fills, 1);
+    assert_eq!(report.applied_fills, 0);
     assert_eq!(
         harness.cell(0).to_buy_back,
         Quantity::parse("0.03").unwrap()
@@ -353,20 +356,8 @@ async fn a_fully_filled_order_whose_fill_record_is_late_is_not_replaced() {
 
     let report = harness.step(1).await;
 
-    // 订单从挂单列表里消失，但交易所说它已成交：不能判成撤销、不能在同一个格子
-    // 再挂一张新买单，也不能因为仓位多了一份就暂停。
-    assert!(!report.is_paused());
-    assert!(report.placed.is_empty());
-    assert_eq!(harness.exchange.place_count(), place_count);
-    assert_eq!(report.position, Position::parse("0.05").unwrap());
-    assert_eq!(report.expected_position, Position::parse("0.05").unwrap());
-    assert_eq!(harness.orders().len(), 20);
-    assert_eq!(harness.working().len(), 20);
-
-    // 成交记录到了：补记进格子，订单收尾，然后照常挂出这一格的卖单。
-    harness.exchange.deliver_delayed_fills();
-    let report = harness.step(2).await;
-
+    // 订单从挂单列表里消失，交易所说它已成交：按订单状态记账，不判成撤销、不在同一个
+    // 格子再挂一张新买单，也不因为仓位多了一份就暂停；这一步就挂出这一格的卖单。
     assert!(!report.is_paused());
     assert_eq!(report.applied_fills, 1);
     assert_eq!(
@@ -374,12 +365,32 @@ async fn a_fully_filled_order_whose_fill_record_is_late_is_not_replaced() {
         Quantity::ZERO,
         "the whole cell was bought"
     );
-    assert_eq!(harness.working().len(), 20);
+    assert_eq!(report.position, Position::parse("0.05").unwrap());
+    assert_eq!(report.expected_position, Position::parse("0.05").unwrap());
+    assert_eq!(report.placed.len(), 1);
+    assert_eq!(harness.exchange.place_count(), place_count + 1);
+    assert!(
+        !harness
+            .working()
+            .iter()
+            .any(|order| order.record.unit == long_cell(0)
+                && order.record.purpose == OrderPurpose::GridEntry),
+        "no second buy for the same cell"
+    );
     let sell = harness.working_cloid(0, OrderPurpose::GridExit);
     assert_eq!(
         harness.at_exchange(&sell).unwrap().limit_price,
         Price::parse("96000").unwrap()
     );
+
+    // 成交记录到了：只进流水表，不重复记账。
+    harness.exchange.deliver_delayed_fills();
+    let report = harness.step(2).await;
+
+    assert!(!report.is_paused());
+    assert_eq!(report.applied_fills, 0);
+    assert_eq!(harness.cell(0).to_buy_back, Quantity::ZERO);
+    assert_eq!(harness.working().len(), 20);
 }
 
 #[tokio::test]
@@ -546,29 +557,30 @@ async fn a_partially_filled_order_canceled_by_the_exchange_is_booked_and_release
         "买到的 0.02 不再算待买回"
     );
 
-    // 买到的 0.02 这一步就挂出卖单；补挂 0.03 的买单要等成交流水到齐：撤单只带回了
-    // 累计成交量，流水还没到，这张单的成交没对完账（第 9.2 节，同
-    // `a_fully_filled_order_whose_fill_record_is_late_is_not_replaced`）。
-    assert_eq!(report.placed.len(), 1);
+    // 交易所给出了最终累计量，这张单就对完了账：买到的 0.02 挂出卖单，剩余预留释放
+    // 出来补挂 0.03 的买单，不等流水（第 9.3 节）。
+    assert!(!report.is_paused());
+    assert_eq!(report.placed.len(), 2);
     let sell = harness.working_cloid(0, OrderPurpose::GridExit);
     assert_eq!(
         harness.at_exchange(&sell).unwrap().quantity,
         Quantity::parse("0.02").unwrap(),
         "买到的 0.02 必须挂出卖单"
     );
-
-    // 流水到了：这张单对完账，剩余预留释放出来补挂 0.03 的买单。
-    harness.exchange.deliver_delayed_fills();
-    let report = harness.step(2).await;
-
-    assert!(!report.is_paused());
-    assert_eq!(report.placed.len(), 1);
     let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
     assert_eq!(
         harness.order(&buy).record.quantity,
         Quantity::parse("0.03").unwrap(),
         "剩余的 0.03 必须补挂回去"
     );
+
+    // 流水到了：只进流水表，不重复记账、不多挂。
+    harness.exchange.deliver_delayed_fills();
+    let report = harness.step(2).await;
+
+    assert!(!report.is_paused());
+    assert_eq!(report.applied_fills, 0);
+    assert!(report.placed.is_empty());
 }
 
 #[tokio::test]

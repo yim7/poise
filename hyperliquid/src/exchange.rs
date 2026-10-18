@@ -60,13 +60,14 @@ impl Exchange for Hyperliquid {
             )
             .await?;
         let mut receipt = order_receipt(&response)?;
-        // 立即成交否则撤销的单只成交了一部分时，交易所同样回 `filled`，`totalSz` 是成交的
-        // 那部分：剩下的已经撤掉了，记成已撤销，不能当成全部成交。
-        if request.time_in_force == TimeInForce::ImmediateOrCancel
-            && receipt.status == OrderStatus::Filled
-            && receipt.cumulative_filled < request.quantity
-        {
-            receipt.status = OrderStatus::Canceled;
+        // 只成交了一部分时，交易所同样回 `filled`，`totalSz` 是成交的那部分（测试网实测，
+        // 设计附录 A）。剩下的那部分：立即成交否则撤销的单已经撤掉了，记成已撤销；挂单
+        // 还挂在场上，记成在场。都不能当成全部成交。
+        if receipt.status == OrderStatus::Filled && receipt.cumulative_filled < request.quantity {
+            receipt.status = match request.time_in_force {
+                TimeInForce::ImmediateOrCancel => OrderStatus::Canceled,
+                TimeInForce::GoodTillCanceled => OrderStatus::Open,
+            };
         }
         Ok(receipt)
     }

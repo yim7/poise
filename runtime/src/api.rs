@@ -5,11 +5,13 @@
 //!
 //! 私钥不经过这里：[`Runtime`] 的接口上没有私钥，响应里也就不会有。
 
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -63,6 +65,61 @@ fn api_routes() -> Router<Arc<Runtime>> {
             "/account/settings",
             get(account_settings).put(update_account_settings),
         )
+        .layer(middleware::from_fn(require_local_browser))
+}
+
+/// 控制台没有登录，只靠「只能从本机访问」。这里再核对一次请求是不是真的来自本机页面。
+///
+/// 只监听 127.0.0.1 挡不住两件事：无请求体的 POST（暂停、恢复、停止、预览）是 CORS
+/// 「简单请求」，用户正在看的任何网页都能跨站发给本机端口；DNS 重绑定还能让浏览器带着
+/// 别人的域名当 `Host` 访问本机。浏览器一定会带 `Host`，跨站时还会带 `Origin`：两个头
+/// 任何一个不是本机地址就拒绝。没有这两个头的请求（命令行、测试）不是浏览器，照常放行。
+async fn require_local_browser(request: Request, next: Next) -> Response {
+    for (name, with_scheme) in [("host", false), ("origin", true)] {
+        let Some(value) = request.headers().get(name) else {
+            continue;
+        };
+        let authority = value.to_str().ok().and_then(|value| {
+            if with_scheme {
+                value
+                    .strip_prefix("http://")
+                    .or_else(|| value.strip_prefix("https://"))
+            } else {
+                Some(value)
+            }
+        });
+        if !authority.is_some_and(is_local_authority) {
+            return ApiError {
+                status: StatusCode::FORBIDDEN,
+                kind: "not_local",
+                message: format!(
+                    "the `{name}` header is not a local address; the console only answers pages served from this machine"
+                ),
+            }
+            .into_response();
+        }
+    }
+    next.run(request).await
+}
+
+/// `host[:port]` 是不是本机：`localhost`、`127.x.x.x` 或 `[::1]`。
+fn is_local_authority(authority: &str) -> bool {
+    let host = match authority.strip_prefix('[') {
+        Some(rest) => rest.split_once(']').map(|(host, _)| host),
+        None => Some(
+            authority
+                .rsplit_once(':')
+                .map_or(authority, |(host, _)| host),
+        ),
+    };
+    let Some(host) = host else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host == "::1"
+        || host
+            .parse::<Ipv4Addr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 /// `/api` 下没有的路径：接口自己的 404，不走网页的静态文件。
@@ -308,4 +365,41 @@ struct ErrorBody {
     /// 机器可读的错误类别，见 [`ApiError`] 的说明。
     kind: &'static str,
     error: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_authority;
+
+    /// 浏览器会带的本机写法都认：带不带端口、IPv4、IPv6、`localhost`。
+    #[test]
+    fn local_authorities_are_recognised() {
+        for authority in [
+            "127.0.0.1:8010",
+            "127.0.0.1",
+            "127.1.2.3:8000",
+            "localhost:5173",
+            "LocalHost",
+            "[::1]:8010",
+            "[::1]",
+        ] {
+            assert!(is_local_authority(authority), "{authority}");
+        }
+    }
+
+    /// 别人的域名、局域网地址、空值都不是本机，哪怕它解析到 127.0.0.1（DNS 重绑定）。
+    #[test]
+    fn other_authorities_are_refused() {
+        for authority in [
+            "evil.example:8010",
+            "192.168.1.10:8010",
+            "0.0.0.0:8010",
+            "localhost.evil.example",
+            "[::2]:8010",
+            "",
+            "null",
+        ] {
+            assert!(!is_local_authority(authority), "{authority}");
+        }
+    }
 }

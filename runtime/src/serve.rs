@@ -176,6 +176,11 @@ async fn hold_back(runtime: &Runtime, strategy_id: &StrategyId) -> Result<(), Ru
 /// 除了运行中的，还有「恢复中」「暂停中」「停止中」：它们各自还没走完，收尾、撤单和
 /// 补记成交都要靠驱动推进。
 ///
+/// 各个策略并发走步：一步里有十几次串行的交易所请求，单次超时 15 秒，一个策略在交易所
+/// 半挂起时能占住好几分钟；串行驱动的话，其它策略的失效价检查、保证金率撤单都要排在
+/// 它后面（第 7.5、7.6 节）。同一个策略仍然同一时刻只走一步（[`Runtime::step`] 的占用
+/// 标记），资金预检有自己的锁，所以并发不会让两个策略共用一份额度。
+///
 /// 一个策略出错不拖住别的策略：记下来，下一轮再来。策略自己被暂停之后就不再是
 /// 「运行中」，下一轮自然不会再驱动它。
 ///
@@ -208,6 +213,7 @@ async fn drive(runtime: Arc<Runtime>, interval: Duration, mut pending: Vec<Strat
                 continue;
             }
         };
+        let mut steps = Vec::new();
         for strategy_id in drivable {
             if pending.contains(&strategy_id) {
                 tracing::error!(
@@ -216,8 +222,15 @@ async fn drive(runtime: Arc<Runtime>, interval: Duration, mut pending: Vec<Strat
                 );
                 continue;
             }
-            match runtime.step(&strategy_id).await {
-                Ok(report) => tracing::debug!(
+            let runtime = runtime.clone();
+            steps.push(tokio::spawn(async move {
+                let outcome = runtime.step(&strategy_id).await;
+                (strategy_id, outcome)
+            }));
+        }
+        for step in steps {
+            match step.await {
+                Ok((strategy_id, Ok(report))) => tracing::debug!(
                     strategy = %strategy_id,
                     status = report.status.as_str(),
                     placed = report.placed.len(),
@@ -226,11 +239,15 @@ async fn drive(runtime: Arc<Runtime>, interval: Duration, mut pending: Vec<Strat
                 ),
                 // 接口那边正在驱动同一个策略：它走的就是这一步，这一轮跳过就是了。
                 // 网页每隔几秒刷新一次详情，撞上是常事，不是失败。
-                Err(RuntimeError::Busy(_)) => tracing::debug!(
+                Ok((strategy_id, Err(RuntimeError::Busy(_)))) => tracing::debug!(
                     strategy = %strategy_id,
                     "step skipped: the strategy is being driven by a console request"
                 ),
-                Err(error) => tracing::error!(strategy = %strategy_id, %error, "step failed"),
+                Ok((strategy_id, Err(error))) => {
+                    tracing::error!(strategy = %strategy_id, %error, "step failed")
+                }
+                // 一步里 panic 了：只影响这个策略的这一轮，下一轮照常再驱动。
+                Err(error) => tracing::error!(%error, "a step panicked"),
             }
         }
     }

@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use poise_strategy::Strategy;
 use poise_strategy::invalidation::invalidation_sold;
 use poise_strategy::order::{OrderPurpose, OrderRecord, Unit, WorkingOrder};
+use poise_strategy::planning::WaitReason;
 use poise_strategy::side::Direction;
 use poise_strategy::units::{Notional, Position, Quantity, Rate, SCALE};
 
@@ -192,6 +193,25 @@ impl Runtime {
         let mut view = self.store.load_view(strategy_id)?;
         view.status = status;
         view.note = Some(note);
+        self.store.save_view(strategy_id, &view)?;
+        Ok(())
+    }
+
+    /// 和 [`Runtime::annotate_view`] 一样只改状态和说明，另外把「这一步在等什么」换掉。
+    ///
+    /// 运行中的一步读取没走通时用：上一份快照里的等待原因（往往是「没有等待」）已经不
+    /// 成立，留着它页面就会一边说「该挂的单都挂上了」、一边说这一步没读到数据。
+    pub(super) async fn annotate_view_waiting(
+        &self,
+        strategy_id: &StrategyId,
+        status: StrategyStatus,
+        note: String,
+        waiting: Vec<WaitReason>,
+    ) -> Result<(), RuntimeError> {
+        let mut view = self.store.load_view(strategy_id)?;
+        view.status = status;
+        view.note = Some(note);
+        view.waiting = waiting;
         self.store.save_view(strategy_id, &view)?;
         Ok(())
     }

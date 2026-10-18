@@ -206,6 +206,58 @@ async fn new_orders_stop_once_the_margin_reading_gets_stale() {
     assert!(report.plan.waiting.contains(&WaitReason::StaleMarketData));
 }
 
+/// 读取阶段很慢：步首读的保证金读数到发单时已经超过行情过期时间，标记价却是刚读的。
+/// 发单前重读一次保证金，闸门状态没变就照常发单，不能在慢链路上每一步都报行情过期
+/// （第 7.2 节）。
+#[tokio::test]
+async fn a_margin_reading_aged_by_a_slow_read_phase_is_read_again_before_placing() {
+    let harness = harness().await;
+    // 成交接口每次 11 秒：保证金在第 0 秒读，标记价在第 11 秒读，发单在第 11 秒。
+    harness
+        .exchange
+        .slow_fills_since(harness.clock.clone(), chrono::Duration::seconds(11));
+    harness.account.set_margin(margin_at(10));
+
+    let report = harness.step(0).await;
+
+    assert!(
+        !report.plan.waiting.contains(&WaitReason::StaleMarketData),
+        "{:?}",
+        report.plan.waiting
+    );
+    assert_eq!(report.placed.len(), 20, "二十格买单照常挂出");
+}
+
+/// 同样的慢读取，但重读时保证金率已经越过停止阈值：闸门状态变了，这一步不发新单，下一步
+/// 按新的保证金率重新判定（撤掉增仓单）。
+#[tokio::test]
+async fn a_margin_that_crossed_the_stop_while_reading_sends_no_new_orders() {
+    let harness = harness().await;
+    harness
+        .exchange
+        .slow_fills_since(harness.clock.clone(), chrono::Duration::seconds(11));
+    // 步首读到 10%，发单前重读读到 60%。
+    harness
+        .account
+        .script_margins(vec![margin_at(10), margin_at(60)]);
+
+    let report = harness.step(0).await;
+
+    assert!(report.placed.is_empty(), "{:?}", report.placed);
+    assert!(report.plan.waiting.contains(&WaitReason::StaleMarketData));
+
+    // 下一步按 60% 判定：只发只减仓单，一张增仓单都不发。
+    harness.account.set_margin(margin_at(60));
+    let report = harness.step(1).await;
+    assert!(report.placed.is_empty());
+    assert!(
+        report
+            .plan
+            .waiting
+            .contains(&WaitReason::MarginRatioAboveStopThreshold)
+    );
+}
+
 /// B35b：中性网格的格子单可能让净仓位穿越零，不是只减仓单；超过停止阈值时两侧的单都撤，
 /// 不会出现卖出之后变成净空的情况。
 #[tokio::test]

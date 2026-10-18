@@ -371,12 +371,7 @@ pub struct Store {
     connection: Arc<Mutex<Connection>>,
     /// 还要让几次成交记账写库失败，见 [`Store::fail_applied_fills`]。
     injected_write_failures: Arc<AtomicUsize>,
-    /// 下一次写入符合条件的订单时失败，见 [`Store::fail_next_order_update`]。
-    injected_order_failure: Arc<Mutex<Option<OrderMatcher>>>,
 }
-
-/// 测试用：挑出要让写库失败的那一次订单写入。
-type OrderMatcher = Box<dyn Fn(&StoredOrder) -> bool + Send + Sync>;
 
 /// 存业务数据的表：没有归属记录的库里只要有一张不是空的，就只能给测试网用
 /// （[`Store::bind_identity`]）。加表时要一起加进来。
@@ -440,7 +435,6 @@ impl Store {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             injected_write_failures: Arc::new(AtomicUsize::new(0)),
-            injected_order_failure: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -451,20 +445,6 @@ impl Store {
     /// 已经写进去了——这正是要复现的中间态：流水在，格子和订单的累计成交量没跟上。
     pub fn fail_applied_fills(&self, count: usize) {
         self.injected_write_failures.store(count, Ordering::SeqCst);
-    }
-
-    /// 让下一次符合 `matching` 的订单写入（[`Store::update_order`]）失败，只失败一次。
-    ///
-    /// 只给测试用：和 [`Store::fail_applied_fills`] 一样，要验的是「写失败之后内存里那份
-    /// 改动还算不算数」。按条件挑，是因为一步里会写很多次订单，按次数数不准。
-    pub fn fail_next_order_update(
-        &self,
-        matching: impl Fn(&StoredOrder) -> bool + Send + Sync + 'static,
-    ) {
-        *self
-            .injected_order_failure
-            .lock()
-            .expect("injection lock poisoned") = Some(Box::new(matching));
     }
 
     /// 取走一次注入的写失败。
@@ -779,7 +759,7 @@ impl Store {
     /// 进度还是全部放行」，重启后限速静默失效（第 4.1 节）。
     ///
     /// 只给 runtime 用（改参数要经过 [`crate::Runtime::update_config`] 的检查：只有限速
-    /// 间隔能改）。放出去就直接改配置、绕过那些检查了。
+    /// 间隔和观点失效设置能改）。放出去就直接改配置、绕过那些检查了。
     pub(crate) fn save_config(
         &self,
         strategy_id: &StrategyId,
@@ -1301,16 +1281,6 @@ impl Store {
         strategy_id: &StrategyId,
         order: &StoredOrder,
     ) -> Result<(), StoreError> {
-        {
-            let mut injected = self
-                .injected_order_failure
-                .lock()
-                .expect("injection lock poisoned");
-            if injected.as_ref().is_some_and(|matching| matching(order)) {
-                *injected = None;
-                return Err(StoreError::InjectedWriteFailure);
-            }
-        }
         let record = &order.record;
         self.lock().execute(
             "UPDATE orders SET
@@ -1632,22 +1602,25 @@ fn parse_order_status(value: &str) -> Result<OrderStatus, StoreError> {
     }
 }
 
-/// 全量改写一个策略的状态。
+/// 写入一个策略的全部状态。
 ///
-/// 两侧的批次和格子都是整体替换的：它们的数量由配置决定，不会中途增减。
+/// 两侧的批次和格子的数量由配置决定，不会中途增减，所以按主键 upsert 就覆盖了全部行；
+/// 没变的行用 `WHERE` 跳过更新，不碰页面。一步里记账、推进批次、几轮仓位核对都会写
+/// 状态，格子多到几千时整表删了重插会让每一步写几万行。
 fn write_state(
     transaction: &rusqlite::Transaction<'_>,
     strategy_id: &StrategyId,
     state: &StrategyState,
 ) -> Result<(), StoreError> {
-    transaction.execute(
-        "DELETE FROM batch_states WHERE strategy_id = ?1",
-        params![strategy_id.as_str()],
-    )?;
     {
         let mut statement = transaction.prepare(
             "INSERT INTO batch_states (strategy_id, direction, batch_index, filled_units, finished)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (strategy_id, direction, batch_index) DO UPDATE SET
+                 filled_units = excluded.filled_units,
+                 finished = excluded.finished
+             WHERE batch_states.filled_units != excluded.filled_units
+                OR batch_states.finished != excluded.finished",
         )?;
         for side in state.sides() {
             for (index, batch) in side.batches().iter().enumerate() {
@@ -1662,14 +1635,15 @@ fn write_state(
         }
     }
 
-    transaction.execute(
-        "DELETE FROM cell_states WHERE strategy_id = ?1",
-        params![strategy_id.as_str()],
-    )?;
     {
         let mut statement = transaction.prepare(
             "INSERT INTO cell_states (strategy_id, direction, cell_index, enabled, to_buy_back_units)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (strategy_id, direction, cell_index) DO UPDATE SET
+                 enabled = excluded.enabled,
+                 to_buy_back_units = excluded.to_buy_back_units
+             WHERE cell_states.enabled != excluded.enabled
+                OR cell_states.to_buy_back_units != excluded.to_buy_back_units",
         )?;
         for side in state.sides() {
             for (index, cell) in side.cells().iter().enumerate() {

@@ -157,38 +157,38 @@ pub async fn status(instance: &Instance, instrument: &Instrument) -> Result<()> 
     Ok(())
 }
 
-/// 撤销全部策略在本标的上的在场订单（第 9.4 节的暂停）。
+/// 紧急停止：暂停本标的上的全部策略，撤掉本系统在场的订单（第 9.4 节的暂停）。
+///
+/// 常驻服务在跑时实例锁在它手里，这里拿不到；这时改走服务的本机接口，让服务自己去
+/// 暂停、撤单——同一把锁、同一份状态，不会和它抢订单。地址取服务写在数据目录里的
+/// 实际监听地址，不取启动文件里的 `listen`。服务没在跑时才直接打开数据库操作。
+///
+/// 失效中的策略不动：它正在用只减仓单止损，停止会把它归档、放弃剩下的减仓（第 2.4 节）。
+/// 真要放弃，去网页上点停止。
 pub async fn stop(instance: &Instance, instrument: &Instrument) -> Result<()> {
-    // 撤单会写数据库，也要先取实例锁：否则会和正在跑的 `serve` 抢同一批订单。
-    let _lock = instance.lock()?;
-
-    let runtime = instance.runtime()?;
-    let ids = runtime
-        .store()
-        .load_strategy_ids(instrument)
-        .context("cannot read the strategies in this database")?;
-    if ids.is_empty() {
+    // 撤单会写数据库，先取实例锁：否则会和正在跑的 `serve` 抢同一批订单。
+    let found = match instance.lock() {
+        Ok(lock) => {
+            let outcome = stop_locally(instance, instrument).await;
+            drop(lock);
+            outcome?
+        }
+        Err(lock_error) => {
+            let listen =
+                running_service_address(instance).with_context(|| format!("{lock_error:#}"))?;
+            println!(
+                "实例锁被占着（{}），常驻服务应当正在运行：改走它的本机接口 http://{listen}",
+                lock_error.root_cause()
+            );
+            stop_via_api(&listen.to_string(), instrument)
+                .await
+                .with_context(|| format!("{lock_error:#}"))?
+        }
+    };
+    // 这个标的上没有策略：本系统在这里没下过单，不用再去交易所核对。
+    if found == Found::Nothing {
         println!("{} 上还没有策略", instrument.symbol());
         return Ok(());
-    }
-
-    for strategy_id in ids {
-        let stored = runtime.store().load_strategy(&strategy_id)?;
-        match action_for(stored.status) {
-            // 归档的策略没有挂单，也不该被重新唤醒。
-            Action::Skip => println!("策略 {strategy_id} {}，跳过", status_name(stored.status)),
-            // 恢复中、暂停中都没有新单在场外等着，暂停只是把它们收尾的进度往前推一步。
-            Action::Pause => {
-                let canceled = runtime.pause(&strategy_id).await?;
-                println!("策略 {strategy_id} 已暂停，撤销 {} 张订单", canceled.len());
-            }
-            // 已经点过停止的走停止那条路：暂停不收「停止中」，而它要的正是把撤单收尾
-            // 推进一步，和停止是同一件事。
-            Action::Stop => {
-                let canceled = runtime.stop(&strategy_id).await?;
-                println!("策略 {strategy_id} 停止中，撤销 {} 张订单", canceled.len());
-            }
-        }
     }
 
     // 收尾核对：交易所上不该再剩本系统的挂单。
@@ -215,6 +215,196 @@ pub async fn stop(instance: &Instance, instrument: &Instrument) -> Result<()> {
     Ok(())
 }
 
+/// 常驻服务写在数据目录里的实际监听地址。没有这个文件就不去猜：按启动文件里的 `listen`
+/// 去连，可能连到同一端口上的别的服务。
+fn running_service_address(instance: &Instance) -> Result<std::net::SocketAddr> {
+    let path = instance.listen_file();
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "cannot read `{}`, where the running service records its address",
+            path.display()
+        )
+    })?;
+    let address: std::net::SocketAddr = text
+        .trim()
+        .parse()
+        .with_context(|| format!("`{}` does not hold an address", path.display()))?;
+    if !address.ip().is_loopback() {
+        anyhow::bail!(
+            "`{}` holds {address}, which is not a local address",
+            path.display()
+        );
+    }
+    Ok(address)
+}
+
+/// 这个标的上有没有找到策略。
+#[derive(Debug, PartialEq, Eq)]
+enum Found {
+    Nothing,
+    Strategies,
+}
+
+/// 服务没在跑：直接打开数据库，逐个策略处理。
+///
+/// 一个策略出错不中断后面的：紧急命令要把能撤的都撤掉，最后再把失败的报出来。
+async fn stop_locally(instance: &Instance, instrument: &Instrument) -> Result<Found> {
+    let runtime = instance.runtime()?;
+    let ids = runtime
+        .store()
+        .load_strategy_ids(instrument)
+        .context("cannot read the strategies in this database")?;
+    if ids.is_empty() {
+        return Ok(Found::Nothing);
+    }
+
+    let mut failures = Vec::new();
+    for strategy_id in ids {
+        let status = match runtime.store().load_strategy(&strategy_id) {
+            Ok(stored) => stored.status,
+            Err(error) => {
+                println!("策略 {strategy_id} 读不出来：{error}");
+                failures.push(strategy_id);
+                continue;
+            }
+        };
+        let outcome = match action_for(status) {
+            Action::Skip => {
+                println!("策略 {strategy_id} {}，跳过", status_name(status));
+                continue;
+            }
+            Action::KeepReducing => {
+                println!(
+                    "策略 {strategy_id} 失效中，正在用只减仓单止损，不打断；要放弃减仓请在网页上点停止"
+                );
+                continue;
+            }
+            // 恢复中、暂停中都没有新单在场外等着，暂停只是把它们收尾的进度往前推一步。
+            Action::Pause => runtime
+                .pause(&strategy_id)
+                .await
+                .map(|canceled| format!("已暂停，撤销 {} 张订单", canceled.len())),
+            // 已经点过停止的走停止那条路：暂停不收「停止中」，而它要的正是把撤单收尾
+            // 推进一步，和停止是同一件事。
+            Action::Stop => runtime
+                .stop(&strategy_id)
+                .await
+                .map(|canceled| format!("停止中，撤销 {} 张订单", canceled.len())),
+        };
+        match outcome {
+            Ok(message) => println!("策略 {strategy_id} {message}"),
+            Err(error) => {
+                println!("策略 {strategy_id} 处理失败：{error}");
+                failures.push(strategy_id);
+            }
+        }
+    }
+    if failures.is_empty() {
+        return Ok(Found::Strategies);
+    }
+    anyhow::bail!(
+        "{} 个策略没处理成功：{}",
+        failures.len(),
+        failures
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+/// 服务在跑：通过它的本机接口暂停本标的上的策略。
+///
+/// 接口和网页用的是同一套（`runtime/src/api.rs`）：先列策略，再对本标的上每个活动策略
+/// 发暂停或停止，和本地路径的决定一样。
+async fn stop_via_api(listen: &str, instrument: &Instrument) -> Result<Found> {
+    let base = format!("http://{listen}/api");
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("cannot build the HTTP client")?;
+    let strategies: Vec<serde_json::Value> = http
+        .get(format!("{base}/strategies"))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .with_context(|| format!("cannot reach the running service at http://{listen}"))?
+        .json()
+        .await
+        .context("the running service returned an unreadable strategy list")?;
+
+    let mut found = Found::Nothing;
+    let mut failures = Vec::new();
+    for strategy in strategies {
+        if strategy["instrument"].as_str() != Some(instrument.symbol()) {
+            continue;
+        }
+        let Some(strategy_id) = strategy["strategy_id"].as_str() else {
+            continue;
+        };
+        found = Found::Strategies;
+        let status = strategy["status"].as_str().unwrap_or("");
+        let (status, action) = match status_from_api(status) {
+            Some(status) => (status, action_for(status)),
+            None => {
+                println!("策略 {strategy_id} 状态 `{status}` 认不出来，跳过");
+                failures.push(strategy_id.to_string());
+                continue;
+            }
+        };
+        let path = match action {
+            Action::Skip => {
+                println!("策略 {strategy_id} {}，跳过", status_name(status));
+                continue;
+            }
+            Action::KeepReducing => {
+                println!(
+                    "策略 {strategy_id} 失效中，正在用只减仓单止损，不打断；要放弃减仓请在网页上点停止"
+                );
+                continue;
+            }
+            Action::Pause => "pause",
+            Action::Stop => "stop",
+        };
+        let response = http
+            .post(format!("{base}/strategies/{strategy_id}/{path}"))
+            .send()
+            .await;
+        let outcome = async {
+            let body: serde_json::Value = response?.error_for_status()?.json().await?;
+            Ok::<_, reqwest::Error>(body)
+        }
+        .await;
+        match outcome {
+            Ok(body) => println!(
+                "策略 {strategy_id} {}，撤销 {} 张订单",
+                body["status"]
+                    .as_str()
+                    .and_then(status_from_api)
+                    .map_or("状态未知", status_name),
+                body["canceled"].as_array().map_or(0, Vec::len)
+            ),
+            Err(error) => {
+                println!("策略 {strategy_id} 处理失败：{error}");
+                failures.push(strategy_id.to_string());
+            }
+        }
+    }
+    if failures.is_empty() {
+        return Ok(found);
+    }
+    anyhow::bail!(
+        "{} 个策略没处理成功：{}",
+        failures.len(),
+        failures.join(" ")
+    )
+}
+
+/// 接口上的状态字符串和数据库里是同一套（`StrategyStatus::as_str`）。
+fn status_from_api(value: &str) -> Option<StrategyStatus> {
+    serde_json::from_value(serde_json::Value::String(value.to_string())).ok()
+}
+
 /// `stop` 对每个策略做的事。
 ///
 /// 这个映射跟着运行时那边的契约走：暂停只收运行中、恢复中、暂停中、已暂停，已经点过
@@ -228,6 +418,9 @@ enum Action {
     Pause,
     /// 已经点过停止：把撤单收尾推进一步。
     Stop,
+    /// 失效中：正在止损减仓，紧急命令不打断它。停止会归档并放弃剩下的减仓，那是用户
+    /// 要明确做的决定，不该由一条「撤掉挂单」的命令顺手做掉。
+    KeepReducing,
 }
 
 fn action_for(status: StrategyStatus) -> Action {
@@ -235,8 +428,8 @@ fn action_for(status: StrategyStatus) -> Action {
         StrategyStatus::Stopped | StrategyStatus::Invalidated | StrategyStatus::Draft => {
             Action::Skip
         }
-        // 失效中不接受暂停（它正在减仓）：要它停下只能走停止，撤单之后归档。
-        StrategyStatus::Stopping | StrategyStatus::Invalidating => Action::Stop,
+        StrategyStatus::Stopping => Action::Stop,
+        StrategyStatus::Invalidating => Action::KeepReducing,
         StrategyStatus::Running
         | StrategyStatus::Restoring
         | StrategyStatus::Pausing
@@ -299,21 +492,37 @@ mod tests {
 
     /// 每个状态下 `stop` 该走哪条路。
     ///
-    /// 「停止中」走的是停止：点过停止的策略再点暂停会被运行时拒掉，整条命令会在它这里
-    /// 中断，排在后头的策略一张单都撤不掉。
+    /// 「停止中」走的是停止：点过停止的策略再点暂停会被运行时拒掉。「失效中」不动：
+    /// 它正在止损减仓，停止会归档并放弃剩下的减仓，紧急撤单的命令不该顺手做掉这件事。
     #[test]
-    fn stop_advances_a_stopping_strategy_along_the_stop_path() {
+    fn stop_advances_a_stopping_strategy_and_leaves_an_invalidating_one_alone() {
         let expected = [
             (StrategyStatus::Draft, Action::Skip),
             (StrategyStatus::Stopped, Action::Skip),
+            (StrategyStatus::Invalidated, Action::Skip),
             (StrategyStatus::Running, Action::Pause),
             (StrategyStatus::Restoring, Action::Pause),
             (StrategyStatus::Pausing, Action::Pause),
             (StrategyStatus::Paused, Action::Pause),
             (StrategyStatus::Stopping, Action::Stop),
+            (StrategyStatus::Invalidating, Action::KeepReducing),
         ];
         for (status, action) in expected {
             assert_eq!(action_for(status), action, "{}", status_name(status));
         }
+    }
+
+    /// 接口上的状态字符串就是数据库里那一套，认不出的返回 `None` 而不是猜。
+    #[test]
+    fn api_statuses_map_back_to_the_lifecycle_statuses() {
+        assert_eq!(
+            super::status_from_api("invalidating"),
+            Some(StrategyStatus::Invalidating)
+        );
+        assert_eq!(
+            super::status_from_api("running"),
+            Some(StrategyStatus::Running)
+        );
+        assert_eq!(super::status_from_api("archived"), None);
     }
 }

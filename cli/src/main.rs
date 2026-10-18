@@ -23,7 +23,10 @@ use tracing_subscriber::EnvFilter;
 use crate::instance::Instance;
 
 #[derive(Parser)]
-#[command(name = "poise", about = "Poise 网格策略的命令行入口（本期只连测试网）")]
+#[command(
+    name = "poise",
+    about = "Poise 网格策略的命令行入口；连测试网还是正式网由实例目录里的启动文件决定"
+)]
 struct Cli {
     /// 实例目录，里面放着启动文件 poise.toml。
     #[arg(long, global = true, value_name = "目录", default_value = ".")]

@@ -184,53 +184,35 @@ async fn b45_a_lost_cancel_receipt_still_archives_the_strategy() {
     );
 }
 
-/// 撤销之前成交的那部分要先补记，成交流水到齐之前不归档。
+/// 撤销之前成交的那部分要先记账，记完才归档；不等成交流水（第 9.3 节）。
 ///
-/// 撤销只说明订单不再在场，撤销前可能已经有成交、成交记录也可能还没到。没对完账就归档，
-/// 那段成交再也没有人补记，仓位和记录就此对不上。
+/// 撤销只说明订单不再在场，撤销前可能已经有成交。按 `cloid` 问出撤销时的累计成交量、
+/// 记进格子之后才归档：没记账就归档，那段成交再也没有人补记。流水只是审计记录，晚到
+/// 不挡归档。
 #[tokio::test]
-async fn b45_fills_are_backfilled_before_the_strategy_is_archived() {
+async fn b45_fills_are_booked_before_the_strategy_is_archived() {
     let harness = harness().await;
     harness.step(0).await;
     let cell0_buy = harness.working_cloid(0, OrderPurpose::GridEntry);
-    // 成交记录比订单状态晚到：这一笔要等下一次查成交时才看得见。
+    // 成交记录比订单状态晚到。
     harness.exchange.delay_next_fills(1);
     harness
         .exchange
         .fill(&cell0_buy, Quantity::parse("0.03").unwrap(), at(10))
         .unwrap();
 
-    // 点停止：订单撤掉了，交易所认到的成交量也补记进了格子，但成交流水还没到，
-    // 所以先不归档。
     let canceled = harness.stop(11).await;
+
     assert_eq!(canceled.len(), 20);
-    assert_eq!(
-        harness.runtime.status(&harness.strategy_id).unwrap(),
-        StrategyStatus::Stopping
-    );
     assert!(harness.working().is_empty(), "订单已经不在场了");
     assert_eq!(
-        harness.exchange.current_position(),
-        Position::parse("0.03").unwrap()
+        harness.order(&cell0_buy).record.cumulative_filled,
+        Quantity::parse("0.03").unwrap(),
+        "撤销前的成交按订单状态记了账"
     );
-    assert!(
-        harness
-            .runtime
-            .fills(&harness.strategy_id)
-            .unwrap()
-            .is_empty(),
-        "成交流水还没到，对账没完成"
-    );
-
-    // 成交流水到了：对完账才归档。
-    harness.exchange.deliver_delayed_fills();
-    let report = harness.step(12).await;
-
-    assert_eq!(report.status, StrategyStatus::Stopped);
     assert_eq!(
-        harness.runtime.fills(&harness.strategy_id).unwrap().len(),
-        1,
-        "撤销前的那笔成交留下了流水"
+        harness.cell(0).to_buy_back,
+        Quantity::parse("0.02").unwrap()
     );
     assert_eq!(
         harness.exchange.current_position(),
@@ -238,7 +220,8 @@ async fn b45_fills_are_backfilled_before_the_strategy_is_archived() {
     );
     assert_eq!(
         harness.runtime.status(&harness.strategy_id).unwrap(),
-        StrategyStatus::Stopped
+        StrategyStatus::Stopped,
+        "记完账就归档，不等流水"
     );
 }
 
@@ -728,50 +711,6 @@ async fn a_failed_fill_write_after_the_cancels_is_not_carried_into_the_readings(
         harness.cell(0).to_buy_back,
         to_buy_back_before.saturating_sub(filled)
     );
-}
-
-/// 停止时，读数阶段的仓位核对循环里又对了一次账，写库却失败了：收场要按库里的状态判断，
-/// 不能按内存里那份宣告归档。
-///
-/// 撤单请求在路上时成交了一部分，流水晚到：撤完之后这张单记了成交，可流水还没对上。读数时
-/// 仓位接口先报旧值，核对循环再对一遍账，流水正好在这时到，这张单在内存里对完了账——写库
-/// 那一下失败了。按内存归档的话，库里这张单永远停在「没对完账」，后台也不会再推进它。
-#[tokio::test]
-async fn a_stop_is_not_archived_when_the_readings_fail_to_store_a_reconciliation() {
-    let harness = harness().await;
-    harness.step(0).await;
-    let entry = harness.working_cloid(0, OrderPurpose::GridEntry);
-    let filled = Quantity::parse("0.02").unwrap();
-    let position_before = harness.exchange.current_position();
-
-    harness.exchange.delay_next_fills(1);
-    harness
-        .exchange
-        .fill_before_next_cancel(1, entry.clone(), filled, at(5));
-    harness.exchange.report_stale_positions(1, position_before);
-    harness.exchange.deliver_delayed_fills_on_next_position();
-    let target = entry.clone();
-    harness
-        .runtime
-        .store()
-        .fail_next_order_update(move |order| {
-            order.record.client_order_id == target
-                && order.fills_reconciled
-                && !order.record.cumulative_filled.is_zero()
-        });
-    harness.stop(6).await;
-
-    assert_eq!(
-        harness.runtime.status(&harness.strategy_id).unwrap(),
-        StrategyStatus::Stopping
-    );
-    assert!(!harness.order(&entry).fills_reconciled);
-
-    // 下一步把账对完，才归档。
-    let report = harness.step(7).await;
-    assert_eq!(report.status, StrategyStatus::Stopped);
-    assert!(harness.order(&entry).fills_reconciled);
-    assert_eq!(harness.order(&entry).record.cumulative_filled, filled);
 }
 
 /// 恢复也不能被订单查询卡住：成交和挂单一直查不到，遗留挂单照样撤。

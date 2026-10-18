@@ -11,7 +11,15 @@ use poise_strategy::units::Quantity;
 use crate::exchange::{ExchangeError, ExchangeOrder, OrderLookup};
 use crate::store::{StoredFill, StoredOrder, StoredStrategy, StrategyId};
 
+use super::cancel_only::outcome_unknown;
 use super::{ExchangeFacts, ReconcileOutcome, Runtime, RuntimeError, order_states};
+
+/// 拉成交流水最多往前查多久（[`Runtime::fills_since`]）。
+///
+/// 流水只是审计记录，漏掉更早的不影响记账；而 Hyperliquid 的成交接口只留整个账户最近
+/// 一万笔，查得太远就永远查不全。按设计第 10 节的估算，网格每天的操作不到两千次，
+/// 一小时远到不了一万笔。
+pub(super) const FILL_STREAM_MAX_WINDOW: chrono::Duration = chrono::Duration::hours(1);
 
 impl Runtime {
     /// 与交易所核对订单：收尾不在挂单列表里的订单、吸收它们已经成交的部分。
@@ -23,9 +31,8 @@ impl Runtime {
     /// 一张单完全成交后同样会消失，所以不能只凭「过了 `expiresAfter`」判它撤销，
     /// 要问交易所它是什么结局（第 9.2 节）。
     ///
-    /// 核对范围是「还在场」加「成交还没核对完整」的订单：终态化不等于成交已经对完，
-    /// 撤销前可能已经有成交、成交记录也可能还没到。没对完的订单要继续查，
-    /// 它们也是成交回查起点的下限（见 [`Runtime::fills_since`]）。
+    /// 核对范围是「还在场」加「还没对完账」的订单：撤销只说明它不在场了，撤销前成交了
+    /// 多少要等交易所给出最终累计量。交易所给的累计量直接记账，不等成交流水（第 9.3 节）。
     pub(super) async fn reconcile_orders(
         &self,
         strategy_id: &StrategyId,
@@ -86,10 +93,6 @@ impl Runtime {
             ));
             let facts = ExchangeFacts {
                 view: &exchange_view,
-                saved_fills: saved_fills
-                    .get(&order.record.client_order_id)
-                    .copied()
-                    .unwrap_or(Quantity::ZERO),
                 observed_at,
             };
             if self
@@ -106,8 +109,16 @@ impl Runtime {
         })
     }
 
-    /// 按交易所给的订单状态收尾一张订单：更新本地记录，必要时把交易所认到的成交量
-    /// 记入格子。返回是否新记了一笔成交。
+    /// 按交易所给的订单状态收尾一张订单：把交易所认到的累计成交量记入格子，更新本地
+    /// 记录。返回是否新记了一笔成交。
+    ///
+    /// 累计成交量以订单状态为准，在场的单和终态的单一样直接记账，不等成交流水（第 9.3 节）。
+    /// 测试网实测：部分成交后撤销的单，按 `cloid` 查到的原始数量减剩余数量就是成交量，
+    /// 和流水、仓位一致（设计附录 A）。
+    ///
+    /// 订单状态里没有成交时间，只能用拿到这份状态的时刻当上界：成交发生在查询之前，
+    /// 所以接收时刻一定不早于真实成交时刻，限速按它算只会放行得偏晚。流水到了会把它改回
+    /// 真实时刻（[`Strategy::record_fill_time`] 只往早里改）。
     pub(super) async fn settle_order(
         &self,
         strategy_id: &StrategyId,
@@ -122,47 +133,6 @@ impl Runtime {
             exchange_view.cumulative_filled,
             order.record.cumulative_filled,
         );
-        let saved = facts.saved_fills;
-
-        // 交易所还认它是挂单：按挂单状态更新。成交还没对完，回查起点继续保留，
-        // 规划也不为这个单位下同一用途的新单。
-        if exchange_view.status.is_working() {
-            let settled = fills_settled(
-                order.record.cumulative_filled,
-                exchange_view.cumulative_filled,
-                saved,
-            );
-            let changed = Self::adopt_snapshot(order, exchange_view, now);
-            if order.fills_reconciled != settled {
-                order.fills_reconciled = settled;
-                order.updated_at = now;
-                self.store.update_order(strategy_id, order)?;
-            } else if changed {
-                self.store.update_order(strategy_id, order)?;
-            }
-            return Ok(false);
-        }
-
-        // 已成交，但成交记录还没到齐：保留预留等它补齐，不释放剩余量、也不重发。
-        // 核对没完成，回查起点继续保留。
-        //
-        // 交易所的订单编号要记下来：它证明这张单落过地。下单超时的单这时状态还是「结果
-        // 未知」，不记下来就会被当成「从没生效」按期限作废、重新下单（第 9.2 节）。
-        if exchange_view.status == OrderStatus::Filled && !unbooked.is_zero() {
-            if order.exchange_order_id.is_none() {
-                order.exchange_order_id = Some(exchange_view.exchange_order_id.clone());
-                order.updated_at = now;
-                self.store.update_order(strategy_id, order)?;
-            }
-            return Ok(false);
-        }
-
-        // 终态：把交易所认到的成交量吸收进格子。
-        //
-        // 挂单状态里没有成交时间，只能用拿到这份状态的时刻当上界：成交发生在查询之前，
-        // 所以接收时刻一定不早于真实成交时刻。这一步开始的时刻不行——它可能早于真实
-        // 成交时刻（查询发生在这一步中途），记下来之后真实流水也改不回去
-        // （[`Strategy::record_fill_time`] 只往早里改）。
         let booked = !unbooked.is_zero()
             && !strategy
                 .apply_fill(
@@ -172,22 +142,33 @@ impl Runtime {
                     facts.observed_at,
                 )
                 .is_duplicate();
-        order.exchange_order_id = Some(exchange_view.exchange_order_id.clone());
-        order.record.status = exchange_view.status;
-        // 交易所的结局已知、记入的累计量也追上了，但成交流水还可能没到：流水表里
-        // 属于这张单的数量之和没追平时不算对完账，回查起点要继续保留，
-        // 否则这段流水会被永久漏掉。
-        order.fills_reconciled = fills_settled(
+
+        // 交易所的订单编号要记下来：它证明这张单落过地。下单超时的单这时状态还是「结果
+        // 未知」，不记下来就会被当成「从没生效」按期限作废、重新下单（第 9.2 节）。
+        let changed = if exchange_view.status.is_working() {
+            Self::adopt_snapshot(order, exchange_view, now)
+        } else {
+            let changed = order.record.status != exchange_view.status
+                || order.exchange_order_id.as_deref()
+                    != Some(exchange_view.exchange_order_id.as_str());
+            order.exchange_order_id = Some(exchange_view.exchange_order_id.clone());
+            order.record.status = exchange_view.status;
+            changed
+        };
+        let settled = fills_settled(
             order.record.cumulative_filled,
             exchange_view.cumulative_filled,
-            saved,
         );
-        order.updated_at = now;
+        let reconciled_changed = order.fills_reconciled != settled;
+        order.fills_reconciled = settled;
+        if booked || changed || reconciled_changed {
+            order.updated_at = now;
+        }
         if booked {
             // 格子状态和订单记录写在同一个事务里。
             self.store
                 .save_applied_fills(strategy_id, state, &[&*order])?;
-        } else {
+        } else if changed || reconciled_changed {
             self.store.update_order(strategy_id, order)?;
         }
         Ok(booked)
@@ -214,23 +195,26 @@ impl Runtime {
         changed
     }
 
-    /// 拉成交的起点。
+    /// 拉成交流水的起点（第 9.3 节）。
     ///
-    /// 从上次同步点往前多查一段，免得时间戳早于同步点的成交被永久漏掉；如果还有
-    /// 订单的成交没核对完，就从最早的那张订单挂出去的时间查起，保证它的成交记录是
-    /// 完整的——判定一张查不到的单「没有任何影响」时要靠这个完整性（第 9.2 节）。
+    /// 流水不参与记账（累计成交量以订单状态为准），只用来存审计记录、把限速的第一笔
+    /// 成交时刻改准。所以起点只是上次同步点往前多查一段，免得时间戳早于同步点的流水
+    /// 漏掉；最多往前 [`FILL_STREAM_MAX_WINDOW`]：Hyperliquid 的成交接口按整个账户返回、
+    /// 只留最近一万笔，停机很久之后从停机那一刻查起，会一直查不全。
     ///
-    /// 这里不能只看在场订单：撤单会把订单变成终态，而撤销前的成交可能还没到；
-    /// 只看在场订单就会让回查起点跟着同步点前移，把这段成交永久漏掉。
+    /// 只有交易所从没确认过的订单（结果未知、已记录待发送）把起点钉在它挂出的时刻：
+    /// 判定它「没有任何影响」要证明从发出到现在的流水里没有它（第 9.2 节）。这类单几十秒
+    /// 内就有结论，钉不了多久。挂了很久的在场订单不钉：它的成交量从挂单列表就能读到。
     pub(super) fn fills_since(
         &self,
         stored: &StoredStrategy,
         orders: &[StoredOrder],
     ) -> DateTime<Utc> {
-        let watermark = stored.fills_synced_through - self.options.fills_lookback;
+        let watermark = (stored.fills_synced_through - self.options.fills_lookback)
+            .max(self.clock.now() - FILL_STREAM_MAX_WINDOW);
         orders
             .iter()
-            .filter(|order| order.record.is_working() || !order.fills_reconciled)
+            .filter(|order| outcome_unknown(order.record.status))
             .map(|order| order.placed_at)
             .min()
             .map_or(watermark, |earliest| watermark.min(earliest))
@@ -302,10 +286,8 @@ impl Runtime {
             }
             applied += 1;
             order.updated_at = now;
-            // 记入了新的成交，这张单原来的「已对账」就不再成立：交易所的累计量刚往前走，
-            // 对应的流水很可能还没到齐。由订单核对按新状态重新判定，不要沿用旧结论——
-            // 沿用会让这张单从此不再被核对，回查起点也跟着同步点前移，
-            // 还没到的流水就永久漏掉了。
+            // 流水报的累计量比我们记的多，说明上一次拿到的订单状态已经旧了：这张单要回到
+            // 订单核对里，按交易所现在的说法重新判定，不沿用旧的「已对账」。
             order.fills_reconciled = false;
             if !dirty.contains(&index) {
                 dirty.push(index);

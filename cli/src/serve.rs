@@ -31,16 +31,24 @@ pub async fn run(instance: &Instance, options: ServeOptions, listen: Option<Stri
     let server = Server::bind(runtime, lock, listen, options)
         .await
         .with_context(|| format!("cannot listen on `{listen}`"))?;
-    println!("网页控制台  http://{}", server.local_addr()?);
+    let bound = server.local_addr()?;
+    // 写下实际监听的地址：`poise stop` 在服务运行时按它去连（见 `LISTEN_FILE_NAME`）。
+    let listen_file = instance.listen_file();
+    std::fs::write(&listen_file, format!("{bound}\n"))
+        .with_context(|| format!("cannot write `{}`", listen_file.display()))?;
+    println!("网页控制台  http://{bound}");
     println!("停止        按 Ctrl-C");
 
-    server
+    let served = server
         .run(async {
             if let Err(error) = tokio::signal::ctrl_c().await {
                 tracing::error!(%error, "cannot listen for Ctrl-C; stopping now");
             }
         })
-        .await?;
+        .await;
+    // 进程崩掉时这个文件会留下；`stop` 只在实例锁被占着（服务确实在跑）时才读它。
+    let _ = std::fs::remove_file(&listen_file);
+    served?;
 
     println!("已停止");
     Ok(())

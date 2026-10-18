@@ -164,6 +164,18 @@ impl Runtime {
                     report.canceled.splice(0..0, withdrawn);
                     return Ok(report);
                 }
+                // 这一步到此为止：不发新单，已在场的挂单保留（第 7.2 节）。页面只读视图快照，
+                // 不写一句的话它会一直显示上一步的「没有等待」，用户看不出策略其实已经好几步
+                // 没核对成交、也没下单了（第 11 节）。
+                self.annotate_view_waiting(
+                    strategy_id,
+                    StrategyStatus::Running,
+                    format!(
+                        "这一步没读到成交或订单状态（{error}）：不发新单，已在场的挂单保留，下一步重新核对。"
+                    ),
+                    vec![WaitReason::FillsPending],
+                )
+                .await?;
                 return Err(error);
             }
         };
@@ -229,6 +241,13 @@ impl Runtime {
         if decision.withdraw_increasing {
             withdraw_increasing(&mut plan, &orders);
         }
+        // 保证金读数的时刻：交易所给的时刻和读到的时刻里更早的那个（第 7.2 节）。
+        let margin_read_at = margin_reading
+            .and_then(|(_, as_of)| as_of)
+            .map_or(reads_started_at, |as_of| as_of.min(reads_started_at));
+        let margin_read_at = self
+            .refresh_margin_if_stale(strategy_id, margin, margin_read_at, &settings)
+            .await;
         let executed = self
             .execute_plan(
                 strategy_id,
@@ -238,11 +257,8 @@ impl Runtime {
                 &mut plan,
                 NewOrders {
                     permits: decision.permits,
-                    // 读数里最旧的那个时刻：保证金读数本身可能早于这一步开始（第 7.2 节）。
-                    priced_at: margin_reading
-                        .and_then(|(_, as_of)| as_of)
-                        .map_or(reads_started_at, |as_of| as_of.min(reads_started_at))
-                        .min(snapshot.priced_at),
+                    // 发新单依据的读数里最旧的那个时刻：保证金读数和标记价。
+                    priced_at: margin_read_at.min(snapshot.priced_at),
                     max_age: settings.market_data_max_age,
                 },
                 now,
@@ -386,6 +402,41 @@ impl Runtime {
             return None;
         }
         Some((margin.ratio(), margin.as_of))
+    }
+
+    /// 保证金读数是这一步最先读的，补拉成交、逐张核对订单、几轮仓位核对都排在它后面：链路
+    /// 慢的时候走到发单前它已经比行情过期时间还旧，而标记价是刚读的。读数旧了不等于风险
+    /// 变了：这里再读一次，闸门状态和判定时一样就按新读数的时刻发单；状态变了就沿用旧时刻，
+    /// 这一步不发新单，下一步按新状态重新判定。否则在慢链路上每一步都会因为「行情过期」
+    /// 一张单都发不出去，而行情其实是新的（第 7.2 节）。
+    ///
+    /// 读数还新鲜、或者本来就读不到（闸门已经关着）时什么都不做。
+    async fn refresh_margin_if_stale(
+        &self,
+        strategy_id: &StrategyId,
+        judged: MarginState,
+        read_at: DateTime<Utc>,
+        settings: &AccountSettings,
+    ) -> DateTime<Utc> {
+        if judged == MarginState::Unavailable
+            || self.clock.now().signed_duration_since(read_at) <= settings.market_data_max_age
+        {
+            return read_at;
+        }
+        let reading_started_at = self.clock.now();
+        let again = self
+            .margin_ratio(strategy_id, settings.market_data_max_age)
+            .await;
+        if margin_state(again.map(|(ratio, _)| ratio), settings) != judged {
+            tracing::info!(
+                strategy = %strategy_id,
+                "the margin state changed while this step was reading; no new orders this step"
+            );
+            return read_at;
+        }
+        again
+            .and_then(|(_, as_of)| as_of)
+            .map_or(reading_started_at, |as_of| as_of.min(reading_started_at))
     }
 
     /// 保证金率超过停止阈值：马上按库里的 `cloid` 撤掉在场的非只减仓单（第 7.4 节）。

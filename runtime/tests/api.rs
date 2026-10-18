@@ -864,6 +864,58 @@ async fn the_console_serves_the_web_page_from_the_same_port() {
     );
 }
 
+/// 控制台没有登录，只认本机页面：浏览器带来的 `Host` 或 `Origin` 不是本机地址就回 403，
+/// 什么都不做。无请求体的 POST 是跨站「简单请求」，任何网页都能发；DNS 重绑定还能让
+/// `Host` 变成别人的域名。本机地址（带不带端口、`localhost`）照常；没带这些头的请求
+/// （命令行、测试）也照常。
+#[tokio::test]
+async fn requests_from_other_hosts_or_origins_are_refused() {
+    let console = console();
+    let router = api::router(console.runtime.clone());
+    let draft_id = create_draft(&router, &long_grid_config()).await;
+    start(&router, &draft_id).await;
+    let path = format!("/api/strategies/{draft_id}/pause");
+
+    for (name, value) in [
+        ("host", "evil.example:8010"),
+        ("host", "192.168.1.10:8010"),
+        ("origin", "http://evil.example"),
+        ("origin", "null"),
+    ] {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(&path)
+            .header(name, value)
+            .body(Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{name}: {value}");
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["kind"], "not_local", "{name}: {value}");
+    }
+    // 一张单都没动。
+    let (_, detail) = call(
+        &router,
+        Method::GET,
+        &format!("/api/strategies/{draft_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(detail["summary"]["status"], "running");
+
+    // 本机页面照常：浏览器访问 127.0.0.1:8010 时带的就是这两个头。
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/strategies")
+        .header("host", "127.0.0.1:8010")
+        .header("origin", "http://localhost:5173")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 async fn create_draft(router: &Router, config: &StrategyConfig) -> String {
     let (status, body) = call(
         router,

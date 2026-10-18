@@ -107,19 +107,19 @@ pub enum RuntimeError {
     /// 这个策略正在被另一个调用驱动。同一个策略同一时刻只能走一步。
     #[error("strategy `{0}` is already being driven")]
     Busy(StrategyId),
-    /// 运行中只允许改限速间隔；改了别的参数必须停下来重建（第 2.4 节）。
+    /// 运行中只允许改限速间隔和观点失效设置；改了别的参数必须停下来重建（第 2.4 节）。
     #[error(
-        "only the throttle interval can be changed while running, but the new config also changes `{field}`"
+        "only the throttle interval and the invalidation settings can be changed while running, but the new config also changes `{field}`"
     )]
     ConfigChangeNotAllowed { field: &'static str },
-    /// 预览过期、或者预览之后仓位、可用抵押和会立即成交的订单变了：
-    /// 旧预览说明不了现在会发生什么（B43）。
     /// 账户风控设置不合理（第 7.4 节）。
     #[error("the account settings are invalid: {0}")]
     Settings(#[from] SettingsError),
     /// 已有仓位接管不了（第 8 节第 1 条）。
     #[error("the existing position cannot be taken over: {0}")]
     Takeover(#[from] TakeoverError),
+    /// 预览过期、或者预览之后仓位、可用抵押和会立即成交的订单变了：
+    /// 旧预览说明不了现在会发生什么（B43）。
     #[error("the preview is out of date: {0}; preview again")]
     PreviewStale(&'static str),
     /// 一个标的同一时间只能有一个运行中的策略（B46）。
@@ -175,15 +175,12 @@ struct ReconcileOutcome {
     inconsistent: Option<ClientOrderId>,
 }
 
-/// 交易所对一张订单的说法：它的结局、累计成交量，以及流水表里属于它的数量之和。
+/// 交易所对一张订单的说法：它的结局和累计成交量，以及拿到这份说法的时刻。
 ///
-/// 两个数配对使用：交易所报的累计成交量说明「成交了多少」，流水之和说明「这些成交的
-/// 记录到齐了没有」（见 [`fills_settled`]）。
+/// 累计成交量以它为准记账，不等成交流水（第 9.3 节）。
 struct ExchangeFacts<'a> {
     /// 交易所报的订单状态与累计成交量。
     view: &'a ExchangeOrder,
-    /// 流水表里属于这张订单的数量之和。
-    saved_fills: Quantity,
     /// 这份订单状态是什么时候拿到的（查询结果的接收时刻）。
     ///
     /// 终态订单补记成交时只能用它当成交时刻的上界：成交发生在查询之前，所以接收时刻

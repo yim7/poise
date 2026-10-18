@@ -189,6 +189,25 @@ async fn an_immediate_or_cancel_order_is_sent_as_ioc_and_a_partial_fill_is_cance
     assert_eq!(receipt.status, OrderStatus::Canceled);
 }
 
+/// 挂单（`Gtc`）部分成交、剩下的挂在场上时，交易所的回执同样是 `filled`，`totalSz` 是
+/// 成交的那部分（测试网实测，设计附录 A）。剩下的还在场：记成在场，不能当成全部成交。
+#[tokio::test]
+async fn a_good_till_canceled_order_with_a_partial_fill_stays_working() {
+    let transport = FakeTransport::new(vec![
+        fixture(fixtures::META),
+        fixture(fixtures::ORDER_FILLED),
+    ]);
+    let client = client(transport, fixed_clock(NOW_MS));
+
+    let receipt = client
+        .place_order(&request("0.002", "96000"))
+        .await
+        .unwrap();
+
+    assert_eq!(receipt.cumulative_filled, Quantity::parse("0.001").unwrap());
+    assert_eq!(receipt.status, OrderStatus::Open);
+}
+
 /// B30：操作次数超限的拒绝单独认出来，运行时据此暂停策略。
 #[tokio::test]
 async fn place_order_reports_a_rate_limit_rejection() {

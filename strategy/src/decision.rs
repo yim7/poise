@@ -319,9 +319,8 @@ pub fn expected_position(
 
 /// 还没有对完账的单位：这些单位的这一侧只保留预留，不下新单。
 ///
-/// 一条规则覆盖三种情况：撤单期间的部分成交、恢复时还没到的流水、超出回看窗口的迟到
-/// 流水。它们的共同点是订单的成交还没对完账，这时按旧数量补单就会多买或多卖
-/// （第 9.2 节）。
+/// 典型的是撤单期间的部分成交：撤销只说明订单不在场了，交易所给出最终累计量之前，
+/// 按旧数量补单就会多买或多卖（第 9.2 节）。
 pub fn pending_units(orders: &[OrderState]) -> Vec<PendingUnit> {
     orders
         .iter()
@@ -340,8 +339,8 @@ pub fn pending_units(orders: &[OrderState]) -> Vec<PendingUnit> {
 /// 流水之和最多等于它最终的累计成交量；超出说明流水里混进了不属于这张单的记录
 /// （例如同一笔成交换了成交编号重复上报，或成交被归到了错误的订单上）。
 ///
-/// 这种不一致不会自己消失：[`fills_settled`] 要求两边相等，多出来的部分永远对不平，
-/// 订单会一直占着待处理状态、这一格再也挂不出新单。所以不能让它无声地卡住。
+/// 记账以订单状态为准，流水被记到错的订单上不会直接改格子；但它说明数据本身有问题，
+/// 继续自动运行没有意义，暂停交给用户处理。
 pub fn inconsistent_fill_records(
     saved_fills: &HashMap<ClientOrderId, Quantity>,
     orders: &[OrderState],
@@ -355,25 +354,15 @@ pub fn inconsistent_fill_records(
     })
 }
 
-/// 一张订单的成交是否已经对完账。
+/// 一张订单的成交是否已经对完账：本地记入的累计成交量追上了交易所给的累计成交量。
 ///
-/// 对完账要同时满足两件事：
-/// - 本地记入的累计成交量追上了交易所给的累计成交量（交易所的结局已知，见调用处）；
-/// - 成交流水表里属于这张订单的数量之和，正好等于本地记入的累计成交量。
+/// 调用方要先拿到交易所对这张单的说法（挂单列表或按 `cloid` 查询）。累计成交量以它为准，
+/// 成交流水只是审计记录：流水晚到、漏掉都不影响记账，所以不在这里等它（第 9.3 节）。
 ///
-/// 流水之和按成交编号去重（`trade_id` 是流水表的主键，同一笔成交只会有一行）。
-/// 用「等于」而不是「不少于」：重复报告同一笔成交不能填补另一笔真正缺失的成交。
-/// 每笔成交各自带自己的数量，同一张订单的成交数量之和就等于它的累计成交量，
-/// 所以到齐时一定相等，多出来的一定是重复或凭空多出的记录，不能算到齐。
-///
-/// 只要有一项不满足，这张订单就继续占用所属单位：规划时不为这个单位下同一用途的新单，
-/// 补拉成交的回查起点也继续保留在它挂出去的时间。
-pub fn fills_settled(
-    recorded: Quantity,
-    exchange_cumulative: Quantity,
-    saved_fills: Quantity,
-) -> bool {
-    unbooked_quantity(exchange_cumulative, recorded).is_zero() && saved_fills == recorded
+/// 没对完账的订单继续占用所属单位：规划时不为这个单位下同一用途的新单。撤单之后最终
+/// 累计量还不知道，按撤单前的数量补一张就会多买或多卖（第 9.2 节）。
+pub fn fills_settled(recorded: Quantity, exchange_cumulative: Quantity) -> bool {
+    unbooked_quantity(exchange_cumulative, recorded).is_zero()
 }
 
 /// 交易所报的累计成交量减去我们已经记入的数量，即「成交了但还没记账」的部分。
@@ -666,30 +655,16 @@ mod tests {
         );
     }
 
+    /// 对完账只看交易所的累计量有没有记进来，不等流水。
     #[test]
-    fn a_settled_order_needs_both_sides_to_agree() {
+    fn an_order_is_settled_once_the_exchange_cumulative_is_booked() {
         let recorded = Quantity::parse("0.05").unwrap();
-        let saved = Quantity::parse("0.05").unwrap();
 
-        assert!(fills_settled(recorded, recorded, saved));
+        assert!(fills_settled(recorded, recorded));
         // 交易所报得更多：还有成交没入账。
-        assert!(!fills_settled(
-            recorded,
-            Quantity::parse("0.06").unwrap(),
-            saved
-        ));
-        // 流水少了：真实缺失的那笔还没到。
-        assert!(!fills_settled(
-            recorded,
-            recorded,
-            Quantity::parse("0.04").unwrap()
-        ));
-        // 流水多了：重复报告不能算到齐。
-        assert!(!fills_settled(
-            recorded,
-            recorded,
-            Quantity::parse("0.07").unwrap()
-        ));
+        assert!(!fills_settled(recorded, Quantity::parse("0.06").unwrap()));
+        // 交易所的快照落后于我们（流水先到了）：已经记过的不会少。
+        assert!(fills_settled(recorded, Quantity::parse("0.04").unwrap()));
     }
 
     #[test]

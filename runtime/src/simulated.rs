@@ -61,6 +61,10 @@ struct SimState {
     hidden_from_queries: Vec<ClientOrderId>,
     /// 查标记价时，这个时钟往前走多久（行情响应很慢）。
     slow_mark_price: Option<(Arc<ManualClock>, Duration)>,
+    /// 查成交流水时，这个时钟往前走多久（成交接口很慢）。
+    slow_fills_since: Option<(Arc<ManualClock>, Duration)>,
+    /// 每次查成交流水传进来的起点，按调用顺序。
+    fills_since_starts: Vec<DateTime<Utc>>,
     /// 下一次查仓位时，把延迟的成交放出来。
     deliver_fills_on_next_position: bool,
     /// 每发一张单，这个时钟往前走多久（下单很慢）。
@@ -185,6 +189,8 @@ impl SimulatedExchange {
                 slow_places: None,
                 deliver_fills_on_next_position: false,
                 slow_mark_price: None,
+                slow_fills_since: None,
+                fills_since_starts: Vec::new(),
                 fail_next_mark_price: None,
                 scripted_mark_prices: std::collections::VecDeque::new(),
                 fail_working_orders: 0,
@@ -372,6 +378,11 @@ impl SimulatedExchange {
         self.lock().deliver_fills_on_next_position = true;
     }
 
+    /// 最近一次查成交流水传进来的起点；还没查过时是 `None`。
+    pub fn last_fills_since(&self) -> Option<DateTime<Utc>> {
+        self.lock().fills_since_starts.last().copied()
+    }
+
     /// 延迟的成交现在可以查到了。
     pub fn deliver_delayed_fills(&self) {
         let mut state = self.lock();
@@ -539,6 +550,12 @@ impl SimulatedExchange {
     /// 每查一次标记价，让 `clock` 往前走 `by`：用来构造「行情响应在路上耽搁了」。
     pub fn slow_mark_price(&self, clock: Arc<ManualClock>, by: Duration) {
         self.lock().slow_mark_price = Some((clock, by));
+    }
+
+    /// 每查一次成交流水，让 `clock` 往前走 `by`：用来构造「读取阶段很慢，步首读的保证金
+    /// 读数到发单时已经旧了」。
+    pub fn slow_fills_since(&self, clock: Arc<ManualClock>, by: Duration) {
+        self.lock().slow_fills_since = Some((clock, by));
     }
 
     /// 每发一张单，让 `clock` 往前走 `by`：用来构造「一步还没发完，行情已经旧了」。
@@ -833,6 +850,10 @@ impl Exchange for SimulatedExchange {
     ) -> Result<Vec<ExchangeFill>, ExchangeError> {
         let mut state = self.lock();
         state.call_count += 1;
+        state.fills_since_starts.push(since);
+        if let Some((clock, by)) = &state.slow_fills_since {
+            clock.advance(*by);
+        }
         if instrument != &self.instrument {
             return Err(ExchangeError::Rejected {
                 reason: format!("instrument `{instrument}` does not belong to this exchange"),

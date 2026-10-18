@@ -50,6 +50,9 @@ struct SimAccount {
     margin: MarginReading,
     /// 还要让几次保证金读数失败。
     fail_margin: usize,
+    /// 接下来几次保证金读数依次返回这些值，用完之后返回 `margin`：用来构造「一步里前后
+    /// 两次读到的保证金率不一样」。
+    scripted_margins: std::collections::VecDeque<MarginReading>,
     /// 杠杆设置；默认 [`DEFAULT_LEVERAGE`] 倍全仓。
     leverage: Leverage,
     /// 还要让几次杠杆读数失败。
@@ -87,6 +90,7 @@ impl SimulatedAccount {
                     as_of: None,
                 },
                 fail_margin: 0,
+                scripted_margins: std::collections::VecDeque::new(),
                 leverage: Leverage {
                     value: DEFAULT_LEVERAGE,
                     cross: true,
@@ -140,6 +144,12 @@ impl SimulatedAccount {
     /// 保证金读数变了（例如用户在别的标的上加了仓）。
     pub fn set_margin(&self, margin: MarginReading) {
         self.lock().margin = margin;
+    }
+
+    /// 接下来几次保证金读数依次返回 `readings`，用完之后照常返回 [`SimulatedAccount::set_margin`]
+    /// 设的那一份。
+    pub fn script_margins(&self, readings: Vec<MarginReading>) {
+        self.lock().scripted_margins = readings.into();
     }
 
     /// 让接下来 `count` 次保证金读数失败：账户接口暂时不可用。
@@ -261,6 +271,9 @@ impl Account for SimulatedAccount {
             return Err(ExchangeError::Unavailable {
                 reason: "the margin summary is unavailable".to_string(),
             });
+        }
+        if let Some(scripted) = state.scripted_margins.pop_front() {
+            return Ok(scripted);
         }
         Ok(state.margin)
     }

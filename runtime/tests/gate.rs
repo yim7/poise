@@ -209,9 +209,8 @@ async fn b15_b36_an_order_that_never_landed_closes_the_gate_until_it_is_voided()
 
 /// 回执丢了，查到它已经成交、可流水还没到：它落过地，不能按「从没生效」作废。
 ///
-/// 这时它在库里还是「结果未知」、本地零成交，交易所报的累计成交量又让仓位核对得上——
-/// 只看这三项就会把它作废、重新下单。记下交易所的订单编号，它就不再算「从没生效」；
-/// 流水到了照常记账。
+/// 按 `cloid` 查到 `Filled` 就按订单状态记账、记下交易所的订单编号，结束未知状态，不等
+/// 流水（第 9.3 节）；它的卖单这一步就挂出去。流水后来到了只进流水表，不重复记账。
 #[tokio::test]
 async fn a_filled_order_with_late_fills_is_not_voided() {
     let harness = harness().await;
@@ -227,17 +226,29 @@ async fn a_filled_order_with_late_fills_is_not_voided() {
     let report = harness.step(DEADLINE + 5).await;
 
     let order = harness.order(&lost.record.client_order_id);
-    assert_ne!(order.record.status, OrderStatus::Void);
+    assert_eq!(order.record.status, OrderStatus::Filled);
+    assert_eq!(order.record.cumulative_filled, lost.record.quantity);
     assert!(order.exchange_order_id.is_some());
-    assert!(report.placed.is_empty(), "它的结局还没记完账，闸门不开");
+    assert!(
+        report.placed.iter().any(|client_order_id| {
+            let placed = harness.order(client_order_id);
+            placed.record.unit == lost.record.unit
+                && placed.record.purpose == OrderPurpose::GridExit
+        }),
+        "booked from its status, its sell goes out in the same step"
+    );
 
     harness.exchange.deliver_delayed_fills();
     let report = harness.step(DEADLINE + 6).await;
 
-    let order = harness.order(&lost.record.client_order_id);
-    assert_eq!(order.record.status, OrderStatus::Filled);
-    assert_eq!(order.record.cumulative_filled, lost.record.quantity);
-    assert!(!report.placed.is_empty(), "记完账，闸门打开");
+    assert_eq!(report.applied_fills, 0, "the late fill is not booked twice");
+    assert_eq!(
+        harness
+            .order(&lost.record.client_order_id)
+            .record
+            .cumulative_filled,
+        lost.record.quantity
+    );
 }
 
 /// 确认在场过的挂单后来查不到了：可能只是查询滞后，它仍然可能成交。`expiresAfter` 只限制
@@ -520,6 +531,14 @@ async fn b33_no_new_orders_until_the_fills_are_read_again() {
 
     assert_eq!(harness.exchange.place_count(), place_count, "不发新单");
     assert_eq!(harness.working().len(), working, "已在场的挂单保留");
+    // 页面只读视图快照：这一步没走通也要写清楚，不能一直显示上一步的「没有等待」。
+    let detail = harness.runtime.detail(&harness.strategy_id).unwrap();
+    assert_eq!(detail.waiting, vec![WaitReason::FillsPending]);
+    let note = detail.note.unwrap_or_default();
+    assert!(
+        note.contains("没读到") && note.contains("成交接口不可用"),
+        "{note}"
+    );
 
     let report = harness.step(3).await;
     assert_eq!(report.applied_fills, 1, "重新核对时补记那笔成交");

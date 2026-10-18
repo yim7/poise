@@ -141,14 +141,14 @@ async fn b19_restart_backfills_offline_fills_and_replaces_orders_by_state() {
     );
 }
 
-/// 订单终态化之后，迟到很久的成交仍然要能补记。
+/// 按订单状态记下的成交跨过重启照样算数，迟到的流水不会让它再记一遍（第 9.3 节）。
 ///
-/// 事件序列：t=0 挂单并成交 `.02`，但成交流水迟迟不到；t=120 走一步，挂单的累计量
-/// 解释了仓位差额，同步点推到 120；这时流水才到，进程重启，t=121 恢复。
-/// 恢复会先撤掉这张单，如果回查起点跟着同步点前移（120 − 60 = 60），
-/// t=0 的成交就永久漏记了。
+/// 事件序列：t=0 挂单并成交 `.02`，成交流水迟迟不到；t=120 走一步，按挂单列表的累计量
+/// 把 `.02` 记进格子、挂出它的卖单；这时流水才到，进程重启，等那张卖单过期之后 t=126
+/// 恢复。恢复撤掉遗留挂单、重新挂单，
+/// 格子和仓位一致，那笔流水比回看窗口早得多，不再去追。
 #[tokio::test]
-async fn a_fill_delivered_after_the_order_went_terminal_is_still_recorded() {
+async fn a_fill_booked_from_the_order_status_survives_a_restart() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("poise.sqlite");
 
@@ -164,19 +164,15 @@ async fn a_fill_delivered_after_the_order_went_terminal_is_still_recorded() {
             .fill(&cell0_buy, Quantity::parse("0.02").unwrap(), at(0))
             .unwrap();
 
-        // 走到 t=120：挂单快照里的累计量解释了仓位差额，同步点推到 120。
+        // 走到 t=120：按挂单列表的累计量记账，同步点推到 120。
         let report = harness.step(120).await;
         assert!(!report.is_paused());
-        assert_eq!(
-            report.applied_fills, 0,
-            "the fill record is not visible yet"
-        );
+        assert_eq!(report.applied_fills, 1, "booked from the working list");
         assert_eq!(report.position, Position::parse("0.02").unwrap());
         assert_eq!(report.expected_position, Position::parse("0.02").unwrap());
         assert_eq!(
             harness.cell(0).to_buy_back,
-            Quantity::parse("0.05").unwrap(),
-            "nothing has been booked yet"
+            Quantity::parse("0.03").unwrap()
         );
 
         strategy_id = harness.strategy_id.clone();
@@ -191,12 +187,11 @@ async fn a_fill_delivered_after_the_order_went_terminal_is_still_recorded() {
         strategy_id.clone(),
     );
 
-    let report = harness.recover(121).await;
+    let report = harness.recover(126).await;
     assert_eq!(report.status, StrategyStatus::Running);
 
-    // 恢复先撤掉遗留挂单，再补拉成交：这张单的成交核对还没完成，
-    // 回查起点仍然追到它挂出去的时刻，t=0 的成交没有漏掉。
-    assert_eq!(report.applied_fills, 1);
+    // 记过的账不重记，格子和仓位一致。
+    assert_eq!(report.applied_fills, 0);
     assert_eq!(
         harness.cell(0).to_buy_back,
         Quantity::parse("0.03").unwrap()
@@ -204,8 +199,8 @@ async fn a_fill_delivered_after_the_order_went_terminal_is_still_recorded() {
     assert_eq!(report.position, Position::parse("0.02").unwrap());
     assert_eq!(report.expected_position, Position::parse("0.02").unwrap());
     assert!(!report.is_paused());
-    // 成交也留下了流水记录。
-    assert_eq!(harness.runtime.fills(&strategy_id).unwrap().len(), 1);
+    // t=0 的流水早于回看窗口（同步点往前 60 秒），不再去追：流水只是审计记录。
+    assert_eq!(harness.exchange.last_fills_since(), Some(at(126 - 60)));
 }
 
 #[tokio::test]

@@ -14,6 +14,12 @@ use poise_runtime::{Account, Exchange, InstanceLock, Runtime, RuntimeOptions, St
 /// 启动文件名，固定放在实例目录下。
 pub const STARTUP_FILE_NAME: &str = "poise.toml";
 
+/// 常驻服务实际监听的地址，服务起来之后写在数据目录里，退出时删掉。
+///
+/// `poise stop` 在服务运行时按它去连，不按启动文件里的 `listen`：服务可以用 `--listen`
+/// 换端口，按启动文件去连可能连到同一端口上的别的服务（旧系统就在 8000）。
+pub const LISTEN_FILE_NAME: &str = "poise.listen";
+
 pub struct Instance {
     startup: StartupFile,
     exchange: Arc<Hyperliquid>,
@@ -87,6 +93,11 @@ impl Instance {
         let data_dir = self.startup.data_dir();
         InstanceLock::acquire(data_dir)
             .with_context(|| format!("cannot take the instance lock in `{}`", data_dir.display()))
+    }
+
+    /// 常驻服务写下实际监听地址的文件（[`LISTEN_FILE_NAME`]）。
+    pub fn listen_file(&self) -> std::path::PathBuf {
+        self.startup.data_dir().join(LISTEN_FILE_NAME)
     }
 
     /// 打开数据库。命令各自开一次，用完即关。

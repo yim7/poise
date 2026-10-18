@@ -357,8 +357,9 @@
 
 ### 9.3 成交与重启
 
-- **成交去重**：按交易所成交标识 `tid` 去重；同一订单的累计成交量只接受更大的值。
-- **重启**：运行中的策略先进入“恢复中”：等遗留订单的 `expiresAfter` 过去，撤销它们，按 `cloid` 查询终态，补拉成交、核对仓位，收干净之后再按保存的状态重新挂单。不重发旧订单。
+- **记账以订单状态为准**：每张订单的累计成交量取交易所的挂单列表或按 `cloid` 查到的状态（原始数量减剩余数量），在场的单和已撤销的单一样直接记账；同一订单的累计成交量只接受更大的值。撤单之后、交易所给出最终累计量之前，这个单位不下同用途的新单。
+- **成交流水是审计记录**：按交易所成交标识 `tid` 去重后存下，用来留底和把限速的第一笔成交时刻改准，不参与记账，晚到或漏掉都不挡记账、暂停和归档。每一步从上次同步点往前 60 秒开始拉，最多往前 1 小时（Hyperliquid 的成交接口按整个账户返回、只留最近一万笔，查得太远就永远查不全）；同步点只在拉取成功后前进。唯一的例外是第 9.2 节结果未知的订单：它的「没有成交」要从发出时刻查起，回看起点钉在它的发出时刻，几十秒内就有结论。
+- **重启**：运行中的策略先进入“恢复中”：等遗留订单的 `expiresAfter` 过去，撤销它们，按 `cloid` 查询终态并记账、核对仓位，收干净之后再按保存的状态重新挂单。不重发旧订单。
 
 ### 9.4 暂停、恢复与外部交易
 
@@ -508,6 +509,8 @@
 | 请求次数 | `userRateLimit` 返回 `cumVlm`、`nRequestsUsed`、`nRequestsCap`、`nRequestsSurplus`；`nRequestsCap` = 累计成交额 + 1 万，是按地址的累计上限，**不是** Unified 账户每天 5 万次的操作上限。累计上限被拒的原话是 `Too many cumulative requests sent (…) for cumulative volume traded $…`（顶层 `"status": "err"`）；每日上限的原话未见出处。下单撤单接口没有错误码，只有原话 | [限额说明](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits)、[账户模式](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes)；原话来自 ccxt 的错误映射 |
 | 资金费 | 每小时结算；`metaAndAssetCtxs` 的 `funding` 是当前每小时费率，可能多于 8 位小数；`userFunding` 按时间返回整个账户各标的的结算（`usdc` 负数是付出，可能带前导空格），一次最多 500 条，下一页用上一页最后一条的时刻作起点（含） | [资金费](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding)、info endpoint；测试网实测 |
 | 立即成交否则撤销 | IOC 单部分成交时回执是 `filled`、`totalSz` 为成交部分；一点都没成交时整张拒绝（`Order could not immediately match…`） | 错误说明；测试网实测 |
+| 挂单部分成交 | GTC 单部分成交、剩余挂在场上时，回执同样是 `filled`、`totalSz` 为成交部分，没有 `resting`；挂单列表里它的 `origSz` 是原始数量、`sz` 是剩余数量 | 测试网实测（2026-10-19，LDO：买 61.9、成交 41.3） |
+| 撤销后的累计成交量 | 部分成交后撤销的单，按 `cloid` 查到 `status=canceled`、`origSz=61.9`、`sz=20.6`，原始数量减剩余数量 41.3 和流水之和、实际仓位一致，可以作为记账依据 | 测试网实测（同上） |
 | 第三方市场（HIP-3） | 标的名形如 `xyz:GOLD`；资产编号 = 100000 + 市场在 `perpDexs` 里的位置 × 10000 + 下标；`meta`、`metaAndAssetCtxs`、`clearinghouseState`、`openOrders` 带 `dex` 参数，成交和资金费结算不分市场、按完整标的名过滤；订单状态按账户和订单编号查询，也不带 `dex`；`meta` 的 `collateralToken` 是抵押币（`xyz` 是 0，即 USDC）。手续费：费用系数 s（`deployerFeeScale`）小于 1 时乘 s+1，否则乘 2s；开了增长模式（`growthMode: enabled`）再乘 0.1；挂单返佣（maker 为负）不乘系数，只在开了增长模式时乘 0.1。正式网 `xyz` 的系数都是 1.0，美股开了增长模式，黄金没开。全仓由部署者按标的开启：正式网 `xyz` 的黄金、原油、白银、美股都支持全仓，测试网的原油、白银只能逐仓 | [Asset IDs](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/asset-ids)、[HIP-3](https://hyperliquid.gitbook.io/hyperliquid-docs/hyperliquid-improvement-proposals-hips/hip-3-builder-deployed-perpetuals)、[Fees](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees)；正式网公开元数据只读、测试网实测 `xyz:TSLA` |
 | API 钱包能否提现 | 不能转账或提现（用户确认）。与文档一致：API 钱包只用于代为签名，转账、提现属于用户签名动作，需要主钱包签名 | 用户确认；[Nonces and API wallets](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets) |
 

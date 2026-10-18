@@ -50,8 +50,8 @@ pub struct PendingUnit {
 
 /// 策略当前不发出新订单的原因。
 ///
-/// 除最后三条外是设计第 11 节列出的集合。本任务支持的配置（做多、可选限速）会产生
-/// 「等待限速放行」「等待所属批次」和「限价因自身反向订单下调」三种；其余属于后续任务。
+/// 除最后三条外是设计第 11 节列出的集合。规划本身只产生「等待限速放行」「等待所属批次」
+/// 「限价因自身反向订单下调」和「成交待对账」；其余由 runtime 的判定和执行阶段加进来。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitReason {

@@ -191,9 +191,7 @@ impl Runtime {
                 Placement::StaleMarket => stale = true,
             }
         }
-        if !placed.is_empty() {
-            self.store.save_fills_synced_through(strategy_id, now)?;
-        }
+        // 同步点由撤单那一轮推进（只在补拉流水走通时，见 [`Runtime::cancel_only_round`]）。
 
         // 4. 收场：撤单和核对都走通，订单全部有了结论、成交对完账，仓位不超过剩余数量（或
         //    只剩下不了单的尾量）。这一步刚发过减仓单就等下一步：它的成交还要核对。
