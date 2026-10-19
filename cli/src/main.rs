@@ -1,12 +1,14 @@
 //! `poise`：一个实例的命令行入口。
 //!
 //! `serve` 是常驻进程：驱动运行中的策略，并在本机提供网页控制台。新建、预览、
-//! 确认启动、暂停、恢复、停止都在网页上做，命令行只留 `check`、`status`、`stop`
-//! 三个辅助命令。连测试网还是正式网由启动文件决定（[`instance`]）。
+//! 确认启动、暂停、恢复、停止都在网页上做，命令行只留 `check`、`status`、`stop`、
+//! `instances` 几个辅助命令。连测试网还是正式网由启动文件决定（[`instance`]），
+//! 实例按名字在根目录下找（[`home`]）。
 //!
 //! 会写数据库、会向交易所下单撤单的命令（`serve`、`stop`）先取实例锁：
 //! 一个实例同时只允许一个这样的进程。
 
+mod home;
 mod instance;
 mod report;
 mod serve;
@@ -28,9 +30,10 @@ use crate::instance::Instance;
     about = "Poise 网格策略的命令行入口；连测试网还是正式网由实例目录里的启动文件决定"
 )]
 struct Cli {
-    /// 实例目录，里面放着启动文件 poise.toml。
-    #[arg(long, global = true, value_name = "目录", default_value = ".")]
-    instance: PathBuf,
+    /// 实例名（在 ~/.poise 或 POISE_HOME 下找），或者实例目录的路径；目录里放着启动文件
+    /// poise.toml。
+    #[arg(long, global = true, value_name = "名字或目录")]
+    instance: Option<String>,
     /// 打印调试日志。
     #[arg(long, global = true)]
     verbose: bool,
@@ -48,6 +51,8 @@ enum Command {
     Status(InstrumentArgs),
     /// 撤销这个标的上本系统全部在场订单。
     Stop(InstrumentArgs),
+    /// 列出根目录下的实例：网络、监听地址和账户。
+    Instances,
 }
 
 #[derive(Args)]
@@ -78,7 +83,16 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.verbose);
 
-    let instance = Instance::load(&cli.instance)?;
+    let root = home::root_from_env()?;
+    if let Command::Instances = cli.command {
+        println!("实例根目录：{}", root.display());
+        for line in home::describe(&root) {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+    let directory = home::resolve(cli.instance.as_deref(), &root)?;
+    let instance = Instance::load(&directory)?;
     match cli.command {
         Command::Check => report::check(&instance).await,
         Command::Serve(args) => {
@@ -96,6 +110,7 @@ async fn main() -> Result<()> {
             let instrument = parse_instrument(&args.instrument)?;
             report::stop(&instance, &instrument).await
         }
+        Command::Instances => unreachable!("handled before loading an instance"),
     }
 }
 
@@ -147,6 +162,20 @@ mod tests {
     #[test]
     fn grid_is_gone() {
         assert!(Cli::try_parse_from(["poise", "grid"]).is_err());
+    }
+
+    /// `--instance` 可以不写在命令行上（解析时不报错）：找不到实例时由 [`super::home::resolve`]
+    /// 报错并列出已有实例。写了就原样留给它：名字或路径。
+    #[test]
+    fn the_instance_is_a_name_or_a_path() {
+        let cli = Cli::try_parse_from(["poise", "serve"]).unwrap();
+        assert_eq!(cli.instance, None);
+
+        let cli = Cli::try_parse_from(["poise", "--instance", "testnet", "check"]).unwrap();
+        assert_eq!(cli.instance.as_deref(), Some("testnet"));
+
+        let cli = Cli::try_parse_from(["poise", "instances"]).unwrap();
+        assert!(matches!(cli.command, Command::Instances));
     }
 
     /// 地址缺省用启动文件里的；命令行可以覆盖，覆盖值走同一套本机地址检查。

@@ -4,8 +4,8 @@
 //! 调的那几个路径。跑之前先起服务：
 //!
 //! ```text
-//! cargo run -p poise-cli -- --instance <实例目录> serve --step-interval-secs 3
-//! cargo run -p poise-cli --example web_flow -- http://127.0.0.1:8000
+//! cargo run -p poise-cli -- --instance testnet serve --step-interval-secs 3
+//! cargo run -p poise-cli --example web_flow -- http://127.0.0.1:8010
 //! ```
 
 use std::io::{Read, Write};
@@ -30,7 +30,7 @@ const CONFIG: &str = r#"{
 fn main() {
     let base = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "http://127.0.0.1:8000".to_string());
+        .unwrap_or_else(|| "http://127.0.0.1:8010".to_string());
     let host = base.trim_start_matches("http://").to_string();
 
     // 0. 网页本身：刷新任意一个前端路由都要能拿到 index.html。
