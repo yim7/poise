@@ -602,6 +602,7 @@ const TABLES: &str = "
                  strategy_id TEXT PRIMARY KEY,
                  requested_at TEXT NOT NULL
              );
+
              CREATE TABLE IF NOT EXISTS action_counts (
                  day TEXT PRIMARY KEY,
                  count INTEGER NOT NULL
@@ -1208,6 +1209,41 @@ impl Store {
             params![strategy_id.as_str()],
         )?;
         Ok(())
+    }
+
+    /// 停止收尾完成、带着平仓标记进入平仓中（第 7.7 节）：改状态和用掉平仓标记在同一个事务
+    /// 里。分开写，中途崩溃会留下「平仓中但标记还在」：之后停止想放弃平仓，收尾时又按标记
+    /// 进了平仓中。
+    pub fn enter_closing(
+        &self,
+        strategy_id: &StrategyId,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "UPDATE strategies SET status = ?2, updated_at = ?3 WHERE strategy_id = ?1",
+            params![
+                strategy_id.as_str(),
+                StrategyStatus::Closing.as_str(),
+                format_time(now)
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM close_requests WHERE strategy_id = ?1",
+            params![strategy_id.as_str()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// 这个标的上的未归档策略（运行中、暂停、收尾中、失效中、平仓中）。
+    pub fn live_strategy(&self, instrument: &Instrument) -> Result<Option<StrategyId>, StoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        let live = live_strategy_on(&transaction, instrument)?;
+        transaction.commit()?;
+        Ok(live)
     }
 
     /// 已归档的策略进入平仓中（第 7.7 节）：这个标的上没有别的未归档策略才行。检查和改状态

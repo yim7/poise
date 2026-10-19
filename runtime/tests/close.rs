@@ -486,6 +486,8 @@ async fn b60_the_position_belongs_to_the_latest_archived_strategy_or_to_a_live_o
 
     console.clock.set(at(20));
     let third = start(long_grid_config()).await;
+    // 新策略一启动仓位就归它管：不等下一次读数，旧的那份马上不再列出。
+    assert_eq!(held_of(&second), None);
     console.clock.set(at(30));
     console.runtime.read_archived_positions().await.unwrap();
     assert_eq!(held_of(&first), None);
@@ -546,4 +548,247 @@ async fn b62_a_dust_position_is_listed_and_closed_to_zero() {
     assert_eq!(closes[0].record.quantity, quantity("0.001"));
     assert_eq!(harness.exchange.current_position(), Position::ZERO);
     assert_eq!(harness.step(12).await.status, StrategyStatus::Closed);
+}
+
+/// 归档之后在交易所手动改过仓位，再平仓时平仓单结果未知：期限过后查无此单、没有成交，
+/// 要能作废它、按实际仓位重新平，不能因为账上的应有持仓对不上就一直卡在平仓中。
+#[tokio::test]
+async fn an_unknown_close_after_a_manual_trade_is_voided_and_retried() {
+    let harness = holding().await;
+    harness.clock.set(at(2));
+    harness.runtime.stop(&harness.strategy_id).await.unwrap();
+    // 归档之后在交易所手动平掉一部分：账上的应有持仓和实际仓位不再一致。
+    let half = Position::parse("0.02").unwrap();
+    assert!(harness.exchange.current_position() > half);
+    harness.exchange.set_position(half);
+
+    harness.clock.set(at(10));
+    harness.runtime.close(&harness.strategy_id).await.unwrap();
+    harness.exchange.unknown_next_place("timeout");
+    harness.step(11).await;
+    assert_eq!(
+        close_orders(&harness)[0].record.status,
+        OrderStatus::Unknown
+    );
+    assert_eq!(harness.exchange.current_position(), half);
+
+    // 期限（下单时刻 + 5 秒）和核对余量（30 秒）都过去之后：作废它，按实际仓位重新平。
+    for second in [60, 61, 62, 63] {
+        if harness.step(second).await.status == StrategyStatus::Closed {
+            break;
+        }
+    }
+    let closes = close_orders(&harness);
+    assert_eq!(closes[0].record.status, OrderStatus::Void);
+    assert_eq!(closes.len(), 2);
+
+    assert_eq!(harness.exchange.current_position(), Position::ZERO);
+    assert_eq!(status(&harness), StrategyStatus::Closed);
+}
+
+/// 已确认平仓、还在停止中收尾时再停一次（命令行紧急停止就是这样）：保留平仓，收尾之后
+/// 照样进入平仓中。已经在平仓中时再停才是放弃平仓（B56）。
+#[tokio::test]
+async fn stopping_again_keeps_a_confirmed_close() {
+    let harness = holding().await;
+    harness.exchange.unknown_next_cancels(2, "timeout");
+    harness.clock.set(at(2));
+    harness
+        .runtime
+        .stop_and_close(&harness.strategy_id)
+        .await
+        .unwrap();
+    assert_eq!(status(&harness), StrategyStatus::Stopping);
+
+    harness.clock.set(at(3));
+    harness.runtime.stop(&harness.strategy_id).await.unwrap();
+    for second in 4..10 {
+        if status(&harness) != StrategyStatus::Stopping {
+            break;
+        }
+        harness.step(second).await;
+    }
+
+    // 收尾之后进入平仓中，而不是保留仓位归档。
+    assert_eq!(status(&harness), StrategyStatus::Closing);
+}
+
+/// 已归档的策略「停止并平仓」：停止已经做过了，平仓照样做，不静默忽略。
+#[tokio::test]
+async fn stop_and_close_on_an_archived_strategy_closes() {
+    let harness = holding().await;
+    harness.clock.set(at(2));
+    harness.runtime.stop(&harness.strategy_id).await.unwrap();
+    assert_eq!(status(&harness), StrategyStatus::Stopped);
+
+    harness.clock.set(at(3));
+    harness
+        .runtime
+        .stop_and_close(&harness.strategy_id)
+        .await
+        .unwrap();
+
+    assert_eq!(status(&harness), StrategyStatus::Closing);
+}
+
+/// 仓位读数还在变的时候不发平仓单：按还没追上的仓位算出来的数量是错的。读数稳定之后照常
+/// 平掉。
+#[tokio::test]
+async fn a_close_waits_for_a_stable_reading() {
+    let harness = holding().await;
+    harness.clock.set(at(2));
+    harness.runtime.stop(&harness.strategy_id).await.unwrap();
+    harness
+        .exchange
+        .set_position(Position::parse("0.02").unwrap());
+    harness.clock.set(at(10));
+    harness.runtime.close(&harness.strategy_id).await.unwrap();
+
+    // 这一步的四次仓位查询读数各不相同：核对结论是「还在变」。
+    for value in ["0.03", "0.04", "0.03", "0.04"] {
+        harness
+            .exchange
+            .report_stale_positions(1, Position::parse(value).unwrap());
+    }
+    harness.step(11).await;
+    assert!(close_orders(&harness).is_empty());
+
+    harness.step(12).await;
+    assert_eq!(harness.exchange.current_position(), Position::ZERO);
+    assert_eq!(harness.step(13).await.status, StrategyStatus::Closed);
+}
+
+/// 归档后手动改过仓位、重新平仓时平仓单结果未知，这时停止（放弃平仓）：停止中的收尾同样
+/// 作废这张单（平仓单作废不看仓位一致），能归档，不会卡在停止中。
+#[tokio::test]
+async fn giving_up_a_close_settles_an_unknown_close_order() {
+    let harness = holding().await;
+    harness.clock.set(at(2));
+    harness.runtime.stop(&harness.strategy_id).await.unwrap();
+    harness
+        .exchange
+        .set_position(Position::parse("0.02").unwrap());
+    harness.clock.set(at(10));
+    harness.runtime.close(&harness.strategy_id).await.unwrap();
+    harness.exchange.unknown_next_place("timeout");
+    harness.step(11).await;
+    assert_eq!(
+        close_orders(&harness)[0].record.status,
+        OrderStatus::Unknown
+    );
+
+    harness.clock.set(at(12));
+    harness.runtime.stop(&harness.strategy_id).await.unwrap();
+    assert_eq!(status(&harness), StrategyStatus::Stopping);
+    for second in [60, 61, 62] {
+        if status(&harness) != StrategyStatus::Stopping {
+            break;
+        }
+        harness.step(second).await;
+    }
+
+    assert_eq!(status(&harness), StrategyStatus::Stopped);
+    assert_eq!(close_orders(&harness)[0].record.status, OrderStatus::Void);
+    assert_eq!(
+        harness.exchange.current_position(),
+        Position::parse("0.02").unwrap()
+    );
+}
+
+/// 仓位读数还在变、最后一次恰好读到 0：不能当成已经平完归档，真实仓位还在。
+#[tokio::test]
+async fn an_unstable_zero_reading_does_not_finish_the_close() {
+    let harness = holding().await;
+    harness.clock.set(at(2));
+    harness.runtime.stop(&harness.strategy_id).await.unwrap();
+    harness
+        .exchange
+        .set_position(Position::parse("0.02").unwrap());
+    harness.clock.set(at(10));
+    harness.runtime.close(&harness.strategy_id).await.unwrap();
+
+    for value in ["0.03", "0.04", "0.03", "0"] {
+        harness
+            .exchange
+            .report_stale_positions(1, Position::parse(value).unwrap());
+    }
+    harness.step(11).await;
+    assert_eq!(status(&harness), StrategyStatus::Closing);
+
+    harness.step(12).await;
+    assert_eq!(harness.exchange.current_position(), Position::ZERO);
+    assert_eq!(harness.step(13).await.status, StrategyStatus::Closed);
+}
+
+/// 平仓途中在交易所手动交易过：账上的应有持仓和实际对不上，结果未知的平仓单照样能作废、
+/// 按实际仓位重新平。
+#[tokio::test]
+async fn a_manual_trade_during_the_close_does_not_block_an_unknown_close() {
+    let harness = holding().await;
+    harness.clock.set(at(2));
+    harness
+        .runtime
+        .stop_and_close(&harness.strategy_id)
+        .await
+        .unwrap();
+    // 第一张平仓单只成交一部分。
+    harness.exchange.cap_next_ioc_fill(quantity("0.01"));
+    harness.step(3).await;
+    harness.step(4).await;
+    // 平仓途中手动平掉一部分，下一张平仓单结果未知。
+    harness
+        .exchange
+        .set_position(Position::parse("0.01").unwrap());
+    harness.exchange.unknown_next_place("timeout");
+    harness.step(5).await;
+    harness.step(6).await;
+    let unknown = close_orders(&harness)
+        .into_iter()
+        .find(|order| order.record.status == OrderStatus::Unknown)
+        .expect("an unknown close order");
+
+    for second in [60, 61, 62, 63] {
+        if harness.step(second).await.status == StrategyStatus::Closed {
+            break;
+        }
+    }
+
+    let voided = close_orders(&harness)
+        .into_iter()
+        .find(|order| order.record.client_order_id == unknown.record.client_order_id)
+        .unwrap();
+    assert_eq!(voided.record.status, OrderStatus::Void);
+    assert_eq!(harness.exchange.current_position(), Position::ZERO);
+    assert_eq!(status(&harness), StrategyStatus::Closed);
+}
+
+/// 平仓成交已经记账、仓位接口还停在旧值上（连着几次都一样）：按旧仓位多发的只减仓单
+/// 不会平过头，仓位追上之后照常平完。
+#[tokio::test]
+async fn a_lagging_position_after_a_close_fill_still_closes() {
+    let harness = holding().await;
+    let held = harness.exchange.current_position();
+    harness.clock.set(at(2));
+    harness
+        .runtime
+        .stop_and_close(&harness.strategy_id)
+        .await
+        .unwrap();
+    harness.exchange.cap_next_ioc_fill(quantity("0.01"));
+    harness.step(3).await;
+    assert_eq!(close_orders(&harness).len(), 1);
+
+    // 这一步的仓位查询都还停在平仓之前。
+    harness.exchange.report_stale_positions(4, held);
+    harness.step(4).await;
+    // 只减仓：按旧仓位多发的数量成交不了，仓位不会被翻到空头。
+    assert!(harness.exchange.current_position() >= Position::ZERO);
+
+    for second in 5..10 {
+        if harness.step(second).await.status == StrategyStatus::Closed {
+            break;
+        }
+    }
+    assert_eq!(harness.exchange.current_position(), Position::ZERO);
+    assert_eq!(status(&harness), StrategyStatus::Closed);
 }

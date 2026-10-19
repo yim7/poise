@@ -207,7 +207,13 @@ impl Runtime {
                 return Ok(report);
             }
         };
-        let unknown = match readings.check {
+        let check = readings.check;
+        // 平仓在仓位读数还在变的时候不发单：按还没追上的仓位算出来的数量是错的。
+        let ready = match reducing {
+            Reducing::Invalidation => true,
+            Reducing::Close => check != Some(PositionCheck::Unstable),
+        };
+        let unknown = match check {
             Some(check) => {
                 Some(self.settle_unknown_orders(strategy_id, &mut orders, check, now)?)
             }
@@ -235,7 +241,7 @@ impl Runtime {
         };
         let mut placed: Vec<ClientOrderId> = Vec::new();
         let mut stale = false;
-        if let Some(intent) = &reduction.order {
+        if let Some(intent) = reduction.order.as_ref().filter(|_| ready) {
             match self
                 .place_one(
                     strategy_id,
@@ -270,9 +276,20 @@ impl Runtime {
         ) {
             stale = true;
         }
+        // 仓位读数还在变时不算完成：最后一次恰好读到 0，真实仓位可能还在。平仓要求走通常规
+        // 读数、读数稳定（账上和实际本来就可能不一致，`Mismatch` 也算稳定）；失效减仓在成交
+        // 同步没走通、直接读仓位时（`None`）照旧（B39）。
+        let confirmed = match reducing {
+            Reducing::Close => matches!(
+                check,
+                Some(PositionCheck::Consistent | PositionCheck::Mismatch)
+            ),
+            Reducing::Invalidation => check != Some(PositionCheck::Unstable),
+        };
         let done = round.is_clean()
             && placed.is_empty()
             && !stale
+            && confirmed
             && reduction.settled
             && cancel_only_settled(&orders);
         let status = if done {

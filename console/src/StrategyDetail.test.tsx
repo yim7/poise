@@ -316,6 +316,91 @@ describe('运行详情', () => {
     finish()
   })
 
+  it('b49_停止请求还没回来时就确认平仓：平仓请求等停止成功之后才发', async () => {
+    // 服务端一个策略同一时间只做一件事，最多等 3 秒；撤单常常更久。平仓请求要排在停止之后，
+    // 不能指望服务端替我们排队。
+    let finish: () => void = () => {}
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    const server = detailRoutes({
+      'POST /api/strategies/s-1/stop': { body: { canceled: ['0x1'], status: 'stopping' }, wait: pending },
+      'POST /api/strategies/s-1/close': { body: { status: 'stopping' } },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.click(screen.getByRole('button', { name: '停止' }))
+    await userEvent.click(screen.getByRole('button', { name: '确认停止' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '市价平仓？' })
+    await userEvent.click(within(dialog).getByRole('button', { name: '市价平仓' }))
+
+    expect(server.count('POST', '/api/strategies/s-1/close')).toBe(0)
+    finish()
+    await waitFor(() => {
+      expect(server.count('POST', '/api/strategies/s-1/close')).toBe(1)
+    })
+    expect(await screen.findByText(/撤单收尾后市价平仓/)).toBeInTheDocument()
+  })
+
+  it('停止没成功时不发平仓请求，说清原因', async () => {
+    let fail: () => void = () => {}
+    const pending = new Promise<void>((resolve) => {
+      fail = resolve
+    })
+    const server = detailRoutes({
+      'POST /api/strategies/s-1/stop': {
+        status: 409,
+        body: { kind: 'busy', error: '正在执行上一步，稍后再试' },
+        wait: pending,
+      },
+      'POST /api/strategies/s-1/close': { body: { status: 'stopping' } },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.click(screen.getByRole('button', { name: '停止' }))
+    await userEvent.click(screen.getByRole('button', { name: '确认停止' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '市价平仓？' })
+    await userEvent.click(within(dialog).getByRole('button', { name: '市价平仓' }))
+    fail()
+
+    expect(await screen.findByText(/停止没成功，没有平仓/)).toBeInTheDocument()
+    expect(server.count('POST', '/api/strategies/s-1/close')).toBe(0)
+  })
+
+  it('停止的响应失败、关掉了第二次确认之后，再点市价平仓照常发出', async () => {
+    // 服务端其实执行了停止，但响应丢了：页面刷新后已经是停止中。这时独立发起的平仓不该再
+    // 等那次失败的停止。
+    let stopped = false
+    const server = detailRoutes({
+      'GET /api/strategies/s-1': () => ({
+        body: detail({ summary: summary({ status: stopped ? 'stopping' : 'running' }) }),
+      }),
+      'POST /api/strategies/s-1/stop': () => {
+        stopped = true
+        return { status: 502, body: { kind: 'exchange', error: '交易所暂不可用：timeout' } }
+      },
+      'POST /api/strategies/s-1/close': { body: { status: 'stopping' } },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.click(screen.getByRole('button', { name: '停止' }))
+    await userEvent.click(screen.getByRole('button', { name: '确认停止' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '市价平仓？' })
+    await userEvent.click(within(dialog).getByRole('button', { name: '保留仓位' }))
+    await screen.findByText(/交易所暂不可用/)
+
+    await userEvent.click(await screen.findByRole('button', { name: '市价平仓' }))
+    const again = await screen.findByRole('alertdialog', { name: '市价平仓？' })
+    await userEvent.click(within(again).getByRole('button', { name: '市价平仓' }))
+
+    await waitFor(() => {
+      expect(server.count('POST', '/api/strategies/s-1/close')).toBe(1)
+    })
+  })
+
   it('最差成交价按交易所的价格规则显示：最多 5 位有效数字', async () => {
     detailRoutes({
       'GET /api/strategies/s-1': {

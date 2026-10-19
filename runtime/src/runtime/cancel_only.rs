@@ -99,6 +99,7 @@ impl Runtime {
     /// 补记成交，全部订单有了结论之后进入「平仓中」，由常驻服务按实时净仓位平掉。
     ///
     /// 平仓一定排在撤单收尾之后：残留的网格单还可能成交，先平仓会被它们把仓位开回来。
+    /// 已经归档的策略停止早就做完了，直接按 [`Runtime::close`] 平仓。
     pub async fn stop_and_close(
         &self,
         strategy_id: &StrategyId,
@@ -115,6 +116,11 @@ impl Runtime {
         let now = self.clock.now();
         let status = self.store.load_strategy(strategy_id)?.status;
         match status {
+            // 等驱动权的时候后台可能刚好收尾归档：在同一次驱动权里接着平仓，不漏掉。
+            status if status.is_archived() && close => {
+                self.close_archived(strategy_id, now).await?;
+                return Ok(Vec::new());
+            }
             status if status.is_archived() => return Ok(Vec::new()),
             StrategyStatus::Draft => {
                 return Err(RuntimeError::NotRunning(strategy_id.clone(), status));
@@ -123,11 +129,10 @@ impl Runtime {
             // 收尾之后归档（停止时选了平仓就进入平仓中）。
             _ => {}
         }
-        // 普通停止就是不平仓：停止中补上的平仓标记、平仓中正在进行的平仓都作罢。
+        // 普通停止不清平仓标记：停止中再停一次（命令行紧急停止就是这样）是重复操作，用户
+        // 已经确认过的平仓照样做。平仓中停止就是放弃平仓（B56）：进入平仓中时标记已经用掉。
         if close {
             self.store.save_close_request(strategy_id, now)?;
-        } else {
-            self.store.clear_close_request(strategy_id)?;
         }
         if status != StrategyStatus::Stopping {
             self.store
@@ -140,10 +145,10 @@ impl Runtime {
     /// 市价平仓（第 7.7 节第 1 条的第二个入口）：停止中点了，等于补上平仓标记；已归档的
     /// 策略点了，进入「平仓中」，由常驻服务按实时净仓位平掉。返回之后的状态。
     ///
-    /// 已归档的策略要满足两项才行：交易所上这个标的的净仓位按标记价够最低下单金额
-    /// （[`RuntimeError::NothingToClose`]），而且这个标的上没有别的未归档策略
-    /// （[`RuntimeError::InstrumentBusy`]，仓位归它管）。还在运行的策略走
-    /// [`Runtime::stop_and_close`]。
+    /// 已归档的策略要满足两项才行：交易所上这个标的有净仓位（不足最低下单金额的零头也算，
+    /// 整个平掉的只减仓单不受最低金额限制；没有仓位是 [`RuntimeError::NothingToClose`]），而且
+    /// 这个标的上没有别的未归档策略（[`RuntimeError::InstrumentBusy`]，仓位归它管）。还在运行
+    /// 的策略走 [`Runtime::stop_and_close`]。
     pub async fn close(&self, strategy_id: &StrategyId) -> Result<StrategyStatus, RuntimeError> {
         let _guard = self.begin_waiting(strategy_id).await?;
         let now = self.clock.now();
@@ -151,12 +156,24 @@ impl Runtime {
         match stored.status {
             StrategyStatus::Stopping => {
                 self.store.save_close_request(strategy_id, now)?;
-                return Ok(StrategyStatus::Stopping);
+                Ok(StrategyStatus::Stopping)
             }
-            StrategyStatus::Closing => return Ok(StrategyStatus::Closing),
-            status if status.is_archived() => {}
-            other => return Err(RuntimeError::NotRunning(strategy_id.clone(), other)),
+            StrategyStatus::Closing => Ok(StrategyStatus::Closing),
+            status if status.is_archived() => {
+                self.close_archived(strategy_id, now).await?;
+                Ok(StrategyStatus::Closing)
+            }
+            other => Err(RuntimeError::NotRunning(strategy_id.clone(), other)),
         }
+    }
+
+    /// 已归档的策略进入平仓中。调用方必须已经取得这个策略的驱动权。
+    async fn close_archived(
+        &self,
+        strategy_id: &StrategyId,
+        now: DateTime<Utc>,
+    ) -> Result<(), RuntimeError> {
+        let stored = self.store.load_strategy(strategy_id)?;
         let strategy = Strategy::new(stored.config.clone(), stored.spec.clone(), stored.fees)?;
         let instrument = strategy.spec().instrument();
         let mark = self.exchange.mark_price(instrument).await?;
@@ -177,7 +194,7 @@ impl Runtime {
                 other => RuntimeError::Store(other),
             })?;
         tracing::warn!(strategy = %strategy_id, %position, "market close requested on an archived strategy");
-        Ok(StrategyStatus::Closing)
+        Ok(())
     }
 
     /// 只撤单的一步（第 2.4 节）：不下任何新单，只撤掉在场订单、按 `cloid` 查终态、
@@ -262,11 +279,13 @@ impl Runtime {
         let status = if settled {
             // 收场时刻按此刻的时钟记：归档的策略按它截止资金费（第 7.6 节），用这一轮开始的
             // 时刻会把撤单、对账期间结算的那笔排除在外。
-            self.store
-                .save_strategy_status(strategy_id, target, self.clock.now())?;
             if target == StrategyStatus::Closing {
-                // 已经进入平仓中，标记用完了：之后再停止就是放弃平仓。
-                self.store.clear_close_request(strategy_id)?;
+                // 进入平仓中，标记用完了：之后再停止就是放弃平仓。改状态和用掉标记在同一个
+                // 事务里（见 [`crate::Store::enter_closing`]）。
+                self.store.enter_closing(strategy_id, self.clock.now())?;
+            } else {
+                self.store
+                    .save_strategy_status(strategy_id, target, self.clock.now())?;
             }
             tracing::warn!(
                 strategy = %strategy_id,

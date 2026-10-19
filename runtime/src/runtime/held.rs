@@ -107,9 +107,14 @@ impl Runtime {
         Ok(())
     }
 
-    /// 这份已归档策略的标的上仍有的净仓位；读数过期、或者不挂在它身上时是 `None`。
+    /// 这份已归档策略的标的上仍有的净仓位；读数过期、不挂在它身上、或者标的上已经有未归档
+    /// 策略时是 `None`。最后一条在显示时现查：新策略启动和每分钟的读取可能交错，正在进行的
+    /// 读取会把刚作废的旧读数写回去，只靠清缓存挡不住。
     pub(super) fn held_position(&self, stored: &StoredStrategy) -> Option<HeldPosition> {
         if !stored.status.is_archived() {
+            return None;
+        }
+        if !matches!(self.store.live_strategy(&stored.instrument), Ok(None)) {
             return None;
         }
         let now = self.clock.now();

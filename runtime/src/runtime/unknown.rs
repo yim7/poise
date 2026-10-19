@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use poise_strategy::decision::{MissingFact, PositionCheck, missing_facts};
-use poise_strategy::order::{ClientOrderId, OrderStatus};
+use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderStatus};
 use poise_strategy::units::Quantity;
 
 use crate::store::{StoredOrder, StrategyId};
@@ -75,6 +75,12 @@ impl Runtime {
     /// 成交同步成功之后调它。仓位要用这一步刚核对出的结论，`position` 不是
     /// [`PositionCheck::Consistent`] 时一张都不作废。
     ///
+    /// 市价平仓单（第 7.7 节）不看仓位这一项：它只减仓、立即成交否则撤销，过了期限不会再
+    /// 成交；下一张平仓单按交易所的实时仓位算，这张单就算悄悄成交过，实时仓位里也已经扣掉
+    /// 了，交易所的只减仓限制保证不会平过头。账上的应有持仓在平仓时本来就可能和实际仓位
+    /// 不一致（归档之后手动交易过、仓位核对失败暂停过、平仓途中手动交易），要求仓位一致，
+    /// 这张单就永远作废不了，平仓和放弃平仓的收尾都会卡住。
+    ///
     /// 作废之后不换 `cloid` 重发：它的单位按状态重新规划，下一张单是新的订单。
     pub(super) fn settle_unknown_orders(
         &self,
@@ -99,6 +105,11 @@ impl Runtime {
             .filter(|order| order.record.status == OrderStatus::Unknown)
         {
             let deadline = order.expires_at + self.options.unknown_order_grace;
+            let position = if order.record.purpose == OrderPurpose::Close {
+                PositionCheck::Consistent
+            } else {
+                position
+            };
             let missing = missing_facts(
                 order.exchange_order_id.is_some(),
                 now >= deadline,

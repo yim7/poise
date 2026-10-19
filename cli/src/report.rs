@@ -364,7 +364,15 @@ async fn stop_via_api(listen: &str, instrument: &Instrument) -> Result<Found> {
                 continue;
             }
             Action::Pause => "pause",
-            Action::Stop => "stop",
+            // 停止中的策略后台本来就在撤单、对账，不再发停止：服务那边可能刚好收尾进了平仓中，
+            // 这时再停就成了放弃用户已经确认的平仓（第 7.7 节）。
+            Action::Stop => {
+                println!(
+                    "策略 {strategy_id} {}，后台正在撤单收尾，不重复停止",
+                    status.label()
+                );
+                continue;
+            }
         };
         let response = http
             .post(format!("{base}/strategies/{strategy_id}/{path}"))

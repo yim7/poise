@@ -4,7 +4,7 @@
 // 在场挂单和主仓批次；最后是运行中可改的参数和参数版本。暂停、恢复、停止在右上角
 // （第 2.4 节，B45）。
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { KindBadge, Pill, StatusBadge } from '@/components/badges'
@@ -56,24 +56,31 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
   })
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
+  // 正在进行的操作数：停止和紧接着的平仓会同时在途，一个结束不能提前解锁按钮。
+  const [inFlight, setInFlight] = useState(0)
+  const busy = inFlight > 0
+  // 还没返回的停止请求：平仓要等它成功之后再发（服务端最多等 3 秒，撤单常常更久）。
+  const pendingStop = useRef<Promise<unknown> | null>(null)
   // 停止确认之后的第二次确认：要不要市价平仓（第 7.7 节）。
   const [askClose, setAskClose] = useState(false)
   const client = useQueryClient()
 
-  /** 三个动作都要等下一轮读数：做完立刻刷新，页面不会停在旧状态。 */
+  /**
+   * 动作做完立刻刷新，页面不会停在旧状态。失败了也刷新：响应丢了的时候，服务端可能已经
+   * 执行过了（例如停止其实已经开始）。
+   */
   async function run(action: () => Promise<string>) {
-    setBusy(true)
+    setInFlight((count) => count + 1)
     setError(null)
     setNotice(null)
     try {
       setNotice(await action())
-      await client.invalidateQueries({ queryKey: ['strategy', strategyId] })
-      await client.invalidateQueries({ queryKey: ['strategies'] })
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure))
     } finally {
-      setBusy(false)
+      setInFlight((count) => count - 1)
+      await client.invalidateQueries({ queryKey: ['strategy', strategyId] })
+      await client.invalidateQueries({ queryKey: ['strategies'] })
     }
   }
 
@@ -123,8 +130,21 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
     ? { position: held.position, mark: held.market_price }
     : { position: strategy.position, mark: strategy.market_price }
 
-  /** 平仓：停止中补上平仓标记，已归档进入平仓中。 */
-  const close = () => run(async () => closeSummary(await api.close(strategyId)))
+  /** 平仓：停止中补上平仓标记，已归档进入平仓中。紧跟在停止后面时，先等停止成功。 */
+  const close = () =>
+    run(async () => {
+      const stop = pendingStop.current
+      if (stop !== null) {
+        try {
+          await stop
+        } catch {
+          throw new Error('停止没成功，没有平仓。')
+        } finally {
+          pendingStop.current = null
+        }
+      }
+      return closeSummary(await api.close(strategyId))
+    })
 
   return (
     <div className="flex flex-col gap-5">
@@ -172,16 +192,24 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
                 busy={busy}
                 status={status}
                 onConfirm={() => {
-                  // 平仓中停止就是放弃平仓；其余有仓位的，紧接着问要不要平（第 7.7 节）。不等
-                  // 停止请求回来：撤单要好几秒，平仓请求会在服务端排在停止后面。
+                  // 平仓中停止就是放弃平仓；其余有仓位的，紧接着问要不要平（第 7.7 节）。弹窗
+                  // 不等停止请求回来（撤单要好几秒），确认之后的平仓请求等它成功再发。
+                  const stop = api.stop(strategyId)
+                  pendingStop.current = stop
                   if (hasPosition && status !== 'closing') setAskClose(true)
-                  void run(async () => stopSummary(await api.stop(strategyId)))
+                  void run(async () => stopSummary(await stop))
                 }}
               />
             ) : null}
             <CloseDialog
               open={askClose}
-              onOpenChange={setAskClose}
+              onOpenChange={(open) => {
+                setAskClose(open)
+                // 第二次确认关掉了（保留仓位，或者已经确认过平仓）：和那次停止的关联到此为止。
+                // 之后再点市价平仓是独立的操作，不该再等那次停止的结果。确认平仓时，平仓已经
+                // 在关窗之前取走了这次停止。
+                if (!open) pendingStop.current = null
+              }}
               position={closing.position}
               mark={closing.mark}
               onConfirm={close}
