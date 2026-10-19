@@ -13,6 +13,8 @@ export interface Call {
 export interface Reply {
   status?: number
   body?: unknown
+  /** 等它完成才回答：模拟要好几秒的请求，例如撤单。 */
+  wait?: Promise<unknown>
 }
 
 type Route = Reply | ((call: Call) => Reply)
@@ -40,6 +42,7 @@ export function fakeServer(routes: Routes): FakeServer {
       const route = routes[`${method} ${path}`]
       if (route === undefined) throw new Error(`测试没有准备 ${method} ${path}`)
       const reply = typeof route === 'function' ? route(call) : route
+      if (reply.wait !== undefined) await reply.wait
       return new Response(reply.body === undefined ? null : JSON.stringify(reply.body), {
         status: reply.status ?? 200,
         headers: { 'content-type': 'application/json' },

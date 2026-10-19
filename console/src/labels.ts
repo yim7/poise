@@ -24,13 +24,27 @@ export const STATUS_LABELS: Record<StrategyStatus, string> = {
   stopped: '已归档',
   invalidating: '失效中',
   invalidated: '已失效',
+  closing: '平仓中',
+  closed: '已平仓',
 }
 
-export const CELL_STATUS_LABELS: Record<CellStatus, string> = {
-  waiting_for_batch: '等待所属批次',
-  waiting_for_buy: '等待买入',
-  holding: '持有中',
-  to_buy_back: '等待买回',
+/** 归档只读：已停止、已失效、已平仓（第 2.4 节）。标的上还有仓位时只剩市价平仓。 */
+export function isArchived(status: StrategyStatus): boolean {
+  return status === 'stopped' || status === 'invalidated' || status === 'closed'
+}
+
+/**
+ * 格子状态只在格子还没启用时显示：等买入、持有、部分持有从持有量一眼就能看出来，
+ * 再写一遍是重复。
+ */
+export const CELL_STATUS_LABELS: Partial<Record<CellStatus, string>> = {
+  waiting_for_batch: '等批次',
+}
+
+/** 方向的单字简写：格子、批次、挂单归属里用。 */
+export const DIRECTION_SHORT: Record<Direction, string> = {
+  long: '多',
+  short: '空',
 }
 
 export const DIRECTION_LABELS: Record<Direction, string> = {
@@ -38,12 +52,26 @@ export const DIRECTION_LABELS: Record<Direction, string> = {
   short: '做空',
 }
 
-/** 订单用途只说「哪条腿」：买卖方向按侧相反，写「买入／卖出」在空头侧就是错的。 */
+/** 订单用途只说「哪条腿」：开仓、平仓还是主仓。买卖另起一列，按侧推出来。 */
 export const PURPOSE_LABELS: Record<OrderPurpose, string> = {
-  core: '主仓建仓',
-  grid_entry: '格子建仓',
-  grid_exit: '格子平仓',
+  core: '主仓',
+  grid_entry: '开',
+  grid_exit: '平',
   invalidation: '失效减仓',
+  close: '清仓',
+}
+
+/** 订单的买卖：多头侧建仓（主仓、开）是买，平仓、失效减仓和清仓是卖；空头侧反过来。 */
+export function orderSide(direction: Direction, purpose: OrderPurpose): Side {
+  const opening = purpose === 'core' || purpose === 'grid_entry'
+  return opening === (direction === 'long') ? 'buy' : 'sell'
+}
+
+/** 订单归属的方向。 */
+export function unitDirection(unit: Unit): Direction {
+  if ('batch' in unit) return unit.batch[0]
+  if ('cell' in unit) return unit.cell[0]
+  return unit.side
 }
 
 export const SIDE_LABELS: Record<Side, string> = {
@@ -52,13 +80,13 @@ export const SIDE_LABELS: Record<Side, string> = {
 }
 
 export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
-  submitting: '已记录待发送',
+  submitting: '待发送',
   open: '在场',
   partially_filled: '部分成交',
   filled: '已成交',
   canceled: '已撤销',
   rejected: '被拒绝',
-  void: '作废（核对为没有影响）',
+  void: '作废',
   unknown: '结果待查',
 }
 
@@ -67,7 +95,7 @@ export const WAIT_REASON_LABELS: Record<WaitReason, string> = {
   price_not_reached: '价格未到',
   waiting_for_throttle: '等待限速放行',
   waiting_for_batch: '等待所属批次',
-  limit_adjusted_by_own_order: '限价因自身反向订单下调',
+  limit_adjusted_by_own_order: '限价避让自身挂单',
   insufficient_funds: '资金不足或退避中',
   margin_ratio_above_stop_threshold: '保证金率超过停止阈值',
   margin_ratio_unavailable: '保证金率读不到',
@@ -76,15 +104,15 @@ export const WAIT_REASON_LABELS: Record<WaitReason, string> = {
   position_check_failed: '仓位核对失败已暂停',
   invalidated: '观点已失效',
   fills_pending: '成交待对账',
-  position_unstable: '仓位数据还在变化',
+  position_unstable: '仓位变动中',
   fill_records_inconsistent: '成交记录对不上',
 }
 
-/** 订单归属：中性网格两侧都有批次和格子，归属里必须带上方向才分得清。 */
+/** 订单归属：中性网格两侧都有批次和格子，归属里带上方向才分得清。多3 是多头第 3 格，多批0 是多头第 0 批主仓。 */
 export function unitLabel(unit: Unit): string {
-  if ('batch' in unit) return `${DIRECTION_LABELS[unit.batch[0]]}第 ${unit.batch[1]} 批主仓`
-  if ('cell' in unit) return `${DIRECTION_LABELS[unit.cell[0]]}第 ${unit.cell[1]} 格`
-  return `${DIRECTION_LABELS[unit.side]}整侧`
+  if ('batch' in unit) return `${DIRECTION_SHORT[unit.batch[0]]}批${unit.batch[1]}`
+  if ('cell' in unit) return `${DIRECTION_SHORT[unit.cell[0]]}${unit.cell[1]}`
+  return `${DIRECTION_SHORT[unit.side]}侧`
 }
 
 /** 策略类型：只有多头侧是做多，只有空头侧是做空，两侧都有是中性网格。 */

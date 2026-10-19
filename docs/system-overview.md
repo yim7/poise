@@ -13,7 +13,7 @@
   - `store`：SQLite 存储。`api`：网页接口。`serve`：常驻服务。
   - `exchange`、`account`：交易所和账户接口；`simulated`、`simulated_account`：测试用的模拟实现。
 - `hyperliquid/`：实现 `Exchange` 和 `Account`。负责签名、下单撤单、按 `cloid` 查订单、成交和仓位、账户读数（保证金、杠杆、费率、资金费）。
-- `cli/`：命令行 `poise`（`check`、`serve`、`status`、`stop`）和实例目录、实例锁。`stop` 在服务运行时改走服务的本机接口，不动失效中的策略。
+- `cli/`：命令行 `poise`（`check`、`serve`、`status`、`stop`、`instances`）、实例的查找（`~/.poise/<名字>`，`POISE_HOME` 可换根目录）和实例锁。`stop` 在服务运行时改走服务的本机接口，不动失效中的策略。
 - `console/`：网页控制台。只发请求、只显示服务端给的数据，不重算数量和金额。接口只监听本机地址，并拒绝 `Host` 或 `Origin` 不是本机的请求（跨站的简单请求、DNS 重绑定）。
 
 ## 策略状态

@@ -79,7 +79,7 @@ export function parseThrottle(minutes: string): ThrottleInput {
   if (value === '') return { interval: null }
   const parsed = Number(value)
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    return { problem: '限速间隔要填一个正数（分钟）；不限速就留空。' }
+    return { problem: '限速间隔填正数（分钟），留空不限速。' }
   }
   return { interval: [Math.round(parsed * 60), 0] }
 }
@@ -114,7 +114,7 @@ export function parseInvalidation(
   const price = input.price.trim()
   if (price === '') return { invalidation: null }
   const slippage = percentInputToRatio(input.slippage)
-  if (slippage === null) return { problem: '失效平仓滑点上限要填百分比数字，例如 1。' }
+  if (slippage === null) return { problem: '失效滑点上限填百分比数字。' }
   const remaining = input.remaining.trim()
   return {
     invalidation: {

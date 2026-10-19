@@ -34,7 +34,7 @@ function renderEditor(server: FakeServer, onStarted = vi.fn()) {
 /** 保存并预览，等到预览出来。 */
 async function saveAndPreview() {
   await userEvent.click(screen.getByRole('button', { name: '保存并预览' }))
-  await screen.findByText('参数校验通过。')
+  await screen.findByText('校验通过')
 }
 
 describe('新建与确认启动', () => {
@@ -89,6 +89,61 @@ describe('新建与确认启动', () => {
     expect(screen.getByRole('button', { name: '确认启动' })).toBeDisabled()
   })
 
+  it('新建的草稿第一次保存后报出草稿标识，页面据此换成草稿地址，刷新还能回到这份草稿', async () => {
+    const server = editorRoutes()
+    const onCreated = vi.fn()
+    renderWithQuery(
+      <DraftEditor draftId={null} onBack={() => {}} onStarted={() => {}} onCreated={onCreated} />,
+    )
+
+    await saveAndPreview()
+    expect(onCreated).toHaveBeenCalledWith('s-1')
+
+    // 再保存是改同一份草稿，不再报新标识。
+    await userEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => {
+      expect(server.count('PUT', '/api/drafts/s-1')).toBe(1)
+    })
+    expect(onCreated).toHaveBeenCalledTimes(1)
+  })
+
+  it('网格价差默认跟随间距：改间距时价差一起变', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+
+    const spacing = side('做多侧').getByLabelText('网格间距 d')
+    await userEvent.clear(spacing)
+    await userEvent.type(spacing, '500')
+
+    expect(side('做多侧').getByLabelText('网格价差 g')).toHaveValue('500')
+    expect(side('做多侧').getByText('= d')).toBeInTheDocument()
+    await saveAndPreview()
+    expect(server.lastBody('POST', '/api/drafts')).toMatchObject({
+      long: { grid_spacing: '500', grid_spread: '500' },
+    })
+  })
+
+  it('改过价差就记下它和间距的比例：之后改间距，价差按比例跟着变', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+
+    const spread = side('做多侧').getByLabelText('网格价差 g')
+    await userEvent.clear(spread)
+    await userEvent.type(spread, '2000')
+    expect(side('做多侧').getByText('= 2 × d')).toBeInTheDocument()
+
+    // 先删空再输入：删空的那一刻比例不能丢。
+    const spacing = side('做多侧').getByLabelText('网格间距 d')
+    await userEvent.clear(spacing)
+    await userEvent.type(spacing, '400')
+
+    expect(side('做多侧').getByLabelText('网格价差 g')).toHaveValue('800')
+    await saveAndPreview()
+    expect(server.lastBody('POST', '/api/drafts')).toMatchObject({
+      long: { grid_spacing: '400', grid_spread: '800' },
+    })
+  })
+
   it('做空网格：只勾空头侧，提交的配置里没有多头侧', async () => {
     const server = editorRoutes()
     renderEditor(server)
@@ -118,21 +173,21 @@ describe('新建与确认启动', () => {
     // 两侧都配置就是中性网格：两侧都不设主仓，输入框也改不了。
     expect(side('做多侧').getByLabelText('主仓比例 r')).toBeDisabled()
     expect(side('做空侧').getByLabelText('主仓比例 r')).toBeDisabled()
-    expect(screen.getByText('两侧都配置：这是中性网格，两侧都不设主仓。')).toBeInTheDocument()
+    expect(screen.getByText('中性网格不设主仓')).toBeInTheDocument()
     expect(server.lastBody('POST', '/api/drafts')).toMatchObject({
       instrument: 'BTC',
       long: { price_low: '75000', core_ratio: '0', batch_count: null },
       short: { price_low: '96000', core_ratio: '0', batch_count: null },
     })
 
-    // 预览里的格子表按侧展示：两侧各一格。
+    // 预览里的格子阶梯两侧各一格，按建仓价从高到低：空头侧 91 在上，多头侧 89 在下。
     const table = screen.getByText('网格格子表').closest('table') as HTMLTableElement
     const rows = within(table).getAllByRole('row')
     expect(rows).toHaveLength(3)
-    expect(rows[1]).toHaveTextContent('做多')
-    expect(rows[1]).toHaveTextContent('89')
-    expect(rows[2]).toHaveTextContent('做空')
-    expect(rows[2]).toHaveTextContent('91')
+    expect(rows[1]).toHaveTextContent('空0')
+    expect(rows[1]).toHaveTextContent('91')
+    expect(rows[2]).toHaveTextContent('多0')
+    expect(rows[2]).toHaveTextContent('89')
   })
 
   it('b37_填了观点失效价时，滑点上限的百分比换成比率提交', async () => {
@@ -205,7 +260,7 @@ describe('新建与确认启动', () => {
     await saveAndPreview()
     await userEvent.click(screen.getByRole('button', { name: '确认启动' }))
 
-    expect(await screen.findByText(/请重新预览/)).toBeInTheDocument()
+    expect(await screen.findByText(/重新预览/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '确认启动' })).toBeDisabled()
   })
 
@@ -215,7 +270,7 @@ describe('新建与确认启动', () => {
         status: 409,
         body: {
           kind: 'instrument_busy',
-          error: 'instrument `BTC` already has a live strategy `s-2`',
+          error: '标的 BTC 已有活动策略 s-2',
         },
       },
     })
@@ -224,7 +279,7 @@ describe('新建与确认启动', () => {
     await saveAndPreview()
     await userEvent.click(screen.getByRole('button', { name: '确认启动' }))
 
-    expect(await screen.findByText(/先停掉那一个/)).toBeInTheDocument()
+    expect(await screen.findByText(/已有活动策略，先停止它/)).toBeInTheDocument()
     // 预览没作废：停掉那一个之后还能用这次预览启动。
     expect(screen.getByRole('button', { name: '确认启动' })).toBeEnabled()
   })
@@ -233,7 +288,7 @@ describe('新建与确认启动', () => {
     const server = editorRoutes({
       'POST /api/drafts/s-1/start': {
         status: 409,
-        body: { kind: 'busy', error: 'strategy `s-1` is already being driven' },
+        body: { kind: 'busy', error: '正在执行上一步，稍后再试' },
       },
     })
     renderEditor(server)
@@ -241,7 +296,7 @@ describe('新建与确认启动', () => {
     await saveAndPreview()
     await userEvent.click(screen.getByRole('button', { name: '确认启动' }))
 
-    expect(await screen.findByText(/稍等一下再点确认启动/)).toBeInTheDocument()
+    expect(await screen.findByText(/正在执行上一步，稍后再试/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '确认启动' })).toBeEnabled()
   })
 
@@ -287,7 +342,7 @@ describe('新建与确认启动', () => {
 
     await saveAndPreview()
 
-    expect(screen.getByText(/标的上已有仓位/)).toBeInTheDocument()
+    expect(screen.getByText(/已有仓位，启动时按接管规则/)).toBeInTheDocument()
     const planned = screen.getByRole('table', { name: '启动后第一步挂出的订单' })
     // 限价由服务端算好（已避开自己的卖单），页面原样显示。
     expect(within(planned).getByText('88999')).toBeInTheDocument()
@@ -321,7 +376,7 @@ describe('新建与确认启动', () => {
     const table = screen.getByRole('table', { name: '满仓压力测试' })
     expect(within(table).getByText('36.057692%')).toBeInTheDocument()
     expect(within(table).getByText('67747.6')).toBeInTheDocument()
-    expect(screen.getByText(/提醒：多头侧满仓/)).toBeInTheDocument()
+    expect(screen.getByText(/多头侧满仓/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '确认启动' })).toBeEnabled()
   })
 
@@ -355,7 +410,7 @@ describe('新建与确认启动', () => {
     const server = editorRoutes({
       'POST /api/drafts/s-1/preview': {
         body: preview({
-          validation: { valid: false, reason: 'the grid spread is too small' },
+          validation: { valid: false, reason: '做多侧：网格价差 g 10 扣掉两边的 taker 手续费后不赚钱，至少要 12' },
           token: null,
         }),
       },
@@ -364,7 +419,12 @@ describe('新建与确认启动', () => {
 
     await userEvent.click(screen.getByRole('button', { name: '保存并预览' }))
 
-    expect(await screen.findByText(/the grid spread is too small/)).toBeInTheDocument()
+    // 标题说不通过，正文是服务端给的原因，原样显示。
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByText('校验不通过')).toBeInTheDocument()
+    expect(
+      within(alert).getByText('做多侧：网格价差 g 10 扣掉两边的 taker 手续费后不赚钱，至少要 12'),
+    ).toBeInTheDocument()
     expect(screen.queryByText('网格格子表')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '确认启动' })).toBeDisabled()
   })

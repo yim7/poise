@@ -71,6 +71,9 @@ struct SimState {
     slow_places: Option<(Arc<ManualClock>, Duration)>,
     /// 下一次查标记价失败的原因。行情只用于展示和判定，拿不到它不该挡住撤单。
     fail_next_mark_price: Option<String>,
+    /// 还要让几次查仓位失败，以及失败的原因。
+    fail_positions: usize,
+    fail_positions_reason: String,
     /// 接下来几次查标记价依次拿到的结果：`Ok` 是这一次读到的价格（不改撮合用的行情），
     /// `Err` 是这一次失败的原因。用来构造「两次读数之间价格变了、或者第二次读不到」。
     scripted_mark_prices: std::collections::VecDeque<Result<Price, String>>,
@@ -192,6 +195,8 @@ impl SimulatedExchange {
                 slow_fills_since: None,
                 fills_since_starts: Vec::new(),
                 fail_next_mark_price: None,
+                fail_positions: 0,
+                fail_positions_reason: String::new(),
                 scripted_mark_prices: std::collections::VecDeque::new(),
                 fail_working_orders: 0,
                 fail_working_orders_reason: String::new(),
@@ -570,6 +575,13 @@ impl SimulatedExchange {
         self.lock().fail_next_mark_price = Some(reason.to_string());
     }
 
+    /// 让接下来 `count` 次查仓位失败：交易所的账户接口暂时不可用。
+    pub fn fail_positions(&self, count: usize, reason: &str) {
+        let mut state = self.lock();
+        state.fail_positions = count;
+        state.fail_positions_reason = reason.to_string();
+    }
+
     /// 接下来几次查标记价依次返回 `results`，用完之后照常返回当前行情。
     pub fn script_mark_prices(&self, results: Vec<Result<Price, &str>>) {
         self.lock().scripted_mark_prices = results
@@ -881,6 +893,12 @@ impl Exchange for SimulatedExchange {
         if instrument != &self.instrument {
             return Err(ExchangeError::Rejected {
                 reason: format!("instrument `{instrument}` does not belong to this exchange"),
+            });
+        }
+        if state.fail_positions > 0 {
+            state.fail_positions -= 1;
+            return Err(ExchangeError::Unavailable {
+                reason: state.fail_positions_reason.clone(),
             });
         }
         if let Some((client_order_id, quantity)) = state.fill_before_next_position.pop_front() {

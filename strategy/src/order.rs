@@ -127,6 +127,8 @@ pub enum OrderPurpose {
     GridExit,
     /// 观点失效后的减仓单：只减仓、立即成交否则撤销，方向和平仓腿相同（第 7.5 节）。
     Invalidation,
+    /// 用户确认的市价平仓单：只减仓、立即成交否则撤销，平掉标的上的净仓位（第 7.7 节）。
+    Close,
 }
 
 impl OrderPurpose {
@@ -134,8 +136,14 @@ impl OrderPurpose {
     pub const fn side(self, direction: Direction) -> Side {
         match self {
             Self::Core | Self::GridEntry => direction.entry_side(),
-            Self::GridExit | Self::Invalidation => direction.exit_side(),
+            Self::GridExit | Self::Invalidation | Self::Close => direction.exit_side(),
         }
+    }
+
+    /// 按交易所实时仓位减仓的单：失效减仓和市价平仓。它们的成交不改批次和格子的账，
+    /// 应有持仓直接扣掉它们的累计成交量；都是立即成交否则撤销。
+    pub const fn is_reduction(self) -> bool {
+        matches!(self, Self::Invalidation | Self::Close)
     }
 
     pub const fn as_str(self) -> &'static str {
@@ -144,6 +152,7 @@ impl OrderPurpose {
             Self::GridEntry => "grid_entry",
             Self::GridExit => "grid_exit",
             Self::Invalidation => "invalidation",
+            Self::Close => "close",
         }
     }
 }

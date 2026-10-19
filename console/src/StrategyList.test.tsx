@@ -38,13 +38,34 @@ describe('策略列表', () => {
     )
 
     expect(await screen.findByText('运行中')).toBeInTheDocument()
-    expect(screen.getByText('已归档')).toBeInTheDocument()
     expect(screen.getByText('0.015')).toBeInTheDocument()
     // 「草稿」既是分栏标题，也是草稿行的状态。
     expect(screen.getAllByText('草稿')).toHaveLength(2)
     expect(screen.getByText(/75000–95000/)).toBeInTheDocument()
-    // 只配多头侧：类型列是「做多」，两条策略加一条草稿。
-    expect(screen.getAllByText('做多')).toHaveLength(3)
+    // 只配多头侧：类型是「做多」，在跑的策略加一条草稿；已归档的默认收起。
+    expect(screen.getAllByText('做多')).toHaveLength(2)
+
+    // 已归档的展开之后才看得到。
+    const archived = screen.getByRole('region', { name: '已归档' })
+    expect(within(archived).queryByRole('button', { name: '查看' })).toBeNull()
+    await userEvent.click(within(archived).getByRole('button', { name: '展开' }))
+    expect(within(archived).getByText('做多')).toBeInTheDocument()
+    expect(within(archived).getByRole('button', { name: '查看' })).toBeInTheDocument()
+  })
+
+  it('列表上画出价格条：网格范围两端和最近的标记价', async () => {
+    fakeServer({
+      'GET /api/strategies': { body: [summary({ market_price: '85000' })] },
+      'GET /api/drafts': { body: [] },
+    })
+    renderWithQuery(
+      <StrategyList onNew={() => {}} onOpenDraft={() => {}} onOpenStrategy={() => {}} onOpenSettings={() => {}} />,
+    )
+
+    const live = await screen.findByRole('region', { name: '活动策略' })
+    await within(live).findByText('85000')
+    expect(within(live).getByText('75000')).toBeInTheDocument()
+    expect(within(live).getByText('95000')).toBeInTheDocument()
   })
 
   it('做空和中性策略的类型列分别显示做空和中性', async () => {
@@ -61,9 +82,10 @@ describe('策略列表', () => {
       <StrategyList onNew={() => {}} onOpenDraft={() => {}} onOpenStrategy={() => {}} onOpenSettings={() => {}} />,
     )
 
-    const table = (await screen.findByText('做空')).closest('table') as HTMLTableElement
-    expect(within(table).getByText('中性')).toBeInTheDocument()
-    expect(within(table).queryByText('做多')).not.toBeInTheDocument()
+    const live = await screen.findByRole('region', { name: '活动策略' })
+    expect(await within(live).findByText('做空')).toBeInTheDocument()
+    expect(within(live).getByText('中性')).toBeInTheDocument()
+    expect(within(live).queryByText('做多')).not.toBeInTheDocument()
   })
 
   it('点“查看”打开运行详情，点“新建策略”打开新建表单', async () => {
@@ -84,6 +106,56 @@ describe('策略列表', () => {
 
     await userEvent.click(screen.getByRole('button', { name: '新建策略' }))
     expect(onNew).toHaveBeenCalled()
+  })
+
+  it('b59_已归档、仍有仓位的单独一栏，不收起，可以直接市价平仓', async () => {
+    const server = fakeServer({
+      'GET /api/strategies': {
+        body: [
+          summary({
+            strategy_id: 's-9',
+            instrument: 'SOL',
+            status: 'stopped',
+            working_orders: 0,
+            held: { position: '-1.01', market_price: '104.73', read_at: '2026-10-15T00:05:00Z' },
+          }),
+          summary({ strategy_id: 's-2', status: 'stopped', position: '0', working_orders: 0 }),
+        ],
+      },
+      'GET /api/drafts': { body: [] },
+      'POST /api/strategies/s-9/close': { body: { status: 'closing' } },
+    })
+    renderWithQuery(
+      <StrategyList onNew={() => {}} onOpenDraft={() => {}} onOpenStrategy={() => {}} onOpenSettings={() => {}} />,
+    )
+
+    const held = await screen.findByRole('region', { name: '仍有仓位' })
+    expect(within(held).getByText('SOL')).toBeInTheDocument()
+    expect(within(held).getByText('-1.01')).toBeInTheDocument()
+    expect(within(held).getByText('已归档')).toBeInTheDocument()
+    // 不和收起的已归档重复：已归档那一栏只剩没有仓位的那一份。
+    expect(screen.getByRole('region', { name: '已归档' })).toHaveTextContent('1')
+
+    await userEvent.click(within(held).getByRole('button', { name: '市价平仓' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '市价平仓？' })
+    // 空仓买回：104.73 × 1.05 = 109.9665。
+    expect(within(dialog).getByText('约 109.97')).toBeInTheDocument()
+    await userEvent.click(within(dialog).getByRole('button', { name: '市价平仓' }))
+
+    await waitFor(() => {
+      expect(server.count('POST', '/api/strategies/s-9/close')).toBe(1)
+    })
+    expect(await screen.findByText(/已开始平仓/)).toBeInTheDocument()
+  })
+
+  it('没有仍有仓位的已归档策略时不显示这一栏', async () => {
+    listRoutes()
+    renderWithQuery(
+      <StrategyList onNew={() => {}} onOpenDraft={() => {}} onOpenStrategy={() => {}} onOpenSettings={() => {}} />,
+    )
+
+    await screen.findByText('运行中')
+    expect(screen.queryByRole('region', { name: '仍有仓位' })).not.toBeInTheDocument()
   })
 
   it('服务端读不到时把原因显示出来，而不是空着', async () => {

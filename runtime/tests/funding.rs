@@ -54,7 +54,7 @@ async fn an_adverse_funding_rate_above_the_threshold_warns() {
     // 做多：正费率由多头付。0.0001 每小时，年化 87.6%。
     let long = harness().await;
     step_with_funding(&long, "0.0001", 0).await;
-    assert!(note(&long).contains("资金费率"), "{}", note(&long));
+    assert_eq!(note(&long), "资金费率不利：年化 87.60%（阈值 50.00%）。");
 
     // 同样的费率对做空有利：不提醒。
     let short = short_harness().await;

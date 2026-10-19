@@ -9,7 +9,7 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::runtime::{
-    DraftPreview, ResumeOutcome, Runtime, RuntimeError, StrategyDetail, StrategySummary,
+    DraftPreview, InstanceInfo, ResumeOutcome, Runtime, RuntimeError, StrategyDetail,
+    StrategySummary,
 };
 use crate::settings::AccountSettings;
 use crate::store::{DraftId, StoreError, StoredDraft, StrategyId, StrategyStatus};
@@ -48,11 +49,13 @@ fn api_routes() -> Router<Arc<Runtime>> {
         // `/api` 下没有的路由要回 JSON 404，不能落到网页的静态文件上：前端拿到
         // 200 加一段 HTML，只会报一句和真实原因无关的解析错误。
         .fallback(api_not_found)
+        .route("/instance", get(instance))
         .route("/strategies", get(list_strategies))
         .route("/strategies/:id", get(strategy_detail))
         .route("/strategies/:id/pause", post(pause_strategy))
         .route("/strategies/:id/resume", post(resume_strategy))
         .route("/strategies/:id/stop", post(stop_strategy))
+        .route("/strategies/:id/close", post(close_strategy))
         .route("/strategies/:id/config", put(update_config))
         .route("/drafts", get(list_drafts).post(create_draft))
         .route(
@@ -133,6 +136,11 @@ async fn api_not_found(axum::extract::OriginalUri(uri): axum::extract::OriginalU
     }
 }
 
+/// 这个实例连的网络和账户：页面顶部的标识。
+async fn instance(State(runtime): State<Arc<Runtime>>) -> Result<Json<InstanceInfo>, ApiError> {
+    Ok(Json(runtime.instance()?))
+}
+
 /// 策略列表。只读库里的记录和视图快照，不问交易所（第 11 节）。
 async fn list_strategies(
     State(runtime): State<Arc<Runtime>>,
@@ -165,14 +173,41 @@ async fn resume_strategy(
     Ok(Json(runtime.resume(&strategy_id(id)?).await?))
 }
 
+/// 停止的选项：`close=true` 表示撤单收尾之后市价平仓（第 7.7 节）。不带就是普通停止。
+#[derive(Deserialize)]
+struct StopQuery {
+    #[serde(default)]
+    close: bool,
+}
+
 async fn stop_strategy(
     State(runtime): State<Arc<Runtime>>,
     Path(id): Path<String>,
+    Query(query): Query<StopQuery>,
 ) -> Result<Json<CanceledBody>, ApiError> {
     let strategy_id = strategy_id(id)?;
-    let canceled = runtime.stop(&strategy_id).await?;
+    let canceled = if query.close {
+        runtime.stop_and_close(&strategy_id).await?
+    } else {
+        runtime.stop(&strategy_id).await?
+    };
     let status = runtime.status(&strategy_id)?;
     Ok(Json(CanceledBody { canceled, status }))
+}
+
+#[derive(Serialize)]
+struct StatusBody {
+    status: StrategyStatus,
+}
+
+/// 市价平仓：停止中的补上平仓标记，已归档的进入平仓中（第 7.7 节）。
+async fn close_strategy(
+    State(runtime): State<Arc<Runtime>>,
+    Path(id): Path<String>,
+) -> Result<Json<StatusBody>, ApiError> {
+    let strategy_id = strategy_id(id)?;
+    let status = runtime.close(&strategy_id).await?;
+    Ok(Json(StatusBody { status }))
 }
 
 async fn update_config(
@@ -332,6 +367,7 @@ impl From<RuntimeError> for ApiError {
             RuntimeError::NotRunning(..) => (StatusCode::CONFLICT, "not_running"),
             RuntimeError::Busy(_) => (StatusCode::CONFLICT, "busy"),
             RuntimeError::Archived(_) => (StatusCode::CONFLICT, "archived"),
+            RuntimeError::NothingToClose(_) => (StatusCode::CONFLICT, "nothing_to_close"),
             // 交易所或账户那边的问题，不是这次请求的错。
             RuntimeError::Exchange(_) => (StatusCode::BAD_GATEWAY, "exchange"),
             // 库里的状态和计划对不上：是本地的数据问题，不是交易所故障。

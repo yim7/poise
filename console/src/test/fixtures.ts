@@ -158,8 +158,10 @@ export function summary(overrides: Partial<StrategySummary> = {}): StrategySumma
     created_at: '2026-10-15T00:00:00Z',
     updated_at: '2026-10-15T00:00:01Z',
     position: '0.015',
+    market_price: '95500',
     working_orders: 1,
     config,
+    held: null,
     ...overrides,
   }
 }

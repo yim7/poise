@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::batch::BatchIndex;
+use crate::batch::{BatchIndex, core_quantity};
 use crate::error::ConfigError;
 use crate::instrument::InstrumentSpec;
 use crate::side::Direction;
@@ -131,7 +131,7 @@ fn align_entry_price(
         .checked_round_to_tick(tick, direction.entry_rounding())
         .ok_or(ConfigError::PriceOutOfRange {
             direction,
-            field: "cell price",
+            field: "格子价",
             price,
             price_tick: tick,
         })
@@ -244,6 +244,9 @@ pub(crate) fn meets_minimum_cell_notional(
 
 /// 同样的价格范围与间距下，最多能设多少格。
 ///
+/// 按网格总量平均分给各格估算。有主仓批次时格子按批分配，各批格数不一定相同，实际放得下
+/// 的格数可能略少，所以报错里写「约」。
+///
 /// 格数越少，每格数量越大，被砍掉的又是靠近空隙那一端里最低金额最紧的格子，所以判据
 /// 随格数单调放松，可以二分。逐格检查而不是只看最低价那一格：两条腿里较低价格最低的
 /// 那一格（多头侧是最后一格，空头侧是第一格）不一定是数量最小的那一格，只看它得到的
@@ -278,6 +281,12 @@ fn cells_meet_minimum_notional(
     spec: &InstrumentSpec,
 ) -> bool {
     let step = spec.quantity_step();
+    // 有主仓时格子只分到网格那部分：M 减去主仓（第 4.2 节）。按整份 M 算会报出偏大的格数。
+    let grid_total = shape.max_position.saturating_sub(core_quantity(
+        shape.max_position,
+        shape.core_ratio,
+        step,
+    ));
     let Ok(prices) = cell_prices(
         direction,
         shape.price_low,
@@ -293,7 +302,7 @@ fn cells_meet_minimum_notional(
         let Ok(exit) = exit_price(direction, *entry, CellIndex(index), shape, spec) else {
             return false;
         };
-        let quantity = cell_quantity(index, count, shape.max_position, step);
+        let quantity = cell_quantity(index, count, grid_total, step);
         meets_minimum_cell_notional(quantity, (*entry).min(exit), spec)
     })
 }

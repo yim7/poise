@@ -113,6 +113,11 @@ pub enum StrategyStatus {
     /// 已失效：所有订单都有了结论，仓位不超过剩余数量（或只剩下不了单的尾量）。和
     /// 「已停止」一样归档只读：价格回来也不自动恢复，剩余仓位由新策略接管（第 8 节）。
     Invalidated,
+    /// 平仓中：用户确认了市价平仓，正在用只减仓单平掉标的上的净仓位（第 7.7 节）。
+    /// 不下任何别的单，也不能暂停、恢复；只能停止，停止就是放弃剩下的平仓。
+    Closing,
+    /// 已平仓：所有订单都有了结论，净仓位为 0（或只剩下不了单的尾量）。归档只读。
+    Closed,
 }
 
 impl StrategyStatus {
@@ -127,12 +132,32 @@ impl StrategyStatus {
             Self::Stopped => "stopped",
             Self::Invalidating => "invalidating",
             Self::Invalidated => "invalidated",
+            Self::Closing => "closing",
+            Self::Closed => "closed",
         }
     }
 
-    /// 归档只读：不能再驱动、不能改参数，也不能恢复（第 2.4、7.5 节）。
+    /// 页面和命令行上的叫法。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Draft => "草稿",
+            Self::Running => "运行中",
+            Self::Restoring => "恢复中",
+            Self::Pausing => "暂停中",
+            Self::Paused => "已暂停",
+            Self::Stopping => "停止中",
+            Self::Stopped => "已归档",
+            Self::Invalidating => "失效中",
+            Self::Invalidated => "已失效",
+            Self::Closing => "平仓中",
+            Self::Closed => "已平仓",
+        }
+    }
+
+    /// 归档只读：不能再驱动、不能改参数，也不能恢复（第 2.4、7.5 节）。标的上还有仓位时
+    /// 只剩市价平仓这一个操作（第 7.7 节）。
     pub const fn is_archived(self) -> bool {
-        matches!(self, Self::Stopped | Self::Invalidated)
+        matches!(self, Self::Stopped | Self::Invalidated | Self::Closed)
     }
 
     /// 这个状态下策略还在交易所里活动（在场订单由它负责）。
@@ -147,6 +172,7 @@ impl StrategyStatus {
                 | Self::Paused
                 | Self::Stopping
                 | Self::Invalidating
+                | Self::Closing
         )
     }
 
@@ -166,6 +192,8 @@ impl StrategyStatus {
             "stopped" => Ok(Self::Stopped),
             "invalidating" => Ok(Self::Invalidating),
             "invalidated" => Ok(Self::Invalidated),
+            "closing" => Ok(Self::Closing),
+            "closed" => Ok(Self::Closed),
             other => Err(StoreError::UnknownStatus {
                 value: other.to_string(),
             }),
@@ -304,14 +332,14 @@ pub enum StoreError {
         "this database has data but no network on record, so it can only be a testnet database; use a separate data directory for mainnet"
     )]
     UnboundDataOnMainnet,
-    #[error("strategy `{0}` is not stored")]
+    #[error("策略 {0} 不存在")]
     UnknownStrategy(StrategyId),
     #[error("strategy `{0}` has no view snapshot")]
     UnknownView(StrategyId),
-    #[error("draft `{0}` is not stored")]
+    #[error("草稿 {0} 不存在")]
     UnknownDraft(StrategyId),
     #[error(
-        "instrument `{}` already has a live strategy `{strategy_id}`",
+        "标的 {} 已有活动策略 {strategy_id}",
         instrument.symbol()
     )]
     InstrumentBusy {
@@ -375,7 +403,7 @@ pub struct Store {
 
 /// 存业务数据的表：没有归属记录的库里只要有一张不是空的，就只能给测试网用
 /// （[`Store::bind_identity`]）。加表时要一起加进来。
-const BUSINESS_TABLES: [&str; 15] = [
+const BUSINESS_TABLES: [&str; 16] = [
     "strategies",
     "drafts",
     "batch_states",
@@ -389,6 +417,7 @@ const BUSINESS_TABLES: [&str; 15] = [
     "funding_payments",
     "funding_syncs",
     "pause_reasons",
+    "close_requests",
     "action_counts",
     "instance_identity",
 ];
@@ -568,6 +597,10 @@ const TABLES: &str = "
              CREATE TABLE IF NOT EXISTS pause_reasons (
                  strategy_id TEXT PRIMARY KEY,
                  reason TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS close_requests (
+                 strategy_id TEXT PRIMARY KEY,
+                 requested_at TEXT NOT NULL
              );
              CREATE TABLE IF NOT EXISTS action_counts (
                  day TEXT PRIMARY KEY,
@@ -1015,6 +1048,18 @@ impl Store {
         Ok(())
     }
 
+    /// 数据库认领的网络和账户（[`Store::bind_identity`]）；还没认领时是 `None`。
+    pub fn identity(&self) -> Result<Option<(String, String)>, StoreError> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT network, account_address FROM instance_identity WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?)
+    }
+
     /// 存下一批资金费结算，并记下同步到了哪一刻（第 7.6 节）。同一个标的同一时刻只结算一次：
     /// 重复同步时按时刻覆盖，不会重复计入。两件事写在同一个事务里。
     pub fn save_funding_payments(
@@ -1126,6 +1171,73 @@ impl Store {
             "DELETE FROM pause_reasons WHERE strategy_id = ?1",
             params![strategy_id.as_str()],
         )?;
+        Ok(())
+    }
+
+    /// 记下「停止收尾之后市价平仓」（第 7.7 节）：撤单收尾要好几轮，状态一直是停止中，
+    /// 收尾时看它决定归档还是进入平仓中。重复记一次不改原来的时刻。
+    pub fn save_close_request(
+        &self,
+        strategy_id: &StrategyId,
+        requested_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        self.lock().execute(
+            "INSERT INTO close_requests (strategy_id, requested_at) VALUES (?1, ?2)
+             ON CONFLICT (strategy_id) DO NOTHING",
+            params![strategy_id.as_str(), format_time(requested_at)],
+        )?;
+        Ok(())
+    }
+
+    pub fn has_close_request(&self, strategy_id: &StrategyId) -> Result<bool, StoreError> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT 1 FROM close_requests WHERE strategy_id = ?1",
+                params![strategy_id.as_str()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// 放弃平仓（停止平仓中的策略），或者已经进入平仓中，用不着它了。
+    pub fn clear_close_request(&self, strategy_id: &StrategyId) -> Result<(), StoreError> {
+        self.lock().execute(
+            "DELETE FROM close_requests WHERE strategy_id = ?1",
+            params![strategy_id.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// 已归档的策略进入平仓中（第 7.7 节）：这个标的上没有别的未归档策略才行。检查和改状态
+    /// 在同一个事务里，理由同 [`Store::start_draft`]：分开做，平仓和新策略启动可以各自
+    /// 通过检查，同一个标的上就有两个策略在下单。
+    pub fn reopen_for_close(
+        &self,
+        strategy_id: &StrategyId,
+        instrument: &Instrument,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        if let Some(live) = live_strategy_on(&transaction, instrument)?
+            && &live != strategy_id
+        {
+            return Err(StoreError::InstrumentBusy {
+                instrument: instrument.clone(),
+                strategy_id: live,
+            });
+        }
+        transaction.execute(
+            "UPDATE strategies SET status = ?2, updated_at = ?3 WHERE strategy_id = ?1",
+            params![
+                strategy_id.as_str(),
+                StrategyStatus::Closing.as_str(),
+                format_time(now)
+            ],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -1546,6 +1658,7 @@ fn parse_purpose(value: &str) -> Result<OrderPurpose, StoreError> {
         "grid_entry" => Ok(OrderPurpose::GridEntry),
         "grid_exit" => Ok(OrderPurpose::GridExit),
         "invalidation" => Ok(OrderPurpose::Invalidation),
+        "close" => Ok(OrderPurpose::Close),
         other => Err(StoreError::UnknownPurpose {
             value: other.to_string(),
         }),
@@ -2206,6 +2319,8 @@ mod tests {
             StrategyStatus::Paused,
             StrategyStatus::Stopping,
             StrategyStatus::Stopped,
+            StrategyStatus::Closing,
+            StrategyStatus::Closed,
         ] {
             assert_eq!(StrategyStatus::parse(status.as_str()).unwrap(), status);
         }
@@ -2215,7 +2330,10 @@ mod tests {
         assert!(StrategyStatus::Pausing.is_live());
         assert!(StrategyStatus::Paused.is_live());
         assert!(StrategyStatus::Stopping.is_live());
+        assert!(StrategyStatus::Closing.is_live());
         assert!(!StrategyStatus::Stopped.is_live());
+        assert!(!StrategyStatus::Closed.is_live());
+        assert!(StrategyStatus::Closed.is_archived());
         assert!(!StrategyStatus::Draft.is_live());
         // 只撤单的只有两个过渡状态。
         assert!(StrategyStatus::Pausing.is_cancel_only());

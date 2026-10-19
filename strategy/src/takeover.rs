@@ -13,13 +13,19 @@ use crate::units::{Position, Quantity};
 /// 已有仓位接管不了（第 8 节第 1 条）。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TakeoverError {
-    #[error("the existing {direction} position {quantity} has no matching side in the config")]
+    #[error(
+        "标的上已有{short}仓 {quantity}，但配置里没有{side}",
+        short = .direction.short_label(),
+        side = .direction.side_label()
+    )]
     NoMatchingSide {
         direction: Direction,
         quantity: Quantity,
     },
     #[error(
-        "the existing {direction} position {quantity} is above the side's max position {max_position}"
+        "标的上已有{short}仓 {quantity}，超过{side}最大仓位 M {max_position}",
+        short = .direction.short_label(),
+        side = .direction.side_label()
     )]
     AboveMaxPosition {
         direction: Direction,
@@ -27,7 +33,10 @@ pub enum TakeoverError {
         max_position: Quantity,
     },
     /// 分完所有单位还剩下一部分：划分本身合计不到 M 时才会出现。
-    #[error("{left} of the existing {direction} position could not be allocated to any unit")]
+    #[error(
+        "标的上已有的{short}仓里有 {left} 分不到批次或格子",
+        short = .direction.short_label()
+    )]
     Unallocated {
         direction: Direction,
         left: Quantity,

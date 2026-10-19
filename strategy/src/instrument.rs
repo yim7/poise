@@ -113,9 +113,9 @@ impl PriceRule {
 /// 合约规则不合法。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SpecError {
-    #[error("instrument symbol must not be empty")]
+    #[error("标的不能为空")]
     EmptySymbol,
-    #[error("instrument `{0}` must be `COIN` or `dex:COIN`")]
+    #[error("标的 `{0}` 的写法应为 `BTC` 或 `xyz:GOLD`")]
     InvalidSymbol(String),
     #[error("price tick must be positive, got {0}")]
     InvalidPriceTick(Price),

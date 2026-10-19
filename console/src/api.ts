@@ -7,7 +7,9 @@ import type {
   CanceledOrders,
   DraftIdBody,
   DraftPreview,
+  InstanceInfo,
   ResumeOutcome,
+  StatusBody,
   StepReport,
   StoredDraft,
   StrategyConfig,
@@ -60,12 +62,15 @@ async function failure(response: Response, path: string): Promise<HttpError> {
 }
 
 export const api = {
+  instance: () => request<InstanceInfo>('/api/instance'),
   strategies: () => request<StrategySummary[]>('/api/strategies'),
   strategy: (id: string) => request<StrategyDetail>(`/api/strategies/${id}`),
   pause: (id: string) =>
     request<CanceledOrders>(`/api/strategies/${id}/pause`, send('POST')),
   resume: (id: string) => request<ResumeOutcome>(`/api/strategies/${id}/resume`, send('POST')),
   stop: (id: string) => request<CanceledOrders>(`/api/strategies/${id}/stop`, send('POST')),
+  /** 市价平仓：停止中的补上平仓标记，已归档的进入平仓中（第 7.7 节）。 */
+  close: (id: string) => request<StatusBody>(`/api/strategies/${id}/close`, send('POST')),
   updateConfig: (id: string, config: StrategyConfig) =>
     request<VersionBody>(`/api/strategies/${id}/config`, send('PUT', config)),
 
@@ -86,14 +91,14 @@ export const api = {
 
 /** 恢复的结果里能看出发生了什么，页面只关心「在跑」还是「要等」。 */
 export function resumeSummary(outcome: ResumeOutcome): string {
-  if (outcome === 'AlreadyRunning') return '策略一直在运行，订单没有动。'
-  if ('WaitingForExpiry' in outcome) return `等遗留订单过期后再恢复（${outcome.WaitingForExpiry.until}）。`
+  if (outcome === 'AlreadyRunning') return '已在运行。'
+  if ('WaitingForExpiry' in outcome) return `等遗留订单过期（${outcome.WaitingForExpiry.until}）后恢复。`
   // 「没收场」不等于「没撤掉」：结果从来没拿到过的订单，撤销只会得到「查无此单」，
   // 后台核对也问不出结局。说成「没撤掉、会继续撤」，用户会以为等下去就能好。
   if ('WaitingForSettle' in outcome)
-    return `还有 ${outcome.WaitingForSettle.working} 张遗留订单没收场，后台会继续撤单和核对，收干净才恢复运行。`
+    return `${outcome.WaitingForSettle.working} 张遗留订单待收尾，收完后恢复。`
   const report: StepReport = outcome.Resumed
-  return `已恢复：挂上 ${report.placed.length} 张，撤销 ${report.canceled.length} 张。`
+  return `已恢复：挂 ${report.placed.length} 张，撤 ${report.canceled.length} 张。`
 }
 
 /**
@@ -103,13 +108,19 @@ export function resumeSummary(outcome: ResumeOutcome): string {
  * 后台每一轮继续撤。说「已暂停」用户就以为挂单已经撤掉了（第 2.4 节）。
  */
 export function pauseSummary(canceled: CanceledOrders): string {
-  if (canceled.status === 'paused') return `已暂停，撤销 ${canceled.canceled.length} 张订单。`
-  return `正在撤单：已撤销 ${canceled.canceled.length} 张订单，还有挂单在场，后台会继续撤。`
+  if (canceled.status === 'paused') return `已暂停，撤 ${canceled.canceled.length} 张。`
+  return `撤单中：已撤 ${canceled.canceled.length} 张，余下继续撤。`
+}
+
+/** 平仓请求之后的状态：停止中的要先收尾，已归档的直接开始平。 */
+export function closeSummary(body: StatusBody): string {
+  if (body.status === 'stopping') return '撤单收尾后市价平仓。'
+  return '已开始平仓。'
 }
 
 /** 停止的结果：和暂停一样，只有接口确认落在「已停止」才说归档完成。 */
 export function stopSummary(canceled: CanceledOrders): string {
   if (canceled.status === 'stopped')
-    return `已停止并归档，撤销 ${canceled.canceled.length} 张订单；仓位保留。`
-  return `正在撤单：已撤销 ${canceled.canceled.length} 张订单，还有挂单在场，撤干净才归档；仓位保留。`
+    return `已停止，撤 ${canceled.canceled.length} 张；仓位保留。`
+  return `撤单中：已撤 ${canceled.canceled.length} 张，撤完归档；仓位保留。`
 }

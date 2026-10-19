@@ -229,7 +229,7 @@ async fn b43_a_stale_token_is_a_conflict() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(
-        body["error"].as_str().unwrap().contains("preview again"),
+        body["error"].as_str().unwrap().contains("重新预览"),
         "{body}"
     );
 
@@ -416,7 +416,7 @@ async fn b44_changing_a_locked_parameter_while_running_is_a_bad_request() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(
-        body["error"].as_str().unwrap().contains("grid_spacing"),
+        body["error"].as_str().unwrap().contains("网格间距 d"),
         "{body}"
     );
 
@@ -458,7 +458,7 @@ async fn an_invalid_config_cannot_be_started() {
         preview["validation"]["reason"]
             .as_str()
             .unwrap()
-            .contains("spread"),
+            .contains("价差 g"),
         "{preview}"
     );
     assert!(preview["token"].is_null());
@@ -471,7 +471,7 @@ async fn an_invalid_config_cannot_be_started() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(body["error"].as_str().unwrap().contains("spread"), "{body}");
+    assert!(body["error"].as_str().unwrap().contains("价差 g"), "{body}");
 }
 
 /// 做空网格：只配空头侧的配置从草稿一路走到运行详情，表里都是空头侧。
@@ -625,7 +625,7 @@ async fn a_two_sided_config_error_is_reported_by_the_preview() {
         preview["validation"]["reason"]
             .as_str()
             .unwrap()
-            .contains("below the short side"),
+            .contains("须低于做空侧下限 L"),
         "{preview}"
     );
     // 没有令牌：确认启动无从谈起。
@@ -642,7 +642,7 @@ async fn a_two_sided_config_error_is_reported_by_the_preview() {
         body["error"]
             .as_str()
             .unwrap()
-            .contains("below the short side"),
+            .contains("须低于做空侧下限 L"),
         "{body}"
     );
 
@@ -665,7 +665,7 @@ async fn a_two_sided_config_error_is_reported_by_the_preview() {
         preview["validation"]["reason"]
             .as_str()
             .unwrap()
-            .contains("neutral grid has no core"),
+            .contains("中性网格没有主仓"),
         "{preview}"
     );
 }
@@ -914,6 +914,110 @@ async fn requests_from_other_hosts_or_origins_are_refused() {
         .unwrap();
     let response = router.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// 页面顶部要一眼看出连的是测试网还是正式网、哪个账户：同一台机器上两个实例并存，
+/// 认错了就是在实盘上操作。
+#[tokio::test]
+async fn the_instance_endpoint_tells_the_network_and_the_account() {
+    let console = console();
+    let router = api::router(console.runtime.clone());
+
+    // 数据库还没认领网络和账户时如实说不知道。
+    let (status, body) = call(&router, Method::GET, "/api/instance", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "network": null, "account_address": null }));
+
+    console
+        .store
+        .bind_identity("mainnet", "0x2222222222222222222222222222222222222222")
+        .unwrap();
+    let (status, body) = call(&router, Method::GET, "/api/instance", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["network"], "mainnet");
+    assert_eq!(
+        body["account_address"],
+        "0x2222222222222222222222222222222222222222"
+    );
+}
+
+/// 列表上每个策略带着最近一次读到的标记价：不点进详情也能看出价格落在网格的哪里。
+#[tokio::test]
+async fn the_strategy_list_carries_the_latest_mark_price() {
+    let console = console();
+    let router = api::router(console.runtime.clone());
+    let draft_id = create_draft(&router, &long_grid_config()).await;
+    start(&router, &draft_id).await;
+
+    let (status, body) = call(&router, Method::GET, "/api/strategies", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body[0]["market_price"], common::INITIAL_MARKET_PRICE);
+}
+
+/// B49、B53：停止时带上 `close=true` 收尾后进入平仓中；已归档的策略单独平仓，没有可平的
+/// 仓位时说清楚。
+#[tokio::test]
+async fn a_stop_can_close_the_position_and_an_archived_strategy_can_close_later() {
+    let console = console();
+    let router = api::router(console.runtime.clone());
+    let first = create_draft(&router, &long_grid_config()).await;
+    start(&router, &first).await;
+    console
+        .exchange
+        .set_position(poise_strategy::units::Position::parse("0.05").unwrap());
+
+    let (status, body) = call(
+        &router,
+        Method::POST,
+        &format!("/api/strategies/{first}/stop?close=true"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "closing");
+
+    // 普通停止的策略：之后再平仓。没有仓位时是 409，类别说清楚没有可平的。
+    let second = create_draft(&router, &long_grid_config()).await;
+    let first_id = poise_runtime::StrategyId::try_from(first.clone()).unwrap();
+    console.runtime.step(&first_id).await.unwrap();
+    console.runtime.step(&first_id).await.unwrap();
+    assert_eq!(
+        console.runtime.status(&first_id).unwrap(),
+        poise_runtime::StrategyStatus::Closed
+    );
+    start(&router, &second).await;
+    let (status, body) = call(
+        &router,
+        Method::POST,
+        &format!("/api/strategies/{second}/stop"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "stopped");
+    let (status, body) = call(
+        &router,
+        Method::POST,
+        &format!("/api/strategies/{second}/close"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["kind"], "nothing_to_close");
+
+    console
+        .exchange
+        .set_position(poise_strategy::units::Position::parse("0.05").unwrap());
+    let (status, body) = call(
+        &router,
+        Method::POST,
+        &format!("/api/strategies/{second}/close"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "closing");
 }
 
 async fn create_draft(router: &Router, config: &StrategyConfig) -> String {

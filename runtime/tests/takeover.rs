@@ -99,7 +99,10 @@ async fn b22_a_short_position_cannot_be_taken_over_by_a_long_only_strategy() {
     assert!(!preview.validation.valid);
     assert!(preview.token.is_none());
     let reason = preview.validation.reason.unwrap();
-    assert!(reason.contains("no matching side"), "{reason}");
+    assert!(
+        reason.contains("标的上已有空仓 0.1，但配置里没有做空侧"),
+        "{reason}"
+    );
 }
 
 /// B22：已有仓位超过这一侧的上限时，预览不通过。
@@ -112,7 +115,7 @@ async fn b22_a_position_above_the_max_position_cannot_be_taken_over() {
 
     assert!(!preview.validation.valid);
     let reason = preview.validation.reason.unwrap();
-    assert!(reason.contains("max position"), "{reason}");
+    assert!(reason.contains("超过做多侧最大仓位 M"), "{reason}");
 }
 
 /// 交易所上已有的、非本系统下的挂单：预览里列出，启动、运行、停止都不撤它（第 8 节第 4 条）。

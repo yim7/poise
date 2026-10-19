@@ -3,6 +3,9 @@
 //! 一侧的错误都带上 `direction`：两侧的字段名和下标是一样的，不说清是哪一侧就没法改。
 //! 只有账户级别的错误（taker 费率）不带，它对两侧都一样。
 //!
+//! 报错原样显示在预览页上：用中文写清是哪一侧、哪个参数（用表单上的符号 L、H、M、r、n、d、g、R），
+//! 能改的说出怎么改。
+//!
 //! 单独成模块，是因为生成批次与格子的 [`crate::batch`]、[`crate::grid`] 也要报这些错；
 //! 放在 [`crate::config`] 里就会让 config 和它们互相引用。
 
@@ -15,69 +18,60 @@ use crate::units::{Price, Quantity, Rate};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
-    #[error("config instrument `{config}` does not match the exchange instrument `{spec}`")]
+    #[error("标的 `{config}` 和交易所的 `{spec}` 不一致")]
     InstrumentMismatch { config: String, spec: String },
-    #[error("a strategy needs at least one side: set `long`, `short`, or both")]
+    #[error("至少启用一侧")]
     NoSidesConfigured,
-    #[error(
-        "the long side must stay below the short side, but its high {long_high} is not below the short side low {short_low}"
-    )]
+    #[error("做多侧上限 H {long_high} 须低于做空侧下限 L {short_low}")]
     SidesOverlap { long_high: Price, short_low: Price },
-    #[error(
-        "a neutral grid has no core, but the {direction} side sets a core ratio of {core_ratio}; use a one-sided grid to keep a core"
-    )]
+    #[error("{side}：中性网格没有主仓，主仓比例 r 须为 0（现在是 {core_ratio}）", side = .direction.side_label())]
     CoreInNeutralGrid {
         direction: Direction,
         core_ratio: Rate,
     },
     #[error(
-        "the {direction} invalidation price {price} must lie outside the range: below the low {edge} for the long side, above the high {edge} for the short side"
+        "{side}：观点失效价 {price} 须在范围外（做多低于 L，做空高于 H），现在的边界是 {edge}",
+        side = .direction.side_label()
     )]
     InvalidationPriceInsideRange {
         direction: Direction,
         price: Price,
         edge: Price,
     },
-    #[error(
-        "the {direction} invalidation keeps {remaining}, above the side's total core {core_total}"
-    )]
+    #[error("{side}：失效后剩余 R {remaining} 超过主仓总量 {core_total}", side = .direction.side_label())]
     InvalidationRemainingAboveCore {
         direction: Direction,
         remaining: Quantity,
         core_total: Quantity,
     },
-    #[error(
-        "a neutral grid closes everything when a side is invalidated, but the {direction} side keeps {remaining}"
-    )]
+    #[error("{side}：中性网格失效后全部平仓，剩余 R 须为 0（现在是 {remaining}）", side = .direction.side_label())]
     InvalidationRemainingInNeutralGrid {
         direction: Direction,
         remaining: Quantity,
     },
-    #[error("the {direction} invalidation slippage {max_slippage} must be above 0 and below 100%")]
+    #[error("{side}：失效平仓滑点上限须大于 0、小于 100%（现在是 {max_slippage}）", side = .direction.side_label())]
     InvalidationSlippageOutOfRange {
         direction: Direction,
         max_slippage: Rate,
     },
-    #[error("{direction} {field} must not be negative, got {price}")]
+    #[error("{side}：{field}不能为负（现在是 {price}）", side = .direction.side_label())]
     NegativePrice {
         direction: Direction,
         field: &'static str,
         price: Price,
     },
-    #[error("{direction} max position must not be negative, got {max_position}")]
+    #[error("{side}：最大仓位 M 不能为负（现在是 {max_position}）", side = .direction.side_label())]
     NegativeMaxPosition {
         direction: Direction,
         max_position: Quantity,
     },
-    #[error("{direction} price range must be ascending after rounding, got {low} and {high}")]
+    #[error("{side}：按报价精度规整后，下限 L {low} 须低于上限 H {high}", side = .direction.side_label())]
     PriceRangeNotAscending {
         direction: Direction,
         low: Price,
         high: Price,
     },
-    #[error(
-        "{direction} {field} {price} is out of the representable price range at tick {price_tick}"
-    )]
+    #[error("{side}：{field} {price} 超出可表示的价格范围（报价精度 {price_tick}）", side = .direction.side_label())]
     PriceOutOfRange {
         direction: Direction,
         field: &'static str,
@@ -85,7 +79,8 @@ pub enum ConfigError {
         price_tick: Price,
     },
     #[error(
-        "{direction} batch {batch_index} price between {price_low} and {price_high} is out of the representable price range"
+        "{side}：第 {batch_index} 批的价格（{price_low} 到 {price_high} 之间）超出可表示的价格范围",
+        side = .direction.side_label()
     )]
     BatchPriceOutOfRange {
         direction: Direction,
@@ -93,51 +88,48 @@ pub enum ConfigError {
         price_low: Price,
         price_high: Price,
     },
-    #[error("{direction} grid spacing {grid_spacing} must be at least one price tick {price_tick}")]
+    #[error("{side}：网格间距 d {grid_spacing} 小于最小报价单位 {price_tick}", side = .direction.side_label())]
     GridSpacingBelowOneTick {
         direction: Direction,
         grid_spacing: Price,
         price_tick: Price,
     },
-    #[error("{direction} grid spread {grid_spread} must be at least one price tick {price_tick}")]
+    #[error("{side}：网格价差 g {grid_spread} 小于最小报价单位 {price_tick}", side = .direction.side_label())]
     GridSpreadBelowOneTick {
         direction: Direction,
         grid_spread: Price,
         price_tick: Price,
     },
-    #[error("{direction} max position {max_position} is below one quantity step {quantity_step}")]
+    #[error("{side}：最大仓位 M {max_position} 小于最小数量单位 {quantity_step}", side = .direction.side_label())]
     MaxPositionBelowOneStep {
         direction: Direction,
         max_position: Quantity,
         quantity_step: Quantity,
     },
-    #[error("{direction} core ratio {core_ratio} must be between 0 and 1 inclusive")]
+    #[error("{side}：主仓比例 r 须在 0 到 1 之间（现在是 {core_ratio}）", side = .direction.side_label())]
     CoreRatioOutOfRange {
         direction: Direction,
         core_ratio: Rate,
     },
-    #[error("{direction} throttle interval must not be negative, got {interval:?}")]
+    #[error("{side}：限速间隔不能为负", side = .direction.side_label())]
     NegativeThrottleInterval {
         direction: Direction,
         interval: Duration,
     },
-    #[error(
-        "{direction} core ratio is above 0, so the batch count must be at least 1, got {batch_count:?}"
-    )]
+    #[error("{side}：主仓比例 r 大于 0 时，批数 n 至少为 1", side = .direction.side_label())]
     BatchCountOutOfRange {
         direction: Direction,
         batch_count: Option<u32>,
     },
-    #[error(
-        "{direction} batch count {batch_count} is above the supported maximum {max_batch_count}"
-    )]
+    #[error("{side}：批数 n {batch_count} 超过上限 {max_batch_count}", side = .direction.side_label())]
     TooManyBatches {
         direction: Direction,
         batch_count: u32,
         max_batch_count: usize,
     },
     #[error(
-        "{direction} grid needs {cell_count} cells, more than the supported maximum {max_cell_count}"
+        "{side}：需要 {cell_count} 格，超过上限 {max_cell_count} 格；加大网格间距 d",
+        side = .direction.side_label()
     )]
     TooManyCells {
         direction: Direction,
@@ -145,7 +137,9 @@ pub enum ConfigError {
         max_cell_count: usize,
     },
     #[error(
-        "{direction} cell {cell_index} at {cell_price} holds {cell_quantity}, below the {required_quantity} required for the minimum order amount; at most {max_cell_count} cells fit in this range"
+        "{side}：格子太多，每格数量不够最低下单金额（{short}{cell_index} 格在 {cell_price} 只有 {cell_quantity}，至少要 {required_quantity}）。这个范围最多约 {max_cell_count} 格：加大网格间距 d 或最大仓位 M",
+        side = .direction.side_label(),
+        short = .direction.short_label()
     )]
     CellBelowMinimumOrderNotional {
         direction: Direction,
@@ -156,7 +150,8 @@ pub enum ConfigError {
         max_cell_count: usize,
     },
     #[error(
-        "{direction} batch {batch_index} at {batch_price} has no cell in its segment ({segment_low}, {segment_high}]; use a smaller grid spacing or fewer batches"
+        "{side}：第 {batch_index} 批（{batch_price}）的区间 ({segment_low}, {segment_high}] 里没有格子；减小网格间距 d 或减少批数 n",
+        side = .direction.side_label()
     )]
     BatchWithoutCell {
         direction: Direction,
@@ -166,7 +161,8 @@ pub enum ConfigError {
         segment_high: Price,
     },
     #[error(
-        "{direction} batch {batch_index} at {batch_price} buys {core_quantity} as core, below the {required_quantity} required for the minimum order amount; use fewer batches"
+        "{side}：第 {batch_index} 批（{batch_price}）主仓只有 {core_quantity}，不够最低下单金额（至少要 {required_quantity}）；减少批数 n",
+        side = .direction.side_label()
     )]
     BatchCoreBelowMinimumOrderNotional {
         direction: Direction,
@@ -176,7 +172,9 @@ pub enum ConfigError {
         required_quantity: Quantity,
     },
     #[error(
-        "{direction} cell {cell_index} at {entry_price} with the grid spread {grid_spread} has no exit price in the representable range"
+        "{side}：{short}{cell_index} 格（{entry_price}）加上价差 g {grid_spread} 后，平仓价超出可表示的价格范围",
+        side = .direction.side_label(),
+        short = .direction.short_label()
     )]
     ExitPriceOutOfRange {
         direction: Direction,
@@ -185,7 +183,8 @@ pub enum ConfigError {
         grid_spread: Price,
     },
     #[error(
-        "{direction} grid spread {grid_spread} does not stay profitable after taker fees {taker_fee_rate} on both legs; at least {minimum_grid_spread} is required"
+        "{side}：网格价差 g {grid_spread} 扣掉两边的 taker 手续费（费率 {taker_fee_rate}）后不赚钱，至少要 {minimum_grid_spread}",
+        side = .direction.side_label()
     )]
     GridSpreadNotProfitable {
         direction: Direction,
@@ -194,13 +193,14 @@ pub enum ConfigError {
         taker_fee_rate: Rate,
     },
     #[error(
-        "{direction} has no price at {entry_price} that can cover taker fees {taker_fee_rate} on both legs within the representable range"
+        "{side}：在 {entry_price} 找不到能覆盖两边 taker 手续费（费率 {taker_fee_rate}）的平仓价",
+        side = .direction.side_label()
     )]
     GridSpreadUnreachable {
         direction: Direction,
         entry_price: Price,
         taker_fee_rate: Rate,
     },
-    #[error("taker fee rate {taker_fee_rate} is at least 1, so no grid can be profitable")]
+    #[error("taker 费率 {taker_fee_rate} 不低于 1，任何网格都不赚钱")]
     TakerFeeRateTooHigh { taker_fee_rate: Rate },
 }

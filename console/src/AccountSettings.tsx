@@ -7,6 +7,9 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
+import { Callout, PageHeader } from '@/components/layout'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { api } from './api'
 import { percentInputToRatio, ratioToPercentInput } from './format'
 
@@ -54,13 +57,13 @@ export function AccountSettingsView({ onBack }: AccountSettingsProps) {
     const stopRatio = percentInputToRatio(stop)
     const fundingRatio = percentInputToRatio(funding)
     if (alertRatio === null || stopRatio === null || fundingRatio === null) {
-      setProblem('阈值要填百分比数字，例如 30。')
+      setProblem('阈值填百分比数字。')
       return
     }
     // 秒数先按整数字符串认，再确认转换没有丢精度：不能把用户填的数悄悄改成别的。
     const seconds = Number(maxAge.trim())
     if (!/^\d+$/.test(maxAge.trim()) || !Number.isSafeInteger(seconds) || seconds < 1) {
-      setProblem('行情过期时间要填正整数秒。')
+      setProblem('行情过期时间填正整数（秒）。')
       return
     }
     setProblem(null)
@@ -73,57 +76,151 @@ export function AccountSettingsView({ onBack }: AccountSettingsProps) {
   }
 
   return (
-    <section className="settings">
-      <div className="actions">
-        <button type="button" onClick={onBack}>
-          返回列表
-        </button>
-      </div>
-      <h2>账户风控设置</h2>
-      <p className="hint">
-        保证金率超过提醒阈值时提醒；超过停止阈值时，同一账户所有策略只发、只保留只减仓单，回落后自动恢复。
-      </p>
-      {settings.error ? <p className="error">读不到设置：{settings.error.message}</p> : null}
-      <label>
-        提醒阈值（%）
-        <input
-          value={alert}
-          disabled={save.isPending}
-          onChange={(event) => edit(setAlert, event.target.value)}
-        />
-      </label>
-      <label>
-        停止阈值（%）
-        <input
-          value={stop}
-          disabled={save.isPending}
-          onChange={(event) => edit(setStop, event.target.value)}
-        />
-      </label>
-      <label>
-        行情过期时间（秒）
-        <input
-          value={maxAge}
-          disabled={save.isPending}
-          onChange={(event) => edit(setMaxAge, event.target.value)}
-        />
-      </label>
-      <label>
-        资金费率提醒阈值（年化 %）
-        <input
-          value={funding}
-          disabled={save.isPending}
-          onChange={(event) => edit(setFunding, event.target.value)}
-        />
-      </label>
-      <p className="hint">资金费率对本策略不利、年化超过这个数时提醒；不自动交易。</p>
-      <div className="actions">
-        <button type="button" className="primary" onClick={submit} disabled={save.isPending}>
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
+      <PageHeader
+        leading={
+          <button
+            type="button"
+            onClick={onBack}
+            className="w-fit text-xs text-muted-foreground transition-colors hover:text-foreground"
+          >
+            ← 返回列表
+          </button>
+        }
+        title="账户风控设置"
+        subtitle="全账户共用"
+      />
+      {settings.error ? <Callout tone="danger" title={`读不到设置：${settings.error.message}`} /> : null}
+
+      <Card
+        title="保证金率"
+        description="超过停止阈值：全账户只留只减仓单，回落后恢复。"
+      >
+        <MarginScale alert={alert} stop={stop} />
+        <div className="grid grid-cols-2 gap-4">
+          <Field
+            label="提醒阈值（%）"
+            value={alert}
+            disabled={save.isPending}
+            onChange={(value) => edit(setAlert, value)}
+          />
+          <Field
+            label="停止阈值（%）"
+            value={stop}
+            disabled={save.isPending}
+            onChange={(value) => edit(setStop, value)}
+          />
+        </div>
+      </Card>
+
+      <Card title="行情与资金费">
+        <div className="grid grid-cols-2 gap-4">
+          <Field
+            label="行情过期时间（秒）"
+            hint="更旧的读数视为读不到"
+            value={maxAge}
+            disabled={save.isPending}
+            onChange={(value) => edit(setMaxAge, value)}
+          />
+          <Field
+            label="资金费率提醒阈值（年化 %）"
+            hint="仅提醒，不自动交易"
+            value={funding}
+            disabled={save.isPending}
+            onChange={(value) => edit(setFunding, value)}
+          />
+        </div>
+      </Card>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <Button onClick={submit} disabled={save.isPending}>
           保存
-        </button>
+        </Button>
+        {saved ? <span className="text-xs text-long">已保存，下一步起生效。</span> : null}
       </div>
-      {problem ? <p className="error">{problem}</p> : null}
-      {saved ? <p className="ok">已保存，下一步起按新设置判断。</p> : null}
+      {problem ? <Callout tone="danger" title={problem} /> : null}
+    </div>
+  )
+}
+
+function Card({
+  title,
+  description,
+  children,
+}: {
+  title: string
+  description?: string
+  children: React.ReactNode
+}) {
+  return (
+    <section aria-label={title} className="flex flex-col gap-4 rounded-lg bg-card p-4 ring-1 ring-border">
+      <div className="flex flex-col gap-1">
+        <h2 className="font-heading text-sm font-semibold tracking-tight">{title}</h2>
+        {description === undefined ? null : (
+          <p className="text-xs/relaxed text-muted-foreground">{description}</p>
+        )}
+      </div>
+      {children}
     </section>
+  )
+}
+
+function Field({
+  label,
+  hint,
+  value,
+  disabled,
+  onChange,
+}: {
+  label: string
+  hint?: string
+  value: string
+  disabled: boolean
+  onChange: (value: string) => void
+}) {
+  return (
+    <label className="flex min-w-0 flex-col gap-1">
+      <span className="text-[11px] text-muted-foreground">{label}</span>
+      <Input
+        aria-label={label}
+        className="num h-8"
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {hint === undefined ? null : (
+        <span className="text-[10px] leading-snug text-muted-foreground/80">{hint}</span>
+      )}
+    </label>
+  )
+}
+
+/**
+ * 0–100% 的保证金率刻度：安全、提醒、停止三段，跟着输入框变。到 100% 维持保证金占满，
+ * 账户会被强平。只画用户填的数；填得不是 0–100 之间、或者停止不高于提醒时不画，
+ * 原因由保存时的校验说明。
+ */
+function MarginScale({ alert, stop }: { alert: string; stop: string }) {
+  const a = Number(alert)
+  const s = Number(stop)
+  if (alert.trim() === '' || stop.trim() === '' || !(a > 0 && a < s && s < 100)) return null
+  return (
+    <div aria-hidden className="flex flex-col gap-1">
+      <div className="flex h-2 overflow-hidden rounded-full">
+        <div className="bg-long/45" style={{ width: `${a}%` }} />
+        <div className="bg-warn/55" style={{ width: `${s - a}%` }} />
+        <div className="bg-destructive/60" style={{ width: `${100 - s}%` }} />
+      </div>
+      <div className="num relative h-4 text-[10px] text-muted-foreground">
+        <span className="absolute left-0">0%</span>
+        <span className="absolute -translate-x-1/2 text-warn" style={{ left: `${a}%` }}>
+          提醒 {alert}%
+        </span>
+        <span className="absolute -translate-x-1/2 text-destructive" style={{ left: `${s}%` }}>
+          停止 {stop}%
+        </span>
+        <span className="absolute right-0">100% 强平</span>
+      </div>
+    </div>
   )
 }

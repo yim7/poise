@@ -145,6 +145,22 @@ impl Direction {
             Self::Short => PriceRounding::Down,
         }
     }
+
+    /// 界面上的叫法：做多侧、做空侧。报错用它开头，和表单里的分组对得上。
+    pub const fn side_label(self) -> &'static str {
+        match self {
+            Self::Long => "做多侧",
+            Self::Short => "做空侧",
+        }
+    }
+
+    /// 单字简写：多、空。格子写成「多3」，仓位写成「多仓」，和页面一致。
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::Long => "多",
+            Self::Short => "空",
+        }
+    }
 }
 
 impl std::fmt::Display for Direction {

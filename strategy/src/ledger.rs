@@ -88,7 +88,9 @@ impl Strategy {
                                     .saturating_add(applied)
                                     .min(cell_quantity);
                             }
-                            OrderPurpose::Core | OrderPurpose::Invalidation => {}
+                            OrderPurpose::Core
+                            | OrderPurpose::Invalidation
+                            | OrderPurpose::Close => {}
                         }
                     }
                 }

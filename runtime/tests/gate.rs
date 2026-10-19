@@ -271,7 +271,7 @@ async fn an_order_the_exchange_once_confirmed_is_not_voided_when_it_disappears()
         .unwrap()
         .note
         .unwrap_or_default();
-    assert!(note.contains("确认过它在场"), "unexpected note: {note}");
+    assert!(note.contains("曾确认在场"), "unexpected note: {note}");
 
     // 查询追上来了：它还在场，结束未知状态。
     harness.exchange.show_in_queries(&entry);

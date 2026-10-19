@@ -20,11 +20,11 @@ const MAX_DECIMALS: usize = 8;
 /// 定点小数解析失败。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UnitsError {
-    #[error("`{value}` is not a decimal number")]
+    #[error("`{value}` 不是数字")]
     NotANumber { value: String },
-    #[error("`{value}` has more than {MAX_DECIMALS} decimal places")]
+    #[error("`{value}` 的小数超过 {MAX_DECIMALS} 位")]
     TooManyDecimals { value: String },
-    #[error("`{value}` is out of range")]
+    #[error("`{value}` 超出范围")]
     OutOfRange { value: String },
 }
 

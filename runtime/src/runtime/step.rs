@@ -7,7 +7,7 @@ use poise_strategy::decision::{
     expected_position as expected_from, judge, pending_units, position_check,
 };
 use poise_strategy::instrument::Instrument;
-use poise_strategy::order::{ClientOrderId, OrderPurpose, OrderRecord, OrderStatus, WorkingOrder};
+use poise_strategy::order::{ClientOrderId, OrderRecord, OrderStatus, WorkingOrder};
 use poise_strategy::planning::{OrderIntent, PendingUnit, Plan, WaitReason};
 use poise_strategy::state::StrategyState;
 use poise_strategy::units::{Position, Price, Quantity, Rate};
@@ -66,6 +66,7 @@ impl Runtime {
             StrategyStatus::Restoring => self.restore_step(strategy_id, now).await,
             StrategyStatus::Running => self.running_step(strategy_id, now).await,
             StrategyStatus::Invalidating => self.invalidation_step(strategy_id, now).await,
+            StrategyStatus::Closing => self.closing_step(strategy_id, now).await,
             status if status.is_archived() => Err(RuntimeError::Archived(strategy_id.clone())),
             other => Err(RuntimeError::NotRunning(strategy_id.clone(), other)),
         }
@@ -170,9 +171,7 @@ impl Runtime {
                 self.annotate_view_waiting(
                     strategy_id,
                     StrategyStatus::Running,
-                    format!(
-                        "这一步没读到成交或订单状态（{error}）：不发新单，已在场的挂单保留，下一步重新核对。"
-                    ),
+                    format!("没读到成交或订单状态（{error}），这一步不发新单，下一步重新核对。"),
                     vec![WaitReason::FillsPending],
                 )
                 .await?;
@@ -1077,9 +1076,9 @@ impl Runtime {
             limit_price: intent.limit_price,
             quantity: intent.quantity,
             reduce_only: intent.reduce_only,
-            // 失效减仓按标记价让出滑点上限去成交，没成交的部分不能留在场上：下一步按新的
-            // 标记价重新算（B38）。
-            time_in_force: if intent.purpose == OrderPurpose::Invalidation {
+            // 失效减仓和市价平仓按标记价让出滑点上限去成交，没成交的部分不能留在场上：下一步
+            // 按新的标记价重新算（B38、B51）。
+            time_in_force: if intent.purpose.is_reduction() {
                 TimeInForce::ImmediateOrCancel
             } else {
                 TimeInForce::GoodTillCanceled
@@ -1190,13 +1189,13 @@ fn margin_alert_note(ratio: Option<Rate>, settings: &AccountSettings) -> Option<
     let ratio = ratio?;
     if ratio >= settings.margin_stop_ratio {
         Some(format!(
-            "账户保证金率 {} 达到停止阈值 {}：同一账户所有策略只发、只保留只减仓单，回落后自动恢复。",
+            "保证金率 {} 达到停止阈值 {}：全账户只保留只减仓单，回落后自动恢复。",
             percent(ratio),
             percent(settings.margin_stop_ratio)
         ))
     } else if ratio >= settings.margin_alert_ratio {
         Some(format!(
-            "账户保证金率 {} 超过提醒阈值 {}。",
+            "保证金率 {} 超过提醒阈值 {}。",
             percent(ratio),
             percent(settings.margin_alert_ratio)
         ))
@@ -1209,23 +1208,23 @@ fn margin_alert_note(ratio: Option<Rate>, settings: &AccountSettings) -> Option<
 fn pause_reason_note(reason: PauseReason) -> &'static str {
     match reason {
         PauseReason::PositionCheckFailed => {
-            "交易所仓位和应有持仓对不上，策略已暂停：先核对交易所上的仓位（例如是否手动交易过），处理好再恢复。"
+            "仓位和应有持仓对不上，已暂停：核对交易所仓位（是否手动交易过）后再恢复。"
         }
         PauseReason::FillRecordsInconsistent => {
-            "成交记录和订单的累计成交量对不上，策略已暂停：先核对这张订单的成交，处理好再恢复。"
+            "成交记录和订单累计成交量对不上，已暂停：核对该单成交后再恢复。"
         }
     }
 }
 
 /// 被交易所以操作次数超限拒绝之后暂停的原因（B30）。
 const RATE_LIMITED_NOTE: &str =
-    "交易所以操作次数超限拒绝了请求，策略已暂停：减少格子或加大间距，确认额度恢复后再恢复。";
+    "操作次数超限被交易所拒绝，已暂停：减少格子或加大间距 d，额度恢复后再恢复。";
 
 /// 当日操作次数超过上限的 80% 时的提醒（第 10 节，B30）。
 fn action_alert_note(actions: u64) -> Option<String> {
     (actions * 10 > DAILY_ACTION_LIMIT * 8).then(|| {
         format!(
-            "今日操作次数 {actions}，超过每日上限 {DAILY_ACTION_LIMIT} 次的 80%：考虑减少格子或加大间距。"
+            "今日操作次数 {actions}，超过上限 {DAILY_ACTION_LIMIT} 的 80%：考虑减少格子或加大间距 d。"
         )
     })
 }

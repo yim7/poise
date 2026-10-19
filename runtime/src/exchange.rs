@@ -85,24 +85,24 @@ pub struct ExchangeFill {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExchangeError {
     /// 交易所明确拒绝。
-    #[error("exchange rejected the order: {reason}")]
+    #[error("交易所拒单：{reason}")]
     Rejected { reason: String },
     /// 交易所以保证金不足拒绝下单（第 10 节）：和 [`ExchangeError::Rejected`] 一样是明确
     /// 拒绝，单独列出来，调用方据此退避重试，不要每一步都再撞一次。
-    #[error("exchange rejected the order for insufficient margin: {reason}")]
+    #[error("保证金不足被拒：{reason}")]
     InsufficientMargin { reason: String },
     /// 交易所以操作次数超限拒绝（第 10 节，B30）：Unified 账户每天的用户操作上限，或者
     /// 按地址的累计请求上限。和明确拒绝一样没有落地；单独列出来，调用方据此暂停策略。
-    #[error("exchange rejected the action for too many requests: {reason}")]
+    #[error("请求次数超限被拒：{reason}")]
     RateLimited { reason: String },
     /// 交易所不认识这个客户端订单 ID。
-    #[error("exchange does not know client order id `{client_order_id}`")]
+    #[error("交易所查无此单 {client_order_id}")]
     UnknownOrder { client_order_id: ClientOrderId },
     /// 结果未知：超时、断连或含义不明的错误。
-    #[error("exchange result unknown: {reason}")]
+    #[error("结果未知：{reason}")]
     Unknown { reason: String },
     /// 暂时不可用。
-    #[error("exchange unavailable: {reason}")]
+    #[error("交易所暂不可用：{reason}")]
     Unavailable { reason: String },
 }
 
@@ -137,6 +137,19 @@ pub trait Exchange: Send + Sync {
     ) -> Result<Vec<ExchangeFill>, ExchangeError>;
 
     async fn position(&self, instrument: &Instrument) -> Result<Position, ExchangeError>;
+
+    /// 几个标的的净仓位，顺序和 `instruments` 一致。默认逐个读；能按市场一次读完的交易所
+    /// 覆盖它（第 7.7 节第 8 条）。
+    async fn positions(
+        &self,
+        instruments: &[Instrument],
+    ) -> Result<Vec<(Instrument, Position)>, ExchangeError> {
+        let mut positions = Vec::with_capacity(instruments.len());
+        for instrument in instruments {
+            positions.push((instrument.clone(), self.position(instrument).await?));
+        }
+        Ok(positions)
+    }
 
     async fn mark_price(&self, instrument: &Instrument) -> Result<Price, ExchangeError>;
 }

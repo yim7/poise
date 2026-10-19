@@ -1,91 +1,121 @@
-/* 沿用旧控制台的视觉语言：深色底、青绿点缀、数字用等宽。 */
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/space-grotesk";
+@import "@fontsource-variable/jetbrains-mono";
+
+/*
+ * Poise 控制台的视觉语言：深色交易终端，墨绿近黑的底，一处荧光黄绿的信号色。
+ *
+ * - 颜色只表达意思：做多薄荷绿、做空珊瑚红、需要留意琥珀、出了问题红；信号色只给品牌和
+ *   主操作，不拿来装饰，这样一眼能看到的就是要紧的事。
+ * - 所有数字用等宽字体并按位对齐：价格、数量、比率上下扫读不跳。
+ * - 只有深色：长时间盯盘，深色更省眼，也不必维护两套配色。
+ */
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: "Inter Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
+  --font-heading: "Space Grotesk Variable", "PingFang SC", "Hiragino Sans GB", ui-sans-serif, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-long: var(--long);
+  --color-short: var(--short);
+  --color-warn: var(--warn);
+  --color-info: var(--info);
+  --color-signal: var(--signal);
+  --color-raised: var(--raised);
+
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
 
 :root {
-  color: #e8ebf0;
-  background: #101615;
-  font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color-scheme: dark;
+  --radius: 0.5rem;
+
+  --background: oklch(0.16 0.009 170);
+  --foreground: oklch(0.95 0.006 150);
+  --card: oklch(0.195 0.01 170);
+  --card-foreground: var(--foreground);
+  --raised: oklch(0.235 0.011 170);
+  --popover: oklch(0.215 0.011 170);
+  --popover-foreground: var(--foreground);
+  --muted: oklch(0.235 0.011 170);
+  --muted-foreground: oklch(0.69 0.013 160);
+  --accent: oklch(0.255 0.012 170);
+  --accent-foreground: var(--foreground);
+  --secondary: oklch(0.255 0.012 170);
+  --secondary-foreground: var(--foreground);
+  --border: oklch(0.3 0.011 170);
+  --input: oklch(0.33 0.012 170);
+  --ring: oklch(0.88 0.17 125 / 60%);
+
+  /* 信号色：品牌与主操作。 */
+  --signal: oklch(0.9 0.18 125);
+  --primary: var(--signal);
+  --primary-foreground: oklch(0.2 0.04 130);
+
+  --long: oklch(0.8 0.14 162);
+  --short: oklch(0.73 0.15 22);
+  --warn: oklch(0.83 0.14 78);
+  --info: oklch(0.77 0.1 235);
+  --destructive: oklch(0.68 0.19 25);
 }
 
-* { box-sizing: border-box; }
-body { margin: 0; background: #101615; }
-button, input, select { font: inherit; }
-button { color: inherit; }
-button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #a4dcc3; outline-offset: 2px; }
-
-main { max-width: 1180px; margin: 0 auto; padding: 20px 24px 48px; }
-header { border-bottom: 1px solid #252b34; padding-bottom: 12px; margin-bottom: 18px; }
-h1 { margin: 0; font-size: 22px; letter-spacing: -.02em; }
-h2 { margin: 22px 0 9px; color: #b9c1cd; font-size: 14px; }
-h3 { margin: 18px 0 7px; color: #aeb7c4; font-size: 13px; }
-p { margin: 0 0 8px; }
-small { color: #7c8695; font-size: 11px; }
-
-.hint { color: #8b95a3; font-size: 12px; }
-.notice { color: #a8dec0; }
-.error { color: #ef9a96; }
-.warning { color: #e8c26a; }
-.ok { color: #a8dec0; }
-
-.actions { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0; }
-button {
-  padding: 6px 11px;
-  border: 1px solid #465160;
-  border-radius: 4px;
-  color: #dce1e8;
-  background: #222936;
-  cursor: pointer;
-}
-button:hover:not(:disabled) { border-color: #617086; background: #2a3341; }
-button.primary { border-color: #4d78a7; background: #264d77; color: #fff; }
-button.danger { border-color: #82474c; background: #3a2124; color: #ffd9d6; }
-button:disabled { cursor: not-allowed; opacity: .42; }
-
-.form { display: grid; gap: 12px; }
-.form > .field { max-width: 260px; }
-/* 两侧并排；窄屏时各占一行。 */
-.sides { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
-.side {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 10px 12px;
-  margin: 0;
-  padding: 10px 12px 12px;
-  border: 1px solid #252b34;
-  border-radius: 6px;
-}
-.side legend { padding: 0 6px; color: #b9c1cd; font-size: 12px; font-weight: 700; }
-/* 启用这一侧的开关独占一行，勾选框跟着文字。 */
-.side > .field:first-of-type { display: flex; align-items: center; gap: 8px; grid-column: 1 / -1; }
-.side > .field:first-of-type input { width: auto; height: auto; }
-.field { display: grid; gap: 4px; color: #949daa; font-size: 12px; }
-input, select {
-  width: 100%;
-  min-width: 0;
-  height: 32px;
-  padding: 5px 8px;
-  border: 1px solid #39424f;
-  border-radius: 4px;
-  color: #edf0f4;
-  background: #0e1218;
-  font-variant-numeric: tabular-nums;
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans antialiased;
+  }
+  body {
+    @apply bg-background text-foreground text-[13px];
+    /* 一层很淡的网格纹理：呼应「网格」，不抢内容。 */
+    background-image:
+      linear-gradient(oklch(1 0 0 / 2.2%) 1px, transparent 1px),
+      linear-gradient(90deg, oklch(1 0 0 / 2.2%) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
 }
 
-.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0 18px; margin: 12px 0; }
-.facts div { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; border-bottom: 1px solid #252b34; }
-.facts dt { color: #929ba8; }
-.facts dd { margin: 0; color: #eef1f5; text-align: right; font-variant-numeric: tabular-nums; }
-
-table { width: 100%; border-collapse: collapse; margin: 10px 0 18px; font-variant-numeric: tabular-nums; }
-caption { text-align: left; padding: 0 0 6px; color: #b9c1cd; font-size: 13px; font-weight: 700; }
-th, td { padding: 5px 9px; border-bottom: 1px solid #252b34; text-align: right; white-space: nowrap; }
-th { color: #8b95a3; font-size: 11px; font-weight: 600; }
-td:first-child, th:first-child { text-align: left; }
-tbody tr:hover { background: #171c24; }
-.config-summary { text-align: left; white-space: normal; color: #b6bdc8; }
-
-.waiting { list-style: none; margin: 0 0 14px; padding: 0; }
-.waiting li { padding: 5px 9px; border-left: 2px solid #b9dfc9; background: #18201d; color: #d8f1e3; }
-
-.running-editor { margin-top: 22px; padding-top: 12px; border-top: 1px solid #252b34; }
-.preview { margin-top: 20px; padding-top: 12px; border-top: 1px solid #252b34; }
+@layer utilities {
+  /* 数字：等宽、按位对齐、零不带斜杠。 */
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "zero" 0;
+    letter-spacing: -0.01em;
+  }
+  /* 小标签：区块标题、表头。 */
+  .eyebrow {
+    @apply text-[11px] font-medium tracking-wide text-muted-foreground uppercase;
+  }
+}

@@ -148,7 +148,7 @@ impl Runtime {
                 preview.validation = Validation {
                     valid: false,
                     reason: Some(format!(
-                        "读不到保证金数据，做不了满仓压力测试（{error}）；稍后重新预览。"
+                        "读不到保证金数据，做不了满仓压力测试（{error}），稍后再预览。"
                     )),
                 };
                 return Ok(preview);
@@ -193,7 +193,7 @@ impl Runtime {
                 sides: Vec::new(),
                 warnings: Vec::new(),
                 refusal: Some(format!(
-                    "`{instrument}` 在交易所上设成了逐仓。本系统只支持全仓：请在交易所把它改成全仓后重新预览。"
+                    "`{instrument}` 是逐仓，只支持全仓：在交易所改成全仓后再预览。"
                 )),
             });
         }
@@ -241,28 +241,25 @@ impl Runtime {
                 settings.margin_alert_ratio,
             ) {
                 Suggestion::Max(suggested) => format!(
-                    "保证金率在提醒阈值 {} 以内的最大仓位约 {suggested}。",
+                    "建议最大仓位 M ≤ {suggested}（保证金率不超过 {}）。",
                     percent(settings.margin_alert_ratio)
                 ),
-                Suggestion::HeldPositionTooLarge => "标的上已有的仓位本身就超过提醒阈值，缩小还没成交的部分也达不到；请先处理已有仓位或增加资金。".to_string(),
-                Suggestion::NoFeasiblePosition => "按现在的批次和格子设置，找不到既够最低下单金额、又在提醒阈值以内的仓位上限；请调整价格范围、间距或主仓比例，或者增加资金。".to_string(),
+                Suggestion::HeldPositionTooLarge => "已有仓位本身就超过提醒阈值：先处理已有仓位或增加资金。".to_string(),
+                Suggestion::NoFeasiblePosition => "找不到既够最低下单金额、又不超过提醒阈值的最大仓位：调整范围、间距 d 或主仓比例 r，或增加资金。".to_string(),
             };
-            let side_name = match side.direction {
-                Direction::Long => "多头侧",
-                Direction::Short => "空头侧",
-            };
+            let side_name = side.direction.side_label();
             // 保证金率到了 100% 就是强平：这时报强平价比报一个封顶的比率更有用。
             let what = match side.liquidation {
                 Liquidation::At { price: liquidation }
                     if side.margin_ratio >= Rate::from_units(SCALE) =>
                 {
                     format!(
-                        "{side_name}满仓 {}、价格到 {} 之前就会强平（强平价约 {liquidation}）",
+                        "{side_name}满仓 {}，价格到 {} 之前就会强平（强平价约 {liquidation}）",
                         side.position, side.adverse_price
                     )
                 }
                 _ => format!(
-                    "{side_name}满仓 {}、价格到 {} 时，预计账户保证金率 {}",
+                    "{side_name}满仓 {}、价格到 {} 时保证金率 {}",
                     side.position,
                     side.adverse_price,
                     percent(side.margin_ratio)
@@ -270,7 +267,7 @@ impl Runtime {
             };
             if side.margin_ratio >= settings.margin_stop_ratio {
                 refusal.get_or_insert(format!(
-                    "{what}，达到停止阈值 {}：运行中会在加满之前被停住，这份配置做不到。{suggestion}",
+                    "{what}，达到停止阈值 {}，运行中加不满。{suggestion}",
                     percent(settings.margin_stop_ratio)
                 ));
             } else {
@@ -307,34 +304,25 @@ impl Runtime {
         let fees = self.account.fees(&instrument).await?;
         let strategy = Strategy::new(draft.config, spec, fees)?;
 
-        let (previewed_at, previewed_collateral, fingerprint) = parse_token(token).ok_or(
-            RuntimeError::PreviewStale("the confirm token is not readable"),
-        )?;
+        let (previewed_at, previewed_collateral, fingerprint) =
+            parse_token(token).ok_or(RuntimeError::PreviewStale("确认令牌无法识别"))?;
         let fresh = self.preview_draft(draft_id).await?;
         let fresh_fingerprint =
             preview_fingerprint(&fresh, strategy.config(), strategy.spec(), strategy.fees())?;
         if fresh.token.is_none() {
-            return Err(RuntimeError::PreviewStale(
-                "the config does not validate any more",
-            ));
+            return Err(RuntimeError::PreviewStale("参数不再通过校验"));
         }
         if fresh_fingerprint != fingerprint {
-            return Err(RuntimeError::PreviewStale(
-                "the position or the orders that would fill immediately changed",
-            ));
+            return Err(RuntimeError::PreviewStale("仓位或立即成交的订单变了"));
         }
         if collateral_dropped(previewed_collateral, fresh.available_collateral) {
-            return Err(RuntimeError::PreviewStale(
-                "the available collateral dropped since the preview",
-            ));
+            return Err(RuntimeError::PreviewStale("可用资金比预览时少"));
         }
         // 时长落在未来（时钟被回拨，或者令牌里的时刻是编的）也算过期：只判「大于 60 秒」
         // 的话，负的时长永远不大于它，60 秒这条上界就被绕过去了。
         let age = now.signed_duration_since(previewed_at);
         if age > PREVIEW_TTL || age < Duration::zero() {
-            return Err(RuntimeError::PreviewStale(
-                "the preview is older than 60 seconds",
-            ));
+            return Err(RuntimeError::PreviewStale("超过 60 秒"));
         }
 
         // 和预览同一份起始状态：标的上已有仓位时就是接管之后的状态（第 8 节）。预览校验

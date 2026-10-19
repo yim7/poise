@@ -154,10 +154,10 @@ impl StrategyConfig {
 
 fn check_side_signs(direction: Direction, side: &SideConfig) -> Result<(), ConfigError> {
     for (field, price) in [
-        ("price low", side.price_low),
-        ("price high", side.price_high),
-        ("grid spacing", side.grid_spacing),
-        ("grid spread", side.grid_spread),
+        ("下限 L", side.price_low),
+        ("上限 H", side.price_high),
+        ("网格间距 d", side.grid_spacing),
+        ("网格价差 g", side.grid_spread),
     ] {
         if price.units() < 0 {
             return Err(ConfigError::NegativePrice {
@@ -291,8 +291,8 @@ impl NormalizedSide {
         side: &SideConfig,
         spec: &InstrumentSpec,
     ) -> Result<Self, ConfigError> {
-        let price_low = normalize_price(direction, "price low", side.price_low, spec)?;
-        let price_high = normalize_price(direction, "price high", side.price_high, spec)?;
+        let price_low = normalize_price(direction, "下限 L", side.price_low, spec)?;
+        let price_high = normalize_price(direction, "上限 H", side.price_high, spec)?;
         if price_low >= price_high {
             return Err(ConfigError::PriceRangeNotAscending {
                 direction,
@@ -306,9 +306,9 @@ impl NormalizedSide {
         // 间距与价差不参与计算，也就不该被拒绝。
         let price_tick = spec.price_rule().step_at(price_high);
         let grid_spacing =
-            normalize_difference(direction, "grid spacing", side.grid_spacing, price_tick)?;
+            normalize_difference(direction, "网格间距 d", side.grid_spacing, price_tick)?;
         let grid_spread =
-            normalize_difference(direction, "grid spread", side.grid_spread, price_tick)?;
+            normalize_difference(direction, "网格价差 g", side.grid_spread, price_tick)?;
 
         let max_position = spec.normalize_quantity(side.max_position);
         if max_position.units() < spec.quantity_step().units() {
@@ -867,7 +867,10 @@ mod tests {
                 segment_high: Price::parse("85000").unwrap(),
             }
         );
-        assert!(error.to_string().contains("smaller grid spacing"));
+        assert_eq!(
+            error.to_string(),
+            "做多侧：第 2 批（85000）的区间 (80000, 85000] 里没有格子；减小网格间距 d 或减少批数 n"
+        );
 
         // 缩小网格间距，每批的段内就都有格子了。
         let mut denser = raw.clone();
@@ -1094,7 +1097,7 @@ mod tests {
             raw.normalize(&btc_spec(), &btc_fees()).unwrap_err(),
             ConfigError::PriceOutOfRange {
                 direction: Direction::Long,
-                field: "price high",
+                field: "上限 H",
                 price: Price::parse("92233720368.54").unwrap(),
                 price_tick: Price::parse("1").unwrap(),
             }
@@ -1259,7 +1262,10 @@ mod tests {
                 required_quantity: Quantity::parse("0.00011").unwrap(),
             }
         );
-        assert!(error.to_string().contains("fewer batches"));
+        assert_eq!(
+            error.to_string(),
+            "做多侧：第 0 批（95000）主仓只有 0.0001，不够最低下单金额（至少要 0.00011）；减少批数 n"
+        );
 
         // 同样的比例与批数下，总量大一些每批的主仓就够最低金额了。
         let mut larger = raw.clone();
@@ -1284,7 +1290,12 @@ mod tests {
                 max_cell_count: 1,
             }
         );
-        assert!(error.to_string().contains("at most 1 cells fit"));
+        // 页面原样显示：说清哪一侧、哪一格、差多少，以及怎么改。
+        assert_eq!(
+            error.to_string(),
+            "做多侧：格子太多，每格数量不够最低下单金额（多4 格在 91000 只有 0.001，至少要 0.003）。\
+             这个范围最多约 1 格：加大网格间距 d 或最大仓位 M"
+        );
     }
 
     /// 空头格的最低金额按买入平仓价校验，不是开空价（第 2.3 节、第 13 节 B26）。
@@ -1573,6 +1584,42 @@ mod tests {
                 Quantity::from_units(required.units() - spec.quantity_step().units()),
                 Price::parse("91000").unwrap()
             ) < threshold
+        );
+    }
+
+    /// 有主仓时格子只分到网格那部分（M × (1 − r)），格数上限要按它算：按整份 M 算会报出
+    /// 偏大的格数，照着改还是通不过。
+    #[test]
+    fn b23_the_max_cell_count_leaves_out_the_core() {
+        let with_spacing = |spacing: &str| StrategyConfig {
+            long: Some(SideConfig {
+                core_ratio: Rate::parse("0.5").unwrap(),
+                batch_count: Some(1),
+                grid_spacing: Price::parse(spacing).unwrap(),
+                ..config("85000", "95000", "0.02").long.unwrap()
+            }),
+            ..config("85000", "95000", "0.02")
+        };
+
+        let ConfigError::CellBelowMinimumOrderNotional { max_cell_count, .. } =
+            with_spacing("1000")
+                .normalize(&btc_spec(), &btc_fees())
+                .unwrap_err()
+        else {
+            panic!("expected a minimum order amount error");
+        };
+
+        // 网格那部分只有 0.01，每格至少要 0.003：放得下 3 格，放不下 4 格。按整份 M 算会报 6 格。
+        assert_eq!(max_cell_count, 3);
+        assert!(
+            with_spacing("3334")
+                .normalize(&btc_spec(), &btc_fees())
+                .is_ok()
+        );
+        assert!(
+            with_spacing("2500")
+                .normalize(&btc_spec(), &btc_fees())
+                .is_err()
         );
     }
 

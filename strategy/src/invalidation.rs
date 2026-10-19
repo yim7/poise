@@ -1,4 +1,6 @@
-//! 观点失效（第 7.5 节）：什么时候触发，触发之后这一次补发多少减仓。
+//! 观点失效（第 7.5 节）：什么时候触发，触发之后这一次补发多少减仓；以及市价平仓
+//! （第 7.7 节）这一次补发多少。两者按同一套办法下单：只减仓、立即成交否则撤销，限价按
+//! 标记价让出滑点上限。
 //!
 //! 只做计算。撤单、发单、等订单有结论由 runtime 负责。减仓数量按交易所实时查询的仓位
 //! 算，不按账上的状态：成交推送断开、成交记录还没到的时候，账上的状态是旧的（B39）。
@@ -11,19 +13,20 @@ use crate::side::Direction;
 use crate::state::StrategyState;
 use crate::units::{Position, Price, PriceRounding, Quantity, Rate, SCALE};
 
-/// 观点失效每一侧已经卖出（或买回）的数量：失效减仓单记入的累计成交量之和，按侧分开。
+/// 市价平仓相对标记价最多让出 5%：和官方 SDK 市价平仓的默认值一样（第 7.7 节）。固定值，
+/// 不设成参数。
+pub const MARKET_CLOSE_SLIPPAGE: Rate = Rate::from_units(SCALE / 20);
+
+/// 每一侧已经减掉的数量：失效减仓单和市价平仓单记入的累计成交量之和，按侧分开。
 ///
-/// 和 [`Strategy::after_invalidation`] 配合使用，给批次表、格子表算失效之后的持有。
-pub fn invalidation_sold(orders: &[OrderRecord]) -> Vec<(Direction, Quantity)> {
+/// 和 [`Strategy::after_invalidation`] 配合使用，给批次表、格子表算减仓之后的持有。
+pub fn reduction_sold(orders: &[OrderRecord]) -> Vec<(Direction, Quantity)> {
     Direction::ALL
         .into_iter()
         .map(|direction| {
             let sold = orders
                 .iter()
-                .filter(|order| {
-                    order.purpose == OrderPurpose::Invalidation
-                        && order.unit.direction() == direction
-                })
+                .filter(|order| order.purpose.is_reduction() && order.unit.direction() == direction)
                 .fold(Quantity::ZERO, |total, order| {
                     total + order.cumulative_filled
                 });
@@ -42,8 +45,9 @@ fn div_ceil(numerator: i128, denominator: i128) -> i128 {
 pub struct Reduction {
     /// 实时仓位超出剩余数量的部分；没有超出是 0。
     pub excess: Quantity,
-    /// 超出部分已经无法下单：是 0，或者不足一个数量步长、按标记价不足最低下单金额。
-    /// 这时减仓这一项算完成，`excess` 就是界面上显示的尾量（B39d）。
+    /// 超出部分已经无法下单，减仓这一项算完成。平到 0 时是仓位不足一个数量步长：把整个
+    /// 仓位平掉的只减仓单不受最低金额限制（附录 A），零头照样平。只减掉一部分（R > 0）时
+    /// 还包括按标记价不足最低下单金额，`excess` 就是界面上显示的尾量（B39d）。
     pub settled: bool,
     /// 这一次要补发的减仓单。超出部分已经被还可能成交的减仓单覆盖、或者补发量不足最低
     /// 下单金额时是 `None`。
@@ -74,8 +78,9 @@ impl Strategy {
     /// 不会让得更多。卖出让满滑点上限之后不足最低下单金额时，限价只让到刚好够最低金额
     /// 为止（滑点上限是最多让多少，不是必须让满）。
     ///
-    /// 超出部分按**标记价**不足最低下单金额（或不足一个数量步长）就算减仓完成（第 7.5 节
-    /// 第 4 步）：那部分下不了单，界面显示尾量。
+    /// R > 0 时，超出部分按**标记价**不足最低下单金额（或不足一个数量步长）就算减仓完成
+    /// （第 7.5 节第 4 步）：那部分下不了单，界面显示尾量。R = 0（含中性网格）是把整个
+    /// 仓位平掉，零头也照样发单（B62）。
     pub fn reduction(
         &self,
         position: Position,
@@ -83,10 +88,72 @@ impl Strategy {
         working: &[WorkingOrder],
     ) -> Reduction {
         let (holding, excess) = self.excess(position);
+        let slippage = holding.map_or(Rate::ZERO, |holding| self.invalidation_slippage(holding));
+        let whole = excess.units() == position.units().abs();
+        self.reduce(
+            holding,
+            excess,
+            whole,
+            mark,
+            working,
+            OrderPurpose::Invalidation,
+            slippage,
+        )
+    }
+
+    /// 市价平仓这一次要补发的平仓单（第 7.7 节第 3 步）：平掉标的上的全部净仓位。
+    ///
+    /// 和配置了哪几侧无关：仓位是多就卖、是空就买，包括接管来的和用户手动开的仓位。补发
+    /// 数量 = 实时净仓位 − 还可能成交的同方向平仓单余量，限价按标记价让出
+    /// [`MARKET_CLOSE_SLIPPAGE`]。平的是整个仓位，零头也照样发单，平到 0 才算完成（B62）。
+    pub fn market_close(
+        &self,
+        position: Position,
+        mark: Price,
+        working: &[WorkingOrder],
+    ) -> Reduction {
+        let holding = match position.units() {
+            units if units > 0 => Some(Direction::Long),
+            units if units < 0 => Some(Direction::Short),
+            _ => None,
+        };
+        let excess = Quantity::from_units(position.units().abs());
+        self.reduce(
+            holding,
+            excess,
+            true,
+            mark,
+            working,
+            OrderPurpose::Close,
+            MARKET_CLOSE_SLIPPAGE,
+        )
+    }
+
+    /// 失效减仓和市价平仓共用的规划：持有 `holding` 一侧、要减掉 `excess`。`whole` 表示
+    /// 要减掉的就是整个仓位（平到 0）。
+    ///
+    /// 交易所对只减仓单的最低金额只在「把整个仓位平掉」时放行（附录 A）：平到 0 时零头
+    /// 照样发；只减一部分时，不足最低金额的就算完成、留作尾量。还有别的同方向平仓单没有
+    /// 结论时，这一次补发的不是整个仓位，仍按最低金额来，不够就先等。
+    #[allow(clippy::too_many_arguments)]
+    fn reduce(
+        &self,
+        holding: Option<Direction>,
+        excess: Quantity,
+        whole: bool,
+        mark: Price,
+        working: &[WorkingOrder],
+        purpose: OrderPurpose,
+        slippage: Rate,
+    ) -> Reduction {
         let spec = self.spec();
-        let Some(holding) =
-            holding.filter(|_| spec.meets_minimum_order(spec.normalize_quantity(excess), mark))
-        else {
+        let normalized = spec.normalize_quantity(excess);
+        let sendable = if whole {
+            normalized.units() > 0
+        } else {
+            spec.meets_minimum_order(normalized, mark)
+        };
+        let Some(holding) = holding.filter(|_| sendable) else {
             return Reduction {
                 excess,
                 settled: true,
@@ -100,11 +167,12 @@ impl Strategy {
             .filter(|order| order.unit.side(order.purpose) == side)
             .fold(Quantity::ZERO, |total, order| total + order.remaining);
         let quantity = spec.normalize_quantity(excess.saturating_sub(pending).max(Quantity::ZERO));
+        let closes_whole = whole && pending.is_zero();
         let order = self
-            .reduction_price(holding, mark, side, quantity)
+            .reduction_price(mark, side, quantity, slippage, closes_whole)
             .map(|limit_price| OrderIntent {
                 unit: Unit::Side(holding),
-                purpose: OrderPurpose::Invalidation,
+                purpose,
                 side,
                 limit_price,
                 quantity,
@@ -115,6 +183,18 @@ impl Strategy {
             settled: false,
             order,
         }
+    }
+
+    /// 失效减仓的滑点上限：持有侧的设置；中性网格持有侧没设失效时用另一侧的。
+    fn invalidation_slippage(&self, holding: Direction) -> Rate {
+        self.side(holding)
+            .and_then(|plan| plan.config().invalidation)
+            .or_else(|| {
+                self.sides()
+                    .iter()
+                    .find_map(|plan| plan.config().invalidation)
+            })
+            .map_or(Rate::ZERO, |invalidation| invalidation.max_slippage)
     }
 
     /// 批次表和格子表要显示的状态：把观点失效已经卖出的数量按「先网格、后主仓」从账上
@@ -185,29 +265,22 @@ impl Strategy {
         }
     }
 
-    /// 减仓单的限价：标记价让出滑点上限。中性网格持有侧没设失效时用另一侧的滑点上限。
+    /// 减仓单的限价：标记价让出 `slippage`。
     ///
-    /// 数量为零、或者按标记价都不够最低下单金额时是 `None`：这一次不发单。
+    /// 数量为零时是 `None`。不是把整个仓位平掉（`closes_whole`）时，按标记价都不够最低
+    /// 下单金额也是 `None`：这一次不发单。
     fn reduction_price(
         &self,
-        holding: Direction,
         mark: Price,
         side: Side,
         quantity: Quantity,
+        slippage: Rate,
+        closes_whole: bool,
     ) -> Option<Price> {
         let spec = self.spec();
-        if !spec.meets_minimum_order(quantity, mark) {
+        if quantity.units() <= 0 || !closes_whole && !spec.meets_minimum_order(quantity, mark) {
             return None;
         }
-        let slippage = self
-            .side(holding)
-            .and_then(|plan| plan.config().invalidation)
-            .or_else(|| {
-                self.sides()
-                    .iter()
-                    .find_map(|plan| plan.config().invalidation)
-            })
-            .map_or(Rate::ZERO, |invalidation| invalidation.max_slippage);
         let scale = i128::from(SCALE);
         let (factor, rounding) = match side {
             Side::Sell => (scale - i128::from(slippage.units()), PriceRounding::Up),
@@ -224,7 +297,7 @@ impl Strategy {
             return None;
         }
         let slipped = spec.normalize_price(price, rounding)?;
-        if spec.meets_minimum_order(quantity, slipped) {
+        if closes_whole || spec.meets_minimum_order(quantity, slipped) {
             return Some(slipped);
         }
         // 卖出让满之后不够最低金额：限价抬到刚好够的那个价位，不超过标记价。买入的限价
@@ -402,6 +475,104 @@ mod tests {
         assert!(tail.settled);
         assert_eq!(tail.excess, quantity("0.001"));
         assert_eq!(tail.order, None);
+    }
+
+    /// 第 7.7 节：市价平仓平掉全部净仓位，只减仓，限价按标记价让出 5%。
+    #[test]
+    fn a_market_close_sells_the_whole_long_position_five_percent_below_the_mark() {
+        let strategy = Strategy::new(core_long_config(), btc_spec(), btc_fees()).unwrap();
+
+        let close = strategy.market_close(position("0.35"), price("89001"), &[]);
+
+        assert_eq!(close.excess, quantity("0.35"));
+        assert!(!close.settled);
+        let order = close.order.unwrap();
+        assert_eq!(order.purpose, OrderPurpose::Close);
+        assert_eq!(order.unit, Unit::Side(Direction::Long));
+        assert_eq!(order.side, Side::Sell);
+        assert!(order.reduce_only);
+        assert_eq!(order.quantity, quantity("0.35"));
+        // 89001 × .95 = 84550.95，向上取到 1 美元：84551，没有让出超过 5%。
+        assert_eq!(order.limit_price, price("84551"));
+    }
+
+    /// 平的是标的上的净仓位，和配置了哪一侧无关：只配做多侧、手里却是空仓时买回。
+    #[test]
+    fn a_market_close_buys_back_a_short_position_even_on_a_long_only_strategy() {
+        let strategy = Strategy::new(core_long_config(), btc_spec(), btc_fees()).unwrap();
+
+        let order = strategy
+            .market_close(position("-0.2"), price("90000"), &[])
+            .order
+            .unwrap();
+
+        assert_eq!(order.unit, Unit::Side(Direction::Short));
+        assert_eq!(order.side, Side::Buy);
+        assert_eq!(order.quantity, quantity("0.2"));
+        // 90000 × 1.05 = 94500。
+        assert_eq!(order.limit_price, price("94500"));
+    }
+
+    /// 结果未知的平仓单余量照样扣掉，不重复平；没有仓位时直接算完成。
+    #[test]
+    fn a_market_close_counts_pending_orders_and_settles_at_zero() {
+        let strategy = Strategy::new(core_long_config(), btc_spec(), btc_fees()).unwrap();
+        let pending = WorkingOrder {
+            purpose: OrderPurpose::Close,
+            ..unknown_sell("0.35")
+        };
+
+        let close = strategy.market_close(position("0.35"), price("90000"), &[pending]);
+        assert!(!close.settled);
+        assert_eq!(close.order, None);
+
+        let flat = strategy.market_close(Position::ZERO, price("90000"), &[]);
+        assert!(flat.settled);
+        assert_eq!(flat.excess, Quantity::ZERO);
+    }
+
+    /// 把整个仓位平掉的只减仓单不受最低金额限制（附录 A，测试网实测）：市价平仓遇到零头
+    /// 照样发单，平到 0 才算完成，不留尾量。
+    #[test]
+    fn b62_a_market_close_sends_a_dust_position_below_the_minimum_order() {
+        let strategy = Strategy::new(core_long_config(), btc_spec(), btc_fees()).unwrap();
+
+        // 0.001 × 9000 = 9 美元，不足 10 美元。
+        let close = strategy.market_close(position("0.001"), price("9000"), &[]);
+
+        assert!(!close.settled);
+        let order = close.order.unwrap();
+        assert_eq!(order.quantity, quantity("0.001"));
+        assert_eq!(order.limit_price, price("8550"));
+    }
+
+    /// 失效减仓 R = 0 也是把整个仓位平掉：零头照样发单。
+    #[test]
+    fn b63_an_invalidation_down_to_zero_sends_a_dust_position_too() {
+        let strategy = core_long("0");
+
+        let reduction = strategy.reduction(position("0.001"), price("9000"), &[]);
+
+        assert!(!reduction.settled);
+        let order = reduction.order.unwrap();
+        assert_eq!(order.quantity, quantity("0.001"));
+        // 9000 × .99 = 8910。
+        assert_eq!(order.limit_price, price("8910"));
+    }
+
+    /// 有别的平仓单还没有结论时，剩下的零头不是整个仓位，交易所会拒：先等它有结论。
+    #[test]
+    fn dust_left_beside_a_pending_close_waits_for_it() {
+        let strategy = Strategy::new(core_long_config(), btc_spec(), btc_fees()).unwrap();
+        let pending = WorkingOrder {
+            purpose: OrderPurpose::Close,
+            ..unknown_sell("0.001")
+        };
+
+        let close = strategy.market_close(position("0.002"), price("9000"), &[pending]);
+
+        assert!(!close.settled);
+        assert_eq!(close.order, None);
     }
 
     /// 批次表和格子表按「先网格、后主仓」显示失效之后的持有：网格从离空隙最远的格子

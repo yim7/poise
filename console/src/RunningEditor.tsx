@@ -5,6 +5,10 @@
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 
+import { Callout } from '@/components/layout'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { cn } from '@/lib/utils'
 import { HttpError, api } from './api'
 import {
   type InvalidationInput,
@@ -14,6 +18,7 @@ import {
   throttleMinutes,
 } from './format'
 import { DIRECTION_LABELS } from './labels'
+import { Panel } from './tables'
 import type { Direction, StrategyConfig } from './types'
 
 interface RunningEditorProps {
@@ -51,7 +56,7 @@ function sideInputs(config: StrategyConfig, direction: Direction): SideInputs {
  */
 function describeSaveFailure(failure: unknown): string {
   if (failure instanceof HttpError && failure.kind === 'busy') {
-    return '这个策略正在走一步，稍等一下再点保存。'
+    return '正在执行上一步，稍后再试。'
   }
   return failure instanceof Error ? failure.message : String(failure)
 }
@@ -112,7 +117,7 @@ export function RunningEditor({ strategyId, config }: RunningEditorProps) {
     setNotice(null)
     try {
       const saved = await api.updateConfig(strategyId, next)
-      setNotice(`运行参数已生效，记为第 ${saved.version} 版。`)
+      setNotice(`已生效（v${saved.version}）。`)
       await client.invalidateQueries({ queryKey: ['strategy', strategyId] })
     } catch (failure) {
       setError(describeSaveFailure(failure))
@@ -122,70 +127,102 @@ export function RunningEditor({ strategyId, config }: RunningEditorProps) {
   }
 
   return (
-    <section className="running-editor">
-      <h3>运行中可改的参数</h3>
-      {sides.map((direction) => {
-        const label = DIRECTION_LABELS[direction]
-        const values = inputs[direction]
-        return (
-          <fieldset key={direction}>
-            <legend>{label}侧</legend>
-            <label className="field">
-              <span>{label}侧限速间隔 τ（分钟）</span>
-              <input
-                aria-label={`${label}侧限速间隔 τ（分钟）`}
+    <Panel
+      title="运行中可改的参数"
+      aside={
+        <Button size="sm" onClick={save} disabled={busy}>
+          保存运行参数
+        </Button>
+      }
+    >
+      <div className="flex flex-col gap-4 p-4">
+        {sides.map((direction) => {
+          const label = DIRECTION_LABELS[direction]
+          const values = inputs[direction]
+          return (
+            <fieldset key={direction} className="grid min-w-0 grid-cols-2 gap-3 sm:grid-cols-4">
+              <legend
+                className={cn(
+                  'mb-2 text-[11px] font-medium',
+                  direction === 'long' ? 'text-long' : 'text-short',
+                )}
+              >
+                {label}侧
+              </legend>
+              <Field
+                label={`${label}侧限速间隔 τ（分钟）`}
+                caption="限速 τ（分钟）"
+                placeholder="不限速"
                 value={values.throttleMinutes}
                 disabled={busy}
-                onChange={(event) => update(direction, { throttleMinutes: event.target.value })}
+                onChange={(value) => update(direction, { throttleMinutes: value })}
               />
-              <small>留空表示不限速</small>
-            </label>
-            <label className="field">
-              <span>{label}侧观点失效价</span>
-              <input
-                aria-label={`${label}侧观点失效价`}
+              <Field
+                label={`${label}侧观点失效价`}
+                caption="观点失效价"
+                placeholder="不止损"
+                hint={direction === 'long' ? '须低于 L' : '须高于 H'}
                 value={values.invalidation.price}
                 disabled={busy}
-                onChange={(event) => updateInvalidation(direction, { price: event.target.value })}
+                onChange={(value) => updateInvalidation(direction, { price: value })}
               />
-              <small>
-                {direction === 'long'
-                  ? '留空表示不启用自动止损；必须低于 L'
-                  : '留空表示不启用自动止损；必须高于 H'}
-              </small>
-            </label>
-            <label className="field">
-              <span>{label}侧失效后剩余数量 R</span>
-              <input
-                aria-label={`${label}侧失效后剩余数量 R`}
+              <Field
+                label={`${label}侧失效后剩余数量 R`}
+                caption="失效后剩余 R"
+                hint={neutral ? '中性固定 0' : undefined}
                 value={neutral ? '0' : values.invalidation.remaining}
                 disabled={busy || neutral}
-                onChange={(event) => updateInvalidation(direction, { remaining: event.target.value })}
+                onChange={(value) => updateInvalidation(direction, { remaining: value })}
               />
-              <small>
-                {neutral ? '中性网格失效时全部平仓，固定为 0' : '0 表示全部平仓；不超过本侧主仓总量'}
-              </small>
-            </label>
-            <label className="field">
-              <span>{label}侧失效平仓滑点上限（%）</span>
-              <input
-                aria-label={`${label}侧失效平仓滑点上限（%）`}
+              <Field
+                label={`${label}侧失效平仓滑点上限（%）`}
+                caption="失效滑点上限 %"
                 value={values.invalidation.slippage}
                 disabled={busy}
-                onChange={(event) => updateInvalidation(direction, { slippage: event.target.value })}
+                onChange={(value) => updateInvalidation(direction, { slippage: value })}
               />
-            </label>
-          </fieldset>
-        )
-      })}
-      <div className="actions">
-        <button type="button" onClick={save} disabled={busy}>
-          保存运行参数
-        </button>
+            </fieldset>
+          )
+        })}
+        <p className="text-[11px] text-muted-foreground">
+          其他参数要停止后新建
+        </p>
+        {notice === null ? null : <Callout tone="ok">{notice}</Callout>}
+        {error === null ? null : <Callout tone="danger">{error}</Callout>}
       </div>
-      <p className="hint">价格范围、最大仓位、主仓比例、批数和网格参数改不了：要换就先停止，再新建。</p>
-      {notice === null ? null : <p className="notice">{notice}</p>}
-      {error === null ? null : <p className="error">{error}</p>}
-    </section>
+    </Panel>
+  )
+}
+
+function Field({
+  label,
+  caption,
+  hint,
+  placeholder,
+  value,
+  disabled,
+  onChange,
+}: {
+  label: string
+  caption: string
+  hint?: string
+  placeholder?: string
+  value: string
+  disabled: boolean
+  onChange: (value: string) => void
+}) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[11px] text-muted-foreground">{caption}</span>
+      <Input
+        aria-label={label}
+        className="num h-8"
+        value={value}
+        placeholder={placeholder}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {hint === undefined ? null : <span className="text-[10px] text-muted-foreground/80">{hint}</span>}
+    </label>
   )
 }

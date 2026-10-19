@@ -1213,6 +1213,56 @@ async fn hip3_positions_and_orders_are_read_from_their_dex() {
     );
 }
 
+/// 几个标的一起读仓位：同一个市场只问一次（第 7.7 节第 8 条）。主市场的 BTC、ETH 一次，
+/// 第三方市场的 `xyz:GOLD` 一次；没有仓位的标的是 0。
+#[tokio::test]
+async fn positions_are_read_once_per_market() {
+    let transport = FakeTransport::new(vec![
+        json!({
+            "time": 1_792_000_000_000_i64,
+            "assetPositions": [
+                {"type": "oneWay", "position": {"coin": "ETH", "szi": "-0.1",
+                    "leverage": {"type": "cross", "value": 10}, "marginUsed": "20.0"}}
+            ]
+        }),
+        json!({
+            "time": 1_792_000_000_000_i64,
+            "assetPositions": [
+                {"type": "oneWay", "position": {"coin": "xyz:GOLD", "szi": "0.02",
+                    "leverage": {"type": "cross", "value": 10}, "marginUsed": "8.0"}}
+            ]
+        }),
+    ]);
+    let client = client(transport.clone(), fixed_clock(NOW_MS));
+    let eth = Instrument::try_new("ETH").unwrap();
+
+    let positions = client
+        .positions(&[btc(), gold(), eth.clone()])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        positions,
+        vec![
+            (btc(), Position::ZERO),
+            (gold(), Position::parse("0.02").unwrap()),
+            (
+                eth,
+                Position::from_units(-Position::parse("0.1").unwrap().units())
+            ),
+        ]
+    );
+    assert_eq!(transport.requests().len(), 2);
+    assert_eq!(
+        transport.request(0).body,
+        json!({"type": "clearinghouseState", "user": ACCOUNT})
+    );
+    assert_eq!(
+        transport.request(1).body,
+        json!({"type": "clearinghouseState", "user": ACCOUNT, "dex": "xyz"})
+    );
+}
+
 /// 保证金读数加上在用标的所在的第三方市场：两处的全仓占用、逐仓保证金相加，时刻取较旧的。
 #[tokio::test]
 async fn the_margin_reading_adds_the_dexes_in_use() {

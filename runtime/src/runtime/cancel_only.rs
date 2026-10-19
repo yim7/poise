@@ -7,7 +7,7 @@ use poise_strategy::planning::Plan;
 use poise_strategy::state::StrategyState;
 use poise_strategy::units::{Position, Price};
 
-use crate::store::{StoredOrder, StoredStrategy, StrategyId, StrategyStatus};
+use crate::store::{StoreError, StoredOrder, StoredStrategy, StrategyId, StrategyStatus};
 
 use super::unknown::UnknownOrders;
 use super::{CancelOnly, CancelOnlyRound, ResumeOutcome, Runtime, RuntimeError, StepReport};
@@ -92,21 +92,42 @@ impl Runtime {
     /// 撤不干净的订单不会留在无人看管的地方：状态停在「停止中」，常驻服务继续撤、
     /// 继续对账，全部订单终态且成交对完账之后才归档。
     pub async fn stop(&self, strategy_id: &StrategyId) -> Result<Vec<ClientOrderId>, RuntimeError> {
+        self.stop_inner(strategy_id, false).await
+    }
+
+    /// 停止并在撤单收尾之后市价平仓（第 7.7 节，B49）：先按停止的规则撤单、等撤单结果、
+    /// 补记成交，全部订单有了结论之后进入「平仓中」，由常驻服务按实时净仓位平掉。
+    ///
+    /// 平仓一定排在撤单收尾之后：残留的网格单还可能成交，先平仓会被它们把仓位开回来。
+    pub async fn stop_and_close(
+        &self,
+        strategy_id: &StrategyId,
+    ) -> Result<Vec<ClientOrderId>, RuntimeError> {
+        self.stop_inner(strategy_id, true).await
+    }
+
+    async fn stop_inner(
+        &self,
+        strategy_id: &StrategyId,
+        close: bool,
+    ) -> Result<Vec<ClientOrderId>, RuntimeError> {
         let _guard = self.begin_waiting(strategy_id).await?;
         let now = self.clock.now();
         let status = self.store.load_strategy(strategy_id)?.status;
         match status {
-            StrategyStatus::Stopped | StrategyStatus::Invalidated => return Ok(Vec::new()),
+            status if status.is_archived() => return Ok(Vec::new()),
             StrategyStatus::Draft => {
                 return Err(RuntimeError::NotRunning(strategy_id.clone(), status));
             }
-            // 失效中也能停：用户决定不再减仓、剩下的仓位自己处理。撤单收尾之后归档。
-            StrategyStatus::Running
-            | StrategyStatus::Restoring
-            | StrategyStatus::Pausing
-            | StrategyStatus::Paused
-            | StrategyStatus::Stopping
-            | StrategyStatus::Invalidating => {}
+            // 失效中也能停：用户决定不再减仓。平仓中也能停：放弃剩下的平仓（B56）。撤单
+            // 收尾之后归档（停止时选了平仓就进入平仓中）。
+            _ => {}
+        }
+        // 普通停止就是不平仓：停止中补上的平仓标记、平仓中正在进行的平仓都作罢。
+        if close {
+            self.store.save_close_request(strategy_id, now)?;
+        } else {
+            self.store.clear_close_request(strategy_id)?;
         }
         if status != StrategyStatus::Stopping {
             self.store
@@ -114,6 +135,49 @@ impl Runtime {
         }
         let report = self.cancel_only_step_by_id(strategy_id, now).await?;
         Ok(report.canceled)
+    }
+
+    /// 市价平仓（第 7.7 节第 1 条的第二个入口）：停止中点了，等于补上平仓标记；已归档的
+    /// 策略点了，进入「平仓中」，由常驻服务按实时净仓位平掉。返回之后的状态。
+    ///
+    /// 已归档的策略要满足两项才行：交易所上这个标的的净仓位按标记价够最低下单金额
+    /// （[`RuntimeError::NothingToClose`]），而且这个标的上没有别的未归档策略
+    /// （[`RuntimeError::InstrumentBusy`]，仓位归它管）。还在运行的策略走
+    /// [`Runtime::stop_and_close`]。
+    pub async fn close(&self, strategy_id: &StrategyId) -> Result<StrategyStatus, RuntimeError> {
+        let _guard = self.begin_waiting(strategy_id).await?;
+        let now = self.clock.now();
+        let stored = self.store.load_strategy(strategy_id)?;
+        match stored.status {
+            StrategyStatus::Stopping => {
+                self.store.save_close_request(strategy_id, now)?;
+                return Ok(StrategyStatus::Stopping);
+            }
+            StrategyStatus::Closing => return Ok(StrategyStatus::Closing),
+            status if status.is_archived() => {}
+            other => return Err(RuntimeError::NotRunning(strategy_id.clone(), other)),
+        }
+        let strategy = Strategy::new(stored.config.clone(), stored.spec.clone(), stored.fees)?;
+        let instrument = strategy.spec().instrument();
+        let mark = self.exchange.mark_price(instrument).await?;
+        let position = self.exchange.position(instrument).await?;
+        if strategy.market_close(position, mark, &[]).settled {
+            return Err(RuntimeError::NothingToClose(strategy_id.clone()));
+        }
+        self.store
+            .reopen_for_close(strategy_id, instrument, now)
+            .map_err(|error| match error {
+                StoreError::InstrumentBusy {
+                    instrument,
+                    strategy_id,
+                } => RuntimeError::InstrumentBusy {
+                    instrument,
+                    strategy_id,
+                },
+                other => RuntimeError::Store(other),
+            })?;
+        tracing::warn!(strategy = %strategy_id, %position, "market close requested on an archived strategy");
+        Ok(StrategyStatus::Closing)
     }
 
     /// 只撤单的一步（第 2.4 节）：不下任何新单，只撤掉在场订单、按 `cloid` 查终态、
@@ -137,6 +201,10 @@ impl Runtime {
     ) -> Result<StepReport, RuntimeError> {
         let target = match stored.status {
             StrategyStatus::Pausing => StrategyStatus::Paused,
+            // 停止时选了市价平仓：收尾之后进入平仓中，而不是归档（第 7.7 节第 2 条）。
+            StrategyStatus::Stopping if self.store.has_close_request(strategy_id)? => {
+                StrategyStatus::Closing
+            }
             StrategyStatus::Stopping => StrategyStatus::Stopped,
             other => return Err(RuntimeError::NotRunning(strategy_id.clone(), other)),
         };
@@ -196,6 +264,10 @@ impl Runtime {
             // 时刻会把撤单、对账期间结算的那笔排除在外。
             self.store
                 .save_strategy_status(strategy_id, target, self.clock.now())?;
+            if target == StrategyStatus::Closing {
+                // 已经进入平仓中，标记用完了：之后再停止就是放弃平仓。
+                self.store.clear_close_request(strategy_id)?;
+            }
             tracing::warn!(
                 strategy = %strategy_id,
                 status = target.as_str(),
@@ -436,14 +508,10 @@ impl Runtime {
                 self.resume_inner(strategy_id, now).await
             }
             StrategyStatus::Running => Ok(ResumeOutcome::AlreadyRunning),
-            StrategyStatus::Stopped | StrategyStatus::Invalidated => {
-                Err(RuntimeError::Archived(strategy_id.clone()))
-            }
-            // 已经点了停止：撤单收尾由常驻服务推进，不再接受恢复。失效中的策略正在减仓，
-            // 恢复会让它重新挂出增仓单（第 7.5 节）。
-            StrategyStatus::Stopping | StrategyStatus::Draft | StrategyStatus::Invalidating => {
-                Err(RuntimeError::NotRunning(strategy_id.clone(), status))
-            }
+            status if status.is_archived() => Err(RuntimeError::Archived(strategy_id.clone())),
+            // 已经点了停止：撤单收尾由常驻服务推进，不再接受恢复。失效中、平仓中的策略正在
+            // 减仓，恢复会让它重新挂出增仓单（第 7.5、7.7 节）。
+            _ => Err(RuntimeError::NotRunning(strategy_id.clone(), status)),
         }
     }
 
@@ -485,6 +553,7 @@ impl Runtime {
             StrategyStatus::Paused,
             StrategyStatus::Stopping,
             StrategyStatus::Invalidating,
+            StrategyStatus::Closing,
         ])
     }
 
@@ -556,7 +625,7 @@ impl Runtime {
                     self.annotate_view(
                         strategy_id,
                         StrategyStatus::Restoring,
-                        format!("恢复失败：{error}。后台会继续重试。"),
+                        format!("恢复失败：{error}。后台重试中。"),
                     )
                     .await?;
                 }
@@ -586,7 +655,7 @@ impl Runtime {
             self.annotate_view(
                 strategy_id,
                 StrategyStatus::Restoring,
-                format!("等重启前挂出去的单过期（{until}）之后再重新挂单。"),
+                format!("等重启前的挂单过期（{until}）后再挂单。"),
             )
             .await?;
             return Ok(ResumeOutcome::WaitingForExpiry { until });
@@ -723,7 +792,7 @@ pub(super) fn settle_note(orders: &[StoredOrder], unknown: Option<&UnknownOrders
         .filter(|order| order.record.is_working() && !outcome_unknown(order.record.status))
         .count();
     let parts: Vec<String> = [
-        (working > 0).then(|| format!("还有 {working} 张遗留订单没撤掉，正在重试。")),
+        (working > 0).then(|| format!("{working} 张遗留订单没撤掉，重试中。")),
         unknown_note(orders, unknown),
     ]
     .into_iter()
@@ -753,12 +822,12 @@ pub(super) fn cancel_only_note(
     let done = match status {
         StrategyStatus::Pausing => "暂停",
         StrategyStatus::Invalidating => "转为已失效",
+        StrategyStatus::Closing => "转为已平仓",
         _ => "归档",
     };
     let parts: Vec<String> = [
-        (working > 0).then(|| format!("还有 {working} 张订单没撤掉，正在重试。")),
-        (unreconciled > 0)
-            .then(|| format!("还有 {unreconciled} 张订单的成交没对完账，对完才{done}。")),
+        (working > 0).then(|| format!("{working} 张订单没撤掉，重试中。")),
+        (unreconciled > 0).then(|| format!("{unreconciled} 张订单的成交没对完，对完才{done}。")),
         unknown_note(orders, unknown),
     ]
     .into_iter()
@@ -778,10 +847,7 @@ fn unknown_note(orders: &[StoredOrder], unknown: Option<&UnknownOrders>) -> Opti
         .filter(|order| order.record.is_working() && outcome_unknown(order.record.status))
         .count();
     (count > 0).then(|| {
-        format!(
-            "有 {count} 张订单结果未知（交易所查无此单），撤销问不出结局；这一轮没读到仓位，\
-             下一轮再按挂单、成交、仓位三项核对。"
-        )
+        format!("{count} 张订单结果未知（交易所查无此单）；这一步没读到仓位，下一步再核对。")
     })
 }
 
@@ -790,7 +856,7 @@ fn unknown_note(orders: &[StoredOrder], unknown: Option<&UnknownOrders>) -> Opti
 /// 读数沿用上一份，用户看到的可能是一份几分钟前的行情；不写清楚原因，它看起来和
 /// 刚取回来的没什么两样。撤单和成交对账没受影响，也要说一句，免得用户以为整步都失败了。
 pub(super) fn stale_reading_note(what: &str, progress: Option<String>) -> String {
-    let stale = format!("这一步没读到{what}，读数沿用上一份。");
+    let stale = format!("没读到{what}，读数沿用上一份。");
     match progress {
         Some(progress) => format!("{stale}{progress}"),
         None => stale,

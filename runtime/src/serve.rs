@@ -105,11 +105,13 @@ impl Server {
         };
         let restoring = tokio::spawn(async move { restore(runtime, interval).await });
         let funding = tokio::spawn(refresh_funding(self.runtime.clone()));
+        let held = tokio::spawn(read_archived_positions(self.runtime.clone()));
         let served = axum::serve(self.listener, router)
             .with_graceful_shutdown(shutdown)
             .await;
         restoring.abort();
         funding.abort();
+        held.abort();
         Ok(served?)
     }
 }
@@ -126,6 +128,19 @@ async fn refresh_funding(runtime: Arc<Runtime>) {
         ticker.tick().await;
         if let Err(error) = runtime.refresh_funding_rates().await {
             tracing::warn!(%error, "cannot refresh the funding rates");
+        }
+    }
+}
+
+/// 每分钟读一次已归档标的上仍有的仓位（第 7.7 节第 8 条）。只读、不下单，和交易的驱动
+/// 分开跑；失败了下一轮再读，读数超过 5 分钟没更新页面就不再显示。
+async fn read_archived_positions(runtime: Arc<Runtime>) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        if let Err(error) = runtime.read_archived_positions().await {
+            tracing::warn!(%error, "cannot read the positions left on archived instruments");
         }
     }
 }
@@ -167,7 +182,7 @@ async fn hold_back(runtime: &Runtime, strategy_id: &StrategyId) -> Result<(), Ru
         "holding this strategy back until its leftover orders are cleared"
     );
     runtime
-        .hold_for_restore(strategy_id, "进程重启，正在收尾重启前挂出去的单。")
+        .hold_for_restore(strategy_id, "进程重启，正在收尾重启前的挂单。")
         .await
 }
 

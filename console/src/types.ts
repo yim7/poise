@@ -23,6 +23,10 @@ export type StrategyStatus =
   | 'invalidating'
   /** 已失效：和已归档一样只读；价格回来也不自动恢复。 */
   | 'invalidated'
+  /** 平仓中：用户确认了市价平仓，正在用只减仓单平掉标的净仓位（第 7.7 节）。 */
+  | 'closing'
+  /** 已平仓：和已归档一样只读。 */
+  | 'closed'
 
 /** 限速间隔按 `[秒, 纳秒]` 传（chrono 的 Duration）。 */
 export type ThrottleInterval = [number, number] | null
@@ -114,7 +118,7 @@ export type Unit =
   | { side: Direction }
 
 /** 订单用途：主仓建仓腿、格子的建仓腿和平仓腿。买卖方向由服务端按侧算。 */
-export type OrderPurpose = 'core' | 'grid_entry' | 'grid_exit' | 'invalidation'
+export type OrderPurpose = 'core' | 'grid_entry' | 'grid_exit' | 'invalidation' | 'close'
 
 export type OrderStatus =
   | 'submitting'
@@ -231,6 +235,14 @@ export interface StoredConfigVersion {
   recorded_at: string
 }
 
+/** 已归档标的上仍有的净仓位（第 7.7 节第 8 条）：常驻服务每分钟读一次。 */
+export interface HeldPosition {
+  position: Decimal
+  /** 读到仓位时的标记价：确认弹窗按它算最差成交价。 */
+  market_price: Decimal
+  read_at: string
+}
+
 export interface StrategySummary {
   strategy_id: string
   instrument: string
@@ -239,8 +251,18 @@ export interface StrategySummary {
   created_at: string
   updated_at: string
   position: Decimal
+  /** 最近一次读到的标记价：列表上画出价格落在网格的哪里。 */
+  market_price: Decimal
   working_orders: number
   config: StrategyConfig
+  /** 已归档、标的上仍有仓位时的最近读数；其余情况是 null。 */
+  held: HeldPosition | null
+}
+
+/** 这个实例连的网络和账户；数据库还没认领时两项都是 null。 */
+export interface InstanceInfo {
+  network: 'testnet' | 'mainnet' | null
+  account_address: string | null
 }
 
 export type WaitReason =
@@ -314,6 +336,11 @@ export type ResumeOutcome =
  * `status` 不一定就是「已暂停」「已停止」：撤单回执丢了、成交还没对完账时它停在
  * `pausing`／`stopping`，订单还在交易所上，后台每一轮继续撤。页面照它说话。
  */
+/** 市价平仓请求之后策略所在的状态：停止中（收尾后平）或平仓中。 */
+export interface StatusBody {
+  status: StrategyStatus
+}
+
 export interface CanceledOrders {
   canceled: string[]
   status: StrategyStatus

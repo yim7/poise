@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use poise_strategy::Strategy;
-use poise_strategy::invalidation::invalidation_sold;
+use poise_strategy::invalidation::reduction_sold;
 use poise_strategy::order::{OrderPurpose, OrderRecord, Unit, WorkingOrder};
 use poise_strategy::planning::WaitReason;
 use poise_strategy::side::Direction;
@@ -12,9 +12,20 @@ use crate::account::FundingRate;
 use crate::settings::AccountSettings;
 use crate::store::{StrategyId, StrategyStatus, ViewSnapshot};
 
-use super::{Runtime, RuntimeError, StepReport, StrategyDetail, StrategySummary, percent};
+use super::{
+    InstanceInfo, Runtime, RuntimeError, StepReport, StrategyDetail, StrategySummary, percent,
+};
 
 impl Runtime {
+    /// 这个实例连的网络和账户（页面顶部的标识）。
+    pub fn instance(&self) -> Result<InstanceInfo, RuntimeError> {
+        let identity = self.store.identity()?;
+        Ok(InstanceInfo {
+            network: identity.as_ref().map(|(network, _)| network.clone()),
+            account_address: identity.map(|(_, account)| account),
+        })
+    }
+
     /// 策略列表，新建的在前（第 11 节）。
     ///
     /// 只读库：仓位来自后台每一步之后落的视图快照（第 11 节）。不去问交易所——网页
@@ -43,7 +54,7 @@ impl Runtime {
         // 观点失效卖出的数量不进账本：批次表和格子表按「先网格、后主仓」把它扣掉再显示
         // （第 7.5 节，见 [`Strategy::after_invalidation`]）。
         let records: Vec<OrderRecord> = orders.iter().map(|order| order.record.clone()).collect();
-        let sold = invalidation_sold(&records);
+        let sold = reduction_sold(&records);
         let state = strategy.after_invalidation(&self.load_state(strategy_id, &strategy)?, &sold);
         let working: Vec<WorkingOrder> = orders
             .iter()
@@ -132,10 +143,12 @@ impl Runtime {
             created_at: stored.created_at,
             updated_at: stored.updated_at,
             position: view.position,
+            market_price: view.market_price,
             working_orders: orders
                 .iter()
                 .filter(|order| order.record.is_working())
                 .count(),
+            held: self.held_position(&stored),
             config: stored.config,
         })
     }
@@ -243,7 +256,7 @@ pub(super) fn funding_alert_note(
     });
     (paid > settings.funding_alert_annual_rate).then(|| {
         format!(
-            "资金费率对本策略不利：年化 {}，超过提醒阈值 {}。不自动调整，是否减仓或改参数由你决定。",
+            "资金费率不利：年化 {}（阈值 {}）。",
             percent(paid),
             percent(settings.funding_alert_annual_rate)
         )

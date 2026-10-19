@@ -218,6 +218,43 @@ impl Exchange for Hyperliquid {
     }
 
     async fn position(&self, instrument: &Instrument) -> Result<Position, ExchangeError> {
+        let state = self.clearinghouse_state(instrument).await?;
+        position_in(&state, instrument)
+    }
+
+    /// `clearinghouseState` 一次返回一个合约市场上的全部仓位，没有跨市场一次读完的接口：
+    /// 同一个市场的标的只问一次（主市场一次，用到的第三方市场各一次）。
+    async fn positions(
+        &self,
+        instruments: &[Instrument],
+    ) -> Result<Vec<(Instrument, Position)>, ExchangeError> {
+        let mut states: Vec<(Option<&str>, ClearinghouseState)> = Vec::new();
+        let mut positions = Vec::with_capacity(instruments.len());
+        for instrument in instruments {
+            let state = match states.iter().position(|(dex, _)| *dex == instrument.dex()) {
+                Some(index) => &states[index].1,
+                None => {
+                    let state = self.clearinghouse_state(instrument).await?;
+                    states.push((instrument.dex(), state));
+                    &states[states.len() - 1].1
+                }
+            };
+            positions.push((instrument.clone(), position_in(state, instrument)?));
+        }
+        Ok(positions)
+    }
+
+    async fn mark_price(&self, instrument: &Instrument) -> Result<Price, ExchangeError> {
+        Hyperliquid::mark_price(self, instrument).await
+    }
+}
+
+impl Hyperliquid {
+    /// 这个账户在 `instrument` 所在合约市场上的状态，含这个市场的全部仓位。
+    async fn clearinghouse_state(
+        &self,
+        instrument: &Instrument,
+    ) -> Result<ClearinghouseState, ExchangeError> {
         let body = with_dex(
             json!({
                 "type": "clearinghouseState",
@@ -225,24 +262,27 @@ impl Exchange for Hyperliquid {
             }),
             instrument,
         );
-        let state: ClearinghouseState = self.info(&body, "clearinghouseState").await?;
-        let szi = state
-            .asset_positions
-            .iter()
-            .find(|position| position.position.coin == instrument.symbol())
-            .map(|position| position.position.szi.as_str())
-            .unwrap_or("0");
-        Position::parse(szi).map_err(|_| ExchangeError::Unavailable {
-            reason: format!(
-                "the exchange returned an invalid position for `{}`",
-                instrument.symbol()
-            ),
-        })
+        self.info(&body, "clearinghouseState").await
     }
+}
 
-    async fn mark_price(&self, instrument: &Instrument) -> Result<Price, ExchangeError> {
-        Hyperliquid::mark_price(self, instrument).await
-    }
+/// 从一个市场的状态里取出某个标的的净仓位；没有这个标的就是 0。
+fn position_in(
+    state: &ClearinghouseState,
+    instrument: &Instrument,
+) -> Result<Position, ExchangeError> {
+    let szi = state
+        .asset_positions
+        .iter()
+        .find(|position| position.position.coin == instrument.symbol())
+        .map(|position| position.position.szi.as_str())
+        .unwrap_or("0");
+    Position::parse(szi).map_err(|_| ExchangeError::Unavailable {
+        reason: format!(
+            "the exchange returned an invalid position for `{}`",
+            instrument.symbol()
+        ),
+    })
 }
 
 /// 交易所的订单状态变成领域状态。看不懂的状态按「结果未知」处理：它仍然算在场。

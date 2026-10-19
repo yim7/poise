@@ -289,7 +289,7 @@ pub fn position_check(
 
 /// 仓位核对时我们预计交易所会有的仓位。
 ///
-/// 由格子状态算出的应有持仓，减去观点失效已经记入的减仓成交（它们不改格子状态，见
+/// 由格子状态算出的应有持仓，减去失效减仓和市价平仓已经记入的成交（它们不改格子状态，见
 /// [`crate::Strategy::apply_fill`]），再加上交易所已经成交、我们还没记入的数量：成交记录
 /// 可能比挂单状态晚到，这段差额是能解释的（第 7.1.3 节）。
 pub fn expected_position(
@@ -299,7 +299,7 @@ pub fn expected_position(
 ) -> Position {
     let mut unrecorded: i64 = orders
         .iter()
-        .filter(|order| order.purpose == OrderPurpose::Invalidation)
+        .filter(|order| order.purpose.is_reduction())
         .map(|order| signed_delta(order.unit.side(order.purpose), order.cumulative_filled))
         .sum();
     for (client_order_id, cumulative) in reported {

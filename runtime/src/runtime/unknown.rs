@@ -43,22 +43,19 @@ impl UnknownOrders {
                     .missing
                     .iter()
                     .map(|fact| match fact {
-                        MissingFact::NeverConfirmed => {
-                            "交易所确认过它在场，要等交易所给出明确的终态".to_string()
-                        }
+                        MissingFact::NeverConfirmed => "曾确认在场，等交易所给出终态".to_string(),
                         MissingFact::Deadline => {
-                            format!("等期限（{}）过去", pending.deadline)
+                            format!("等期限 {}", pending.deadline)
                         }
-                        MissingFact::Fills => "它有成交记录，落过地".to_string(),
-                        MissingFact::Position => "仓位还没核对一致".to_string(),
+                        MissingFact::Fills => "有成交记录".to_string(),
+                        MissingFact::Position => "仓位未核对一致".to_string(),
                     })
                     .collect();
                 format!("{}：{}", pending.client_order_id, missing.join("、"))
             })
             .collect();
         Some(format!(
-            "有 {} 张订单结果未知，交易所查不到（查无此单）。期限过后挂单、成交、仓位三项核对一致才释放预留，\
-             之前本策略不发新单，已在场的挂单保留。{}",
+            "{} 张订单结果未知（交易所查无此单），挂单、成交、仓位核对一致前不发新单。{}",
             self.pending.len(),
             orders.join("；")
         ))

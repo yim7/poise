@@ -5,10 +5,13 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 
+import { PageHeader } from '@/components/layout'
+import { Button } from '@/components/ui/button'
 import { HttpError, api } from './api'
 import {
   DEFAULT_FORM,
   DraftForm,
+  changeSideField,
   fromConfig,
   toConfig,
   type FormValues,
@@ -40,16 +43,16 @@ function describeStartFailure(failure: unknown): StartFailure {
   switch (failure.kind) {
     case 'preview_stale':
       return {
-        message: '行情、仓位或账户在预览之后变了：请重新预览，再确认启动。',
+        message: '预览后行情或仓位有变，重新预览。',
         stalePreview: true,
       }
     case 'instrument_busy':
       return {
-        message: '这个标的已经有运行中或已暂停的策略：先停掉那一个，再回来确认启动。',
+        message: '该标的已有活动策略，先停止它。',
         stalePreview: false,
       }
     case 'busy':
-      return { message: '这个策略正在走一步，稍等一下再点确认启动。', stalePreview: false }
+      return { message: '正在执行上一步，稍后再试。', stalePreview: false }
     default:
       return { message: failure.message, stalePreview: false }
   }
@@ -60,9 +63,11 @@ interface DraftEditorProps {
   draftId: string | null
   onStarted: (strategyId: string) => void
   onBack: () => void
+  /** 新建的草稿第一次保存成功，拿到了标识。 */
+  onCreated?: (draftId: string) => void
 }
 
-export function DraftEditor({ draftId, onStarted, onBack }: DraftEditorProps) {
+export function DraftEditor({ draftId, onStarted, onBack, onCreated }: DraftEditorProps) {
   const [id, setId] = useState(draftId)
   const [values, setValues] = useState<FormValues>(DEFAULT_FORM)
   const [preview, setPreview] = useState<DraftPreview | null>(null)
@@ -100,7 +105,7 @@ export function DraftEditor({ draftId, onStarted, onBack }: DraftEditorProps) {
   function changeSide(direction: Direction, name: SideFieldName, value: string) {
     setValues((current) => ({
       ...current,
-      [direction]: { ...current[direction], [name]: value },
+      [direction]: changeSideField(current[direction], name, value),
     }))
     changed()
   }
@@ -128,11 +133,12 @@ export function DraftEditor({ draftId, onStarted, onBack }: DraftEditorProps) {
         const created = await api.createDraft(config)
         setId(created.draft_id)
         setLoaded(created.draft_id)
+        onCreated?.(created.draft_id)
         setNotice('草稿已保存。')
         return created.draft_id
       }
       const saved = await api.saveDraft(id, config)
-      setNotice(`已保存为第 ${saved.version} 版。`)
+      setNotice(`已保存（v${saved.version}）。`)
       return id
     } catch (failure) {
       setError(describe(failure))
@@ -149,11 +155,8 @@ export function DraftEditor({ draftId, onStarted, onBack }: DraftEditorProps) {
     try {
       const result = await api.previewDraft(saved)
       setPreview(result)
-      setNotice(
-        result.validation.valid
-          ? '预览已按当前行情和账户算好，确认后按它启动。'
-          : '参数校验不通过，改完再预览。',
-      )
+      // 通过时不另说：底栏会写确认后挂几张单。
+      setNotice(result.validation.valid ? null : '校验不通过。')
     } catch (failure) {
       setError(describe(failure))
     } finally {
@@ -190,9 +193,29 @@ export function DraftEditor({ draftId, onStarted, onBack }: DraftEditorProps) {
     }
   }
 
+  const built = toConfig(values)
+  const previewConfig = 'config' in built ? built.config : null
+  const ready = preview?.token != null
+
   return (
-    <section className="editor">
-      <h2>{id === null ? '新建策略' : `草稿 ${id}`}</h2>
+    <div className="flex flex-col gap-6 pb-20">
+      <div className="flex flex-col gap-2">
+        <Button variant="ghost" size="sm" className="-ml-2 w-fit text-muted-foreground" onClick={onBack} disabled={busy}>
+          ← 返回
+        </Button>
+        <PageHeader
+          title={id === null ? '新建策略' : '编辑草稿'}
+          subtitle={id === null ? undefined : <span className="num">{id}</span>}
+          actions={
+            id === null ? null : (
+              <Button variant="destructive" size="lg" onClick={remove} disabled={busy}>
+                删除草稿
+              </Button>
+            )
+          }
+        />
+      </div>
+
       <DraftForm
         values={values}
         disabled={busy}
@@ -200,33 +223,41 @@ export function DraftEditor({ draftId, onStarted, onBack }: DraftEditorProps) {
         onChange={changeSide}
         onToggle={toggleSide}
       />
-      <div className="actions">
-        <button type="button" onClick={onBack} disabled={busy}>
-          返回
-        </button>
-        <button type="button" onClick={save} disabled={busy}>
-          保存
-        </button>
-        <button type="button" onClick={saveAndPreview} disabled={busy} className="primary">
-          保存并预览
-        </button>
-        <button
-          type="button"
-          onClick={confirmStart}
-          disabled={busy || preview?.token == null}
-          className="primary"
-        >
-          确认启动
-        </button>
-        {id === null ? null : (
-          <button type="button" onClick={remove} disabled={busy} className="danger">
-            删除草稿
-          </button>
-        )}
+
+      {preview === null ? null : <PreviewPanel preview={preview} config={previewConfig} />}
+
+      {/* 操作栏固定在底部：滚到哪里都看得到下一步，以及点下去会发生什么。 */}
+      <div className="fixed inset-x-0 bottom-0 z-30 border-t border-border bg-background/90 backdrop-blur">
+        <div className="mx-auto flex max-w-[1240px] flex-wrap items-center gap-3 px-5 py-3">
+          <div className="min-w-0 flex-1 text-xs">
+            {error !== null ? (
+              <span role="alert" className="text-destructive">{error}</span>
+            ) : notice !== null ? (
+              <span className="text-muted-foreground">{notice}</span>
+            ) : ready ? (
+              <span className="text-muted-foreground">
+                确认后挂 <span className="num text-foreground">{preview.planned_orders.length}</span> 张
+                {preview.immediate_fills.length > 0 ? (
+                  <>
+                    ，<span className="num text-warn">{preview.immediate_fills.length}</span> 张立即成交
+                  </>
+                ) : null}
+              </span>
+            ) : (
+              <span className="text-muted-foreground">预览后可确认启动</span>
+            )}
+          </div>
+          <Button variant="ghost" size="lg" onClick={save} disabled={busy}>
+            保存
+          </Button>
+          <Button variant="outline" size="lg" onClick={saveAndPreview} disabled={busy}>
+            保存并预览
+          </Button>
+          <Button size="lg" onClick={confirmStart} disabled={busy || !ready}>
+            确认启动
+          </Button>
+        </div>
       </div>
-      {notice === null ? null : <p className="notice">{notice}</p>}
-      {error === null ? null : <p className="error">{error}</p>}
-      {preview === null ? null : <PreviewPanel preview={preview} />}
-    </section>
+    </div>
   )
 }

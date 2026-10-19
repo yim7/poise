@@ -183,7 +183,7 @@ async fn b43_a_preview_older_than_a_minute_requires_a_new_preview() {
         .await
         .unwrap_err();
     assert!(matches!(error, RuntimeError::PreviewStale(_)), "{error:?}");
-    assert!(error.to_string().contains("60 seconds"), "{error}");
+    assert!(error.to_string().contains("超过 60 秒"), "{error}");
     assert!(console.store.load_all_strategy_ids().unwrap().is_empty());
 
     let fresh = console.runtime.preview_draft(&draft_id).await.unwrap();
@@ -296,7 +296,7 @@ async fn b43_a_position_change_requires_a_new_preview() {
         .await
         .unwrap_err();
     assert!(matches!(error, RuntimeError::PreviewStale(_)), "{error:?}");
-    assert!(error.to_string().contains("position"), "{error}");
+    assert!(error.to_string().contains("仓位"), "{error}");
 
     let fresh = console.runtime.preview_draft(&draft_id).await.unwrap();
     assert_eq!(fresh.position, Position::parse("0.2").unwrap());

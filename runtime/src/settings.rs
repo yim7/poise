@@ -8,6 +8,8 @@ use chrono::Duration;
 use poise_strategy::units::Rate;
 use serde::{Deserialize, Serialize};
 
+use crate::runtime::percent;
+
 /// 账户风控设置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountSettings {
@@ -45,13 +47,13 @@ impl Default for AccountSettings {
 /// 设置不合理：改完再提交。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SettingsError {
-    #[error("the margin alert ratio {alert} must be above 0 and below the stop ratio {stop}")]
+    #[error("提醒阈值 {} 须大于 0、小于停止阈值 {}", percent(*.alert), percent(*.stop))]
     AlertNotBelowStop { alert: Rate, stop: Rate },
-    #[error("the margin stop ratio {0} must be below 100%")]
+    #[error("停止阈值 {} 须小于 100%", percent(*.0))]
     StopNotBelowOne(Rate),
-    #[error("the market data max age must be at least one second")]
+    #[error("行情过期时间至少 1 秒")]
     MaxAgeTooShort,
-    #[error("the funding alert rate {0} must be above 0")]
+    #[error("资金费率提醒阈值须大于 0")]
     FundingAlertNotPositive(Rate),
 }
 

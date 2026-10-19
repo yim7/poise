@@ -22,22 +22,106 @@ function detailRoutes(extra: Routes = {}) {
   })
 }
 
+/** 标题行：大标题是标的，旁边是类型和状态两个标识。 */
+async function expectTitle(kind: string, status: string) {
+  const heading = await screen.findByRole('heading', { level: 1, name: 'BTC' })
+  const row = heading.parentElement as HTMLElement
+  expect(within(row).getByText(kind)).toBeInTheDocument()
+  expect(within(row).getByText(status)).toBeInTheDocument()
+}
+
 describe('运行详情', () => {
   it('显示批次表、格子表、挂单、等待原因和参数版本', async () => {
     detailRoutes()
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText('主仓批次表')).toBeInTheDocument()
-    expect(screen.getByText('网格格子表')).toBeInTheDocument()
-    expect(screen.getByText('在场挂单')).toBeInTheDocument()
-    // 「等待所属批次」既是格子状态也是等待原因，两处都该出现。
-    expect(screen.getAllByText('等待所属批次')).toHaveLength(2)
+    expect(await screen.findByRole('region', { name: '主仓批次' })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '网格格子' })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '在场挂单' })).toBeInTheDocument()
+    // 格子还没启用时状态列写「等批次」；等待原因里写全称。
+    expect(within(screen.getByRole('region', { name: '网格格子' })).getByText('等批次')).toBeInTheDocument()
+    expect(screen.getByText('等待所属批次')).toBeInTheDocument()
     expect(screen.getByText('价格未到')).toBeInTheDocument()
-    // 「参数版本」既是事实项，也是版本表的标题。
-    expect(screen.getAllByText('参数版本')).toHaveLength(2)
-    expect(screen.getByText('做多第 0 批主仓')).toBeInTheDocument()
-    // 仓位和应有持仓一致时不提示。
-    expect(screen.queryByText(/仓位与应有持仓不一致/)).not.toBeInTheDocument()
+    const versions = screen.getByRole('region', { name: '参数版本' })
+    expect(within(versions).getByText('v2')).toBeInTheDocument()
+    expect(within(versions).getByText('v1')).toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: '在场挂单' })).getByText('多批0')).toBeInTheDocument()
+    // 仓位和应有持仓一致时不显示应有持仓。
+    expect(screen.queryByText(/应有持仓/)).not.toBeInTheDocument()
+  })
+
+  it('仓位和应有持仓不一致时才显示应有持仓', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': { body: detail({ position: '0.03', expected_position: '0.015' }) },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    expect(await screen.findByText(/应有持仓/)).toHaveTextContent('应有持仓 0.015')
+  })
+
+  it('格子和挂单用简写：多3、开平、买卖，数量写成已成交 / 总量，状态只在异常时出现', async () => {
+    const base = detail()
+    const order = (
+      client_order_id: string,
+      unit: { cell: ['long' | 'short', number] },
+      purpose: 'grid_entry' | 'grid_exit',
+      limit_price: string,
+      cumulative_filled: string,
+    ) => ({
+      ...base.orders[0],
+      record: {
+        ...base.orders[0].record,
+        client_order_id,
+        unit,
+        purpose,
+        limit_price,
+        quantity: '0.02',
+        cumulative_filled,
+      },
+    })
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({
+          cells: base.cells.filter((cell) => cell.status !== 'waiting_for_batch'),
+          orders: [
+            order('0x1', { cell: ['long', 3] }, 'grid_entry', '93000', '0'),
+            order('0x2', { cell: ['short', 1] }, 'grid_exit', '97000', '0.0154'),
+          ],
+        }),
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    const orders = await screen.findByRole('region', { name: '在场挂单' })
+    const rows = within(orders).getAllByRole('row')
+    // 按限价从高到低，和格子阶梯一致。
+    expect(rows[1]).toHaveTextContent('空1')
+    expect(rows[1]).toHaveTextContent('平')
+    // 空头侧平仓是买。
+    expect(rows[1]).toHaveTextContent('买')
+    expect(rows[1]).toHaveTextContent('0.0154 / 0.02')
+    expect(rows[2]).toHaveTextContent('多3')
+    expect(rows[2]).toHaveTextContent('开')
+    expect(rows[2]).toHaveTextContent('买')
+    // 全部在场：不出现状态列。
+    expect(within(orders).queryByText('在场')).not.toBeInTheDocument()
+    expect(within(orders).queryByRole('columnheader', { name: '状态' })).not.toBeInTheDocument()
+
+    // 格子全部已启用：没有状态列，也不写「持有中」「等待买入」。
+    const ladder = screen.getByRole('region', { name: '网格格子' })
+    expect(within(ladder).getByText('多1')).toBeInTheDocument()
+    expect(within(ladder).queryByRole('columnheader', { name: '状态' })).not.toBeInTheDocument()
+    expect(within(ladder).queryByText(/持有中|等待买入|等待买回/)).not.toBeInTheDocument()
+  })
+
+  it('运行中没有在等的事、也没有提醒时，不显示等待区', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': { body: detail({ waiting: [] }) },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    await expectTitle('做多', '运行中')
+    expect(screen.queryByRole('region', { name: '等待' })).not.toBeInTheDocument()
   })
 
   it('b35_显示账户保证金率；读不到时如实说读不到', async () => {
@@ -53,16 +137,20 @@ describe('运行详情', () => {
     detailRoutes()
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText(/^每小时 0.00125%，年化 10.95%（.+ 读）$/)).toBeInTheDocument()
+    const rate = await screen.findByText(/^0.00125%\/时 · 年化 10.95%$/)
+    // 读到的时刻放在悬停提示里。
+    expect(rate).toHaveAttribute('title', expect.stringMatching(/^读于 /))
   })
 
   it('显示累计资金费、网格已实现利润和资金费占的比例', async () => {
     detailRoutes()
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText(/^-1.5（截至 .+）$/)).toBeInTheDocument()
-    expect(screen.getByText('网格已实现利润（估算）')).toBeInTheDocument()
-    expect(screen.getByText('-5%')).toBeInTheDocument()
+    const readings = await screen.findByRole('region', { name: '关键读数' })
+    expect(within(readings).getByText('-1.5')).toBeInTheDocument()
+    expect(within(readings).getByText(/^截至 .+/)).toBeInTheDocument()
+    expect(within(readings).getByText('网格利润（估）')).toBeInTheDocument()
+    expect(within(readings).getByText('-5%')).toBeInTheDocument()
   })
 
   it('还没有网格利润时不算比例', async () => {
@@ -73,7 +161,8 @@ describe('运行详情', () => {
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText('还没有网格利润')).toBeInTheDocument()
+    const ratio = await screen.findByText('资金费 / 网格利润')
+    expect(ratio.parentElement).toHaveTextContent('资金费 / 网格利润—')
   })
 
   it('负资金费率显示负号：空头付', async () => {
@@ -84,7 +173,7 @@ describe('运行详情', () => {
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText(/^每小时 -0.027774%，年化 -243.30532%/)).toBeInTheDocument()
+    expect(await screen.findByText(/^-0.027774%\/时 · 年化 -243.30532%$/)).toBeInTheDocument()
   })
 
   it('暂停时说明设了失效价的照样会减仓', async () => {
@@ -102,12 +191,12 @@ describe('运行详情', () => {
   it('运行中也显示说明：保证金率、资金费率、操作次数这些提醒在说明里', async () => {
     detailRoutes({
       'GET /api/strategies/s-1': {
-        body: detail({ note: '资金费率对本策略不利：年化 87.6%，超过提醒阈值 50%。' }),
+        body: detail({ note: '资金费率不利：年化 87.60%（阈值 50.00%）。' }),
       },
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText(/资金费率对本策略不利/)).toBeInTheDocument()
+    expect(await screen.findByText(/资金费率不利/)).toBeInTheDocument()
     expect(screen.getByText('价格未到')).toBeInTheDocument()
   })
 
@@ -176,6 +265,208 @@ describe('运行详情', () => {
     expect(await screen.findByText(/仓位保留/)).toBeInTheDocument()
   })
 
+  it('b49_停止确认之后再问是否市价平仓，选了就调用平仓接口', async () => {
+    const server = detailRoutes({
+      'POST /api/strategies/s-1/close': { body: { status: 'stopping' } },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.click(screen.getByRole('button', { name: '停止' }))
+    await userEvent.click(screen.getByRole('button', { name: '确认停止' }))
+
+    // 第二次确认紧接着弹出，不等撤单收尾：显示要平的净仓位、标记价和最差成交价（标记价
+    // 让出 5%）。
+    const dialog = await screen.findByRole('alertdialog', { name: '市价平仓？' })
+    await waitFor(() => {
+      expect(server.count('POST', '/api/strategies/s-1/stop')).toBe(1)
+    })
+    expect(within(dialog).getByText('0.015')).toBeInTheDocument()
+    expect(within(dialog).getByText('95500')).toBeInTheDocument()
+    // 多仓卖出：95500 × 0.95。
+    expect(within(dialog).getByText('约 90725')).toBeInTheDocument()
+    expect(server.count('POST', '/api/strategies/s-1/close')).toBe(0)
+
+    await userEvent.click(within(dialog).getByRole('button', { name: '市价平仓' }))
+
+    await waitFor(() => {
+      expect(server.count('POST', '/api/strategies/s-1/close')).toBe(1)
+    })
+    expect(await screen.findByText(/撤单收尾后市价平仓/)).toBeInTheDocument()
+  })
+
+  it('b49_停止请求还没回来时就问是否平仓：撤单要好几秒，不让人干等', async () => {
+    let finish: () => void = () => {}
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    detailRoutes({
+      'POST /api/strategies/s-1/stop': {
+        body: { canceled: ['0x1'], status: 'stopping' },
+        wait: pending,
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.click(screen.getByRole('button', { name: '停止' }))
+    await userEvent.click(screen.getByRole('button', { name: '确认停止' }))
+
+    expect(await screen.findByRole('alertdialog', { name: '市价平仓？' })).toBeInTheDocument()
+    finish()
+  })
+
+  it('最差成交价按交易所的价格规则显示：最多 5 位有效数字', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({
+          summary: summary({
+            status: 'stopped',
+            working_orders: 0,
+            held: { position: '1.01', market_price: '104.73', read_at: '2026-10-15T00:05:00Z' },
+          }),
+          orders: [],
+        }),
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: '市价平仓' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '市价平仓？' })
+    // 104.73 × 0.95 = 99.4935，5 位有效数字。标记价恰好是整数时也不会少显示小数。
+    expect(within(dialog).getByText('约 99.493')).toBeInTheDocument()
+  })
+
+  it('标记价恰好是整数时，最差成交价照样保留小数：105 × 0.95 = 99.75，不写成 100', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({
+          summary: summary({
+            status: 'stopped',
+            working_orders: 0,
+            held: { position: '0.68', market_price: '105', read_at: '2026-10-15T00:05:00Z' },
+          }),
+          orders: [],
+        }),
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: '市价平仓' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '市价平仓？' })
+    expect(within(dialog).getByText('约 99.75')).toBeInTheDocument()
+  })
+
+  it('b50_第二次确认选保留仓位，就是普通停止，不调用平仓接口', async () => {
+    const server = detailRoutes()
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.click(screen.getByRole('button', { name: '停止' }))
+    await userEvent.click(screen.getByRole('button', { name: '确认停止' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '市价平仓？' })
+    await userEvent.click(within(dialog).getByRole('button', { name: '保留仓位' }))
+
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(server.count('POST', '/api/strategies/s-1/close')).toBe(0)
+    expect(screen.getByText(/仓位保留/)).toBeInTheDocument()
+  })
+
+  it('b58_停止时净仓位为 0 不问是否平仓', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': { body: detail({ position: '0', expected_position: '0' }) },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.click(screen.getByRole('button', { name: '停止' }))
+    await userEvent.click(screen.getByRole('button', { name: '确认停止' }))
+
+    expect(await screen.findByText(/仓位保留/)).toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog', { name: '市价平仓？' })).not.toBeInTheDocument()
+  })
+
+  it('b53_已归档、仍有仓位的策略可以市价平仓：空仓买回，最差成交价在标记价之上', async () => {
+    const server = detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({
+          summary: summary({
+            status: 'stopped',
+            working_orders: 0,
+            held: { position: '-0.2', market_price: '95500', read_at: '2026-10-15T00:05:00Z' },
+          }),
+          orders: [],
+          position: '0.015',
+          expected_position: '0',
+        }),
+      },
+      'POST /api/strategies/s-1/close': { body: { status: 'closing' } },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: '市价平仓' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '市价平仓？' })
+    // 空仓买回：95500 × 1.05。
+    expect(within(dialog).getByText('约 100275')).toBeInTheDocument()
+    await userEvent.click(within(dialog).getByRole('button', { name: '市价平仓' }))
+
+    await waitFor(() => {
+      expect(server.count('POST', '/api/strategies/s-1/close')).toBe(1)
+    })
+    expect(await screen.findByText(/已开始平仓/)).toBeInTheDocument()
+  })
+
+  it('b53_已归档、没有仍有仓位的读数就不给平仓按钮：归档时的旧快照不算数', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({
+          summary: summary({ status: 'stopped', working_orders: 0, held: null }),
+          orders: [],
+          position: '0.015',
+          expected_position: '0',
+        }),
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    await expectTitle('做多', '已归档')
+    expect(screen.queryByRole('button', { name: '市价平仓' })).not.toBeInTheDocument()
+  })
+
+  it('b56_平仓中：显示状态和清仓单，停止就是放弃剩下的平仓', async () => {
+    const base = detail()
+    const close = {
+      ...base.orders[0],
+      record: {
+        ...base.orders[0].record,
+        unit: { side: 'long' as const },
+        purpose: 'close' as const,
+        limit_price: '90725',
+        quantity: '0.015',
+        reduce_only: true,
+      },
+    }
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({
+          summary: summary({ status: 'closing' }),
+          orders: [close],
+          note: '平仓中：还要平 0.015。',
+        }),
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    await expectTitle('做多', '平仓中')
+    expect(screen.getByText('平仓中：还要平 0.015。')).toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: '在场挂单' })).getByText('清仓')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '市价平仓' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '恢复' })).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: '停止' }))
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('放弃剩余平仓')
+  })
+
   it('b45_暂停还没撤完时按接口返回的状态说正在撤单', async () => {
     // 撤单回执丢了、成交还没对完账的时候，接口回的是「暂停中」：订单还在交易所上，
     // 后台每一轮继续撤。这时候说「已暂停」，用户以为挂单已经撤掉了。
@@ -189,7 +480,7 @@ describe('运行详情', () => {
 
     await userEvent.click(screen.getByRole('button', { name: '暂停' }))
 
-    expect(await screen.findByText(/正在撤单/)).toBeInTheDocument()
+    expect(await screen.findByText(/撤单中/)).toBeInTheDocument()
     expect(screen.queryByText(/已暂停/)).not.toBeInTheDocument()
   })
 
@@ -204,7 +495,7 @@ describe('运行详情', () => {
 
     await userEvent.click(screen.getByRole('button', { name: '暂停' }))
 
-    expect(await screen.findByText('已暂停，撤销 2 张订单。')).toBeInTheDocument()
+    expect(await screen.findByText('已暂停，撤 2 张。')).toBeInTheDocument()
   })
 
   it('b45_停止还没撤完时按接口返回的状态说正在撤单，不说已归档', async () => {
@@ -219,7 +510,7 @@ describe('运行详情', () => {
     await userEvent.click(screen.getByRole('button', { name: '停止' }))
     await userEvent.click(screen.getByRole('button', { name: '确认停止' }))
 
-    expect(await screen.findByText(/正在撤单/)).toBeInTheDocument()
+    expect(await screen.findByText(/撤单中/)).toBeInTheDocument()
     expect(screen.queryByText(/已停止并归档/)).not.toBeInTheDocument()
     // 仓位照旧保留，说清楚。
     expect(screen.getByText(/仓位保留/)).toBeInTheDocument()
@@ -239,7 +530,7 @@ describe('运行详情', () => {
 
     await userEvent.click(screen.getByRole('button', { name: '恢复' }))
 
-    expect(await screen.findByText(/3 张遗留订单没收场/)).toBeInTheDocument()
+    expect(await screen.findByText(/3 张遗留订单待收尾/)).toBeInTheDocument()
   })
 
   it('b45_已归档的策略只读：没有暂停、恢复、停止，也没有改参数的入口', async () => {
@@ -253,14 +544,14 @@ describe('运行详情', () => {
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText('策略已归档，只能只读查看。')).toBeInTheDocument()
+    expect(await screen.findByText('已归档，只读。')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '暂停' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '保存运行参数' })).not.toBeInTheDocument()
     expect(screen.getByText('没有在场挂单。')).toBeInTheDocument()
     // 不在运行：没有在等的事，也没有「应有持仓」可比。
-    expect(screen.getByText('策略已归档，没有在等的事。')).toBeInTheDocument()
-    expect(screen.queryByText('应有持仓')).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '等待' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/应有持仓/)).not.toBeInTheDocument()
   })
 
   it('b37_失效中只能停止：显示减仓进度，没有暂停、恢复和改参数', async () => {
@@ -275,7 +566,7 @@ describe('运行详情', () => {
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
     expect(await screen.findByText(/还要减 0.2/)).toBeInTheDocument()
-    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('失效中')
+    await expectTitle('做多', '失效中')
     expect(screen.getByRole('button', { name: '停止' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '暂停' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '恢复' })).not.toBeInTheDocument()
@@ -303,9 +594,9 @@ describe('运行详情', () => {
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    const table = (await screen.findByText('在场挂单')).closest('section') ?? document.body
-    expect(within(table as HTMLElement).getByText('做多整侧')).toBeInTheDocument()
-    expect(within(table as HTMLElement).getByText('失效减仓')).toBeInTheDocument()
+    const orders = await screen.findByRole('region', { name: '在场挂单' })
+    expect(within(orders).getByText('多侧')).toBeInTheDocument()
+    expect(within(orders).getByText('失效减仓')).toBeInTheDocument()
   })
 
   it('b39d_已失效只读，说明里显示没减掉的尾量', async () => {
@@ -321,7 +612,7 @@ describe('运行详情', () => {
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
     expect(await screen.findByText(/0.0005 不足最低下单金额/)).toBeInTheDocument()
-    expect(screen.getByText(/新建一个策略接管剩下的仓位/)).toBeInTheDocument()
+    expect(screen.getByText(/新建策略可接管剩余仓位/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '恢复' })).not.toBeInTheDocument()
   })
@@ -339,8 +630,9 @@ describe('运行详情', () => {
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText('策略已暂停，没有在等的事。')).toBeInTheDocument()
-    expect(screen.queryByText(/仓位与应有持仓不一致/)).not.toBeInTheDocument()
+    await expectTitle('做多', '已暂停')
+    expect(screen.queryByRole('region', { name: '等待' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/应有持仓/)).not.toBeInTheDocument()
     // 交易所仓位照常显示。
     expect(screen.getByText('交易所仓位')).toBeInTheDocument()
   })
@@ -359,7 +651,7 @@ describe('运行详情', () => {
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText(/BTC · 做多 · 暂停中/)).toBeInTheDocument()
+    await expectTitle('做多', '暂停中')
     expect(screen.getByText('还有 2 张订单没撤掉，正在重试。')).toBeInTheDocument()
     // 已经在撤单：不再给暂停按钮，但可以恢复，也可以直接停止。
     expect(screen.queryByRole('button', { name: '暂停' })).not.toBeInTheDocument()
@@ -381,15 +673,15 @@ describe('运行详情', () => {
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText(/BTC · 做多 · 停止中/)).toBeInTheDocument()
+    await expectTitle('做多', '停止中')
     expect(
       screen.getByText('还有 1 张订单没撤掉、1 张订单的成交没对完账。'),
     ).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '暂停' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '恢复' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument()
-    // 还没归档：仍然看得到在等什么，而不是「没有在等的事」。
-    expect(screen.queryByText(/没有在等的事/)).not.toBeInTheDocument()
+    // 还没归档：仍然看得到在等什么。
+    expect(screen.getByRole('region', { name: '等待' })).toBeInTheDocument()
   })
 
   it('b19_恢复失败的策略显示原因，可以立刻再试一次', async () => {
@@ -404,7 +696,7 @@ describe('运行详情', () => {
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText(/BTC · 做多 · 恢复中/)).toBeInTheDocument()
+    await expectTitle('做多', '恢复中')
     expect(screen.getByText('恢复失败：rate limited。后台会继续重试。')).toBeInTheDocument()
     // 恢复中一张新单都没下，也没有在等行情。
     expect(screen.queryByText('价格未到')).not.toBeInTheDocument()
@@ -440,7 +732,7 @@ describe('运行详情', () => {
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText(/策略已暂停，现在改不了参数/)).toBeInTheDocument()
+    expect(await screen.findByText(/已暂停，恢复后可改限速和失效设置/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '保存运行参数' })).not.toBeInTheDocument()
   })
 
@@ -453,7 +745,7 @@ describe('运行详情', () => {
 
     await userEvent.click(screen.getByRole('button', { name: '恢复' }))
 
-    expect(await screen.findByText(/挂上 1 张/)).toBeInTheDocument()
+    expect(await screen.findByText(/挂 1 张/)).toBeInTheDocument()
     expect(server.count('POST', '/api/strategies/s-1/resume')).toBe(1)
   })
 
@@ -465,7 +757,7 @@ describe('运行详情', () => {
     await userEvent.type(screen.getByLabelText('做多侧限速间隔 τ（分钟）'), '30')
     await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
 
-    expect(await screen.findByText(/第 3 版/)).toBeInTheDocument()
+    expect(await screen.findByText(/v3/)).toBeInTheDocument()
     expect(server.lastBody('PUT', '/api/strategies/s-1/config')).toMatchObject({
       instrument: 'BTC',
       long: { price_low: '75000', throttle_interval: [1800, 0] },
@@ -484,7 +776,7 @@ describe('运行详情', () => {
     await userEvent.type(screen.getByLabelText('做多侧失效平仓滑点上限（%）'), '0.5')
     await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
 
-    expect(await screen.findByText(/第 3 版/)).toBeInTheDocument()
+    expect(await screen.findByText(/v3/)).toBeInTheDocument()
     expect(server.lastBody('PUT', '/api/strategies/s-1/config')).toMatchObject({
       long: {
         throttle_interval: null,
@@ -504,7 +796,7 @@ describe('运行详情', () => {
     await userEvent.type(screen.getByLabelText('做多侧失效平仓滑点上限（%）'), '一点')
     await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
 
-    expect(await screen.findByText(/要填百分比数字/)).toBeInTheDocument()
+    expect(await screen.findByText(/百分比数字/)).toBeInTheDocument()
     expect(server.count('PUT', '/api/strategies/s-1/config')).toBe(0)
   })
 
@@ -517,7 +809,7 @@ describe('运行详情', () => {
     await userEvent.type(screen.getByLabelText('做多侧限速间隔 τ（分钟）'), '十分钟')
     await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
 
-    expect(await screen.findByText(/要填一个正数/)).toBeInTheDocument()
+    expect(await screen.findByText(/填正数/)).toBeInTheDocument()
     expect(server.count('PUT', '/api/strategies/s-1/config')).toBe(0)
   })
 
@@ -538,7 +830,7 @@ describe('运行详情', () => {
     expect(screen.getByLabelText('做多侧限速间隔 τ（分钟）')).toHaveValue('1.5')
     await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
 
-    expect(await screen.findByText(/第 3 版/)).toBeInTheDocument()
+    expect(await screen.findByText(/v3/)).toBeInTheDocument()
     expect(server.lastBody('PUT', '/api/strategies/s-1/config')).toMatchObject({
       long: { throttle_interval: [90, 0] },
     })
@@ -548,7 +840,7 @@ describe('运行详情', () => {
     detailRoutes({
       'PUT /api/strategies/s-1/config': {
         status: 409,
-        body: { kind: 'busy', error: 'strategy `s-1` is already being driven' },
+        body: { kind: 'busy', error: '正在执行上一步，稍后再试' },
       },
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
@@ -557,7 +849,7 @@ describe('运行详情', () => {
     await userEvent.type(screen.getByLabelText('做多侧限速间隔 τ（分钟）'), '30')
     await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
 
-    expect(await screen.findByText(/稍等一下再点保存/)).toBeInTheDocument()
+    expect(await screen.findByText(/正在执行上一步，稍后再试/)).toBeInTheDocument()
   })
 
   it('b44_改了不让改的参数时把服务端的原因显示出来', async () => {
@@ -587,7 +879,7 @@ describe('运行详情', () => {
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText(/仓位核对失败：策略会被暂停/)).toBeInTheDocument()
+    expect(await screen.findByText(/仓位核对失败，即将暂停/)).toBeInTheDocument()
   })
 
   it('仓位对不上但数据还在变时不说会被暂停', async () => {
@@ -602,8 +894,8 @@ describe('运行详情', () => {
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText('仓位数据还在变化')).toBeInTheDocument()
-    expect(screen.queryByText(/策略会被暂停/)).not.toBeInTheDocument()
+    expect(await screen.findByText('仓位变动中')).toBeInTheDocument()
+    expect(screen.queryByText(/即将暂停/)).not.toBeInTheDocument()
   })
 
   it('做空网格：类型、格子表和限速入口都按空头侧显示', async () => {
@@ -612,11 +904,11 @@ describe('运行详情', () => {
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText(/BTC · 做空 · 运行中/)).toBeInTheDocument()
+    await expectTitle('做空', '运行中')
     const table = screen.getByText('网格格子表').closest('table') as HTMLTableElement
     const rows = within(table).getAllByRole('row')
     expect(rows).toHaveLength(2)
-    expect(rows[1]).toHaveTextContent('做空')
+    expect(rows[1]).toHaveTextContent('空0')
     // 空头侧的开空价在买平价之上：表头说的是建仓价/平仓价，不是买价/卖价。
     expect(rows[1]).toHaveTextContent('96000')
     expect(rows[1]).toHaveTextContent('95000')
@@ -631,17 +923,18 @@ describe('运行详情', () => {
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
-    expect(await screen.findByText(/BTC · 中性 · 运行中/)).toBeInTheDocument()
+    await expectTitle('中性', '运行中')
     const table = screen.getByText('网格格子表').closest('table') as HTMLTableElement
     const rows = within(table).getAllByRole('row')
     expect(rows).toHaveLength(3)
-    expect(rows[1]).toHaveTextContent('做多')
-    expect(rows[2]).toHaveTextContent('做空')
+    // 阶梯按建仓价从高到低：空头侧 91 在上，多头侧 89 在下。
+    expect(rows[1]).toHaveTextContent('空0')
+    expect(rows[2]).toHaveTextContent('多0')
 
     await userEvent.type(screen.getByLabelText('做空侧限速间隔 τ（分钟）'), '30')
     await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
 
-    expect(await screen.findByText(/第 3 版/)).toBeInTheDocument()
+    expect(await screen.findByText(/v3/)).toBeInTheDocument()
     // 提交的是整份参数：没改的那一侧原样带回去，两侧的限速各归各。
     expect(server.lastBody('PUT', '/api/strategies/s-1/config')).toMatchObject({
       long: { price_low: '79', throttle_interval: null },
@@ -657,7 +950,7 @@ describe('运行详情', () => {
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={onBack} />)
 
     expect(await screen.findByText(/not stored/)).toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: '返回列表' }))
+    await userEvent.click(screen.getByRole('button', { name: /返回列表/ }))
     expect(onBack).toHaveBeenCalled()
   })
 })

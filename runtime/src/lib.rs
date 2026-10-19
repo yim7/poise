@@ -29,8 +29,9 @@ pub use crate::exchange::{
 };
 pub use crate::lock::{InstanceLock, LockError};
 pub use crate::runtime::{
-    DAILY_ACTION_LIMIT, DraftPreview, ResumeOutcome, Runtime, RuntimeError, RuntimeOptions,
-    StepReport, StrategyDetail, StrategySummary, Validation,
+    DAILY_ACTION_LIMIT, DraftPreview, HELD_POSITION_MAX_AGE, HeldPosition, InstanceInfo,
+    ResumeOutcome, Runtime, RuntimeError, RuntimeOptions, StepReport, StrategyDetail,
+    StrategySummary, Validation,
 };
 pub use crate::secret::{Address, SecretError, SecretKey};
 pub use crate::serve::{ServeError, ServeOptions, Server};

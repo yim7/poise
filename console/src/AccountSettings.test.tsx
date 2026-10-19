@@ -49,7 +49,7 @@ describe('账户风控设置', () => {
       'GET /api/account/settings': { body: defaults },
       'PUT /api/account/settings': {
         status: 400,
-        body: { kind: 'invalid_config', error: 'the margin alert ratio 0.6 must be below the stop ratio 0.5' },
+        body: { kind: 'invalid_config', error: '提醒阈值 60.00% 须大于 0、小于停止阈值 50.00%' },
       },
     })
     renderWithQuery(<AccountSettingsView onBack={() => {}} />)
@@ -60,7 +60,7 @@ describe('账户风控设置', () => {
     await userEvent.click(screen.getByRole('button', { name: '保存' }))
 
     await waitFor(() => {
-      expect(screen.getByText(/must be below the stop ratio/)).toBeInTheDocument()
+      expect(screen.getByText(/须大于 0、小于停止阈值 50.00%/)).toBeInTheDocument()
     })
   })
 
@@ -101,7 +101,7 @@ describe('账户风控设置', () => {
     await userEvent.type(maxAge, '1.0000000000000001')
     await userEvent.click(screen.getByRole('button', { name: '保存' }))
 
-    expect(screen.getByText(/正整数秒/)).toBeInTheDocument()
+    expect(screen.getByText(/正整数（秒）/)).toBeInTheDocument()
     expect(server.count('PUT', '/api/account/settings')).toBe(0)
   })
 

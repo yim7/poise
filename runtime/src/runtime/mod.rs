@@ -54,12 +54,15 @@ use crate::store::{
 
 mod cancel_only;
 mod funds;
+mod held;
 mod invalidation;
 mod lifecycle;
 mod reconcile;
 mod step;
 mod unknown;
 mod view;
+
+pub use held::{HELD_POSITION_MAX_AGE, HeldPosition};
 
 /// 运行参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,39 +101,40 @@ pub enum RuntimeError {
     Store(#[from] StoreError),
     #[error(transparent)]
     Exchange(#[from] ExchangeError),
-    #[error("strategy config is invalid: {0}")]
+    #[error("{0}")]
     Config(#[from] ConfigError),
-    #[error("strategy state is invalid: {0}")]
+    #[error("策略状态和划分对不上：{0}")]
     State(#[from] StateError),
-    #[error("strategy `{0}` is not running but {1:?}")]
+    #[error("策略{}，不能执行这个操作", .1.label())]
     NotRunning(StrategyId, StrategyStatus),
     /// 这个策略正在被另一个调用驱动。同一个策略同一时刻只能走一步。
-    #[error("strategy `{0}` is already being driven")]
+    #[error("正在执行上一步，稍后再试")]
     Busy(StrategyId),
     /// 运行中只允许改限速间隔和观点失效设置；改了别的参数必须停下来重建（第 2.4 节）。
-    #[error(
-        "only the throttle interval and the invalidation settings can be changed while running, but the new config also changes `{field}`"
-    )]
+    #[error("运行中只能改限速和观点失效设置；{} 要停止后新建", field_label(field))]
     ConfigChangeNotAllowed { field: &'static str },
     /// 账户风控设置不合理（第 7.4 节）。
-    #[error("the account settings are invalid: {0}")]
+    #[error("{0}")]
     Settings(#[from] SettingsError),
     /// 已有仓位接管不了（第 8 节第 1 条）。
-    #[error("the existing position cannot be taken over: {0}")]
+    #[error("{0}")]
     Takeover(#[from] TakeoverError),
     /// 预览过期、或者预览之后仓位、可用抵押和会立即成交的订单变了：
     /// 旧预览说明不了现在会发生什么（B43）。
-    #[error("the preview is out of date: {0}; preview again")]
+    #[error("预览已过期（{0}），重新预览")]
     PreviewStale(&'static str),
     /// 一个标的同一时间只能有一个运行中的策略（B46）。
-    #[error("instrument `{instrument}` already has a live strategy `{strategy_id}`")]
+    #[error("标的 {instrument} 已有活动策略 {strategy_id}")]
     InstrumentBusy {
         instrument: Instrument,
         strategy_id: StrategyId,
     },
     /// 归档的策略只读：停止之后不能改参数，也不能再驱动（第 2.4 节）。
-    #[error("strategy `{0}` is archived and read-only")]
+    #[error("策略已归档，只读")]
     Archived(StrategyId),
+    /// 已归档策略的标的上没有可平的仓位：净仓位按标记价不足最低下单金额（第 7.7 节）。
+    #[error("标的上没有可平的仓位（不足最低下单金额）")]
+    NothingToClose(StrategyId),
 }
 
 /// 走一步的结果。
@@ -390,6 +394,16 @@ pub struct DraftPreview {
     pub token: Option<String>,
 }
 
+/// 这个实例连的网络和账户：页面顶部要一眼看出是测试网还是正式网。
+///
+/// 来自数据库第一次启动时认领的那一份（[`Store::bind_identity`]）；还没认领时两项都是
+/// `None`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceInfo {
+    pub network: Option<String>,
+    pub account_address: Option<String>,
+}
+
 /// 策略列表里的一行（第 11 节）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StrategySummary {
@@ -402,10 +416,14 @@ pub struct StrategySummary {
     pub updated_at: DateTime<Utc>,
     /// 交易所上这个标的的净仓位。
     pub position: Position,
+    /// 最近一次读到的标记价（视图快照里的那一份）：列表上画出价格落在网格的哪里。
+    pub market_price: Price,
     /// 在场挂单数量。
     pub working_orders: usize,
     /// 当前参数。列表上直接显示摘要，不必再取一次。
     pub config: StrategyConfig,
+    /// 已归档、标的上仍有仓位时的最近读数（第 7.7 节第 8 条）；其余情况是 `None`。
+    pub held: Option<HeldPosition>,
 }
 
 /// 运行详情（第 11 节）：批次表、格子表、在场挂单、等待原因、参数版本。
@@ -480,6 +498,8 @@ pub struct Runtime {
     funds: funds::Funds,
     /// 各标的最近读到的资金费率和读到的时刻（第 7.6 节）。
     funding_rates: Mutex<HashMap<Instrument, (FundingRate, DateTime<Utc>)>>,
+    /// 已归档标的上仍有的仓位（第 7.7 节第 8 条）。
+    held: Mutex<HashMap<Instrument, held::HeldReading>>,
 }
 
 /// 一次驱动期间持有的占用标记，离开作用域就释放。
@@ -528,6 +548,7 @@ impl Runtime {
             stepping: Mutex::new(HashSet::new()),
             funds: funds::Funds::default(),
             funding_rates: Mutex::new(HashMap::new()),
+            held: Mutex::new(HashMap::new()),
         }
     }
 
@@ -729,7 +750,22 @@ fn order_states(orders: &[StoredOrder]) -> Vec<OrderState> {
 }
 
 /// 比率按百分比写，保留两位小数：网页和说明文字里给人看的写法。
-pub(super) fn percent(ratio: Rate) -> String {
+/// 运行中不能改的字段在页面上的叫法：和表单的标签一致。
+fn field_label(field: &str) -> &'static str {
+    match field {
+        "sides" => "启用哪几侧",
+        "price_low" => "价格下限 L",
+        "price_high" => "价格上限 H",
+        "max_position" => "最大仓位 M",
+        "core_ratio" => "主仓比例 r",
+        "batch_count" => "主仓批数 n",
+        "grid_spacing" => "网格间距 d",
+        "grid_spread" => "网格价差 g",
+        _ => "这个参数",
+    }
+}
+
+pub(crate) fn percent(ratio: Rate) -> String {
     let hundredths = i128::from(ratio.units()) * 10_000 / i128::from(poise_strategy::units::SCALE);
     format!("{}.{:02}%", hundredths / 100, hundredths % 100)
 }

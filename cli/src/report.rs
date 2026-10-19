@@ -10,7 +10,7 @@ use poise_runtime::{
 };
 use poise_strategy::Strategy;
 use poise_strategy::instrument::{Instrument, PriceRule};
-use poise_strategy::invalidation::invalidation_sold;
+use poise_strategy::invalidation::reduction_sold;
 use poise_strategy::order::OrderRecord;
 use poise_strategy::side::Direction;
 
@@ -83,7 +83,7 @@ pub async fn status(instance: &Instance, instrument: &Instrument) -> Result<()> 
     let stored = store.load_strategy(strategy_id)?;
     println!("策略        {strategy_id}");
     println!("标的        {}", stored.instrument.symbol());
-    println!("状态        {}", status_name(stored.status));
+    println!("状态        {}", stored.status.label());
     println!("建立时间    {}", stored.created_at);
     println!("成交同步点  {}", stored.fills_synced_through);
     println!(
@@ -96,10 +96,8 @@ pub async fn status(instance: &Instance, instrument: &Instrument) -> Result<()> 
     // 观点失效卖出的数量不进账本：和网页的格子表一样，按「先网格、后主仓」扣掉再显示。
     let records: Vec<OrderRecord> = orders.iter().map(|order| order.record.clone()).collect();
     let strategy = Strategy::new(stored.config.clone(), stored.spec.clone(), stored.fees)?;
-    let state = strategy.after_invalidation(
-        &store.load_state(strategy_id)?,
-        &invalidation_sold(&records),
-    );
+    let state =
+        strategy.after_invalidation(&store.load_state(strategy_id)?, &reduction_sold(&records));
     for direction in Direction::ALL {
         let Some(side) = stored.config.side(direction) else {
             continue;
@@ -270,12 +268,13 @@ async fn stop_locally(instance: &Instance, instrument: &Instrument) -> Result<Fo
         };
         let outcome = match action_for(status) {
             Action::Skip => {
-                println!("策略 {strategy_id} {}，跳过", status_name(status));
+                println!("策略 {strategy_id} {}，跳过", status.label());
                 continue;
             }
             Action::KeepReducing => {
                 println!(
-                    "策略 {strategy_id} 失效中，正在用只减仓单止损，不打断；要放弃减仓请在网页上点停止"
+                    "策略 {strategy_id} {}，正在用只减仓单减仓，不打断；要放弃请在网页上点停止",
+                    status.label()
                 );
                 continue;
             }
@@ -354,12 +353,13 @@ async fn stop_via_api(listen: &str, instrument: &Instrument) -> Result<Found> {
         };
         let path = match action {
             Action::Skip => {
-                println!("策略 {strategy_id} {}，跳过", status_name(status));
+                println!("策略 {strategy_id} {}，跳过", status.label());
                 continue;
             }
             Action::KeepReducing => {
                 println!(
-                    "策略 {strategy_id} 失效中，正在用只减仓单止损，不打断；要放弃减仓请在网页上点停止"
+                    "策略 {strategy_id} {}，正在用只减仓单减仓，不打断；要放弃请在网页上点停止",
+                    status.label()
                 );
                 continue;
             }
@@ -381,7 +381,7 @@ async fn stop_via_api(listen: &str, instrument: &Instrument) -> Result<Found> {
                 body["status"]
                     .as_str()
                     .and_then(status_from_api)
-                    .map_or("状态未知", status_name),
+                    .map_or("状态未知", StrategyStatus::label),
                 body["canceled"].as_array().map_or(0, Vec::len)
             ),
             Err(error) => {
@@ -418,37 +418,23 @@ enum Action {
     Pause,
     /// 已经点过停止：把撤单收尾推进一步。
     Stop,
-    /// 失效中：正在止损减仓，紧急命令不打断它。停止会归档并放弃剩下的减仓，那是用户
-    /// 要明确做的决定，不该由一条「撤掉挂单」的命令顺手做掉。
+    /// 失效中、平仓中：正在止损减仓或平仓，紧急命令不打断它。停止会归档并放弃剩下的减仓，
+    /// 那是用户要明确做的决定，不该由一条「撤掉挂单」的命令顺手做掉。
     KeepReducing,
 }
 
 fn action_for(status: StrategyStatus) -> Action {
     match status {
-        StrategyStatus::Stopped | StrategyStatus::Invalidated | StrategyStatus::Draft => {
-            Action::Skip
-        }
+        StrategyStatus::Stopped
+        | StrategyStatus::Invalidated
+        | StrategyStatus::Closed
+        | StrategyStatus::Draft => Action::Skip,
         StrategyStatus::Stopping => Action::Stop,
-        StrategyStatus::Invalidating => Action::KeepReducing,
+        StrategyStatus::Invalidating | StrategyStatus::Closing => Action::KeepReducing,
         StrategyStatus::Running
         | StrategyStatus::Restoring
         | StrategyStatus::Pausing
         | StrategyStatus::Paused => Action::Pause,
-    }
-}
-
-/// 状态的中文说法。
-fn status_name(status: StrategyStatus) -> &'static str {
-    match status {
-        StrategyStatus::Draft => "草稿",
-        StrategyStatus::Running => "运行中",
-        StrategyStatus::Restoring => "恢复中",
-        StrategyStatus::Pausing => "暂停中",
-        StrategyStatus::Paused => "已暂停",
-        StrategyStatus::Stopping => "停止中",
-        StrategyStatus::Stopped => "已归档",
-        StrategyStatus::Invalidating => "失效中",
-        StrategyStatus::Invalidated => "已失效",
     }
 }
 
@@ -487,7 +473,7 @@ fn cloid_label(order: &poise_runtime::ExchangeOrder) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, action_for, status_name};
+    use super::{Action, action_for};
     use poise_runtime::StrategyStatus;
 
     /// 每个状态下 `stop` 该走哪条路。
@@ -506,9 +492,11 @@ mod tests {
             (StrategyStatus::Paused, Action::Pause),
             (StrategyStatus::Stopping, Action::Stop),
             (StrategyStatus::Invalidating, Action::KeepReducing),
+            (StrategyStatus::Closing, Action::KeepReducing),
+            (StrategyStatus::Closed, Action::Skip),
         ];
         for (status, action) in expected {
-            assert_eq!(action_for(status), action, "{}", status_name(status));
+            assert_eq!(action_for(status), action, "{}", status.label());
         }
     }
 

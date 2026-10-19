@@ -1,7 +1,10 @@
 //! 观点失效（第 7.5 节）：标记价越过失效价之后撤单、用只减仓单减到剩余数量，所有订单
 //! 都有了结论、仓位不超过剩余数量之后进入「已失效」。
 //!
-//! 失效中的每一步都按同一个顺序走：
+//! 市价平仓（第 7.7 节）走同一条路：「平仓中」把标的上的净仓位平到 0，完成后进入
+//! 「已平仓」。两者只差在减到多少、限价让多少，以及说明怎么写（[`Reducing`]）。
+//!
+//! 失效中、平仓中的每一步都按同一个顺序走：
 //! 1. 撤掉全部在场订单、按 `cloid` 核对终态、补记成交（[`Runtime::cancel_only_round`]）；
 //! 2. 读实时仓位和标记价；成交同步走通时顺带做仓位核对，用来作废结果未知的订单；
 //! 3. 补发一张立即成交否则撤销的只减仓单（[`Strategy::reduction`]）；
@@ -24,6 +27,41 @@ use crate::store::{StoredOrder, StrategyId, StrategyStatus};
 use super::cancel_only::{cancel_only_note, cancel_only_settled};
 use super::step::{Placement, expected_position};
 use super::{NewOrders, Runtime, RuntimeError, StepReport, fresh};
+
+/// 按实时仓位减仓的两种状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Reducing {
+    /// 观点失效：减到剩余数量 R（第 7.5 节）。
+    Invalidation,
+    /// 市价平仓：平掉标的上的全部净仓位（第 7.7 节）。
+    Close,
+}
+
+impl Reducing {
+    /// 减仓进行中的状态。
+    const fn active(self) -> StrategyStatus {
+        match self {
+            Self::Invalidation => StrategyStatus::Invalidating,
+            Self::Close => StrategyStatus::Closing,
+        }
+    }
+
+    /// 减完之后归档的状态。
+    const fn done(self) -> StrategyStatus {
+        match self {
+            Self::Invalidation => StrategyStatus::Invalidated,
+            Self::Close => StrategyStatus::Closed,
+        }
+    }
+
+    /// 说明的开头：哪一种减仓正在进行。
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Invalidation => "失效减仓中",
+            Self::Close => "平仓中",
+        }
+    }
+}
 
 /// 失效中一步的读数。
 struct Readings {
@@ -106,8 +144,29 @@ impl Runtime {
         strategy_id: &StrategyId,
         now: DateTime<Utc>,
     ) -> Result<StepReport, RuntimeError> {
+        self.reduction_step(strategy_id, now, Reducing::Invalidation)
+            .await
+    }
+
+    /// 平仓中的策略走一步（见模块说明）。
+    ///
+    /// 调用方必须已经通过 [`Runtime::begin`] 取得这个策略的驱动权。
+    pub(super) async fn closing_step(
+        &self,
+        strategy_id: &StrategyId,
+        now: DateTime<Utc>,
+    ) -> Result<StepReport, RuntimeError> {
+        self.reduction_step(strategy_id, now, Reducing::Close).await
+    }
+
+    async fn reduction_step(
+        &self,
+        strategy_id: &StrategyId,
+        now: DateTime<Utc>,
+        reducing: Reducing,
+    ) -> Result<StepReport, RuntimeError> {
         let stored = self.store.load_strategy(strategy_id)?;
-        if stored.status != StrategyStatus::Invalidating {
+        if stored.status != reducing.active() {
             return Err(RuntimeError::NotRunning(strategy_id.clone(), stored.status));
         }
         let strategy = Strategy::new(stored.config.clone(), stored.spec.clone(), stored.fees)?;
@@ -136,13 +195,13 @@ impl Runtime {
             Err(error) => {
                 tracing::warn!(strategy = %strategy_id, %error, "no position or mark price, retrying the reduction next step");
                 let note = format!(
-                    "失效减仓中：这一步没读到仓位或行情（{error}），下一轮再试。{}",
-                    cancel_only_note(&orders, StrategyStatus::Invalidating, None)
-                        .unwrap_or_default()
+                    "{}：没读到仓位或行情（{error}），下一步再试。{}",
+                    reducing.label(),
+                    cancel_only_note(&orders, reducing.active(), None).unwrap_or_default()
                 );
-                self.annotate_view(strategy_id, StrategyStatus::Invalidating, note)
+                self.annotate_view(strategy_id, reducing.active(), note)
                     .await?;
-                let mut report = self.nothing_happened(strategy_id, StrategyStatus::Invalidating);
+                let mut report = self.nothing_happened(strategy_id, reducing.active());
                 report.canceled = round.canceled;
                 report.applied_fills = round.applied_fills;
                 return Ok(report);
@@ -155,13 +214,20 @@ impl Runtime {
             None => None,
         };
 
-        // 3. 补发减仓单：数量扣掉还可能成交的减仓单（含结果未知的，B39c）。
+        // 3. 补发减仓单：数量扣掉还可能成交的减仓单（含结果未知的，B39c、B55）。
         let working: Vec<WorkingOrder> = orders
             .iter()
             .filter(|order| order.record.is_working())
             .map(|order| order.record.working_view())
             .collect();
-        let reduction = strategy.reduction(readings.position, readings.market_price, &working);
+        let reduction = match reducing {
+            Reducing::Invalidation => {
+                strategy.reduction(readings.position, readings.market_price, &working)
+            }
+            Reducing::Close => {
+                strategy.market_close(readings.position, readings.market_price, &working)
+            }
+        };
         let new_orders = NewOrders {
             permits: Permits::ALL,
             priced_at: readings.priced_at,
@@ -181,8 +247,8 @@ impl Runtime {
                 )
                 .await?
             {
-                // 失效中不因为操作次数超限暂停：止损要继续，超限后交易所仍然每 10 秒放行一次，
-                // 下一步照常重试。
+                // 失效中、平仓中不因为操作次数超限暂停：止损和平仓要继续，超限后交易所仍然
+                // 每 10 秒放行一次，下一步照常重试。
                 Placement::Sent(client_order_id)
                 | Placement::Rejected(client_order_id)
                 | Placement::MarginRejected(client_order_id)
@@ -212,16 +278,17 @@ impl Runtime {
         let status = if done {
             self.store
                 // 收场时刻按此刻的时钟记，理由同停止归档（资金费按它截止）。
-                .save_strategy_status(strategy_id, StrategyStatus::Invalidated, self.clock.now())?;
+                .save_strategy_status(strategy_id, reducing.done(), self.clock.now())?;
             tracing::warn!(
                 strategy = %strategy_id,
+                status = reducing.done().as_str(),
                 position = %readings.position,
                 tail = %reduction.excess,
-                "invalidation finished"
+                "reduction finished"
             );
-            StrategyStatus::Invalidated
+            reducing.done()
         } else {
-            StrategyStatus::Invalidating
+            reducing.active()
         };
 
         let report = StepReport {
@@ -238,16 +305,17 @@ impl Runtime {
             position: readings.position,
             expected_position: readings.expected_position,
         };
-        let note = invalidation_note(
+        let note = reduction_note(
+            reducing,
             status,
             &reduction,
             !report.placed.is_empty(),
             stale,
-            cancel_only_note(&orders, StrategyStatus::Invalidating, unknown.as_ref()),
+            cancel_only_note(&orders, reducing.active(), unknown.as_ref()),
         );
         match readings.available_collateral {
             Some(available) => {
-                // 保证金率只进视图快照：失效中只发只减仓单，闸门管不着它。
+                // 保证金率只进视图快照：失效中、平仓中只发只减仓单，闸门管不着它。
                 let margin_ratio = self
                     .margin_ratio(strategy_id, settings.market_data_max_age)
                     .await
@@ -267,8 +335,8 @@ impl Runtime {
         Ok(report)
     }
 
-    /// 失效中一步的读数。成交同步走通时走常规的读数（带仓位核对）；没走通时直接问交易所
-    /// 要仓位和标记价——减仓按实时仓位算，不能因为成交流水断了就停下来（B39）。
+    /// 失效中、平仓中一步的读数。成交同步走通时走常规的读数（带仓位核对）；没走通时直接问
+    /// 交易所要仓位和标记价——减仓按实时仓位算，不能因为成交流水断了就停下来（B39）。
     async fn invalidation_readings(
         &self,
         strategy_id: &StrategyId,
@@ -318,45 +386,63 @@ impl Runtime {
     }
 }
 
-/// 失效中、已失效写给用户看的说明。
-fn invalidation_note(
+/// 失效中、已失效、平仓中、已平仓写给用户看的说明。
+fn reduction_note(
+    reducing: Reducing,
     status: StrategyStatus,
     reduction: &Reduction,
     placed: bool,
     stale: bool,
     progress: Option<String>,
 ) -> String {
-    let tail = (reduction.settled && !reduction.excess.is_zero()).then(|| {
-        format!(
-            "超出剩余数量的 {} 不足最低下单金额，下不了单，由你决定是否手动处理。",
+    let label = reducing.label();
+    let tail = (reduction.settled && !reduction.excess.is_zero()).then(|| match reducing {
+        Reducing::Invalidation => format!(
+            "超出剩余数量的 {} 不足最低下单金额，下不了单。",
             reduction.excess
-        )
+        ),
+        // 平到 0 时零头也照样发单（B62），还剩的只会是小于最小下单数量的部分。
+        Reducing::Close => format!("剩 {} 小于最小下单数量，下不了单。", reduction.excess),
     });
-    let head = if status == StrategyStatus::Invalidated {
-        "已失效：标记价越过了失效价，订单都已撤销、仓位已减到剩余数量。价格回来也不会自动恢复；\
-         要继续做，新建一个策略接管剩下的仓位。"
-            .to_string()
+    let head = if status == reducing.done() {
+        match reducing {
+            Reducing::Invalidation => "已失效：订单已撤，仓位已减到剩余数量 R。不会自动恢复；要继续，新建策略接管剩余仓位。"
+                .to_string(),
+            Reducing::Close => "已平仓：订单已撤，仓位已平掉。".to_string(),
+        }
     } else if reduction.settled {
-        "失效减仓中：仓位已经减到剩余数量，等所有订单都有结论之后转为已失效。".to_string()
+        match reducing {
+            Reducing::Invalidation => {
+                format!("{label}：已减到剩余数量 R，等订单都有结论后转为已失效。")
+            }
+            Reducing::Close => format!("{label}：仓位已平掉，等订单都有结论后转为已平仓。"),
+        }
     } else if placed {
         // 这一步刚发出减仓单：超出量是发单之前的读数，成交多少下一步核对之后才知道。
-        format!(
-            "失效减仓中：标记价越过了失效价，已发出只减仓单（超出剩余数量 {}），下一步核对成交。",
-            reduction.excess
-        )
+        match reducing {
+            Reducing::Invalidation => format!(
+                "{label}：已发只减仓单（超出 R {}），下一步核对成交。",
+                reduction.excess
+            ),
+            Reducing::Close => format!(
+                "{label}：已发只减仓单（要平 {}），下一步核对成交。",
+                reduction.excess
+            ),
+        }
     } else {
-        format!(
-            "失效减仓中：标记价越过了失效价，正在用只减仓单减仓，还要减 {}。",
-            reduction.excess
-        )
+        match reducing {
+            Reducing::Invalidation => {
+                format!("{label}：只减仓单减仓，还要减 {}。", reduction.excess)
+            }
+            Reducing::Close => format!("{label}：还要平 {}。", reduction.excess),
+        }
     };
-    let stale = stale
-        .then(|| "这一步的行情过期了，按它算出来的减仓不算数，下一步按新行情再算。".to_string());
+    let stale = stale.then(|| "行情过期，这一步不按它减仓，下一步重算。".to_string());
     [
         Some(head),
         stale,
         tail,
-        progress.filter(|_| status == StrategyStatus::Invalidating),
+        progress.filter(|_| status == reducing.active()),
     ]
     .into_iter()
     .flatten()
