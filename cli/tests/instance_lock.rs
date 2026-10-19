@@ -5,7 +5,7 @@
 //!
 //! `poise stop` 拿不到锁时改走常驻服务的本机接口，地址取服务启动时写在数据目录里的
 //! `poise.listen`，不取启动文件里的 `listen`：服务可以用 `--listen` 换端口，按启动文件
-//! 去连，可能连到同一端口上的别的服务。启动文件里的 `listen` 这里故意写成旧服务的 8000。
+//! 去连，可能连到同一端口上的别的服务。启动文件里的 `listen` 这里故意写成别的服务占着的 8000。
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

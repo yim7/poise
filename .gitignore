@@ -2,10 +2,4 @@
 **/.DS_Store
 target/
 /.env
-**/.data/
-/.logs/
-/service/.data/
-/.worktrees/
 /.agents
-.superpowers
-/instances/
