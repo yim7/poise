@@ -17,7 +17,7 @@ pub const STARTUP_FILE_NAME: &str = "poise.toml";
 /// 常驻服务实际监听的地址，服务起来之后写在数据目录里，退出时删掉。
 ///
 /// `poise stop` 在服务运行时按它去连，不按启动文件里的 `listen`：服务可以用 `--listen`
-/// 换端口，按启动文件去连可能连到同一端口上的别的服务（旧系统就在 8000）。
+/// 换端口，按启动文件去连可能连到同一端口上的别的服务。
 pub const LISTEN_FILE_NAME: &str = "poise.listen";
 
 pub struct Instance {

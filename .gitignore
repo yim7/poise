@@ -9,9 +9,3 @@ target/
 /.agents
 .superpowers
 /instances/
-
-# 旧系统留下的目录：还在运行的旧服务（8000 端口）每次请求都从
-# server/../web/dist 读页面（路径编译时写死），两个目录在旧服务停用之前都不要删。
-# 重启方式见 /Users/yim/poise-legacy/LEGACY.md。
-/web/
-/server/
