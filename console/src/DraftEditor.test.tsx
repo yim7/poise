@@ -107,6 +107,49 @@ describe('新建与确认启动', () => {
     expect(onCreated).toHaveBeenCalledTimes(1)
   })
 
+  it('主仓批数下面显示批次价格范围和段宽，改 L 时跟着变', async () => {
+    renderEditor(editorRoutes())
+    const long = side('做多侧')
+    for (const [label, value] of [
+      ['价格下限 L', '75000'],
+      ['价格上限 H', '84000'],
+      ['主仓比例 r', '0.5'],
+      ['主仓批数 n', '5'],
+    ]) {
+      const input = long.getByLabelText(label)
+      await userEvent.clear(input)
+      await userEvent.type(input, value)
+    }
+
+    // 做多从 H 往下排：最低一批在 L 上方一段，L 是格子的下限。
+    expect(long.getByText('主仓 84000 → 76800，段宽 1800')).toBeInTheDocument()
+
+    const low = long.getByLabelText('价格下限 L')
+    await userEvent.clear(low)
+    await userEvent.type(low, '72750')
+    expect(long.getByText('主仓 84000 → 75000，段宽 2250')).toBeInTheDocument()
+  })
+
+  it('做空侧的批次从 L 往上排；没有主仓时提示留空', async () => {
+    renderEditor(editorRoutes())
+    await userEvent.click(screen.getByRole('switch', { name: '启用做多侧' }))
+    await userEvent.click(screen.getByRole('switch', { name: '启用做空侧' }))
+    const short = side('做空侧')
+    expect(short.getByText('r = 0 时留空')).toBeInTheDocument()
+
+    for (const [label, value] of [
+      ['主仓比例 r', '0.5'],
+      ['主仓批数 n', '3'],
+    ]) {
+      const input = short.getByLabelText(label)
+      await userEvent.clear(input)
+      await userEvent.type(input, value)
+    }
+
+    // 默认空头侧范围 96000–99000：段宽 1000，批次 96000、97000、98000。
+    expect(short.getByText('主仓 96000 → 98000，段宽 1000')).toBeInTheDocument()
+  })
+
   it('网格价差默认跟随间距：改间距时价差一起变', async () => {
     const server = editorRoutes()
     renderEditor(server)

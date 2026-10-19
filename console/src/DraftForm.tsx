@@ -66,6 +66,25 @@ export function changeSideField(
   return next
 }
 
+/**
+ * 批数下面的一行说明：主仓第一批和最低（做空是最高）一批的价格，以及段宽。范围均分成 n 段，
+ * 每批挂在自己那一段靠近空隙的一端（第 3.1 节）：做多从 H 往下，最远一批在 L 上方一段，
+ * L 是格子的下限。服务端还会按报价精度规整，预览里的批次表是准数。输入不完整时是 `null`。
+ */
+export function batchHint(direction: Direction, values: SideFormValues): string | null {
+  const low = positive(values.priceLow)
+  const high = positive(values.priceHigh)
+  const ratio = positive(values.coreRatio)
+  const count = Number(values.batchCount.trim())
+  if (low === null || high === null || ratio === null || high <= low) return null
+  if (!Number.isInteger(count) || count < 1) return null
+  const width = (high - low) / count
+  const [first, last] =
+    direction === 'long' ? [high, high - (count - 1) * width] : [low, low + (count - 1) * width]
+  const show = (value: number) => String(Number(value.toPrecision(10)))
+  return `主仓 ${show(first)} → ${show(last)}，段宽 ${show(width)}`
+}
+
 /** 价差下面的一行说明：现在按什么比例跟随间距。写成公式就够：改 d 时价差跟着变，一看便知。 */
 export function spreadHint(ratio: number): string {
   if (ratio === 1) return '= d'
@@ -348,7 +367,10 @@ function SideFields({
               disabled: coreDisabled,
               hint: neutral ? '中性固定 0' : undefined,
             })}
-            {field('batchCount', '主仓批数 n', { disabled: coreDisabled, hint: 'r = 0 时留空' })}
+            {field('batchCount', '主仓批数 n', {
+              disabled: coreDisabled,
+              hint: (coreDisabled ? null : batchHint(direction, values)) ?? 'r = 0 时留空',
+            })}
           </Group>
           <Group title="网格">
             {field('gridSpacing', '网格间距 d')}
