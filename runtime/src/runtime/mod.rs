@@ -424,6 +424,8 @@ pub struct StrategySummary {
     pub config: StrategyConfig,
     /// 已归档、标的上仍有仓位时的最近读数（第 7.7 节第 8 条）；其余情况是 `None`。
     pub held: Option<HeldPosition>,
+    /// 格子表（扣掉减仓之后）：列表的价格条按它画出每一格持有多少。
+    pub cells: Vec<CellSummary>,
 }
 
 /// 运行详情（第 11 节）：批次表、格子表、在场挂单、等待原因、参数版本。

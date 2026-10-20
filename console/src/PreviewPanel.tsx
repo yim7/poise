@@ -57,7 +57,7 @@ export function PreviewPanel({ preview, config }: { preview: DraftPreview; confi
             size="lg"
           />
         </div>
-        {config === null ? null : <RangeBar config={config} mark={preview.market_price} />}
+        {config === null ? null : <RangeBar config={config} mark={preview.market_price} cells={preview.cells} />}
       </div>
 
       {preview.stress.length === 0 ? null : (

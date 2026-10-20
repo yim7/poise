@@ -257,6 +257,8 @@ export interface StrategySummary {
   config: StrategyConfig
   /** 已归档、标的上仍有仓位时的最近读数；其余情况是 null。 */
   held: HeldPosition | null
+  /** 格子表（扣掉减仓之后）：列表的价格条按它画出每一格持有多少。 */
+  cells: CellSummary[]
 }
 
 /** 这个实例连的网络和账户；数据库还没认领时两项都是 null。 */

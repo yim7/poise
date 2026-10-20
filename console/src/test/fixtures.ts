@@ -162,6 +162,7 @@ export function summary(overrides: Partial<StrategySummary> = {}): StrategySumma
     working_orders: 1,
     config,
     held: null,
+    cells,
     ...overrides,
   }
 }

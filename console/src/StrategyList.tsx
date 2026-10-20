@@ -205,7 +205,7 @@ function StrategyCard({ strategy, onOpen }: { strategy: StrategySummary; onOpen:
         </div>
         <StatusBadge status={strategy.status} />
       </header>
-      <RangeBar config={strategy.config} mark={strategy.market_price} />
+      <RangeBar config={strategy.config} mark={strategy.market_price} cells={strategy.cells} />
       <div className="grid grid-cols-3 gap-3">
         <Stat label="净仓位" value={decimal(strategy.position)} tone={positionTone(strategy.position)} />
         <Stat label="在场挂单" value={strategy.working_orders} />

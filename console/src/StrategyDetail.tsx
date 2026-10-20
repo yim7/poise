@@ -378,7 +378,14 @@ function Readings({ strategy, showExpected }: { strategy: StrategyDetail; showEx
         <Stat label="可用 USDC" value={decimal(strategy.available_collateral)} size="lg" />
       </div>
 
-      <RangeBar config={summary.config} mark={strategy.market_price} />
+      <RangeBar
+        config={summary.config}
+        mark={strategy.market_price}
+        cells={strategy.cells}
+        average={strategy.average_price}
+        breakeven={strategy.breakeven_price}
+        variant="full"
+      />
 
       <dl className="grid grid-cols-1 gap-x-6 gap-y-1.5 border-t border-border pt-3 text-xs sm:grid-cols-2 lg:grid-cols-3">
         {/* 资金费每小时结算一次：费率按每小时给，年化只是换算，方便和阈值对照。 */}

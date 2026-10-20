@@ -7,11 +7,14 @@ use poise_strategy::order::{OrderRecord, WorkingOrder};
 use poise_strategy::planning::WaitReason;
 use poise_strategy::pnl::{Execution, holdings, profit_and_loss};
 use poise_strategy::side::Direction;
+use poise_strategy::state::StrategyState;
 use poise_strategy::units::{Notional, Position, Price, Quantity, Rate, SCALE};
 
 use crate::account::FundingRate;
 use crate::settings::AccountSettings;
-use crate::store::{StoredFill, StoredOrder, StrategyId, StrategyStatus, ViewSnapshot};
+use crate::store::{
+    StoredFill, StoredOrder, StoredStrategy, StrategyId, StrategyStatus, ViewSnapshot,
+};
 
 use super::{
     InstanceInfo, Runtime, RuntimeError, StepReport, StrategyDetail, StrategySummary, percent,
@@ -50,19 +53,13 @@ impl Runtime {
         let status = summary.status;
         let stored = self.store.load_strategy(strategy_id)?;
         let view = self.store.load_view(strategy_id)?;
-        let strategy = Strategy::new(stored.config.clone(), stored.spec.clone(), stored.fees)?;
         let orders = self.store.load_orders(strategy_id)?;
-        // 观点失效卖出的数量不进账本：批次表和格子表按「先网格、后主仓」把它扣掉再显示
-        // （第 7.5 节，见 [`Strategy::after_invalidation`]）。
-        let records: Vec<OrderRecord> = orders.iter().map(|order| order.record.clone()).collect();
-        let sold = reduction_sold(&records);
-        let ledger = self.load_state(strategy_id, &strategy)?;
-        let state = strategy.after_invalidation(&ledger, &sold);
-        let working: Vec<WorkingOrder> = orders
-            .iter()
-            .filter(|order| order.record.is_working())
-            .map(|order| order.record.working_view())
-            .collect();
+        let Ledger {
+            strategy,
+            ledger,
+            state,
+            working,
+        } = self.ledger(strategy_id, &stored, &orders)?;
         // 资金费率按读详情这一刻的读数（常驻服务单独去读，半小时没读到就当读不到），不按快照：
         // 暂停的策略不走步，快照不会更新，可仓位还在付资金费（第 7.6 节）。归档的策略不提醒。
         let funding = self.current_funding_rate(&stored.instrument);
@@ -153,6 +150,10 @@ impl Runtime {
         let stored = self.store.load_strategy(strategy_id)?;
         let view = self.store.load_view(strategy_id)?;
         let orders = self.store.load_orders(strategy_id)?;
+        let tables = self.ledger(strategy_id, &stored, &orders)?;
+        let cells = tables
+            .strategy
+            .cell_summaries(&tables.state, &tables.working);
         Ok(StrategySummary {
             strategy_id: strategy_id.clone(),
             instrument: stored.instrument.clone(),
@@ -168,6 +169,35 @@ impl Runtime {
                 .count(),
             held: self.held_position(&stored),
             config: stored.config,
+            cells,
+        })
+    }
+
+    /// 这个策略的账本：库里记的状态，和扣掉失效减仓、市价平仓之后给页面看的那份。
+    ///
+    /// 观点失效卖出的数量不进账本：批次表和格子表按「先网格、后主仓」把它扣掉再显示
+    /// （第 7.5 节，见 [`Strategy::after_invalidation`]）。
+    fn ledger(
+        &self,
+        strategy_id: &StrategyId,
+        stored: &StoredStrategy,
+        orders: &[StoredOrder],
+    ) -> Result<Ledger, RuntimeError> {
+        let strategy = Strategy::new(stored.config.clone(), stored.spec.clone(), stored.fees)?;
+        let records: Vec<OrderRecord> = orders.iter().map(|order| order.record.clone()).collect();
+        let sold = reduction_sold(&records);
+        let ledger = self.load_state(strategy_id, &strategy)?;
+        let state = strategy.after_invalidation(&ledger, &sold);
+        let working = orders
+            .iter()
+            .filter(|order| order.record.is_working())
+            .map(|order| order.record.working_view())
+            .collect();
+        Ok(Ledger {
+            strategy,
+            ledger,
+            state,
+            working,
         })
     }
 
@@ -246,6 +276,16 @@ impl Runtime {
         self.store.save_view(strategy_id, &view)?;
         Ok(())
     }
+}
+
+/// [`Runtime::ledger`] 的结果。
+struct Ledger {
+    strategy: Strategy,
+    /// 库里记的状态。
+    ledger: StrategyState,
+    /// 扣掉减仓之后的状态。
+    state: StrategyState,
+    working: Vec<WorkingOrder>,
 }
 
 /// 资金费由哪一侧付才算对本策略不利：按实际净仓位的方向；还没有仓位时按单侧网格的方向，
