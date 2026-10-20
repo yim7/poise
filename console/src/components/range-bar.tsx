@@ -33,21 +33,40 @@ function mix(empty: number, full: number, held: number): number {
   return empty + (full - empty) * held
 }
 
-/** 这一侧的颜色，取 `percent`% 的不透明度。 */
+/** 这一侧的霓虹色，取 `percent`% 的不透明度。 */
 function tint(tone: Direction, percent: number): string {
-  return `color-mix(in oklch, var(--${tone}) ${percent.toFixed(1)}%, transparent)`
+  return `color-mix(in oklch, var(--neon-${tone}) ${percent.toFixed(1)}%, transparent)`
 }
 
-/** 一格的霓虹样式：边框、里面的光和外面的光晕，都随持有比例变亮。 */
+/** 灯管最亮的芯：霓虹色掺进 `white`% 的白，再取 `percent`% 的不透明度。 */
+function core(tone: Direction, white: number, percent: number): string {
+  const lit = `color-mix(in oklch, var(--neon-${tone}), white ${white.toFixed(1)}%)`
+  return `color-mix(in oklch, ${lit} ${percent.toFixed(1)}%, transparent)`
+}
+
+/**
+ * 一格的霓虹样式，亮度随持有比例 `held` 变：
+ * - 边框是灯管的芯，越满越亮、越偏白，外面叠三层由近到远的光晕；
+ * - 里面上下两沿亮、中间透，像透过玻璃管看到的光，越满越亮。
+ */
 function neon(tone: Direction, held: number) {
+  const px = (value: number) => `${value.toFixed(1)}px`
+  const halo =
+    held > 0
+      ? [
+          `0 0 ${px(mix(1, 3, held))} ${tint(tone, mix(30, 90, held))}`,
+          `0 0 ${px(mix(3, 8, held))} ${tint(tone, mix(15, 60, held))}`,
+          `0 0 ${px(mix(6, 18, held))} ${tint(tone, mix(5, 30, held))}`,
+        ]
+      : []
+  const inside = mix(5, 34, held)
   return {
-    border: { boxShadow: `inset 0 0 0 1px ${tint(tone, mix(30, 95, held))}` },
+    border: {
+      boxShadow: [`inset 0 0 0 1px ${core(tone, mix(0, 45, held), mix(28, 100, held))}`, ...halo].join(', '),
+    },
     glow: {
-      background: tint(tone, mix(4, 28, held)),
-      boxShadow:
-        held > 0
-          ? `0 0 ${mix(2, 10, held).toFixed(1)}px ${tint(tone, mix(10, 55, held))}, inset 0 0 ${mix(1, 6, held).toFixed(1)}px ${tint(tone, mix(10, 45, held))}`
-          : 'none',
+      background: `linear-gradient(to bottom, ${tint(tone, inside)}, ${tint(tone, inside * 0.25)} 50%, ${tint(tone, inside)})`,
+      boxShadow: held > 0 ? `inset 0 0 ${px(mix(2, 6, held))} ${tint(tone, mix(20, 70, held))}` : 'none',
     },
   }
 }
@@ -302,7 +321,7 @@ export function RangeBar({
             >
               <div
                 data-glow
-                className={cn('absolute inset-0', slot.held > 0 && 'neon-flicker')}
+                className={cn('absolute inset-0 mix-blend-plus-lighter', slot.held > 0 && 'neon-flicker')}
                 // 错开每一格的闪烁，不让整排一起闪。
                 style={{ ...style.glow, animationDelay: `${(index * 0.73) % 4}s` }}
               />

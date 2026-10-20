@@ -52,13 +52,14 @@ describe('RangeBar', () => {
     const drawn = slots(container)
     expect(drawn.map((slot) => slot.dataset.held)).toEqual(['1', '1', '0.4', '0', '0'])
     const glow = (slot: HTMLElement) => slot.querySelector<HTMLElement>('[data-glow]')!
-    // 边框：空格 30%，持满 95%，持有 40% 在中间。
-    expect(drawn[0].style.boxShadow).toContain('95.0%')
-    expect(drawn[2].style.boxShadow).toContain('56.0%')
-    expect(drawn[3].style.boxShadow).toContain('30.0%')
-    // 里面的光：空格几乎透明、没有光晕，也不闪。
-    expect(glow(drawn[0]).style.background).toContain('28.0%')
-    expect(glow(drawn[3]).style.background).toContain('4.0%')
+    // 边框：空格 28% 不透明、不掺白；持满全亮、掺 45% 的白；持有 40% 在中间。
+    expect(drawn[0].style.boxShadow).toContain('white 45.0%')
+    expect(drawn[2].style.boxShadow).toContain('white 18.0%')
+    expect(drawn[3].style.boxShadow).toContain('white 0.0%')
+    expect(drawn[3].style.boxShadow).toContain('28.0%')
+    // 里面的光：持满 34%，空格只有 5%、没有光晕，也不闪。
+    expect(glow(drawn[0]).style.background).toContain('34.0%')
+    expect(glow(drawn[3]).style.background).toContain('5.0%')
     expect(glow(drawn[3]).style.boxShadow).toBe('none')
     expect(glow(drawn[0]).className).toContain('neon-flicker')
     expect(glow(drawn[3]).className).not.toContain('neon-flicker')
