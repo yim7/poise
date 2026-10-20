@@ -47,7 +47,7 @@ function core(tone: Direction, white: number, percent: number): string {
 /**
  * 一格的霓虹样式，亮度随持有比例 `held` 变：
  * - 边框是灯管的芯，越满越亮、越偏白，外面叠三层由近到远的光晕；
- * - 里面整格都亮着，上下两沿略亮一点，越满越亮；中间不能暗下去，否则看起来是一个黑框。
+ * - 里面是同色的透明光，整格均匀，越满越亮；中间不能单独暗下去，否则看起来是一个黑框。
  */
 function neon(tone: Direction, held: number) {
   const px = (value: number) => `${value.toFixed(1)}px`
@@ -59,15 +59,14 @@ function neon(tone: Direction, held: number) {
           `0 0 ${px(mix(6, 18, held))} ${tint(tone, mix(5, 30, held))}`,
         ]
       : []
-  const inside = mix(6, 40, held)
-  // 管内的光掺白、透明度不高：颜色亮而轻，透得出底下，又不会发暗。
-  const fill = (percent: number) => core(tone, mix(0, 35, held), percent)
+  const inside = mix(5, 30, held)
   return {
     border: {
       boxShadow: [`inset 0 0 0 1px ${core(tone, mix(0, 45, held), mix(28, 100, held))}`, ...halo].join(', '),
     },
     glow: {
-      background: `linear-gradient(to bottom, ${fill(inside)}, ${fill(inside * 0.85)} 50%, ${fill(inside)})`,
+      // 纯霓虹色、透明度低、上下几乎一样：透得出底下，中间又不会单独暗下去。
+      background: `linear-gradient(to bottom, ${tint(tone, inside)}, ${tint(tone, inside * 0.9)} 50%, ${tint(tone, inside)})`,
       boxShadow: held > 0 ? `inset 0 0 ${px(mix(2, 6, held))} ${tint(tone, mix(20, 70, held))}` : 'none',
     },
   }
