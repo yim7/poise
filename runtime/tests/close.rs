@@ -6,7 +6,7 @@ use common::{Harness, at, console, core_harness, long_grid_config};
 use poise_runtime::{RuntimeError, StoredOrder, StrategyStatus};
 use poise_strategy::order::{OrderPurpose, OrderStatus, Side, Unit};
 use poise_strategy::side::Direction;
-use poise_strategy::units::{Position, Price, Quantity};
+use poise_strategy::units::{Notional, Position, Price, Quantity};
 
 fn price(value: &str) -> Price {
     Price::parse(value).unwrap()
@@ -791,4 +791,68 @@ async fn a_lagging_position_after_a_close_fill_still_closes() {
     }
     assert_eq!(harness.exchange.current_position(), Position::ZERO);
     assert_eq!(status(&harness), StrategyStatus::Closed);
+}
+
+/// 平仓平掉的是整个净仓位，含账本外的仓位（用户手动开的）：那一部分不是这个策略的，不算进
+/// 减仓已实现，归档之后再平掉的也一样。账本上的部分按平仓成交价减去账本成本。
+#[tokio::test]
+async fn a_close_counts_only_the_ledger_part_as_realized() {
+    let harness = holding().await;
+    let before = harness.runtime.detail(&harness.strategy_id).unwrap();
+    let held = before
+        .batches
+        .iter()
+        .map(|batch| (batch.core_filled, batch.price))
+        .chain(
+            before
+                .cells
+                .iter()
+                .map(|cell| (cell.held, cell.entry_price)),
+        );
+    let (ledger, cost) = held.fold(
+        (Quantity::ZERO, Notional::ZERO),
+        |(ledger, cost), (quantity, price)| {
+            (ledger + quantity, cost + Notional::of(quantity, price))
+        },
+    );
+    assert_eq!(
+        Position::from_quantity(ledger),
+        harness.exchange.current_position()
+    );
+
+    harness.clock.set(at(2));
+    harness
+        .runtime
+        .stop_and_close(&harness.strategy_id)
+        .await
+        .unwrap();
+    harness.exchange.manual_trade(quantity("0.1"));
+    for second in 3..10 {
+        if harness.step(second).await.status == StrategyStatus::Closed {
+            break;
+        }
+    }
+    assert_eq!(status(&harness), StrategyStatus::Closed);
+
+    // 平仓单按标记价让出 5% 成交：89000 × .95 = 84550。
+    let detail = harness.runtime.detail(&harness.strategy_id).unwrap();
+    let realized = Notional::of(ledger, price("84550")) - cost;
+    assert_eq!(detail.reduction_realized_profit, Some(realized));
+    assert_eq!(detail.average_price, None);
+    assert_eq!(detail.unrealized_pnl, Notional::ZERO);
+    assert_eq!(detail.total_pnl, detail.grid_realized_profit + realized);
+
+    // 归档之后又平掉一笔账本外的仓位（价格不同）：不改写这个策略已有的盈亏。
+    harness.exchange.manual_trade(quantity("0.1"));
+    harness.exchange.set_market_price(price("95000"), at(20));
+    harness.clock.set(at(20));
+    harness.runtime.close(&harness.strategy_id).await.unwrap();
+    for second in 21..30 {
+        if harness.step(second).await.status == StrategyStatus::Closed {
+            break;
+        }
+    }
+    assert_eq!(harness.exchange.current_position(), Position::ZERO);
+    let detail = harness.runtime.detail(&harness.strategy_id).unwrap();
+    assert_eq!(detail.reduction_realized_profit, Some(realized));
 }

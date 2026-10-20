@@ -188,6 +188,11 @@ export function detail(overrides: Partial<StrategyDetail> = {}): StrategyDetail 
     funding_synced_through: '2026-10-15T00:00:00Z',
     grid_realized_profit: '30',
     funding_share: '-0.05',
+    average_price: '94000',
+    unrealized_pnl: '22.5',
+    reduction_realized_profit: null,
+    total_pnl: '51',
+    breakeven_price: '92100',
     ...overrides,
   }
 }

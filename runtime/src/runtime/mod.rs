@@ -465,6 +465,18 @@ pub struct StrategyDetail {
     pub grid_realized_profit: Notional,
     /// 资金费占网格已实现利润的比例（带符号，付出去是负的）；还没有利润时是 `None`。
     pub funding_share: Option<Rate>,
+    /// 账本上的持仓均价（[`poise_strategy::preview::HoldingCost`]）：主仓按批次价、格子按建仓价，只算还拿着的部分；
+    /// 账本上没有净持仓时是 `None`。
+    pub average_price: Option<Price>,
+    /// 按标记价算的账本持仓浮动盈亏（估算）。
+    pub unrealized_pnl: Notional,
+    /// 失效减仓和市价平仓已经实现的盈亏（估算）：成交得到的钱减去卖掉部分的账本成本；
+    /// 还没有减仓成交时是 `None`。
+    pub reduction_realized_profit: Option<Notional>,
+    /// 合计：网格已实现利润 + 减仓已实现 + 累计资金费 + 浮动盈亏。
+    pub total_pnl: Notional,
+    /// 保本价：价格到这里时合计正好为零；没有净持仓、或者算出来不是正数时是 `None`。
+    pub breakeven_price: Option<Price>,
 }
 
 /// 资金费率隔多久重读一次。

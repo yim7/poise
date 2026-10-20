@@ -424,6 +424,11 @@ impl Notional {
         Ok(Self::from_scaled(parse_fixed(value)?))
     }
 
+    /// 以 1e-16 报价货币为单位构造，和 [`Self::raw`] 互为逆运算。
+    pub const fn from_raw(raw: i128) -> Self {
+        Self(raw)
+    }
+
     pub const fn raw(self) -> i128 {
         self.0
     }

@@ -5,12 +5,13 @@ use poise_strategy::Strategy;
 use poise_strategy::invalidation::reduction_sold;
 use poise_strategy::order::{OrderPurpose, OrderRecord, Unit, WorkingOrder};
 use poise_strategy::planning::WaitReason;
+use poise_strategy::preview::{BatchSummary, CellSummary, HoldingCost};
 use poise_strategy::side::Direction;
 use poise_strategy::units::{Notional, Position, Quantity, Rate, SCALE};
 
 use crate::account::FundingRate;
 use crate::settings::AccountSettings;
-use crate::store::{StrategyId, StrategyStatus, ViewSnapshot};
+use crate::store::{StoredFill, StoredOrder, StrategyId, StrategyStatus, ViewSnapshot};
 
 use super::{
     InstanceInfo, Runtime, RuntimeError, StepReport, StrategyDetail, StrategySummary, percent,
@@ -55,7 +56,8 @@ impl Runtime {
         // （第 7.5 节，见 [`Strategy::after_invalidation`]）。
         let records: Vec<OrderRecord> = orders.iter().map(|order| order.record.clone()).collect();
         let sold = reduction_sold(&records);
-        let state = strategy.after_invalidation(&self.load_state(strategy_id, &strategy)?, &sold);
+        let ledger = self.load_state(strategy_id, &strategy)?;
+        let state = strategy.after_invalidation(&ledger, &sold);
         let working: Vec<WorkingOrder> = orders
             .iter()
             .filter(|order| order.record.is_working())
@@ -84,6 +86,21 @@ impl Runtime {
             .map(|order| (order.record.unit, order.record.cumulative_filled))
             .collect();
         let grid_realized_profit = strategy.grid_realized_profit(&exits);
+        let batches = strategy.batch_summaries(&state);
+        let cells = strategy.cell_summaries(&state, &working);
+        let holding = HoldingCost::of_tables(&batches, &cells);
+        let reduction_realized_profit = reduction_realized(
+            &strategy.batch_summaries(&ledger),
+            &strategy.cell_summaries(&ledger, &working),
+            &batches,
+            &cells,
+            &orders,
+            &self.store.load_fills(strategy_id)?,
+        );
+        let realized = grid_realized_profit
+            + reduction_realized_profit.unwrap_or(Notional::ZERO)
+            + funding_total;
+        let unrealized_pnl = holding.unrealized(view.market_price);
         Ok(StrategyDetail {
             summary,
             taken_at: view.taken_at,
@@ -106,8 +123,8 @@ impl Runtime {
             .into_iter()
             .chain(funding_alert)
             .reduce(|note, alert| format!("{note}{alert}")),
-            batches: strategy.batch_summaries(&state),
-            cells: strategy.cell_summaries(&state, &working),
+            batches,
+            cells,
             orders: orders
                 .into_iter()
                 .filter(|order| order.record.is_working())
@@ -121,6 +138,11 @@ impl Runtime {
             funding_synced_through: self.store.funding_synced_through(&stored.instrument)?,
             grid_realized_profit,
             funding_share: share_of(funding_total, grid_realized_profit),
+            average_price: holding.average_price(),
+            unrealized_pnl,
+            reduction_realized_profit,
+            total_pnl: realized + unrealized_pnl,
+            breakeven_price: holding.breakeven_price(realized),
         })
     }
 
@@ -261,6 +283,109 @@ pub(super) fn funding_alert_note(
             percent(settings.funding_alert_annual_rate)
         )
     })
+}
+
+/// 失效减仓和市价平仓已经实现的盈亏（第 7.5、7.7 节），两侧分开算：成交得到的钱减去卖掉
+/// 那部分的账本成本（减仓之前的账本成本减去之后的）。还没有减仓成交时是 `None`。
+///
+/// 市价平仓平的是整个标的的净仓位，可能比账本上多（用户手动开的仓位，或者归档之后再平掉
+/// 的仓位）：多出来的那部分不是这个策略的。按发出的先后，每张单只有还没超出账本减掉的
+/// 数量的那部分成交算本策略的，成交金额按这部分占比折算。
+fn reduction_realized(
+    batches_before: &[BatchSummary],
+    cells_before: &[CellSummary],
+    batches_after: &[BatchSummary],
+    cells_after: &[CellSummary],
+    orders: &[StoredOrder],
+    fills: &[StoredFill],
+) -> Option<Notional> {
+    let mut reductions: Vec<&StoredOrder> = orders
+        .iter()
+        .filter(|order| {
+            order.record.purpose.is_reduction() && !order.record.cumulative_filled.is_zero()
+        })
+        .collect();
+    if reductions.is_empty() {
+        return None;
+    }
+    reductions.sort_by_key(|order| order.placed_at);
+    let realized = Direction::ALL
+        .into_iter()
+        .map(|direction| {
+            let before = side_cost(direction, batches_before, cells_before);
+            let after = side_cost(direction, batches_after, cells_after);
+            let mut left = (before.position.units() - after.position.units()).abs();
+            let mut amount = Notional::ZERO;
+            for order in reductions
+                .iter()
+                .filter(|order| order.record.unit.direction() == direction)
+            {
+                let (proceeds, quantity) = order_proceeds(&order.record, fills);
+                let taken = quantity.units().min(left);
+                left -= taken;
+                amount = amount + scale(proceeds, taken, quantity.units());
+            }
+            // 多头侧卖出收钱，空头侧买回花钱。
+            let signed = match direction {
+                Direction::Long => amount,
+                Direction::Short => Notional::ZERO - amount,
+            };
+            signed - (before.cost - after.cost)
+        })
+        .fold(Notional::ZERO, |total, realized| total + realized);
+    Some(realized)
+}
+
+/// 一侧的账本持仓成本。
+fn side_cost(direction: Direction, batches: &[BatchSummary], cells: &[CellSummary]) -> HoldingCost {
+    HoldingCost::of(
+        batches
+            .iter()
+            .filter(|batch| batch.direction == direction)
+            .map(|batch| (direction, batch.core_filled, batch.price))
+            .chain(
+                cells
+                    .iter()
+                    .filter(|cell| cell.direction == direction)
+                    .map(|cell| (direction, cell.held, cell.entry_price)),
+            ),
+    )
+}
+
+/// 一张减仓单成交的金额和数量（累计成交量）。
+///
+/// 按这张单记下的成交流水的价格算。流水只往回拉一段，可能比累计成交量少（服务停过很久）：
+/// 少的那部分按这张单已有流水的均价算，一条流水都没有时按限价算。
+fn order_proceeds(record: &OrderRecord, fills: &[StoredFill]) -> (Notional, Quantity) {
+    let (amount, quantity) = fills
+        .iter()
+        .filter(|fill| fill.client_order_id == record.client_order_id)
+        .fold(
+            (Notional::ZERO, Quantity::ZERO),
+            |(amount, quantity), fill| {
+                (
+                    amount + Notional::of(fill.quantity, fill.price),
+                    quantity + fill.quantity,
+                )
+            },
+        );
+    let filled = record.cumulative_filled.max(quantity);
+    let amount = if quantity.is_zero() {
+        Notional::of(filled, record.limit_price)
+    } else {
+        scale(amount, filled.units(), quantity.units())
+    };
+    (amount, filled)
+}
+
+/// `amount × part ÷ whole`，先除后乘，不让中间结果溢出；`whole` 为 0 时是 0。
+fn scale(amount: Notional, part: i64, whole: i64) -> Notional {
+    if whole == 0 {
+        return Notional::ZERO;
+    }
+    let (part, whole) = (i128::from(part), i128::from(whole));
+    let raw = amount.raw();
+    Notional::from_raw(raw / whole * part + raw % whole * part / whole)
 }
 
 /// `part` 占 `whole` 的比例（带符号）；`whole` 不是正数、或者算出来超出范围时是 `None`。

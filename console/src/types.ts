@@ -321,6 +321,16 @@ export interface StrategyDetail {
   grid_realized_profit: Decimal
   /** 资金费占网格已实现利润的比例（带符号）；还没有利润时是 null。 */
   funding_share: Decimal | null
+  /** 账本上的持仓均价：主仓按批次价、格子按建仓价，只算还拿着的部分；没有净持仓时是 null。 */
+  average_price: Decimal | null
+  /** 按标记价算的账本持仓浮动盈亏（估算）。 */
+  unrealized_pnl: Decimal
+  /** 失效减仓和市价平仓已经实现的盈亏（估算）；还没有减仓成交时是 null。 */
+  reduction_realized_profit: Decimal | null
+  /** 合计：网格已实现利润 + 减仓已实现 + 累计资金费 + 浮动盈亏。 */
+  total_pnl: Decimal
+  /** 保本价：价格到这里时合计正好为零；没有净持仓、或者算出来不是正数时是 null。 */
+  breakeven_price: Decimal | null
 }
 
 /** 恢复的结果：一直在跑、等遗留订单过期、遗留订单没收场、或者真的恢复了。 */

@@ -7,7 +7,7 @@ mod common;
 use common::{Harness, at, harness, short_harness};
 use poise_runtime::settings::AccountSettings;
 use poise_strategy::order::OrderPurpose;
-use poise_strategy::units::{Notional, Rate};
+use poise_strategy::units::{Notional, Price, Rate};
 
 fn notional(value: &str) -> Notional {
     Notional::parse(value).unwrap()
@@ -254,4 +254,45 @@ async fn an_archived_strategy_keeps_the_funding_up_to_when_it_was_archived() {
     let detail = harness.runtime.detail(&harness.strategy_id).unwrap();
     assert_eq!(detail.funding_total, notional("-1.5"));
     assert_eq!(detail.funding_synced_through, Some(at(7300)));
+}
+
+/// 账本持仓的均价、浮动盈亏、合计和保本价：持有一格时均价就是这一格的建仓价；价格跌 500
+/// （不到下一格）就按 500 浮亏；合计把资金费算进去，保本价跟着往上挪。
+#[tokio::test]
+async fn the_detail_shows_the_holding_cost_and_the_total() {
+    let harness = harness().await;
+    harness.step(0).await;
+    let detail = harness.runtime.detail(&harness.strategy_id).unwrap();
+    assert_eq!(detail.average_price, None);
+    assert_eq!(detail.total_pnl, Notional::ZERO);
+    assert_eq!(detail.breakeven_price, None);
+
+    let cell = detail.cells[0].clone();
+    let entry = harness.working_cloid(0, OrderPurpose::GridEntry);
+    harness.exchange.fill(&entry, cell.quantity, at(1)).unwrap();
+    let lower = Price::from_units(cell.entry_price.units() - 50_000_000_000);
+    harness.exchange.set_market_price(lower, at(2));
+    harness.step(2).await;
+    harness
+        .account
+        .add_funding_payment(at(3600), notional("-1"));
+    harness.clock.set(at(3700));
+    harness.runtime.refresh_funding_rates().await.unwrap();
+
+    let detail = harness.runtime.detail(&harness.strategy_id).unwrap();
+    let loss = Notional::of(cell.quantity, Price::parse("500").unwrap());
+    assert_eq!(detail.market_price, lower);
+    assert_eq!(detail.average_price, Some(cell.entry_price));
+    assert_eq!(detail.unrealized_pnl, Notional::ZERO - loss);
+    assert_eq!(detail.reduction_realized_profit, None);
+    assert_eq!(detail.total_pnl, Notional::ZERO - loss - notional("1"));
+    // 付出去的 1 摊到持仓上：保本价 = 建仓价 + 1 ÷ 数量。
+    let raised = Notional::of(cell.quantity, cell.entry_price) + notional("1");
+    let units = i128::from(cell.quantity.units());
+    assert_eq!(
+        detail.breakeven_price,
+        Some(Price::from_units(
+            ((2 * raised.raw() + units) / (2 * units)) as i64
+        ))
+    );
 }

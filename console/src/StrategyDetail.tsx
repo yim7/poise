@@ -319,11 +319,45 @@ function Readings({ strategy, showExpected }: { strategy: StrategyDetail; showEx
           }
         />
         <Stat
+          label="持仓均价"
+          value={decimal(strategy.average_price)}
+          tone={strategy.average_price === null ? 'muted' : 'default'}
+          size="lg"
+        />
+        {/* 保本价把网格利润、减仓盈亏和资金费都摊进持仓：标记价回到这里，合计正好为零。 */}
+        <Stat
+          label="保本价"
+          value={decimal(strategy.breakeven_price)}
+          tone={strategy.breakeven_price === null ? 'muted' : 'default'}
+          size="lg"
+        />
+        <Stat
+          label="浮动盈亏（估）"
+          value={decimal(strategy.unrealized_pnl)}
+          tone={signTone(strategy.unrealized_pnl)}
+          size="lg"
+        />
+        <Stat
+          label="合计（估）"
+          value={decimal(strategy.total_pnl)}
+          tone={signTone(strategy.total_pnl)}
+          size="lg"
+        />
+        <Stat
           label="网格利润（估）"
           value={decimal(strategy.grid_realized_profit)}
           tone={signTone(strategy.grid_realized_profit)}
           size="lg"
         />
+        {/* 只有失效减仓或市价平仓成交过才有：没有时不占位置。 */}
+        {strategy.reduction_realized_profit === null ? null : (
+          <Stat
+            label="减仓已实现（估）"
+            value={decimal(strategy.reduction_realized_profit)}
+            tone={signTone(strategy.reduction_realized_profit)}
+            size="lg"
+          />
+        )}
         <Stat
           label="累计资金费"
           value={strategy.funding_synced_through === null ? '未同步' : decimal(strategy.funding_total)}

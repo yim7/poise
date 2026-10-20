@@ -153,6 +153,57 @@ describe('运行详情', () => {
     expect(within(readings).getByText('-5%')).toBeInTheDocument()
   })
 
+  it('显示持仓均价、保本价、浮动盈亏和合计', async () => {
+    detailRoutes()
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    const readings = await screen.findByRole('region', { name: '关键读数' })
+    expect(within(readings).getByText('持仓均价').parentElement).toHaveTextContent('持仓均价94000')
+    expect(within(readings).getByText('保本价').parentElement).toHaveTextContent('保本价92100')
+    const unrealized = within(readings).getByText('浮动盈亏（估）').parentElement
+    expect(unrealized).toHaveTextContent('浮动盈亏（估）22.5')
+    expect(within(readings).getByText('合计（估）').parentElement).toHaveTextContent('合计（估）51')
+    // 没有减仓成交时不显示这一项。
+    expect(within(readings).queryByText('减仓已实现（估）')).not.toBeInTheDocument()
+  })
+
+  it('没有持仓时均价和保本价显示横线；减仓有成交时单独列出', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': {
+        body: detail({
+          position: '0',
+          expected_position: '0',
+          average_price: null,
+          breakeven_price: null,
+          unrealized_pnl: '0',
+          reduction_realized_profit: '-120.5',
+          total_pnl: '-92',
+        }),
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    const readings = await screen.findByRole('region', { name: '关键读数' })
+    expect(within(readings).getByText('持仓均价').parentElement).toHaveTextContent('持仓均价—')
+    expect(within(readings).getByText('保本价').parentElement).toHaveTextContent('保本价—')
+    expect(within(readings).getByText('减仓已实现（估）').parentElement).toHaveTextContent(
+      '减仓已实现（估）-120.5',
+    )
+    expect(within(readings).getByText('合计（估）').parentElement).toHaveTextContent('合计（估）-92')
+  })
+
+  it('减仓成交过、盈亏正好为零时照样列出', async () => {
+    detailRoutes({
+      'GET /api/strategies/s-1': { body: detail({ reduction_realized_profit: '0' }) },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    const readings = await screen.findByRole('region', { name: '关键读数' })
+    expect(within(readings).getByText('减仓已实现（估）').parentElement).toHaveTextContent(
+      '减仓已实现（估）0',
+    )
+  })
+
   it('还没有网格利润时不算比例', async () => {
     detailRoutes({
       'GET /api/strategies/s-1': {

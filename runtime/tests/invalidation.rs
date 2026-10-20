@@ -10,7 +10,7 @@ use poise_runtime::{RuntimeError, Store, StoredOrder, StrategyStatus};
 use poise_strategy::config::{Invalidation, StrategyConfig};
 use poise_strategy::order::{OrderPurpose, OrderStatus, Side, Unit};
 use poise_strategy::side::Direction;
-use poise_strategy::units::{Position, Price, Quantity, Rate};
+use poise_strategy::units::{Notional, Position, Price, Quantity, Rate};
 
 fn invalidation(price: &str, remaining: &str) -> Invalidation {
     Invalidation {
@@ -194,6 +194,41 @@ async fn b37_a_long_grid_reduces_to_the_remaining_quantity_and_stays_invalidated
             .contains(&harness.strategy_id)
     );
     assert_eq!(harness.exchange.place_count(), placed);
+}
+
+/// 失效减仓卖出的部分算已实现：合计等于全部现金流加上剩余仓位按标记价的价值，均价只算
+/// 剩下的那部分主仓。
+#[tokio::test]
+async fn the_reduction_counts_as_realized_in_the_total() {
+    let harness = crossed("0.3").await;
+    harness.step(1).await;
+    harness.step(2).await;
+
+    let detail = harness.runtime.detail(&harness.strategy_id).unwrap();
+    let bought = detail.batches.iter().fold(Notional::ZERO, |total, batch| {
+        total + Notional::of(batch.core_quantity, batch.price)
+    });
+    let held = detail.batches.iter().fold(Notional::ZERO, |total, batch| {
+        total + Notional::of(batch.core_filled, batch.price)
+    });
+    // 四批主仓按批次价买进 .7，在 68310 卖出 .4，剩 .3 按 69000 计价。
+    let sold = Notional::of(quantity("0.4"), price("68310"));
+    let remaining = Notional::of(quantity("0.3"), price("69000"));
+
+    assert_eq!(
+        detail.reduction_realized_profit,
+        Some(sold - (bought - held))
+    );
+    assert_eq!(detail.unrealized_pnl, remaining - held);
+    assert_eq!(detail.total_pnl, remaining + sold - bought);
+    // 四舍五入到最小报价单位。
+    let units = i128::from(quantity("0.3").units());
+    assert_eq!(
+        detail.average_price,
+        Some(Price::from_units(
+            ((2 * held.raw() + units) / (2 * units)) as i64
+        ))
+    );
 }
 
 /// B38：滑点上限内没成交完，下一步按新的标记价继续，直到仓位不超过 R。
