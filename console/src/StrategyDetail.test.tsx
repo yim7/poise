@@ -30,10 +30,38 @@ async function expectTitle(kind: string, status: string) {
   expect(within(row).getByText(status)).toBeInTheDocument()
 }
 
+/** 参数区默认收起：要看可改的参数、版本历史或者为什么不能改，先展开。 */
+async function openParams() {
+  await userEvent.click(await screen.findByRole('button', { name: '展开' }))
+}
+
 describe('运行详情', () => {
+  it('参数默认收起，只显示版本和摘要；计划和挂单分成两组', async () => {
+    detailRoutes()
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+
+    const params = await screen.findByRole('region', { name: '参数' })
+    expect(within(params).getByText('v2')).toBeInTheDocument()
+    expect(within(params).getByText(/^做多 75000–95000/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '保存运行参数' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '参数版本' })).not.toBeInTheDocument()
+
+    // 计划和挂单各有标题：批次和格子在「计划」下，挂单在「挂单」下。
+    const plan = screen.getByRole('heading', { name: '计划' }).parentElement as HTMLElement
+    const orders = screen.getByRole('heading', { name: '挂单' }).parentElement as HTMLElement
+    expect(within(plan).getByRole('region', { name: '主仓批次' })).toBeInTheDocument()
+    expect(within(plan).queryByRole('region', { name: '在场挂单' })).not.toBeInTheDocument()
+    expect(within(orders).getByRole('region', { name: '在场挂单' })).toBeInTheDocument()
+
+    await userEvent.click(within(params).getByRole('button', { name: '展开' }))
+    expect(screen.getByRole('button', { name: '保存运行参数' })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '参数版本' })).toBeInTheDocument()
+  })
+
   it('显示批次表、格子表、挂单、等待原因和参数版本', async () => {
     detailRoutes()
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
 
     expect(await screen.findByRole('region', { name: '主仓批次' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: '网格格子' })).toBeInTheDocument()
@@ -235,6 +263,7 @@ describe('运行详情', () => {
     }
     detailRoutes({ 'GET /api/strategies/s-1': { body: detail({ summary: paused }) } })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
 
     expect(await screen.findByText(/暂停期间越过失效价照样减仓/)).toBeInTheDocument()
   })
@@ -723,6 +752,7 @@ describe('运行详情', () => {
       },
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
 
     expect(await screen.findByText('已归档，只读。')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '暂停' })).not.toBeInTheDocument()
@@ -790,6 +820,7 @@ describe('运行详情', () => {
       },
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
 
     expect(await screen.findByText(/0.0005 不足最低下单金额/)).toBeInTheDocument()
     expect(screen.getByText(/新建策略可接管剩余仓位/)).toBeInTheDocument()
@@ -911,6 +942,7 @@ describe('运行详情', () => {
       },
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
 
     expect(await screen.findByText(/已暂停，恢复后可改限速和失效设置/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '保存运行参数' })).not.toBeInTheDocument()
@@ -932,6 +964,7 @@ describe('运行详情', () => {
   it('b44_运行中改限速间隔会提交整份参数，并显示新的版本号', async () => {
     const server = detailRoutes()
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
     await screen.findByText('主仓批次表')
 
     await userEvent.type(screen.getByLabelText('做多侧限速间隔 τ（分钟）'), '30')
@@ -948,6 +981,7 @@ describe('运行详情', () => {
   it('b44_运行中改观点失效设置会提交整份参数，限速间隔保持原样', async () => {
     const server = detailRoutes()
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
     await screen.findByText('主仓批次表')
 
     await userEvent.type(screen.getByLabelText('做多侧观点失效价'), '70000')
@@ -969,6 +1003,7 @@ describe('运行详情', () => {
   it('b44_失效滑点上限不是数字时不提交', async () => {
     const server = detailRoutes()
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
     await screen.findByText('主仓批次表')
 
     await userEvent.type(screen.getByLabelText('做多侧观点失效价'), '70000')
@@ -984,6 +1019,7 @@ describe('运行详情', () => {
     // 把「写错了」当成「不限速」提交上去，用户以为限了速，实际提交的是另一份参数。
     const server = detailRoutes()
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
     await screen.findByText('主仓批次表')
 
     await userEvent.type(screen.getByLabelText('做多侧限速间隔 τ（分钟）'), '十分钟')
@@ -1005,6 +1041,7 @@ describe('运行详情', () => {
       },
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
     await screen.findByText('主仓批次表')
 
     expect(screen.getByLabelText('做多侧限速间隔 τ（分钟）')).toHaveValue('1.5')
@@ -1024,6 +1061,7 @@ describe('运行详情', () => {
       },
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
     await screen.findByText('主仓批次表')
 
     await userEvent.type(screen.getByLabelText('做多侧限速间隔 τ（分钟）'), '30')
@@ -1040,6 +1078,7 @@ describe('运行详情', () => {
       },
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
     await screen.findByText('主仓批次表')
 
     await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
@@ -1083,6 +1122,7 @@ describe('运行详情', () => {
       'GET /api/strategies/s-1': { body: shortDetail() },
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
 
     await expectTitle('做空', '运行中')
     const table = screen.getByText('网格格子表').closest('table') as HTMLTableElement
@@ -1102,6 +1142,7 @@ describe('运行详情', () => {
       'GET /api/strategies/s-1': { body: neutralDetail() },
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
 
     await expectTitle('中性', '运行中')
     const table = screen.getByText('网格格子表').closest('table') as HTMLTableElement

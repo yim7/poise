@@ -26,7 +26,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { RunningEditor } from './RunningEditor'
 import { api, closeSummary, pauseSummary, resumeSummary, stopSummary } from './api'
-import { decimal, percent, timestamp } from './format'
+import { configSummary, decimal, percent, timestamp } from './format'
 import { isArchived, statusLabel, waitReasonLabel } from './labels'
 import { BatchTable, CellLadder, ConfigVersionTable, OrdersTable, Panel } from './tables'
 import type { StrategyDetail } from './types'
@@ -240,31 +240,74 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
 
       <WhatsHappening strategy={strategy} running={running} settling={settling} />
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Panel title="网格格子" count={strategy.cells.length}>
-          <CellLadder cells={strategy.cells} mark={strategy.market_price} />
-        </Panel>
-        <div className="flex flex-col gap-4">
-          <Panel title="在场挂单" count={strategy.orders.length}>
-            <OrdersTable orders={strategy.orders} />
+      {/* 计划（账本上的批次和格子）和交易所上的挂单分成两组，各有标题，不挤在同一栏里。 */}
+      <Group title="计划">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <Panel
+            title="网格格子"
+            count={strategy.cells.length}
+            className={strategy.batches.length === 0 ? 'lg:col-span-2' : undefined}
+          >
+            <CellLadder cells={strategy.cells} mark={strategy.market_price} />
           </Panel>
           {strategy.batches.length === 0 ? null : (
-            <Panel title="主仓批次" count={strategy.batches.length}>
+            <Panel title="主仓批次" count={strategy.batches.length} className="self-start">
               <BatchTable batches={strategy.batches} />
             </Panel>
           )}
         </div>
-      </div>
+      </Group>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <div>
-          <EditorSection strategy={strategy} strategyId={strategyId} />
-        </div>
-        <Panel title="参数版本" count={strategy.config_versions.length}>
-          <ConfigVersionTable versions={strategy.config_versions} />
+      <Group title="挂单">
+        <Panel title="在场挂单" count={strategy.orders.length}>
+          <OrdersTable orders={strategy.orders} />
         </Panel>
-      </div>
+      </Group>
+
+      <ParamsSection strategy={strategy} strategyId={strategyId} />
     </div>
+  )
+}
+
+/** 一组区块的小标题。 */
+function Group({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <h2 className="eyebrow">{title}</h2>
+      {children}
+    </div>
+  )
+}
+
+/**
+ * 参数：默认只显示一行摘要，不抢读数和挂单的注意力；展开后才是可改的参数和版本历史。
+ */
+function ParamsSection({ strategy, strategyId }: { strategy: StrategyDetail; strategyId: string }) {
+  const [open, setOpen] = useState(false)
+  const summary = strategy.summary
+  return (
+    <section aria-label="参数" className="flex flex-col gap-3 rounded-lg ring-1 ring-border/60 px-4 py-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-baseline gap-3 text-xs">
+          <span className="eyebrow shrink-0">参数</span>
+          <span className="num shrink-0 text-muted-foreground">v{summary.config_version}</span>
+          <span className="truncate text-muted-foreground">{configSummary(summary.config)}</span>
+        </div>
+        <Button variant="ghost" size="sm" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? '收起' : '展开'}
+        </Button>
+      </div>
+      {open ? (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <div>
+            <EditorSection strategy={strategy} strategyId={strategyId} />
+          </div>
+          <Panel title="参数版本" count={strategy.config_versions.length}>
+            <ConfigVersionTable versions={strategy.config_versions} />
+          </Panel>
+        </div>
+      ) : null}
+    </section>
   )
 }
 
