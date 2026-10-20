@@ -3,8 +3,9 @@
 //
 // 只用来定位：价格换成横轴上的位置，不参与任何交易数量的计算。
 //
-// 格子里面是透明的：空格子只有一圈很淡的细边，持有的部分边框亮起来、带一点柔光，部分持有
-// 只点亮左边那一截。格子之间留 2px 空隙；一侧超过 60 格时空隙会把格子吃掉，就不留空隙。
+// 格子是霓虹灯管：边框发亮，里面是比边框淡一点的同色光。亮度跟着持有比例走——没持有时
+// 边框偏淡、里面几乎透明；持满时边框和里面都更亮、外面一圈光晕，并且轻轻闪烁。格子之间留
+// 2px 空隙；一侧超过 60 格时空隙会把格子吃掉，就不留空隙。
 
 import { type RefObject, useEffect, useRef, useState } from 'react'
 
@@ -25,6 +26,30 @@ interface Slot {
   high: number
   held: number
   tone: Direction
+}
+
+/** 按持有比例 `held`（0 到 1）在两头之间插值。 */
+function mix(empty: number, full: number, held: number): number {
+  return empty + (full - empty) * held
+}
+
+/** 这一侧的颜色，取 `percent`% 的不透明度。 */
+function tint(tone: Direction, percent: number): string {
+  return `color-mix(in oklch, var(--${tone}) ${percent.toFixed(1)}%, transparent)`
+}
+
+/** 一格的霓虹样式：边框、里面的光和外面的光晕，都随持有比例变亮。 */
+function neon(tone: Direction, held: number) {
+  return {
+    border: { boxShadow: `inset 0 0 0 1px ${tint(tone, mix(30, 95, held))}` },
+    glow: {
+      background: tint(tone, mix(4, 28, held)),
+      boxShadow:
+        held > 0
+          ? `0 0 ${mix(2, 10, held).toFixed(1)}px ${tint(tone, mix(10, 55, held))}, inset 0 0 ${mix(1, 6, held).toFixed(1)}px ${tint(tone, mix(10, 45, held))}`
+          : 'none',
+    },
+  }
 }
 
 /** 一侧格子超过这么多就不留空隙。 */
@@ -261,32 +286,26 @@ export function RangeBar({
             }
           />
         ))}
-        {drawn.map((slot) => {
+        {drawn.map((slot, index) => {
           const gap = dense(slot.tone) ? '0px' : '1px'
+          const style = neon(slot.tone, slot.held)
           return (
             <div
               key={slot.key}
               data-held={slot.held}
-              className={cn(
-                'absolute top-1/2 h-2.5 -translate-y-1/2 ring-1 ring-inset',
-                slot.tone === 'long' ? 'ring-long/20' : 'ring-short/20',
-              )}
+              className="absolute top-1/2 h-2.5 -translate-y-1/2"
               style={{
                 left: `calc(${at(slot.low)} + ${gap})`,
                 width: `calc(${at(slot.high)} - ${at(slot.low)} - 2 * ${gap})`,
+                ...style.border,
               }}
             >
-              {slot.held > 0 ? (
-                <div
-                  className={cn(
-                    'absolute inset-y-0 left-0 ring-1 ring-inset shadow-[0_0_6px_0]',
-                    slot.tone === 'long'
-                      ? 'bg-long/[0.08] ring-long/80 shadow-long/40'
-                      : 'bg-short/[0.08] ring-short/80 shadow-short/40',
-                  )}
-                  style={{ width: `${slot.held * 100}%` }}
-                />
-              ) : null}
+              <div
+                data-glow
+                className={cn('absolute inset-0', slot.held > 0 && 'neon-flicker')}
+                // 错开每一格的闪烁，不让整排一起闪。
+                style={{ ...style.glow, animationDelay: `${(index * 0.73) % 4}s` }}
+              />
             </div>
           )
         })}

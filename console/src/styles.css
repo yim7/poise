@@ -119,3 +119,20 @@
     @apply text-[11px] font-medium tracking-wide text-muted-foreground uppercase;
   }
 }
+
+/* 价格条上持有的格子：霓虹灯管那样偶尔轻轻暗一下。 */
+@keyframes neon-flicker {
+  0%, 100% { opacity: 1; }
+  7% { opacity: 0.78; }
+  9% { opacity: 1; }
+  48% { opacity: 0.9; }
+  50% { opacity: 1; }
+}
+.neon-flicker {
+  animation: neon-flicker 4s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .neon-flicker {
+    animation: none;
+  }
+}

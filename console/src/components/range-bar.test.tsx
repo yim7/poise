@@ -46,13 +46,22 @@ function slots(container: HTMLElement) {
 }
 
 describe('RangeBar', () => {
-  it('每一格按持有比例填色，部分持有只填左边那一截', () => {
+  it('每一格的亮度跟着持有比例走：持满最亮并闪烁，空格只有淡边框', () => {
     const { container } = render(<RangeBar config={fiveCells} cells={cells} mark="80200" />)
 
     const drawn = slots(container)
     expect(drawn.map((slot) => slot.dataset.held)).toEqual(['1', '1', '0.4', '0', '0'])
-    expect((drawn[2].firstElementChild as HTMLElement).style.width).toBe('40%')
-    expect(drawn[3].firstElementChild).toBeNull()
+    const glow = (slot: HTMLElement) => slot.querySelector<HTMLElement>('[data-glow]')!
+    // 边框：空格 30%，持满 95%，持有 40% 在中间。
+    expect(drawn[0].style.boxShadow).toContain('95.0%')
+    expect(drawn[2].style.boxShadow).toContain('56.0%')
+    expect(drawn[3].style.boxShadow).toContain('30.0%')
+    // 里面的光：空格几乎透明、没有光晕，也不闪。
+    expect(glow(drawn[0]).style.background).toContain('28.0%')
+    expect(glow(drawn[3]).style.background).toContain('4.0%')
+    expect(glow(drawn[3]).style.boxShadow).toBe('none')
+    expect(glow(drawn[0]).className).toContain('neon-flicker')
+    expect(glow(drawn[3]).className).not.toContain('neon-flicker')
     // 格子之间留空隙：每格左右各让 1px。
     expect(drawn[0].style.left).toContain('+ 1px')
   })
