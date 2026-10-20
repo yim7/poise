@@ -46,7 +46,7 @@ function core(tone: Direction, white: number, percent: number): string {
 
 /**
  * 一格的霓虹样式，亮度随持有比例 `held` 变：
- * - 边框是灯管的芯，越满越亮、越偏白，外面叠三层由近到远的光晕；
+ * - 边框是灯管的芯，越满越亮、略偏白，外面两层收得很近的光晕，不抢页面上别的读数；
  * - 里面是同色的透明光，整格均匀，越满越亮；中间不能单独暗下去，否则看起来是一个黑框。
  */
 function neon(tone: Direction, held: number) {
@@ -54,15 +54,14 @@ function neon(tone: Direction, held: number) {
   const halo =
     held > 0
       ? [
-          `0 0 ${px(mix(1, 3, held))} ${tint(tone, mix(30, 90, held))}`,
-          `0 0 ${px(mix(3, 8, held))} ${tint(tone, mix(15, 60, held))}`,
-          `0 0 ${px(mix(6, 18, held))} ${tint(tone, mix(5, 30, held))}`,
+          `0 0 ${px(mix(1, 2, held))} ${tint(tone, mix(20, 55, held))}`,
+          `0 0 ${px(mix(3, 8, held))} ${tint(tone, mix(8, 22, held))}`,
         ]
       : []
-  const inside = mix(5, 30, held)
+  const inside = mix(4, 22, held)
   return {
     border: {
-      boxShadow: [`inset 0 0 0 1px ${core(tone, mix(0, 45, held), mix(28, 100, held))}`, ...halo].join(', '),
+      boxShadow: [`inset 0 0 0 1px ${core(tone, mix(0, 25, held), mix(28, 90, held))}`, ...halo].join(', '),
     },
     glow: {
       // 纯霓虹色、透明度低、上下几乎一样：透得出底下，中间又不会单独暗下去。
@@ -70,7 +69,7 @@ function neon(tone: Direction, held: number) {
       boxShadow: held > 0 ? `inset 0 0 ${px(mix(2, 6, held))} ${tint(tone, mix(20, 70, held))}` : 'none',
     },
     // 灯管后面墙上的一团柔光：透明的管子透出来的是这团光，不是黑底。
-    spill: held > 0 ? { background: tint(tone, mix(10, 45, held)), filter: `blur(${px(mix(2, 5, held))})` } : null,
+    spill: held > 0 ? { background: tint(tone, mix(6, 25, held)), filter: `blur(${px(mix(2, 4, held))})` } : null,
   }
 }
 

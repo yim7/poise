@@ -80,9 +80,9 @@
 
   --long: oklch(0.8 0.14 162);
   --short: oklch(0.73 0.15 22);
-  /* 价格条格子的霓虹色：比多空色更饱和、更亮。 */
-  --neon-long: oklch(0.87 0.2 160);
-  --neon-short: oklch(0.72 0.22 20);
+  /* 价格条格子的霓虹色：比多空色稍亮稍饱和，放在整页里不突兀。 */
+  --neon-long: oklch(0.83 0.16 162);
+  --neon-short: oklch(0.72 0.18 22);
   --warn: oklch(0.83 0.14 78);
   --info: oklch(0.77 0.1 235);
   --destructive: oklch(0.68 0.19 25);
@@ -126,9 +126,9 @@
 /* 价格条上持有的格子：霓虹灯管那样偶尔轻轻暗一下。 */
 @keyframes neon-flicker {
   0%, 100% { opacity: 1; }
-  7% { opacity: 0.78; }
+  7% { opacity: 0.88; }
   9% { opacity: 1; }
-  48% { opacity: 0.9; }
+  48% { opacity: 0.95; }
   50% { opacity: 1; }
 }
 .neon-flicker {

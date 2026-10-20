@@ -52,16 +52,16 @@ describe('RangeBar', () => {
     const drawn = slots(container)
     expect(drawn.map((slot) => slot.dataset.held)).toEqual(['1', '1', '0.4', '0', '0'])
     const glow = (slot: HTMLElement) => slot.querySelector<HTMLElement>('[data-glow]')!
-    // 边框：空格 28% 不透明、不掺白；持满全亮、掺 45% 的白；持有 40% 在中间。
-    expect(drawn[0].style.boxShadow).toContain('white 45.0%')
-    expect(drawn[2].style.boxShadow).toContain('white 18.0%')
+    // 边框：空格 28% 不透明、不掺白；持满 90%、掺 25% 的白；持有 40% 在中间。
+    expect(drawn[0].style.boxShadow).toContain('white 25.0%')
+    expect(drawn[2].style.boxShadow).toContain('white 10.0%')
     expect(drawn[3].style.boxShadow).toContain('white 0.0%')
     expect(drawn[3].style.boxShadow).toContain('28.0%')
-    // 里面的光：不掺白的透明霓虹色，持满 30%，中间 27%；空格只有 5%、没有光晕，也不闪。
-    expect(glow(drawn[0]).style.background).toContain('30.0%')
-    expect(glow(drawn[0]).style.background).toContain('27.0%')
+    // 里面的光：不掺白的透明霓虹色，持满 22%，中间 19.8%；空格只有 4%、没有光晕，也不闪。
+    expect(glow(drawn[0]).style.background).toContain('22.0%')
+    expect(glow(drawn[0]).style.background).toContain('19.8%')
     expect(glow(drawn[0]).style.background).not.toContain('white')
-    expect(glow(drawn[3]).style.background).toContain('5.0%')
+    expect(glow(drawn[3]).style.background).toContain('4.0%')
     expect(glow(drawn[3]).style.boxShadow).toBe('none')
     // 持有的格子后面有一团柔光，透明的格子透出来的是它；空格没有。
     expect(drawn[0].querySelector('[data-spill]')).not.toBeNull()
