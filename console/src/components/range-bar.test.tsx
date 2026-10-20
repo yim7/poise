@@ -57,11 +57,11 @@ describe('RangeBar', () => {
     expect(drawn[2].style.boxShadow).toContain('white 18.0%')
     expect(drawn[3].style.boxShadow).toContain('white 0.0%')
     expect(drawn[3].style.boxShadow).toContain('28.0%')
-    // 里面的光：持满 62%、掺 20% 的白，中间也有 49.6%，不会暗成黑框；空格只有 8%、没有光晕，也不闪。
-    expect(glow(drawn[0]).style.background).toContain('62.0%')
-    expect(glow(drawn[0]).style.background).toContain('49.6%')
-    expect(glow(drawn[0]).style.background).toContain('white 20.0%')
-    expect(glow(drawn[3]).style.background).toContain('8.0%')
+    // 里面的光：持满 40%、掺 35% 的白，中间也有 34%，亮而通透；空格只有 6%、没有光晕，也不闪。
+    expect(glow(drawn[0]).style.background).toContain('40.0%')
+    expect(glow(drawn[0]).style.background).toContain('34.0%')
+    expect(glow(drawn[0]).style.background).toContain('white 35.0%')
+    expect(glow(drawn[3]).style.background).toContain('6.0%')
     expect(glow(drawn[3]).style.boxShadow).toBe('none')
     expect(glow(drawn[0]).className).toContain('neon-flicker')
     expect(glow(drawn[3]).className).not.toContain('neon-flicker')

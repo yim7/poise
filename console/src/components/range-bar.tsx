@@ -59,15 +59,15 @@ function neon(tone: Direction, held: number) {
           `0 0 ${px(mix(6, 18, held))} ${tint(tone, mix(5, 30, held))}`,
         ]
       : []
-  const inside = mix(8, 62, held)
-  // 管内的光也掺一点白，越满越亮：纯霓虹色铺在暗底上显得发暗。
-  const fill = (percent: number) => core(tone, mix(0, 20, held), percent)
+  const inside = mix(6, 40, held)
+  // 管内的光掺白、透明度不高：颜色亮而轻，透得出底下，又不会发暗。
+  const fill = (percent: number) => core(tone, mix(0, 35, held), percent)
   return {
     border: {
       boxShadow: [`inset 0 0 0 1px ${core(tone, mix(0, 45, held), mix(28, 100, held))}`, ...halo].join(', '),
     },
     glow: {
-      background: `linear-gradient(to bottom, ${fill(inside)}, ${fill(inside * 0.8)} 50%, ${fill(inside)})`,
+      background: `linear-gradient(to bottom, ${fill(inside)}, ${fill(inside * 0.85)} 50%, ${fill(inside)})`,
       boxShadow: held > 0 ? `inset 0 0 ${px(mix(2, 6, held))} ${tint(tone, mix(20, 70, held))}` : 'none',
     },
   }
