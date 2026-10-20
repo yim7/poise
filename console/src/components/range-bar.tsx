@@ -69,6 +69,8 @@ function neon(tone: Direction, held: number) {
       background: `linear-gradient(to bottom, ${tint(tone, inside)}, ${tint(tone, inside * 0.9)} 50%, ${tint(tone, inside)})`,
       boxShadow: held > 0 ? `inset 0 0 ${px(mix(2, 6, held))} ${tint(tone, mix(20, 70, held))}` : 'none',
     },
+    // 灯管后面墙上的一团柔光：透明的管子透出来的是这团光，不是黑底。
+    spill: held > 0 ? { background: tint(tone, mix(10, 45, held)), filter: `blur(${px(mix(2, 5, held))})` } : null,
   }
 }
 
@@ -306,6 +308,14 @@ export function RangeBar({
             }
           />
         ))}
+        {/* 色带底：格子透明，透出来的是一层很淡的亮底，不是黑的卡片底色 */}
+        {segments.map((part) => (
+          <div
+            key={`band-${part.tone}`}
+            className="absolute top-1/2 h-3 -translate-y-1/2 bg-foreground/[0.05]"
+            style={{ left: at(part.low), width: `calc(${at(part.high)} - ${at(part.low)})` }}
+          />
+        ))}
         {drawn.map((slot, index) => {
           const gap = dense(slot.tone) ? '0px' : '1px'
           const style = neon(slot.tone, slot.held)
@@ -313,13 +323,16 @@ export function RangeBar({
             <div
               key={slot.key}
               data-held={slot.held}
-              className="absolute top-1/2 h-3 -translate-y-1/2"
+              className="absolute isolate top-1/2 h-3 -translate-y-1/2"
               style={{
                 left: `calc(${at(slot.low)} + ${gap})`,
                 width: `calc(${at(slot.high)} - ${at(slot.low)} - 2 * ${gap})`,
                 ...style.border,
               }}
             >
+              {style.spill === null ? null : (
+                <div data-spill className="absolute -inset-0.5 -z-10" style={style.spill} />
+              )}
               <div
                 data-glow
                 className={cn('absolute inset-0 mix-blend-plus-lighter', slot.held > 0 && 'neon-flicker')}

@@ -63,6 +63,9 @@ describe('RangeBar', () => {
     expect(glow(drawn[0]).style.background).not.toContain('white')
     expect(glow(drawn[3]).style.background).toContain('5.0%')
     expect(glow(drawn[3]).style.boxShadow).toBe('none')
+    // 持有的格子后面有一团柔光，透明的格子透出来的是它；空格没有。
+    expect(drawn[0].querySelector('[data-spill]')).not.toBeNull()
+    expect(drawn[3].querySelector('[data-spill]')).toBeNull()
     expect(glow(drawn[0]).className).toContain('neon-flicker')
     expect(glow(drawn[3]).className).not.toContain('neon-flicker')
     // 格子之间留空隙：每格左右各让 1px。
