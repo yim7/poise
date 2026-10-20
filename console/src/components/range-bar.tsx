@@ -3,8 +3,8 @@
 //
 // 只用来定位：价格换成横轴上的位置，不参与任何交易数量的计算。
 //
-// 格子不画边框，靠 2px 的空隙分开；空格子很淡，持有的部分半透明填色，部分持有只填左边
-// 那一截。格子太密（一侧超过 60 格）时空隙会把格子吃掉，就不留空隙，连成一条。
+// 格子里面是透明的：空格子只有一圈很淡的细边，持有的部分边框亮起来、带一点柔光，部分持有
+// 只点亮左边那一截。格子之间留 2px 空隙；一侧超过 60 格时空隙会把格子吃掉，就不留空隙。
 
 import { type RefObject, useEffect, useRef, useState } from 'react'
 
@@ -268,8 +268,8 @@ export function RangeBar({
               key={slot.key}
               data-held={slot.held}
               className={cn(
-                'absolute top-1/2 h-2 -translate-y-1/2 overflow-hidden',
-                slot.tone === 'long' ? 'bg-long/[0.07]' : 'bg-short/[0.07]',
+                'absolute top-1/2 h-2.5 -translate-y-1/2 ring-1 ring-inset',
+                slot.tone === 'long' ? 'ring-long/20' : 'ring-short/20',
               )}
               style={{
                 left: `calc(${at(slot.low)} + ${gap})`,
@@ -278,7 +278,12 @@ export function RangeBar({
             >
               {slot.held > 0 ? (
                 <div
-                  className={cn('h-full', slot.tone === 'long' ? 'bg-long/35' : 'bg-short/35')}
+                  className={cn(
+                    'absolute inset-y-0 left-0 ring-1 ring-inset shadow-[0_0_6px_0]',
+                    slot.tone === 'long'
+                      ? 'bg-long/[0.08] ring-long/80 shadow-long/40'
+                      : 'bg-short/[0.08] ring-short/80 shadow-short/40',
+                  )}
                   style={{ width: `${slot.held * 100}%` }}
                 />
               ) : null}
