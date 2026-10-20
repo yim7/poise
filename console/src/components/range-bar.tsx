@@ -47,7 +47,7 @@ function core(tone: Direction, white: number, percent: number): string {
 /**
  * 一格的霓虹样式，亮度随持有比例 `held` 变：
  * - 边框是灯管的芯，越满越亮、越偏白，外面叠三层由近到远的光晕；
- * - 里面上下两沿亮、中间透，像透过玻璃管看到的光，越满越亮。
+ * - 里面整格都亮着，上下两沿略亮一点，越满越亮；中间不能暗下去，否则看起来是一个黑框。
  */
 function neon(tone: Direction, held: number) {
   const px = (value: number) => `${value.toFixed(1)}px`
@@ -59,13 +59,15 @@ function neon(tone: Direction, held: number) {
           `0 0 ${px(mix(6, 18, held))} ${tint(tone, mix(5, 30, held))}`,
         ]
       : []
-  const inside = mix(5, 34, held)
+  const inside = mix(8, 62, held)
+  // 管内的光也掺一点白，越满越亮：纯霓虹色铺在暗底上显得发暗。
+  const fill = (percent: number) => core(tone, mix(0, 20, held), percent)
   return {
     border: {
       boxShadow: [`inset 0 0 0 1px ${core(tone, mix(0, 45, held), mix(28, 100, held))}`, ...halo].join(', '),
     },
     glow: {
-      background: `linear-gradient(to bottom, ${tint(tone, inside)}, ${tint(tone, inside * 0.25)} 50%, ${tint(tone, inside)})`,
+      background: `linear-gradient(to bottom, ${fill(inside)}, ${fill(inside * 0.8)} 50%, ${fill(inside)})`,
       boxShadow: held > 0 ? `inset 0 0 ${px(mix(2, 6, held))} ${tint(tone, mix(20, 70, held))}` : 'none',
     },
   }
@@ -312,7 +314,7 @@ export function RangeBar({
             <div
               key={slot.key}
               data-held={slot.held}
-              className="absolute top-1/2 h-2.5 -translate-y-1/2"
+              className="absolute top-1/2 h-3 -translate-y-1/2"
               style={{
                 left: `calc(${at(slot.low)} + ${gap})`,
                 width: `calc(${at(slot.high)} - ${at(slot.low)} - 2 * ${gap})`,
