@@ -118,48 +118,105 @@ async fn a_strategy_cannot_be_driven_by_two_callers_at_once() {
 
 /// 改配置和走一步也不能同时进行：两者都读同一份状态、都写同一份状态。
 #[tokio::test]
-async fn changing_the_config_cannot_race_a_step() {
-    let store = Store::open_in_memory().unwrap();
-    let exchange = Arc::new(YieldingExchange::new(exchange()));
-    let clock = Arc::new(ManualClock::new(at(0)));
-    let runtime = Runtime::with_clock(
-        exchange.clone(),
-        account(),
-        store,
-        RuntimeOptions::default(),
-        clock.clone(),
-    );
+async fn changing_the_config_waits_for_the_step_in_flight() {
+    let (runtime, clock) = common::slow_runtime(std::time::Duration::from_millis(300));
     let strategy_id = start_strategy(&runtime, long_grid_config()).await;
     clock.set(at(1));
 
-    let (step, update) = tokio::join!(runtime.step(&strategy_id), async {
-        runtime.update_config(
-            &strategy_id,
-            throttled(long_grid_config(), Duration::hours(1)),
-        )
-    },);
+    // 这一步停在标记价上，驱动权还握在它手里。
+    let stepping = tokio::spawn({
+        let runtime = runtime.clone();
+        let strategy_id = strategy_id.clone();
+        async move { runtime.step(&strategy_id).await }
+    });
+    tokio::task::yield_now().await;
 
-    // 恰好一个走完，另一个被挡在门外。
-    match (&step, &update) {
-        (Ok(_), Err(RuntimeError::Busy(busy))) | (Err(RuntimeError::Busy(busy)), Ok(_)) => {
-            assert_eq!(busy, &strategy_id);
+    let updating = tokio::spawn({
+        let runtime = runtime.clone();
+        let strategy_id = strategy_id.clone();
+        async move {
+            runtime
+                .update_config(
+                    &strategy_id,
+                    throttled(long_grid_config(), Duration::hours(1)),
+                )
+                .await
         }
-        other => panic!("expected one of the two to be Busy, got {other:?}"),
-    }
-    assert_eq!(exchange.inner.place_count(), 20, "这一步只挂了一遍单");
-    assert_eq!(
-        runtime.config_versions(&strategy_id).unwrap().len(),
-        1,
-        "被挡下的改配置不记版本"
-    );
+    });
+    // 这一步没走完之前，改配置在排队，没有动库里的配置。
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!updating.is_finished(), "改配置该等这一步走完");
+    assert_eq!(runtime.config_versions(&strategy_id).unwrap().len(), 1);
 
-    // 走完这一步之后驱动权就释放了：改配置照常。
-    clock.set(at(2));
-    let version = runtime
-        .update_config(
-            &strategy_id,
-            throttled(long_grid_config(), Duration::hours(1)),
-        )
+    stepping.await.unwrap().unwrap();
+    assert_eq!(updating.await.unwrap().unwrap(), 2);
+}
+
+/// 一步走得比节拍长时，常驻服务的下一步紧接着就开始，驱动权几乎一直被占着。用户点的
+/// 停止并平仓要排上队：这一步一走完就轮到它，而不是被下一步抢走、报「忙」。
+#[tokio::test]
+async fn stopping_while_steps_run_back_to_back_takes_effect() {
+    let (runtime, clock) = common::slow_runtime(std::time::Duration::from_millis(100));
+    let strategy_id = start_strategy(&runtime, long_grid_config()).await;
+    clock.set(at(1));
+
+    // 模仿常驻服务：一步接一步地走，中间不留空档；忙就是用户操作在用驱动权，跳过。
+    let driving = tokio::spawn({
+        let runtime = runtime.clone();
+        let strategy_id = strategy_id.clone();
+        async move {
+            let mut skipped = 0;
+            loop {
+                match runtime.step(&strategy_id).await {
+                    Ok(report) if report.status.is_archived() => return skipped,
+                    Ok(_) => {}
+                    Err(RuntimeError::Busy(_)) => {
+                        skipped += 1;
+                        tokio::task::yield_now().await;
+                    }
+                    Err(RuntimeError::Archived(_)) => return skipped,
+                    Err(error) => panic!("step failed: {error:?}"),
+                }
+            }
+        }
+    });
+    // 等这一步确实在走（停在标记价上）再点停止。
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        runtime.stop_and_close(&strategy_id),
+    )
+    .await
+    .expect("停止该排上队，而不是一直等")
+    .expect("停止该被接受");
+
+    let skipped = tokio::time::timeout(std::time::Duration::from_secs(10), driving)
+        .await
+        .expect("停止之后常驻服务该把它收尾归档")
         .unwrap();
-    assert_eq!(version, 2);
+    assert!(skipped > 0, "停止拿着驱动权时常驻服务该跳过");
+    let status = runtime.store().load_strategy(&strategy_id).unwrap().status;
+    assert!(status.is_archived(), "{status:?}");
+}
+
+/// 交易所卡住、一步迟迟不走完时，用户操作等一阵子之后报忙，不会无限挂着。
+#[tokio::test(start_paused = true)]
+async fn a_user_action_gives_up_when_the_step_never_finishes() {
+    let (runtime, clock) = common::slow_runtime(std::time::Duration::from_secs(3600));
+    let strategy_id = start_strategy(&runtime, long_grid_config()).await;
+    clock.set(at(1));
+
+    let stuck = tokio::spawn({
+        let runtime = runtime.clone();
+        let strategy_id = strategy_id.clone();
+        async move { runtime.step(&strategy_id).await }
+    });
+    tokio::task::yield_now().await;
+
+    match runtime.pause(&strategy_id).await {
+        Err(RuntimeError::Busy(busy)) => assert_eq!(busy, strategy_id),
+        other => panic!("expected Busy, got {other:?}"),
+    }
+    stuck.abort();
 }

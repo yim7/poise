@@ -215,7 +215,7 @@ async fn update_config(
     Path(id): Path<String>,
     Json(config): Json<StrategyConfig>,
 ) -> Result<Json<VersionBody>, ApiError> {
-    let version = runtime.update_config(&strategy_id(id)?, config)?;
+    let version = runtime.update_config(&strategy_id(id)?, config).await?;
     Ok(Json(VersionBody { version }))
 }
 

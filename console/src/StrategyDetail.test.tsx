@@ -394,6 +394,50 @@ describe('运行详情', () => {
     expect(await screen.findByText(/撤单收尾后市价平仓/)).toBeInTheDocument()
   })
 
+  it('停止请求在途时说明正在等当前这一步，按钮不能再点；回来后换成结果', async () => {
+    let finish: () => void = () => {}
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    detailRoutes({
+      'POST /api/strategies/s-1/stop': {
+        body: { canceled: ['0x1'], status: 'stopping' },
+        wait: pending,
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.click(screen.getByRole('button', { name: '停止' }))
+    await userEvent.click(screen.getByRole('button', { name: '确认停止' }))
+    const dialog = await screen.findByRole('alertdialog', { name: '市价平仓？' })
+    await userEvent.click(within(dialog).getByRole('button', { name: '保留仓位' }))
+
+    expect(await screen.findByText(/等当前这一步走完后执行/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '暂停' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '停止' })).toBeDisabled()
+
+    finish()
+    expect(await screen.findByText(/撤单中：已撤 1 张/)).toBeInTheDocument()
+    expect(screen.queryByText(/等当前这一步走完后执行/)).not.toBeInTheDocument()
+  })
+
+  it('暂停等不到正在走的一步时，在途说明换成服务端的原因', async () => {
+    detailRoutes({
+      'POST /api/strategies/s-1/pause': {
+        status: 409,
+        body: { kind: 'busy', error: '上一步迟迟没有走完（交易所可能响应慢），稍后再试' },
+      },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await screen.findByText('主仓批次表')
+
+    await userEvent.click(screen.getByRole('button', { name: '暂停' }))
+
+    expect(await screen.findByText(/上一步迟迟没有走完/)).toBeInTheDocument()
+    expect(screen.queryByText(/等当前这一步走完后执行/)).not.toBeInTheDocument()
+  })
+
   it('停止没成功时不发平仓请求，说清原因', async () => {
     let fail: () => void = () => {}
     const pending = new Promise<void>((resolve) => {
@@ -972,11 +1016,11 @@ describe('运行详情', () => {
     })
   })
 
-  it('b44_保存限速撞上服务端正在走一步时说清楚等一下再点', async () => {
+  it('b44_保存限速等不到正在走的一步时说清楚等一下再点', async () => {
     detailRoutes({
       'PUT /api/strategies/s-1/config': {
         status: 409,
-        body: { kind: 'busy', error: '正在执行上一步，稍后再试' },
+        body: { kind: 'busy', error: '上一步迟迟没有走完（交易所可能响应慢），稍后再试' },
       },
     })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
@@ -985,7 +1029,7 @@ describe('运行详情', () => {
     await userEvent.type(screen.getByLabelText('做多侧限速间隔 τ（分钟）'), '30')
     await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
 
-    expect(await screen.findByText(/正在执行上一步，稍后再试/)).toBeInTheDocument()
+    expect(await screen.findByText(/上一步迟迟没有走完/)).toBeInTheDocument()
   })
 
   it('b44_改了不让改的参数时把服务端的原因显示出来', async () => {

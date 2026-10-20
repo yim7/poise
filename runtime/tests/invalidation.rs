@@ -39,6 +39,7 @@ async fn b44_the_invalidation_can_change_while_running() {
             &harness.strategy_id,
             core_long_with(Some(invalidation("70000", "0.3"))),
         )
+        .await
         .unwrap();
 
     assert_eq!(version, 2);
@@ -59,6 +60,7 @@ async fn b44_the_invalidation_can_change_while_running() {
             &harness.strategy_id,
             core_long_with(Some(invalidation("80000", "0.3"))),
         )
+        .await
         .unwrap_err();
     assert!(matches!(error, RuntimeError::Config(_)), "{error:?}");
     assert_eq!(
@@ -554,7 +556,8 @@ async fn an_invalidating_strategy_can_only_be_stopped() {
     assert!(matches!(
         harness
             .runtime
-            .update_config(&harness.strategy_id, core_long_with(None)),
+            .update_config(&harness.strategy_id, core_long_with(None))
+            .await,
         Err(RuntimeError::NotRunning(..))
     ));
 

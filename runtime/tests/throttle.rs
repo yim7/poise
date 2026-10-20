@@ -73,8 +73,12 @@ fn released(harness: &Harness) -> usize {
 }
 
 /// 改配置被拒绝时，报出的是哪个字段。
-fn refused(harness: &Harness, config: StrategyConfig) -> &'static str {
-    match harness.runtime.update_config(&harness.strategy_id, config) {
+async fn refused(harness: &Harness, config: StrategyConfig) -> &'static str {
+    match harness
+        .runtime
+        .update_config(&harness.strategy_id, config)
+        .await
+    {
         Err(RuntimeError::ConfigChangeNotAllowed { field }) => field,
         other => panic!("expected the change to be refused, got {other:?}"),
     }
@@ -393,6 +397,7 @@ async fn b44_changing_the_throttle_interval_while_running_takes_effect_and_recor
             &harness.strategy_id,
             throttled(core_long_config(), Duration::minutes(5)),
         )
+        .await
         .unwrap();
     assert_eq!(version, 2);
 
@@ -419,23 +424,23 @@ async fn b44_changing_the_throttle_interval_while_running_takes_effect_and_recor
     // 其它参数运行中不能改：改了就得停下来按新配置重建。
     let mut range = core_long_config();
     long_side_mut(&mut range).price_low = Price::parse("74000").unwrap();
-    assert_eq!(refused(&harness, range), "price_low");
+    assert_eq!(refused(&harness, range).await, "price_low");
 
     let mut spacing = core_long_config();
     long_side_mut(&mut spacing).grid_spacing = Price::parse("2000").unwrap();
-    assert_eq!(refused(&harness, spacing), "grid_spacing");
+    assert_eq!(refused(&harness, spacing).await, "grid_spacing");
 
     let mut position = core_long_config();
     long_side_mut(&mut position).max_position = Quantity::parse("2").unwrap();
-    assert_eq!(refused(&harness, position), "max_position");
+    assert_eq!(refused(&harness, position).await, "max_position");
 
     let mut ratio = core_long_config();
     long_side_mut(&mut ratio).core_ratio = Rate::parse("0.6").unwrap();
-    assert_eq!(refused(&harness, ratio), "core_ratio");
+    assert_eq!(refused(&harness, ratio).await, "core_ratio");
 
     let mut batches = core_long_config();
     long_side_mut(&mut batches).batch_count = Some(3);
-    assert_eq!(refused(&harness, batches), "batch_count");
+    assert_eq!(refused(&harness, batches).await, "batch_count");
 
     // 换标的在规整时就拒绝了：新配置的标的必须和交易所的一致。
     let mut instrument = core_long_config();
@@ -443,7 +448,8 @@ async fn b44_changing_the_throttle_interval_while_running_takes_effect_and_recor
     assert!(matches!(
         harness
             .runtime
-            .update_config(&harness.strategy_id, instrument),
+            .update_config(&harness.strategy_id, instrument)
+            .await,
         Err(RuntimeError::Config(_))
     ));
 
@@ -475,6 +481,7 @@ async fn b44_saving_the_same_config_again_does_not_add_a_version() {
     let version = harness
         .runtime
         .update_config(&harness.strategy_id, throttled(core_long_config(), HOUR))
+        .await
         .unwrap();
     assert_eq!(version, 1);
     assert_eq!(versions(&harness).len(), 1);
@@ -485,11 +492,13 @@ async fn b44_saving_the_same_config_again_does_not_add_a_version() {
     let version = harness
         .runtime
         .update_config(&harness.strategy_id, new_config.clone())
+        .await
         .unwrap();
     assert_eq!(version, 2);
     let version = harness
         .runtime
         .update_config(&harness.strategy_id, new_config)
+        .await
         .unwrap();
     assert_eq!(version, 2, "同样的参数再存一遍还是第 2 版");
     assert_eq!(versions(&harness).len(), 2);
@@ -521,6 +530,7 @@ async fn b44_clearing_the_interval_while_running_lifts_the_throttle() {
                 ..core_long_config()
             },
         )
+        .await
         .unwrap();
 
     let report = harness.step(10).await;
@@ -543,6 +553,7 @@ async fn b44_clearing_the_interval_while_running_lifts_the_throttle() {
     let version = harness
         .runtime
         .update_config(&harness.strategy_id, throttled(core_long_config(), HOUR))
+        .await
         .unwrap();
     assert_eq!(version, 3);
     assert_eq!(released(&harness), 1, "加回限速后退回只放行第一个单位");
@@ -581,6 +592,7 @@ async fn b44_adding_a_throttle_while_running_starts_the_interval_from_that_momen
     let version = harness
         .runtime
         .update_config(&harness.strategy_id, throttled(core_long_config(), HOUR))
+        .await
         .unwrap();
     assert_eq!(version, 2);
     assert_eq!(released(&harness), 1, "改成限速后退回只放行第一个单位");
@@ -651,6 +663,7 @@ async fn adding_a_throttle_keeps_finished_batches_released() {
     harness
         .runtime
         .update_config(&harness.strategy_id, throttled(core_only_config(), HOUR))
+        .await
         .unwrap();
     assert_eq!(released(&harness), 2, "已经开始的批次保持放行");
 
@@ -733,6 +746,7 @@ async fn adding_a_throttle_does_not_strand_batches_behind_a_gap() {
     harness
         .runtime
         .update_config(&harness.strategy_id, throttled(core_only_config(), HOUR))
+        .await
         .unwrap();
     assert_eq!(released(&harness), 2, "放行到最后一个已经开始的批次");
     let state = harness.runtime.state(&harness.strategy_id).unwrap();
@@ -787,7 +801,8 @@ async fn adding_a_throttle_writes_the_config_and_the_progress_in_one_transaction
 
     let error = harness
         .runtime
-        .update_config(&harness.strategy_id, throttled(core_long_config(), HOUR));
+        .update_config(&harness.strategy_id, throttled(core_long_config(), HOUR))
+        .await;
 
     assert!(matches!(error, Err(RuntimeError::Store(_))));
     // 新配置和参数版本一起回滚：库里还是那套不限速的参数，下一步改配置才是第 2 版。
@@ -844,6 +859,7 @@ async fn adding_a_throttle_to_one_side_leaves_the_other_sides_progress_alone() {
     let version = harness
         .runtime
         .update_config(&harness.strategy_id, both_sides_throttled_neutral())
+        .await
         .unwrap();
     assert_eq!(version, 2);
 

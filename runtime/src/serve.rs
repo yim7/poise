@@ -252,8 +252,7 @@ async fn drive(runtime: Arc<Runtime>, interval: Duration, mut pending: Vec<Strat
                     canceled = report.canceled.len(),
                     "step done"
                 ),
-                // 接口那边正在驱动同一个策略：它走的就是这一步，这一轮跳过就是了。
-                // 网页每隔几秒刷新一次详情，撞上是常事，不是失败。
+                // 用户操作正在用、或者排队等着用这个策略的驱动权：让它先走，这一轮跳过。
                 Ok((strategy_id, Err(RuntimeError::Busy(_)))) => tracing::debug!(
                     strategy = %strategy_id,
                     "step skipped: the strategy is being driven by a console request"

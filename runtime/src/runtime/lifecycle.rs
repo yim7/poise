@@ -390,14 +390,14 @@ impl Runtime {
     /// 放行进度和计时完全不动：重建会把它退回「最后一个已经开始的单位」并重新计时，
     /// 白白推后它下一次放行。
     ///
-    /// 改配置和走一步都会读写同一份状态，所以两者互斥：正在被驱动时返回
-    /// [`RuntimeError::Busy`]。
-    pub fn update_config(
+    /// 改配置和走一步都会读写同一份状态，所以两者互斥：正在被驱动时排队等这一步走完，
+    /// 等太久才返回 [`RuntimeError::Busy`]。
+    pub async fn update_config(
         &self,
         strategy_id: &StrategyId,
         config: StrategyConfig,
     ) -> Result<i64, RuntimeError> {
-        let _guard = self.begin(strategy_id)?;
+        let _guard = self.begin_waiting(strategy_id).await?;
         let now = self.clock.now();
         self.refuse_archived(strategy_id)?;
         let stored = self.store.load_strategy(strategy_id)?;

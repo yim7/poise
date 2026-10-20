@@ -51,12 +51,12 @@ function sideInputs(config: StrategyConfig, direction: Direction): SideInputs {
 /**
  * 保存失败时该怎么跟用户说。
  *
- * 「正忙」是常事：常驻服务每隔几秒走一步，正好撞上就报这个。告诉用户等一下再点，
- * 而不是把服务端那句「已经被驱动」原样端上来。
+ * 撞上常驻服务正在走的一步时，服务端会排队等它走完再保存；只有这一步迟迟不走完（交易所
+ * 卡住）才报「忙」。告诉用户等一下再点。
  */
 function describeSaveFailure(failure: unknown): string {
   if (failure instanceof HttpError && failure.kind === 'busy') {
-    return '正在执行上一步，稍后再试。'
+    return '上一步迟迟没有走完（交易所可能响应慢），稍后再试。'
   }
   return failure instanceof Error ? failure.message : String(failure)
 }

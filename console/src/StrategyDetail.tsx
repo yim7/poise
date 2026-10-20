@@ -33,6 +33,9 @@ import type { StrategyDetail } from './types'
 
 const REFRESH_MS = 3000
 
+/** 操作在途时的说明：服务端排队等正在走的那一步走完，接着执行。 */
+const WAITING_FOR_STEP = '已提交，等当前这一步走完后执行…'
+
 /** Unified 账户每天最多的用户操作次数（第 10 节），和服务端的上限一致。 */
 const DAILY_ACTION_LIMIT = 50000
 
@@ -59,7 +62,7 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
   // 正在进行的操作数：停止和紧接着的平仓会同时在途，一个结束不能提前解锁按钮。
   const [inFlight, setInFlight] = useState(0)
   const busy = inFlight > 0
-  // 还没返回的停止请求：平仓要等它成功之后再发（服务端最多等 3 秒，撤单常常更久）。
+  // 还没返回的停止请求：平仓要等它成功之后再发（服务端排队等正在走的那一步，再撤单，常常要好几秒）。
   const pendingStop = useRef<Promise<unknown> | null>(null)
   // 停止确认之后的第二次确认：要不要市价平仓（第 7.7 节）。
   const [askClose, setAskClose] = useState(false)
@@ -68,14 +71,18 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
   /**
    * 动作做完立刻刷新，页面不会停在旧状态。失败了也刷新：响应丢了的时候，服务端可能已经
    * 执行过了（例如停止其实已经开始）。
+   *
+   * `pending` 是请求在途时的说明：服务端要排队等正在走的那一步走完才执行，常常要好几秒，
+   * 不说一声用户会以为没点上。
    */
-  async function run(action: () => Promise<string>) {
+  async function run(action: () => Promise<string>, pending: string | null = null) {
     setInFlight((count) => count + 1)
     setError(null)
-    setNotice(null)
+    setNotice(pending)
     try {
       setNotice(await action())
     } catch (failure) {
+      setNotice(null)
       setError(failure instanceof Error ? failure.message : String(failure))
     } finally {
       setInFlight((count) => count - 1)
@@ -144,7 +151,7 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
         }
       }
       return closeSummary(await api.close(strategyId))
-    })
+    }, WAITING_FOR_STEP)
 
   return (
     <div className="flex flex-col gap-5">
@@ -165,7 +172,9 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
                 variant="outline"
                 size="lg"
                 disabled={busy}
-                onClick={() => run(async () => pauseSummary(await api.pause(strategyId)))}
+                onClick={() =>
+                  run(async () => pauseSummary(await api.pause(strategyId)), WAITING_FOR_STEP)
+                }
               >
                 暂停
               </Button>
@@ -176,7 +185,9 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
               <Button
                 size="lg"
                 disabled={busy}
-                onClick={() => run(async () => resumeSummary(await api.resume(strategyId)))}
+                onClick={() =>
+                  run(async () => resumeSummary(await api.resume(strategyId)), WAITING_FOR_STEP)
+                }
               >
                 恢复
               </Button>
@@ -197,7 +208,7 @@ export function StrategyDetailView({ strategyId, onBack }: StrategyDetailViewPro
                   const stop = api.stop(strategyId)
                   pendingStop.current = stop
                   if (hasPosition && status !== 'closing') setAskClose(true)
-                  void run(async () => stopSummary(await stop))
+                  void run(async () => stopSummary(await stop), WAITING_FOR_STEP)
                 }}
               />
             ) : null}

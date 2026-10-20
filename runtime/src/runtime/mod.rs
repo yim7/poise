@@ -25,7 +25,7 @@
 //! 时间全部来自注入的时钟（[`crate::clock::Clock`]）：订单的 `expiresAfter` 按实际
 //! 发送时刻算，限速按实际成交时刻算（第 4.1、9.1 节）。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, Utc};
@@ -107,8 +107,9 @@ pub enum RuntimeError {
     State(#[from] StateError),
     #[error("策略{}，不能执行这个操作", .1.label())]
     NotRunning(StrategyId, StrategyStatus),
-    /// 这个策略正在被另一个调用驱动。同一个策略同一时刻只能走一步。
-    #[error("正在执行上一步，稍后再试")]
+    /// 这个策略正在被另一个调用驱动。同一个策略同一时刻只能走一步；用户操作会排队等
+    /// 这一步走完，等太久才是这个错误。
+    #[error("上一步迟迟没有走完（交易所可能响应慢），稍后再试")]
     Busy(StrategyId),
     /// 运行中只允许改限速间隔和观点失效设置；改了别的参数必须停下来重建（第 2.4 节）。
     #[error("运行中只能改限速和观点失效设置；{} 要停止后新建", field_label(field))]
@@ -494,9 +495,9 @@ const FUNDING_RATE_MAX_AGE: Duration = Duration::minutes(30);
 /// abstraction modes」。超过 80% 提醒。
 pub const DAILY_ACTION_LIMIT: u64 = 50_000;
 
-/// 等正在走的那一步时，每轮之间歇多久、最多等几轮（合起来约 3 秒）。
-const WAIT_STEP_MS: u64 = 200;
-const WAIT_ROUNDS: usize = 15;
+/// 用户操作最多等正在走的那一步多久。一步一般几秒就走完；交易所半挂起时一步能拖好几分钟
+/// （单次请求超时 15 秒），这时才报忙。
+const STEP_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct Runtime {
     exchange: Arc<dyn Exchange>,
@@ -506,8 +507,11 @@ pub struct Runtime {
     options: RuntimeOptions,
     /// 当前时间的来源。策略是纯计算，时间只在这里取。
     clock: Arc<dyn Clock>,
-    /// 正在被驱动的策略。同一个策略并发走两步会用同一份状态各下一遍单。
-    stepping: Mutex<HashSet<StrategyId>>,
+    /// 每个策略一把驱动锁。同一个策略并发走两步会用同一份状态各下一遍单。
+    ///
+    /// 锁是公平的（先到先得）：用户操作排上队之后，这一步一走完驱动权就交给它，常驻服务
+    /// 下一轮的 `try_lock` 抢不走。
+    stepping: Mutex<HashMap<StrategyId, Arc<tokio::sync::Mutex<()>>>>,
     /// 资金预检的锁和保证金不足的退避表（第 10 节）：同一账户的所有策略共用一份。
     funds: funds::Funds,
     /// 各标的最近读到的资金费率和读到的时刻（第 7.6 节）。
@@ -516,19 +520,9 @@ pub struct Runtime {
     held: Mutex<HashMap<Instrument, held::HeldReading>>,
 }
 
-/// 一次驱动期间持有的占用标记，离开作用域就释放。
-struct StepGuard<'a> {
-    stepping: &'a Mutex<HashSet<StrategyId>>,
-    strategy_id: StrategyId,
-}
-
-impl Drop for StepGuard<'_> {
-    fn drop(&mut self) {
-        self.stepping
-            .lock()
-            .expect("stepping lock poisoned")
-            .remove(&self.strategy_id);
-    }
+/// 一次驱动期间持有的驱动权，离开作用域就释放。
+struct StepGuard {
+    _held: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl Runtime {
@@ -559,7 +553,7 @@ impl Runtime {
             store,
             options,
             clock,
-            stepping: Mutex::new(HashSet::new()),
+            stepping: Mutex::new(HashMap::new()),
             funds: funds::Funds::default(),
             funding_rates: Mutex::new(HashMap::new()),
             held: Mutex::new(HashMap::new()),
@@ -571,34 +565,37 @@ impl Runtime {
         self.clock.now()
     }
 
-    /// 取得一个策略的驱动权；已经有调用在驱动时返回 [`RuntimeError::Busy`]。
-    fn begin(&self, strategy_id: &StrategyId) -> Result<StepGuard<'_>, RuntimeError> {
-        let mut stepping = self.stepping.lock().expect("stepping lock poisoned");
-        if !stepping.insert(strategy_id.clone()) {
-            return Err(RuntimeError::Busy(strategy_id.clone()));
-        }
-        drop(stepping);
-        Ok(StepGuard {
-            stepping: &self.stepping,
-            strategy_id: strategy_id.clone(),
-        })
+    /// 这个策略的驱动锁，第一次用到时建。
+    fn driving_lock(&self, strategy_id: &StrategyId) -> Arc<tokio::sync::Mutex<()>> {
+        self.stepping
+            .lock()
+            .expect("stepping lock poisoned")
+            .entry(strategy_id.clone())
+            .or_default()
+            .clone()
     }
 
-    /// 读取和用户操作等正在走的那一步结束，而不是直接报忙。
+    /// 取得一个策略的驱动权；已经有调用在驱动、或者有用户操作在排队时返回
+    /// [`RuntimeError::Busy`]。
+    fn begin(&self, strategy_id: &StrategyId) -> Result<StepGuard, RuntimeError> {
+        let held = self
+            .driving_lock(strategy_id)
+            .try_lock_owned()
+            .map_err(|_| RuntimeError::Busy(strategy_id.clone()))?;
+        Ok(StepGuard { _held: held })
+    }
+
+    /// 用户操作排队等正在走的那一步结束，而不是直接报忙。
     ///
-    /// 网页每隔几秒刷新一次详情，常驻服务每隔几秒走一步，两者撞上是常事。把「忙」
-    /// 当成失败，页面就会周期性地闪一下错误、按钮点了没反应。一步是有头的，等一会儿
-    /// 就好；真等不到（比如交易所卡住）才报忙。
-    async fn begin_waiting(&self, strategy_id: &StrategyId) -> Result<StepGuard<'_>, RuntimeError> {
-        for _ in 0..WAIT_ROUNDS {
-            match self.begin(strategy_id) {
-                Err(RuntimeError::Busy(_)) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(WAIT_STEP_MS)).await;
-                }
-                other => return other,
-            }
-        }
-        self.begin(strategy_id)
+    /// 常驻服务每隔几秒走一步，一步走得比节拍长时下一步紧接着就开始（测试网的调试构建
+    /// 常常如此），驱动权几乎一直被占着；靠轮询去抢，十几次也抢不到。所以这里排队：
+    /// 这一步一走完驱动权就交给排在前面的操作，常驻服务这一轮跳过。真等不到（比如交易所
+    /// 卡住）才报忙。
+    async fn begin_waiting(&self, strategy_id: &StrategyId) -> Result<StepGuard, RuntimeError> {
+        let held = tokio::time::timeout(STEP_WAIT, self.driving_lock(strategy_id).lock_owned())
+            .await
+            .map_err(|_| RuntimeError::Busy(strategy_id.clone()))?;
+        Ok(StepGuard { _held: held })
     }
 
     pub fn store(&self) -> &Store {

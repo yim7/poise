@@ -59,6 +59,7 @@ async fn b45_stopping_cancels_every_order_and_archives_the_strategy() {
             &harness.strategy_id,
             throttled(harness.config(), Duration::hours(1)),
         )
+        .await
         .unwrap_err();
     assert!(
         matches!(error, RuntimeError::Archived(_)),
