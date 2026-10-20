@@ -14,7 +14,7 @@ use crate::order::{OrderPurpose, Side, Unit, WorkingOrder};
 use crate::planning::OrderIntent;
 use crate::side::{Direction, SidePlan};
 use crate::state::{CellState, StrategyState};
-use crate::units::{Notional, Position, Price, Quantity};
+use crate::units::{Notional, Price, Quantity};
 
 /// 批次表的一行：预览和运行中查看都用它。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,31 +193,6 @@ impl Strategy {
                 }
             })
             .collect()
-    }
-
-    /// 网格已实现利润的估算（第 7.6 节）：每个格子平仓腿已经成交的数量，按这一格的计划
-    /// 建仓价、平仓价和 maker 费率算扣费后收益，加起来。
-    ///
-    /// 是估算：实际成交价可能比计划价好（下单即成交时），手续费也可能有一条腿是 taker。
-    /// 它和预览里「每格扣费后收益」是同一个口径，用来看资金费占了多少利润。
-    /// `exits` 是每个单位平仓腿已经记入的成交量；不是格子的单位不算。
-    pub fn grid_realized_profit(&self, exits: &[(Unit, Quantity)]) -> Notional {
-        exits
-            .iter()
-            .filter_map(|(unit, quantity)| {
-                let Unit::Cell(direction, index) = *unit else {
-                    return None;
-                };
-                let cell = self.side(direction)?.grid().cell(index)?;
-                Some(self.cell_profit(
-                    direction,
-                    cell.entry_price,
-                    cell.exit_price,
-                    *quantity,
-                    self.fees().maker_rate,
-                ))
-            })
-            .fold(Notional::ZERO, |total, profit| total + profit)
     }
 
     /// 整格买卖一次的扣费后收益：`|平仓价 − 建仓价| × 数量 − (平仓价 + 建仓价) × 数量 × 费率`。
@@ -424,101 +399,9 @@ fn cell_entry_fill(
         })
 }
 
-/// 账本上的持仓成本（第 7.6 节）：主仓已成交的部分按批次价、格子持有的部分按格子建仓价，
-/// 多头记正、空头记负。
-///
-/// 只算现在还拿着的仓位：卖掉的格子不再摊进均价，交易所的持仓均价做不到这一点。和网格
-/// 已实现利润同一口径，按计划价算，不含持有部分的建仓手续费，所以是估算。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct HoldingCost {
-    /// 账本上的净持仓。
-    pub position: Position,
-    /// 带符号的建仓金额：多头买入花的钱记正，空头开空收的钱记负。
-    pub cost: Notional,
-}
-
-impl HoldingCost {
-    /// 按一份份持仓（哪一侧、多少、建仓价）加起来。
-    pub fn of(lots: impl IntoIterator<Item = (Direction, Quantity, Price)>) -> Self {
-        lots.into_iter()
-            .fold(Self::default(), |total, (direction, quantity, price)| {
-                let amount = Notional::of(quantity, price);
-                match direction {
-                    Direction::Long => Self {
-                        position: Position::from_units(total.position.units() + quantity.units()),
-                        cost: total.cost + amount,
-                    },
-                    Direction::Short => Self {
-                        position: Position::from_units(total.position.units() - quantity.units()),
-                        cost: total.cost - amount,
-                    },
-                }
-            })
-    }
-
-    /// 批次表和格子表里还拿着的部分：主仓累计成交，格子持有量。
-    pub fn of_tables(batches: &[BatchSummary], cells: &[CellSummary]) -> Self {
-        Self::of(
-            batches
-                .iter()
-                .map(|batch| (batch.direction, batch.core_filled, batch.price))
-                .chain(
-                    cells
-                        .iter()
-                        .map(|cell| (cell.direction, cell.held, cell.entry_price)),
-                ),
-        )
-    }
-
-    /// 持仓均价；没有净持仓时是 `None`。
-    pub fn average_price(&self) -> Option<Price> {
-        self.price_of(self.cost)
-    }
-
-    /// 按 `price` 算的浮动盈亏：`净持仓 × 价格 − 建仓金额`。
-    pub fn unrealized(&self, price: Price) -> Notional {
-        signed_notional(self.position, price) - self.cost
-    }
-
-    /// 保本价：价格到这里时浮动盈亏正好抵掉 `realized`（已实现的盈亏，含资金费），也就是
-    /// `均价 − realized ÷ 净持仓`。没有净持仓、或者算出来不是正数时是 `None`。
-    pub fn breakeven_price(&self, realized: Notional) -> Option<Price> {
-        self.price_of(self.cost - realized)
-    }
-
-    /// `amount ÷ 净持仓`，四舍五入到最小报价单位；不是正数时是 `None`。
-    fn price_of(&self, amount: Notional) -> Option<Price> {
-        let position = i128::from(self.position.units());
-        if position == 0 {
-            return None;
-        }
-        // 金额是 1e-16、仓位是 1e-8，相除正好是 1e-8 的价格。
-        let (numerator, denominator) = if position < 0 {
-            (-amount.raw(), -position)
-        } else {
-            (amount.raw(), position)
-        };
-        let units = (2 * numerator + denominator).div_euclid(2 * denominator);
-        (units > 0)
-            .then(|| i64::try_from(units).ok())
-            .flatten()
-            .map(Price::from_units)
-    }
-}
-
-/// 带符号的仓位 × 价格。
-fn signed_notional(position: Position, price: Price) -> Notional {
-    let amount = Notional::of(Quantity::from_units(position.units().abs()), price);
-    if position.units() < 0 {
-        Notional::ZERO - amount
-    } else {
-        amount
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{CellStatus, HoldingCost, ImmediateFill};
+    use super::{CellStatus, ImmediateFill};
     use crate::Strategy;
     use crate::batch::BatchIndex;
     use crate::config::SideConfig;
@@ -531,7 +414,7 @@ mod tests {
     use crate::order::{ClientOrderId, OrderPurpose, Unit, WorkingOrder};
     use crate::side::Direction;
     use crate::state::StrategyState;
-    use crate::units::{Notional, Position, Price, Quantity};
+    use crate::units::{Notional, Price, Quantity};
     use chrono::Duration;
 
     fn fill(unit: Unit, limit_price: &str, quantity: &str) -> ImmediateFill {
@@ -1039,88 +922,5 @@ mod tests {
         assert_eq!(batches[0].enabled_cell_count, 2);
         assert_eq!(batches[0].cell_count, 5);
         assert_eq!(batches[1].enabled_cell_count, 0);
-    }
-
-    /// 网格已实现利润：平仓腿成交了整格，就是这一格的 maker 扣费后收益；两格相加；主仓
-    /// 和整侧的单位不算。
-    #[test]
-    fn the_realized_grid_profit_adds_up_the_closed_cells() {
-        let strategy = long_grid_strategy();
-        let cells = strategy.cell_summaries(&strategy.initial_state(), &[]);
-        let exits = [
-            (Unit::Cell(Direction::Long, CellIndex(0)), cells[0].quantity),
-            (Unit::Cell(Direction::Long, CellIndex(1)), cells[1].quantity),
-            (
-                Unit::Batch(Direction::Long, BatchIndex(0)),
-                Quantity::parse("1").unwrap(),
-            ),
-            (Unit::Side(Direction::Long), Quantity::parse("1").unwrap()),
-        ];
-
-        assert_eq!(
-            strategy.grid_realized_profit(&exits),
-            cells[0].profit_maker + cells[1].profit_maker
-        );
-        assert_eq!(strategy.grid_realized_profit(&[]), Notional::ZERO);
-    }
-
-    fn lot(direction: Direction, quantity: &str, price: &str) -> (Direction, Quantity, Price) {
-        (
-            direction,
-            Quantity::parse(quantity).unwrap(),
-            Price::parse(price).unwrap(),
-        )
-    }
-
-    /// 主仓 1 在 100、格子 1 在 99：均价 99.5；标记价 98 时浮亏 3；网格已赚 1 时保本价 99。
-    #[test]
-    fn the_holding_cost_averages_what_is_still_held() {
-        let cost = HoldingCost::of([
-            lot(Direction::Long, "1", "100"),
-            lot(Direction::Long, "1", "99"),
-        ]);
-
-        assert_eq!(cost.position, Position::parse("2").unwrap());
-        assert_eq!(cost.average_price(), Some(Price::parse("99.5").unwrap()));
-        assert_eq!(
-            cost.unrealized(Price::parse("98").unwrap()),
-            Notional::ZERO - Notional::parse("3").unwrap()
-        );
-        assert_eq!(
-            cost.breakeven_price(Notional::parse("1").unwrap()),
-            Some(Price::parse("99").unwrap())
-        );
-    }
-
-    /// 空头：价格跌了是浮盈，已实现的盈利让保本价往上走。
-    #[test]
-    fn a_short_holding_gains_when_the_price_falls() {
-        let cost = HoldingCost::of([lot(Direction::Short, "2", "100")]);
-
-        assert_eq!(cost.position, Position::parse("-2").unwrap());
-        assert_eq!(cost.average_price(), Some(Price::parse("100").unwrap()));
-        assert_eq!(
-            cost.unrealized(Price::parse("98").unwrap()),
-            Notional::parse("4").unwrap()
-        );
-        assert_eq!(
-            cost.breakeven_price(Notional::parse("2").unwrap()),
-            Some(Price::parse("101").unwrap())
-        );
-    }
-
-    /// 没有净持仓就没有均价和保本价；已实现的盈利超过持仓成本时保本价不是正数，也不给。
-    #[test]
-    fn no_holding_means_no_average_or_breakeven() {
-        let empty = HoldingCost::of([]);
-        assert_eq!(empty.average_price(), None);
-        assert_eq!(empty.breakeven_price(Notional::ZERO), None);
-        assert_eq!(
-            empty.unrealized(Price::parse("98").unwrap()),
-            Notional::ZERO
-        );
-
-        let small = HoldingCost::of([lot(Direction::Long, "0.01", "100")]);
-        assert_eq!(small.breakeven_price(Notional::parse("5").unwrap()), None);
     }
 }

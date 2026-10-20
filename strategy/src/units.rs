@@ -441,6 +441,15 @@ impl Notional {
         self.0.checked_mul(factor as i128).map(Self)
     }
 
+    /// `self × part ÷ whole`，先除后乘，中间结果不溢出；`whole` 为 0 时是 0。
+    pub fn scale(self, part: i64, whole: i64) -> Self {
+        if whole == 0 {
+            return Self::ZERO;
+        }
+        let (part, whole) = (i128::from(part), i128::from(whole));
+        Self(self.0 / whole * part + self.0 % whole * part / whole)
+    }
+
     /// 按 1e-8 报价货币取值，向下取整。
     pub const fn scaled_floor(self) -> i64 {
         (self.0 / SCALE_RAW) as i64

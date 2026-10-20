@@ -200,7 +200,15 @@ async fn b37_a_long_grid_reduces_to_the_remaining_quantity_and_stays_invalidated
 /// 剩下的那部分主仓。
 #[tokio::test]
 async fn the_reduction_counts_as_realized_in_the_total() {
-    let harness = crossed("0.3").await;
+    let harness = harness_with(
+        core_long_with(Some(invalidation("70000", "0.3"))),
+        Store::open_in_memory().unwrap(),
+    )
+    .await;
+    // 手续费记为 0：这里只看归属，手续费的算法在策略的单元测试里。
+    harness.exchange.set_fee_rate(Rate::ZERO);
+    harness.step(0).await;
+    harness.exchange.set_market_price(price("69000"), at(1));
     harness.step(1).await;
     harness.step(2).await;
 

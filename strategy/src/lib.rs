@@ -19,6 +19,7 @@ pub mod invalidation;
 pub mod ledger;
 pub mod order;
 pub mod planning;
+pub mod pnl;
 pub mod preview;
 pub mod side;
 pub mod state;

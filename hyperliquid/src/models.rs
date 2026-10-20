@@ -175,6 +175,9 @@ pub(crate) struct FillResponse {
     /// 只有我们自己下的单才有 `cloid`；没有的成交不属于本策略。
     #[serde(default)]
     pub cloid: Option<String>,
+    /// 这笔成交付的手续费（负数是返佣），按报价货币计。
+    #[serde(default)]
+    pub fee: Option<String>,
 }
 
 /// `orderStatus` 里 `order` 的内容。

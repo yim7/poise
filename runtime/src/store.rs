@@ -278,6 +278,8 @@ pub struct StoredFill {
     pub quantity: Quantity,
     pub cumulative_quantity: Quantity,
     pub filled_at: DateTime<Utc>,
+    /// 实际手续费（负数是返佣）；交易所没给、或者这个版本之前记的成交是 `None`。
+    pub fee: Option<Notional>,
 }
 
 /// 一份视图快照：后台每走一步就落一份（第 11 节）。
@@ -555,6 +557,12 @@ const TABLES: &str = "
                  filled_at TEXT NOT NULL
              );
              CREATE INDEX IF NOT EXISTS fills_by_strategy ON fills (strategy_id, filled_at);
+             -- 成交的实际手续费单独一张表：已有的库打开时照样建出来，不用改结构版本。
+             -- 这张表之前记的成交没有这一行。
+             CREATE TABLE IF NOT EXISTS fill_fees (
+                 trade_id TEXT PRIMARY KEY,
+                 fee TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS throttle_states (
                  strategy_id TEXT NOT NULL,
                  direction TEXT NOT NULL,
@@ -1583,9 +1591,16 @@ impl Store {
         Ok(orders)
     }
 
-    /// 记一笔成交；已经记过时返回 `false`。
+    /// 记一笔成交；已经记过时返回 `false`。手续费另记，之前没记上的这次补上。
     pub fn insert_fill(&self, fill: &StoredFill) -> Result<bool, StoreError> {
-        let inserted = self.lock().execute(
+        let connection = self.lock();
+        if let Some(fee) = fill.fee {
+            connection.execute(
+                "INSERT OR IGNORE INTO fill_fees (trade_id, fee) VALUES (?1, ?2)",
+                params![fill.trade_id, fee.to_string()],
+            )?;
+        }
+        let inserted = connection.execute(
             "INSERT OR IGNORE INTO fills (
                  trade_id, strategy_id, client_order_id, price_units, quantity_units,
                  cumulative_quantity_units, filled_at
@@ -1606,9 +1621,10 @@ impl Store {
     pub fn load_fills(&self, strategy_id: &StrategyId) -> Result<Vec<StoredFill>, StoreError> {
         let connection = self.lock();
         let mut statement = connection.prepare(
-            "SELECT trade_id, client_order_id, price_units, quantity_units,
-                    cumulative_quantity_units, filled_at
-             FROM fills WHERE strategy_id = ?1 ORDER BY filled_at, rowid",
+            "SELECT fills.trade_id, client_order_id, price_units, quantity_units,
+                    cumulative_quantity_units, filled_at, fill_fees.fee
+             FROM fills LEFT JOIN fill_fees ON fill_fees.trade_id = fills.trade_id
+             WHERE strategy_id = ?1 ORDER BY filled_at, fills.rowid",
         )?;
         let rows = statement.query_map(params![strategy_id.as_str()], |row| {
             Ok((
@@ -1618,12 +1634,13 @@ impl Store {
                 row.get::<_, i64>(3)?,
                 row.get::<_, i64>(4)?,
                 row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
             ))
         })?;
 
         let mut fills = Vec::new();
         for row in rows {
-            let (trade_id, client_order_id, price, quantity, cumulative, filled_at) = row?;
+            let (trade_id, client_order_id, price, quantity, cumulative, filled_at, fee) = row?;
             fills.push(StoredFill {
                 trade_id,
                 strategy_id: strategy_id.clone(),
@@ -1637,6 +1654,14 @@ impl Store {
                 quantity: Quantity::from_units(quantity),
                 cumulative_quantity: Quantity::from_units(cumulative),
                 filled_at: parse_time(&filled_at)?,
+                fee: fee
+                    .map(|fee| {
+                        Notional::parse(&fee).map_err(|_| StoreError::InvalidColumn {
+                            column: "fill_fees.fee",
+                            value: fee,
+                        })
+                    })
+                    .transpose()?,
             });
         }
         Ok(fills)
@@ -2286,11 +2311,20 @@ mod tests {
             quantity: Quantity::parse("0.02").unwrap(),
             cumulative_quantity: Quantity::parse("0.02").unwrap(),
             filled_at: at(1),
+            fee: None,
         };
 
         assert!(store.insert_fill(&fill).unwrap());
         assert!(!store.insert_fill(&fill).unwrap());
-        assert_eq!(store.load_fills(&strategy_id).unwrap(), vec![fill]);
+        assert_eq!(store.load_fills(&strategy_id).unwrap(), vec![fill.clone()]);
+
+        // 先记下的成交没有手续费，再拉到同一笔时带上了：补记手续费，成交仍只有一条。
+        let with_fee = StoredFill {
+            fee: Some(Notional::parse("-0.0123").unwrap()),
+            ..fill
+        };
+        assert!(!store.insert_fill(&with_fee).unwrap());
+        assert_eq!(store.load_fills(&strategy_id).unwrap(), vec![with_fee]);
     }
 
     /// 流水表里每张订单的数量之和：用来判断订单的成交是不是都已经记进流水。
@@ -2306,6 +2340,7 @@ mod tests {
             quantity: Quantity::parse(quantity).unwrap(),
             cumulative_quantity: Quantity::parse(cumulative).unwrap(),
             filled_at: at(1),
+            fee: None,
         };
 
         // 同一张订单的两笔成交加在一起；累计量回退的迟到成交也照加。

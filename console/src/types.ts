@@ -317,15 +317,15 @@ export interface StrategyDetail {
   funding_total: Decimal
   /** 资金费结算同步到了哪一刻；还没同步过时是 null。 */
   funding_synced_through: string | null
-  /** 网格已实现利润的估算：平仓腿成交量按计划价和 maker 费率算。 */
+  /** 网格已实现利润：格子平仓腿按实际成交和配对的建仓成交相减，扣两边手续费。 */
   grid_realized_profit: Decimal
   /** 资金费占网格已实现利润的比例（带符号）；还没有利润时是 null。 */
   funding_share: Decimal | null
-  /** 账本上的持仓均价：主仓按批次价、格子按建仓价，只算还拿着的部分；没有净持仓时是 null。 */
+  /** 还拿着的仓位按实际成交价的均价，接管来的部分按计划价；没有净持仓时是 null。 */
   average_price: Decimal | null
-  /** 按标记价算的账本持仓浮动盈亏（估算）。 */
+  /** 还拿着的仓位按标记价的浮动盈亏，扣掉建仓手续费。 */
   unrealized_pnl: Decimal
-  /** 失效减仓和市价平仓已经实现的盈亏（估算）；还没有减仓成交时是 null。 */
+  /** 失效减仓和市价平仓已经实现的盈亏；还没有减仓成交时是 null。 */
   reduction_realized_profit: Decimal | null
   /** 合计：网格已实现利润 + 减仓已实现 + 累计资金费 + 浮动盈亏。 */
   total_pnl: Decimal

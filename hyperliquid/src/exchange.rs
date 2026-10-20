@@ -10,7 +10,7 @@ use poise_runtime::{
 };
 use poise_strategy::instrument::Instrument;
 use poise_strategy::order::{ClientOrderId, OrderStatus, Side};
-use poise_strategy::units::{Position, Price, Quantity};
+use poise_strategy::units::{Notional, Position, Price, Quantity};
 use serde_json::{Value, json};
 
 use crate::actions::{
@@ -411,6 +411,11 @@ fn ordered_fills(unique: HashMap<u64, FillResponse>) -> Vec<ExchangeFill> {
             quantity,
             cumulative_quantity: *running,
             filled_at,
+            // 手续费读不出来不影响记账：只用在盈亏上，缺了按费率估算。
+            fee: fill
+                .fee
+                .as_deref()
+                .and_then(|fee| Notional::parse(fee).ok()),
         });
     }
     result

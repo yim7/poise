@@ -461,16 +461,16 @@ pub struct StrategyDetail {
     pub funding_total: Notional,
     /// 资金费结算同步到了哪一刻；`funding_total` 算到这一刻为止。还没同步过时是 `None`。
     pub funding_synced_through: Option<DateTime<Utc>>,
-    /// 网格已实现利润的估算：平仓腿的成交量按计划价和 maker 费率算（第 7.6 节）。
+    /// 网格已实现利润：格子平仓腿按实际成交价，和配对的建仓成交相减，扣两边手续费（第 7.6 节）。
     pub grid_realized_profit: Notional,
     /// 资金费占网格已实现利润的比例（带符号，付出去是负的）；还没有利润时是 `None`。
     pub funding_share: Option<Rate>,
-    /// 账本上的持仓均价（[`poise_strategy::preview::HoldingCost`]）：主仓按批次价、格子按建仓价，只算还拿着的部分；
-    /// 账本上没有净持仓时是 `None`。
+    /// 还拿着的仓位按实际成交价的均价（[`poise_strategy::pnl`]）：接管来的部分按计划价；
+    /// 没有净持仓时是 `None`。
     pub average_price: Option<Price>,
-    /// 按标记价算的账本持仓浮动盈亏（估算）。
+    /// 还拿着的仓位按标记价的浮动盈亏，扣掉建仓手续费。
     pub unrealized_pnl: Notional,
-    /// 失效减仓和市价平仓已经实现的盈亏（估算）：成交得到的钱减去卖掉部分的账本成本；
+    /// 失效减仓和市价平仓已经实现的盈亏：成交得到的钱减去卖掉部分的成本和手续费；
     /// 还没有减仓成交时是 `None`。
     pub reduction_realized_profit: Option<Notional>,
     /// 合计：网格已实现利润 + 减仓已实现 + 累计资金费 + 浮动盈亏。

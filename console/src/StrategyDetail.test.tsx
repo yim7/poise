@@ -149,7 +149,7 @@ describe('运行详情', () => {
     const readings = await screen.findByRole('region', { name: '关键读数' })
     expect(within(readings).getByText('-1.5')).toBeInTheDocument()
     expect(within(readings).getByText(/^截至 .+/)).toBeInTheDocument()
-    expect(within(readings).getByText('网格利润（估）')).toBeInTheDocument()
+    expect(within(readings).getByText('网格利润')).toBeInTheDocument()
     expect(within(readings).getByText('-5%')).toBeInTheDocument()
   })
 
@@ -160,11 +160,11 @@ describe('运行详情', () => {
     const readings = await screen.findByRole('region', { name: '关键读数' })
     expect(within(readings).getByText('持仓均价').parentElement).toHaveTextContent('持仓均价94000')
     expect(within(readings).getByText('保本价').parentElement).toHaveTextContent('保本价92100')
-    const unrealized = within(readings).getByText('浮动盈亏（估）').parentElement
-    expect(unrealized).toHaveTextContent('浮动盈亏（估）22.5')
-    expect(within(readings).getByText('合计（估）').parentElement).toHaveTextContent('合计（估）51')
+    const unrealized = within(readings).getByText('浮动盈亏').parentElement
+    expect(unrealized).toHaveTextContent('浮动盈亏22.5')
+    expect(within(readings).getByText('合计').parentElement).toHaveTextContent('合计51')
     // 没有减仓成交时不显示这一项。
-    expect(within(readings).queryByText('减仓已实现（估）')).not.toBeInTheDocument()
+    expect(within(readings).queryByText('减仓已实现')).not.toBeInTheDocument()
   })
 
   it('没有持仓时均价和保本价显示横线；减仓有成交时单独列出', async () => {
@@ -186,10 +186,10 @@ describe('运行详情', () => {
     const readings = await screen.findByRole('region', { name: '关键读数' })
     expect(within(readings).getByText('持仓均价').parentElement).toHaveTextContent('持仓均价—')
     expect(within(readings).getByText('保本价').parentElement).toHaveTextContent('保本价—')
-    expect(within(readings).getByText('减仓已实现（估）').parentElement).toHaveTextContent(
-      '减仓已实现（估）-120.5',
+    expect(within(readings).getByText('减仓已实现').parentElement).toHaveTextContent(
+      '减仓已实现-120.5',
     )
-    expect(within(readings).getByText('合计（估）').parentElement).toHaveTextContent('合计（估）-92')
+    expect(within(readings).getByText('合计').parentElement).toHaveTextContent('合计-92')
   })
 
   it('减仓成交过、盈亏正好为零时照样列出', async () => {
@@ -199,8 +199,8 @@ describe('运行详情', () => {
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
 
     const readings = await screen.findByRole('region', { name: '关键读数' })
-    expect(within(readings).getByText('减仓已实现（估）').parentElement).toHaveTextContent(
-      '减仓已实现（估）0',
+    expect(within(readings).getByText('减仓已实现').parentElement).toHaveTextContent(
+      '减仓已实现0',
     )
   })
 

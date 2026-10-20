@@ -6,7 +6,7 @@ use common::{Harness, at, console, core_harness, long_grid_config};
 use poise_runtime::{RuntimeError, StoredOrder, StrategyStatus};
 use poise_strategy::order::{OrderPurpose, OrderStatus, Side, Unit};
 use poise_strategy::side::Direction;
-use poise_strategy::units::{Notional, Position, Price, Quantity};
+use poise_strategy::units::{Notional, Position, Price, Quantity, Rate};
 
 fn price(value: &str) -> Price {
     Price::parse(value).unwrap()
@@ -797,7 +797,12 @@ async fn a_lagging_position_after_a_close_fill_still_closes() {
 /// 减仓已实现，归档之后再平掉的也一样。账本上的部分按平仓成交价减去账本成本。
 #[tokio::test]
 async fn a_close_counts_only_the_ledger_part_as_realized() {
-    let harness = holding().await;
+    let harness = core_harness().await;
+    // 手续费记为 0：这里只看归属，手续费的算法在策略的单元测试里。
+    harness.exchange.set_fee_rate(Rate::ZERO);
+    harness.step(0).await;
+    harness.exchange.set_market_price(price("89000"), at(1));
+    harness.step(1).await;
     let before = harness.runtime.detail(&harness.strategy_id).unwrap();
     let held = before
         .batches

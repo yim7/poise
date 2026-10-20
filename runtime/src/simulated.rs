@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use poise_strategy::instrument::Instrument;
 use poise_strategy::order::{ClientOrderId, OrderStatus, Side};
-use poise_strategy::units::{Position, Price, Quantity};
+use poise_strategy::units::{Notional, Position, Price, Quantity, Rate};
 
 use crate::clock::ManualClock;
 use crate::exchange::{
@@ -31,6 +31,10 @@ pub struct SimulatedExchange {
 struct SimState {
     /// 模拟交易所看到的当前时间，只用于判断下单是否已过期。
     now: DateTime<Utc>,
+    /// 设了就按这个费率给每笔成交报手续费；没设时成交不带手续费（交易所没给）。
+    fee_rate: Option<Rate>,
+    /// 下一笔成交按这个价格成交，而不是限价（立即成交时拿到了更好的价格）。
+    next_fill_price: Option<Price>,
     market_price: Price,
     position: Position,
     orders: Vec<SimOrder>,
@@ -171,6 +175,8 @@ impl SimulatedExchange {
             instrument,
             state: Mutex::new(SimState {
                 now,
+                fee_rate: None,
+                next_fill_price: None,
                 market_price,
                 position: Position::ZERO,
                 orders: Vec::new(),
@@ -237,6 +243,16 @@ impl SimulatedExchange {
     }
 
     /// 设置最新成交价，并让穿过的挂单按各自限价全部成交。
+    /// 下一笔成交按 `price` 成交，不按限价。
+    pub fn set_next_fill_price(&self, price: Price) {
+        self.lock().next_fill_price = Some(price);
+    }
+
+    /// 之后的成交按 `rate` 报手续费。
+    pub fn set_fee_rate(&self, rate: Rate) {
+        self.lock().fee_rate = Some(rate);
+    }
+
     pub fn set_market_price(&self, price: Price, now: DateTime<Utc>) {
         let mut state = self.lock();
         state.now = now;
@@ -339,6 +355,7 @@ impl SimulatedExchange {
                 quantity,
                 cumulative_quantity,
                 filled_at,
+                fee: None,
             },
         );
         Ok(())
@@ -366,6 +383,7 @@ impl SimulatedExchange {
                 quantity,
                 cumulative_quantity: quantity,
                 filled_at,
+                fee: None,
             },
         );
     }
@@ -1047,22 +1065,27 @@ fn record_fill(
     };
     state.position = Position::from_units(state.position.units() + signed);
     state.next_trade_id += 1;
+    let price = state.next_fill_price.take().unwrap_or(limit_price);
     push_fill(
         state,
         ExchangeFill {
             trade_id: format!("trade-{}", state.next_trade_id),
             client_order_id,
-            price: limit_price,
+            price,
             quantity: applied,
             cumulative_quantity: cumulative,
             filled_at: now,
+            fee: None,
         },
     );
     applied
 }
 
 /// 记一条成交。设了延迟时先放进「查不到」的那一堆。
-fn push_fill(state: &mut SimState, fill: ExchangeFill) {
+fn push_fill(state: &mut SimState, mut fill: ExchangeFill) {
+    if let Some(rate) = state.fee_rate {
+        fill.fee = Some(Notional::of(fill.quantity, fill.price).mul_rate(rate));
+    }
     if state.delay_next_fills > 0 {
         state.delay_next_fills -= 1;
         state.delayed_fills.push(fill);

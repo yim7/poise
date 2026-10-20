@@ -594,6 +594,7 @@ async fn fills_are_deduplicated_and_carry_a_per_order_running_total() {
         Quantity::parse("0.001").unwrap()
     );
     assert_eq!(fills[0].filled_at, at(1_792_000_000_000));
+    assert_eq!(fills[0].fee, Some(Notional::parse("0.014").unwrap()));
     assert_eq!(fills[1].trade_id, "5002");
     assert_eq!(
         fills[1].client_order_id,

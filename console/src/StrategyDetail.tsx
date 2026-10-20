@@ -332,19 +332,19 @@ function Readings({ strategy, showExpected }: { strategy: StrategyDetail; showEx
           size="lg"
         />
         <Stat
-          label="浮动盈亏（估）"
+          label="浮动盈亏"
           value={decimal(strategy.unrealized_pnl)}
           tone={signTone(strategy.unrealized_pnl)}
           size="lg"
         />
         <Stat
-          label="合计（估）"
+          label="合计"
           value={decimal(strategy.total_pnl)}
           tone={signTone(strategy.total_pnl)}
           size="lg"
         />
         <Stat
-          label="网格利润（估）"
+          label="网格利润"
           value={decimal(strategy.grid_realized_profit)}
           tone={signTone(strategy.grid_realized_profit)}
           size="lg"
@@ -352,7 +352,7 @@ function Readings({ strategy, showExpected }: { strategy: StrategyDetail; showEx
         {/* 只有失效减仓或市价平仓成交过才有：没有时不占位置。 */}
         {strategy.reduction_realized_profit === null ? null : (
           <Stat
-            label="减仓已实现（估）"
+            label="减仓已实现"
             value={decimal(strategy.reduction_realized_profit)}
             tone={signTone(strategy.reduction_realized_profit)}
             size="lg"
@@ -391,7 +391,7 @@ function Readings({ strategy, showExpected }: { strategy: StrategyDetail; showEx
             </span>
           )}
         </Fact>
-        {/* 利润是按计划价的估算，比例只用来看资金费吃掉了多少利润（第 7.6 节）。 */}
+        {/* 比例用来看资金费吃掉了多少网格利润（第 7.6 节）。 */}
         <Fact label="资金费 / 网格利润">
           {strategy.funding_share === null ? '—' : percent(strategy.funding_share)}
         </Fact>

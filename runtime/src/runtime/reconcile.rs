@@ -257,6 +257,7 @@ impl Runtime {
                 quantity: fill.quantity,
                 cumulative_quantity: fill.cumulative_quantity,
                 filled_at: fill.filled_at,
+                fee: fill.fee,
             })?;
 
             let order = &mut orders[index];

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use poise_strategy::instrument::Instrument;
 use poise_strategy::order::{ClientOrderId, OrderStatus, Side};
-use poise_strategy::units::{Position, Price, Quantity};
+use poise_strategy::units::{Notional, Position, Price, Quantity};
 use serde::{Deserialize, Serialize};
 
 /// 下单请求。客户端订单 ID 由 runtime 生成并先写入数据库。
@@ -80,6 +80,8 @@ pub struct ExchangeFill {
     /// 该订单的累计成交量。
     pub cumulative_quantity: Quantity,
     pub filled_at: DateTime<Utc>,
+    /// 这笔成交实际付的手续费（负数是返佣）；交易所没给时是 `None`，用的地方按费率估算。
+    pub fee: Option<Notional>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
