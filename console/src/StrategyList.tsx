@@ -8,6 +8,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { KindBadge, Pill, StatusBadge } from '@/components/badges'
 import { CloseDialog } from '@/components/close-dialog'
 import { Callout, PageHeader, SectionTitle } from '@/components/layout'
+import { Private, usePrivacy } from '@/components/privacy'
 import { RangeBar } from '@/components/range-bar'
 import { Stat, positionTone } from '@/components/stat'
 import { Button } from '@/components/ui/button'
@@ -207,7 +208,7 @@ function StrategyCard({ strategy, onOpen }: { strategy: StrategySummary; onOpen:
       </header>
       <RangeBar config={strategy.config} mark={strategy.market_price} cells={strategy.cells} />
       <div className="grid grid-cols-3 gap-3">
-        <Stat label="净仓位" value={decimal(strategy.position)} tone={positionTone(strategy.position)} />
+        <Stat label="净仓位" value={<Private>{decimal(strategy.position)}</Private>} tone={positionTone(strategy.position)} />
         <Stat label="在场挂单" value={strategy.working_orders} />
         <Stat label="参数版本" value={`v${strategy.config_version}`} tone="muted" />
       </div>
@@ -231,13 +232,14 @@ function StrategyCard({ strategy, onOpen }: { strategy: StrategySummary; onOpen:
 }
 
 function DraftRow({ draft, onOpen }: { draft: StoredDraft; onOpen: () => void }) {
+  const { hidden } = usePrivacy()
   return (
     <div className="flex items-center gap-3 border-b border-border bg-card px-4 py-3 last:border-b-0">
       <span className="w-20 shrink-0 font-heading text-sm font-semibold">{draft.config.instrument}</span>
       <KindBadge config={draft.config} />
       <Pill tone="info">草稿</Pill>
-      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={configSummary(draft.config)}>
-        {configSummary(draft.config)}
+      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={configSummary(draft.config, hidden)}>
+        {configSummary(draft.config, hidden)}
       </span>
       <span className="hidden shrink-0 text-[11px] text-muted-foreground num sm:inline">
         {timestamp(draft.updated_at)}
@@ -267,7 +269,7 @@ function HeldRow({
       <span className="w-20 shrink-0 font-heading text-sm font-semibold">{strategy.instrument}</span>
       <StatusBadge status={strategy.status} />
       <span className={cn('num text-sm font-medium', positionTone(held.position) === 'short' ? 'text-short' : 'text-long')}>
-        {decimal(held.position)}
+        <Private>{decimal(held.position)}</Private>
       </span>
       <span className="min-w-0 flex-1 text-[11px] text-muted-foreground num" title="仓位读数时刻">
         {timestamp(held.read_at)}
@@ -290,6 +292,7 @@ function HeldRow({
 }
 
 function ArchivedRow({ strategy, onOpen }: { strategy: StrategySummary; onOpen: () => void }) {
+  const { hidden } = usePrivacy()
   return (
     <div className="flex items-center gap-3 border-b border-border bg-card/60 px-4 py-2.5 last:border-b-0">
       <span className="w-20 shrink-0 font-heading text-sm font-semibold text-muted-foreground">
@@ -297,8 +300,8 @@ function ArchivedRow({ strategy, onOpen }: { strategy: StrategySummary; onOpen: 
       </span>
       <KindBadge config={strategy.config} />
       <StatusBadge status={strategy.status} />
-      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={configSummary(strategy.config)}>
-        {configSummary(strategy.config)}
+      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={configSummary(strategy.config, hidden)}>
+        {configSummary(strategy.config, hidden)}
       </span>
       <span className="hidden shrink-0 text-[11px] text-muted-foreground num sm:inline">
         {timestamp(strategy.updated_at)}

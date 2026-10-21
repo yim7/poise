@@ -10,6 +10,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { KindBadge, Pill, StatusBadge } from '@/components/badges'
 import { Callout } from '@/components/layout'
 import { CloseDialog } from '@/components/close-dialog'
+import { Private, PrivateText, usePrivacy } from '@/components/privacy'
 import { RangeBar } from '@/components/range-bar'
 import { Stat, type StatTone, positionTone } from '@/components/stat'
 import {
@@ -284,6 +285,7 @@ function Group({ title, children }: { title: string; children: React.ReactNode }
  */
 function ParamsSection({ strategy, strategyId }: { strategy: StrategyDetail; strategyId: string }) {
   const [open, setOpen] = useState(false)
+  const { hidden } = usePrivacy()
   const summary = strategy.summary
   return (
     <section aria-label="参数" className="flex flex-col gap-3 rounded-lg ring-1 ring-border/60 px-4 py-3">
@@ -291,7 +293,7 @@ function ParamsSection({ strategy, strategyId }: { strategy: StrategyDetail; str
         <div className="flex min-w-0 items-baseline gap-3 text-xs">
           <span className="eyebrow shrink-0">参数</span>
           <span className="num shrink-0 text-muted-foreground">v{summary.config_version}</span>
-          <span className="truncate text-muted-foreground">{configSummary(summary.config)}</span>
+          <span className="truncate text-muted-foreground">{configSummary(summary.config, hidden)}</span>
         </div>
         <Button variant="ghost" size="sm" aria-expanded={open} onClick={() => setOpen(!open)}>
           {open ? '收起' : '展开'}
@@ -360,14 +362,14 @@ function Readings({ strategy, showExpected }: { strategy: StrategyDetail; showEx
         <Stat label="标记价" value={decimal(strategy.market_price)} tone="signal" size="lg" />
         <Stat
           label="交易所仓位"
-          value={decimal(strategy.position)}
+          value={<Private>{decimal(strategy.position)}</Private>}
           tone={positionTone(strategy.position)}
           size="lg"
           // 和应有持仓一致时不写：只有对不上才值得看。
           hint={
             mismatch ? (
               <span className="text-warn">
-                应有持仓 <span className="num">{decimal(strategy.expected_position)}</span>
+                应有持仓 <span className="num"><Private>{decimal(strategy.expected_position)}</Private></span>
               </span>
             ) : undefined
           }
@@ -387,19 +389,19 @@ function Readings({ strategy, showExpected }: { strategy: StrategyDetail; showEx
         />
         <Stat
           label="浮动盈亏"
-          value={decimal(strategy.unrealized_pnl)}
+          value={<Private>{decimal(strategy.unrealized_pnl)}</Private>}
           tone={signTone(strategy.unrealized_pnl)}
           size="lg"
         />
         <Stat
           label="合计"
-          value={decimal(strategy.total_pnl)}
+          value={<Private>{decimal(strategy.total_pnl)}</Private>}
           tone={signTone(strategy.total_pnl)}
           size="lg"
         />
         <Stat
           label="网格利润"
-          value={decimal(strategy.grid_realized_profit)}
+          value={<Private>{decimal(strategy.grid_realized_profit)}</Private>}
           tone={signTone(strategy.grid_realized_profit)}
           size="lg"
         />
@@ -407,14 +409,14 @@ function Readings({ strategy, showExpected }: { strategy: StrategyDetail; showEx
         {strategy.reduction_realized_profit === null ? null : (
           <Stat
             label="减仓已实现"
-            value={decimal(strategy.reduction_realized_profit)}
+            value={<Private>{decimal(strategy.reduction_realized_profit)}</Private>}
             tone={signTone(strategy.reduction_realized_profit)}
             size="lg"
           />
         )}
         <Stat
           label="累计资金费"
-          value={strategy.funding_synced_through === null ? '未同步' : decimal(strategy.funding_total)}
+          value={strategy.funding_synced_through === null ? '未同步' : <Private>{decimal(strategy.funding_total)}</Private>}
           tone={strategy.funding_synced_through === null ? 'muted' : signTone(strategy.funding_total)}
           size="lg"
           hint={
@@ -429,7 +431,7 @@ function Readings({ strategy, showExpected }: { strategy: StrategyDetail; showEx
           tone={strategy.margin_ratio === null ? 'muted' : 'default'}
           size="lg"
         />
-        <Stat label="可用 USDC" value={decimal(strategy.available_collateral)} size="lg" />
+        <Stat label="可用 USDC" value={<Private>{decimal(strategy.available_collateral)}</Private>} size="lg" />
       </div>
 
       <RangeBar
@@ -514,15 +516,21 @@ function WhatsHappening({
             </ul>
           )}
           {/* 运行中的说明：结果未知订单缺什么、保证金率、资金费率、操作次数的提醒。 */}
-          {strategy.note === null ? null : <Callout tone="warn">{strategy.note}</Callout>}
+          {strategy.note === null ? null : (
+            <Callout tone="warn">
+              <PrivateText>{strategy.note}</PrivateText>
+            </Callout>
+          )}
         </>
       ) : settling ? (
         <Callout tone={status === 'invalidating' ? 'danger' : 'warn'}>
-          {strategy.note ?? `${statusLabel(status)}：撤单、对账中，不下新单。`}
+          <PrivateText>{strategy.note ?? `${statusLabel(status)}：撤单、对账中，不下新单。`}</PrivateText>
         </Callout>
       ) : (
         // 已暂停的说明里有暂停原因和资金费提醒，已失效的说明里有没减掉的尾量，都要让用户看到。
-        <Callout tone={status === 'invalidated' ? 'danger' : 'info'}>{strategy.note}</Callout>
+        <Callout tone={status === 'invalidated' ? 'danger' : 'info'}>
+          {strategy.note === null ? null : <PrivateText>{strategy.note}</PrivateText>}
+        </Callout>
       )}
     </section>
   )

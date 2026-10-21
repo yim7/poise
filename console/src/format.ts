@@ -2,6 +2,7 @@
 //
 // 小数是服务端算好的定点数，这里只做显示：不加、不减、不四舍五入成另一个数量。
 
+import { MASK } from '@/components/privacy'
 import type { Direction, Invalidation, SideConfig, StrategyConfig, ThrottleInterval } from './types'
 
 /** 原样显示服务端的定点小数。 */
@@ -125,8 +126,9 @@ export function parseInvalidation(
   }
 }
 
-/** 一侧参数的摘要。 */
-export function sideSummary(side: SideConfig): string {
+/** 一侧参数的摘要。`hideAmounts` 时遮住持仓上限和失效剩余数量（见 `components/privacy`）。 */
+export function sideSummary(side: SideConfig, hideAmounts = false): string {
+  const amount = (value: string) => (hideAmounts ? MASK : value)
   const core =
     side.batch_count === null || Number(side.core_ratio) === 0
       ? '无主仓'
@@ -134,16 +136,16 @@ export function sideSummary(side: SideConfig): string {
   const invalidation =
     side.invalidation === null
       ? ''
-      : `，失效价 ${side.invalidation.price}（剩 ${side.invalidation.remaining}，滑点 ≤${percent(side.invalidation.max_slippage)}）`
-  return `${side.price_low}–${side.price_high}，间距 ${side.grid_spacing}，价差 ${side.grid_spread}，上限 ${side.max_position}，${core}${invalidation}`
+      : `，失效价 ${side.invalidation.price}（剩 ${amount(side.invalidation.remaining)}，滑点 ≤${percent(side.invalidation.max_slippage)}）`
+  return `${side.price_low}–${side.price_high}，间距 ${side.grid_spacing}，价差 ${side.grid_spread}，上限 ${amount(side.max_position)}，${core}${invalidation}`
 }
 
 /** 参数摘要：列表和版本记录里用一句话说清两侧的关键参数。 */
-export function configSummary(config: StrategyConfig): string {
+export function configSummary(config: StrategyConfig, hideAmounts = false): string {
   const sides: [Direction, SideConfig][] = []
   if (config.long !== null) sides.push(['long', config.long])
   if (config.short !== null) sides.push(['short', config.short])
   return sides
-    .map(([direction, side]) => `${direction === 'long' ? '做多' : '做空'} ${sideSummary(side)}`)
+    .map(([direction, side]) => `${direction === 'long' ? '做多' : '做空'} ${sideSummary(side, hideAmounts)}`)
     .join('；')
 }

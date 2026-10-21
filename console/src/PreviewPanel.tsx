@@ -4,6 +4,7 @@
 // 先放能不能启、风险多大，再放会发生什么，最后是划分的明细。
 
 import { Callout } from '@/components/layout'
+import { Private, PrivateText } from '@/components/privacy'
 import { RangeBar } from '@/components/range-bar'
 import { Stat, positionTone } from '@/components/stat'
 import { decimal } from './format'
@@ -31,12 +32,12 @@ export function PreviewPanel({ preview, config }: { preview: DraftPreview; confi
         <Callout tone="ok" title="校验通过" />
       ) : (
         <Callout tone="danger" title="校验不通过">
-          {preview.validation.reason}
+          {preview.validation.reason === null ? null : <PrivateText>{preview.validation.reason}</PrivateText>}
         </Callout>
       )}
       {preview.warnings.map((warning) => (
         <Callout key={warning} tone="warn">
-          {warning}
+          <PrivateText>{warning}</PrivateText>
         </Callout>
       ))}
 
@@ -45,11 +46,11 @@ export function PreviewPanel({ preview, config }: { preview: DraftPreview; confi
           <Stat label="标记价" value={decimal(preview.market_price)} tone="signal" size="lg" />
           <Stat
             label="交易所仓位"
-            value={decimal(preview.position)}
+            value={<Private>{decimal(preview.position)}</Private>}
             tone={positionTone(preview.position)}
             size="lg"
           />
-          <Stat label="可用 USDC" value={decimal(preview.available_collateral)} size="lg" />
+          <Stat label="可用 USDC" value={<Private>{decimal(preview.available_collateral)}</Private>} size="lg" />
           <Stat
             label="启动后立即成交"
             value={valid ? `${preview.immediate_fills.length} 张` : '—'}

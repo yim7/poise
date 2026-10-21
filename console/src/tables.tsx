@@ -4,6 +4,7 @@
 // 不是交易数量。
 
 import { Pill, type Tone } from '@/components/badges'
+import { Private, usePrivacy } from '@/components/privacy'
 import { cn } from '@/lib/utils'
 import {
   CELL_STATUS_LABELS,
@@ -128,11 +129,11 @@ function SideText({ side }: { side: Side }) {
 
 /** 数量：有成交时写成「已成交 / 总量」。 */
 function FilledQuantity({ filled, quantity }: { filled: string; quantity: string }) {
-  if (Number(filled) === 0) return <>{decimal(quantity)}</>
+  if (Number(filled) === 0) return <Private>{decimal(quantity)}</Private>
   return (
     <>
-      {decimal(filled)}
-      <span className="text-muted-foreground"> / {decimal(quantity)}</span>
+      <Private>{decimal(filled)}</Private>
+      <span className="text-muted-foreground"> / <Private>{decimal(quantity)}</Private></span>
     </>
   )
 }
@@ -247,11 +248,11 @@ function LadderRow({
         </td>
         <td className="num font-medium">{decimal(cell.entry_price)}</td>
         <td className="num text-muted-foreground">{decimal(cell.exit_price)}</td>
-        <td className="num">{decimal(cell.quantity)}</td>
+        <td className="num"><Private>{decimal(cell.quantity)}</Private></td>
         <td className="num">
           <span className="inline-flex items-center gap-2">
             <Meter part={cell.held} whole={cell.quantity} tone={cell.direction} />
-            <span className={cn(!held && 'text-muted-foreground')}>{decimal(cell.held)}</span>
+            <span className={cn(!held && 'text-muted-foreground')}><Private>{decimal(cell.held)}</Private></span>
           </span>
         </td>
         <td className="num">
@@ -264,8 +265,8 @@ function LadderRow({
         {statusColumn ? <td>{status === undefined ? null : <Pill tone="muted">{status}</Pill>}</td> : null}
         {profit ? (
           <td className="num text-muted-foreground">
-            {decimal(cell.profit_maker)}
-            <span className="text-[10px]"> / {decimal(cell.profit_taker)}</span>
+            <Private>{decimal(cell.profit_maker)}</Private>
+            <span className="text-[10px]"> / <Private>{decimal(cell.profit_taker)}</Private></span>
           </td>
         ) : null}
       </tr>
@@ -312,11 +313,11 @@ export function BatchTable({ batches }: { batches: BatchSummary[] }) {
               <td className="num">
                 <span className="inline-flex items-center gap-2">
                   <Meter part={batch.core_filled} whole={batch.core_quantity} tone="signal" />
-                  {decimal(batch.core_filled)}
-                  <span className="text-muted-foreground"> / {decimal(batch.core_quantity)}</span>
+                  <Private>{decimal(batch.core_filled)}</Private>
+                  <span className="text-muted-foreground"> / <Private>{decimal(batch.core_quantity)}</Private></span>
                 </span>
               </td>
-              <td className="num text-muted-foreground">{decimal(batch.grid_quantity)}</td>
+              <td className="num text-muted-foreground"><Private>{decimal(batch.grid_quantity)}</Private></td>
               <td className="num">
                 {batch.enabled_cell_count}
                 <span className="text-muted-foreground"> / {batch.cell_count}</span>
@@ -329,7 +330,7 @@ export function BatchTable({ batches }: { batches: BatchSummary[] }) {
                 {Number(batch.core_shortfall) === 0 && Number(batch.grid_shortfall) === 0 ? (
                   <span className="text-muted-foreground">—</span>
                 ) : (
-                  <span className="text-warn">{`${decimal(batch.core_shortfall)} / ${decimal(batch.grid_shortfall)}`}</span>
+                  <span className="text-warn"><Private>{`${decimal(batch.core_shortfall)} / ${decimal(batch.grid_shortfall)}`}</Private></span>
                 )}
               </td>
             </tr>
@@ -429,7 +430,7 @@ export function ImmediateFillTable({ fills }: { fills: ImmediateFill[] }) {
               <SideText side={orderSide(unitDirection(fill.unit), fill.purpose)} />
             </td>
             <td className="num font-medium">{decimal(fill.limit_price)}</td>
-            <td className="num">{decimal(fill.quantity)}</td>
+            <td className="num"><Private>{decimal(fill.quantity)}</Private></td>
           </tr>
         ))}
       </tbody>
@@ -466,7 +467,7 @@ export function PlannedOrderTable({ orders }: { orders: OrderIntent[] }) {
               <SideText side={order.side} />
             </td>
             <td className="num font-medium">{decimal(order.limit_price)}</td>
-            <td className="num">{decimal(order.quantity)}</td>
+            <td className="num"><Private>{decimal(order.quantity)}</Private></td>
           </tr>
         ))}
       </tbody>
@@ -539,7 +540,7 @@ export function StressTable({ sides }: { sides: SideStress[] }) {
               <DirectionTag direction={side.direction} />
             </td>
             <td className="num">{decimal(side.adverse_price)}</td>
-            <td className="num">{decimal(side.position)}</td>
+            <td className="num"><Private>{decimal(side.position)}</Private></td>
             <td className="num">{decimal(side.average_entry)}</td>
             <td className="num font-medium">{percent(side.margin_ratio)}</td>
             <td className={cn('num', side.liquidation.kind === 'at' && 'text-destructive')}>
@@ -565,6 +566,7 @@ function throttleText(config: StrategyConfig): string {
 }
 
 export function ConfigVersionTable({ versions }: { versions: StoredConfigVersion[] }) {
+  const { hidden } = usePrivacy()
   return (
     <Table>
       <caption className="sr-only">参数版本</caption>
@@ -582,7 +584,7 @@ export function ConfigVersionTable({ versions }: { versions: StoredConfigVersion
             <td className="num">v{version.version}</td>
             <td className="num text-muted-foreground">{timestamp(version.recorded_at)}</td>
             <td className="text-muted-foreground">{throttleText(version.config)}</td>
-            <td className="!text-left !whitespace-normal text-muted-foreground">{configSummary(version.config)}</td>
+            <td className="!text-left !whitespace-normal text-muted-foreground">{configSummary(version.config, hidden)}</td>
           </tr>
         ))}
       </tbody>

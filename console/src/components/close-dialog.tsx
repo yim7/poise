@@ -12,6 +12,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import { Private } from '@/components/privacy'
 import { decimal } from '@/format'
 import { cn } from '@/lib/utils'
 
@@ -60,7 +61,7 @@ export function CloseDialog({
           <div className="flex flex-col gap-1">
             <dt className="eyebrow">净仓位</dt>
             <dd className={cn('num text-base font-medium', long ? 'text-long' : 'text-short')}>
-              {decimal(position)}
+              <Private>{decimal(position)}</Private>
             </dd>
           </div>
           <div className="flex flex-col gap-1">

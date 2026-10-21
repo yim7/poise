@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
+import { PrivacyProvider } from '@/components/privacy'
 import { App } from './App'
 import './styles.css'
 
@@ -13,7 +14,9 @@ const client = new QueryClient({
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={client}>
-      <App />
+      <PrivacyProvider>
+        <App />
+      </PrivacyProvider>
     </QueryClientProvider>
   </StrictMode>,
 )
