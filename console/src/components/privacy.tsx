@@ -5,6 +5,8 @@
 
 import { createContext, useContext, useState } from 'react'
 
+import { shortAddress } from '@/components/badges'
+
 const STORAGE_KEY = 'poise.hide-amounts'
 
 /** 遮住之后显示的字样。 */
@@ -86,5 +88,19 @@ function EyeIcon({ closed }: { closed: boolean }) {
       <circle cx="8" cy="8" r="2" />
       {closed ? <path d="M2.5 13.5 13.5 2.5" /> : null}
     </svg>
+  )
+}
+
+/**
+ * 账户地址：隐藏时整个不显示。Hyperliquid 的账户是公开的，拿到地址就能在浏览器上查到
+ * 全部余额和仓位——遮了金额却留着地址，等于没遮。
+ */
+export function AccountAddress({ address }: { address: string }) {
+  const { hidden } = usePrivacy()
+  if (hidden) return null
+  return (
+    <span className="hidden text-[11px] text-muted-foreground num sm:inline" title={address}>
+      {shortAddress(address)}
+    </span>
   )
 }

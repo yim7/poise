@@ -37,6 +37,7 @@ impl Instance {
                 startup.data_dir().display()
             )
         })?;
+        private_directory(startup.data_dir())?;
 
         let exchange = Arc::new(Hyperliquid::new(HyperliquidConfig {
             network: startup.network(),
@@ -119,6 +120,22 @@ impl Instance {
     }
 }
 
+/// 数据目录只给自己：库里有订单、成交和资金记录，同组的其他用户不该读到。
+///
+/// 每次加载都设一遍，已有的目录（以前按默认权限建的）也一起收紧。
+#[cfg(unix)]
+fn private_directory(directory: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("cannot restrict `{}` to its owner", directory.display()))
+}
+
+#[cfg(not(unix))]
+fn private_directory(_directory: &Path) -> Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -184,6 +201,21 @@ mod tests {
 
         assert_eq!(instance.startup().network().as_str(), "testnet");
         assert!(directory.path().join("data").is_dir());
+    }
+
+    /// 以前按默认权限建好的数据目录，加载时收紧成只有自己能进。
+    #[test]
+    fn restricts_the_data_directory_to_its_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        write_startup(directory.path(), "testnet");
+        let data = directory.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        Instance::load(directory.path()).unwrap();
+
+        let mode = std::fs::metadata(&data).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "data directory mode is {mode:o}");
     }
 
     #[test]

@@ -5,7 +5,7 @@ import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import { CloseDialog } from '@/components/close-dialog'
-import { MASK, PrivacyProvider, PrivacyToggle, maskNumbers } from '@/components/privacy'
+import { AccountAddress, MASK, PrivacyProvider, PrivacyToggle, maskNumbers } from '@/components/privacy'
 import { configSummary } from './format'
 import { PreviewPanel } from './PreviewPanel'
 import { StrategyDetailView } from './StrategyDetail'
@@ -26,6 +26,17 @@ function withToggle(ui: React.ReactNode) {
 afterEach(() => window.localStorage.clear())
 
 describe('隐藏金额', () => {
+  it('顶栏的账户地址整个不显示：公开账户凭地址就能查到余额', async () => {
+    const address = '0x7e5f4552091a69125d5dfcb7b8c2659029395bdf'
+    const { container } = withToggle(<AccountAddress address={address} />)
+    expect(screen.getByTitle(address)).toHaveTextContent('0x7e5f…5bdf')
+
+    await userEvent.click(screen.getByRole('button', { name: '隐藏金额' }))
+
+    expect(screen.queryByTitle(address)).not.toBeInTheDocument()
+    expect(container).not.toHaveTextContent('7e5f')
+  })
+
   it('运行详情：遮住仓位、盈亏、可用资金和表里的数量，价格照常显示', async () => {
     fakeServer({ 'GET /api/strategies/s-1': { body: detail() } })
     withToggle(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)

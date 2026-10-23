@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -29,7 +29,9 @@ use crate::store::{DraftId, StoreError, StoredDraft, StrategyId, StrategyStatus}
 
 /// 只有接口，没有网页：测试用这个。
 pub fn router(runtime: Arc<Runtime>) -> Router {
-    Router::new().nest("/api", api_routes().with_state(runtime))
+    Router::new()
+        .nest("/api", api_routes().with_state(runtime))
+        .layer(middleware::from_fn(deny_framing))
 }
 
 /// 接口加网页控制台的静态文件。
@@ -41,6 +43,22 @@ pub fn router_with_web(runtime: Arc<Runtime>, web_root: PathBuf) -> Router {
     Router::new()
         .nest("/api", api_routes().with_state(runtime))
         .fallback_service(ServeDir::new(web_root).fallback(ServeFile::new(index)))
+        .layer(middleware::from_fn(deny_framing))
+}
+
+/// 不许别的页面把控制台嵌进 iframe。
+///
+/// 嵌进去的控制台和本机同源，发出的请求过得了 [`require_local_browser`]：别的网站盖一层
+/// 透明页面，就能骗用户点下「停止」「平仓」。
+async fn deny_framing(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    response
 }
 
 /// 网页用的接口路由，路径相对于 `/api`。

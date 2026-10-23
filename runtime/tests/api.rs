@@ -864,6 +864,26 @@ async fn the_console_serves_the_web_page_from_the_same_port() {
     );
 }
 
+/// 别的网站不能把控制台嵌进 iframe 骗用户点按钮：页面和接口都带禁止嵌入的响应头。
+#[tokio::test]
+async fn the_console_cannot_be_framed_by_other_pages() {
+    let console = console();
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("index.html"), "<!doctype html>控制台").unwrap();
+    let router = api::router_with_web(console.runtime.clone(), directory.path().to_path_buf());
+
+    for path in ["/", "/strategies/s-1", "/api/strategies"] {
+        let request = Request::builder().uri(path).body(Body::empty()).unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        let headers = response.headers();
+        assert_eq!(
+            headers["content-security-policy"], "frame-ancestors 'none'",
+            "{path}"
+        );
+        assert_eq!(headers["x-frame-options"], "DENY", "{path}");
+    }
+}
+
 /// 控制台没有登录，只认本机页面：浏览器带来的 `Host` 或 `Origin` 不是本机地址就回 403，
 /// 什么都不做。无请求体的 POST 是跨站「简单请求」，任何网页都能发；DNS 重绑定还能让
 /// `Host` 变成别人的域名。本机地址（带不带端口、`localhost`）照常；没带这些头的请求

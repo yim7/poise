@@ -4,8 +4,8 @@
 
 import { useQuery } from '@tanstack/react-query'
 
-import { NetworkBadge, shortAddress } from '@/components/badges'
-import { PrivacyToggle } from '@/components/privacy'
+import { NetworkBadge } from '@/components/badges'
+import { AccountAddress, PrivacyToggle } from '@/components/privacy'
 import { cn } from '@/lib/utils'
 import { AccountSettingsView } from './AccountSettings'
 import { DraftEditor } from './DraftEditor'
@@ -45,12 +45,7 @@ export function App() {
           <div className="ml-auto flex items-center gap-3">
             <PrivacyToggle />
             {instance.data?.account_address ? (
-              <span
-                className="hidden text-[11px] text-muted-foreground num sm:inline"
-                title={instance.data.account_address}
-              >
-                {shortAddress(instance.data.account_address)}
-              </span>
+              <AccountAddress address={instance.data.account_address} />
             ) : null}
             <NetworkBadge instance={instance.data} />
           </div>
