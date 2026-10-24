@@ -169,9 +169,12 @@ impl Strategy {
     /// - 结束：`F` 达到 `C` 时启用本批全部格子；剩余量按批次价不足最低下单金额时
     ///   提前结束，按四舍五入启用 `round(格子数 × F / C)` 格（第 4.2.3 节）。
     pub fn advance(&self, state: &mut StrategyState, working_orders: &[WorkingOrder]) -> bool {
-        self.sides.iter().fold(false, |changed, side| {
-            self.advance_side(state, side, working_orders) || changed
-        })
+        // 两侧都要推进，不能在第一侧有变化时就停下（`any` 会短路）。
+        let mut changed = false;
+        for side in &self.sides {
+            changed |= self.advance_side(state, side, working_orders);
+        }
+        changed
     }
 
     /// 推进一侧的批次。

@@ -90,9 +90,12 @@ impl Strategy {
     /// 纯计算：时间由调用方传入，成交时刻由 [`Strategy::apply_fill`] 记下来。
     /// 调用方在记账之后、规划之前调用它，新放行的单位这一步就会挂上单。
     pub fn advance_throttle(&self, state: &mut StrategyState, now: DateTime<Utc>) -> bool {
-        self.sides().iter().fold(false, |changed, side| {
-            advance_side_throttle(side, state, now) || changed
-        })
+        // 两侧都要推进，不能在第一侧有变化时就停下（`any` 会短路）。
+        let mut changed = false;
+        for side in self.sides() {
+            changed |= advance_side_throttle(side, state, now);
+        }
+        changed
     }
 
     /// 按 `now` 这一刻重建 `directions` 这几侧的放行进度，用于运行中加限速（第 4.1 节）。
