@@ -481,7 +481,7 @@ impl Store {
     /// 取走一次注入的写失败。
     fn take_injected_write_failure(&self) -> bool {
         self.injected_write_failures
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
                 (left > 0).then(|| left - 1)
             })
             .is_ok()
