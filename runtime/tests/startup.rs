@@ -180,6 +180,27 @@ fn reads_every_field_and_resolves_the_data_directory_next_to_the_file() {
     );
     assert_eq!(file.listen(), "127.0.0.1:8010");
     assert_eq!(file.path(), subdirectory.join("poise.toml"));
+    assert!(file.feishu_webhook().is_none());
+}
+
+/// 飞书机器人地址可选：读进来不回显，写错了在启动时就拒绝，报错里也不带地址。
+#[test]
+fn reads_an_optional_feishu_webhook_without_echoing_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = write_startup(directory.path(), KEY);
+    let base = std::fs::read_to_string(&path).unwrap();
+    let hook = "https://open.feishu.cn/open-apis/bot/v2/hook/secret-token-123";
+    std::fs::write(&path, format!("{base}feishu_webhook = \"{hook}\"\n")).unwrap();
+
+    let file = StartupFile::load(&path).unwrap();
+    assert_eq!(file.feishu_webhook().unwrap().expose(), hook);
+    assert!(!format!("{file:?}").contains("secret-token-123"));
+
+    let wrong = "https://example.com/hook/secret-token-123";
+    std::fs::write(&path, format!("{base}feishu_webhook = \"{wrong}\"\n")).unwrap();
+    let error = StartupFile::load(&path).unwrap_err();
+    assert!(matches!(error, StartupError::InvalidWebhook));
+    assert!(!error.to_string().contains("secret-token-123"));
 }
 
 #[test]

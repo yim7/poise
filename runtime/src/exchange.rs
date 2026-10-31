@@ -24,6 +24,23 @@ pub struct OrderRequest {
     pub expires_at: DateTime<Utc>,
 }
 
+/// 交易所侧的止损触发单（兜底单）：标记价越过触发价时交易所自己按市价减仓，poise
+/// 掉线时也会执行。只减仓。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopRequest {
+    pub instrument: Instrument,
+    pub client_order_id: ClientOrderId,
+    /// 减仓的方向：多仓卖、空仓买。
+    pub side: Side,
+    /// 标记价越过它时触发。
+    pub trigger_price: Price,
+    /// 触发后的市价单最差成交价。
+    pub limit_price: Price,
+    pub quantity: Quantity,
+    /// 超过这个时间戳的动作会被交易所拒绝。
+    pub expires_at: DateTime<Utc>,
+}
+
 /// 订单的有效期策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeInForce {
@@ -111,6 +128,10 @@ pub enum ExchangeError {
 #[async_trait]
 pub trait Exchange: Send + Sync {
     async fn place_order(&self, request: &OrderRequest) -> Result<OrderReceipt, ExchangeError>;
+
+    /// 挂一张交易所侧的止损触发单（[`StopRequest`]）。撤销和查询与普通订单一样按客户端
+    /// 订单 ID。
+    async fn place_stop(&self, request: &StopRequest) -> Result<OrderReceipt, ExchangeError>;
 
     async fn cancel_order(
         &self,

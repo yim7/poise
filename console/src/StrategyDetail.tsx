@@ -459,7 +459,21 @@ function Readings({ strategy, showExpected }: { strategy: StrategyDetail; showEx
           {strategy.funding_share === null ? '—' : percent(strategy.funding_share)}
         </Fact>
         {/* 全账户的计数：同一账户的所有策略共用每天 5 万次的上限，超过 80% 时说明里会提醒。 */}
-        <Fact label="今日操作次数">
+        {/* 设了失效价才有：poise 离线时交易所按它止损。仓位不超过 R 时不需要，显示「未挂」。 */}
+        {hasInvalidation(summary.config) || strategy.backstops.length > 0 ? (
+          <Fact label="兜底止损">
+            {strategy.backstops.length === 0
+              ? '未挂'
+              : strategy.backstops.map((backstop) => (
+                  <span key={backstop.direction} className="block">
+                    {`${backstop.direction === 'long' ? '多' : '空'} 触发 ${decimal(backstop.trigger_price)} · `}
+                    <Private>{decimal(backstop.quantity)}</Private>
+                    {backstop.confirmed ? '' : '（核对中）'}
+                  </span>
+                ))}
+          </Fact>
+        ) : null}
+                <Fact label="今日操作次数">
           {strategy.actions_today} / {DAILY_ACTION_LIMIT}
         </Fact>
         {/* 行情、仓位、可用资金都是后台取回来的读数，不是点开这一页时现取的：标上时刻。 */}
@@ -469,6 +483,10 @@ function Readings({ strategy, showExpected }: { strategy: StrategyDetail; showEx
       </dl>
     </section>
   )
+}
+
+function hasInvalidation(config: StrategyDetail['summary']['config']): boolean {
+  return [config.long, config.short].some((side) => side?.invalidation)
 }
 
 function Fact({ label, children }: { label: string; children: React.ReactNode }) {

@@ -12,6 +12,7 @@ pub mod api;
 pub mod clock;
 pub mod exchange;
 pub mod lock;
+pub mod notify;
 pub mod runtime;
 pub mod secret;
 pub mod serve;
@@ -25,9 +26,10 @@ pub use crate::account::{Account, AccountMode, ApiWallet};
 pub use crate::clock::{Clock, ManualClock, SystemClock};
 pub use crate::exchange::{
     Exchange, ExchangeError, ExchangeFill, ExchangeOrder, OrderLookup, OrderReceipt, OrderRequest,
-    TimeInForce,
+    StopRequest, TimeInForce,
 };
 pub use crate::lock::{InstanceLock, LockError};
+pub use crate::notify::{NoNotifier, Notice, Notifier, RecordingNotifier};
 pub use crate::runtime::{
     DAILY_ACTION_LIMIT, DraftPreview, HELD_POSITION_MAX_AGE, HeldPosition, InstanceInfo,
     ResumeOutcome, Runtime, RuntimeError, RuntimeOptions, StepReport, StrategyDetail,
@@ -38,9 +40,10 @@ pub use crate::serve::{ServeError, ServeOptions, Server};
 pub use crate::simulated::SimulatedExchange;
 pub use crate::simulated_account::SimulatedAccount;
 pub use crate::startup::{
-    Network, StartupCheck, StartupError, StartupFile, StartupWarning, validate as validate_startup,
+    Network, StartupCheck, StartupError, StartupFile, StartupWarning, Webhook,
+    validate as validate_startup,
 };
 pub use crate::store::{
-    DraftId, Store, StoreError, StoredConfigVersion, StoredDraft, StoredFill, StoredOrder,
-    StoredStrategy, StrategyId, StrategyStatus, ViewSnapshot,
+    DraftId, Store, StoreError, StoredBackstop, StoredConfigVersion, StoredDraft, StoredFill,
+    StoredOrder, StoredStrategy, StrategyId, StrategyStatus, ViewSnapshot,
 };

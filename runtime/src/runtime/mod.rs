@@ -46,13 +46,16 @@ use serde::{Deserialize, Serialize};
 use crate::account::{Account, FundingRate};
 use crate::clock::{Clock, SystemClock};
 use crate::exchange::{Exchange, ExchangeError, ExchangeOrder};
+use crate::notify::{NoNotifier, Notice, Notifier};
 use crate::settings::SettingsError;
 use crate::store::{
     DraftId, Store, StoreError, StoredConfigVersion, StoredFill, StoredOrder, StrategyId,
     StrategyStatus,
 };
 
+mod backstop;
 mod cancel_only;
+mod churn;
 mod funds;
 mod held;
 mod invalidation;
@@ -62,6 +65,7 @@ mod step;
 mod unknown;
 mod view;
 
+pub use backstop::BackstopView;
 pub use held::{HELD_POSITION_MAX_AGE, HeldPosition};
 
 /// 运行参数。
@@ -480,6 +484,8 @@ pub struct StrategyDetail {
     pub total_pnl: Notional,
     /// 保本价：价格到这里时合计正好为零；没有净持仓、或者算出来不是正数时是 `None`。
     pub breakeven_price: Option<Price>,
+    /// 交易所上挂着的兜底止损单（`backstop`）。
+    pub backstops: Vec<BackstopView>,
 }
 
 /// 资金费率隔多久重读一次。
@@ -518,6 +524,22 @@ pub struct Runtime {
     funding_rates: Mutex<HashMap<Instrument, (FundingRate, DateTime<Utc>)>>,
     /// 已归档标的上仍有的仓位（第 7.7 节第 8 条）。
     held: Mutex<HashMap<Instrument, held::HeldReading>>,
+    /// 对外提醒的出口；缺省什么都不送。
+    notifier: Arc<dyn Notifier>,
+    /// 上一次读到的账户保证金率落在哪一档：只在换档时提醒。
+    margin_level: Mutex<Option<MarginLevel>>,
+    /// 各策略最近一小时里没成交就撤掉的挂单（见 `churn`）。
+    churn: Mutex<HashMap<StrategyId, churn::Churn>>,
+    /// 各策略兜底单最近一次挂不上的原因（见 `backstop`）。
+    backstop_problems: Mutex<HashMap<StrategyId, String>>,
+}
+
+/// 账户保证金率落在哪一档（第 7.4 节）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum MarginLevel {
+    Normal,
+    AboveAlert,
+    AboveStop,
 }
 
 /// 一次驱动期间持有的驱动权，离开作用域就释放。
@@ -557,7 +579,37 @@ impl Runtime {
             funds: funds::Funds::default(),
             funding_rates: Mutex::new(HashMap::new()),
             held: Mutex::new(HashMap::new()),
+            notifier: Arc::new(NoNotifier),
+            margin_level: Mutex::new(None),
+            churn: Mutex::new(HashMap::new()),
+            backstop_problems: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 换上对外提醒的出口。
+    pub fn with_notifier(mut self, notifier: Arc<dyn Notifier>) -> Self {
+        self.notifier = notifier;
+        self
+    }
+
+    /// 送一条提醒（见 [`crate::notify`]）。
+    pub fn notify(&self, notice: Notice) {
+        tracing::info!(title = %notice.title, "notice");
+        self.notifier.notify(notice);
+    }
+
+    /// 送一条关于某个策略的提醒：标题以标的开头，去重按策略和事件分开。
+    fn notify_strategy(&self, strategy_id: &StrategyId, event: &str, title: &str, body: String) {
+        let instrument = self
+            .store
+            .load_strategy(strategy_id)
+            .map(|stored| stored.instrument.to_string())
+            .unwrap_or_else(|_| strategy_id.to_string());
+        self.notify(Notice::new(
+            format!("{strategy_id}:{event}"),
+            format!("{instrument} {title}"),
+            body,
+        ));
     }
 
     /// 当前时间。

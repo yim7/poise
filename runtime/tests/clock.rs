@@ -72,6 +72,13 @@ impl Exchange for SlowExchange {
         self.inner.place_order(request).await
     }
 
+    async fn place_stop(
+        &self,
+        request: &poise_runtime::StopRequest,
+    ) -> Result<OrderReceipt, ExchangeError> {
+        self.inner.place_stop(request).await
+    }
+
     async fn cancel_order(
         &self,
         instrument: &Instrument,

@@ -8,6 +8,7 @@
 //! api_wallet_private_key = "0x…"
 //! data_dir = "data"
 //! listen = "127.0.0.1:8010"
+//! feishu_webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/…"   # 可选：提醒推到飞书
 //! ```
 //!
 //!
@@ -56,7 +57,38 @@ pub struct StartupFile {
     api_wallet_private_key: SecretKey,
     data_dir: PathBuf,
     listen: String,
+    feishu_webhook: Option<Webhook>,
     path: PathBuf,
+}
+
+/// 飞书机器人的地址。地址本身就是凭据（知道它就能往群里发消息），`Debug` 不显示内容。
+#[derive(Clone)]
+pub struct Webhook(String);
+
+impl Webhook {
+    /// 只接受飞书和 Lark 的自定义机器人地址：写错了在启动时就报出来，而不是等到第一次提醒。
+    fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        let known = [
+            "https://open.feishu.cn/open-apis/bot/v2/hook/",
+            "https://open.larksuite.com/open-apis/bot/v2/hook/",
+        ];
+        known
+            .iter()
+            .any(|prefix| value.len() > prefix.len() && value.starts_with(prefix))
+            .then(|| Self(value.to_string()))
+    }
+
+    /// 地址原文：只给发送的那一处用。
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Webhook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Webhook(<redacted>)")
+    }
 }
 
 impl StartupFile {
@@ -97,6 +129,10 @@ impl StartupFile {
             _ => data_dir,
         };
         let listen = required(raw.listen.as_deref(), "listen")?.to_string();
+        let feishu_webhook = match raw.feishu_webhook.as_deref() {
+            None => None,
+            Some(value) => Some(Webhook::parse(value).ok_or(StartupError::InvalidWebhook)?),
+        };
 
         Ok(Self {
             network,
@@ -104,6 +140,7 @@ impl StartupFile {
             api_wallet_private_key,
             data_dir,
             listen,
+            feishu_webhook,
             path,
         })
     }
@@ -160,6 +197,11 @@ impl StartupFile {
 
     pub fn listen(&self) -> &str {
         &self.listen
+    }
+
+    /// 飞书机器人地址；没写就不推提醒。
+    pub fn feishu_webhook(&self) -> Option<&Webhook> {
+        self.feishu_webhook.as_ref()
     }
 }
 
@@ -313,6 +355,8 @@ struct RawStartupFile {
     data_dir: Option<String>,
     #[serde(default)]
     listen: Option<String>,
+    #[serde(default)]
+    feishu_webhook: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -341,6 +385,11 @@ pub enum StartupError {
         field: &'static str,
         source: SecretError,
     },
+    /// 不回显地址：它本身就是凭据。
+    #[error(
+        "`feishu_webhook` in the startup file is not a Feishu bot address (https://open.feishu.cn/open-apis/bot/v2/hook/…)"
+    )]
+    InvalidWebhook,
     #[error("unknown network `{value}`; expected `testnet` or `mainnet`")]
     UnknownNetwork { value: String },
     #[error(

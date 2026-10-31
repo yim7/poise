@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use poise_runtime::{
     Exchange, ExchangeError, ExchangeFill, ExchangeOrder, OrderLookup, OrderReceipt, OrderRequest,
-    TimeInForce,
+    StopRequest, TimeInForce,
 };
 use poise_strategy::instrument::Instrument;
 use poise_strategy::order::{ClientOrderId, OrderStatus, Side};
@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 use crate::actions::{
     CancelByCloid, CancelByCloidAction, ExchangeAction, LimitOrderType, OrderAction, OrderType,
+    TriggerOrderType,
 };
 use crate::client::{Hyperliquid, with_dex};
 use crate::ids::{client_order_id_of, cloid_of};
@@ -70,6 +71,38 @@ impl Exchange for Hyperliquid {
             };
         }
         Ok(receipt)
+    }
+
+    async fn place_stop(&self, request: &StopRequest) -> Result<OrderReceipt, ExchangeError> {
+        let asset = self.asset(&request.instrument).await?;
+        let cloid = cloid_of(&request.client_order_id).map_err(rejected)?;
+        asset.check_price(request.trigger_price).map_err(rejected)?;
+        asset.check_price(request.limit_price).map_err(rejected)?;
+        asset.check_quantity(request.quantity).map_err(rejected)?;
+
+        let action = ExchangeAction::Order(OrderAction {
+            orders: vec![crate::actions::OrderRequest {
+                asset: asset.index,
+                is_buy: request.side == poise_strategy::order::Side::Buy,
+                limit_px: request.limit_price.to_string(),
+                sz: request.quantity.to_string(),
+                reduce_only: true,
+                order_type: OrderType::Trigger(TriggerOrderType {
+                    is_market: true,
+                    trigger_px: request.trigger_price.to_string(),
+                    tpsl: "sl",
+                }),
+                cloid,
+            }],
+            grouping: "na",
+        });
+        let response = self
+            .exchange(
+                &action,
+                Some(request.expires_at.timestamp_millis().max(0) as u64),
+            )
+            .await?;
+        order_receipt(&response)
     }
 
     async fn cancel_order(

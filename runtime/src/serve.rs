@@ -14,8 +14,11 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::time::MissedTickBehavior;
 
+use poise_strategy::planning::WaitReason;
+
 use crate::api;
 use crate::lock::InstanceLock;
+use crate::notify::Notice;
 use crate::runtime::{FUNDING_RATE_REFRESH, Runtime, RuntimeError};
 use crate::store::StrategyId;
 
@@ -202,6 +205,7 @@ async fn hold_back(runtime: &Runtime, strategy_id: &StrategyId) -> Result<(), Ru
 /// `pending` 是启动时没能落成「恢复中」的策略。它们还是「运行中」，身上可能带着重启前
 /// 挂出去的单：每一轮先重试落状态，落成之前绝不驱动——驱动就是在旧单之上再挂一遍。
 async fn drive(runtime: Arc<Runtime>, interval: Duration, mut pending: Vec<StrategyId>) {
+    let mut troubles = Troubles::default();
     let mut ticker = tokio::time::interval(interval);
     // 一轮花的时间超过间隔时不连着补跑：补跑只会把积压的行情一次性用掉。
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -222,9 +226,13 @@ async fn drive(runtime: Arc<Runtime>, interval: Duration, mut pending: Vec<Strat
             pending = still;
         }
         let drivable = match runtime.drivable() {
-            Ok(drivable) => drivable,
+            Ok(drivable) => {
+                troubles.observe_service(&runtime, None);
+                drivable
+            }
             Err(error) => {
                 tracing::error!(%error, "cannot list the strategies to drive");
+                troubles.observe_service(&runtime, Some(format!("读不出要驱动的策略（{error}）")));
                 continue;
             }
         };
@@ -234,6 +242,11 @@ async fn drive(runtime: Arc<Runtime>, interval: Duration, mut pending: Vec<Strat
                 tracing::error!(
                     strategy = %strategy_id,
                     "not driven: it is still not held back from the last restart"
+                );
+                troubles.observe(
+                    &runtime,
+                    &strategy_id,
+                    Some("重启后没能落到恢复中，没有驱动".to_string()),
                 );
                 continue;
             }
@@ -245,24 +258,197 @@ async fn drive(runtime: Arc<Runtime>, interval: Duration, mut pending: Vec<Strat
         }
         for step in steps {
             match step.await {
-                Ok((strategy_id, Ok(report))) => tracing::debug!(
-                    strategy = %strategy_id,
-                    status = report.status.as_str(),
-                    placed = report.placed.len(),
-                    canceled = report.canceled.len(),
-                    "step done"
-                ),
+                Ok((strategy_id, Ok(report))) => {
+                    tracing::debug!(
+                        strategy = %strategy_id,
+                        status = report.status.as_str(),
+                        placed = report.placed.len(),
+                        canceled = report.canceled.len(),
+                        "step done"
+                    );
+                    let trouble = report
+                        .plan
+                        .waiting
+                        .iter()
+                        .find(|reason| is_trouble(**reason))
+                        .map(|reason| wait_label(*reason).to_string());
+                    troubles.observe(&runtime, &strategy_id, trouble);
+                }
                 // 用户操作正在用、或者排队等着用这个策略的驱动权：让它先走，这一轮跳过。
                 Ok((strategy_id, Err(RuntimeError::Busy(_)))) => tracing::debug!(
                     strategy = %strategy_id,
                     "step skipped: the strategy is being driven by a console request"
                 ),
                 Ok((strategy_id, Err(error))) => {
-                    tracing::error!(strategy = %strategy_id, %error, "step failed")
+                    tracing::error!(strategy = %strategy_id, %error, "step failed");
+                    troubles.observe(&runtime, &strategy_id, Some(error.to_string()));
                 }
                 // 一步里 panic 了：只影响这个策略的这一轮，下一轮照常再驱动。
                 Err(error) => tracing::error!(%error, "a step panicked"),
             }
         }
+    }
+}
+
+/// 驱动出问题多久才提醒：交易所偶尔慢一两步是常事，连着 5 分钟就说明止损检查也可能失灵。
+const TROUBLE_ALERT_AFTER: chrono::Duration = chrono::Duration::minutes(5);
+
+/// 这几种等待一直不消失，说明读不到交易所的数据，而不是在正常等价格。
+fn is_trouble(reason: WaitReason) -> bool {
+    matches!(
+        reason,
+        WaitReason::StaleMarketData
+            | WaitReason::MarginRatioUnavailable
+            | WaitReason::OrderResultUnknown
+            | WaitReason::FillsPending
+            | WaitReason::PositionUnstable
+    )
+}
+
+fn wait_label(reason: WaitReason) -> &'static str {
+    match reason {
+        WaitReason::StaleMarketData => "行情过期",
+        WaitReason::MarginRatioUnavailable => "保证金率读不到",
+        WaitReason::OrderResultUnknown => "订单结果待查",
+        WaitReason::FillsPending => "成交待对账",
+        WaitReason::PositionUnstable => "仓位数据还在变化",
+        _ => "等待中",
+    }
+}
+
+/// 各策略（和整个驱动循环）从什么时候开始一直出问题、提醒过没有。
+#[derive(Default)]
+struct Troubles {
+    since: std::collections::HashMap<StrategyId, (chrono::DateTime<chrono::Utc>, bool)>,
+    service: Option<(chrono::DateTime<chrono::Utc>, bool)>,
+}
+
+impl Troubles {
+    /// 整个驱动循环出问题（读不出策略列表）：这时没有任何策略在被驱动。
+    fn observe_service(&mut self, runtime: &Runtime, trouble: Option<String>) {
+        let now = runtime.now();
+        match trouble {
+            Some(what) => {
+                let (since, alerted) = self.service.get_or_insert((now, false));
+                if !*alerted && now - *since >= TROUBLE_ALERT_AFTER {
+                    *alerted = true;
+                    runtime.notify(Notice::new(
+                        "service:trouble",
+                        "poise 驱动连续 5 分钟出问题",
+                        format!("{what}。所有策略都没在驱动，兜底止损单仍在交易所上。"),
+                    ));
+                }
+            }
+            None => {
+                if let Some((_, true)) = self.service.take() {
+                    runtime.notify(Notice::new("service:trouble", "poise 驱动已恢复正常", ""));
+                }
+                self.service = None;
+            }
+        }
+    }
+
+    /// 记下这一步有没有出问题：连续出问题超过 [`TROUBLE_ALERT_AFTER`] 提醒一次，好了之后再
+    /// 提醒一次。
+    fn observe(&mut self, runtime: &Runtime, strategy_id: &StrategyId, trouble: Option<String>) {
+        let now = runtime.now();
+        let instrument = runtime
+            .store()
+            .load_strategy(strategy_id)
+            .map(|stored| stored.instrument.to_string())
+            .unwrap_or_else(|_| strategy_id.to_string());
+        match trouble {
+            Some(what) => {
+                let (since, alerted) = self
+                    .since
+                    .entry(strategy_id.clone())
+                    .or_insert((now, false));
+                if !*alerted && now - *since >= TROUBLE_ALERT_AFTER {
+                    *alerted = true;
+                    runtime.notify(Notice::new(
+                        format!("{strategy_id}:trouble"),
+                        format!("{instrument} 驱动连续 5 分钟出问题"),
+                        format!("{what}。这段时间里失效价检查和挂单调整可能都没在做，兜底止损单仍在交易所上。"),
+                    ));
+                }
+            }
+            None => {
+                if let Some((_, true)) = self.since.remove(strategy_id) {
+                    runtime.notify(Notice::new(
+                        format!("{strategy_id}:trouble"),
+                        format!("{instrument} 驱动已恢复正常"),
+                        "",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use chrono::{Duration, TimeZone, Utc};
+    use poise_strategy::instrument::{Fees, Instrument, InstrumentSpec};
+    use poise_strategy::units::{Notional, Price, Quantity, Rate};
+
+    use super::Troubles;
+    use crate::clock::ManualClock;
+    use crate::notify::RecordingNotifier;
+    use crate::store::{Store, StrategyId};
+    use crate::{Runtime, RuntimeOptions, SimulatedAccount, SimulatedExchange};
+
+    /// 连续出问题满 5 分钟才提醒一次，好了再说一声；中间好过一次就重新计时。
+    #[test]
+    fn trouble_is_reported_after_five_minutes_and_once_more_when_it_clears() {
+        let start = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let btc = Instrument::try_new("BTC").unwrap();
+        let spec = InstrumentSpec::new(
+            btc.clone(),
+            Price::parse("1").unwrap(),
+            Quantity::parse("0.001").unwrap(),
+            Notional::parse("10").unwrap(),
+        )
+        .unwrap();
+        let clock = Arc::new(ManualClock::new(start));
+        let notices = RecordingNotifier::new();
+        let runtime = Runtime::with_clock(
+            Arc::new(SimulatedExchange::new(
+                btc,
+                Price::parse("100").unwrap(),
+                start,
+            )),
+            Arc::new(SimulatedAccount::new(
+                spec,
+                Fees::new(Rate::ZERO, Rate::ZERO),
+            )),
+            Store::open_in_memory().unwrap(),
+            RuntimeOptions::default(),
+            clock.clone(),
+        )
+        .with_notifier(notices.clone());
+        let strategy = StrategyId::new();
+        let mut troubles = Troubles::default();
+
+        troubles.observe(&runtime, &strategy, Some("行情过期".to_string()));
+        clock.advance(Duration::minutes(3));
+        troubles.observe(&runtime, &strategy, None);
+        clock.advance(Duration::minutes(1));
+        troubles.observe(&runtime, &strategy, Some("行情过期".to_string()));
+        clock.advance(Duration::minutes(4));
+        troubles.observe(&runtime, &strategy, Some("行情过期".to_string()));
+        assert!(notices.notices().is_empty(), "中间好过一次，重新计时");
+
+        clock.advance(Duration::minutes(1));
+        troubles.observe(&runtime, &strategy, Some("行情过期".to_string()));
+        troubles.observe(&runtime, &strategy, Some("行情过期".to_string()));
+        troubles.observe(&runtime, &strategy, None);
+
+        let titles = notices.titles();
+        assert_eq!(titles.len(), 2, "{titles:?}");
+        assert!(titles[0].ends_with("驱动连续 5 分钟出问题"), "{titles:?}");
+        assert!(notices.notices()[0].body.starts_with("行情过期"));
+        assert!(titles[1].ends_with("驱动已恢复正常"), "{titles:?}");
     }
 }

@@ -17,6 +17,25 @@ use crate::units::{Position, Price, PriceRounding, Quantity, Rate, SCALE};
 /// 不设成参数。
 pub const MARKET_CLOSE_SLIPPAGE: Rate = Rate::from_units(SCALE / 20);
 
+/// 兜底单的触发价比失效价再远 1%：poise 在线时失效减仓先走（每步都看失效价），交易所上的
+/// 兜底单只在 poise 掉线、断网时接手。固定值，不设成参数。
+pub const BACKSTOP_DISTANCE: Rate = Rate::from_units(SCALE / 100);
+
+/// 兜底单触发后按市价成交，最差成交价相对触发价让出 10%：和 Hyperliquid 止损市价单的滑点
+/// 容忍一致。
+pub const BACKSTOP_SLIPPAGE: Rate = Rate::from_units(SCALE / 10);
+
+/// 交易所侧的兜底止损单：标记价越过触发价时交易所按市价把本侧仓位减到剩余数量 R。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Backstop {
+    /// 保护的是哪一侧：多头侧在下方止损，空头侧在上方止损。
+    pub direction: Direction,
+    pub side: Side,
+    pub trigger_price: Price,
+    pub limit_price: Price,
+    pub quantity: Quantity,
+}
+
 /// 每一侧已经减掉的数量：失效减仓单和市价平仓单记入的累计成交量之和，按侧分开。
 ///
 /// 和 [`Strategy::after_invalidation`] 配合使用，给批次表、格子表算减仓之后的持有。
@@ -127,6 +146,66 @@ impl Strategy {
             OrderPurpose::Close,
             MARKET_CLOSE_SLIPPAGE,
         )
+    }
+
+    /// 按实时仓位，交易所上该挂着的兜底止损单（每个设了失效价、手上有超出 R 的仓位的
+    /// 侧各一张）。
+    ///
+    /// 触发价是失效价再往外 [`BACKSTOP_DISTANCE`]（多头侧往下、空头侧往上），数量是本侧
+    /// 仓位超出剩余数量 R 的部分（中性网格 R = 0），按数量步长向下取整。中性网格两侧各管
+    /// 各的方向：下方那张只减多仓，上方那张只减空仓。
+    pub fn backstops(&self, position: Position) -> Vec<Backstop> {
+        let spec = self.spec();
+        let scale = i128::from(SCALE);
+        self.sides()
+            .iter()
+            .filter_map(|side| {
+                let invalidation = side.config().invalidation?;
+                let direction = side.direction();
+                let held = Quantity::from_units((position.units() * direction.sign()).max(0));
+                let quantity = spec.normalize_quantity(
+                    held.saturating_sub(invalidation.remaining)
+                        .max(Quantity::ZERO),
+                );
+                if quantity.is_zero() {
+                    return None;
+                }
+                let exit = direction.exit_side();
+                // 触发价往外取整，最差成交价往里取整：都不会比规定的让得更多。
+                let (trigger_factor, trigger_rounding, limit_factor, limit_rounding) = match exit {
+                    Side::Sell => (
+                        scale - i128::from(BACKSTOP_DISTANCE.units()),
+                        PriceRounding::Down,
+                        scale - i128::from(BACKSTOP_SLIPPAGE.units()),
+                        PriceRounding::Up,
+                    ),
+                    Side::Buy => (
+                        scale + i128::from(BACKSTOP_DISTANCE.units()),
+                        PriceRounding::Up,
+                        scale + i128::from(BACKSTOP_SLIPPAGE.units()),
+                        PriceRounding::Down,
+                    ),
+                };
+                let scaled = |price: Price, factor: i128| {
+                    i64::try_from(i128::from(price.units()) * factor / scale)
+                        .ok()
+                        .map(Price::from_units)
+                };
+                let trigger_price = spec.normalize_price(
+                    scaled(invalidation.price, trigger_factor)?,
+                    trigger_rounding,
+                )?;
+                let limit_price =
+                    spec.normalize_price(scaled(trigger_price, limit_factor)?, limit_rounding)?;
+                (trigger_price.units() > 0 && limit_price.units() > 0).then_some(Backstop {
+                    direction,
+                    side: exit,
+                    trigger_price,
+                    limit_price,
+                    quantity,
+                })
+            })
+            .collect()
     }
 
     /// 失效减仓和市价平仓共用的规划：持有 `holding` 一侧、要减掉 `excess`。`whole` 表示
@@ -312,6 +391,110 @@ impl Strategy {
         )?;
         (side == Side::Sell && floor <= mark && spec.meets_minimum_order(quantity, floor))
             .then_some(floor)
+    }
+}
+
+#[cfg(test)]
+mod backstop_tests {
+    use super::Backstop;
+    use crate::Strategy;
+    use crate::config::{Invalidation, StrategyConfig};
+    use crate::fixtures::{btc_fees, btc_spec, core_long_config, core_short_config};
+    use crate::order::Side;
+    use crate::side::Direction;
+    use crate::units::{Position, Price, Quantity, Rate};
+
+    fn with_invalidation(
+        mut config: StrategyConfig,
+        price: &str,
+        remaining: &str,
+    ) -> StrategyConfig {
+        let invalidation = Some(Invalidation {
+            price: Price::parse(price).unwrap(),
+            remaining: Quantity::parse(remaining).unwrap(),
+            max_slippage: Rate::parse("0.01").unwrap(),
+        });
+        for side in [config.long.as_mut(), config.short.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            side.invalidation = invalidation;
+        }
+        config
+    }
+
+    fn strategy(config: StrategyConfig) -> Strategy {
+        Strategy::new(config, btc_spec(), btc_fees()).unwrap()
+    }
+
+    /// 做多 `[75000, 95000]`，失效价 67500：触发价 66825（再往下 1%），减到剩余数量；
+    /// 最差成交价再让 10%，向上取到报价精度。
+    #[test]
+    fn a_long_backstop_sits_one_percent_below_the_invalidation_price() {
+        let strategy = strategy(with_invalidation(core_long_config(), "67500", "0.1"));
+
+        let backstops = strategy.backstops(Position::parse("0.4").unwrap());
+
+        assert_eq!(
+            backstops,
+            vec![Backstop {
+                direction: Direction::Long,
+                side: Side::Sell,
+                trigger_price: Price::parse("66825").unwrap(),
+                limit_price: Price::parse("60143").unwrap(),
+                quantity: Quantity::parse("0.3").unwrap(),
+            }]
+        );
+    }
+
+    /// 仓位不超过剩余数量、或者没有仓位：不挂兜底单。
+    #[test]
+    fn no_backstop_without_a_position_above_the_remaining_quantity() {
+        let strategy = strategy(with_invalidation(core_long_config(), "67500", "0.1"));
+
+        assert!(strategy.backstops(Position::ZERO).is_empty());
+        assert!(
+            strategy
+                .backstops(Position::parse("0.1").unwrap())
+                .is_empty()
+        );
+        // 空仓不归做多侧的兜底单管。
+        assert!(
+            strategy
+                .backstops(Position::parse("-0.2").unwrap())
+                .is_empty()
+        );
+    }
+
+    /// 没设失效价就没有兜底单。
+    #[test]
+    fn no_backstop_without_an_invalidation_price() {
+        let strategy = strategy(core_long_config());
+
+        assert!(
+            strategy
+                .backstops(Position::parse("0.4").unwrap())
+                .is_empty()
+        );
+    }
+
+    /// 做空 `[75000, 95000]`，失效价 104500：触发价 105545（再往上 1%），买入平掉全部空仓。
+    #[test]
+    fn a_short_backstop_sits_one_percent_above_the_invalidation_price() {
+        let strategy = strategy(with_invalidation(core_short_config(), "104500", "0"));
+
+        let backstops = strategy.backstops(Position::parse("-0.2").unwrap());
+
+        assert_eq!(
+            backstops,
+            vec![Backstop {
+                direction: Direction::Short,
+                side: Side::Buy,
+                trigger_price: Price::parse("105545").unwrap(),
+                limit_price: Price::parse("116099").unwrap(),
+                quantity: Quantity::parse("0.2").unwrap(),
+            }]
+        );
     }
 }
 

@@ -133,6 +133,15 @@ impl Runtime {
         // 先落「失效中」：从这里开始只撤单、只减仓，进程崩了重启之后也是。
         self.store
             .save_strategy_status(strategy_id, StrategyStatus::Invalidating, now)?;
+        self.notify_strategy(
+            strategy_id,
+            "invalidating",
+            "越过失效价",
+            format!(
+                "标记价 {mark} 越过{}失效价：撤掉全部挂单，减仓到剩余数量。",
+                direction.side_label()
+            ),
+        );
         self.invalidation_step(strategy_id, now).await.map(Some)
     }
 
@@ -173,6 +182,10 @@ impl Runtime {
         let mut state = self.load_state(strategy_id, &strategy)?;
         let mut orders = self.store.load_orders(strategy_id)?;
         let settings = self.store.load_account_settings()?;
+
+        // 0. 交易所上的兜底单先撤：越过失效价的这一步它还挂着，同一波急跌里它和这一步的
+        //    减仓单都成交，R > 0 时会卖穿剩余数量（`backstop`）。
+        self.clear_backstops(strategy_id, &stored, now).await?;
 
         // 1. 撤单：增仓单、格子单、上一步没成交完的减仓单一律撤掉。同步失败也照撤。
         let round = self
@@ -291,11 +304,26 @@ impl Runtime {
             && !stale
             && confirmed
             && reduction.settled
-            && cancel_only_settled(&orders);
+            && cancel_only_settled(&orders)
+            && self.store.load_backstops(strategy_id)?.is_empty();
         let status = if done {
             self.store
                 // 收场时刻按此刻的时钟记，理由同停止归档（资金费按它截止）。
                 .save_strategy_status(strategy_id, reducing.done(), self.clock.now())?;
+            match reducing {
+                Reducing::Invalidation => self.notify_strategy(
+                    strategy_id,
+                    "invalidated",
+                    "已失效",
+                    "减仓完成，策略已归档。".to_string(),
+                ),
+                Reducing::Close => self.notify_strategy(
+                    strategy_id,
+                    "closed",
+                    "已平仓",
+                    "市价平仓完成，策略已归档。".to_string(),
+                ),
+            }
             tracing::warn!(
                 strategy = %strategy_id,
                 status = reducing.done().as_str(),

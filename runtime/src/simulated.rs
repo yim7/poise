@@ -19,7 +19,7 @@ use poise_strategy::units::{Notional, Position, Price, Quantity, Rate};
 use crate::clock::ManualClock;
 use crate::exchange::{
     Exchange, ExchangeError, ExchangeFill, ExchangeOrder, OrderLookup, OrderReceipt, OrderRequest,
-    TimeInForce,
+    StopRequest, TimeInForce,
 };
 use crate::store::Store;
 
@@ -38,6 +38,11 @@ struct SimState {
     market_price: Price,
     position: Position,
     orders: Vec<SimOrder>,
+    /// 止损触发单。触发前不在挂单列表里；触发时按标记价立即成交（只减仓），
+    /// 成交和普通订单一样进成交流水（见 [`SimulatedExchange::set_market_price`]）。
+    stops: Vec<SimStop>,
+    /// 下一张止损单被拒的原因。
+    reject_next_stop: Option<String>,
     fills: Vec<ExchangeFill>,
     /// 暂时不出现在按时间查询结果里的成交（模拟成交查询有延迟）。
     delayed_fills: Vec<ExchangeFill>,
@@ -112,6 +117,37 @@ struct SimState {
 }
 
 #[derive(Clone)]
+struct SimStop {
+    request: StopRequest,
+    exchange_order_id: String,
+    cumulative_filled: Quantity,
+    status: OrderStatus,
+}
+
+impl SimStop {
+    fn is_crossed(&self, market_price: Price) -> bool {
+        self.status == OrderStatus::Open
+            && match self.request.side {
+                Side::Sell => market_price <= self.request.trigger_price,
+                Side::Buy => market_price >= self.request.trigger_price,
+            }
+    }
+
+    fn view(&self) -> ExchangeOrder {
+        ExchangeOrder {
+            client_order_id: Some(self.request.client_order_id.clone()),
+            exchange_order_id: self.exchange_order_id.clone(),
+            side: self.request.side,
+            limit_price: self.request.limit_price,
+            quantity: self.request.quantity,
+            cumulative_filled: self.cumulative_filled,
+            reduce_only: true,
+            status: self.status,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct SimOrder {
     request: OrderRequest,
     exchange_order_id: String,
@@ -180,6 +216,8 @@ impl SimulatedExchange {
                 market_price,
                 position: Position::ZERO,
                 orders: Vec::new(),
+                stops: Vec::new(),
+                reject_next_stop: None,
                 fills: Vec::new(),
                 delayed_fills: Vec::new(),
                 delay_next_fills: 0,
@@ -258,6 +296,27 @@ impl SimulatedExchange {
         state.now = now;
         state.market_price = price;
         match_crossed_orders(&mut state, now);
+        trigger_crossed_stops(&mut state, now);
+    }
+
+    /// 交易所上的止损触发单（含已触发、已撤销的）。
+    pub fn stops(&self) -> Vec<ExchangeOrder> {
+        self.lock().stops.iter().map(SimStop::view).collect()
+    }
+
+    /// 还在等触发的止损单的触发价和数量。
+    pub fn open_stops(&self) -> Vec<(Price, Quantity)> {
+        self.lock()
+            .stops
+            .iter()
+            .filter(|stop| stop.status == OrderStatus::Open)
+            .map(|stop| (stop.request.trigger_price, stop.request.quantity))
+            .collect()
+    }
+
+    /// 下一张止损单以 `reason` 被拒。
+    pub fn reject_next_stop(&self, reason: &str) {
+        self.lock().reject_next_stop = Some(reason.to_string());
     }
 
     /// 直接设定仓位：用来构造「账户上本来就有仓位」的场景。
@@ -769,6 +828,43 @@ impl Exchange for SimulatedExchange {
         })
     }
 
+    async fn place_stop(&self, request: &StopRequest) -> Result<OrderReceipt, ExchangeError> {
+        let mut state = self.lock();
+        state.place_count += 1;
+        state.call_count += 1;
+        if request.instrument != self.instrument {
+            return Err(ExchangeError::Rejected {
+                reason: format!(
+                    "instrument `{}` does not belong to this exchange",
+                    request.instrument
+                ),
+            });
+        }
+        if let Some(reason) = state.reject_next_stop.take() {
+            return Err(ExchangeError::Rejected { reason });
+        }
+        if request.expires_at <= state.now {
+            return Err(ExchangeError::Rejected {
+                reason: format!("order expired at {}", request.expires_at),
+            });
+        }
+        state.next_order_id += 1;
+        let exchange_order_id = format!("sim-stop-{}", state.next_order_id);
+        state.stops.push(SimStop {
+            request: request.clone(),
+            exchange_order_id: exchange_order_id.clone(),
+            cumulative_filled: Quantity::ZERO,
+            status: OrderStatus::Open,
+        });
+        let now = state.now;
+        trigger_crossed_stops(&mut state, now);
+        Ok(OrderReceipt {
+            exchange_order_id,
+            cumulative_filled: Quantity::ZERO,
+            status: OrderStatus::Open,
+        })
+    }
+
     async fn cancel_order(
         &self,
         instrument: &Instrument,
@@ -776,6 +872,19 @@ impl Exchange for SimulatedExchange {
     ) -> Result<(), ExchangeError> {
         let mut state = self.lock();
         state.call_count += 1;
+        if let Some(stop) = state
+            .stops
+            .iter_mut()
+            .find(|stop| &stop.request.client_order_id == client_order_id)
+        {
+            if stop.status != OrderStatus::Open {
+                return Err(ExchangeError::UnknownOrder {
+                    client_order_id: client_order_id.clone(),
+                });
+            }
+            stop.status = OrderStatus::Canceled;
+            return Ok(());
+        }
         if instrument != &self.instrument {
             return Err(ExchangeError::Rejected {
                 reason: format!("instrument `{instrument}` does not belong to this exchange"),
@@ -860,6 +969,13 @@ impl Exchange for SimulatedExchange {
         }
         if state.hidden_from_queries.contains(client_order_id) {
             return Ok(OrderLookup::Unknown);
+        }
+        if let Some(stop) = state
+            .stops
+            .iter()
+            .find(|stop| &stop.request.client_order_id == client_order_id)
+        {
+            return Ok(OrderLookup::Found(stop.view()));
         }
         Ok(
             match state
@@ -1001,6 +1117,56 @@ fn match_crossed_orders(state: &mut SimState, now: DateTime<Utc>) {
         };
         let quantity = state.orders[index].fillable(position);
         record_fill(state, index, quantity, now);
+    }
+}
+
+/// 标记价越过触发价的止损单：按标记价成交，只减仓，最多减到零；没有可减的仓位时
+/// 和 Hyperliquid 一样撤销。
+fn trigger_crossed_stops(state: &mut SimState, now: DateTime<Utc>) {
+    for index in 0..state.stops.len() {
+        if !state.stops[index].is_crossed(state.market_price) {
+            continue;
+        }
+        let (side, quantity, client_order_id) = {
+            let stop = &state.stops[index];
+            (
+                stop.request.side,
+                stop.request.quantity,
+                stop.request.client_order_id.clone(),
+            )
+        };
+        let capacity = match side {
+            Side::Buy => Quantity::from_units(state.position.units().saturating_neg().max(0)),
+            Side::Sell => Quantity::from_units(state.position.units().max(0)),
+        };
+        let applied = quantity.min(capacity);
+        let stop = &mut state.stops[index];
+        if applied.is_zero() {
+            stop.status = OrderStatus::Canceled;
+            continue;
+        }
+        stop.cumulative_filled = applied;
+        stop.status = if applied == quantity {
+            OrderStatus::Filled
+        } else {
+            OrderStatus::Canceled
+        };
+        let signed = match side {
+            Side::Buy => applied.units(),
+            Side::Sell => -applied.units(),
+        };
+        state.position = Position::from_units(state.position.units() + signed);
+        state.next_trade_id += 1;
+        let fill = ExchangeFill {
+            trade_id: format!("trade-{}", state.next_trade_id),
+            client_order_id,
+            price: state.market_price,
+            quantity: applied,
+            cumulative_quantity: applied,
+            filled_at: now,
+            fee: None,
+        };
+        push_fill(state, fill);
     }
 }
 

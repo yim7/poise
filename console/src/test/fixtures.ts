@@ -194,6 +194,7 @@ export function detail(overrides: Partial<StrategyDetail> = {}): StrategyDetail 
     reduction_realized_profit: null,
     total_pnl: '51',
     breakeven_price: '92100',
+    backstops: [],
     ...overrides,
   }
 }

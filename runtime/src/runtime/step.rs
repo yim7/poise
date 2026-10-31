@@ -22,7 +22,8 @@ use super::{
     Cancels, Executed, NewOrders, POSITION_CHECK_ROUNDS, Reading, Runtime, RuntimeError, Snapshot,
     StepReport, Synced, order_states,
 };
-use super::{DAILY_ACTION_LIMIT, fresh, percent};
+use super::{DAILY_ACTION_LIMIT, MarginLevel, fresh, percent};
+use crate::notify::Notice;
 
 impl Runtime {
     /// 走一步。
@@ -44,6 +45,10 @@ impl Runtime {
         now: DateTime<Utc>,
     ) -> Result<StepReport, RuntimeError> {
         let stored = self.store.load_strategy(strategy_id)?;
+        // 交易所上的兜底单先对齐：成交过就说明观点已经失效，这一步改走失效（`backstop`）。
+        if let Some(report) = self.maintain_backstops(strategy_id, &stored, now).await? {
+            return Ok(report);
+        }
         // 失效价是用户声明的止损，暂停只是「先别做网格」：已暂停、暂停中、恢复中的策略越过
         // 失效价同样进入失效（第 7.5 节）。停止中不算：停止就是用户决定自己接管仓位。
         if matches!(
@@ -119,6 +124,12 @@ impl Runtime {
         if withdraw_rate_limited {
             self.store
                 .save_pause_reason(strategy_id, RATE_LIMITED_NOTE)?;
+            self.notify_strategy(
+                strategy_id,
+                "paused",
+                "已暂停",
+                RATE_LIMITED_NOTE.to_string(),
+            );
             let (status, round) = self
                 .pause_inner(strategy_id, &strategy, &mut state, &mut orders, now)
                 .await?;
@@ -280,6 +291,12 @@ impl Runtime {
         if executed.rate_limited {
             self.store
                 .save_pause_reason(strategy_id, RATE_LIMITED_NOTE)?;
+            self.notify_strategy(
+                strategy_id,
+                "paused",
+                "已暂停",
+                RATE_LIMITED_NOTE.to_string(),
+            );
             let (status, round) = self
                 .pause_inner(strategy_id, &strategy, &mut state, &mut orders, now)
                 .await?;
@@ -339,6 +356,8 @@ impl Runtime {
             unknown.note(),
             margin_alert_note(margin_ratio, &settings),
             self.actions_today().ok().and_then(action_alert_note),
+            self.churn_note(strategy_id),
+            self.backstop_note(strategy_id),
         ]);
         self.save_view(
             strategy_id,
@@ -400,7 +419,54 @@ impl Runtime {
             );
             return None;
         }
+        self.observe_margin(margin.ratio());
         Some((margin.ratio(), margin.as_of))
+    }
+
+    /// 保证金率换档时提醒：升到提醒阈值、停止阈值，以及从高档回落到正常。同一档里
+    /// 来回读到不同的数不提醒。
+    fn observe_margin(&self, ratio: Rate) {
+        let settings = match self.store.load_account_settings() {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::warn!(%error, "cannot load the account settings to grade the margin ratio");
+                return;
+            }
+        };
+        let level = if ratio >= settings.margin_stop_ratio {
+            MarginLevel::AboveStop
+        } else if ratio >= settings.margin_alert_ratio {
+            MarginLevel::AboveAlert
+        } else {
+            MarginLevel::Normal
+        };
+        let previous = self
+            .margin_level
+            .lock()
+            .expect("margin level lock poisoned")
+            .replace(level);
+        let title = match (previous, level) {
+            (previous, level) if previous == Some(level) => return,
+            // 刚启动、第一次读到正常：没有什么可说的。
+            (None, MarginLevel::Normal) => return,
+            (_, MarginLevel::AboveStop) => format!(
+                "保证金率 {} 达到停止阈值 {}",
+                percent(ratio),
+                percent(settings.margin_stop_ratio)
+            ),
+            (_, MarginLevel::AboveAlert) => format!(
+                "保证金率 {} 超过提醒阈值 {}",
+                percent(ratio),
+                percent(settings.margin_alert_ratio)
+            ),
+            (_, MarginLevel::Normal) => format!("保证金率 {} 已回落", percent(ratio)),
+        };
+        let body = match level {
+            MarginLevel::AboveStop => "全账户只保留只减仓单，回落后自动恢复。",
+            MarginLevel::AboveAlert => "",
+            MarginLevel::Normal => "低于提醒阈值，策略照常运行。",
+        };
+        self.notify(Notice::new("account:margin", title, body));
     }
 
     /// 保证金读数是这一步最先读的，补拉成交、逐张核对订单、几轮仓位核对都排在它后面：链路
@@ -531,6 +597,12 @@ impl Runtime {
         // 等待原因，不存下来用户就不知道为什么停了。恢复时清掉。
         self.store
             .save_pause_reason(strategy_id, pause_reason_note(reason))?;
+        self.notify_strategy(
+            strategy_id,
+            "paused",
+            "已暂停",
+            pause_reason_note(reason).to_string(),
+        );
         let (status, round) = self
             .pause_inner(strategy_id, strategy, state, orders, now)
             .await?;
@@ -945,6 +1017,11 @@ impl Runtime {
                     orders[index].updated_at = now;
                     self.store.update_order(strategy_id, &orders[index])?;
                     canceled.push(client_order_id.clone());
+                    let record = &orders[index].record;
+                    if record.cumulative_filled.is_zero() && !record.purpose.is_reduction() {
+                        let side = record.unit.side(record.purpose);
+                        self.record_churn(strategy_id, side, record.limit_price);
+                    }
                 }
                 false => {
                     uncertain = true;

@@ -35,6 +35,14 @@ impl Exchange for YieldingExchange {
         self.inner.place_order(request).await
     }
 
+    async fn place_stop(
+        &self,
+        request: &poise_runtime::StopRequest,
+    ) -> Result<OrderReceipt, ExchangeError> {
+        tokio::task::yield_now().await;
+        self.inner.place_stop(request).await
+    }
+
     async fn cancel_order(
         &self,
         instrument: &Instrument,

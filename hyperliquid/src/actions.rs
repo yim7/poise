@@ -52,12 +52,25 @@ pub(crate) struct OrderRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) enum OrderType {
     Limit(LimitOrderType),
+    Trigger(TriggerOrderType),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct LimitOrderType {
     /// 有效期策略：`Gtc` 一直挂到撤销。
     pub tif: &'static str,
+}
+
+/// 触发单：标记价越过 `triggerPx` 时交易所发出订单。字段顺序和官方 SDK 一致
+/// （`isMarket`、`triggerPx`、`tpsl`），msgpack 签名按这个顺序编码。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct TriggerOrderType {
+    #[serde(rename = "isMarket")]
+    pub is_market: bool,
+    #[serde(rename = "triggerPx")]
+    pub trigger_px: String,
+    /// `sl` 止损、`tp` 止盈。
+    pub tpsl: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -75,7 +88,7 @@ pub(crate) struct CancelByCloid {
 mod tests {
     use super::{
         CancelByCloid, CancelByCloidAction, ExchangeAction, LimitOrderType, OrderAction,
-        OrderRequest, OrderType,
+        OrderRequest, OrderType, TriggerOrderType,
     };
     use crate::signing::{action_hash, sign_l1_action};
     use poise_runtime::{Network, SecretKey};
@@ -168,6 +181,32 @@ mod tests {
             })
         );
         assert_eq!(action.kind(), "order");
+    }
+
+    /// 止损触发单的线上格式：`t` 是 `{"trigger": {"isMarket", "triggerPx", "tpsl"}}`。
+    #[test]
+    fn stop_order_serializes_the_wire_shape() {
+        let action = ExchangeAction::Order(OrderAction {
+            orders: vec![OrderRequest {
+                asset: 0,
+                is_buy: false,
+                limit_px: "54000".to_string(),
+                sz: "0.002".to_string(),
+                reduce_only: true,
+                order_type: OrderType::Trigger(TriggerOrderType {
+                    is_market: true,
+                    trigger_px: "60000".to_string(),
+                    tpsl: "sl",
+                }),
+                cloid: "0x33333333333333333333333333333333".to_string(),
+            }],
+            grouping: "na",
+        });
+
+        assert_eq!(
+            serde_json::to_string(&action).unwrap(),
+            r#"{"type":"order","orders":[{"a":0,"b":false,"p":"54000","s":"0.002","r":true,"t":{"trigger":{"isMarket":true,"triggerPx":"60000","tpsl":"sl"}},"c":"0x33333333333333333333333333333333"}],"grouping":"na"}"#
+        );
     }
 
     #[test]

@@ -1174,4 +1174,39 @@ describe('运行详情', () => {
     await userEvent.click(screen.getByRole('button', { name: /返回列表/ }))
     expect(onBack).toHaveBeenCalled()
   })
+
+  it('设了失效价：读数里列出交易所上的兜底止损单，没挂时显示未挂；没设失效价不显示这一项', async () => {
+    const guarded = {
+      ...config,
+      long: { ...longSide, invalidation: { price: '70000', remaining: '0.3', max_slippage: '0.01' } },
+    }
+    fakeServer({
+      'GET /api/strategies/s-1': {
+        body: detail({
+          summary: summary({ config: guarded }),
+          backstops: [
+            { direction: 'long', trigger_price: '69300', quantity: '0.39', confirmed: true },
+          ],
+        }),
+      },
+    })
+    const { unmount } = renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    const readings = await screen.findByRole('region', { name: '关键读数' })
+    const fact = within(readings).getByText('兜底止损').parentElement as HTMLElement
+    expect(fact).toHaveTextContent('多 触发 69300 · 0.39')
+    unmount()
+
+    fakeServer({
+      'GET /api/strategies/s-1': { body: detail({ summary: summary({ config: guarded }) }) },
+    })
+    const second = renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    const empty = await screen.findByRole('region', { name: '关键读数' })
+    expect(within(empty).getByText('兜底止损').parentElement).toHaveTextContent('未挂')
+    second.unmount()
+
+    detailRoutes()
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    const plain = await screen.findByRole('region', { name: '关键读数' })
+    expect(within(plain).queryByText('兜底止损')).not.toBeInTheDocument()
+  })
 })

@@ -136,6 +136,7 @@ impl Runtime {
             reduction_realized_profit,
             total_pnl: realized + unrealized_pnl,
             breakeven_price: holding.breakeven_price(realized),
+            backstops: self.backstop_views(strategy_id)?,
         })
     }
 

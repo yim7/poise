@@ -333,6 +333,17 @@ export interface StrategyDetail {
   total_pnl: Decimal
   /** 保本价：价格到这里时合计正好为零；没有净持仓、或者算出来不是正数时是 null。 */
   breakeven_price: Decimal | null
+  /** 交易所上挂着的兜底止损单：poise 离线时由交易所在失效价外 1% 止损。 */
+  backstops: Backstop[]
+}
+
+/** 一张兜底止损单。 */
+export interface Backstop {
+  direction: Direction
+  trigger_price: Decimal
+  quantity: Decimal
+  /** 交易所确认挂上了；false 是还在核对。 */
+  confirmed: boolean
 }
 
 /** 恢复的结果：一直在跑、等遗留订单过期、遗留订单没收场、或者真的恢复了。 */

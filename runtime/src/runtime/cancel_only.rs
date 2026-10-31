@@ -229,6 +229,11 @@ impl Runtime {
         let mut state = self.load_state(strategy_id, &strategy)?;
         let mut orders = self.store.load_orders(strategy_id)?;
 
+        // 停止就是用户自己接管仓位：交易所上的兜底单也撤掉。网页和命令行的停止都直接走到这里，
+        // 不经过常驻驱动的那一步，所以不能只靠驱动开头去撤（`backstop`）。
+        if stored.status == StrategyStatus::Stopping {
+            self.clear_backstops(strategy_id, stored, now).await?;
+        }
         // 判定不参与：这一步只撤单，判定出来的「该下什么单」在这里没有意义。
         let round = self
             .cancel_only_round(strategy_id, stored, &strategy, &mut state, &mut orders, now)
@@ -275,7 +280,10 @@ impl Runtime {
 
         // 收场：撤销和核对都走通，而且没有还在场的订单、成交也对完了账。任何一样没做到
         // 都留在「暂停中」「停止中」，由后台继续推（第 9.2 节）。
-        let settled = round.is_clean() && cancel_only_settled(&orders);
+        // 归档之前交易所上的兜底单也要撤干净：停止就是用户自己接管仓位（`backstop`）。
+        let settled = round.is_clean()
+            && cancel_only_settled(&orders)
+            && (!target.is_archived() || self.store.load_backstops(strategy_id)?.is_empty());
         let status = if settled {
             // 收场时刻按此刻的时钟记：归档的策略按它截止资金费（第 7.6 节），用这一轮开始的
             // 时刻会把撤单、对账期间结算的那笔排除在外。

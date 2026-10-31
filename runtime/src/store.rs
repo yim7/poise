@@ -268,6 +268,21 @@ pub struct StoredConfigVersion {
     pub recorded_at: DateTime<Utc>,
 }
 
+/// 一张交易所侧的兜底止损单（见 `runtime::backstop`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredBackstop {
+    pub client_order_id: ClientOrderId,
+    pub direction: Direction,
+    pub trigger_price: Price,
+    pub limit_price: Price,
+    pub quantity: Quantity,
+    pub placed_at: DateTime<Utc>,
+    /// 下单请求的 `expiresAfter`：结果未知的兜底单过了它（加余量）还查不到，就当没挂上。
+    pub expires_at: DateTime<Utc>,
+    /// 交易所确认挂上了（回执或者按 `cloid` 查到）。没确认的可能还在路上。
+    pub confirmed: bool,
+}
+
 /// 一笔已补记的成交。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredFill {
@@ -405,7 +420,7 @@ pub struct Store {
 
 /// 存业务数据的表：没有归属记录的库里只要有一张不是空的，就只能给测试网用
 /// （[`Store::bind_identity`]）。加表时要一起加进来。
-const BUSINESS_TABLES: [&str; 16] = [
+const BUSINESS_TABLES: [&str; 17] = [
     "strategies",
     "drafts",
     "batch_states",
@@ -422,6 +437,7 @@ const BUSINESS_TABLES: [&str; 16] = [
     "close_requests",
     "action_counts",
     "instance_identity",
+    "backstops",
 ];
 
 impl Store {
@@ -609,6 +625,20 @@ const TABLES: &str = "
              CREATE TABLE IF NOT EXISTS close_requests (
                  strategy_id TEXT PRIMARY KEY,
                  requested_at TEXT NOT NULL
+             );
+
+             -- 交易所侧的兜底止损单，不进订单账本（见 `runtime::backstop`）。新加的表，已有的库
+             -- 打开时照样建出来，不用改结构版本。
+             CREATE TABLE IF NOT EXISTS backstops (
+                 client_order_id TEXT PRIMARY KEY,
+                 strategy_id TEXT NOT NULL,
+                 direction TEXT NOT NULL,
+                 trigger_price_units INTEGER NOT NULL,
+                 limit_price_units INTEGER NOT NULL,
+                 quantity_units INTEGER NOT NULL,
+                 placed_at TEXT NOT NULL,
+                 expires_at TEXT NOT NULL,
+                 confirmed INTEGER NOT NULL
              );
 
              CREATE TABLE IF NOT EXISTS action_counts (
@@ -1282,6 +1312,85 @@ impl Store {
             ],
         )?;
         transaction.commit()?;
+        Ok(())
+    }
+
+    /// 记下一张兜底单（先写库、再发送），或者更新它的确认标记。
+    pub fn save_backstop(
+        &self,
+        strategy_id: &StrategyId,
+        backstop: &StoredBackstop,
+    ) -> Result<(), StoreError> {
+        self.lock().execute(
+            "INSERT INTO backstops (client_order_id, strategy_id, direction, trigger_price_units,
+                 limit_price_units, quantity_units, placed_at, expires_at, confirmed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT (client_order_id) DO UPDATE SET confirmed = excluded.confirmed",
+            params![
+                backstop.client_order_id.as_str(),
+                strategy_id.as_str(),
+                backstop.direction.as_str(),
+                backstop.trigger_price.units(),
+                backstop.limit_price.units(),
+                backstop.quantity.units(),
+                format_time(backstop.placed_at),
+                format_time(backstop.expires_at),
+                backstop.confirmed,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_backstops(
+        &self,
+        strategy_id: &StrategyId,
+    ) -> Result<Vec<StoredBackstop>, StoreError> {
+        let connection = self.lock();
+        let mut statement = connection.prepare(
+            "SELECT client_order_id, direction, trigger_price_units, limit_price_units,
+                    quantity_units, placed_at, expires_at, confirmed
+             FROM backstops WHERE strategy_id = ?1 ORDER BY placed_at",
+        )?;
+        let rows = statement.query_map(params![strategy_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, bool>(7)?,
+            ))
+        })?;
+        let mut backstops = Vec::new();
+        for row in rows {
+            let (id, direction, trigger, limit, quantity, placed_at, expires_at, confirmed) = row?;
+            backstops.push(StoredBackstop {
+                client_order_id: ClientOrderId::try_new(id.clone()).map_err(|_| {
+                    StoreError::InvalidColumn {
+                        column: "backstop client order id",
+                        value: id,
+                    }
+                })?,
+                direction: parse_direction(&direction)?,
+                trigger_price: Price::from_units(trigger),
+                limit_price: Price::from_units(limit),
+                quantity: Quantity::from_units(quantity),
+                placed_at: parse_time(&placed_at)?,
+                expires_at: parse_time(&expires_at)?,
+                confirmed,
+            });
+        }
+        Ok(backstops)
+    }
+
+    /// 兜底单已经不在交易所上（撤掉、触发完、或者确认没挂上）。
+    pub fn delete_backstop(&self, client_order_id: &ClientOrderId) -> Result<(), StoreError> {
+        self.lock().execute(
+            "DELETE FROM backstops WHERE client_order_id = ?1",
+            params![client_order_id.as_str()],
+        )?;
         Ok(())
     }
 
