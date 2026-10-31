@@ -78,6 +78,14 @@ impl Instance {
         &self.startup
     }
 
+    /// 提醒消息开头的那一段：一眼看出是哪个网络。
+    pub fn label(&self) -> String {
+        match self.startup.network() {
+            poise_runtime::Network::Mainnet => "poise 正式网".to_string(),
+            poise_runtime::Network::Testnet => "poise 测试网".to_string(),
+        }
+    }
+
     pub fn exchange(&self) -> &Arc<Hyperliquid> {
         &self.exchange
     }

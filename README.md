@@ -6,7 +6,7 @@
 
 价位、批次和观点失效价，都在想清楚的时候定好；成交多半发生在急跌急涨、人最容易乱的时候。Poise 守住这两个时刻之间的镇定：判断由人在平静时做，纪律由程序在波动中执行。
 
-Poise 在 Hyperliquid 上自动运行分批主仓加网格的策略：按价格范围分批挂单积累主仓并保留，网格部分低买高卖循环；可以做多、做空或中性，可选按时间限速积累；带保证金风控、观点失效止损和市价平仓。
+Poise 在 Hyperliquid 上自动运行分批主仓加网格的策略：按价格范围分批挂单积累主仓并保留，网格部分低买高卖循环；可以做多、做空或中性，可选按时间限速积累；带保证金风控、观点失效止损（交易所上另挂兜底止损单）、市价平仓和飞书提醒。
 
 设计见 [分批主仓与网格设计](docs/layered-grid-design.md)，术语见 [GLOSSARY.md](GLOSSARY.md)，架构和运行语义见 [系统说明](docs/system-overview.md)。
 
@@ -15,7 +15,7 @@ Poise 在 Hyperliquid 上自动运行分批主仓加网格的策略：按价格�
 - 只支持 Hyperliquid，账户必须是 Unified 模式。
 - 品种：主市场的加密货币（例如 `BTC`），以及第三方市场 `xyz` 上的黄金、原油、美股（`xyz:GOLD`、`xyz:CL`、`xyz:TSLA`）。只支持全仓、USDC 抵押。
 - 连测试网还是正式网由启动文件的 `network` 决定；正式网要你自己把正式网 API 钱包私钥写进启动文件。
-- 正式网上走过：新建、预览、确认启动、暂停、恢复、停止。只在测试网上验证过：接管已有仓位、观点失效减仓、市价平仓（含不足最低金额的零头）、归档后仍有仓位的读取、资金预检、保证金率读取、资金费读取，以及第三方市场的 `xyz:TSLA`。
+- 正式网上走过：新建、预览、确认启动、暂停、恢复、停止。只在测试网上验证过：接管已有仓位、观点失效减仓、市价平仓（含不足最低金额的零头）、归档后仍有仓位的读取、资金预检、保证金率读取、资金费读取、第三方市场的 `xyz:TSLA`，以及兜底单的挂出、随参数调整、暂停保留、停止撤销和常驻运行。兜底单在交易所上真正触发的路径只在模拟交易所里测过。
 
 ## 实例与启动文件
 
@@ -27,10 +27,12 @@ account_address = "0x…"          # 主账户地址
 api_wallet_private_key = "0x…"   # 在 Hyperliquid 网页上为这个账户授权的 API 钱包私钥
 data_dir = "data"                # 数据库放在这里（相对实例目录）
 listen = "127.0.0.1:8010"        # 网页控制台地址，只接受本机地址
+feishu_webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/…"   # 可选：提醒推到这个飞书机器人
 ```
 
 - 私钥由你自己写进文件；程序不生成、不保存、不打印私钥。API 钱包只能代为签名交易，不能转账或提现。
 - 启动时逐项校验：文件权限、私钥格式、由私钥推出的地址是否在这个账户已授权且未过期的 API 钱包里、账户模式是否 Unified。API 钱包剩余有效期少于 14 天时提醒续期。
+- `feishu_webhook` 可以不写，不写就不推提醒。地址本身就是凭据，和私钥一样只放在启动文件里，不进日志。
 - 同一个实例同时只能有一个进程（实例锁）。几个实例可以同时运行，各用各的 `listen` 端口。
 - 数据库第一次用时记下网络和账户，之后换网络或账户就拒绝启动：测试网和正式网要用各自的数据目录（`data_dir`），测试网的策略不会被拿到正式网上恢复运行。
 
@@ -46,7 +48,9 @@ target/release/poise instances                    # 列出 ~/.poise 下的实例
 target/release/poise --instance testnet check     # 只做启动校验
 target/release/poise --instance testnet serve     # 常驻服务 + 网页控制台
 target/release/poise --instance testnet status    # 策略、订单、仓位、可用余额
-target/release/poise --instance testnet stop      # 紧急用：暂停这个标的上的策略、撤掉本系统的全部挂单
+target/release/poise --instance testnet stop      # 紧急用：暂停这个标的上的策略、撤掉本系统的网格挂单（兜底止损单留着）
+target/release/poise --instance testnet notify-test   # 往飞书发一条测试消息
+target/release/poise --instance testnet service install   # 常驻运行（见下）
 ```
 
 `--instance` 写名字就到 `~/.poise/` 下找；写路径（含 `/`，或以 `.`、`~` 开头）就照原样用那个目录。必须写：不写时报错并列出已有实例，不会按当前目录去找——正式网实例的私钥就在启动文件里，不能因为在哪个目录下执行而连错实例。
@@ -59,6 +63,23 @@ target/release/poise --instance testnet stop      # 紧急用：暂停这个标�
 - 按节拍（`--step-interval-secs`，默认 5 秒）驱动策略；
 - 每 10 分钟单独读一次资金费率和资金费结算；
 - 在 `listen` 地址提供网页控制台（静态文件默认取 `console/dist`）。
+
+## 常驻运行
+
+`service install` 把当前的 `poise` 程序和网页控制台（`console/dist`）复制进实例目录的 `bin/`、`console/`，写一份 launchd 用户级配置 `~/Library/LaunchAgents/com.poise.<实例名>.plist` 并启动：登录后自动启动，崩溃后 10 秒内自动拉起，运行期间用 `caffeinate` 挡住系统睡眠（合上笔记本盖子挡不住）。日志在实例目录的 `logs/poise.log`。
+
+```bash
+target/release/poise --instance mainnet service install     # 装上并启动；换新版本时重新构建后再跑一次
+target/release/poise --instance mainnet service status      # 在不在跑、进程号、拉起过几次
+target/release/poise --instance mainnet service uninstall   # 停掉并卸下
+```
+
+复制而不是直接指向仓库里的构建产物：仓库里重新编译、`cargo clean` 都不会悄悄换掉正在跑的程序。
+
+## 兜底止损单与提醒
+
+- **兜底单**：设了观点失效价的一侧，交易所上另挂一张只减仓的止损市价单，触发价在失效价外 1%，数量是仓位超出剩余数量 R 的部分，随仓位自动调整。poise 在线时失效减仓先走；poise 掉线时由交易所执行，之后 poise 发现它成交过就转失效收尾。暂停时留着，停止、失效、平仓时撤掉。详情页「兜底止损」一栏显示它。
+- **飞书提醒**：越过失效价、已失效、已平仓、自动暂停（仓位或成交对不上、操作次数超限）、兜底单触发或挂不上、保证金率越过提醒或停止阈值、同一价格反复撤挂没成交、驱动连续 5 分钟出问题（和恢复）、服务启动和退出。消息只带标的、价格和原因，不带仓位、数量和金额。
 
 ## 网页控制台
 

@@ -8,10 +8,12 @@
 //! 会写数据库、会向交易所下单撤单的命令（`serve`、`stop`）先取实例锁：
 //! 一个实例同时只允许一个这样的进程。
 
+mod feishu;
 mod home;
 mod instance;
 mod report;
 mod serve;
+mod service;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -53,6 +55,28 @@ enum Command {
     Stop(InstrumentArgs),
     /// 列出根目录下的实例：网络、监听地址和账户。
     Instances,
+    /// 往启动文件里的飞书机器人发一条测试消息，确认提醒能送到。
+    NotifyTest,
+    /// 常驻运行：交给 launchd，登录后自动启动、崩溃后自动拉起。
+    #[command(subcommand)]
+    Service(ServiceCommand),
+}
+
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// 把当前程序和网页控制台复制进实例目录，装上并启动；已装过就换成当前版本。
+    Install {
+        /// 两步之间的间隔秒数。
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        step_interval_secs: u64,
+        /// 网页控制台的静态文件目录（前端 `npm run build` 的产物），会复制进实例目录。
+        #[arg(long, value_name = "目录", default_value = DEFAULT_WEB_ROOT)]
+        web_root: PathBuf,
+    },
+    /// 停掉并卸下。
+    Uninstall,
+    /// launchd 里的状态。
+    Status,
 }
 
 #[derive(Args)]
@@ -110,8 +134,31 @@ async fn main() -> Result<()> {
             let instrument = parse_instrument(&args.instrument)?;
             report::stop(&instance, &instrument).await
         }
+        Command::NotifyTest => notify_test(&instance).await,
+        Command::Service(command) => match command {
+            ServiceCommand::Install {
+                step_interval_secs,
+                web_root,
+            } => service::install(&instance, &directory, &web_root, step_interval_secs),
+            ServiceCommand::Uninstall => service::uninstall(&directory),
+            ServiceCommand::Status => service::status(&directory),
+        },
         Command::Instances => unreachable!("handled before loading an instance"),
     }
+}
+
+async fn notify_test(instance: &Instance) -> Result<()> {
+    let Some(webhook) = instance.startup().feishu_webhook() else {
+        anyhow::bail!("启动文件里没有 `feishu_webhook`");
+    };
+    let notice = poise_runtime::Notice::new(
+        "test",
+        "提醒测试",
+        "这是一条测试消息：之后失效、自动暂停、兜底单触发、保证金率越线、驱动连续失败和反复撤挂都会推到这里。",
+    );
+    feishu::send_now(webhook.expose(), &instance.label(), &notice).await?;
+    println!("已发送，飞书确认收到");
+    Ok(())
 }
 
 fn parse_instrument(symbol: &str) -> Result<Instrument> {
@@ -121,9 +168,12 @@ fn parse_instrument(symbol: &str) -> Result<Instrument> {
 fn init_logging(verbose: bool) {
     let default = if verbose { "debug" } else { "info" };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+    // 常驻运行时日志写进文件：不是终端就不带颜色控制符。
+    let terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        .with_ansi(terminal)
         .init();
 }
 

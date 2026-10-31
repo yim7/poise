@@ -11,8 +11,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use poise_runtime::{ServeOptions, Server};
+use poise_runtime::{Notice, Notifier, ServeOptions, Server, StartupWarning};
 
+use crate::feishu::FeishuNotifier;
 use crate::instance::Instance;
 
 /// 起服务并一直跑到 `Ctrl-C`。
@@ -22,13 +23,24 @@ pub async fn run(instance: &Instance, options: ServeOptions, listen: Option<Stri
     let lock = instance.lock()?;
 
     // 启动闸门：账户不是 Unified、或私钥推出的地址不在已授权列表里，就此打住（第 2.0 节）。
-    crate::report::validate(instance).await?;
+    let check = crate::report::validate(instance).await?;
 
     let text = listen.unwrap_or_else(|| instance.startup().listen().to_string());
     let listen = listen_address(&text)?;
-    let runtime = Arc::new(instance.runtime()?);
+    let notifier: Option<Arc<FeishuNotifier>> = match instance.startup().feishu_webhook() {
+        Some(webhook) => Some(FeishuNotifier::spawn(
+            webhook.expose().to_string(),
+            instance.label(),
+        )?),
+        None => None,
+    };
+    let mut runtime = instance.runtime()?;
+    if let Some(notifier) = &notifier {
+        runtime = runtime.with_notifier(notifier.clone());
+    }
+    let runtime = Arc::new(runtime);
 
-    let server = Server::bind(runtime, lock, listen, options)
+    let server = Server::bind(runtime.clone(), lock, listen, options)
         .await
         .with_context(|| format!("cannot listen on `{listen}`"))?;
     let bound = server.local_addr()?;
@@ -38,20 +50,71 @@ pub async fn run(instance: &Instance, options: ServeOptions, listen: Option<Stri
         .with_context(|| format!("cannot write `{}`", listen_file.display()))?;
     println!("网页控制台  http://{bound}");
     println!("停止        按 Ctrl-C");
+    println!(
+        "提醒        {}",
+        if notifier.is_some() {
+            "推到飞书"
+        } else {
+            "没配置（启动文件里写 feishu_webhook 才推）"
+        }
+    );
+    // 重启提醒：常驻运行时进程被拉起来，用户靠它知道服务断过。
+    let live = runtime.drivable().map(|ids| ids.len()).unwrap_or_default();
+    let mut body = format!("{live} 个策略交给它驱动，控制台 http://{bound}");
+    for warning in &check.warnings {
+        match warning {
+            StartupWarning::ApiWalletExpiresSoon { remaining_days, .. } => {
+                body.push_str(&format!(
+                    "\nAPI 钱包还有 {remaining_days} 天到期，请提前续期。"
+                ));
+            }
+        }
+    }
+    runtime.notify(Notice::new("service:start", "poise 已启动", body));
 
     let served = server
         .run(async {
-            if let Err(error) = tokio::signal::ctrl_c().await {
-                tracing::error!(%error, "cannot listen for Ctrl-C; stopping now");
-            }
+            shutdown_signal().await;
         })
         .await;
     // 进程崩掉时这个文件会留下；`stop` 只在实例锁被占着（服务确实在跑）时才读它。
     let _ = std::fs::remove_file(&listen_file);
+    if let Some(notifier) = &notifier {
+        notifier.notify(Notice::new(
+            "service:stop",
+            "poise 已停止",
+            "服务正常退出：策略不再被驱动，交易所上的兜底止损单仍然挂着。",
+        ));
+        // 后台任务还要把这一条送出去。
+        notifier.flush(std::time::Duration::from_secs(5)).await;
+    }
     served?;
 
     println!("已停止");
     Ok(())
+}
+
+/// 等到 Ctrl-C 或 SIGTERM：launchd 停服务发的是 SIGTERM。
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    result = tokio::signal::ctrl_c() => if let Err(error) = result {
+                        tracing::error!(%error, "cannot listen for Ctrl-C");
+                    },
+                    _ = terminate.recv() => {}
+                }
+                return;
+            }
+            Err(error) => tracing::error!(%error, "cannot listen for SIGTERM"),
+        }
+    }
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::error!(%error, "cannot listen for Ctrl-C; stopping now");
+    }
 }
 
 /// 启动文件里的 `listen`。
