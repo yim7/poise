@@ -87,6 +87,11 @@ pub struct RuntimeOptions {
     /// `expiresAfter` 只保证超过时间戳的请求会被拒绝；交易所的挂单和成交查询可能比撮合
     /// 晚一点才看得到，余量就是留给这段延迟的。具体长度需要在测试网确认。
     pub unknown_order_grace: Duration,
+    /// 仓位对不上的差额要持续多久才算真的对不上、暂停策略（第 7.1 节第 3 条）。
+    ///
+    /// 成交之后交易所的仓位、挂单和成交流水接口不是同一时刻更新：正式网实测仓位先变，
+    /// 挂单和流水过几秒才跟上。宽限期之内按「仓位数据还在变化」等待，不发新单。
+    pub position_check_grace: Duration,
 }
 
 impl Default for RuntimeOptions {
@@ -95,6 +100,7 @@ impl Default for RuntimeOptions {
             order_expires_after: Duration::seconds(5),
             fills_lookback: Duration::seconds(60),
             unknown_order_grace: Duration::seconds(30),
+            position_check_grace: Duration::seconds(30),
         }
     }
 }
@@ -198,10 +204,11 @@ struct ExchangeFacts<'a> {
     observed_at: DateTime<Utc>,
 }
 
-/// 仓位核对最多比几轮。
+/// 仓位核对一步之内最多比几轮。
 ///
 /// 一轮是「刷新成交、挂单状态和仓位，再比一次」。数据还在变的时候每轮读到的都不一样，
-/// 必须有个上限；上限之内还没读到连续两轮相同的数据，就说明数据不稳定。
+/// 必须有个上限；上限之内还没读到连续两轮相同的数据，就说明数据不稳定。读到了也只是
+/// 「差额稳定了」：要不要暂停还要看它跨步持续了多久（[`RuntimeOptions::position_check_grace`]）。
 const POSITION_CHECK_ROUNDS: usize = 3;
 
 /// 读取阶段读回来的快照：判定需要的全部输入，加这一步报出的仓位。
@@ -215,7 +222,8 @@ struct Snapshot {
     /// 这一轮读到的仓位核对数据：交易所的实际仓位、我们推算的应有仓位，
     /// 以及每张订单交易所报的累计成交量快照。
     reading: PositionReading,
-    /// 仓位核对的结论。读取阶段的循环里已经算过，判定直接用，不重算一遍。
+    /// 这一步之内的仓位核对结论。读取阶段的循环里已经算过；运行中的一步还要再过一道
+    /// 跨步的宽限（[`Runtime::position_check_over_time`]）才交给判定。
     check: PositionCheck,
     /// 成交流水与订单累计成交量对不上的订单。
     inconsistent: Option<ClientOrderId>,
@@ -532,6 +540,8 @@ pub struct Runtime {
     churn: Mutex<HashMap<StrategyId, churn::Churn>>,
     /// 各策略兜底单最近一次挂不上的原因（见 `backstop`）。
     backstop_problems: Mutex<HashMap<StrategyId, String>>,
+    /// 各策略仓位差额稳定下来的时刻（见 [`Runtime::position_check_over_time`]）。
+    position_mismatches: Mutex<HashMap<StrategyId, DateTime<Utc>>>,
 }
 
 /// 账户保证金率落在哪一档（第 7.4 节）。
@@ -583,6 +593,7 @@ impl Runtime {
             margin_level: Mutex::new(None),
             churn: Mutex::new(HashMap::new()),
             backstop_problems: Mutex::new(HashMap::new()),
+            position_mismatches: Mutex::new(HashMap::new()),
         }
     }
 

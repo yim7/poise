@@ -59,6 +59,8 @@ impl Runtime {
         // 重启后驱动的也是只撤单的那条路。
         self.store
             .save_strategy_status(strategy_id, StrategyStatus::Pausing, now)?;
+        // 暂停期间不再核对仓位：恢复之后差额重新从头计。
+        self.forget_position_mismatch(strategy_id);
         // 走的是和「暂停中」的驱动、恢复一样的那一轮：撤单只看库里的 `cloid`，
         // 同步失败就丢掉内存、重新加载再撤（[`Runtime::cancel_only_round`]）。
         let round = self

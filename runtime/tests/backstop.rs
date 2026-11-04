@@ -214,7 +214,9 @@ async fn an_automatic_pause_is_notified() {
     harness.step(1).await;
 
     harness.exchange.manual_trade(quantity("0.05"));
-    let report = harness.step(2).await;
+    // 差额要持续满宽限期（30 秒）才暂停：这一步记下差额，30 秒后那一步才暂停。
+    harness.step(2).await;
+    let report = harness.step(32).await;
 
     assert!(report.is_paused());
     let pause = notices

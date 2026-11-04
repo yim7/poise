@@ -12,6 +12,8 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Duration, Utc};
+
 use crate::order::{ClientOrderId, OrderPurpose, OrderRecord, Side, Unit};
 use crate::planning::{PendingUnit, WaitReason};
 use crate::units::{Position, Quantity};
@@ -48,7 +50,8 @@ impl OrderState {
 /// 说明不了问题」，下一步再核对（第 9.2 节）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PauseReason {
-    /// 仓位核对失败：连续两轮读到同一份数据，仍然解释不了差额。
+    /// 仓位核对失败：连续两轮读到同一份数据解释不了差额，而且差额持续满了宽限期
+    /// （[`position_check_over_time`]）。
     PositionCheckFailed,
     /// 成交流水与订单累计成交量对不上。
     FillRecordsInconsistent,
@@ -267,13 +270,16 @@ pub enum PositionCheck {
     /// 数据还在变化：这一轮说明不了问题，下一步再核对。
     Unstable,
     /// 连续两轮读到同一份数据，仍然对不上：仓位异常。
+    ///
+    /// 一步之内这是「差额稳定下来了」；要不要据此暂停还要看它持续了多久
+    /// （[`position_check_over_time`]）。
     Mismatch,
 }
 
 /// 比对一轮读数与上一次读数。
 ///
 /// `previous` 是上一轮读到的数据，只有读过两轮以上才有值。两次读到完全相同的数据
-/// 还解释不了差额，就不是「数据在变」，而是仓位真的对不上。
+/// 还解释不了差额，就不是「数据在变」，而是这一步里差额稳定了。
 pub fn position_check(
     reading: &PositionReading,
     previous: Option<&PositionReading>,
@@ -284,6 +290,37 @@ pub fn position_check(
         PositionCheck::Mismatch
     } else {
         PositionCheck::Unstable
+    }
+}
+
+/// 跨步的仓位核对：一份稳定的差额要持续满 `grace` 才算真的对不上（第 7.1 节第 3 条）。
+///
+/// 交易所的仓位、挂单列表、订单状态和成交流水是几个独立的接口，一笔成交之后它们不是
+/// 同一时刻更新：正式网实测仓位接口先变，挂单和流水接口过几秒才跟上。一步里连续两轮
+/// 读到同一份对不上的数据（[`PositionCheck::Mismatch`]）只说明这几秒里数据没变，还不足以
+/// 说明仓位真的异常。所以差额第一次稳定下来时只记下时刻、按「数据还在变」等待，不发新单；
+/// 从那一刻起持续满 `grace` 仍然对不上，才是 [`PositionCheck::Mismatch`]。
+///
+/// `stable_since` 是上一步记下的「差额稳定下来的时刻」，之前没有就是 `None`。返回这一步的
+/// 结论，以及下一步要记住的时刻：对上了就清掉；数据还在变时保留——差额从稳定下来那一刻
+/// 起一直存在，中间读数变动不算重新开始。
+pub fn position_check_over_time(
+    check: PositionCheck,
+    stable_since: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    grace: Duration,
+) -> (PositionCheck, Option<DateTime<Utc>>) {
+    match check {
+        PositionCheck::Consistent => (PositionCheck::Consistent, None),
+        PositionCheck::Unstable => (PositionCheck::Unstable, stable_since),
+        PositionCheck::Mismatch => {
+            let since = stable_since.unwrap_or(now);
+            if now - since >= grace {
+                (PositionCheck::Mismatch, Some(since))
+            } else {
+                (PositionCheck::Unstable, Some(since))
+            }
+        }
     }
 }
 
@@ -390,7 +427,8 @@ mod tests {
     use super::{
         Decision, MarginState, MissingFact, OrderState, PauseReason, Permits, PositionCheck,
         PositionReading, SystemState, expected_position, fills_settled, inconsistent_fill_records,
-        judge, missing_facts, pending_units, position_check, unbooked_quantity,
+        judge, missing_facts, pending_units, position_check, position_check_over_time,
+        unbooked_quantity,
     };
     use crate::batch::BatchIndex;
     use crate::grid::CellIndex;
@@ -398,6 +436,7 @@ mod tests {
     use crate::planning::{PendingUnit, WaitReason};
     use crate::side::Direction;
     use crate::units::{Position, Price, Quantity};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use std::collections::HashMap;
 
     fn cloid(value: &str) -> ClientOrderId {
@@ -490,6 +529,66 @@ mod tests {
     fn the_same_mismatch_twice_is_a_mismatch() {
         let same = reading("0.01", "0");
         assert_eq!(position_check(&same, Some(&same)), PositionCheck::Mismatch);
+    }
+
+    fn at(seconds: i64) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 4, 5, 38, 0).unwrap() + Duration::seconds(seconds)
+    }
+
+    const GRACE: Duration = Duration::seconds(30);
+
+    /// 差额第一次稳定下来：记下时刻，按「数据还在变」等待，不暂停。
+    #[test]
+    fn a_mismatch_seen_for_the_first_time_waits_and_starts_the_clock() {
+        assert_eq!(
+            position_check_over_time(PositionCheck::Mismatch, None, at(0), GRACE),
+            (PositionCheck::Unstable, Some(at(0)))
+        );
+    }
+
+    /// 宽限期之内仍然对不上：继续等，时刻不动。
+    #[test]
+    fn a_mismatch_within_the_grace_keeps_waiting() {
+        assert_eq!(
+            position_check_over_time(PositionCheck::Mismatch, Some(at(0)), at(29), GRACE),
+            (PositionCheck::Unstable, Some(at(0)))
+        );
+    }
+
+    /// 差额持续满宽限期：才是仓位真的对不上。
+    #[test]
+    fn a_mismatch_that_lasted_the_whole_grace_is_a_mismatch() {
+        assert_eq!(
+            position_check_over_time(PositionCheck::Mismatch, Some(at(0)), at(30), GRACE),
+            (PositionCheck::Mismatch, Some(at(0)))
+        );
+        // 宽限期为零就是原来的规则：稳定下来立刻算对不上。
+        assert_eq!(
+            position_check_over_time(PositionCheck::Mismatch, None, at(0), Duration::zero()),
+            (PositionCheck::Mismatch, Some(at(0)))
+        );
+    }
+
+    /// 对上了：清掉记下的时刻，下次差额从头计。
+    #[test]
+    fn a_consistent_reading_clears_the_clock() {
+        assert_eq!(
+            position_check_over_time(PositionCheck::Consistent, Some(at(0)), at(10), GRACE),
+            (PositionCheck::Consistent, None)
+        );
+    }
+
+    /// 数据还在变：结论不变，已经记下的时刻保留——差额从稳定下来那一刻起一直存在。
+    #[test]
+    fn unstable_data_keeps_the_clock_as_it_is() {
+        assert_eq!(
+            position_check_over_time(PositionCheck::Unstable, Some(at(0)), at(10), GRACE),
+            (PositionCheck::Unstable, Some(at(0)))
+        );
+        assert_eq!(
+            position_check_over_time(PositionCheck::Unstable, None, at(10), GRACE),
+            (PositionCheck::Unstable, None)
+        );
     }
 
     /// 净仓位一模一样、订单快照却在变：不能算「同一份数据」。

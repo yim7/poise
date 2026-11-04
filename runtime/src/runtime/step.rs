@@ -5,6 +5,7 @@ use poise_strategy::Strategy;
 use poise_strategy::decision::{
     MarginState, PauseReason, Permits, PositionCheck, PositionReading, SystemState,
     expected_position as expected_from, judge, pending_units, position_check,
+    position_check_over_time,
 };
 use poise_strategy::instrument::Instrument;
 use poise_strategy::order::{ClientOrderId, OrderRecord, OrderStatus, WorkingOrder};
@@ -189,11 +190,13 @@ impl Runtime {
                 return Err(error);
             }
         };
+        // 一步之内差额稳定了还不算对不上：要持续满宽限期（第 7.1 节第 3 条）。
+        let check = self.position_check_over_time(strategy_id, &snapshot, now);
         // 结果未知的订单：三项核对都有了就作废、释放预留（第 9.2 节）。放在判定之前：
         // 作废之后，闸门在这一步就能打开。
-        let unknown = self.settle_unknown_orders(strategy_id, &mut orders, snapshot.check, now)?;
+        let unknown = self.settle_unknown_orders(strategy_id, &mut orders, check, now)?;
         let decision = judge(
-            snapshot.check,
+            check,
             snapshot.inconsistent.as_ref(),
             &order_states(&orders),
             SystemState {
@@ -584,7 +587,7 @@ impl Runtime {
                 );
             }
             PauseReason::PositionCheckFailed => {
-                // 连续两轮读到同一份数据，仍然解释不了差额：仓位真的对不上。
+                // 差额稳定下来之后又持续满了宽限期，仍然解释不了：仓位真的对不上。
                 tracing::warn!(
                     strategy = %strategy_id,
                     actual = %snapshot.reading.actual,
@@ -624,7 +627,9 @@ impl Runtime {
     /// 差额能用「在场订单已经成交、我们还没记入」解释时不算失败：成交记录可能还没到，
     /// 等到手后状态自然会对上。数据本身也可能还在变——查成交、查挂单状态、查仓位是
     /// 三次独立的读取，中间随时可能又有成交——所以每轮都刷新这三样再比一次，最多比
-    /// [`POSITION_CHECK_ROUNDS`] 轮；结论由 [`position_check`] 给出。
+    /// [`POSITION_CHECK_ROUNDS`] 轮；结论由 [`position_check`] 给出。连续两轮相同也只是
+    /// 这一步里差额稳定了：交易所几个接口在成交后不是同一时刻更新，要不要暂停还要看差额
+    /// 跨步持续了多久（[`Runtime::position_check_over_time`]）。
     ///
     /// 订单快照必须跟着刷新：`reported` 是上一次核对时的累计量，成交记录还可能查不到，
     /// 沿用旧快照会把「刚成交、还没入账」算成仓位对不上，误暂停一个正常运行的策略。
@@ -810,6 +815,57 @@ impl Runtime {
             applied_fills,
             inconsistent,
         })
+    }
+
+    /// 跨步的仓位核对：这一步里稳定下来的差额要持续满宽限期才算真的对不上
+    /// （[`position_check_over_time`]，第 7.1 节第 3 条）。
+    ///
+    /// 差额稳定下来的时刻只记在内存里：进程重启后从头计，重启本来就要走恢复、重新对账。
+    /// 对上了就清掉；暂停（无论自动还是用户操作）也清掉，恢复之后差额重新从头计
+    /// （[`Runtime::forget_position_mismatch`]）。
+    fn position_check_over_time(
+        &self,
+        strategy_id: &StrategyId,
+        snapshot: &Snapshot,
+        now: DateTime<Utc>,
+    ) -> PositionCheck {
+        let mut mismatches = self
+            .position_mismatches
+            .lock()
+            .expect("position mismatches lock poisoned");
+        let before = mismatches.get(strategy_id).copied();
+        let (check, since) = position_check_over_time(
+            snapshot.check,
+            before,
+            now,
+            self.options.position_check_grace,
+        );
+        match since {
+            Some(since) => {
+                mismatches.insert(strategy_id.clone(), since);
+            }
+            None => {
+                mismatches.remove(strategy_id);
+            }
+        }
+        if before.is_none() && since.is_some() {
+            tracing::warn!(
+                strategy = %strategy_id,
+                actual = %snapshot.reading.actual,
+                expected = %snapshot.reading.expected,
+                grace_secs = self.options.position_check_grace.num_seconds(),
+                "the position does not match the expected position, waiting for the exchange's views to catch up"
+            );
+        }
+        check
+    }
+
+    /// 忘掉这个策略的仓位差额：暂停之后恢复，差额要重新从头计。
+    pub(super) fn forget_position_mismatch(&self, strategy_id: &StrategyId) {
+        self.position_mismatches
+            .lock()
+            .expect("position mismatches lock poisoned")
+            .remove(strategy_id);
     }
 
     /// 规划：把判定给出的「被阻塞单位」交给策略，算出这一步要下的单和要撤的单。

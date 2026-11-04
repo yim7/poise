@@ -105,6 +105,9 @@ struct SimState {
     fill_after_next_position: Option<(ClientOrderId, Quantity)>,
     /// 接下来几次仓位查询报出的旧值（仓位接口滞后）。
     stale_positions: VecDeque<Position>,
+    /// 接下来几次挂单列表和按 `cloid` 的查询都按这份旧的订单快照回答（订单接口滞后），
+    /// 以及还剩几次。
+    stale_orders: Option<(usize, Vec<SimOrder>)>,
     pending_fill: Option<(ClientOrderId, Quantity)>,
     place_count: usize,
     /// 收到的全部请求次数（见 [`SimulatedExchange::call_count`]）。
@@ -254,6 +257,7 @@ impl SimulatedExchange {
                 fill_before_next_cancel: VecDeque::new(),
                 fill_after_next_position: None,
                 stale_positions: VecDeque::new(),
+                stale_orders: None,
                 pending_fill: None,
                 place_count: 0,
                 call_count: 0,
@@ -523,6 +527,16 @@ impl SimulatedExchange {
         for _ in 0..count {
             state.stale_positions.push_back(position);
         }
+    }
+
+    /// 让接下来 `count` 次挂单列表或按 `cloid` 的查询都按此刻的订单快照回答（订单接口滞后）。
+    ///
+    /// 之后的成交照常改变仓位和成交流水，只有订单查询还停在成交之前：用来构造「仓位接口
+    /// 先变、挂单和订单状态过几秒才跟上」（正式网实测）。
+    pub fn lag_order_views(&self, count: usize) {
+        let mut state = self.lock();
+        let snapshot = state.orders.clone();
+        state.stale_orders = Some((count, snapshot));
     }
 
     /// 用户在交易所手动交易，直接改变仓位，不产生属于本策略的订单。
@@ -942,8 +956,8 @@ impl Exchange for SimulatedExchange {
             let reason = state.fail_working_orders_reason.clone();
             return Err(ExchangeError::Unavailable { reason });
         }
-        Ok(state
-            .orders
+        let orders = take_stale_orders(&mut state).unwrap_or_else(|| state.orders.clone());
+        Ok(orders
             .iter()
             .filter(|order| order.is_working())
             .filter(|order| {
@@ -977,9 +991,9 @@ impl Exchange for SimulatedExchange {
         {
             return Ok(OrderLookup::Found(stop.view()));
         }
+        let orders = take_stale_orders(&mut state).unwrap_or_else(|| state.orders.clone());
         Ok(
-            match state
-                .orders
+            match orders
                 .iter()
                 .find(|order| &order.request.client_order_id == client_order_id)
             {
@@ -1245,6 +1259,21 @@ fn record_fill(
         },
     );
     applied
+}
+
+/// 订单查询还在滞后时，取这一次要回答的旧快照并把剩余次数减一；没在滞后时是 `None`。
+fn take_stale_orders(state: &mut SimState) -> Option<Vec<SimOrder>> {
+    let (remaining, snapshot) = state.stale_orders.as_mut()?;
+    if *remaining == 0 {
+        state.stale_orders = None;
+        return None;
+    }
+    *remaining -= 1;
+    let snapshot = snapshot.clone();
+    if *remaining == 0 {
+        state.stale_orders = None;
+    }
+    Some(snapshot)
 }
 
 /// 记一条成交。设了延迟时先放进「查不到」的那一堆。

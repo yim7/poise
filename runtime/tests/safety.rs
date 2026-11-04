@@ -201,10 +201,12 @@ async fn a_cancel_that_fails_while_pausing_is_retried_by_pausing_again() {
     harness
         .exchange
         .manual_trade(Quantity::parse("0.01").unwrap());
+    // 差额要持续满宽限期（30 秒）才暂停：这一步记下差额，30 秒后那一步才暂停。
+    harness.step(1).await;
     // 第一次撤单请求超时：这张单还留在交易所，策略仍然暂停。
     harness.exchange.unknown_next_cancel("timed out");
 
-    let report = harness.step(1).await;
+    let report = harness.step(31).await;
 
     assert!(report.is_paused());
     assert_eq!(report.canceled.len(), 19);
@@ -335,6 +337,52 @@ async fn a_fill_hidden_from_the_fills_query_does_not_pause_the_strategy() {
 
     assert!(!report.is_paused());
     assert_eq!(report.applied_fills, 0);
+    assert_eq!(
+        harness.cell(0).to_buy_back,
+        Quantity::parse("0.03").unwrap()
+    );
+}
+
+/// 成交之后交易所的几个接口不是同一时刻更新：正式网实测仓位接口先变，挂单列表、订单状态和
+/// 成交流水过几秒才跟上。这一步里连续两轮读到同一份对不上的数据，也不能马上暂停：记下时刻、
+/// 按「仓位数据还在变化」等待，下一步接口追上来就对上了。
+/// 2026-11-04 正式网一张卖单成交后接口滞后约 3 秒，策略因此误暂停了近 13 小时。
+#[tokio::test]
+async fn a_fill_the_order_queries_lag_behind_waits_instead_of_pausing() {
+    let harness = harness().await;
+    harness.step(0).await;
+    let buy = harness.working_cloid(0, OrderPurpose::GridEntry);
+    // 成交 0.02：仓位立刻变了，可这一步里的两次挂单查询和成交流水都还停在成交之前。
+    harness.exchange.lag_order_views(2);
+    harness.exchange.delay_next_fills(1);
+    harness
+        .exchange
+        .fill(&buy, Quantity::parse("0.02").unwrap(), at(1))
+        .unwrap();
+
+    let report = harness.step(1).await;
+
+    // 差额稳定了但还在宽限期内：等待，不暂停、不发新单、不撤单。
+    assert!(!report.is_paused());
+    assert!(report.plan.waiting.contains(&WaitReason::PositionUnstable));
+    assert!(report.placed.is_empty());
+    assert!(report.canceled.is_empty());
+    assert_eq!(report.position, Position::parse("0.02").unwrap());
+    assert_eq!(report.expected_position, Position::ZERO);
+    assert_eq!(
+        harness.runtime.status(&harness.strategy_id).unwrap(),
+        StrategyStatus::Running
+    );
+
+    // 接口追上来了：下一步按挂单列表的累计量记账，仓位对上，照常挂出卖单。
+    harness.exchange.deliver_delayed_fills();
+    let report = harness.step(6).await;
+
+    assert!(!report.is_paused());
+    assert_eq!(report.applied_fills, 1);
+    assert_eq!(report.position, Position::parse("0.02").unwrap());
+    assert_eq!(report.expected_position, Position::parse("0.02").unwrap());
+    assert_eq!(report.placed.len(), 1);
     assert_eq!(
         harness.cell(0).to_buy_back,
         Quantity::parse("0.03").unwrap()
@@ -592,7 +640,17 @@ async fn b18_a_position_mismatch_pauses_the_strategy_and_cancels_its_orders() {
         .exchange
         .manual_trade(Quantity::parse("0.01").unwrap());
 
+    // 差额第一次稳定下来：先按「仓位数据还在变化」等待，不发新单、不撤单。交易所几个接口
+    // 在成交后不是同一时刻更新，这几秒的差额多半只是接口还没追上。
     let report = harness.step(1).await;
+
+    assert!(!report.is_paused());
+    assert!(report.plan.waiting.contains(&WaitReason::PositionUnstable));
+    assert!(report.placed.is_empty());
+    assert_eq!(harness.working().len(), 20);
+
+    // 差额持续满宽限期（30 秒）仍然解释不了：仓位真的对不上，暂停、撤单。
+    let report = harness.step(31).await;
 
     assert!(report.is_paused());
     assert_eq!(report.position, Position::parse("0.01").unwrap());
@@ -626,17 +684,20 @@ async fn b18_a_position_mismatch_pauses_the_strategy_and_cancels_its_orders() {
 
     // 暂停后的一步只看失效价（这个策略没设），不下单、不撤单，仍是已暂停。
     let placed = harness.exchange.place_count();
-    let report = harness.step(2).await;
+    let report = harness.step(32).await;
     assert_eq!(report.status, StrategyStatus::Paused);
     assert!(report.placed.is_empty() && report.canceled.is_empty());
     assert_eq!(harness.exchange.place_count(), placed);
 
-    // 仓位没修好之前，恢复会立刻再次暂停。
-    let outcome = harness.resume(3).await;
+    // 仓位没修好之前恢复：差额重新从头计，先等待，持续满宽限期再次暂停。
+    let outcome = harness.resume(33).await;
 
     let ResumeOutcome::Resumed(report) = outcome else {
         panic!("expected a step, got {outcome:?}");
     };
+    assert!(!report.is_paused());
+    assert!(report.plan.waiting.contains(&WaitReason::PositionUnstable));
+    let report = harness.step(63).await;
     assert!(report.is_paused());
     assert_eq!(
         harness.runtime.status(&harness.strategy_id).unwrap(),
@@ -689,8 +750,9 @@ async fn a_reduce_only_sell_does_not_open_a_short_position() {
     );
     assert_eq!(harness.exchange.current_position(), Position::ZERO);
 
-    // 对账时发现仓位对不上：应有持仓是 .05，实际是 0，策略暂停。
-    let report = harness.step(2).await;
+    // 对账时发现仓位对不上：应有持仓是 .05，实际是 0。差额持续满宽限期（30 秒）后策略暂停。
+    harness.step(2).await;
+    let report = harness.step(32).await;
 
     assert!(report.is_paused());
     assert_eq!(report.position, Position::ZERO);
