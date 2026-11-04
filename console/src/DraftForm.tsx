@@ -20,6 +20,8 @@ export interface SideFormValues {
   maxPosition: string
   coreRatio: string
   batchCount: string
+  /** 主仓倾斜（末批÷首批）；留空表示不倾斜。 */
+  coreSkew: string
   gridSpacing: string
   gridSpread: string
   throttleMinutes: string
@@ -85,6 +87,27 @@ export function batchHint(direction: Direction, values: SideFormValues): string 
   return `主仓 ${show(first)} → ${show(last)}，段宽 ${show(width)}`
 }
 
+/**
+ * 主仓倾斜下面的一行说明：首批和末批各买多少主仓。主仓总量 r × M 按权重分到 n 批，权重从 1
+ * 线性过渡到倾斜比（第 3.1 节）；网格部分平均分给全部格子，不随批次。服务端还会按数量精度
+ * 规整，预览里的批次表是准数。倾斜留空或输入不完整时是 `null`。
+ */
+export function skewHint(values: SideFormValues): string | null {
+  const skew = positive(values.coreSkew)
+  const ratio = positive(values.coreRatio)
+  const position = positive(values.maxPosition)
+  const count = Number(values.batchCount.trim())
+  if (skew === null || ratio === null || position === null) return null
+  if (!Number.isInteger(count) || count < 1) return null
+  const weights = Array.from({ length: count }, (_, index) =>
+    count === 1 ? 1 : count - 1 + (skew - 1) * index,
+  )
+  const total = weights.reduce((sum, weight) => sum + weight, 0)
+  const core = ratio * position
+  const show = (value: number) => String(Number(value.toPrecision(4)))
+  return `主仓每批 ${show((core * weights[0]) / total)} → ${show((core * weights[count - 1]) / total)}，网格均分给全部格子`
+}
+
 /** 价差下面的一行说明：现在按什么比例跟随间距。写成公式就够：改 d 时价差跟着变，一看便知。 */
 export function spreadHint(ratio: number): string {
   if (ratio === 1) return '= d'
@@ -107,6 +130,7 @@ export const DEFAULT_FORM: FormValues = {
     maxPosition: '1',
     coreRatio: '0',
     batchCount: '',
+    coreSkew: '',
     gridSpacing: '1000',
     gridSpread: '1000',
     throttleMinutes: '',
@@ -122,6 +146,7 @@ export const DEFAULT_FORM: FormValues = {
     maxPosition: '1',
     coreRatio: '0',
     batchCount: '',
+    coreSkew: '',
     gridSpacing: '1000',
     gridSpread: '1000',
     throttleMinutes: '',
@@ -170,6 +195,7 @@ function sideConfig(
     return { problem: `${DIRECTION_LABELS[direction]}侧：${throttle.problem}` }
   }
   const batchCount = values.batchCount.trim()
+  const coreSkew = values.coreSkew.trim()
   const invalidation = invalidationConfig(direction, values, neutral)
   if ('problem' in invalidation) return invalidation
   return {
@@ -180,6 +206,7 @@ function sideConfig(
       // 中性网格两侧都不设主仓（第 5.2 节）。
       core_ratio: neutral ? '0' : values.coreRatio.trim(),
       batch_count: neutral || batchCount === '' ? null : Number(batchCount),
+      core_skew: neutral || coreSkew === '' ? null : coreSkew,
       grid_spacing: values.gridSpacing.trim(),
       grid_spread: values.gridSpread.trim(),
       throttle_interval: throttle.interval,
@@ -242,6 +269,7 @@ function sideValues(side: SideConfig | null, fallback: SideFormValues): SideForm
     maxPosition: side.max_position,
     coreRatio: side.core_ratio,
     batchCount: side.batch_count === null ? '' : String(side.batch_count),
+    coreSkew: side.core_skew ?? '',
     gridSpacing: side.grid_spacing,
     gridSpread: side.grid_spread,
     throttleMinutes: throttleMinutes(side.throttle_interval),
@@ -314,7 +342,7 @@ function SideFields({
   // 中性网格固定按「无主仓、全部平仓」提交：输入框显示要提交的值，不显示改成中性之前
   // 填的那个——否则看到的和存下的不是一份参数。原来的值留着，取消中性时还在。
   const shown = neutral
-    ? { ...values, coreRatio: '0', batchCount: '', invalidationRemaining: '0' }
+    ? { ...values, coreRatio: '0', batchCount: '', coreSkew: '', invalidationRemaining: '0' }
     : values
   const field = (name: SideFieldName, fieldLabel: string, extra: Partial<FieldProps> = {}) => (
     <Field
@@ -370,6 +398,11 @@ function SideFields({
             {field('batchCount', '主仓批数 n', {
               disabled: coreDisabled,
               hint: (coreDisabled ? null : batchHint(direction, values)) ?? 'r = 0 时留空',
+            })}
+            {field('coreSkew', '主仓倾斜（末批÷首批）', {
+              disabled: coreDisabled,
+              placeholder: '不倾斜',
+              hint: (coreDisabled ? null : skewHint(values)) ?? '留空：M 平均分给各批，网格随批',
             })}
           </Group>
           <Group title="网格">

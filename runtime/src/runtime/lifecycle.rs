@@ -601,6 +601,9 @@ pub(super) fn changed_field(old: &StrategyConfig, new: &StrategyConfig) -> Optio
         if old_side.batch_count != new_side.batch_count {
             return Some("batch_count");
         }
+        if old_side.core_skew != new_side.core_skew {
+            return Some("core_skew");
+        }
         if old_side.grid_spacing != new_side.grid_spacing {
             return Some("grid_spacing");
         }

@@ -2,7 +2,8 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { percent } from './format'
+import { percent, sideSummary } from './format'
+import { coreSide } from './test/fixtures'
 
 describe('百分比', () => {
   it('比率按百分比显示', () => {
@@ -16,5 +17,12 @@ describe('百分比', () => {
     expect(percent('-0.005')).toBe('-0.5%')
     expect(percent('-2.4330532')).toBe('-243.30532%')
     expect(percent('-0')).toBe('0%')
+  })
+})
+
+describe('一侧参数的摘要', () => {
+  it('有主仓倾斜时在批数后面写出来，没有就不写', () => {
+    expect(sideSummary(coreSide)).toMatch(/主仓 0\.7×4 批$/)
+    expect(sideSummary({ ...coreSide, core_skew: '3' })).toContain('主仓 0.7×4 批（倾斜 3）')
   })
 })

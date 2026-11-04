@@ -41,6 +41,8 @@ export interface SideConfig {
   max_position: Decimal
   core_ratio: Decimal
   batch_count: number | null
+  /** 主仓倾斜：末批主仓 ÷ 首批主仓；null 表示不倾斜，M 平均分给各批、网格随批。 */
+  core_skew: Decimal | null
   grid_spacing: Decimal
   grid_spread: Decimal
   throttle_interval: ThrottleInterval

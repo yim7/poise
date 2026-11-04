@@ -111,6 +111,7 @@ pub(crate) fn long_grid_config() -> StrategyConfig {
             max_position: Quantity::parse("1").unwrap(),
             core_ratio: Rate::ZERO,
             batch_count: None,
+            core_skew: None,
             grid_spacing: Price::parse("1000").unwrap(),
             grid_spread: Price::parse("1000").unwrap(),
             throttle_interval: None,
@@ -128,9 +129,24 @@ pub(crate) fn core_long_config() -> StrategyConfig {
         long: Some(SideConfig {
             core_ratio: Rate::parse("0.7").unwrap(),
             batch_count: Some(4),
+            core_skew: None,
             ..long_grid_config().long.unwrap()
         }),
         ..long_grid_config()
+    }
+}
+
+/// [`core_long_config`] 加上主仓倾斜 3（第 3.1 节的例子）。
+///
+/// 主仓总量 .7 按 3 : 5 : 7 : 9 分到四批：.088、.146、.204、.262；网格 .3 平均分给
+/// 20 格，每格 .015；每批数量 .163、.221、.279、.337。
+pub(crate) fn skewed_core_long_config() -> StrategyConfig {
+    StrategyConfig {
+        long: Some(SideConfig {
+            core_skew: Some(Rate::parse("3").unwrap()),
+            ..core_long_config().long.unwrap()
+        }),
+        ..core_long_config()
     }
 }
 
@@ -143,6 +159,7 @@ pub(crate) fn core_only_config() -> StrategyConfig {
         long: Some(SideConfig {
             core_ratio: Rate::parse("1").unwrap(),
             batch_count: Some(4),
+            core_skew: None,
             ..long_grid_config().long.unwrap()
         }),
         ..long_grid_config()
@@ -167,6 +184,7 @@ pub(crate) fn core_short_config() -> StrategyConfig {
         short: Some(SideConfig {
             core_ratio: Rate::parse("0.7").unwrap(),
             batch_count: Some(4),
+            core_skew: None,
             ..short_grid_config().short.unwrap()
         }),
         ..short_grid_config()
@@ -186,6 +204,7 @@ pub(crate) fn neutral_grid_config() -> StrategyConfig {
             max_position: Quantity::parse("1").unwrap(),
             core_ratio: Rate::ZERO,
             batch_count: None,
+            core_skew: None,
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,
@@ -197,6 +216,7 @@ pub(crate) fn neutral_grid_config() -> StrategyConfig {
             max_position: Quantity::parse("0.25").unwrap(),
             core_ratio: Rate::ZERO,
             batch_count: None,
+            core_skew: None,
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,
@@ -211,6 +231,10 @@ pub(crate) fn long_grid_strategy() -> Strategy {
 
 pub(crate) fn core_long_strategy() -> Strategy {
     Strategy::new(core_long_config(), btc_spec(), btc_fees()).unwrap()
+}
+
+pub(crate) fn skewed_core_long_strategy() -> Strategy {
+    Strategy::new(skewed_core_long_config(), btc_spec(), btc_fees()).unwrap()
 }
 
 /// 同样的批次划分，但数量精度是 0.00001，用来构造主仓尾量。
@@ -245,6 +269,7 @@ pub(crate) fn single_small_batch_strategy() -> Strategy {
             max_position: Quantity::parse("0.5").unwrap(),
             core_ratio: Rate::parse("0.22").unwrap(),
             batch_count: Some(1),
+            core_skew: None,
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,
@@ -267,6 +292,7 @@ pub(crate) fn single_batch_core_strategy() -> Strategy {
             max_position: Quantity::parse("10").unwrap(),
             core_ratio: Rate::parse("0.7").unwrap(),
             batch_count: Some(1),
+            core_skew: None,
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,

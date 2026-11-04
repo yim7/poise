@@ -2880,6 +2880,7 @@ mod tests {
                 max_position: Quantity::parse("1").unwrap(),
                 core_ratio: Rate::ZERO,
                 batch_count: None,
+                core_skew: None,
                 grid_spacing: Price::parse("1000").unwrap(),
                 grid_spread: Price::parse("1000").unwrap(),
                 throttle_interval: None,

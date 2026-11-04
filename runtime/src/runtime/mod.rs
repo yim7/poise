@@ -833,6 +833,7 @@ fn field_label(field: &str) -> &'static str {
         "max_position" => "最大仓位 M",
         "core_ratio" => "主仓比例 r",
         "batch_count" => "主仓批数 n",
+        "core_skew" => "主仓倾斜",
         "grid_spacing" => "网格间距 d",
         "grid_spread" => "网格价差 g",
         _ => "这个参数",

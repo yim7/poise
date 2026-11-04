@@ -19,6 +19,7 @@ export const longSide: SideConfig = {
   max_position: '1',
   core_ratio: '0',
   batch_count: null,
+  core_skew: null,
   grid_spacing: '1000',
   grid_spread: '1000',
   throttle_interval: null,
@@ -49,6 +50,7 @@ export const neutralConfig: StrategyConfig = {
     max_position: '1',
     core_ratio: '0',
     batch_count: null,
+    core_skew: null,
     grid_spacing: '1',
     grid_spread: '1',
     throttle_interval: null,
@@ -60,6 +62,7 @@ export const neutralConfig: StrategyConfig = {
     max_position: '0.25',
     core_ratio: '0',
     batch_count: null,
+    core_skew: null,
     grid_spacing: '1',
     grid_spread: '1',
     throttle_interval: null,
@@ -72,6 +75,7 @@ export const coreSide: SideConfig = {
   ...longSide,
   core_ratio: '0.7',
   batch_count: 4,
+  core_skew: null,
 }
 
 const batches: BatchSummary[] = [0, 1, 2, 3].map((index) => ({

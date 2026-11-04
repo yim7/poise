@@ -4,11 +4,11 @@
 //! 平仓单，没买完的主仓继续挂买单，与自身平仓单相交的限价按第 6 节下调。
 
 use crate::Strategy;
-use crate::batch::{Batch, core_quantity};
+use crate::batch::Batch;
 use crate::grid::GridPlan;
 use crate::side::{Direction, SidePlan};
 use crate::state::{SideState, StrategyState};
-use crate::units::{Position, Quantity};
+use crate::units::{Position, Quantity, div_ceil};
 
 /// 已有仓位接管不了（第 8 节第 1 条）。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -127,14 +127,31 @@ impl Strategy {
                 left = left.saturating_sub(batch.quantity);
                 continue;
             }
-            // 最后一批只分到一部分：主仓按比例向上取整，其余从靠近批次价的格子依次填满。
-            let core = core_quantity(left, side.config().core_ratio, self.spec().quantity_step())
-                .min(batch.core_quantity);
+            // 最后一批只分到一部分：主仓按这一批自己的比例向上取整，其余从靠近批次价的
+            // 格子依次填满。
+            let core = partial_core(left, batch, self.spec().quantity_step());
             let grid = left.saturating_sub(core);
             return fill_batch(side.grid(), state, batch, core, grid);
         }
         left
     }
+}
+
+/// 一批只分到 `left` 时记多少主仓：按这一批的主仓比例 `C ÷ q` 向上取整到数量精度，
+/// 不超过 `C`（第 8 节第 2 条）。
+///
+/// 没有主仓倾斜时每批的比例约等于 `r`（`C` 按最小单位向上取整，略高）；有倾斜时各批的
+/// 比例不同，所以一律按批算。接管只在预览和确认启动时做，不影响运行中的策略。
+fn partial_core(left: Quantity, batch: &Batch, step: Quantity) -> Quantity {
+    if batch.quantity.is_zero() {
+        return Quantity::ZERO;
+    }
+    let units = div_ceil(
+        i128::from(left.units()) * i128::from(batch.core_quantity.units()),
+        i128::from(batch.quantity.units()),
+    );
+    let units = div_ceil(units, i128::from(step.units())) * i128::from(step.units());
+    Quantity::from_units(i64::try_from(units).unwrap_or(i64::MAX)).min(batch.core_quantity)
 }
 
 /// 从启动端起已经走完的单位数：有主仓时是已经结束的批次，没有主仓时是持有满额的格子。
@@ -218,7 +235,7 @@ mod tests {
     use crate::batch::BatchIndex;
     use crate::fixtures::{
         btc_fees, btc_spec, core_long_config, core_long_strategy, core_short_strategy,
-        long_grid_strategy, neutral_grid_strategy, short_grid_config,
+        long_grid_strategy, neutral_grid_strategy, short_grid_config, skewed_core_long_strategy,
     };
     use crate::grid::CellIndex;
     use crate::side::Direction;
@@ -304,6 +321,42 @@ mod tests {
 
         // 应有持仓 = .175 + .075 + .084 + .036 = .37，正好等于实际仓位。
         assert_eq!(strategy.expected_position(&state), position("0.37"));
+        strategy.validate_state(&state).unwrap();
+    }
+
+    /// 有主仓倾斜时最后一批按它自己的比例拆：90 批 q = .221、C = .146。
+    #[test]
+    fn a_partial_batch_is_split_by_its_own_core_ratio_when_the_core_is_skewed() {
+        let strategy = skewed_core_long_strategy();
+
+        let state = strategy.takeover_state(position("0.3")).unwrap();
+
+        let long = state.side(Direction::Long).unwrap();
+        // 95 批完整（.163）：主仓 .088，已结束。
+        let first = long.batch(BatchIndex(0)).unwrap();
+        assert_eq!(first.filled, quantity("0.088"));
+        assert!(first.finished);
+        // 90 批分到剩余 .137：主仓 ceil(.137 × .146 / .221) = .091，网格 .046。
+        let second = long.batch(BatchIndex(1)).unwrap();
+        assert_eq!(second.filled, quantity("0.091"));
+        assert!(!second.finished);
+
+        let held = cells(&strategy, &state, Direction::Long);
+        for cell in &held[0..5] {
+            assert_eq!(*cell, (true, quantity("0.015")));
+        }
+        // 90、89、88 三格各持有 .015；87 格持有 .001，待买回 .014；86 没启用。
+        for cell in &held[5..8] {
+            assert_eq!(*cell, (true, quantity("0.015")));
+        }
+        assert_eq!(held[8], (true, quantity("0.001")));
+        assert_eq!(
+            long.cell(CellIndex(8)).unwrap().to_buy_back,
+            quantity("0.014")
+        );
+        assert_eq!(held[9], (false, Quantity::ZERO));
+
+        assert_eq!(strategy.expected_position(&state), position("0.3"));
         strategy.validate_state(&state).unwrap();
     }
 

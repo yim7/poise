@@ -109,6 +109,7 @@ pub fn long_grid_config() -> StrategyConfig {
             max_position: Quantity::parse("1").unwrap(),
             core_ratio: Rate::ZERO,
             batch_count: None,
+            core_skew: None,
             grid_spacing: Price::parse("1000").unwrap(),
             grid_spread: Price::parse("1000").unwrap(),
             throttle_interval: None,
@@ -138,6 +139,7 @@ pub fn core_long_config() -> StrategyConfig {
         long: Some(SideConfig {
             core_ratio: Rate::parse("0.7").unwrap(),
             batch_count: Some(4),
+            core_skew: None,
             ..long_side(&long_grid_config()).clone()
         }),
         ..long_grid_config()
@@ -152,6 +154,7 @@ pub fn core_only_config() -> StrategyConfig {
         long: Some(SideConfig {
             core_ratio: Rate::parse("1").unwrap(),
             batch_count: Some(4),
+            core_skew: None,
             ..long_side(&long_grid_config()).clone()
         }),
         ..long_grid_config()
@@ -181,6 +184,7 @@ pub fn core_short_config() -> StrategyConfig {
         short: Some(SideConfig {
             core_ratio: Rate::parse("0.7").unwrap(),
             batch_count: Some(4),
+            core_skew: None,
             ..short_side(&short_grid_config()).clone()
         }),
         ..short_grid_config()
@@ -200,6 +204,7 @@ pub fn neutral_grid_config() -> StrategyConfig {
             max_position: Quantity::parse("1").unwrap(),
             core_ratio: Rate::ZERO,
             batch_count: None,
+            core_skew: None,
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,
@@ -211,6 +216,7 @@ pub fn neutral_grid_config() -> StrategyConfig {
             max_position: Quantity::parse("0.25").unwrap(),
             core_ratio: Rate::ZERO,
             batch_count: None,
+            core_skew: None,
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,

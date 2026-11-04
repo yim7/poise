@@ -1,22 +1,31 @@
 //! 批次划分（主仓）。
 //!
 //! 一侧把 `[L, H]` 均分为 `n` 段，段宽 `w = (H − L) / n`，第 k 批的批次价在启动
-//! 顺序上依次相隔 `w`：多头侧从 `H` 往下，空头侧从 `L` 往上。每批数量把 `M` 按数量
-//! 最小单位平均分成 n 份，除不尽的余数依次多给靠近空隙的批次；每批的主仓
-//! `C = ceil(r × q)`，网格部分 `G = q − C`。
+//! 顺序上依次相隔 `w`：多头侧从 `H` 往下，空头侧从 `L` 往上。数量有两种分法（第 3.1 节）：
+//!
+//! - 没有主仓倾斜：每批数量把 `M` 按数量最小单位平均分成 n 份，除不尽的余数依次多给
+//!   靠近空隙的批次；每批的主仓 `C = ceil(r × q)`，网格部分 `G = q − C` 平均分给跟随
+//!   本批的格子。
+//! - 有主仓倾斜：主仓总量 `K = ceil(r × M)` 按权重分到各批，末批 ÷ 首批等于倾斜比，
+//!   中间线性过渡；网格总量 `M − K` 平均分给本侧全部格子，和批次无关。每批数量
+//!   `q = C + 本批格子数量之和`。
+//!
+//! 运行中的策略每一步都从配置重新划分，所以没设倾斜的配置必须保持原来的分法不变。
 //!
 //! 批次按下标排列，0 是最靠近空隙的一批，也是启动顺序里的第一个。
 //!
-//! 划分批次时同时把每批的网格部分分给跟随它的格子——格子的数量由本批的主仓数量
-//! 决定，两者不能分开算。
+//! 划分批次时同时把格子的数量定下来：没有倾斜时格子的数量由本批的主仓数量决定，
+//! 两者不能分开算。
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
-use crate::grid::{Cell, CellIndex, GridShape, exit_price};
+use crate::grid::{Cell, CellIndex, GridShape, cell_quantity, exit_price};
 use crate::instrument::InstrumentSpec;
 use crate::side::Direction;
-use crate::units::{Price, Quantity, Rate, div_ceil, div_round, split_steps};
+use crate::units::{
+    Price, Quantity, Rate, SCALE, div_ceil, div_round, split_steps, split_steps_by_weight,
+};
 
 /// 批次在划分中的下标，0 是最靠近空隙的一批。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -105,7 +114,7 @@ pub(crate) fn batch_price(
     i64::try_from(steps * tick).ok().map(Price::from_units)
 }
 
-/// 划分批次，并把每批的网格部分分给跟随它的格子。
+/// 划分批次，并定下每个格子的数量。
 ///
 /// `prices` 为空表示这一侧没有网格（`r = 1`）：每批只有主仓，没有格子，
 /// 也就不适用「每批都要有格子」这条规则。
@@ -118,43 +127,129 @@ pub(crate) fn build_batches(
 ) -> Result<(BatchPlan, Vec<Cell>), ConfigError> {
     let count = batch_count as usize;
     let batch_prices = batch_prices(direction, shape, batch_count, spec)?;
-    let quantities = batch_quantities(shape, count, spec.quantity_step());
     let following = following_batches(direction, prices, &batch_prices);
+    let members: Vec<Vec<CellIndex>> = (0..count)
+        .map(|index| members_of(&following, index))
+        .collect();
+    let quantities = match shape.core_skew {
+        None => split_by_batch(shape, &members, spec),
+        Some(skew) => split_core_and_grid(shape, skew, &members, prices.len(), spec),
+    };
 
     let mut batches = Vec::with_capacity(count);
     let mut cells = Vec::with_capacity(prices.len());
     for index in 0..count {
-        let members = members_of(&following, index);
-        check_batch_has_cells(direction, &members, prices, &batch_prices, index, shape)?;
-        let core_quantity = checked_core_quantity(
+        check_batch_has_cells(
+            direction,
+            &members[index],
+            prices,
+            &batch_prices,
+            index,
+            shape,
+        )?;
+        let core_quantity = quantities.core[index];
+        check_core_notional(
             direction,
             BatchIndex(index),
-            quantities[index],
+            core_quantity,
             batch_prices[index],
-            shape,
             spec,
         )?;
-        let grid_quantity = quantities[index].saturating_sub(core_quantity);
         cells.extend(batch_cells(
             direction,
-            &members,
-            grid_quantity,
+            &members[index],
+            &quantities.cells,
             prices,
             shape,
             spec,
             BatchIndex(index),
         )?);
+        let grid_quantity = members[index].iter().fold(Quantity::ZERO, |total, cell| {
+            total + quantities.cells[cell.0]
+        });
         batches.push(Batch {
             index: BatchIndex(index),
             price: batch_prices[index],
-            quantity: quantities[index],
+            quantity: core_quantity + grid_quantity,
             core_quantity,
             grid_quantity,
-            cells: members,
+            cells: members[index].clone(),
         });
     }
 
     Ok((BatchPlan::from_batches(batches), cells))
+}
+
+/// 数量划分的结果：每批的主仓数量，以及按格子下标排列的每格数量。
+struct Quantities {
+    core: Vec<Quantity>,
+    cells: Vec<Quantity>,
+}
+
+/// 没有主仓倾斜：`M` 平均分给各批，每批的主仓 `C = ceil(r × q)`，网格部分 `q − C`
+/// 平均分给跟随本批的格子，余下的最小单位依次给靠近批次价的格子。
+fn split_by_batch(
+    shape: &GridShape,
+    members: &[Vec<CellIndex>],
+    spec: &InstrumentSpec,
+) -> Quantities {
+    let step = spec.quantity_step();
+    let batch_quantities = batch_quantities(shape, members.len(), step);
+    let core: Vec<Quantity> = batch_quantities
+        .iter()
+        .map(|quantity| core_quantity(*quantity, shape.core_ratio, step))
+        .collect();
+    let mut cells = vec![Quantity::ZERO; members.iter().map(Vec::len).sum()];
+    for (index, batch_members) in members.iter().enumerate() {
+        let grid_steps = batch_quantities[index].saturating_sub(core[index]).units() / step.units();
+        for (position, cell) in batch_members.iter().enumerate() {
+            cells[cell.0] = Quantity::from_units(
+                split_steps(grid_steps, position, batch_members.len()) * step.units(),
+            );
+        }
+    }
+    Quantities { core, cells }
+}
+
+/// 有主仓倾斜：主仓总量 `ceil(r × M)` 按倾斜权重分到各批，网格总量平均分给本侧全部
+/// 格子，余下的最小单位依次给靠近空隙的格子（和没有主仓时格子的分法一样）。
+fn split_core_and_grid(
+    shape: &GridShape,
+    skew: Rate,
+    members: &[Vec<CellIndex>],
+    cell_count: usize,
+    spec: &InstrumentSpec,
+) -> Quantities {
+    let step = spec.quantity_step();
+    let core_total = core_quantity(shape.max_position, shape.core_ratio, step);
+    let core = split_steps_by_weight(
+        core_total.units() / step.units(),
+        &core_weights(members.len(), skew),
+    )
+    .into_iter()
+    .map(|steps| Quantity::from_units(steps * step.units()))
+    .collect();
+    let grid_total = shape.max_position.saturating_sub(core_total);
+    let cells = (0..cell_count)
+        .map(|index| cell_quantity(index, cell_count, grid_total, step))
+        .collect();
+    Quantities { core, cells }
+}
+
+/// 主仓倾斜的权重：末批 ÷ 首批等于倾斜比，中间线性过渡。
+///
+/// 第 k 批的权重是 `(n − 1) + (倾斜比 − 1) × k`，按比率的最小单位放大后都是整数；
+/// 倾斜比为正时每个权重都是正数（末批是 `(n − 1) × 倾斜比`）。只有一批时权重不起作用。
+fn core_weights(count: usize, skew: Rate) -> Vec<i128> {
+    if count == 1 {
+        return vec![1];
+    }
+    let last = count as i128 - 1;
+    (0..count as i128)
+        .map(|index| {
+            last * i128::from(SCALE) + (i128::from(skew.units()) - i128::from(SCALE)) * index
+        })
+        .collect()
 }
 
 /// 批次价：把范围均分后按报价精度规整。
@@ -253,18 +348,16 @@ fn check_batch_has_cells(
     })
 }
 
-/// 本批的主仓数量，并检查它按批次价顶得住最低订单金额。
-fn checked_core_quantity(
+/// 本批的主仓按批次价要顶得住最低订单金额。
+fn check_core_notional(
     direction: Direction,
     index: BatchIndex,
-    quantity: Quantity,
+    core_quantity: Quantity,
     batch_price: Price,
-    shape: &GridShape,
     spec: &InstrumentSpec,
-) -> Result<Quantity, ConfigError> {
-    let core_quantity = core_quantity(quantity, shape.core_ratio, spec.quantity_step());
+) -> Result<(), ConfigError> {
     if spec.meets_minimum_order(core_quantity, batch_price) {
-        return Ok(core_quantity);
+        return Ok(());
     }
     Err(ConfigError::BatchCoreBelowMinimumOrderNotional {
         direction,
@@ -275,32 +368,27 @@ fn checked_core_quantity(
     })
 }
 
-/// 本批的格子：网格部分平均分给跟随本批的格子，余下的最小单位依次分给靠近批次价的格子。
+/// 本批的格子，数量取划分好的 `cell_quantities`。
 ///
 /// `members` 按启动顺序排列，也就是从靠近批次价的一端开始。
 fn batch_cells(
     direction: Direction,
     members: &[CellIndex],
-    grid_quantity: Quantity,
+    cell_quantities: &[Quantity],
     prices: &[Price],
     shape: &GridShape,
     spec: &InstrumentSpec,
     batch: BatchIndex,
 ) -> Result<Vec<Cell>, ConfigError> {
-    let step = spec.quantity_step();
-    let grid_steps = grid_quantity.units() / step.units();
     members
         .iter()
-        .enumerate()
-        .map(|(position, cell_index)| {
+        .map(|cell_index| {
             let entry_price = prices[cell_index.0];
             Ok(Cell {
                 index: *cell_index,
                 entry_price,
                 exit_price: exit_price(direction, entry_price, *cell_index, shape, spec)?,
-                quantity: Quantity::from_units(
-                    split_steps(grid_steps, position, members.len()) * step.units(),
-                ),
+                quantity: cell_quantities[cell_index.0],
                 batch: Some(batch),
             })
         })
@@ -332,7 +420,7 @@ pub(crate) fn required_core_quantity(price: Price, spec: &InstrumentSpec) -> Qua
 
 #[cfg(test)]
 mod tests {
-    use super::{batch_price, core_quantity};
+    use super::{batch_price, core_quantity, core_weights};
     use crate::side::Direction;
     use crate::units::{Price, Quantity, Rate};
 
@@ -452,6 +540,28 @@ mod tests {
         assert_eq!(
             core_quantity(quantity, Rate::parse("0.33333333").unwrap(), step),
             Quantity::parse("0.084").unwrap()
+        );
+    }
+
+    /// 倾斜权重：末批 ÷ 首批等于倾斜比，中间线性过渡；按比率最小单位放大后是整数。
+    #[test]
+    fn core_weights_run_linearly_from_one_to_the_skew() {
+        let scale = i128::from(crate::units::SCALE);
+        // 倾斜 3、四批：(n − 1) + (3 − 1) × k = 3、5、7、9。
+        assert_eq!(
+            core_weights(4, Rate::parse("3").unwrap()),
+            vec![3 * scale, 5 * scale, 7 * scale, 9 * scale]
+        );
+        // 倾斜 .5、三批：2、1.5、1，末批是首批的一半。
+        assert_eq!(
+            core_weights(3, Rate::parse("0.5").unwrap()),
+            vec![2 * scale, 3 * scale / 2, scale]
+        );
+        assert_eq!(core_weights(1, Rate::parse("3").unwrap()), vec![1]);
+        assert!(
+            core_weights(10_000, Rate::parse("0.01").unwrap())
+                .iter()
+                .all(|weight| *weight > 0)
         );
     }
 

@@ -25,6 +25,11 @@ use crate::units::{Price, PriceRounding, Quantity, Rate, SCALE};
 /// 正常配置远达不到；按 Hyperliquid 每日 5 万次操作上限，格数超过这个量级本身也不可用。
 pub const MAX_CELL_COUNT: usize = 10_000;
 
+/// 主仓倾斜的取值范围。设计没有规定；上限挡住把首批压到零的输入，也让权重和数量相乘
+/// 不会越界（权重最大约 `(n − 1) × 100`，批数不超过 [`MAX_CELL_COUNT`]）。
+pub const MIN_CORE_SKEW: Rate = Rate::from_units(SCALE / 100);
+pub const MAX_CORE_SKEW: Rate = Rate::from_units(SCALE * 100);
+
 /// 一侧的配置。
 ///
 /// 多头侧在价格下方，空头侧在价格上方；空头侧是多头侧的镜像（第 5.1 节）。
@@ -42,6 +47,11 @@ pub struct SideConfig {
     pub core_ratio: Rate,
     /// 主仓批数 `n`；`r = 0` 时不需要，写 `None`。
     pub batch_count: Option<u32>,
+    /// 主仓倾斜：末批主仓 ÷ 首批主仓，中间线性过渡，大于 1 是低处（空头侧为高处）多买的
+    /// 金字塔，小于 1 反过来。设了它，网格就按全侧均匀分，不再随批次（第 3.1 节）。
+    /// `None` 表示不倾斜，保持 `M` 平均分给各批、网格随批的分法；`r = 0` 时不需要。
+    #[serde(default)]
+    pub core_skew: Option<Rate>,
     /// 网格间距 `d`。
     pub grid_spacing: Price,
     /// 网格价差 `g`：多头侧平仓价 = 建仓价 + g，空头侧平仓价 = 建仓价 − g。
@@ -275,6 +285,8 @@ struct NormalizedSide {
     core_ratio: Rate,
     /// 主仓批数；主仓比例为 0 时没有批次，这里是 `None`。
     batch_count: Option<u32>,
+    /// 主仓倾斜；主仓比例为 0 时没有批次，这里是 `None`。
+    core_skew: Option<Rate>,
     /// 限速间隔不参与规整，原样带到最终配置里。
     throttle_interval: Option<Duration>,
     /// 失效设置：剩余数量已按数量精度向下规整；失效价是触发线，不按报价精度规整。
@@ -326,7 +338,7 @@ impl NormalizedSide {
                 core_ratio,
             });
         }
-        // 主仓比例为 0 时没有批次，批数不参与计算，写什么都不影响结果。
+        // 主仓比例为 0 时没有批次，批数和倾斜不参与计算，写什么都不影响结果。
         let batch_count = match side.batch_count {
             _ if core_ratio.is_zero() => None,
             Some(count) if count >= 1 => Some(count),
@@ -336,6 +348,21 @@ impl NormalizedSide {
                     batch_count: other,
                 });
             }
+        };
+        let core_skew = match side.core_skew {
+            _ if core_ratio.is_zero() => None,
+            Some(skew)
+                if (MIN_CORE_SKEW.units()..=MAX_CORE_SKEW.units()).contains(&skew.units()) =>
+            {
+                Some(skew)
+            }
+            Some(skew) => {
+                return Err(ConfigError::CoreSkewOutOfRange {
+                    direction,
+                    core_skew: skew,
+                });
+            }
+            None => None,
         };
 
         Ok(Self {
@@ -348,6 +375,7 @@ impl NormalizedSide {
             max_position,
             core_ratio,
             batch_count,
+            core_skew,
             throttle_interval: side.throttle_interval,
             invalidation: normalize_invalidation(direction, side, price_low, price_high, spec)?,
         })
@@ -427,6 +455,7 @@ impl NormalizedSide {
             price_high: self.price_high,
             max_position: self.max_position,
             core_ratio: self.core_ratio,
+            core_skew: self.core_skew,
             grid_spacing: self.grid_spacing,
             grid_spread: self.grid_spread,
         }
@@ -440,6 +469,7 @@ impl NormalizedSide {
             max_position: self.max_position,
             core_ratio: self.core_ratio,
             batch_count: self.batch_count,
+            core_skew: self.core_skew,
             grid_spacing: self.grid_spacing,
             grid_spread: self.grid_spread,
             throttle_interval: self.throttle_interval,
@@ -620,8 +650,8 @@ mod tests {
     use super::{ConfigError, MAX_CELL_COUNT, NormalizedConfig, SideConfig, StrategyConfig};
     use crate::batch::BatchIndex;
     use crate::fixtures::{
-        btc_fees, btc_spec, core_only_config, fine_spec, hl_btc_spec, is_quotable,
-        long_grid_config, significant_figures,
+        btc_fees, btc_spec, core_long_config, core_only_config, fine_spec, hl_btc_spec,
+        is_quotable, long_grid_config, significant_figures, skewed_core_long_config,
     };
     use crate::grid::{CellIndex, required_cell_quantity};
     use crate::instrument::{Fees, Instrument, InstrumentSpec, PriceRule};
@@ -663,6 +693,7 @@ mod tests {
             max_position: Quantity::parse(max_position).unwrap(),
             core_ratio: Rate::ZERO,
             batch_count: None,
+            core_skew: None,
             grid_spacing: Price::parse("1000").unwrap(),
             grid_spread: Price::parse("1000").unwrap(),
             throttle_interval: None,
@@ -682,6 +713,7 @@ mod tests {
             long: Some(SideConfig {
                 core_ratio: Rate::parse("0.7").unwrap(),
                 batch_count: Some(batch_count),
+                core_skew: None,
                 ..config("75000", "95000", "1").long.unwrap()
             }),
             ..config("75000", "95000", "1")
@@ -702,6 +734,7 @@ mod tests {
             max_position: Quantity::parse(max_position).unwrap(),
             core_ratio: Rate::ZERO,
             batch_count: None,
+            core_skew: None,
             grid_spacing: Price::parse(grid_spacing).unwrap(),
             grid_spread: Price::parse(grid_spread).unwrap(),
             throttle_interval: None,
@@ -887,6 +920,7 @@ mod tests {
             short: Some(SideConfig {
                 core_ratio: Rate::parse("0.7").unwrap(),
                 batch_count: Some(4),
+                core_skew: None,
                 grid_spacing: Price::parse(spacing).unwrap(),
                 ..config("75000", "95000", "1").long.unwrap()
             }),
@@ -1087,6 +1121,7 @@ mod tests {
             max_position: Quantity::parse("1").unwrap(),
             core_ratio: Rate::ZERO,
             batch_count: None,
+            core_skew: None,
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,
@@ -1122,6 +1157,7 @@ mod tests {
             max_position: Quantity::parse("1000").unwrap(),
             core_ratio: Rate::parse("0.7").unwrap(),
             batch_count: Some(5),
+            core_skew: None,
             grid_spacing: Price::parse("1").unwrap(),
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,
@@ -1240,12 +1276,151 @@ mod tests {
         assert_eq!(long_plan(&normalized).grid().cells().len(), 20);
     }
 
+    /// 主仓倾斜 3：主仓总量 .7 按 3 : 5 : 7 : 9 分到四批，网格 .3 平均分给 20 格。
+    #[test]
+    fn a_core_skew_tilts_the_core_and_spreads_the_grid_evenly() {
+        let normalized = skewed_core_long_config()
+            .normalize(&btc_spec(), &btc_fees())
+            .unwrap();
+
+        let plan = long_plan(&normalized);
+        let batches = plan.batches().batches();
+        let core: Vec<Quantity> = batches.iter().map(|batch| batch.core_quantity).collect();
+        assert_eq!(
+            core,
+            ["0.088", "0.146", "0.204", "0.262"]
+                .map(|value| Quantity::parse(value).unwrap())
+                .to_vec()
+        );
+        // 每批 5 格，每格 .015，和没有倾斜时一样；每批数量 = 主仓 + 5 × .015。
+        assert!(
+            plan.grid()
+                .cells()
+                .iter()
+                .all(|cell| cell.quantity == Quantity::parse("0.015").unwrap())
+        );
+        let quantities: Vec<Quantity> = batches.iter().map(|batch| batch.quantity).collect();
+        assert_eq!(
+            quantities,
+            ["0.163", "0.221", "0.279", "0.337"]
+                .map(|value| Quantity::parse(value).unwrap())
+                .to_vec()
+        );
+        let total = batches
+            .iter()
+            .fold(Quantity::ZERO, |total, batch| total + batch.quantity);
+        assert_eq!(total, Quantity::parse("1").unwrap());
+        assert_eq!(
+            long_side(&normalized.config).core_skew,
+            Some(Rate::parse("3").unwrap())
+        );
+    }
+
+    /// 倾斜小于 1 是倒金字塔：首批最大。
+    #[test]
+    fn a_core_skew_below_one_puts_more_in_the_first_batch() {
+        let mut raw = skewed_core_long_config();
+        long_side_mut(&mut raw).core_skew = Some(Rate::parse("0.5").unwrap());
+
+        let normalized = raw.normalize(&btc_spec(), &btc_fees()).unwrap();
+
+        let core: Vec<Quantity> = long_plan(&normalized)
+            .batches()
+            .batches()
+            .iter()
+            .map(|batch| batch.core_quantity)
+            .collect();
+        assert!(core.windows(2).all(|pair| pair[0] > pair[1]), "{core:?}");
+        assert_eq!(
+            core.iter()
+                .fold(Quantity::ZERO, |total, core| total + *core),
+            Quantity::parse("0.7").unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_a_core_skew_outside_the_allowed_range() {
+        for value in ["0", "0.009", "100.5", "-1"] {
+            let mut raw = skewed_core_long_config();
+            long_side_mut(&mut raw).core_skew = Some(Rate::parse(value).unwrap());
+
+            let error = raw.normalize(&btc_spec(), &btc_fees()).unwrap_err();
+
+            assert_eq!(
+                error,
+                ConfigError::CoreSkewOutOfRange {
+                    direction: Direction::Long,
+                    core_skew: Rate::parse(value).unwrap(),
+                },
+                "{value}"
+            );
+        }
+        assert_eq!(
+            ConfigError::CoreSkewOutOfRange {
+                direction: Direction::Long,
+                core_skew: Rate::parse("200").unwrap(),
+            }
+            .to_string(),
+            "做多侧：主仓倾斜须在 0.01 到 100 之间（现在是 200）"
+        );
+    }
+
+    /// 旧配置的 JSON 里没有这个字段，读出来是不倾斜；写了的按字符串往返。
+    #[test]
+    fn the_core_skew_is_optional_in_json_and_round_trips() {
+        let json = serde_json::to_value(core_long_config()).unwrap();
+        let mut without = json.clone();
+        without["long"].as_object_mut().unwrap().remove("core_skew");
+        let parsed: StrategyConfig = serde_json::from_value(without).unwrap();
+        assert_eq!(parsed, core_long_config());
+        assert_eq!(json["long"]["core_skew"], serde_json::Value::Null);
+
+        let skewed = skewed_core_long_config();
+        let json = serde_json::to_value(&skewed).unwrap();
+        assert_eq!(json["long"]["core_skew"], serde_json::json!("3"));
+        let parsed: StrategyConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, skewed);
+    }
+
+    #[test]
+    fn ignores_the_core_skew_when_the_core_ratio_is_zero() {
+        let mut raw = long_grid_config();
+        long_side_mut(&mut raw).core_skew = Some(Rate::parse("3").unwrap());
+
+        let normalized = raw.normalize(&btc_spec(), &btc_fees()).unwrap();
+
+        assert_eq!(long_side(&normalized.config).core_skew, None);
+    }
+
+    /// 倾斜把首批压得太小时，报的还是「主仓不够最低金额」，并指向倾斜。
+    #[test]
+    fn a_steep_core_skew_can_leave_the_first_batch_below_the_minimum_order_amount() {
+        let mut raw = skewed_core_long_config();
+        long_side_mut(&mut raw).max_position = Quantity::parse("0.004").unwrap();
+        long_side_mut(&mut raw).core_ratio = Rate::parse("0.5").unwrap();
+        long_side_mut(&mut raw).core_skew = Some(Rate::parse("100").unwrap());
+
+        let error = raw.normalize(&fine_spec(), &btc_fees()).unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                ConfigError::BatchCoreBelowMinimumOrderNotional {
+                    batch_index: BatchIndex(0),
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
     #[test]
     fn rejects_a_batch_whose_core_buy_is_below_the_minimum_order_amount() {
         // 每批 0.001，主仓部分是 0.0001，95000 的批次价下只有 9.5 美元。
         let raw = with_long(SideConfig {
             core_ratio: Rate::parse("0.1").unwrap(),
             batch_count: Some(4),
+            core_skew: None,
             max_position: Quantity::parse("0.004").unwrap(),
             ..config("75000", "95000", "0.004").long.unwrap()
         });
@@ -1264,7 +1439,7 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "做多侧：第 0 批（95000）主仓只有 0.0001，不够最低下单金额（至少要 0.00011）；减少批数 n"
+            "做多侧：第 0 批（95000）主仓只有 0.0001，不够最低下单金额（至少要 0.00011）；减少批数 n，或让主仓倾斜更接近 1"
         );
 
         // 同样的比例与批数下，总量大一些每批的主仓就够最低金额了。
@@ -1309,6 +1484,7 @@ mod tests {
                 max_position: Quantity::parse("0.310").unwrap(),
                 core_ratio: Rate::ZERO,
                 batch_count: None,
+                core_skew: None,
                 grid_spacing: Price::parse("1").unwrap(),
                 grid_spread: Price::parse("68").unwrap(),
                 throttle_interval: None,
@@ -1513,6 +1689,7 @@ mod tests {
                 max_position: Quantity::parse("100").unwrap(),
                 core_ratio: Rate::ZERO,
                 batch_count: None,
+                core_skew: None,
                 grid_spacing: Price::parse("0.01").unwrap(),
                 grid_spread: Price::parse("0.1").unwrap(),
                 throttle_interval: None,
@@ -1595,6 +1772,7 @@ mod tests {
             long: Some(SideConfig {
                 core_ratio: Rate::parse("0.5").unwrap(),
                 batch_count: Some(1),
+                core_skew: None,
                 grid_spacing: Price::parse(spacing).unwrap(),
                 ..config("85000", "95000", "0.02").long.unwrap()
             }),
@@ -1635,6 +1813,7 @@ mod tests {
                 max_position: Quantity::parse("0.05").unwrap(),
                 core_ratio: Rate::ZERO,
                 batch_count: None,
+                core_skew: None,
                 grid_spacing: Price::parse("1000").unwrap(),
                 grid_spread: Price::parse("1000").unwrap(),
                 throttle_interval: None,
@@ -1767,6 +1946,7 @@ mod tests {
         let with_core = |low: &str, high: &str, position: &str| SideConfig {
             core_ratio: Rate::parse("0.7").unwrap(),
             batch_count: Some(4),
+            core_skew: None,
             ..config(low, high, position).long.unwrap()
         };
         // 空头侧的范围要够宽：四批里离 `H` 最近的那一批，段宽是 `(H − L) / n`，

@@ -130,6 +130,36 @@ describe('新建与确认启动', () => {
     expect(long.getByText('主仓 84000 → 75000，段宽 2250')).toBeInTheDocument()
   })
 
+  it('主仓倾斜下面显示首批和末批的主仓数量，提交时带上倾斜比；留空提交 null', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+    const long = side('做多侧')
+    expect(long.getByText('留空：M 平均分给各批，网格随批')).toBeInTheDocument()
+    for (const [label, value] of [
+      ['主仓比例 r', '0.7'],
+      ['主仓批数 n', '4'],
+      ['主仓倾斜（末批÷首批）', '3'],
+    ]) {
+      const input = long.getByLabelText(label)
+      await userEvent.clear(input)
+      await userEvent.type(input, value)
+    }
+
+    // 主仓 .7 按 3 : 5 : 7 : 9 分：首批 .0875，末批 .2625；网格不随批。
+    expect(long.getByText('主仓每批 0.0875 → 0.2625，网格均分给全部格子')).toBeInTheDocument()
+
+    await saveAndPreview()
+    expect(server.lastBody('POST', '/api/drafts')).toMatchObject({
+      long: { core_ratio: '0.7', batch_count: 4, core_skew: '3' },
+    })
+
+    await userEvent.clear(long.getByLabelText('主仓倾斜（末批÷首批）'))
+    await userEvent.click(screen.getByRole('button', { name: '保存并预览' }))
+    await waitFor(() => {
+      expect(server.lastBody('PUT', '/api/drafts/s-1')).toMatchObject({ long: { core_skew: null } })
+    })
+  })
+
   it('做空侧的批次从 L 往上排；没有主仓时提示留空', async () => {
     renderEditor(editorRoutes())
     await userEvent.click(screen.getByRole('switch', { name: '启用做多侧' }))

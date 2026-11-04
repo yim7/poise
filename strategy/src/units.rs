@@ -135,6 +135,35 @@ pub(crate) fn split_steps(total_steps: i64, index: usize, count: usize) -> i64 {
     base + i64::from((index as i64) < remainder)
 }
 
+/// 把 `total_steps` 个最小单位按权重分给各份，最大余数法凑齐总数。
+///
+/// 每份先取 `floor(total × w / Σw)`，剩下的最小单位依次给小数部分最大的那几份，相同时
+/// 给下标小的，也就是靠近空隙的那一份。权重都要是正数。
+pub(crate) fn split_steps_by_weight(total_steps: i64, weights: &[i128]) -> Vec<i64> {
+    debug_assert!(!weights.is_empty(), "weights must not be empty");
+    debug_assert!(
+        weights.iter().all(|weight| *weight > 0),
+        "weights must be positive"
+    );
+    let total_weight: i128 = weights.iter().sum();
+    let scaled: Vec<i128> = weights
+        .iter()
+        .map(|weight| i128::from(total_steps) * weight)
+        .collect();
+    let mut shares: Vec<i64> = scaled
+        .iter()
+        .map(|value| (value / total_weight) as i64)
+        .collect();
+    let mut by_remainder: Vec<usize> = (0..weights.len()).collect();
+    // 余数大的在前，余数相同的下标小的在前；`sort_by_key` 是稳定排序，所以倒序排余数即可。
+    by_remainder.sort_by_key(|index| std::cmp::Reverse(scaled[*index] % total_weight));
+    let left = total_steps - shares.iter().sum::<i64>();
+    for index in by_remainder.into_iter().take(left.max(0) as usize) {
+        shares[index] += 1;
+    }
+    shares
+}
+
 /// 把非负整数单位规整到 `step` 的整数倍，用 i128 算中间量。
 ///
 /// 返回值可能超过 `i64`：向上取整时 `(商 + 1) × step` 在接近上限的输入上就会越界。
@@ -646,6 +675,19 @@ mod tests {
             None,
             "rounding up past i64 must be reported, not wrapped"
         );
+    }
+
+    #[test]
+    fn splits_steps_by_weight_with_the_largest_remainders_first() {
+        // 700 步按 3 : 5 : 7 : 9 分：整数部分 87、145、204、262，剩 2 步给余数最大的两份
+        // （.83 的第 1 份，然后 .5 的第 0 份和第 3 份里下标小的第 0 份）。
+        assert_eq!(
+            super::split_steps_by_weight(700, &[3, 5, 7, 9]),
+            vec![88, 146, 204, 262]
+        );
+        // 权重相同就是平均分，余数依次给前几份，和 `split_steps` 一致。
+        assert_eq!(super::split_steps_by_weight(10, &[1, 1, 1]), vec![4, 3, 3]);
+        assert_eq!(super::split_steps_by_weight(0, &[1, 2]), vec![0, 0]);
     }
 
     #[test]

@@ -475,7 +475,9 @@ fn ceil_div(numerator: i128, denominator: i128) -> i128 {
 #[cfg(test)]
 mod tests {
     use super::{AccountBasis, MarginTier, MarginTiers, MarginTiersError};
-    use crate::fixtures::{core_long_strategy, core_short_strategy, neutral_grid_strategy};
+    use crate::fixtures::{
+        core_long_strategy, core_short_strategy, neutral_grid_strategy, skewed_core_long_strategy,
+    };
     use crate::side::Direction;
     use crate::units::{Notional, Position, Price, Quantity, Rate};
 
@@ -564,6 +566,37 @@ mod tests {
         assert_eq!(long.margin_ratio, Rate::parse("0.01064605").unwrap());
         // 资金足够：价格到零也不会强平。
         assert_eq!(long.liquidation, super::Liquidation::Never);
+    }
+
+    /// 主仓倾斜 3 把更多主仓放到低处：满仓的平均成本比平均分时低，保证金率也低。
+    #[test]
+    fn a_skewed_core_lowers_the_full_position_average_entry() {
+        let even = core_long_strategy();
+        let skewed = skewed_core_long_strategy();
+        let mark = Price::parse("95500").unwrap();
+
+        let even_stress = even.stress_test(
+            &even.initial_state(),
+            mark,
+            &basis("100000"),
+            &MarginTiers::single(40),
+        );
+        let skewed_stress = skewed.stress_test(
+            &skewed.initial_state(),
+            mark,
+            &basis("100000"),
+            &MarginTiers::single(40),
+        );
+
+        assert_eq!(skewed_stress[0].position, Quantity::parse("1").unwrap());
+        // 主仓 .088 × 95000 + .146 × 90000 + .204 × 85000 + .262 × 80000 = 59800，
+        // 格子 .3 的成本和平均分时一样 25650（每格 .015，建仓价 95000 到 76000）。
+        assert_eq!(
+            skewed_stress[0].average_entry,
+            Price::parse("85450").unwrap()
+        );
+        assert!(skewed_stress[0].average_entry < even_stress[0].average_entry);
+        assert!(skewed_stress[0].margin_ratio < even_stress[0].margin_ratio);
     }
 
     /// 余额 15000：权益 15000 + X − 86900 − 手续费 39.105 = 维持保证金 0.0125 X。
@@ -726,6 +759,7 @@ mod tests {
                 max_position: Quantity::parse("1").unwrap(),
                 core_ratio: Rate::parse("1").unwrap(),
                 batch_count: Some(1),
+                core_skew: None,
                 grid_spacing: Price::parse("1").unwrap(),
                 grid_spread: Price::parse("1").unwrap(),
                 throttle_interval: None,
@@ -809,6 +843,7 @@ mod tests {
                 max_position: Quantity::parse("100000").unwrap(),
                 core_ratio: Rate::parse("0.00000001").unwrap(),
                 batch_count: Some(1),
+                core_skew: None,
                 grid_spacing: Price::parse("1000").unwrap(),
                 grid_spread: Price::parse("1000").unwrap(),
                 throttle_interval: None,

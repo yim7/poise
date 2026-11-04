@@ -442,6 +442,10 @@ async fn b44_changing_the_throttle_interval_while_running_takes_effect_and_recor
     long_side_mut(&mut batches).batch_count = Some(3);
     assert_eq!(refused(&harness, batches).await, "batch_count");
 
+    let mut skew = core_long_config();
+    long_side_mut(&mut skew).core_skew = Some(Rate::parse("3").unwrap());
+    assert_eq!(refused(&harness, skew).await, "core_skew");
+
     // 换标的在规整时就拒绝了：新配置的标的必须和交易所的一致。
     let mut instrument = core_long_config();
     instrument.instrument = Instrument::try_new("ETH").unwrap();

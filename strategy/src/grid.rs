@@ -143,6 +143,8 @@ pub(crate) struct GridShape {
     pub price_high: Price,
     pub max_position: Quantity,
     pub core_ratio: Rate,
+    /// 主仓倾斜（末批 ÷ 首批）；`None` 是原来的分法：`M` 平均分给各批，网格随批。
+    pub core_skew: Option<Rate>,
     pub grid_spacing: Price,
     pub grid_spread: Price,
 }

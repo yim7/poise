@@ -132,7 +132,7 @@ export function sideSummary(side: SideConfig, hideAmounts = false): string {
   const core =
     side.batch_count === null || Number(side.core_ratio) === 0
       ? '无主仓'
-      : `主仓 ${side.core_ratio}×${side.batch_count} 批`
+      : `主仓 ${side.core_ratio}×${side.batch_count} 批${side.core_skew === null ? '' : `（倾斜 ${side.core_skew}）`}`
   const invalidation =
     side.invalidation === null
       ? ''

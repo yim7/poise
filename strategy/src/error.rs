@@ -121,6 +121,11 @@ pub enum ConfigError {
         direction: Direction,
         batch_count: Option<u32>,
     },
+    #[error("{side}：主仓倾斜须在 0.01 到 100 之间（现在是 {core_skew}）", side = .direction.side_label())]
+    CoreSkewOutOfRange {
+        direction: Direction,
+        core_skew: Rate,
+    },
     #[error("{side}：批数 n {batch_count} 超过上限 {max_batch_count}", side = .direction.side_label())]
     TooManyBatches {
         direction: Direction,
@@ -161,7 +166,7 @@ pub enum ConfigError {
         segment_high: Price,
     },
     #[error(
-        "{side}：第 {batch_index} 批（{batch_price}）主仓只有 {core_quantity}，不够最低下单金额（至少要 {required_quantity}）；减少批数 n",
+        "{side}：第 {batch_index} 批（{batch_price}）主仓只有 {core_quantity}，不够最低下单金额（至少要 {required_quantity}）；减少批数 n，或让主仓倾斜更接近 1",
         side = .direction.side_label()
     )]
     BatchCoreBelowMinimumOrderNotional {
