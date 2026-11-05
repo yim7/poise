@@ -9,6 +9,7 @@ import type {
   DraftPreview,
   InstanceInfo,
   ResumeOutcome,
+  SizingPreview,
   StatusBody,
   StepReport,
   StoredDraft,
@@ -81,6 +82,8 @@ export const api = {
     request<VersionBody>(`/api/drafts/${id}`, send('PUT', config)),
   deleteDraft: (id: string) => request<void>(`/api/drafts/${id}`, send('DELETE')),
   previewDraft: (id: string) => request<DraftPreview>(`/api/drafts/${id}/preview`, send('POST')),
+  /** 填写时的仓位划分：参数随请求带上，只算不存。 */
+  previewSizing: (config: StrategyConfig) => request<SizingPreview>('/api/sizing', send('POST', config)),
   startDraft: (id: string, token: string) =>
     request<StrategyIdBody>(`/api/drafts/${id}/start`, send('POST', { token })),
 

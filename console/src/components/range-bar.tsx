@@ -34,7 +34,7 @@ function mix(empty: number, full: number, held: number): number {
 }
 
 /** 这一侧的霓虹色，取 `percent`% 的不透明度。 */
-function tint(tone: Direction, percent: number): string {
+export function tint(tone: Direction, percent: number): string {
   return `color-mix(in oklch, var(--neon-${tone}) ${percent.toFixed(1)}%, transparent)`
 }
 

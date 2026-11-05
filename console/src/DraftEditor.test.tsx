@@ -3,12 +3,12 @@
 // 页面只发请求、只显示服务端给的数据：数量、批次和格子的划分都在服务端算好。
 
 import { describe, expect, it, vi } from 'vitest'
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import { DraftEditor } from './DraftEditor'
 import { fakeServer, type FakeServer, type Routes } from './test/fakeServer'
-import { longSide, neutralPreview, preview } from './test/fixtures'
+import { longSide, neutralPreview, preview, sizingPreview } from './test/fixtures'
 import { renderWithQuery } from './test/render'
 
 function editorRoutes(extra: Routes = {}) {
@@ -17,6 +17,7 @@ function editorRoutes(extra: Routes = {}) {
     'PUT /api/drafts/s-1': { body: { version: 2 } },
     'POST /api/drafts/s-1/preview': { body: preview() },
     'POST /api/drafts/s-1/start': { body: { strategy_id: 's-1' } },
+    'POST /api/sizing': { body: sizingPreview() },
     ...extra,
   })
 }
@@ -599,7 +600,7 @@ describe('按资金、按格数设置（第 2.2 节）', () => {
     await userEvent.type(side('做多侧').getByLabelText('格数 N'), '2.5')
     await userEvent.click(screen.getByRole('button', { name: '保存并预览' }))
 
-    expect(await screen.findByText('做多侧：格数 N 填正整数。')).toBeInTheDocument()
+    expect(await screen.findByRole('alert')).toHaveTextContent('做多侧：格数 N 填正整数。')
     expect(server.count('POST', '/api/drafts')).toBe(0)
   })
 
@@ -635,5 +636,207 @@ describe('按资金、按格数设置（第 2.2 节）', () => {
     expect(side('做多侧').getByLabelText('格数 N')).toHaveValue('20')
     expect(side('做多侧').getByLabelText('价差倍数 g÷d')).toHaveValue('1.5')
     expect(side('做多侧').getByLabelText('失效后保留主仓（%）')).toHaveValue('25')
+  })
+})
+
+describe('边填边看仓位划分（第 2.4 节第 1 步）', () => {
+  function breakdown() {
+    return within(screen.getByRole('region', { name: '做多侧仓位划分' }))
+  }
+
+  /** 按资金填：投入 86900、主仓 .7 分 4 批、按格数 20 格、失效价 72000 保留一半。 */
+  async function fillByCapital() {
+    await userEvent.click(side('做多侧').getByRole('radio', { name: '按资金' }))
+    await userEvent.type(side('做多侧').getByLabelText('投入资金（USDC）'), '86900')
+    await userEvent.clear(side('做多侧').getByLabelText('主仓比例 r'))
+    await userEvent.type(side('做多侧').getByLabelText('主仓比例 r'), '0.7')
+    await userEvent.type(side('做多侧').getByLabelText('主仓批数 n'), '4')
+    await userEvent.click(side('做多侧').getByRole('radio', { name: '按格数' }))
+    await userEvent.type(side('做多侧').getByLabelText('格数 N'), '20')
+    await userEvent.type(side('做多侧').getByLabelText('观点失效价'), '72000')
+    await userEvent.type(side('做多侧').getByLabelText('失效后保留主仓（%）'), '50')
+  }
+
+  it('不保存就算出 M、资金拆分和现价时的持仓', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+
+    await fillByCapital()
+
+    await waitFor(() =>
+      expect(server.lastBody('POST', '/api/sizing')).toMatchObject({
+        long: { capital: '86900', grid_count: 20, core_ratio: '0.7', batch_count: 4 },
+      }),
+    )
+    expect(await breakdown().findByText('最大仓位 M')).toBeInTheDocument()
+    expect(breakdown().getByText('88000', { selector: 'span' }).parentElement).toHaveTextContent('现价 88000')
+    expect(breakdown().getByText('用到 / 投入').nextElementSibling).toHaveTextContent('86900 / 86900')
+    expect(breakdown().getByText('保证金 · 10x').nextElementSibling).toHaveTextContent('8690')
+    const split = within(breakdown().getByRole('list', { name: '资金拆分' }))
+    expect(split.getByText('主仓 · 失效后保留').parentElement).toHaveTextContent('30625.00 35.2%')
+    expect(split.getByText('主仓 · 失效时卖出').parentElement).toHaveTextContent('30625.00 35.2%')
+    expect(split.getByText('网格 · 20 格').parentElement).toHaveTextContent('25650.00 29.5%')
+    expect(split.queryByText('未用')).not.toBeInTheDocument()
+    // 现价 88000：95000、90000 两批主仓和 95000–88000 八格启动就成交，按现价约投入。
+    expect(breakdown().getByText(/启动即持有/)).toHaveTextContent(
+      '现价 启动即持有 0.470 = 主仓 2 批 0.350 + 网格 8 格 0.120，约投入 41360.00',
+    )
+    expect(server.count('POST', '/api/drafts')).toBe(0)
+  })
+
+  it('投入没用满时把零头标成未用', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+
+    await fillByCapital()
+    await userEvent.clear(side('做多侧').getByLabelText('投入资金（USDC）'))
+    await userEvent.type(side('做多侧').getByLabelText('投入资金（USDC）'), '90000')
+
+    const split = within(await breakdown().findByRole('list', { name: '资金拆分' }))
+    await waitFor(() => expect(split.getByText('未用').parentElement).toHaveTextContent('3100.00 3.4%'))
+  })
+
+  it('鼠标移到阶梯上看那个价位持有多少，越过失效价只剩 R', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+    await fillByCapital()
+    const ladder = await breakdown().findByRole('img', { name: '做多侧持仓阶梯' })
+    vi.spyOn(ladder, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      width: 360,
+      top: 0,
+      height: 116,
+      right: 360,
+      bottom: 116,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    })
+    // 横轴从 70160 到 95690（失效价外留 8%，上限外留 3%）。
+    const at = (price: number) => ((price - 70160) / (95690 - 70160)) * 360
+
+    fireEvent.mouseMove(ladder, { clientX: at(82400) })
+    expect(breakdown().getByText(/一路跌到/)).toHaveTextContent(
+      '一路跌到 82400 持有 0.720 = 主仓 3 批 0.525 + 网格 13 格 0.195',
+    )
+
+    fireEvent.mouseMove(ladder, { clientX: at(71000) })
+    expect(breakdown().getByText(/越过失效价/)).toHaveTextContent('越过失效价 72000：主仓减到 0.35，网格全平，策略停止')
+
+    fireEvent.mouseLeave(ladder)
+    expect(breakdown().getByText(/启动即持有/)).toBeInTheDocument()
+  })
+
+  it('没有主仓时只说网格，拆分条只有网格一段', async () => {
+    const fixture = sizingPreview()
+    const server = editorRoutes({
+      'POST /api/sizing': {
+        body: sizingPreview({
+          batches: [],
+          immediate_fills: fixture.immediate_fills.filter((fill) => 'cell' in fill.unit),
+          sizing: [
+            { ...fixture.sizing[0], core_quantity: '0', core_notional: '0', notional: '25650', invalidation_remaining: null },
+          ],
+        }),
+      },
+    })
+    renderEditor(server)
+
+    expect(await breakdown().findByText(/启动即持有/)).toHaveTextContent('现价 启动即持有 0.120（网格 8 格），约投入 10560.00')
+    const split = within(breakdown().getByRole('list', { name: '资金拆分' }))
+    expect(split.getAllByRole('listitem')).toHaveLength(1)
+    expect(split.getByText('网格 · 20 格').parentElement).toHaveTextContent('25650.00 100.0%')
+  })
+
+  it('设了限速时启动只算放行的那一批，不把现价以上的都算成持有', async () => {
+    const fixture = sizingPreview()
+    const server = editorRoutes({
+      'POST /api/sizing': { body: sizingPreview({ immediate_fills: fixture.immediate_fills.slice(0, 1) }) },
+    })
+    renderEditor(server)
+
+    expect(await breakdown().findByText(/启动即持有/)).toHaveTextContent(
+      '现价 启动即持有 0.175 = 主仓 1 批 0.175 + 网格 0 格 0.000，约投入 15400.00',
+    )
+  })
+
+  it('读不到杠杆时其余照常，保证金一格写明读不到', async () => {
+    const server = editorRoutes({ 'POST /api/sizing': { body: sizingPreview({ leverage: null }) } })
+    renderEditor(server)
+
+    expect(await breakdown().findByText('读不到杠杆')).toBeInTheDocument()
+    expect(breakdown().getByText('最大仓位 M').nextElementSibling).toHaveTextContent('1')
+  })
+
+  it('改了参数、新结果回来之前，旧数字压暗并写更新中', async () => {
+    let answer: (value: unknown) => void = () => {}
+    const pending = new Promise((resolve) => {
+      answer = resolve
+    })
+    let calls = 0
+    const server = editorRoutes({
+      'POST /api/sizing': () => {
+        calls += 1
+        return calls === 1 ? { body: sizingPreview() } : { body: sizingPreview(), wait: pending }
+      },
+    })
+    renderEditor(server)
+    await breakdown().findByText('最大仓位 M')
+
+    await userEvent.type(side('做多侧').getByLabelText('观点失效价'), '72000')
+
+    const region = screen.getByRole('region', { name: '做多侧仓位划分' })
+    await waitFor(() => expect(region).toHaveAttribute('aria-busy', 'true'))
+    expect(within(region).getByText('更新中…')).toBeInTheDocument()
+    answer(null)
+    await waitFor(() => expect(region).toHaveAttribute('aria-busy', 'false'))
+  })
+
+  it('同时涉及两侧的原因两侧都显示', async () => {
+    const reason = '做多侧上限 H 95000 须低于做空侧下限 L 91000'
+    const server = editorRoutes({
+      'POST /api/sizing': {
+        body: sizingPreview({ validation: { valid: false, reason }, sizing: [], batches: [], cells: [] }),
+      },
+    })
+    renderEditor(server)
+    await userEvent.click(screen.getByRole('switch', { name: '启用做空侧' }))
+
+    const shortSide = within(screen.getByRole('region', { name: '做空侧仓位划分' }))
+    expect(await shortSide.findByText(reason)).toBeInTheDocument()
+    expect(breakdown().getByText(reason)).toBeInTheDocument()
+  })
+
+  it('参数不成立时在划分的位置说明原因', async () => {
+    const reason = '做多侧：第 1 批（90000）主仓只有 0，不够最低下单金额（至少要 0.001）；减少批数 n'
+    const server = editorRoutes({
+      'POST /api/sizing': {
+        body: sizingPreview({ validation: { valid: false, reason }, sizing: [], batches: [], cells: [] }),
+      },
+    })
+    renderEditor(server)
+
+    expect(await breakdown().findByText('还算不出划分')).toBeInTheDocument()
+    expect(breakdown().getByText(reason, { exact: false })).toBeInTheDocument()
+  })
+
+  it('数字没填完时请它先填完，不报解析错误', async () => {
+    const server = editorRoutes({ 'POST /api/sizing': { status: 422, body: { error: 'invalid number' } } })
+    renderEditor(server)
+
+    await userEvent.clear(side('做多侧').getByLabelText('价格下限 L'))
+
+    expect(await breakdown().findByText('填完各项数字后显示划分。')).toBeInTheDocument()
+    expect(breakdown().queryByText(/invalid number/)).not.toBeInTheDocument()
+  })
+
+  it('表单本身表达不出来的参数，直接在划分里提示', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+
+    await userEvent.click(side('做多侧').getByRole('radio', { name: '按格数' }))
+    await userEvent.type(side('做多侧').getByLabelText('格数 N'), '2.5')
+
+    expect(await breakdown().findByText('做多侧：格数 N 填正整数。', { exact: false })).toBeInTheDocument()
   })
 })

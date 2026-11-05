@@ -1071,3 +1071,25 @@ async fn start(router: &Router, draft_id: &str) {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }
+
+/// 填写时的仓位划分走 `/api/sizing`：参数随请求带来，不保存草稿。
+#[tokio::test]
+async fn sizing_is_computed_from_the_posted_config_without_saving_a_draft() {
+    let console = console();
+    let router = api::router(console.runtime.clone());
+
+    let (status, body) = call(
+        &router,
+        Method::POST,
+        "/api/sizing",
+        Some(config_body(&long_grid_config())),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["validation"]["valid"], true);
+    assert_eq!(body["sizing"][0]["max_position"], "1");
+    assert_eq!(body["cells"].as_array().unwrap().len(), 20);
+    let (_, drafts) = call(&router, Method::GET, "/api/drafts", None).await;
+    assert_eq!(drafts.as_array().unwrap().len(), 0);
+}

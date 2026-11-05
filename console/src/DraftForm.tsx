@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { DIRECTION_LABELS } from './labels'
+import { type Breakdown, SideBreakdown } from './SideBreakdown'
 import { invalidationInput, parseInvalidation, parseThrottle, throttleMinutes } from './format'
 import type { Direction, Invalidation, SideConfig, StrategyConfig } from './types'
 
@@ -455,6 +456,7 @@ interface SideFieldsProps {
   onToggle: (direction: Direction, enabled: boolean) => void
   onSizeMode: (direction: Direction, mode: SizeMode) => void
   onGridMode: (direction: Direction, mode: GridMode) => void
+  breakdown?: Breakdown | null
 }
 
 function SideFields({
@@ -466,6 +468,7 @@ function SideFields({
   onToggle,
   onSizeMode,
   onGridMode,
+  breakdown,
 }: SideFieldsProps) {
   const label = DIRECTION_LABELS[direction]
   const coreDisabled = disabled || neutral
@@ -594,6 +597,7 @@ function SideFields({
             })}
             {field('invalidationSlippage', '失效平仓滑点上限（%）')}
           </Group>
+          {breakdown === undefined ? null : <SideBreakdown direction={direction} breakdown={breakdown} />}
         </div>
       ) : null}
     </fieldset>
@@ -608,6 +612,8 @@ interface DraftFormProps {
   onToggle: (direction: Direction, enabled: boolean) => void
   onSizeMode: (direction: Direction, mode: SizeMode) => void
   onGridMode: (direction: Direction, mode: GridMode) => void
+  /** 边填边算的仓位划分；不给就不显示这一块。 */
+  breakdown?: Breakdown | null
 }
 
 export function DraftForm({
@@ -618,6 +624,7 @@ export function DraftForm({
   onToggle,
   onSizeMode,
   onGridMode,
+  breakdown,
 }: DraftFormProps) {
   const neutral = values.long.enabled && values.short.enabled
   return (
@@ -644,6 +651,7 @@ export function DraftForm({
           onToggle={onToggle}
           onSizeMode={onSizeMode}
           onGridMode={onGridMode}
+          breakdown={breakdown}
         />
         <SideFields
           direction="short"
@@ -654,6 +662,7 @@ export function DraftForm({
           onToggle={onToggle}
           onSizeMode={onSizeMode}
           onGridMode={onGridMode}
+          breakdown={breakdown}
         />
       </div>
       {neutral ? (

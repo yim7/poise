@@ -8,10 +8,11 @@ import { CloseDialog } from '@/components/close-dialog'
 import { AccountAddress, MASK, PrivacyProvider, PrivacyToggle, maskNumbers } from '@/components/privacy'
 import { configSummary } from './format'
 import { PreviewPanel } from './PreviewPanel'
+import { SideBreakdown } from './SideBreakdown'
 import { StrategyDetailView } from './StrategyDetail'
 import { StrategyList } from './StrategyList'
 import { fakeServer } from './test/fakeServer'
-import { config, detail, longSide, preview, summary } from './test/fixtures'
+import { config, detail, longSide, preview, sizingPreview, summary } from './test/fixtures'
 import { renderWithQuery } from './test/render'
 
 function withToggle(ui: React.ReactNode) {
@@ -138,6 +139,27 @@ describe('隐藏金额', () => {
     const sizing = within(screen.getByRole('table', { name: '仓位与网格' }))
     for (const value of ['85500', '8550']) expect(sizing.queryByText(value)).not.toBeInTheDocument()
     expect(sizing.getByText('20 格，d 1000，g 1000')).toBeInTheDocument()
+  })
+
+  it('填写时的仓位划分：M、金额和持仓数量遮住，价格和占比照常显示', () => {
+    window.localStorage.setItem('poise.hide-amounts', '1')
+    withToggle(
+      <SideBreakdown
+        direction="long"
+        breakdown={{
+          kind: 'ready',
+          preview: sizingPreview(),
+          long: { ...longSide, capital: '86900', invalidation: { price: '72000', remaining: '0', remaining_ratio: '0.5', max_slippage: '0.01' } },
+          short: null,
+        }}
+      />,
+    )
+    const section = screen.getByRole('region', { name: '做多侧仓位划分' })
+    for (const value of ['86900', '8690', '30625.00', '25650.00', '0.470', '41360.00']) {
+      expect(section).not.toHaveTextContent(value)
+    }
+    expect(section).toHaveTextContent('现价 88000')
+    expect(section).toHaveTextContent('35.2%')
   })
 
   it('平仓确认弹窗的净仓位和参数摘要里的失效剩余数量都遮住', () => {

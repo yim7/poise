@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::runtime::{
-    DraftPreview, InstanceInfo, ResumeOutcome, Runtime, RuntimeError, StrategyDetail,
-    StrategySummary,
+    DraftPreview, InstanceInfo, ResumeOutcome, Runtime, RuntimeError, SizingPreview,
+    StrategyDetail, StrategySummary,
 };
 use crate::settings::AccountSettings;
 use crate::store::{DraftId, StoreError, StoredDraft, StrategyId, StrategyStatus};
@@ -82,6 +82,7 @@ fn api_routes() -> Router<Arc<Runtime>> {
         )
         .route("/drafts/:id/preview", post(preview_draft))
         .route("/drafts/:id/start", post(start_draft))
+        .route("/sizing", post(preview_sizing))
         .route(
             "/account/settings",
             get(account_settings).put(update_account_settings),
@@ -296,6 +297,14 @@ async fn preview_draft(
     Path(id): Path<String>,
 ) -> Result<Json<DraftPreview>, ApiError> {
     Ok(Json(runtime.preview_draft(&strategy_id(id)?).await?))
+}
+
+/// 填写时的仓位划分：参数随请求带来，只算不存。
+async fn preview_sizing(
+    State(runtime): State<Arc<Runtime>>,
+    Json(config): Json<StrategyConfig>,
+) -> Result<Json<SizingPreview>, ApiError> {
+    Ok(Json(runtime.preview_sizing(config).await?))
 }
 
 async fn start_draft(

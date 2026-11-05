@@ -5,6 +5,7 @@ import type {
   CellSummary,
   DraftPreview,
   SideConfig,
+  SizingPreview,
   StoredConfigVersion,
   StoredOrder,
   StrategyConfig,
@@ -332,4 +333,77 @@ export function neutralDetail(overrides: Partial<StrategyDetail> = {}): Strategy
     waiting: [],
     ...overrides,
   })
+}
+
+/**
+ * 填写时的仓位划分：设计第 3.2 节的例子按资金设置——投入 86900，M = 1，主仓 r = .7 分 4 批，
+ * 20 格各 .015；失效价 72000、保留一半主仓，R = .35。现价 88000。
+ */
+export function sizingPreview(overrides: Partial<SizingPreview> = {}): SizingPreview {
+  const sizingBatches: BatchSummary[] = [0, 1, 2, 3].map((index) => ({
+    direction: 'long' as const,
+    index,
+    price: String(95000 - index * 5000),
+    quantity: '0.25',
+    core_quantity: '0.175',
+    grid_quantity: '0.075',
+    core_filled: '0',
+    finished: false,
+    cell_count: 5,
+    enabled_cell_count: index === 0 ? 5 : 0,
+    core_shortfall: '0',
+    grid_shortfall: '0',
+  }))
+  const sizingCells: CellSummary[] = Array.from({ length: 20 }, (_, index) => ({
+    direction: 'long' as const,
+    index,
+    batch: Math.floor(index / 5),
+    entry_price: String(95000 - index * 1000),
+    exit_price: String(96000 - index * 1000),
+    quantity: '0.015',
+    held: '0',
+    to_buy_back: '0',
+    working_orders: 0,
+    status: 'waiting_for_buy' as const,
+    profit_maker: '0',
+    profit_taker: '0',
+  }))
+  return {
+    instrument: 'BTC',
+    market_price: '88000',
+    validation: { valid: true, reason: null },
+    sizing: [
+      {
+        direction: 'long',
+        max_position: '1',
+        core_quantity: '0.7',
+        grid_spacing: '1000',
+        grid_spread: '1000',
+        cell_count: 20,
+        notional: '86900',
+        core_notional: '61250',
+        invalidation_remaining: '0.35',
+        margin: '8690',
+      },
+    ],
+    leverage: 10,
+    batches: sizingBatches,
+    cells: sizingCells,
+    // 现价 88000：95000、90000 两批主仓和 95000–88000 八格启动就成交。
+    immediate_fills: [
+      ...sizingBatches.slice(0, 2).map((batch) => ({
+        unit: { batch: ['long', batch.index] as ['long', number] },
+        purpose: 'core' as const,
+        limit_price: batch.price,
+        quantity: batch.core_quantity,
+      })),
+      ...sizingCells.slice(0, 8).map((cell) => ({
+        unit: { cell: ['long', cell.index] as ['long', number] },
+        purpose: 'grid_entry' as const,
+        limit_price: cell.entry_price,
+        quantity: cell.quantity,
+      })),
+    ],
+    ...overrides,
+  }
 }

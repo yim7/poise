@@ -228,6 +228,20 @@ export interface SideSizing {
   margin: Decimal
 }
 
+/** 填写时的仓位划分：表单当前参数直接算出来的，不保存，也不能用来确认启动。 */
+export interface SizingPreview {
+  instrument: string
+  market_price: Decimal
+  validation: Validation
+  /** 交易所上这个标的现在的杠杆；读不到时是 null，保证金占用不可信。 */
+  leverage: number | null
+  sizing: SideSizing[]
+  batches: BatchSummary[]
+  cells: CellSummary[]
+  /** 按现价启动时第一步就会成交的单：设了限速时只有放行的那一个单位。 */
+  immediate_fills: ImmediateFill[]
+}
+
 export interface DraftPreview {
   draft_id: string
   instrument: string

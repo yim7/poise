@@ -301,3 +301,139 @@ async fn a_draft_set_by_capital_and_cell_count_starts_with_the_resolved_quantiti
     let by_quantity = Strategy::new(core_long_config(), btc_spec(), btc_fees()).unwrap();
     assert_eq!(&stored, by_quantity.config());
 }
+
+/// 填写时的仓位划分（第 2.4 节第 1 步）：不保存，算出来的和保存后预览的一样。
+#[tokio::test]
+async fn sizing_while_filling_matches_the_draft_preview_without_saving() {
+    let harness = common::console();
+    harness
+        .exchange
+        .set_market_price(Price::parse("96000").unwrap(), at(0));
+    let mut config = core_long_config();
+    let side = config.long.as_mut().unwrap();
+    side.capital = Some(Notional::parse("86900").unwrap());
+    side.max_position = Quantity::ZERO;
+    side.grid_count = Some(20);
+    side.grid_spacing = Price::ZERO;
+    side.grid_spread = Price::ZERO;
+
+    let sizing = harness
+        .runtime
+        .preview_sizing(config.clone())
+        .await
+        .unwrap();
+
+    assert!(sizing.validation.valid, "{:?}", sizing.validation.reason);
+    assert_eq!(sizing.market_price, Price::parse("96000").unwrap());
+    assert!(harness.runtime.drafts().unwrap().is_empty(), "只算不存");
+    let draft_id = harness.runtime.create_draft(config).unwrap();
+    let preview = harness.runtime.preview_draft(&draft_id).await.unwrap();
+    assert_eq!(sizing.sizing, preview.sizing);
+    assert_eq!(sizing.batches, preview.batches);
+    assert_eq!(sizing.cells, preview.cells);
+    assert_eq!(sizing.immediate_fills, preview.immediate_fills);
+    assert_eq!(sizing.batches.len(), 4);
+    assert_eq!(sizing.cells.len(), 20);
+}
+
+/// 参数还不成立时照常回答，原因写在校验结论里，页面显示在划分的位置上。
+#[tokio::test]
+async fn sizing_while_filling_explains_a_config_that_does_not_work_yet() {
+    let harness = common::console();
+    harness
+        .exchange
+        .set_market_price(Price::parse("96000").unwrap(), at(0));
+    let mut config = core_long_config();
+    let side = config.long.as_mut().unwrap();
+    side.capital = Some(Notional::parse("100").unwrap());
+    side.max_position = Quantity::ZERO;
+
+    let sizing = harness.runtime.preview_sizing(config).await.unwrap();
+
+    assert!(!sizing.validation.valid);
+    assert!(
+        sizing
+            .validation
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("最低下单金额"),
+        "{:?}",
+        sizing.validation.reason
+    );
+    assert!(sizing.sizing.is_empty() && sizing.batches.is_empty() && sizing.cells.is_empty());
+}
+
+/// 边填边算会反复问：交易所读数按标的缓存 30 秒，不占运行中策略共用的请求限额。
+#[tokio::test]
+async fn sizing_while_filling_reuses_exchange_readings_for_a_while() {
+    let harness = common::console();
+    harness
+        .exchange
+        .set_market_price(Price::parse("96000").unwrap(), at(0));
+    let first = harness
+        .runtime
+        .preview_sizing(core_long_config())
+        .await
+        .unwrap();
+    assert_eq!(first.market_price, Price::parse("96000").unwrap());
+    assert!(first.leverage.is_some());
+
+    harness
+        .exchange
+        .set_market_price(Price::parse("88000").unwrap(), at(10));
+    harness.clock.advance(chrono::Duration::seconds(10));
+    let cached = harness
+        .runtime
+        .preview_sizing(core_long_config())
+        .await
+        .unwrap();
+    assert_eq!(cached.market_price, Price::parse("96000").unwrap());
+
+    harness.clock.advance(chrono::Duration::seconds(21));
+    let fresh = harness
+        .runtime
+        .preview_sizing(core_long_config())
+        .await
+        .unwrap();
+    assert_eq!(fresh.market_price, Price::parse("88000").unwrap());
+}
+
+/// 设了限速时启动只放行一个单位：现价下面挂着两批，第一步也只买第一批和它的五格；
+/// 不限速时两批主仓加上 95000–88000 八格都会立即成交。
+#[tokio::test]
+async fn sizing_while_filling_counts_only_the_released_unit_under_a_throttle() {
+    let harness = common::console();
+    harness
+        .exchange
+        .set_market_price(Price::parse("88000").unwrap(), at(0));
+    let config = common::throttled(core_long_config(), chrono::Duration::minutes(60));
+
+    let sizing = harness.runtime.preview_sizing(config).await.unwrap();
+
+    assert!(sizing.validation.valid, "{:?}", sizing.validation.reason);
+    assert_eq!(sizing.immediate_fills.len(), 6);
+    let unthrottled = harness
+        .runtime
+        .preview_sizing(core_long_config())
+        .await
+        .unwrap();
+    assert_eq!(unthrottled.immediate_fills.len(), 10);
+}
+
+/// 读不到杠杆时划分照常给出，只是没有杠杆，页面不显示保证金占用。
+#[tokio::test]
+async fn sizing_while_filling_survives_an_unreadable_leverage() {
+    let harness = common::console();
+    harness.account.fail_leverage(1);
+
+    let sizing = harness
+        .runtime
+        .preview_sizing(core_long_config())
+        .await
+        .unwrap();
+
+    assert!(sizing.validation.valid, "{:?}", sizing.validation.reason);
+    assert_eq!(sizing.leverage, None);
+    assert_eq!(sizing.sizing.len(), 1);
+}

@@ -409,6 +409,25 @@ pub struct DraftPreview {
     pub token: Option<String>,
 }
 
+/// 填写时的仓位划分（第 2.4 节第 1 步）：表单还没保存的参数直接算出来的 M、批次和格子。
+///
+/// 只算不存：不写草稿、不占版本，也没有令牌，确认启动仍然要走 [`DraftPreview`]。
+/// 不读账户仓位和挂单，按全新启动、什么都没持有来划分。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SizingPreview {
+    pub instrument: Instrument,
+    /// 交易所当前的标记价：划分图上标出现价，以及启动后马上会持有多少。
+    pub market_price: Price,
+    pub validation: Validation,
+    /// 交易所上这个标的现在的杠杆；读不到时是 `None`，保证金占用就不可信。
+    pub leverage: Option<u32>,
+    pub sizing: Vec<SideSizing>,
+    pub batches: Vec<BatchSummary>,
+    pub cells: Vec<CellSummary>,
+    /// 按现价启动时第一步就会成交的单：设了限速时只有放行的那一个单位。
+    pub immediate_fills: Vec<ImmediateFill>,
+}
+
 /// 这个实例连的网络和账户：页面顶部要一眼看出是测试网还是正式网。
 ///
 /// 来自数据库第一次启动时认领的那一份（[`Store::bind_identity`]）；还没认领时两项都是
@@ -544,6 +563,8 @@ pub struct Runtime {
     backstop_problems: Mutex<HashMap<StrategyId, String>>,
     /// 各策略仓位差额稳定下来的时刻（见 [`Runtime::position_check_over_time`]）。
     position_mismatches: Mutex<HashMap<StrategyId, DateTime<Utc>>>,
+    /// 填写时算划分用的交易所读数，按标的短时缓存（见 [`Runtime::preview_sizing`]）。
+    sizing_inputs: Mutex<HashMap<Instrument, lifecycle::SizingInputs>>,
 }
 
 /// 账户保证金率落在哪一档（第 7.4 节）。
@@ -596,6 +617,7 @@ impl Runtime {
             churn: Mutex::new(HashMap::new()),
             backstop_problems: Mutex::new(HashMap::new()),
             position_mismatches: Mutex::new(HashMap::new()),
+            sizing_inputs: Mutex::new(HashMap::new()),
         }
     }
 

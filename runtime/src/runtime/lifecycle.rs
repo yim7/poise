@@ -3,6 +3,7 @@
 use chrono::{DateTime, Duration, Utc};
 use poise_strategy::Strategy;
 use poise_strategy::config::StrategyConfig;
+use poise_strategy::instrument::Instrument;
 use poise_strategy::instrument::{Fees, InstrumentSpec};
 use poise_strategy::side::Direction;
 use poise_strategy::state::StrategyState;
@@ -17,7 +18,21 @@ use crate::store::{
     StrategyStatus, ViewSnapshot,
 };
 
-use super::{DraftPreview, Runtime, RuntimeError, Validation, fresh, percent};
+use super::{DraftPreview, Runtime, RuntimeError, SizingPreview, Validation, fresh, percent};
+
+/// 填写时算划分的交易所读数缓存多久：标记价旧一点只影响「启动即持有」的估计，
+/// 确认启动仍然要走现读的预览。
+pub(crate) const SIZING_INPUTS_MAX_AGE: Duration = Duration::seconds(30);
+
+/// 一个标的上算划分要的交易所读数，以及读到的时刻。
+#[derive(Debug, Clone)]
+pub(crate) struct SizingInputs {
+    spec: InstrumentSpec,
+    fees: Fees,
+    market_price: Price,
+    leverage: Option<u32>,
+    read_at: DateTime<Utc>,
+}
 
 impl Runtime {
     /// 新建草稿：只保存参数，不下任何单（第 2.4 节）。
@@ -68,6 +83,86 @@ impl Runtime {
         self.store.delete_draft(draft_id)?;
         tracing::info!(draft = %draft_id, "draft deleted");
         Ok(())
+    }
+
+    /// 按表单当前的参数算仓位划分，不保存（见 [`SizingPreview`]）。
+    ///
+    /// 参数不成立时照常返回，原因写在 `validation` 里：填写过程中参数常常还不完整，
+    /// 页面要把原因显示在划分的位置上，而不是当成请求出错。
+    pub async fn preview_sizing(
+        &self,
+        config: StrategyConfig,
+    ) -> Result<SizingPreview, RuntimeError> {
+        let inputs = self.sizing_inputs(&config.instrument).await?;
+        let mut preview = SizingPreview {
+            instrument: config.instrument.clone(),
+            market_price: inputs.market_price,
+            validation: Validation {
+                valid: true,
+                reason: None,
+            },
+            leverage: inputs.leverage,
+            sizing: Vec::new(),
+            batches: Vec::new(),
+            cells: Vec::new(),
+            immediate_fills: Vec::new(),
+        };
+        let strategy = match Strategy::new(config, inputs.spec, inputs.fees) {
+            Ok(strategy) => strategy,
+            Err(error) => {
+                preview.validation = Validation {
+                    valid: false,
+                    reason: Some(error.to_string()),
+                };
+                return Ok(preview);
+            }
+        };
+        // 杠杆读不到时按 1 倍算出满仓数，页面看 `leverage` 为空就不显示保证金占用。
+        preview.sizing = strategy.side_sizing(inputs.leverage.unwrap_or(1));
+        let state = strategy.initial_state();
+        preview.batches = strategy.batch_summaries(&state);
+        preview.cells = strategy.cell_summaries(&state, &[]);
+        preview.immediate_fills = strategy.immediate_fills(&state, inputs.market_price);
+        Ok(preview)
+    }
+
+    /// 算划分要的交易所读数：合约规则、费率、标记价和杠杆。
+    ///
+    /// 页面边填边问，停一下就是一次；每次都现问交易所会占用和运行中的策略共用的请求
+    /// 限额。这几项在填写的几十秒里几乎不变，按标的缓存 [`SIZING_INPUTS_MAX_AGE`]。
+    async fn sizing_inputs(&self, instrument: &Instrument) -> Result<SizingInputs, RuntimeError> {
+        let now = self.clock.now();
+        if let Some(cached) = self
+            .sizing_inputs
+            .lock()
+            .expect("sizing cache")
+            .get(instrument)
+            && now - cached.read_at < SIZING_INPUTS_MAX_AGE
+        {
+            return Ok(cached.clone());
+        }
+        let spec = self.account.instrument_spec(instrument).await?;
+        let fees = self.account.fees(instrument).await?;
+        let market_price = self.exchange.mark_price(instrument).await?;
+        // 读不到杠杆只少保证金占用一项，不必整块划分出不来。
+        let leverage = self
+            .account
+            .leverage(instrument)
+            .await
+            .ok()
+            .map(|leverage| leverage.value);
+        let inputs = SizingInputs {
+            spec,
+            fees,
+            market_price,
+            leverage,
+            read_at: now,
+        };
+        self.sizing_inputs
+            .lock()
+            .expect("sizing cache")
+            .insert(instrument.clone(), inputs.clone());
+        Ok(inputs)
     }
 
     /// 草稿预览（第 2.4 节）：校验结果、批次表、格子表、立即成交的订单和确认令牌。

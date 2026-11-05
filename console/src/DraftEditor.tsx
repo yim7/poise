@@ -2,7 +2,7 @@
 //
 // 确认启动之前一张单都不下：下单只发生在带令牌的确认请求里，而令牌只能来自一次预览。
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 
 import { PageHeader } from '@/components/layout'
@@ -21,11 +21,15 @@ import {
   type SizeMode,
 } from './DraftForm'
 import { PreviewPanel } from './PreviewPanel'
+import type { Breakdown } from './SideBreakdown'
 import type { Direction, DraftPreview } from './types'
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
+
+/** 停止输入这么久之后才重新算划分：一个数字敲到一半不必每个字都问一次服务端。 */
+const SIZING_DELAY_MS = 300
 
 /** 确认启动失败时该怎么跟用户说，以及要不要作废旧预览。 */
 interface StartFailure {
@@ -92,6 +96,48 @@ export function DraftEditor({ draftId, onStarted, onBack, onCreated }: DraftEdit
     setValues(fromConfig(stored.config))
     setLoaded(stored.draft_id)
   }, [draft.data, loaded])
+
+  // 边填边算划分（第 2.4 节第 1 步）：只算不存，和保存、预览互不影响。慢的旧回答不能盖掉
+  // 新的，所以每次请求带一个序号，只认最后一次；参数和上次算好的一样就不再问。
+  const [breakdown, setBreakdown] = useState<Breakdown | null>(null)
+  const sizingTicket = useRef(0)
+  const sizedConfig = useRef<string | null>(null)
+  useEffect(() => {
+    const ticket = ++sizingTicket.current
+    const built = toConfig(values)
+    if ('problem' in built) {
+      sizedConfig.current = null
+      setBreakdown({ kind: 'problem', message: built.problem })
+      return
+    }
+    const config = built.config
+    const key = JSON.stringify(config)
+    if (config.long === null && config.short === null) {
+      sizedConfig.current = null
+      setBreakdown(null)
+      return
+    }
+    if (key === sizedConfig.current) return
+    // 等新结果的这段时间，旧数字压暗：它们是改动之前的参数算的。
+    setBreakdown((current) => (current === null ? null : { ...current, stale: true }))
+    const timer = window.setTimeout(() => {
+      api.previewSizing(config).then(
+        (preview) => {
+          if (ticket !== sizingTicket.current) return
+          sizedConfig.current = key
+          setBreakdown({ kind: 'ready', preview, long: config.long, short: config.short })
+        },
+        (failure: unknown) => {
+          if (ticket !== sizingTicket.current) return
+          sizedConfig.current = null
+          // 400/422 是请求体解析不了：有数字还没填或填的不是数，等填完再算。
+          const incomplete = failure instanceof HttpError && (failure.status === 400 || failure.status === 422)
+          setBreakdown(incomplete ? { kind: 'incomplete' } : { kind: 'problem', message: describe(failure) })
+        },
+      )
+    }, SIZING_DELAY_MS)
+    return () => window.clearTimeout(timer)
+  }, [values])
 
   /** 参数变了，旧预览就作废：确认启动必须基于改动后的预览（B43）。 */
   function changed() {
@@ -237,6 +283,7 @@ export function DraftEditor({ draftId, onStarted, onBack, onCreated }: DraftEdit
         onToggle={toggleSide}
         onSizeMode={changeSizeMode}
         onGridMode={changeGrid}
+        breakdown={breakdown}
       />
 
       {preview === null ? null : <PreviewPanel preview={preview} config={previewConfig} />}

@@ -32,8 +32,8 @@ pub use crate::lock::{InstanceLock, LockError};
 pub use crate::notify::{NoNotifier, Notice, Notifier, RecordingNotifier};
 pub use crate::runtime::{
     DAILY_ACTION_LIMIT, DraftPreview, HELD_POSITION_MAX_AGE, HeldPosition, InstanceInfo,
-    ResumeOutcome, Runtime, RuntimeError, RuntimeOptions, StepReport, StrategyDetail,
-    StrategySummary, Validation,
+    ResumeOutcome, Runtime, RuntimeError, RuntimeOptions, SizingPreview, StepReport,
+    StrategyDetail, StrategySummary, Validation,
 };
 pub use crate::secret::{Address, SecretError, SecretKey};
 pub use crate::serve::{ServeError, ServeOptions, Server};
