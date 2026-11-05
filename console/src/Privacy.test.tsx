@@ -155,11 +155,14 @@ describe('隐藏金额', () => {
       />,
     )
     const section = screen.getByRole('region', { name: '做多侧仓位划分' })
-    for (const value of ['86900', '8690', '30625.00', '25650.00', '0.470', '41360.00']) {
+    for (const value of ['86900', '8690', '30625.00', '25650.00', '0.470', '41360.00', '0.015', '1140', '14.57']) {
       expect(section).not.toHaveTextContent(value)
     }
     expect(section).toHaveTextContent('现价 88000')
     expect(section).toHaveTextContent('35.2%')
+    // 网格读数：格数、间距和比例照常显示。
+    expect(section).toHaveTextContent('20 格')
+    expect(section).toHaveTextContent('≈ 1.2%')
   })
 
   it('平仓确认弹窗的净仓位和参数摘要里的失效剩余数量都遮住', () => {

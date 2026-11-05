@@ -644,6 +644,26 @@ describe('边填边看仓位划分（第 2.4 节第 1 步）', () => {
     return within(screen.getByRole('region', { name: '做多侧仓位划分' }))
   }
 
+  /** 切到「持仓累计」看法：默认是挂单排布。 */
+  async function showHolding() {
+    await userEvent.click(await breakdown().findByRole('radio', { name: '持仓累计' }))
+  }
+
+  /** 让图知道自己在页面上多大：jsdom 不排版，鼠标位置换不成图上的坐标。 */
+  function sized(element: Element, width: number, height: number) {
+    vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      width,
+      top: 0,
+      height,
+      right: width,
+      bottom: height,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    })
+  }
+
   /** 按资金填：投入 86900、主仓 .7 分 4 批、按格数 20 格、失效价 72000 保留一半。 */
   async function fillByCapital() {
     await userEvent.click(side('做多侧').getByRole('radio', { name: '按资金' }))
@@ -678,10 +698,101 @@ describe('边填边看仓位划分（第 2.4 节第 1 步）', () => {
     expect(split.getByText('网格 · 20 格').parentElement).toHaveTextContent('25650.00 29.5%')
     expect(split.queryByText('未用')).not.toBeInTheDocument()
     // 现价 88000：95000、90000 两批主仓和 95000–88000 八格启动就成交，按现价约投入。
+    await showHolding()
     expect(breakdown().getByText(/启动即持有/)).toHaveTextContent(
       '现价 启动即持有 0.470 = 主仓 2 批 0.350 + 网格 8 格 0.120，约投入 41360.00',
     )
     expect(server.count('POST', '/api/drafts')).toBe(0)
+  })
+
+  it('默认看挂单排布：网格多细一眼看出，每张单画在自己的价格上', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+    await fillByCapital()
+
+    expect(await breakdown().findByText('网格')).toBeInTheDocument()
+    const reading = (label: string) => breakdown().getByText(label).parentElement
+    expect(reading('网格')).toHaveTextContent('20 格价差 g 1000')
+    // 间距 1000 在 75000–95000 的中间价 85000 上约 1.2%。
+    expect(reading('间距 d')).toHaveTextContent('1000≈ 1.2%')
+    expect(reading('每格')).toHaveTextContent('0.015≈ 1140–\u200b1425 USDC')
+    expect(reading('每轮扣费后')).toHaveTextContent('+14.57–\u200b14.66')
+
+    const layout = breakdown().getByRole('img', { name: '做多侧挂单排布' })
+    const order = (name: string) => layout.querySelector(`[data-order="${name}"]`)
+    expect(layout.querySelectorAll('[data-order^="batch-"]')).toHaveLength(4)
+    expect(layout.querySelectorAll('[data-order^="cell-"]')).toHaveLength(20)
+    expect(layout.querySelectorAll('circle')).toHaveLength(20)
+    // 现价 88000：前两批和前八格启动就成交，画亮。
+    expect(order('batch-1')).toHaveAttribute('data-started', 'true')
+    expect(order('batch-2')).toHaveAttribute('data-started', 'false')
+    expect(order('cell-7')).toHaveAttribute('data-started', 'true')
+    expect(order('cell-8')).toHaveAttribute('data-started', 'false')
+  })
+
+  it('鼠标移到某一格或某一批上，写出它的价格、数量和每轮利润', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+    await fillByCapital()
+    const layout = await breakdown().findByRole('img', { name: '做多侧挂单排布' })
+    // 主仓一排在 0–48，网格一排在 70–118，整张图高 136。
+    sized(layout, 360, 136)
+    const at = (price: number) => ((price - 70080) / (96720 - 70080)) * 360
+
+    fireEvent.mouseMove(layout, { clientX: at(91500), clientY: 100 })
+    expect(breakdown().getByText(/每轮/, { selector: 'p' })).toHaveTextContent(
+      '格 3（批 0） · 买 92000 → 卖 93000 · 0.015 · 每轮 +14.58 · 启动即成交',
+    )
+
+    fireEvent.mouseMove(layout, { clientX: at(85000), clientY: 30 })
+    expect(breakdown().getByText(/主仓批/)).toHaveTextContent('主仓批 2 · 买 85000 · 0.175 · 约 14875.00 USDC')
+
+    fireEvent.mouseLeave(layout)
+    expect(breakdown().getByText('移到某一张单上看它的价格、数量和每轮利润。')).toBeInTheDocument()
+  })
+
+  it('网格粗时最外一格的平仓价也画在图里，停在空心点上选中的是这一格', async () => {
+    // 10 格、间距和价差都是 2000：第 0 格 95000 买、97000 卖，在范围外面。
+    const fixture = sizingPreview()
+    const coarse = Array.from({ length: 10 }, (_, index) => ({
+      ...fixture.cells[0],
+      index,
+      batch: null,
+      entry_price: String(95000 - index * 2000),
+      exit_price: String(97000 - index * 2000),
+    }))
+    const server = editorRoutes({
+      'POST /api/sizing': {
+        body: sizingPreview({
+          batches: [],
+          cells: coarse,
+          immediate_fills: [],
+          sizing: [{ ...fixture.sizing[0], grid_spacing: '2000', grid_spread: '2000', cell_count: 10 }],
+        }),
+      },
+    })
+    renderEditor(server)
+    const layout = await breakdown().findByRole('img', { name: '做多侧挂单排布' })
+
+    const dots = [...layout.querySelectorAll('circle')].map((dot) => Number(dot.getAttribute('cx')))
+    expect(dots).toHaveLength(10)
+    for (const cx of dots) expect(cx).toBeGreaterThan(0)
+    for (const cx of dots) expect(cx).toBeLessThan(360)
+
+    // 只有网格一排：在 0–48，空心点那一行在 y = 18，整张图高 66。
+    sized(layout, 360, 66)
+    fireEvent.mouseMove(layout, { clientX: dots[3], clientY: 18 })
+    expect(breakdown().getByText(/每轮/, { selector: 'p' })).toHaveTextContent('格 3 · 买 89000 → 卖 91000')
+  })
+
+  it('只积累主仓时说没有网格，图上只有主仓一排', async () => {
+    const server = editorRoutes({ 'POST /api/sizing': { body: sizingPreview({ cells: [] }) } })
+    renderEditor(server)
+
+    expect(await breakdown().findByText('只积累主仓，没有网格。')).toBeInTheDocument()
+    const layout = breakdown().getByRole('img', { name: '做多侧挂单排布' })
+    expect(layout.querySelectorAll('[data-order^="cell-"]')).toHaveLength(0)
+    expect(layout.querySelectorAll('[data-order^="batch-"]')).toHaveLength(4)
   })
 
   it('投入没用满时把零头标成未用', async () => {
@@ -700,20 +811,11 @@ describe('边填边看仓位划分（第 2.4 节第 1 步）', () => {
     const server = editorRoutes()
     renderEditor(server)
     await fillByCapital()
+    await showHolding()
     const ladder = await breakdown().findByRole('img', { name: '做多侧持仓阶梯' })
-    vi.spyOn(ladder, 'getBoundingClientRect').mockReturnValue({
-      left: 0,
-      width: 360,
-      top: 0,
-      height: 116,
-      right: 360,
-      bottom: 116,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    })
-    // 横轴从 70160 到 95690（失效价外留 8%，上限外留 3%）。
-    const at = (price: number) => ((price - 70160) / (95690 - 70160)) * 360
+    sized(ladder, 360, 116)
+    // 横轴从 70080 到 96720：失效价 72000 外留 8%，最外一格的平仓价 96000 外留 3%。
+    const at = (price: number) => ((price - 70080) / (96720 - 70080)) * 360
 
     fireEvent.mouseMove(ladder, { clientX: at(82400) })
     expect(breakdown().getByText(/一路跌到/)).toHaveTextContent(
@@ -741,6 +843,7 @@ describe('边填边看仓位划分（第 2.4 节第 1 步）', () => {
       },
     })
     renderEditor(server)
+    await showHolding()
 
     expect(await breakdown().findByText(/启动即持有/)).toHaveTextContent('现价 启动即持有 0.120（网格 8 格），约投入 10560.00')
     const split = within(breakdown().getByRole('list', { name: '资金拆分' }))
@@ -754,6 +857,7 @@ describe('边填边看仓位划分（第 2.4 节第 1 步）', () => {
       'POST /api/sizing': { body: sizingPreview({ immediate_fills: fixture.immediate_fills.slice(0, 1) }) },
     })
     renderEditor(server)
+    await showHolding()
 
     expect(await breakdown().findByText(/启动即持有/)).toHaveTextContent(
       '现价 启动即持有 0.175 = 主仓 1 批 0.175 + 网格 0 格 0.000，约投入 15400.00',

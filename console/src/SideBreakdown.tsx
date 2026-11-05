@@ -6,6 +6,7 @@
 
 import { useState } from 'react'
 
+import { ModeToggle } from '@/components/mode-toggle'
 import { Private, PrivateText } from '@/components/privacy'
 import { tint } from '@/components/range-bar'
 import { cn } from '@/lib/utils'
@@ -30,6 +31,9 @@ export type Breakdown = (
   | { kind: 'problem'; message: string }
   | { kind: 'ready'; preview: SizingPreview; long: SideConfig | null; short: SideConfig | null }
 ) & { stale?: boolean }
+
+/** 划分的两种看法：挂单在价格上怎么排（默认），价格一路走过去持有多少。 */
+type View = 'orders' | 'holding'
 
 /** 主仓的实心色：同侧颜色取 `percent`% 的不透明度。 */
 function solid(direction: Direction, percent: number): string {
@@ -117,6 +121,8 @@ const HEIGHT = 116
 
 export function SideBreakdown({ direction, breakdown }: { direction: Direction; breakdown: Breakdown | null }) {
   const label = DIRECTION_LABELS[direction]
+  // 看法记在这一层：参数改到一半算不出来、再算出来时，不跳回默认的那一种。
+  const [view, setView] = useState<View>('orders')
   return (
     <section
       aria-label={`${label}侧仓位划分`}
@@ -126,7 +132,7 @@ export function SideBreakdown({ direction, breakdown }: { direction: Direction; 
         breakdown?.stale === true && 'opacity-60',
       )}
     >
-      <Body direction={direction} breakdown={breakdown} />
+      <Body direction={direction} breakdown={breakdown} view={view} onView={setView} />
     </section>
   )
 }
@@ -169,7 +175,17 @@ function concerns(direction: Direction, message: string): boolean {
   return !message.startsWith(`${DIRECTION_LABELS[other]}侧`) || message.includes(`${DIRECTION_LABELS[direction]}侧`)
 }
 
-function Body({ direction, breakdown }: { direction: Direction; breakdown: Breakdown | null }) {
+function Body({
+  direction,
+  breakdown,
+  view,
+  onView,
+}: {
+  direction: Direction
+  breakdown: Breakdown | null
+  view: View
+  onView: (view: View) => void
+}) {
   if (breakdown === null) {
     return (
       <>
@@ -225,6 +241,8 @@ function Body({ direction, breakdown }: { direction: Direction; breakdown: Break
     <>
       <Header marketPrice={preview.market_price} stale={stale} />
       <Ready
+        view={view}
+        onView={onView}
         direction={direction}
         sizing={sizing}
         config={config}
@@ -249,8 +267,8 @@ interface ReadyProps {
   cells: CellSummary[]
 }
 
-function Ready(props: ReadyProps) {
-  const { direction, sizing, config, leverage } = props
+function Ready({ view, onView, ...props }: ReadyProps & { view: View; onView: (view: View) => void }) {
+  const { direction, sizing, config, leverage, cells } = props
   const capital = config.capital === null ? null : Number(config.capital)
   return (
     <>
@@ -275,16 +293,109 @@ function Ready(props: ReadyProps) {
         />
       </div>
       <Split direction={direction} sizing={sizing} capital={capital} />
-      <Ladder {...props} />
+      {cells.length > 0 ? (
+        <GridStats sizing={sizing} config={config} cells={cells} />
+      ) : (
+        <Note>只积累主仓，没有网格。</Note>
+      )}
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] text-muted-foreground">
+            {view === 'orders' ? '挂单在价格上怎么排' : '价格一路走过去持有多少'}
+          </span>
+          <ModeToggle
+            label={`${DIRECTION_LABELS[direction]}侧划分看法`}
+            value={view}
+            options={[
+              ['orders', '挂单排布'],
+              ['holding', '持仓累计'],
+            ]}
+            disabled={false}
+            onChange={onView}
+          />
+        </div>
+        {view === 'orders' ? <OrderLayout {...props} /> : <Ladder {...props} />}
+      </div>
     </>
   )
 }
 
-function Reading({ label, value }: { label: string; value: React.ReactNode }) {
+function Reading({
+  label,
+  value,
+  hint,
+  wrap = 'anywhere',
+}: {
+  label: string
+  value: React.ReactNode
+  hint?: React.ReactNode
+  /** 放不下时在哪里折行：单个数字任意处，范围在破折号后面。 */
+  wrap?: 'anywhere' | 'words'
+}) {
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
       <span className="text-[11px] text-muted-foreground">{label}</span>
-      <span className="num text-sm break-all">{value}</span>
+      <span className={cn('num text-sm', wrap === 'anywhere' ? 'break-all' : 'break-words')}>{value}</span>
+      {hint === undefined ? null : <span className="num text-[11px] text-muted-foreground">{hint}</span>}
+    </div>
+  )
+}
+
+/**
+ * 一组数的范围：显示出来一样就写一个，不一样写「小–大」。破折号后面可以折行，
+ * 免得数字从中间断开。
+ */
+function span(values: number[], format: (value: number) => string): string {
+  const low = format(Math.min(...values))
+  const high = format(Math.max(...values))
+  return low === high ? low : `${low}–\u200b${high}`
+}
+
+/** 占比留两位有效数字：1.2%、0.24%、0.0012%，间距再小也不写成 0.00%。 */
+function percentOf(ratio: number): string {
+  return `${Number(ratio.toPrecision(2))}%`
+}
+
+/**
+ * 网格有多细：格数、间距（也写成占价格的百分比，不熟悉的标的看比例更直观）、每格数量和
+ * 金额、每格一买一卖扣掉挂单手续费后赚多少。
+ */
+function GridStats({ sizing, config, cells }: { sizing: SideSizing; config: SideConfig; cells: CellSummary[] }) {
+  const spacing = Number(sizing.grid_spacing)
+  const middle = (Number(config.price_low) + Number(config.price_high)) / 2
+  const ratio = middle > 0 ? (spacing / middle) * 100 : 0
+  const quantityPlaces = places(cells.map((cell) => cell.quantity))
+  const quantities = cells.map((cell) => Number(cell.quantity))
+  const amounts = cells.map((cell) => Number(cell.entry_price) * Number(cell.quantity))
+  const profits = cells.map((cell) => Number(cell.profit_maker))
+  return (
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <Reading label="网格" value={`${cells.length} 格`} hint={`价差 g ${sizing.grid_spread}`} />
+      <Reading
+        label="间距 d"
+        value={sizing.grid_spacing}
+        hint={`≈ ${percentOf(ratio)}`}
+      />
+      <Reading
+        label="每格"
+        wrap="words"
+        value={<Private>{span(quantities, (value) => value.toFixed(quantityPlaces))}</Private>}
+        hint={
+          <>
+            ≈ <Private>{span(amounts, (value) => value.toFixed(0))}</Private> USDC
+          </>
+        }
+      />
+      <Reading
+        label="每轮扣费后"
+        wrap="words"
+        value={
+          <span className="text-long">
+            +<Private>{span(profits, (value) => value.toFixed(2))}</Private>
+          </span>
+        }
+        hint="一买一卖都挂单成交"
+      />
     </div>
   )
 }
@@ -367,6 +478,97 @@ function Split({ direction, sizing, capital }: { direction: Direction; sizing: S
   )
 }
 
+/** 两张图共用的价格轴：范围、失效价外留的一段、现价，以及轴上写哪几个价格。 */
+interface Axis {
+  low: number
+  high: number
+  invalidation: number | null
+  marketPrice: number
+  from: number
+  to: number
+  x: (price: number) => number
+  pricePlaces: number
+  ticks: { price: number; color: string }[]
+}
+
+function axisFor(
+  direction: Direction,
+  config: SideConfig,
+  marketText: string,
+  batches: BatchSummary[],
+  cells: CellSummary[],
+): Axis {
+  const marketPrice = Number(marketText)
+  const low = Number(config.price_low)
+  const high = Number(config.price_high)
+  const invalidation = config.invalidation === null ? null : Number(config.invalidation.price)
+  const pricePlaces = places([
+    config.price_low,
+    config.price_high,
+    marketText,
+    ...(config.invalidation === null ? [] : [config.invalidation.price]),
+    ...batches.map((batch) => batch.price),
+    ...cells.flatMap((cell) => [cell.entry_price, cell.exit_price]),
+  ])
+  const outer = invalidation ?? (direction === 'long' ? low : high)
+  // 最外面那格的平仓价在范围外面（做多是 H + g，做空是 L − g），轴要把它也包进来。
+  const exits = cells.map((cell) => Number(cell.exit_price))
+  const floor = Math.min(low, outer, ...exits)
+  const ceiling = Math.max(high, outer, ...exits)
+  const span = ceiling - floor || 1
+  // 失效价外面留一段画「失效后剩余 R」。
+  const beyond = invalidation === null ? span * 0.03 : span * 0.08
+  const from = direction === 'long' ? floor - beyond : floor - span * 0.03
+  const to = direction === 'long' ? ceiling + span * 0.03 : ceiling + beyond
+  const x = (price: number) => ((price - from) / (to - from)) * WIDTH
+
+  // 轴上的价格：现价最要紧，其次失效价，再是范围两端；挨得太近的后来者不写。
+  const ticks: Axis['ticks'] = []
+  const candidates = [
+    { price: marketPrice, color: 'var(--signal)' },
+    ...(invalidation === null ? [] : [{ price: invalidation, color: 'var(--destructive)' }]),
+    { price: low, color: 'var(--muted-foreground)' },
+    { price: high, color: 'var(--muted-foreground)' },
+  ]
+  for (const tick of candidates) {
+    if (tick.price < from || tick.price > to) continue
+    if (ticks.some((placed) => Math.abs(x(placed.price) - x(tick.price)) < 44)) continue
+    ticks.push(tick)
+  }
+  return { low, high, invalidation, marketPrice, from, to, x, pricePlaces, ticks }
+}
+
+/** 失效价、现价两条竖线和轴上的价格，两张图画法一样。 */
+function AxisMarks({ axis, top, bottom }: { axis: Axis; top: number; bottom: number }) {
+  const { x, invalidation, marketPrice, from, to } = axis
+  return (
+    <>
+      {invalidation === null ? null : (
+        <line x1={x(invalidation)} x2={x(invalidation)} y1={top} y2={bottom} stroke="var(--destructive)" strokeDasharray="2 2" />
+      )}
+      {marketPrice >= from && marketPrice <= to ? (
+        <line x1={x(marketPrice)} x2={x(marketPrice)} y1={top} y2={bottom} stroke="var(--signal)" strokeWidth={1.5} />
+      ) : null}
+      {axis.ticks.map((tick) => {
+        const position = x(tick.price)
+        const anchor = position < 24 ? 'start' : position > WIDTH - 24 ? 'end' : 'middle'
+        return (
+          <text
+            key={`${tick.color}-${tick.price}`}
+            x={position}
+            y={bottom + 13}
+            textAnchor={anchor}
+            className="num"
+            style={{ fill: tick.color, fontSize: 9.5 }}
+          >
+            {priceText(tick.price, axis.pricePlaces)}
+          </text>
+        )
+      })}
+    </>
+  )
+}
+
 /** 阶梯上的一段：这段价格里持有多少，以及它是不是启动时就会成交的那一边。 */
 interface Column {
   low: number
@@ -381,34 +583,14 @@ interface Column {
  */
 function Ladder({ direction, sizing, config, marketPrice: marketText, immediateFills, batches, cells }: ReadyProps) {
   const [hover, setHover] = useState<number | null>(null)
-  const marketPrice = Number(marketText)
-  const low = Number(config.price_low)
-  const high = Number(config.price_high)
-  const invalidation = config.invalidation === null ? null : Number(config.invalidation.price)
+  const axis = axisFor(direction, config, marketText, batches, cells)
+  const { low, high, invalidation, marketPrice, from, to, x, pricePlaces } = axis
   const remaining = sizing.invalidation_remaining === null ? 0 : Number(sizing.invalidation_remaining)
   const quantityPlaces = places([
     sizing.max_position,
     ...batches.map((batch) => batch.core_quantity),
     ...cells.map((cell) => cell.quantity),
   ])
-  const pricePlaces = places([
-    config.price_low,
-    config.price_high,
-    marketText,
-    ...(config.invalidation === null ? [] : [config.invalidation.price]),
-    ...batches.map((batch) => batch.price),
-    ...cells.map((cell) => cell.entry_price),
-  ])
-
-  const outer = invalidation ?? (direction === 'long' ? low : high)
-  const floor = Math.min(low, outer)
-  const ceiling = Math.max(high, outer)
-  const span = ceiling - floor || 1
-  // 失效价外面留一段画「失效后剩余 R」。
-  const beyond = invalidation === null ? span * 0.03 : span * 0.08
-  const from = direction === 'long' ? floor - beyond : floor - span * 0.03
-  const to = direction === 'long' ? ceiling + span * 0.03 : ceiling + beyond
-  const x = (price: number) => ((price - from) / (to - from)) * WIDTH
 
   const atStart = holdingAtStart(direction, immediateFills, marketPrice)
   const started = new Set(atStart.units)
@@ -448,21 +630,6 @@ function Ladder({ direction, sizing, config, marketPrice: marketText, immediateF
     setHover(from + Math.min(Math.max(ratio, 0), 1) * (to - from))
   }
 
-  // 轴上的价格：现价最要紧，其次失效价，再是范围两端；挨得太近的后来者不写。
-  const ticks: { price: number; color: string }[] = []
-  const candidates = [
-    { price: marketPrice, color: 'var(--signal)' },
-    ...(invalidation === null ? [] : [{ price: invalidation, color: 'var(--destructive)' }]),
-    { price: low, color: 'var(--muted-foreground)' },
-    { price: high, color: 'var(--muted-foreground)' },
-  ]
-  for (const tick of candidates) {
-    if (tick.price < from || tick.price > to) continue
-    if (ticks.some((placed) => Math.abs(x(placed.price) - x(tick.price)) < 44)) continue
-    ticks.push(tick)
-  }
-
-  const markInside = marketPrice >= from && marketPrice <= to
   return (
     <div className="flex flex-col gap-1.5">
       <svg
@@ -520,38 +687,12 @@ function Ladder({ direction, sizing, config, marketPrice: marketText, immediateF
                 style={{ fill: solid(direction, 28), stroke: tint(direction, 50), strokeDasharray: '2 2' }}
               />
             ) : null}
-            <line
-              x1={x(invalidation)}
-              x2={x(invalidation)}
-              y1={TOP}
-              y2={BOTTOM}
-              stroke="var(--destructive)"
-              strokeDasharray="2 2"
-            />
           </>
         )}
-        {markInside ? (
-          <line x1={x(marketPrice)} x2={x(marketPrice)} y1={TOP} y2={BOTTOM} stroke="var(--signal)" strokeWidth={1.5} />
-        ) : null}
         {hover === null ? null : (
           <line x1={x(hover)} x2={x(hover)} y1={TOP} y2={BOTTOM} stroke="var(--muted-foreground)" opacity={0.7} />
         )}
-        {ticks.map((tick) => {
-          const position = x(tick.price)
-          const anchor = position < 24 ? 'start' : position > WIDTH - 24 ? 'end' : 'middle'
-          return (
-            <text
-              key={`${tick.color}-${tick.price}`}
-              x={position}
-              y={HEIGHT - 3}
-              textAnchor={anchor}
-              className="num"
-              style={{ fill: tick.color, fontSize: 9.5 }}
-            >
-              {priceText(tick.price, pricePlaces)}
-            </text>
-          )
-        })}
+        <AxisMarks axis={axis} top={TOP} bottom={BOTTOM} />
       </svg>
       <p className="num text-[11px] text-muted-foreground" aria-live="polite">
         {beyondInvalidation(at) ? (
@@ -588,6 +729,217 @@ function Ladder({ direction, sizing, config, marketPrice: marketText, immediateF
             ，{hover === null ? '约投入' : '已投入'} <Private>{atHolding.spent.toFixed(2)}</Private>
           </>
         )}
+      </p>
+    </div>
+  )
+}
+
+/** 挂单排布图里鼠标停着的那一张单。 */
+type Pick = { kind: 'batch'; index: number } | { kind: 'cell'; index: number }
+
+/** 一侧格子超过这么多，图上就不画每格的平仓价，格子之间也不留缝：画了也挤成一片。 */
+const DENSE = 60
+
+/**
+ * 挂单排布：横轴价格，和价格条对齐。上排是主仓的建仓单，每批一根，挂在批次价上；下排是
+ * 网格，每格一个灯管，宽度就是它占的那段价格，旁边一个空心点是它的平仓价，两者之间就是价差 g。
+ * 主仓和网格各用各的高度：主仓一批常常是一格的十倍，放在一起格子就看不见了。启动时就会成交
+ * 的单画亮，限速时只有放行的那个单位。
+ */
+function OrderLayout({ direction, sizing, config, marketPrice: marketText, immediateFills, batches, cells }: ReadyProps) {
+  const [pick, setPick] = useState<Pick | null>(null)
+  const axis = axisFor(direction, config, marketText, batches, cells)
+  const { x, low, high } = axis
+  const started = new Set(holdingAtStart(direction, immediateFills, axis.marketPrice).units)
+  const quantityPlaces = places([...batches.map((batch) => batch.core_quantity), ...cells.map((cell) => cell.quantity)])
+  const spacing = Number(sizing.grid_spacing)
+  const dense = cells.length > DENSE
+  const buy = direction === 'long' ? '买' : '卖'
+  const sell = direction === 'long' ? '卖' : '买'
+
+  // 两排的位置：只有主仓或只有网格时只画一排。
+  let cursor = 0
+  const coreLane = batches.length > 0 ? { label: cursor + 9, top: cursor + 14, bottom: cursor + 48 } : null
+  if (coreLane !== null) cursor = coreLane.bottom + 8
+  const gridLane = cells.length > 0 ? { label: cursor + 9, top: cursor + 14, bottom: cursor + 62 } : null
+  if (gridLane !== null) cursor = gridLane.bottom
+  const top = coreLane?.top ?? gridLane?.top ?? 0
+  const exitY = (gridLane?.top ?? 0) + 4
+  const bottom = cursor
+  const height = bottom + 18
+
+  const maxCore = Math.max(...batches.map((batch) => Number(batch.core_quantity)), 0)
+  const batchXs = batches.map((batch) => x(Number(batch.price))).sort((a, b) => a - b)
+  const batchGap = batchXs.slice(1).reduce((least, at, index) => Math.min(least, at - batchXs[index]), Infinity)
+  const barWidth = Math.min(Math.max(batchGap * 0.6, 2), 8)
+  const maxCell = Math.max(...cells.map((cell) => Number(cell.quantity)), 0)
+
+  function slot(cell: CellSummary): [number, number] {
+    const entry = Number(cell.entry_price)
+    const [from, to] = direction === 'long' ? [entry - spacing, entry] : [entry, entry + spacing]
+    return [Math.max(from, low), Math.min(to, high)]
+  }
+
+  function track(event: React.MouseEvent<SVGSVGElement>) {
+    const box = event.currentTarget.getBoundingClientRect()
+    if (box.width <= 0 || box.height <= 0) return
+    const px = ((event.clientX - box.left) / box.width) * WIDTH
+    const py = ((event.clientY - box.top) / box.height) * height
+    const inCore = coreLane !== null && (gridLane === null || py < coreLane.bottom + 4)
+    let best: Pick | null = null
+    let distance = Infinity
+    if (inCore) {
+      batches.forEach((batch) => {
+        const gap = Math.abs(x(Number(batch.price)) - px)
+        if (gap < distance) [best, distance] = [{ kind: 'batch', index: batch.index }, gap]
+      })
+    } else if (!dense && Math.abs(py - exitY) <= 6) {
+      // 停在平仓价那一行：按空心点挑。第 k 格的点落在相邻那格的价格段里，按段挑会挑错。
+      cells.forEach((cell) => {
+        const gap = Math.abs(x(Number(cell.exit_price)) - px)
+        if (gap < distance) [best, distance] = [{ kind: 'cell', index: cell.index }, gap]
+      })
+    } else {
+      cells.forEach((cell) => {
+        const [from, to] = slot(cell)
+        const gap = px >= x(from) && px <= x(to) ? 0 : Math.min(Math.abs(x(from) - px), Math.abs(x(to) - px))
+        if (gap < distance) [best, distance] = [{ kind: 'cell', index: cell.index }, gap]
+      })
+    }
+    setPick(distance <= 12 ? best : null)
+  }
+
+  const picked =
+    pick === null
+      ? null
+      : pick.kind === 'batch'
+        ? batches.find((batch) => batch.index === pick.index)
+        : cells.find((cell) => cell.index === pick.index)
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <svg
+        viewBox={`0 0 ${WIDTH} ${height}`}
+        className="w-full"
+        role="img"
+        aria-label={`${DIRECTION_LABELS[direction]}侧挂单排布`}
+        onMouseMove={track}
+        onMouseLeave={() => setPick(null)}
+      >
+        {coreLane === null ? null : (
+          <>
+            <text x={0} y={coreLane.label} style={{ fill: 'var(--muted-foreground)', fontSize: 9.5 }}>
+              主仓{buy}单 · {batches.length} 批
+            </text>
+            <line x1={0} x2={WIDTH} y1={coreLane.bottom} y2={coreLane.bottom} stroke="var(--border)" />
+            {batches.map((batch) => {
+              const at = x(Number(batch.price))
+              const share = maxCore > 0 ? Number(batch.core_quantity) / maxCore : 1
+              const barHeight = (coreLane.bottom - coreLane.top) * (0.35 + 0.65 * share)
+              const lit = started.has(`b${batch.index}`)
+              return (
+                <rect
+                  key={batch.index}
+                  data-order={`batch-${batch.index}`}
+                  data-started={lit}
+                  x={at - barWidth / 2}
+                  y={coreLane.bottom - barHeight}
+                  width={barWidth}
+                  height={barHeight}
+                  rx={1.5}
+                  style={{
+                    fill: solid(direction, lit ? 60 : 32),
+                    stroke: tint(direction, lit ? 85 : 35),
+                    strokeWidth: pick?.kind === 'batch' && pick.index === batch.index ? 1.6 : 0.8,
+                  }}
+                />
+              )
+            })}
+          </>
+        )}
+        {gridLane === null ? null : (
+          <>
+            <text x={0} y={gridLane.label} style={{ fill: 'var(--muted-foreground)', fontSize: 9.5 }}>
+              网格 · {dense ? `${cells.length} 格` : `每格一${buy}一${sell}，空心点是平仓价`}
+            </text>
+            <line x1={0} x2={WIDTH} y1={gridLane.bottom} y2={gridLane.bottom} stroke="var(--border)" />
+            {cells.map((cell) => {
+              const [from, to] = slot(cell)
+              const inset = dense ? 0 : 0.6
+              const left = x(from) + inset
+              const width = Math.max(x(to) - x(from) - inset * 2, 0.6)
+              const room = gridLane.bottom - gridLane.top - (dense ? 0 : 12)
+              const share = maxCell > 0 ? Number(cell.quantity) / maxCell : 1
+              const tube = room * (0.45 + 0.55 * share)
+              const tubeTop = gridLane.bottom - tube
+              const lit = started.has(`c${cell.index}`)
+              const chosen = pick?.kind === 'cell' && pick.index === cell.index
+              const entry = x(Number(cell.entry_price))
+              const exit = x(Number(cell.exit_price))
+              return (
+                <g key={cell.index}>
+                  <rect
+                    data-order={`cell-${cell.index}`}
+                    data-started={lit}
+                    x={left}
+                    y={tubeTop}
+                    width={width}
+                    height={tube}
+                    rx={dense ? 0 : 1.5}
+                    style={{
+                      fill: tint(direction, lit ? 22 : 5),
+                      stroke: chosen ? 'var(--foreground)' : tint(direction, lit ? 90 : 35),
+                      strokeWidth: chosen ? 1.2 : 0.8,
+                    }}
+                  />
+                  {dense ? null : (
+                    <>
+                      <path
+                        d={`M${entry} ${tubeTop} V${exitY} H${exit}`}
+                        style={{ fill: 'none', stroke: tint(direction, chosen ? 90 : 30), strokeWidth: 0.8 }}
+                      />
+                      <circle
+                        cx={exit}
+                        cy={exitY}
+                        r={1.8}
+                        style={{ fill: 'var(--background)', stroke: tint(direction, lit || chosen ? 90 : 45) }}
+                      />
+                    </>
+                  )}
+                </g>
+              )
+            })}
+          </>
+        )}
+        <AxisMarks axis={axis} top={top} bottom={bottom} />
+      </svg>
+      <p className="num text-[11px] text-muted-foreground" aria-live="polite">
+        {picked === undefined || picked === null || pick === null ? (
+          dense ? (
+            '格子太密，图上不画平仓价；移到某一格上看它的价格和数量。'
+          ) : (
+            '移到某一张单上看它的价格、数量和每轮利润。'
+          )
+        ) : pick.kind === 'batch' && 'core_quantity' in picked ? (
+          <>
+            主仓批 {picked.index} · {buy} <span className="text-foreground">{picked.price}</span> ·{' '}
+            <Private>{Number(picked.core_quantity).toFixed(quantityPlaces)}</Private> · 约{' '}
+            <Private>{(Number(picked.price) * Number(picked.core_quantity)).toFixed(2)}</Private> USDC
+            {started.has(`b${picked.index}`) ? ' · 启动即成交' : ''}
+          </>
+        ) : 'entry_price' in picked ? (
+          <>
+            格 {picked.index}
+            {picked.batch === null ? '' : `（批 ${picked.batch}）`} · {buy}{' '}
+            <span className="text-foreground">{picked.entry_price}</span> → {sell}{' '}
+            <span className="text-foreground">{picked.exit_price}</span> ·{' '}
+            <Private>{Number(picked.quantity).toFixed(quantityPlaces)}</Private> · 每轮{' '}
+            <span className="text-long">
+              +<Private>{Number(picked.profit_maker).toFixed(2)}</Private>
+            </span>
+            {started.has(`c${picked.index}`) ? ' · 启动即成交' : ''}
+          </>
+        ) : null}
       </p>
     </div>
   )

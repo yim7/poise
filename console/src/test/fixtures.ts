@@ -365,7 +365,8 @@ export function sizingPreview(overrides: Partial<SizingPreview> = {}): SizingPre
     to_buy_back: '0',
     working_orders: 0,
     status: 'waiting_for_buy' as const,
-    profit_maker: '0',
+    // 每格一买一卖赚 1000 × .015 = 15，减去两边万分之 1.5 的挂单手续费。
+    profit_maker: (15 - 0.00015 * 0.015 * (191000 - index * 2000)).toFixed(8),
     profit_taker: '0',
   }))
   return {
