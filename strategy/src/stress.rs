@@ -764,6 +764,9 @@ mod tests {
                 grid_spread: Price::parse("1").unwrap(),
                 throttle_interval: None,
                 invalidation: None,
+                grid_count: None,
+                grid_spread_ratio: None,
+                capital: None,
             }),
         };
         let strategy = crate::Strategy::new(config, cheap_spec(), btc_fees()).unwrap();
@@ -848,6 +851,9 @@ mod tests {
                 grid_spread: Price::parse("1000").unwrap(),
                 throttle_interval: None,
                 invalidation: None,
+                grid_count: None,
+                grid_spread_ratio: None,
+                capital: None,
             }),
             short: None,
         };

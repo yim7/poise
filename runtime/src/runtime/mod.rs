@@ -36,7 +36,7 @@ use poise_strategy::error::ConfigError;
 use poise_strategy::instrument::Instrument;
 use poise_strategy::order::ClientOrderId;
 use poise_strategy::planning::{OrderIntent, Plan, WaitReason};
-use poise_strategy::preview::{BatchSummary, CellSummary, ImmediateFill};
+use poise_strategy::preview::{BatchSummary, CellSummary, ImmediateFill, SideSizing};
 use poise_strategy::state::{StateError, StrategyState};
 use poise_strategy::stress::SideStress;
 use poise_strategy::takeover::TakeoverError;
@@ -390,6 +390,8 @@ pub struct DraftPreview {
     /// 交易所上这个标的当前的仓位：标的已有仓位时，预览要能看出接管分配（第 8 节）。
     pub position: Position,
     pub available_collateral: Notional,
+    /// 两侧的仓位与网格读数：按格数、按资金设置时算出来的数量、间距和满仓总价值。
+    pub sizing: Vec<SideSizing>,
     pub batches: Vec<BatchSummary>,
     pub cells: Vec<CellSummary>,
     pub immediate_fills: Vec<ImmediateFill>,

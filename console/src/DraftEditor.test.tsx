@@ -8,7 +8,7 @@ import userEvent from '@testing-library/user-event'
 
 import { DraftEditor } from './DraftEditor'
 import { fakeServer, type FakeServer, type Routes } from './test/fakeServer'
-import { neutralPreview, preview } from './test/fixtures'
+import { longSide, neutralPreview, preview } from './test/fixtures'
 import { renderWithQuery } from './test/render'
 
 function editorRoutes(extra: Routes = {}) {
@@ -268,13 +268,14 @@ describe('新建与确认启动', () => {
     renderEditor(server)
 
     await userEvent.type(side('做多侧').getByLabelText('观点失效价'), '70000')
-    await userEvent.type(side('做多侧').getByLabelText('失效后剩余数量 R'), '0.3')
+    await userEvent.type(side('做多侧').getByLabelText('失效后保留主仓（%）'), '30')
     await userEvent.clear(side('做多侧').getByLabelText('失效平仓滑点上限（%）'))
     await userEvent.type(side('做多侧').getByLabelText('失效平仓滑点上限（%）'), '2')
     await saveAndPreview()
 
+    // 保留主仓的百分比换成比例提交，R 由服务端按主仓总量算出。
     expect(server.lastBody('POST', '/api/drafts')).toMatchObject({
-      long: { invalidation: { price: '70000', remaining: '0.3', max_slippage: '0.02' } },
+      long: { invalidation: { price: '70000', remaining: '0', remaining_ratio: '0.3', max_slippage: '0.02' } },
     })
   })
 
@@ -299,14 +300,14 @@ describe('新建与确认启动', () => {
     await userEvent.clear(side('做多侧').getByLabelText('主仓比例 r'))
     await userEvent.type(side('做多侧').getByLabelText('主仓比例 r'), '0.5')
     await userEvent.type(side('做多侧').getByLabelText('观点失效价'), '70000')
-    await userEvent.type(side('做多侧').getByLabelText('失效后剩余数量 R'), '0.3')
+    await userEvent.type(side('做多侧').getByLabelText('失效后保留主仓（%）'), '30')
     await userEvent.click(screen.getByLabelText('启用做空侧'))
 
-    expect(side('做多侧').getByLabelText('失效后剩余数量 R')).toHaveValue('0')
+    expect(side('做多侧').getByLabelText('失效后保留主仓（%）')).toHaveValue('0')
     expect(side('做多侧').getByLabelText('主仓比例 r')).toHaveValue('0')
     await saveAndPreview()
     expect(server.lastBody('POST', '/api/drafts')).toMatchObject({
-      long: { core_ratio: '0', invalidation: { price: '70000', remaining: '0' } },
+      long: { core_ratio: '0', invalidation: { price: '70000', remaining: '0', remaining_ratio: '0' } },
     })
   })
 
@@ -517,5 +518,122 @@ describe('新建与确认启动', () => {
       (element) => element.getAttribute('name') ?? '',
     )
     expect(names.some((name) => name.includes('key'))).toBe(false)
+  })
+})
+
+describe('按资金、按格数设置（第 2.2 节）', () => {
+  it('按资金：提交投入资金，M 占位 0；预览里列出算出的 M、满仓总价值和保证金占用', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+
+    await userEvent.click(side('做多侧').getByRole('radio', { name: '按资金' }))
+    expect(side('做多侧').queryByLabelText('最大仓位 M')).not.toBeInTheDocument()
+    await userEvent.type(side('做多侧').getByLabelText('投入资金（USDC）'), '85500')
+    await saveAndPreview()
+
+    expect(server.lastBody('POST', '/api/drafts')).toMatchObject({
+      long: { capital: '85500', max_position: '0', grid_count: null },
+    })
+    const sizing = within(screen.getByRole('table', { name: '仓位与网格' }))
+    const row = sizing.getAllByRole('row')[1]
+    expect(row).toHaveTextContent('20 格，d 1000，g 1000')
+    expect(row).toHaveTextContent('85500')
+    expect(row).toHaveTextContent('8550')
+  })
+
+  it('按格数：提交格数和价差倍数，间距和价差占位 0；倍数沿用按间距时的 g ÷ d', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+
+    const spread = side('做多侧').getByLabelText('网格价差 g')
+    await userEvent.clear(spread)
+    await userEvent.type(spread, '2000')
+    await userEvent.click(side('做多侧').getByRole('radio', { name: '按格数' }))
+    expect(side('做多侧').queryByLabelText('网格间距 d')).not.toBeInTheDocument()
+    expect(side('做多侧').getByLabelText('价差倍数 g÷d')).toHaveValue('2')
+    await userEvent.type(side('做多侧').getByLabelText('格数 N'), '20')
+    expect(side('做多侧').getByText('间距约 1000')).toBeInTheDocument()
+    await saveAndPreview()
+
+    expect(server.lastBody('POST', '/api/drafts')).toMatchObject({
+      long: { grid_count: 20, grid_spread_ratio: '2', grid_spacing: '0', grid_spread: '0', capital: null },
+    })
+  })
+
+  it('按格数预览时价格条按算出的间距画格子，不是表单里占位的 0', async () => {
+    const server = editorRoutes()
+    const { container } = renderWithQuery(<DraftEditor draftId={null} onBack={() => {}} onStarted={() => {}} />)
+
+    await userEvent.click(side('做多侧').getByRole('radio', { name: '按格数' }))
+    await userEvent.type(side('做多侧').getByLabelText('格数 N'), '20')
+    await saveAndPreview()
+
+    expect(server.lastBody('POST', '/api/drafts')).toMatchObject({ long: { grid_spacing: '0' } })
+    const drawn = [...container.querySelectorAll<HTMLElement>('[data-held]')]
+    expect(drawn.length).toBeGreaterThan(0)
+    // 每格的宽度是间距在整条上的占比：照占位的 0 画就是 0%。
+    for (const slot of drawn) {
+      const share = Number(/([\d.]+)%/.exec(slot.style.width)?.[1])
+      expect(share).toBeGreaterThan(1)
+    }
+  })
+
+  it('只积累主仓（r = 1）时格数留空也能提交', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+
+    await userEvent.clear(side('做多侧').getByLabelText('主仓比例 r'))
+    await userEvent.type(side('做多侧').getByLabelText('主仓比例 r'), '1')
+    await userEvent.type(side('做多侧').getByLabelText('主仓批数 n'), '4')
+    await userEvent.click(side('做多侧').getByRole('radio', { name: '按格数' }))
+    await saveAndPreview()
+
+    expect(server.lastBody('POST', '/api/drafts')).toMatchObject({ long: { core_ratio: '1', grid_count: null } })
+  })
+
+  it('格数不是正整数时不提交', async () => {
+    const server = editorRoutes()
+    renderEditor(server)
+
+    await userEvent.click(side('做多侧').getByRole('radio', { name: '按格数' }))
+    await userEvent.type(side('做多侧').getByLabelText('格数 N'), '2.5')
+    await userEvent.click(screen.getByRole('button', { name: '保存并预览' }))
+
+    expect(await screen.findByText('做多侧：格数 N 填正整数。')).toBeInTheDocument()
+    expect(server.count('POST', '/api/drafts')).toBe(0)
+  })
+
+  it('重新打开按资金、按格数存的草稿：还是按资金、按格数，填的值都在', async () => {
+    fakeServer({
+      'GET /api/drafts/s-1': {
+        body: {
+          draft_id: 's-1',
+          config: {
+            instrument: 'BTC',
+            long: {
+              ...longSide,
+              max_position: '0',
+              capital: '85500',
+              grid_spacing: '0',
+              grid_spread: '0',
+              grid_count: 20,
+              grid_spread_ratio: '1.5',
+              invalidation: { price: '70000', remaining: '0', remaining_ratio: '0.25', max_slippage: '0.01' },
+            },
+            short: null,
+          },
+          created_at: '2026-11-05T00:00:00Z',
+          updated_at: '2026-11-05T00:00:00Z',
+        },
+      },
+    })
+    renderWithQuery(<DraftEditor draftId="s-1" onBack={() => {}} onStarted={() => {}} />)
+
+    expect(await side('做多侧').findByDisplayValue('85500')).toBeInTheDocument()
+    expect(side('做多侧').getByRole('radio', { name: '按资金' })).toBeChecked()
+    expect(side('做多侧').getByRole('radio', { name: '按格数' })).toBeChecked()
+    expect(side('做多侧').getByLabelText('格数 N')).toHaveValue('20')
+    expect(side('做多侧').getByLabelText('价差倍数 g÷d')).toHaveValue('1.5')
+    expect(side('做多侧').getByLabelText('失效后保留主仓（%）')).toHaveValue('25')
   })
 })

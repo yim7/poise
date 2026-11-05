@@ -16,7 +16,7 @@ import {
   unitDirection,
   unitLabel,
 } from './labels'
-import { configSummary, decimal, percent, timestamp } from './format'
+import { configSummary, decimal, percent, timestamp, usdc } from './format'
 import type {
   BatchSummary,
   CellSummary,
@@ -27,6 +27,7 @@ import type {
   OrderIntent,
   OrderStatus,
   Side,
+  SideSizing,
   SideStress,
   StoredConfigVersion,
   StoredOrder,
@@ -518,6 +519,70 @@ function liquidationText(liquidation: Liquidation): string {
 }
 
 /** 满仓压力测试（第 7.3 节）：每一侧满仓、价格到最不利位置时的账户保证金率和强平价。 */
+/**
+ * 仓位与网格：按资金、按格数设置时服务端算出的 M、d、g 和满仓总价值都在这里核对。
+ * 主仓占资金的比例只是显示用的估算，用浮点算。
+ */
+export function SizingTable({ sides }: { sides: SideSizing[] }) {
+  if (sides.length === 0) return null
+  return (
+    <Table>
+      <caption className="sr-only">仓位与网格</caption>
+      <thead>
+        <tr>
+          <th>方向</th>
+          <th>最大仓位 M</th>
+          <th>主仓</th>
+          <th>网格</th>
+          <th>满仓总价值</th>
+          <th>保证金占用</th>
+          <th>失效后剩余 R</th>
+        </tr>
+      </thead>
+      <tbody>
+        {sides.map((side) => {
+          const total = Number(side.notional)
+          const coreShare = total > 0 ? Number(side.core_notional) / total : 0
+          return (
+            <tr key={side.direction}>
+              <td>
+                <DirectionTag direction={side.direction} />
+              </td>
+              <td className="num">
+                <Private>{decimal(side.max_position)}</Private>
+              </td>
+              <td className="num">
+                {Number(side.core_quantity) === 0 ? (
+                  '无'
+                ) : (
+                  <>
+                    <Private>{decimal(side.core_quantity)}</Private>
+                    <span className="text-muted-foreground">（资金 {(coreShare * 100).toFixed(1)}%）</span>
+                  </>
+                )}
+              </td>
+              <td className="num">
+                {side.cell_count === 0
+                  ? '无网格'
+                  : `${side.cell_count} 格，d ${side.grid_spacing}，g ${side.grid_spread}`}
+              </td>
+              <td className="num font-medium">
+                <Private>{usdc(side.notional)}</Private>
+              </td>
+              <td className="num">
+                <Private>{usdc(side.margin)}</Private>
+              </td>
+              <td className="num">
+                {side.invalidation_remaining === null ? '—' : <Private>{decimal(side.invalidation_remaining)}</Private>}
+              </td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </Table>
+  )
+}
+
 export function StressTable({ sides }: { sides: SideStress[] }) {
   if (sides.length === 0) return null
   return (

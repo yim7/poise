@@ -134,6 +134,10 @@ describe('隐藏金额', () => {
     const stress = within(screen.getByRole('region', { name: '满仓压力测试' }))
     expect(stress.queryByText('1')).not.toBeInTheDocument()
     expect(stress.getByText('75000')).toBeInTheDocument()
+    // 仓位与网格：M、满仓总价值、保证金占用遮住，格数和间距照常显示。
+    const sizing = within(screen.getByRole('table', { name: '仓位与网格' }))
+    for (const value of ['85500', '8550']) expect(sizing.queryByText(value)).not.toBeInTheDocument()
+    expect(sizing.getByText('20 格，d 1000，g 1000')).toBeInTheDocument()
   })
 
   it('平仓确认弹窗的净仓位和参数摘要里的失效剩余数量都遮住', () => {
@@ -144,7 +148,7 @@ describe('隐藏金额', () => {
 
     const invalidating = {
       ...config,
-      long: { ...longSide, invalidation: { price: '70000', remaining: '0.4', max_slippage: '0.01' } },
+      long: { ...longSide, invalidation: { price: '70000', remaining: '0.4', remaining_ratio: null, max_slippage: '0.01' } },
     }
     expect(configSummary(invalidating, true)).toContain(`失效价 70000（剩 ${MASK}，`)
     expect(configSummary(invalidating, true)).not.toContain('0.4')

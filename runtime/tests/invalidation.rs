@@ -17,6 +17,7 @@ fn invalidation(price: &str, remaining: &str) -> Invalidation {
         price: Price::parse(price).unwrap(),
         remaining: Quantity::parse(remaining).unwrap(),
         max_slippage: Rate::parse("0.01").unwrap(),
+        remaining_ratio: None,
     }
 }
 
@@ -514,6 +515,7 @@ async fn b40_a_neutral_grid_flattens_when_either_side_is_invalidated() {
         price: price("97"),
         remaining: Quantity::ZERO,
         max_slippage: Rate::parse("0.01").unwrap(),
+        remaining_ratio: None,
     });
     let harness = harness_with_spec(config, cheap_spec(), Store::open_in_memory().unwrap()).await;
     harness.exchange.set_market_price(price("90"), at(0));

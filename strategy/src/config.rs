@@ -9,7 +9,7 @@
 use chrono::Duration;
 use serde::{Deserialize, Serialize};
 
-use crate::batch::{BatchPlan, build_batches};
+use crate::batch::{BatchPlan, build_batches, planned_notional};
 use crate::error::ConfigError;
 use crate::grid::{
     Cell, GridPlan, GridShape, build_cells, cell_count, cell_prices, max_cell_count,
@@ -17,7 +17,7 @@ use crate::grid::{
 };
 use crate::instrument::{Fees, Instrument, InstrumentSpec};
 use crate::side::{Direction, SidePlan};
-use crate::units::{Price, PriceRounding, Quantity, Rate, SCALE};
+use crate::units::{Notional, Price, PriceRounding, Quantity, Rate, SCALE, div_ceil};
 
 /// 网格格数的技术上限。
 ///
@@ -29,6 +29,10 @@ pub const MAX_CELL_COUNT: usize = 10_000;
 /// 不会越界（权重最大约 `(n − 1) × 100`，批数不超过 [`MAX_CELL_COUNT`]）。
 pub const MIN_CORE_SKEW: Rate = Rate::from_units(SCALE / 100);
 pub const MAX_CORE_SKEW: Rate = Rate::from_units(SCALE * 100);
+
+/// 按格数设置时价差倍数 `g ÷ d` 的取值范围。设计没有规定；和主仓倾斜一样只挡住明显不合理的输入。
+pub const MIN_GRID_SPREAD_RATIO: Rate = Rate::from_units(SCALE / 100);
+pub const MAX_GRID_SPREAD_RATIO: Rate = Rate::from_units(SCALE * 100);
 
 /// 一侧的配置。
 ///
@@ -52,10 +56,23 @@ pub struct SideConfig {
     /// `None` 表示不倾斜，保持 `M` 平均分给各批、网格随批的分法；`r = 0` 时不需要。
     #[serde(default)]
     pub core_skew: Option<Rate>,
-    /// 网格间距 `d`。
+    /// 网格间距 `d`。设了格数 [`Self::grid_count`] 时由格数算出，这里填的值不用。
     pub grid_spacing: Price,
-    /// 网格价差 `g`：多头侧平仓价 = 建仓价 + g，空头侧平仓价 = 建仓价 − g。
+    /// 网格价差 `g`：多头侧平仓价 = 建仓价 + g，空头侧平仓价 = 建仓价 − g。设了格数时
+    /// 按 [`Self::grid_spread_ratio`] 跟随间距算出，这里填的值不用。
     pub grid_spread: Price,
+    /// 按格数设置网格（第 2.2 节）：本侧 `N` 格，`d = (H − L) ÷ N` 按报价精度向上取整，
+    /// 正好分出 `N` 格。规整后的配置里换成算出的 `d`、`g`，这一项清空：运行中的策略只认
+    /// 具体的间距与价差。`None` 表示按间距设置。
+    #[serde(default)]
+    pub grid_count: Option<u32>,
+    /// 按格数设置时的价差倍数 `g ÷ d`，留空按 1。只在设了格数时起作用。
+    #[serde(default)]
+    pub grid_spread_ratio: Option<Rate>,
+    /// 按投入资金设置仓位（第 2.2 节）：满仓时按各批、各格挂单价算出的总价值不超过它，
+    /// 由它反推 `M`。规整后的配置里换成算出的 `M`，这一项清空。`None` 表示按数量设置。
+    #[serde(default)]
+    pub capital: Option<Notional>,
     /// 限速间隔 τ（可选，第 4.1 节）：本侧在 τ 时间内最多启动一个单位；`None` 表示不限速。
     ///
     /// 它是运行中可以修改的参数（第 2.4 节），所以在配置里而不是状态里。
@@ -74,7 +91,13 @@ pub struct Invalidation {
     /// 失效价：多头侧必须低于 `L`，空头侧必须高于 `H`。
     pub price: Price,
     /// 失效后剩余数量 `R`：0 表示全部平仓；不超过本侧主仓总量；中性网格必须是 0。
+    /// 设了 [`Self::remaining_ratio`] 时由它算出，这里填的值不用。
     pub remaining: Quantity,
+    /// 失效后剩余占主仓总量的比例，取值 `[0, 1]`：`R = 主仓总量 × 比例`，按数量精度向下
+    /// 取整。和限速一样运行中可以改，规整后的配置里保留它，`R` 每次从它重新算出。
+    /// `None` 表示直接按 `R` 的数量。
+    #[serde(default)]
+    pub remaining_ratio: Option<Rate>,
     /// 失效平仓单相对标记价最多让出多少，例如 0.01 是 1%。
     pub max_slippage: Rate,
 }
@@ -183,6 +206,11 @@ fn check_side_signs(direction: Direction, side: &SideConfig) -> Result<(), Confi
             max_position: side.max_position,
         });
     }
+    if let Some(capital) = side.capital
+        && capital.raw() <= 0
+    {
+        return Err(ConfigError::CapitalNotPositive { direction, capital });
+    }
     if side.core_ratio.units() < 0 {
         return Err(ConfigError::CoreRatioOutOfRange {
             direction,
@@ -208,9 +236,13 @@ fn normalize_side(
     spec: &InstrumentSpec,
     fees: &Fees,
 ) -> Result<SidePlan, ConfigError> {
-    let normalized = NormalizedSide::new(direction, side, spec)?;
+    let mut normalized = NormalizedSide::new(direction, side, spec)?;
     let prices = normalized.cell_prices(spec)?;
+    if let Some(capital) = side.capital {
+        normalized.max_position = normalized.max_position_for(capital, &prices, spec)?;
+    }
     let (batches, cells) = normalized.build_plan(&prices, spec)?;
+    normalized.resolve_remaining(&batches, spec);
     check_invalidation_remaining(direction, normalized.invalidation, &batches)?;
     check_cell_notional(&cells, &normalized, spec)?;
     check_cell_profitability(&cells, fees, &normalized)?;
@@ -317,13 +349,27 @@ impl NormalizedSide {
         // 「至少一个报价单位」的校验留到生成格子时做：主仓比例为 1 时没有网格，
         // 间距与价差不参与计算，也就不该被拒绝。
         let price_tick = spec.price_rule().step_at(price_high);
-        let grid_spacing =
-            normalize_difference(direction, "网格间距 d", side.grid_spacing, price_tick)?;
-        let grid_spread =
-            normalize_difference(direction, "网格价差 g", side.grid_spread, price_tick)?;
+        // 按格数设置时间距和价差由格数算出；只积累主仓（r = 1）时没有网格，格数和间距一样
+        // 不参与计算，也就不校验。
+        let (grid_spacing, grid_spread) = match side.grid_count {
+            Some(count) if side.core_ratio.units() != SCALE => spacing_for_count(
+                direction,
+                count,
+                side.grid_spread_ratio,
+                price_low,
+                price_high,
+                price_tick,
+            )?,
+            _ => (
+                normalize_difference(direction, "网格间距 d", side.grid_spacing, price_tick)?,
+                normalize_difference(direction, "网格价差 g", side.grid_spread, price_tick)?,
+            ),
+        };
 
+        // 按投入资金设置时 `M` 要等格子价格出来再反推（[`Self::max_position_for`]），
+        // 这里填的数量不用，也就不校验。
         let max_position = spec.normalize_quantity(side.max_position);
-        if max_position.units() < spec.quantity_step().units() {
+        if side.capital.is_none() && max_position.units() < spec.quantity_step().units() {
             return Err(ConfigError::MaxPositionBelowOneStep {
                 direction,
                 max_position,
@@ -430,6 +476,19 @@ impl NormalizedSide {
         prices: &[Price],
         spec: &InstrumentSpec,
     ) -> Result<(BatchPlan, Vec<Cell>), ConfigError> {
+        self.check_batch_count()?;
+        let shape = self.grid_shape();
+        match self.batch_count {
+            Some(batch_count) => build_batches(self.direction, prices, &shape, batch_count, spec),
+            None => Ok((
+                BatchPlan::default(),
+                build_cells(self.direction, prices, &shape, spec)?,
+            )),
+        }
+    }
+
+    /// 批数不超过上限：先挡住过大的批数，再按批数分配内存。
+    fn check_batch_count(&self) -> Result<(), ConfigError> {
         if let Some(batch_count) = self.batch_count
             && batch_count as usize > MAX_CELL_COUNT
         {
@@ -439,14 +498,89 @@ impl NormalizedSide {
                 max_batch_count: MAX_CELL_COUNT,
             });
         }
-        let shape = self.grid_shape();
-        match self.batch_count {
-            Some(batch_count) => build_batches(self.direction, prices, &shape, batch_count, spec),
-            None => Ok((
-                BatchPlan::default(),
-                build_cells(self.direction, prices, &shape, spec)?,
-            )),
+        Ok(())
+    }
+
+    /// 按投入资金反推 `M`（第 2.2 节）：满仓时按挂单价算的总价值不超过投入资金的最大 `M`，
+    /// 按数量精度取整。
+    ///
+    /// 总价值随 `M` 基本成正比（数量取整只让它有几个最小单位的出入），所以先按比例估一个
+    /// 上界，再在最小单位上二分。估算只用来定二分的范围，结论由二分里的精确计算给出。
+    /// 这里只按划分规则分数量，最低金额等校验留给之后的正式划分：资金太少时报出来的是
+    /// 「每格不够最低下单金额」这类具体原因。
+    fn max_position_for(
+        &self,
+        capital: Notional,
+        prices: &[Price],
+        spec: &InstrumentSpec,
+    ) -> Result<Quantity, ConfigError> {
+        self.check_batch_count()?;
+        let step = spec.quantity_step().units();
+        // `None`：这个 `M` 超出可表示范围，当作放不下。
+        let notional = |steps: i64| -> Result<Option<Notional>, ConfigError> {
+            let Some(units) = steps.checked_mul(step) else {
+                return Ok(None);
+            };
+            let shape = GridShape {
+                max_position: Quantity::from_units(units),
+                ..self.grid_shape()
+            };
+            planned_notional(self.direction, prices, &shape, self.batch_count, spec).map(Some)
+        };
+        let fits = |steps: i64| -> Result<bool, ConfigError> {
+            Ok(notional(steps)?.is_some_and(|total| total <= capital))
+        };
+
+        // 估算：先按全部挂在 H 算一个数量，再按它的实际总价值成比例放大。
+        let probe = (capital.raw() / i128::from(self.price_high.units().max(1)) / i128::from(step))
+            .clamp(1, i128::from(i64::MAX / step)) as i64;
+        let estimate = match notional(probe)? {
+            Some(total) if total.raw() > 0 => {
+                probe as f64 * capital.raw() as f64 / total.raw() as f64
+            }
+            _ => (i64::MAX / step) as f64,
+        };
+        // `fits` 的下界 0 恒成立（总价值是 0），上界要找一个放不下的。
+        // 浮点转整数会饱和到 i64 上限，加 2 不能溢出。
+        let mut high = ((estimate * 1.01) as i64).saturating_add(2);
+        while fits(high)? {
+            match high.checked_mul(2) {
+                Some(next) => high = next,
+                None => break,
+            }
         }
+        let mut low = 0;
+        while high - low > 1 {
+            let middle = low + (high - low) / 2;
+            if fits(middle)? {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        if low == 0 {
+            return Err(ConfigError::CapitalBelowOneStep {
+                direction: self.direction,
+                capital,
+                quantity_step: spec.quantity_step(),
+            });
+        }
+        Ok(Quantity::from_units(low * step))
+    }
+
+    /// 按比例设置的失效后剩余数量：`R = 主仓总量 × 比例`，按数量精度向下取整。
+    fn resolve_remaining(&mut self, batches: &BatchPlan, spec: &InstrumentSpec) {
+        let Some(invalidation) = self.invalidation.as_mut() else {
+            return;
+        };
+        let Some(ratio) = invalidation.remaining_ratio else {
+            return;
+        };
+        let core_total = core_total(batches);
+        let units = i128::from(core_total.units()) * i128::from(ratio.units()) / i128::from(SCALE);
+        // 比例不超过 1，结果不超过主仓总量，落在 i64 里。
+        invalidation.remaining =
+            Quantity::from_units(units as i64).floor_to_step(spec.quantity_step());
     }
 
     fn grid_shape(&self) -> GridShape {
@@ -474,6 +608,9 @@ impl NormalizedSide {
             grid_spread: self.grid_spread,
             throttle_interval: self.throttle_interval,
             invalidation: self.invalidation,
+            grid_count: None,
+            grid_spread_ratio: None,
+            capital: None,
         }
     }
 }
@@ -511,6 +648,11 @@ fn normalize_invalidation(
             max_slippage: invalidation.max_slippage,
         });
     }
+    if let Some(ratio) = invalidation.remaining_ratio
+        && !(0..=SCALE).contains(&ratio.units())
+    {
+        return Err(ConfigError::InvalidationRemainingRatioOutOfRange { direction, ratio });
+    }
     if invalidation.remaining.units() < 0 {
         return Err(ConfigError::NegativeMaxPosition {
             direction,
@@ -533,10 +675,7 @@ fn check_invalidation_remaining(
     let Some(invalidation) = invalidation else {
         return Ok(());
     };
-    let core_total = batches
-        .batches()
-        .iter()
-        .fold(Quantity::ZERO, |total, batch| total + batch.core_quantity);
+    let core_total = core_total(batches);
     if invalidation.remaining > core_total {
         return Err(ConfigError::InvalidationRemainingAboveCore {
             direction,
@@ -545,6 +684,64 @@ fn check_invalidation_remaining(
         });
     }
     Ok(())
+}
+
+/// 本侧主仓总量。
+fn core_total(batches: &BatchPlan) -> Quantity {
+    batches
+        .batches()
+        .iter()
+        .fold(Quantity::ZERO, |total, batch| total + batch.core_quantity)
+}
+
+/// 按格数算间距与价差（第 2.2 节）：`d = (H − L) ÷ N` 按报价精度向上取整，`g = d × 倍数`
+/// 按报价精度四舍五入，倍数留空按 1。
+///
+/// 向上取整让格数不多于 `N`；报价精度相对格子过粗时可能凑不出正好 `N` 格，那就报错，
+/// 不悄悄换成别的格数。价差不到一个报价单位由之后的格子校验报出。
+fn spacing_for_count(
+    direction: Direction,
+    count: u32,
+    spread_ratio: Option<Rate>,
+    low: Price,
+    high: Price,
+    tick: Price,
+) -> Result<(Price, Price), ConfigError> {
+    if count == 0 || count as usize > MAX_CELL_COUNT {
+        return Err(ConfigError::GridCountOutOfRange {
+            direction,
+            grid_count: count,
+            max_cell_count: MAX_CELL_COUNT,
+        });
+    }
+    let span = i128::from(high.units()) - i128::from(low.units());
+    let tick_units = i128::from(tick.units());
+    // 至多是一个跨度再加一个报价单位，落在 i64 里。
+    let spacing =
+        Price::from_units((div_ceil(span, i128::from(count) * tick_units) * tick_units) as i64);
+    if cell_count(high, low, spacing) != i64::from(count) {
+        return Err(ConfigError::GridCountUnreachable {
+            direction,
+            grid_count: count,
+            price_tick: tick,
+        });
+    }
+    let ratio = spread_ratio.unwrap_or(Rate::from_units(SCALE));
+    if !(MIN_GRID_SPREAD_RATIO.units()..=MAX_GRID_SPREAD_RATIO.units()).contains(&ratio.units()) {
+        return Err(ConfigError::GridSpreadRatioOutOfRange { direction, ratio });
+    }
+    let units = i128::from(spacing.units()) * i128::from(ratio.units()) / i128::from(SCALE);
+    let spread =
+        i64::try_from(units)
+            .map(Price::from_units)
+            .map_err(|_| ConfigError::PriceOutOfRange {
+                direction,
+                field: "网格价差 g",
+                price: spacing,
+                price_tick: tick,
+            })?;
+    let spread = normalize_difference(direction, "网格价差 g", spread, tick)?;
+    Ok((spacing, spread))
 }
 
 /// 每一格的金额都要够最低下单金额。
@@ -698,6 +895,9 @@ mod tests {
             grid_spread: Price::parse("1000").unwrap(),
             throttle_interval: None,
             invalidation: None,
+            grid_count: None,
+            grid_spread_ratio: None,
+            capital: None,
         })
     }
 
@@ -739,6 +939,9 @@ mod tests {
             grid_spread: Price::parse(grid_spread).unwrap(),
             throttle_interval: None,
             invalidation: None,
+            grid_count: None,
+            grid_spread_ratio: None,
+            capital: None,
         })
     }
 
@@ -902,7 +1105,7 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "做多侧：第 2 批（85000）的区间 (80000, 85000] 里没有格子；减小网格间距 d 或减少批数 n"
+            "做多侧：第 2 批（85000）的区间 (80000, 85000] 里没有格子；减小网格间距 d、增加格数 N，或减少批数 n"
         );
 
         // 缩小网格间距，每批的段内就都有格子了。
@@ -1126,6 +1329,9 @@ mod tests {
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,
             invalidation: None,
+            grid_count: None,
+            grid_spread_ratio: None,
+            capital: None,
         });
 
         assert_eq!(
@@ -1162,6 +1368,9 @@ mod tests {
             grid_spread: Price::parse("1").unwrap(),
             throttle_interval: None,
             invalidation: None,
+            grid_count: None,
+            grid_spread_ratio: None,
+            capital: None,
         });
 
         let normalized = raw.normalize(&spec, &btc_fees()).unwrap();
@@ -1469,7 +1678,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "做多侧：格子太多，每格数量不够最低下单金额（多4 格在 91000 只有 0.001，至少要 0.003）。\
-             这个范围最多约 1 格：加大网格间距 d 或最大仓位 M"
+             这个范围最多约 1 格：减少格子（加大间距 d 或减少格数 N），或加大最大仓位 M、投入资金"
         );
     }
 
@@ -1489,6 +1698,9 @@ mod tests {
                 grid_spread: Price::parse("68").unwrap(),
                 throttle_interval: None,
                 invalidation: None,
+                grid_count: None,
+                grid_spread_ratio: None,
+                capital: None,
             }),
             ..long_grid_config()
         };
@@ -1694,6 +1906,9 @@ mod tests {
                 grid_spread: Price::parse("0.1").unwrap(),
                 throttle_interval: None,
                 invalidation: None,
+                grid_count: None,
+                grid_spread_ratio: None,
+                capital: None,
             }),
             ..long_grid_config()
         };
@@ -1818,6 +2033,9 @@ mod tests {
                 grid_spread: Price::parse("1000").unwrap(),
                 throttle_interval: None,
                 invalidation: None,
+                grid_count: None,
+                grid_spread_ratio: None,
+                capital: None,
             }),
             ..long_grid_config()
         };
@@ -2004,6 +2222,7 @@ mod tests {
             price: Price::parse(price).unwrap(),
             remaining: Quantity::parse(remaining).unwrap(),
             max_slippage: Rate::parse("0.01").unwrap(),
+            remaining_ratio: None,
         })
     }
 
@@ -2096,5 +2315,283 @@ mod tests {
             error,
             ConfigError::InvalidationSlippageOutOfRange { .. }
         ));
+    }
+}
+
+/// 按格数、按投入资金设置，以及按主仓比例设置失效后剩余（第 2.2 节）。
+#[cfg(test)]
+mod sizing_tests {
+    use super::{ConfigError, Invalidation, SideConfig, StrategyConfig};
+    use crate::Strategy;
+    use crate::fixtures::{
+        btc_fees, btc_spec, core_long_config, fine_spec, hl_btc_spec, long_grid_config,
+        short_grid_config, skewed_core_long_config,
+    };
+    use crate::instrument::InstrumentSpec;
+    use crate::side::Direction;
+    use crate::units::{Notional, Price, Quantity, Rate};
+
+    fn price(value: &str) -> Price {
+        Price::parse(value).unwrap()
+    }
+
+    fn quantity(value: &str) -> Quantity {
+        Quantity::parse(value).unwrap()
+    }
+
+    fn rate(value: &str) -> Rate {
+        Rate::parse(value).unwrap()
+    }
+
+    fn notional(value: &str) -> Notional {
+        Notional::parse(value).unwrap()
+    }
+
+    fn long_mut(config: &mut StrategyConfig) -> &mut SideConfig {
+        config.long.as_mut().unwrap()
+    }
+
+    /// 按格数设置：间距、价差这两个输入框里的值不用，填 0。
+    fn by_count(mut config: StrategyConfig, count: u32, ratio: Option<&str>) -> StrategyConfig {
+        for side in [&mut config.long, &mut config.short].into_iter().flatten() {
+            side.grid_count = Some(count);
+            side.grid_spread_ratio = ratio.map(rate);
+            side.grid_spacing = Price::ZERO;
+            side.grid_spread = Price::ZERO;
+        }
+        config
+    }
+
+    /// 按投入资金设置：最大仓位输入框里的值不用，填 0。
+    fn by_capital(mut config: StrategyConfig, capital: &str) -> StrategyConfig {
+        for side in [&mut config.long, &mut config.short].into_iter().flatten() {
+            side.capital = Some(notional(capital));
+            side.max_position = Quantity::ZERO;
+        }
+        config
+    }
+
+    fn strategy(config: StrategyConfig, spec: &InstrumentSpec) -> Strategy {
+        Strategy::new(config, spec.clone(), btc_fees()).unwrap()
+    }
+
+    fn error(config: StrategyConfig) -> ConfigError {
+        Strategy::new(config, btc_spec(), btc_fees()).unwrap_err()
+    }
+
+    /// 设计第 3.2 节的例子按 20 格设置：和按间距 1000 设置的是同一份划分。
+    #[test]
+    fn twenty_cells_give_the_same_plan_as_a_spacing_of_one_thousand() {
+        let by_spacing = strategy(core_long_config(), &btc_spec());
+        let by_count = strategy(by_count(core_long_config(), 20, None), &btc_spec());
+
+        assert_eq!(by_count.config(), by_spacing.config());
+        assert_eq!(by_count.sides(), by_spacing.sides());
+        let side = by_count.config().long.as_ref().unwrap();
+        assert_eq!(side.grid_spacing, price("1000"));
+        assert_eq!(side.grid_spread, price("1000"));
+        // 规整后的配置只认具体的间距：运行中的策略不再从格数重新算。
+        assert_eq!(side.grid_count, None);
+        assert_eq!(side.grid_spread_ratio, None);
+    }
+
+    /// 除不尽时间距向上取整，格数正好是 N；价差按倍数跟随间距。
+    #[test]
+    fn an_uneven_count_rounds_the_spacing_up_and_keeps_exactly_n_cells() {
+        let strategy = strategy(by_count(long_grid_config(), 3, Some("1.5")), &btc_spec());
+
+        let side = strategy.side(Direction::Long).unwrap();
+        assert_eq!(side.config().grid_spacing, price("6667"));
+        assert_eq!(side.config().grid_spread, price("10001"));
+        assert_eq!(side.grid().cells().len(), 3);
+    }
+
+    /// 空头侧同样正好 N 格，价格按 HL 的 5 位有效数字也挂得出去。
+    #[test]
+    fn a_short_side_on_significant_figures_gets_exactly_n_cells() {
+        let spec = hl_btc_spec();
+        let strategy = strategy(by_count(short_grid_config(), 7, None), &spec);
+
+        let side = strategy.side(Direction::Short).unwrap();
+        assert_eq!(side.grid().cells().len(), 7);
+        assert!(side.config().grid_spacing.units() > 0);
+    }
+
+    #[test]
+    fn a_count_outside_the_range_is_rejected() {
+        assert!(matches!(
+            error(by_count(long_grid_config(), 0, None)),
+            ConfigError::GridCountOutOfRange { grid_count: 0, .. }
+        ));
+        assert!(matches!(
+            error(by_count(long_grid_config(), 20, Some("0"))),
+            ConfigError::GridSpreadRatioOutOfRange { .. }
+        ));
+    }
+
+    /// 跨度只有 3 个报价单位时最多分 3 格（间距 1），要 4 格凑不出来。
+    #[test]
+    fn a_count_the_price_tick_cannot_reach_is_rejected() {
+        let mut config = long_grid_config();
+        long_mut(&mut config).price_low = price("94997");
+
+        assert!(matches!(
+            error(by_count(config, 4, None)),
+            ConfigError::GridCountUnreachable { grid_count: 4, .. }
+        ));
+    }
+
+    /// 只积累主仓时没有网格，格数不参与计算。
+    #[test]
+    fn a_count_is_ignored_when_the_side_only_accumulates_core() {
+        let mut config = by_count(core_long_config(), 0, None);
+        long_mut(&mut config).core_ratio = rate("1");
+
+        assert!(Strategy::new(config, btc_spec(), btc_fees()).is_ok());
+    }
+
+    /// 设计第 3.2 节的例子满仓总价值是 86900：主仓 .175 × (95000 + 90000 + 85000 + 80000)
+    /// = 61250，网格 .015 × (95000 + 94000 + … + 76000) = 25650。按这笔资金反推正好 M = 1。
+    #[test]
+    fn the_capital_of_the_design_example_gives_back_one_btc() {
+        let strategy = strategy(by_capital(core_long_config(), "86900"), &btc_spec());
+
+        let side = strategy.side(Direction::Long).unwrap();
+        assert_eq!(side.config().max_position, quantity("1"));
+        assert_eq!(side.planned_notional(), notional("86900"));
+        assert_eq!(side.core_notional(), notional("61250"));
+        assert_eq!(side.config().capital, None);
+    }
+
+    /// 反推出的 M 满仓不超过投入资金，再多一个最小单位就超过。
+    fn assert_largest_within(config: StrategyConfig, capital: &str, spec: &InstrumentSpec) {
+        let resolved = strategy(by_capital(config.clone(), capital), spec);
+        for side in resolved.sides() {
+            let direction = side.direction();
+            assert!(
+                side.planned_notional() <= notional(capital),
+                "{direction:?}"
+            );
+
+            let mut larger = resolved.config().clone();
+            let larger_side = match direction {
+                Direction::Long => larger.long.as_mut().unwrap(),
+                Direction::Short => larger.short.as_mut().unwrap(),
+            };
+            larger_side.max_position = larger_side.max_position + spec.quantity_step();
+            let larger = Strategy::new(larger, spec.clone(), btc_fees()).unwrap();
+            assert!(
+                larger.side(direction).unwrap().planned_notional() > notional(capital),
+                "{direction:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_resolved_position_is_the_largest_within_the_capital() {
+        let spec = fine_spec();
+        assert_largest_within(long_grid_config(), "50000", &spec);
+        assert_largest_within(core_long_config(), "123456.78", &spec);
+        assert_largest_within(skewed_core_long_config(), "99999", &spec);
+        assert_largest_within(short_grid_config(), "77777", &spec);
+        let mut core_only = core_long_config();
+        long_mut(&mut core_only).core_ratio = rate("1");
+        assert_largest_within(core_only, "40000", &spec);
+    }
+
+    /// 资金少到一格都分不够最低金额时，报出来的是具体原因：每格不够最低下单金额。
+    #[test]
+    fn too_little_capital_reports_the_cells_below_the_minimum() {
+        assert!(matches!(
+            error(by_capital(core_long_config(), "2000")),
+            ConfigError::CellBelowMinimumOrderNotional { .. }
+                | ConfigError::BatchCoreBelowMinimumOrderNotional { .. }
+        ));
+        assert!(matches!(
+            error(by_capital(long_grid_config(), "10")),
+            ConfigError::CapitalBelowOneStep { .. }
+        ));
+        assert!(matches!(
+            error(by_capital(long_grid_config(), "0")),
+            ConfigError::CapitalNotPositive { .. }
+        ));
+    }
+
+    /// 失效后保留主仓的一半：主仓总量 .7，剩余 .35；运行中可以改，比例留在规整后的配置里。
+    #[test]
+    fn the_remaining_follows_the_core_total_by_ratio() {
+        let mut config = core_long_config();
+        long_mut(&mut config).invalidation = Some(Invalidation {
+            price: price("70000"),
+            remaining: Quantity::ZERO,
+            remaining_ratio: Some(rate("0.5")),
+            max_slippage: rate("0.01"),
+        });
+
+        let strategy = strategy(config, &btc_spec());
+        let invalidation = strategy
+            .config()
+            .long
+            .as_ref()
+            .unwrap()
+            .invalidation
+            .unwrap();
+        assert_eq!(invalidation.remaining, quantity("0.35"));
+        assert_eq!(invalidation.remaining_ratio, Some(rate("0.5")));
+        // 规整后的配置再规整一遍，结果不变。
+        let again = Strategy::new(strategy.config().clone(), btc_spec(), btc_fees()).unwrap();
+        assert_eq!(again.config(), strategy.config());
+    }
+
+    /// 按资金设置时剩余也跟着反推出的主仓走；比例向下取整到数量精度。
+    #[test]
+    fn the_remaining_ratio_works_with_capital_and_rounds_down() {
+        let mut config = by_capital(core_long_config(), "86900");
+        long_mut(&mut config).invalidation = Some(Invalidation {
+            price: price("70000"),
+            remaining: Quantity::ZERO,
+            remaining_ratio: Some(rate("0.3333")),
+            max_slippage: rate("0.01"),
+        });
+
+        let strategy = strategy(config, &btc_spec());
+        let invalidation = strategy
+            .config()
+            .long
+            .as_ref()
+            .unwrap()
+            .invalidation
+            .unwrap();
+        // .7 × .3333 = .23331，向下取整到 0.001。
+        assert_eq!(invalidation.remaining, quantity("0.233"));
+    }
+
+    #[test]
+    fn a_remaining_ratio_above_one_is_rejected() {
+        let mut config = core_long_config();
+        long_mut(&mut config).invalidation = Some(Invalidation {
+            price: price("70000"),
+            remaining: Quantity::ZERO,
+            remaining_ratio: Some(rate("1.01")),
+            max_slippage: rate("0.01"),
+        });
+
+        assert!(matches!(
+            error(config),
+            ConfigError::InvalidationRemainingRatioOutOfRange { .. }
+        ));
+    }
+
+    /// 旧的配置没有这几项：照原样读出来，按数量与间距设置。
+    #[test]
+    fn a_stored_config_without_the_new_fields_still_reads() {
+        let mut json = serde_json::to_value(core_long_config()).unwrap();
+        let side = json["long"].as_object_mut().unwrap();
+        side.remove("grid_count");
+        side.remove("grid_spread_ratio");
+        side.remove("capital");
+
+        let config: StrategyConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(config, core_long_config());
     }
 }

@@ -30,7 +30,7 @@ const fiveCells: StrategyConfig = {
     price_low: '79000',
     price_high: '81500',
     grid_spacing: '500',
-    invalidation: { price: '76000', remaining: '0', max_slippage: '0.01' },
+    invalidation: { price: '76000', remaining: '0', remaining_ratio: null, max_slippage: '0.01' },
   },
 }
 const cells = [

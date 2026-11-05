@@ -1,6 +1,8 @@
 // 新建/编辑草稿的参数表单：多头侧与空头侧各一块，两侧都可选。
 //
 // 表单里全是字符串，原样交给服务端校验：前端不判断参数是否合理，也不算数量。
+// 仓位可以按数量 M 或按投入资金填，网格可以按间距 d 或按格数 N 填，失效后剩余按保留主仓
+// 的百分比填：换算都在服务端做，预览里报出算出来的 M、d 和 R。
 // 只有两件事在表单里定：哪几侧要配置（至少一侧，服务端也会拒绝两侧都空的配置），
 // 以及两侧都配置时主仓比例按 0 提交——中性网格的主仓比例必须是 0，让用户填一个
 // 必定被拒的值没有意义。
@@ -12,23 +14,38 @@ import { DIRECTION_LABELS } from './labels'
 import { invalidationInput, parseInvalidation, parseThrottle, throttleMinutes } from './format'
 import type { Direction, Invalidation, SideConfig, StrategyConfig } from './types'
 
+/** 仓位按数量 M 填，还是按投入资金填。 */
+export type SizeMode = 'quantity' | 'capital'
+/** 网格按间距 d 填，还是按格数 N 填。 */
+export type GridMode = 'spacing' | 'count'
+
 /** 一侧的表单值。 */
 export interface SideFormValues {
   enabled: boolean
   priceLow: string
   priceHigh: string
+  sizeMode: SizeMode
   maxPosition: string
+  /** 投入资金（USDC）：满仓按挂单价的总价值不超过它，服务端由它反推 M。 */
+  capital: string
   coreRatio: string
   batchCount: string
   /** 主仓倾斜（末批÷首批）；留空表示不倾斜。 */
   coreSkew: string
+  gridMode: GridMode
   gridSpacing: string
   gridSpread: string
+  /** 格数 N：按格数设置时间距由服务端算出。 */
+  gridCount: string
+  /** 按格数设置时的价差倍数 g ÷ d。 */
+  gridSpreadRatio: string
   throttleMinutes: string
   /** 失效价；留空表示不启用观点失效。 */
   invalidationPrice: string
-  /** 失效后剩余数量；留空按 0。 */
-  invalidationRemaining: string
+  /** 失效后保留主仓的百分比；留空按 0。 */
+  invalidationKeep: string
+  /** 旧草稿按数量写的 R：保留百分比留空时原样提交（见 `InvalidationInput`）。 */
+  legacyRemaining: string | null
   /** 失效平仓滑点上限（%）。 */
   invalidationSlippage: string
   /**
@@ -38,8 +55,23 @@ export interface SideFormValues {
   spreadRatio: number
 }
 
-/** 一侧表单里能编辑的字段：`enabled` 是单独的开关，`spreadRatio` 由价差推出来，都不走输入框。 */
-export type SideFieldName = Exclude<keyof SideFormValues, 'enabled' | 'spreadRatio'>
+/** 一侧表单里能编辑的字段：开关、两个设置方式和推出来的值都不走输入框。 */
+export type SideFieldName = Exclude<
+  keyof SideFormValues,
+  'enabled' | 'spreadRatio' | 'sizeMode' | 'gridMode' | 'legacyRemaining'
+>
+
+/**
+ * 切换网格的设置方式。改按格数时价差倍数接着用按间距时的比例：原来 g = 2d，按格数也还是
+ * 2 倍。两种方式各自的输入都留着，切回来时还在。
+ */
+export function changeGridMode(values: SideFormValues, mode: GridMode): SideFormValues {
+  if (mode === values.gridMode) return values
+  if (mode === 'count') {
+    return { ...values, gridMode: mode, gridSpreadRatio: String(Number(values.spreadRatio.toPrecision(6))) }
+  }
+  return { ...values, gridMode: mode }
+}
 
 function positive(value: string): number | null {
   const parsed = Number(value.trim())
@@ -95,10 +127,15 @@ export function batchHint(direction: Direction, values: SideFormValues): string 
 export function skewHint(values: SideFormValues): string | null {
   const skew = positive(values.coreSkew)
   const ratio = positive(values.coreRatio)
-  const position = positive(values.maxPosition)
   const count = Number(values.batchCount.trim())
-  if (skew === null || ratio === null || position === null) return null
+  if (skew === null || ratio === null) return null
   if (!Number.isInteger(count) || count < 1) return null
+  // 按资金设置时 M 还没算出来，只说比例。
+  if (values.sizeMode === 'capital') {
+    return `主仓首批 : 末批 = 1 : ${Number(skew.toPrecision(4))}，网格均分给全部格子`
+  }
+  const position = positive(values.maxPosition)
+  if (position === null) return null
   const weights = Array.from({ length: count }, (_, index) =>
     count === 1 ? 1 : count - 1 + (skew - 1) * index,
   )
@@ -106,6 +143,16 @@ export function skewHint(values: SideFormValues): string | null {
   const core = ratio * position
   const show = (value: number) => String(Number(value.toPrecision(4)))
   return `主仓每批 ${show((core * weights[0]) / total)} → ${show((core * weights[count - 1]) / total)}，网格均分给全部格子`
+}
+
+/** 格数下面的一行说明：算出来的间距大约是多少。服务端按报价精度向上取整，预览里是准数。 */
+export function countHint(values: SideFormValues): string | null {
+  const low = positive(values.priceLow)
+  const high = positive(values.priceHigh)
+  const count = Number(values.gridCount.trim())
+  if (low === null || high === null || high <= low) return null
+  if (!Number.isInteger(count) || count < 1) return null
+  return `间距约 ${Number(((high - low) / count).toPrecision(6))}`
 }
 
 /** 价差下面的一行说明：现在按什么比例跟随间距。写成公式就够：改 d 时价差跟着变，一看便知。 */
@@ -127,15 +174,21 @@ export const DEFAULT_FORM: FormValues = {
     enabled: true,
     priceLow: '75000',
     priceHigh: '95000',
+    sizeMode: 'quantity',
     maxPosition: '1',
+    capital: '',
     coreRatio: '0',
     batchCount: '',
     coreSkew: '',
+    gridMode: 'spacing',
     gridSpacing: '1000',
     gridSpread: '1000',
+    gridCount: '',
+    gridSpreadRatio: '1',
     throttleMinutes: '',
     invalidationPrice: '',
-    invalidationRemaining: '',
+    invalidationKeep: '',
+    legacyRemaining: null,
     invalidationSlippage: '1',
     spreadRatio: 1,
   },
@@ -143,15 +196,21 @@ export const DEFAULT_FORM: FormValues = {
     enabled: false,
     priceLow: '96000',
     priceHigh: '99000',
+    sizeMode: 'quantity',
     maxPosition: '1',
+    capital: '',
     coreRatio: '0',
     batchCount: '',
     coreSkew: '',
+    gridMode: 'spacing',
     gridSpacing: '1000',
     gridSpread: '1000',
+    gridCount: '',
+    gridSpreadRatio: '1',
     throttleMinutes: '',
     invalidationPrice: '',
-    invalidationRemaining: '',
+    invalidationKeep: '',
+    legacyRemaining: null,
     invalidationSlippage: '1',
     spreadRatio: 1,
   },
@@ -198,17 +257,32 @@ function sideConfig(
   const coreSkew = values.coreSkew.trim()
   const invalidation = invalidationConfig(direction, values, neutral)
   if ('problem' in invalidation) return invalidation
+  const byCapital = values.sizeMode === 'capital'
+  const byCount = values.gridMode === 'count'
+  // 格数要提交成整数，填了别的表达不出来，和限速一样在这里拦下。只积累主仓（r = 1）时没有
+  // 网格，服务端不看格数，也就不拦。
+  const gridCount = Number(values.gridCount.trim())
+  const validCount = values.gridCount.trim() !== '' && Number.isInteger(gridCount) && gridCount > 0
+  const coreOnly = !neutral && Number(values.coreRatio.trim()) === 1
+  if (byCount && !validCount && !coreOnly) {
+    return { problem: `${DIRECTION_LABELS[direction]}侧：格数 N 填正整数。` }
+  }
+  const spreadRatio = values.gridSpreadRatio.trim()
   return {
     config: {
       price_low: values.priceLow.trim(),
       price_high: values.priceHigh.trim(),
-      max_position: values.maxPosition.trim(),
+      // 按资金、按格数设置时，数量和间距由服务端算出，这几个输入框的值不提交。
+      max_position: byCapital ? '0' : values.maxPosition.trim(),
+      capital: byCapital ? values.capital.trim() : null,
       // 中性网格两侧都不设主仓（第 5.2 节）。
       core_ratio: neutral ? '0' : values.coreRatio.trim(),
       batch_count: neutral || batchCount === '' ? null : Number(batchCount),
       core_skew: neutral || coreSkew === '' ? null : coreSkew,
-      grid_spacing: values.gridSpacing.trim(),
-      grid_spread: values.gridSpread.trim(),
+      grid_spacing: byCount ? '0' : values.gridSpacing.trim(),
+      grid_spread: byCount ? '0' : values.gridSpread.trim(),
+      grid_count: byCount && validCount ? gridCount : null,
+      grid_spread_ratio: byCount && spreadRatio !== '' ? spreadRatio : null,
       throttle_interval: throttle.interval,
       invalidation: invalidation.invalidation,
     },
@@ -224,8 +298,9 @@ function invalidationConfig(
   const parsed = parseInvalidation(
     {
       price: values.invalidationPrice,
-      remaining: values.invalidationRemaining,
+      keepPercent: values.invalidationKeep,
       slippage: values.invalidationSlippage,
+      legacyRemaining: values.legacyRemaining,
     },
     neutral,
   )
@@ -243,12 +318,16 @@ export function fromConfig(config: StrategyConfig): FormValues {
 /** 失效设置换回表单里的三个输入框。 */
 function invalidationFields(
   invalidation: Invalidation | null,
-): Pick<SideFormValues, 'invalidationPrice' | 'invalidationRemaining' | 'invalidationSlippage'> {
+): Pick<
+  SideFormValues,
+  'invalidationPrice' | 'invalidationKeep' | 'invalidationSlippage' | 'legacyRemaining'
+> {
   const input = invalidationInput(invalidation)
   return {
     invalidationPrice: input.price,
-    invalidationRemaining: input.remaining,
+    invalidationKeep: input.keepPercent,
     invalidationSlippage: input.slippage,
+    legacyRemaining: input.legacyRemaining,
   }
 }
 
@@ -262,19 +341,27 @@ function savedRatio(spacing: string, spread: string): number {
 /** 没配置的这一侧回到默认值：下次勾上它时不是一片空白。 */
 function sideValues(side: SideConfig | null, fallback: SideFormValues): SideFormValues {
   if (side === null) return { ...fallback, enabled: false }
+  const byCapital = side.capital !== null
+  const byCount = side.grid_count !== null
   return {
     enabled: true,
     priceLow: side.price_low,
     priceHigh: side.price_high,
-    maxPosition: side.max_position,
+    sizeMode: byCapital ? 'capital' : 'quantity',
+    // 按资金存的草稿里 M 是占位的 0，不拿出来显示。
+    maxPosition: byCapital ? '' : side.max_position,
+    capital: side.capital ?? '',
     coreRatio: side.core_ratio,
     batchCount: side.batch_count === null ? '' : String(side.batch_count),
     coreSkew: side.core_skew ?? '',
-    gridSpacing: side.grid_spacing,
-    gridSpread: side.grid_spread,
+    gridMode: byCount ? 'count' : 'spacing',
+    gridSpacing: byCount ? '' : side.grid_spacing,
+    gridSpread: byCount ? '' : side.grid_spread,
+    gridCount: side.grid_count === null ? '' : String(side.grid_count),
+    gridSpreadRatio: side.grid_spread_ratio ?? '1',
     throttleMinutes: throttleMinutes(side.throttle_interval),
     ...invalidationFields(side.invalidation),
-    spreadRatio: savedRatio(side.grid_spacing, side.grid_spread),
+    spreadRatio: byCount ? Number(side.grid_spread_ratio ?? '1') : savedRatio(side.grid_spacing, side.grid_spread),
   }
 }
 
@@ -309,12 +396,51 @@ function Field({ direction, name, label, hint, placeholder, disabled, values, on
   )
 }
 
-/** 一组相关的参数：小标题加一行输入框。 */
-function Group({ title, children }: { title: string; children: React.ReactNode }) {
+/** 一组相关的参数：小标题加一行输入框；`aside` 放在小标题右边（设置方式的切换）。 */
+function Group({ title, aside, children }: { title: string; aside?: React.ReactNode; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-2">
-      <div className="eyebrow">{title}</div>
+      <div className="flex items-center justify-between gap-3">
+        <div className="eyebrow">{title}</div>
+        {aside}
+      </div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{children}</div>
+    </div>
+  )
+}
+
+/** 两种设置方式的切换。 */
+function ModeToggle<T extends string>({
+  label,
+  value,
+  options,
+  disabled,
+  onChange,
+}: {
+  label: string
+  value: T
+  options: [T, string][]
+  disabled: boolean
+  onChange: (value: T) => void
+}) {
+  return (
+    <div role="radiogroup" aria-label={label} className="inline-flex rounded-md bg-muted p-0.5">
+      {options.map(([option, text]) => (
+        <button
+          key={option}
+          type="button"
+          role="radio"
+          aria-checked={value === option}
+          disabled={disabled}
+          onClick={() => onChange(option)}
+          className={cn(
+            'rounded px-2 py-0.5 text-[11px] text-muted-foreground transition-colors disabled:opacity-50',
+            value === option ? 'bg-card text-foreground shadow-sm ring-1 ring-border' : 'hover:text-foreground',
+          )}
+        >
+          {text}
+        </button>
+      ))}
     </div>
   )
 }
@@ -327,6 +453,8 @@ interface SideFieldsProps {
   disabled: boolean
   onChange: (direction: Direction, name: SideFieldName, value: string) => void
   onToggle: (direction: Direction, enabled: boolean) => void
+  onSizeMode: (direction: Direction, mode: SizeMode) => void
+  onGridMode: (direction: Direction, mode: GridMode) => void
 }
 
 function SideFields({
@@ -336,13 +464,15 @@ function SideFields({
   disabled,
   onChange,
   onToggle,
+  onSizeMode,
+  onGridMode,
 }: SideFieldsProps) {
   const label = DIRECTION_LABELS[direction]
   const coreDisabled = disabled || neutral
   // 中性网格固定按「无主仓、全部平仓」提交：输入框显示要提交的值，不显示改成中性之前
   // 填的那个——否则看到的和存下的不是一份参数。原来的值留着，取消中性时还在。
   const shown = neutral
-    ? { ...values, coreRatio: '0', batchCount: '', coreSkew: '', invalidationRemaining: '0' }
+    ? { ...values, coreRatio: '0', batchCount: '', coreSkew: '', invalidationKeep: '0' }
     : values
   const field = (name: SideFieldName, fieldLabel: string, extra: Partial<FieldProps> = {}) => (
     <Field
@@ -385,10 +515,26 @@ function SideFields({
       {/* 没启用的这一侧收起来：值留着（打开还在），少看一半字段。 */}
       {values.enabled ? (
         <div className="flex flex-col gap-4 border-t border-border px-4 py-4">
-          <Group title="价格与仓位">
+          <Group
+            title="价格与仓位"
+            aside={
+              <ModeToggle
+                label={`${label}侧仓位设置方式`}
+                value={values.sizeMode}
+                options={[
+                  ['quantity', '按数量'],
+                  ['capital', '按资金'],
+                ]}
+                disabled={disabled}
+                onChange={(mode) => onSizeMode(direction, mode)}
+              />
+            }
+          >
             {field('priceLow', '价格下限 L')}
             {field('priceHigh', '价格上限 H')}
-            {field('maxPosition', '最大仓位 M')}
+            {values.sizeMode === 'capital'
+              ? field('capital', '投入资金（USDC）', { hint: '满仓按挂单价不超过它，预览看 M' })
+              : field('maxPosition', '最大仓位 M')}
           </Group>
           <Group title="主仓">
             {field('coreRatio', '主仓比例 r', {
@@ -405,9 +551,32 @@ function SideFields({
               hint: (coreDisabled ? null : skewHint(values)) ?? '留空：M 平均分给各批，网格随批',
             })}
           </Group>
-          <Group title="网格">
-            {field('gridSpacing', '网格间距 d')}
-            {field('gridSpread', '网格价差 g', { hint: spreadHint(values.spreadRatio) })}
+          <Group
+            title="网格"
+            aside={
+              <ModeToggle
+                label={`${label}侧网格设置方式`}
+                value={values.gridMode}
+                options={[
+                  ['spacing', '按间距'],
+                  ['count', '按格数'],
+                ]}
+                disabled={disabled}
+                onChange={(mode) => onGridMode(direction, mode)}
+              />
+            }
+          >
+            {values.gridMode === 'count' ? (
+              <>
+                {field('gridCount', '格数 N', { hint: countHint(values) ?? '本侧共几格' })}
+                {field('gridSpreadRatio', '价差倍数 g÷d', { hint: '1：价差等于间距' })}
+              </>
+            ) : (
+              <>
+                {field('gridSpacing', '网格间距 d')}
+                {field('gridSpread', '网格价差 g', { hint: spreadHint(values.spreadRatio) })}
+              </>
+            )}
           </Group>
           <Group title="限速与止损">
             {field('throttleMinutes', '限速间隔 τ（分钟）', { placeholder: '不限速' })}
@@ -415,9 +584,13 @@ function SideFields({
               placeholder: '不止损',
               hint: direction === 'long' ? '须低于 L' : '须高于 H',
             })}
-            {field('invalidationRemaining', '失效后剩余数量 R', {
+            {field('invalidationKeep', '失效后保留主仓（%）', {
               disabled: disabled || neutral,
-              hint: neutral ? '中性固定 0' : undefined,
+              hint: neutral
+                ? '中性固定 0'
+                : values.legacyRemaining !== null && values.invalidationKeep.trim() === ''
+                  ? `原为数量 ${values.legacyRemaining}，留空不变`
+                  : '留空按 0：全部平仓',
             })}
             {field('invalidationSlippage', '失效平仓滑点上限（%）')}
           </Group>
@@ -433,6 +606,8 @@ interface DraftFormProps {
   onInstrument: (value: string) => void
   onChange: (direction: Direction, name: SideFieldName, value: string) => void
   onToggle: (direction: Direction, enabled: boolean) => void
+  onSizeMode: (direction: Direction, mode: SizeMode) => void
+  onGridMode: (direction: Direction, mode: GridMode) => void
 }
 
 export function DraftForm({
@@ -441,6 +616,8 @@ export function DraftForm({
   onInstrument,
   onChange,
   onToggle,
+  onSizeMode,
+  onGridMode,
 }: DraftFormProps) {
   const neutral = values.long.enabled && values.short.enabled
   return (
@@ -465,6 +642,8 @@ export function DraftForm({
           disabled={disabled}
           onChange={onChange}
           onToggle={onToggle}
+          onSizeMode={onSizeMode}
+          onGridMode={onGridMode}
         />
         <SideFields
           direction="short"
@@ -473,6 +652,8 @@ export function DraftForm({
           disabled={disabled}
           onChange={onChange}
           onToggle={onToggle}
+          onSizeMode={onSizeMode}
+          onGridMode={onGridMode}
         />
       </div>
       {neutral ? (

@@ -24,7 +24,7 @@ use crate::batch::BatchPlan;
 use crate::config::SideConfig;
 use crate::grid::GridPlan;
 use crate::order::Side;
-use crate::units::{Price, PriceRounding};
+use crate::units::{Notional, Price, PriceRounding};
 
 /// 网格的一侧。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -211,6 +211,27 @@ impl SidePlan {
 
     pub fn grid(&self) -> &GridPlan {
         &self.grid
+    }
+
+    /// 满仓时主仓按批次价算的总价值。
+    pub fn core_notional(&self) -> Notional {
+        self.batches
+            .batches()
+            .iter()
+            .fold(Notional::ZERO, |total, batch| {
+                total + Notional::of(batch.core_quantity, batch.price)
+            })
+    }
+
+    /// 满仓时按挂单价算的总价值：主仓按批次价，格子按建仓价（第 2.2 节）。按投入资金
+    /// 设置时它不超过投入资金。
+    pub fn planned_notional(&self) -> Notional {
+        self.grid
+            .cells()
+            .iter()
+            .fold(self.core_notional(), |total, cell| {
+                total + Notional::of(cell.quantity, cell.entry_price)
+            })
     }
 
     /// 本侧限速的单位数：`r > 0` 时是批数，`r = 0` 时是格数。

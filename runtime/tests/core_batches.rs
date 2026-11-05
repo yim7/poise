@@ -7,11 +7,13 @@
 mod common;
 
 use common::{
-    at, core_harness, core_long_config, core_only_harness, long_batch, long_cell, long_state,
+    at, btc_fees, btc_spec, core_harness, core_long_config, core_only_harness, long_batch,
+    long_cell, long_state,
 };
+use poise_strategy::Strategy;
 use poise_strategy::batch::BatchIndex;
 use poise_strategy::order::{OrderPurpose, OrderStatus, Unit};
-use poise_strategy::units::{Position, Price, Quantity};
+use poise_strategy::units::{Notional, Position, Price, Quantity};
 
 /// 第 `cell` 格的买价：95000 往下每格 1000。
 fn cell_buy_price(cell: usize) -> Price {
@@ -258,4 +260,44 @@ async fn the_draft_preview_shows_the_batch_table_and_the_immediate_fills() {
     assert_eq!(last.purpose, OrderPurpose::GridEntry);
     assert_eq!(last.limit_price, Price::parse("88000").unwrap());
     assert_eq!(last.quantity, Quantity::parse("0.015").unwrap());
+}
+
+/// 按投入资金和格数设置的草稿（第 2.2 节）：预览报出反推的 M、算出的间距和满仓总价值，
+/// 启动后存下的是具体的数量和间距，划分和按 M、d 设置的完全一样。
+#[tokio::test]
+async fn a_draft_set_by_capital_and_cell_count_starts_with_the_resolved_quantities() {
+    let harness = common::console();
+    harness
+        .exchange
+        .set_market_price(Price::parse("96000").unwrap(), at(0));
+    let mut config = core_long_config();
+    let side = config.long.as_mut().unwrap();
+    side.capital = Some(Notional::parse("86900").unwrap());
+    side.max_position = Quantity::ZERO;
+    side.grid_count = Some(20);
+    side.grid_spacing = Price::ZERO;
+    side.grid_spread = Price::ZERO;
+
+    let draft_id = harness.runtime.create_draft(config.clone()).unwrap();
+    let preview = harness.runtime.preview_draft(&draft_id).await.unwrap();
+
+    assert!(preview.validation.valid, "{:?}", preview.validation.reason);
+    assert_eq!(preview.sizing.len(), 1);
+    let sizing = &preview.sizing[0];
+    assert_eq!(sizing.max_position, Quantity::parse("1").unwrap());
+    assert_eq!(sizing.grid_spacing, Price::parse("1000").unwrap());
+    assert_eq!(sizing.cell_count, 20);
+    assert_eq!(sizing.notional, Notional::parse("86900").unwrap());
+    // 草稿里留着用户填的写法，重新打开还是按资金、按格数。
+    assert_eq!(harness.runtime.draft(&draft_id).unwrap().config, config);
+
+    let strategy_id = common::start_strategy(&harness.runtime, config).await;
+    let stored = harness
+        .runtime
+        .store()
+        .load_strategy(&strategy_id)
+        .unwrap()
+        .config;
+    let by_quantity = Strategy::new(core_long_config(), btc_spec(), btc_fees()).unwrap();
+    assert_eq!(&stored, by_quantity.config());
 }

@@ -48,6 +48,15 @@ function sideInputs(config: StrategyConfig, direction: Direction): SideInputs {
   }
 }
 
+/** 保留主仓下面的一行说明：旧策略按数量写的 R 留空不变。 */
+function keepHint(neutral: boolean, input: InvalidationInput): string {
+  if (neutral) return '中性固定 0'
+  if (input.legacyRemaining !== null && input.keepPercent.trim() === '') {
+    return `原为数量 ${input.legacyRemaining}，留空不变`
+  }
+  return '留空按 0：全部平仓'
+}
+
 /**
  * 保存失败时该怎么跟用户说。
  *
@@ -167,12 +176,12 @@ export function RunningEditor({ strategyId, config }: RunningEditorProps) {
                 onChange={(value) => updateInvalidation(direction, { price: value })}
               />
               <Field
-                label={`${label}侧失效后剩余数量 R`}
-                caption="失效后剩余 R"
-                hint={neutral ? '中性固定 0' : undefined}
-                value={neutral ? '0' : values.invalidation.remaining}
+                label={`${label}侧失效后保留主仓（%）`}
+                caption="失效后保留主仓 %"
+                hint={keepHint(neutral, values.invalidation)}
+                value={neutral ? '0' : values.invalidation.keepPercent}
                 disabled={busy || neutral}
-                onChange={(value) => updateInvalidation(direction, { remaining: value })}
+                onChange={(value) => updateInvalidation(direction, { keepPercent: value })}
               />
               <Field
                 label={`${label}侧失效平仓滑点上限（%）`}

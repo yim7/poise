@@ -15,9 +15,28 @@ import {
   ImmediateFillTable,
   Panel,
   PlannedOrderTable,
+  SizingTable,
   StressTable,
 } from './tables'
-import type { DraftPreview, StrategyConfig } from './types'
+import type { DraftPreview, SideConfig, SideSizing, StrategyConfig } from './types'
+
+/**
+ * 价格条要用算出来的间距：按格数、按资金填的表单里 d、M 是占位的 0，照它画格子就没有宽度。
+ * 预览给了算出的值就换上。
+ */
+function resolvedConfig(config: StrategyConfig, sizing: SideSizing[]): StrategyConfig {
+  const resolve = (side: SideConfig | null, direction: SideSizing['direction']): SideConfig | null => {
+    const computed = sizing.find((item) => item.direction === direction)
+    if (side === null || computed === undefined) return side
+    return {
+      ...side,
+      max_position: computed.max_position,
+      grid_spacing: computed.grid_spacing,
+      grid_spread: computed.grid_spread,
+    }
+  }
+  return { ...config, long: resolve(config.long, 'long'), short: resolve(config.short, 'short') }
+}
 
 export function PreviewPanel({ preview, config }: { preview: DraftPreview; config: StrategyConfig | null }) {
   const valid = preview.validation.valid
@@ -58,8 +77,14 @@ export function PreviewPanel({ preview, config }: { preview: DraftPreview; confi
             size="lg"
           />
         </div>
-        {config === null ? null : <RangeBar config={config} mark={preview.market_price} cells={preview.cells} />}
+        {config === null ? null : <RangeBar config={resolvedConfig(config, preview.sizing)} mark={preview.market_price} cells={preview.cells} />}
       </div>
+
+      {preview.sizing.length === 0 ? null : (
+        <Panel title="仓位与网格" aside={<span className="text-[11px] text-muted-foreground">按挂单价、交易所当前杠杆</span>}>
+          <SizingTable sides={preview.sizing} />
+        </Panel>
+      )}
 
       {preview.stress.length === 0 ? null : (
         <Panel title="满仓压力测试">

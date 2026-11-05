@@ -43,8 +43,16 @@ export interface SideConfig {
   batch_count: number | null
   /** 主仓倾斜：末批主仓 ÷ 首批主仓；null 表示不倾斜，M 平均分给各批、网格随批。 */
   core_skew: Decimal | null
+  /** 网格间距 d；按格数设置（grid_count 不为 null）时由服务端算出，这里填的值不用。 */
   grid_spacing: Decimal
+  /** 网格价差 g；按格数设置时按 grid_spread_ratio 跟随间距算出，这里填的值不用。 */
   grid_spread: Decimal
+  /** 按格数设置网格：本侧 N 格；null 表示按间距设置。规整后（运行中）的配置里总是 null。 */
+  grid_count: number | null
+  /** 按格数设置时的价差倍数 g ÷ d；null 按 1。 */
+  grid_spread_ratio: Decimal | null
+  /** 按投入资金设置仓位：服务端由它反推 M；null 表示按数量设置。规整后的配置里总是 null。 */
+  capital: Decimal | null
   throttle_interval: ThrottleInterval
   /** 观点失效（可选，第 7.5 节）；null 表示这一侧不启用自动止损。 */
   invalidation: Invalidation | null
@@ -53,8 +61,10 @@ export interface SideConfig {
 /** 观点失效：价格越过失效价时撤单，把本侧仓位减到剩余数量。 */
 export interface Invalidation {
   price: Decimal
-  /** 失效后剩余数量 R：0 表示全部平仓。 */
+  /** 失效后剩余数量 R：0 表示全部平仓。设了 remaining_ratio 时由服务端按它算出。 */
   remaining: Decimal
+  /** 失效后保留主仓的比例（0 到 1）；null 表示直接按 R 的数量。 */
+  remaining_ratio: Decimal | null
   /** 失效平仓单相对标记价最多让出多少（比率，0.01 是 1%）。 */
   max_slippage: Decimal
 }
@@ -201,6 +211,23 @@ export type Liquidation =
   | { kind: 'at'; price: Decimal }
   | { kind: 'out_of_range' }
 
+/** 一侧的仓位与网格读数：按格数、按资金设置时，算出来的数量和间距都在这里。 */
+export interface SideSizing {
+  direction: Direction
+  max_position: Decimal
+  core_quantity: Decimal
+  grid_spacing: Decimal
+  grid_spread: Decimal
+  cell_count: number
+  /** 满仓时按挂单价算的总价值，以及其中主仓的部分。 */
+  notional: Decimal
+  core_notional: Decimal
+  /** 失效后剩余数量 R；没设观点失效时是 null。 */
+  invalidation_remaining: Decimal | null
+  /** 满仓总价值按交易所当前杠杆要占的保证金（不含手续费）。 */
+  margin: Decimal
+}
+
 export interface DraftPreview {
   draft_id: string
   instrument: string
@@ -209,6 +236,8 @@ export interface DraftPreview {
   market_price: Decimal
   position: Decimal
   available_collateral: Decimal
+  /** 两侧的仓位与网格读数；校验不过时是空的。 */
+  sizing: SideSizing[]
   batches: BatchSummary[]
   cells: CellSummary[]
   immediate_fills: ImmediateFill[]

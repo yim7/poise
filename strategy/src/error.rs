@@ -14,7 +14,7 @@ use chrono::Duration;
 use crate::batch::BatchIndex;
 use crate::grid::CellIndex;
 use crate::side::Direction;
-use crate::units::{Price, Quantity, Rate};
+use crate::units::{Notional, Price, Quantity, Rate};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
@@ -133,7 +133,7 @@ pub enum ConfigError {
         max_batch_count: usize,
     },
     #[error(
-        "{side}：需要 {cell_count} 格，超过上限 {max_cell_count} 格；加大网格间距 d",
+        "{side}：需要 {cell_count} 格，超过上限 {max_cell_count} 格；加大网格间距 d 或减少格数 N",
         side = .direction.side_label()
     )]
     TooManyCells {
@@ -142,7 +142,7 @@ pub enum ConfigError {
         max_cell_count: usize,
     },
     #[error(
-        "{side}：格子太多，每格数量不够最低下单金额（{short}{cell_index} 格在 {cell_price} 只有 {cell_quantity}，至少要 {required_quantity}）。这个范围最多约 {max_cell_count} 格：加大网格间距 d 或最大仓位 M",
+        "{side}：格子太多，每格数量不够最低下单金额（{short}{cell_index} 格在 {cell_price} 只有 {cell_quantity}，至少要 {required_quantity}）。这个范围最多约 {max_cell_count} 格：减少格子（加大间距 d 或减少格数 N），或加大最大仓位 M、投入资金",
         side = .direction.side_label(),
         short = .direction.short_label()
     )]
@@ -155,7 +155,7 @@ pub enum ConfigError {
         max_cell_count: usize,
     },
     #[error(
-        "{side}：第 {batch_index} 批（{batch_price}）的区间 ({segment_low}, {segment_high}] 里没有格子；减小网格间距 d 或减少批数 n",
+        "{side}：第 {batch_index} 批（{batch_price}）的区间 ({segment_low}, {segment_high}] 里没有格子；减小网格间距 d、增加格数 N，或减少批数 n",
         side = .direction.side_label()
     )]
     BatchWithoutCell {
@@ -206,6 +206,42 @@ pub enum ConfigError {
         entry_price: Price,
         taker_fee_rate: Rate,
     },
+    #[error("{side}：格数 N 须在 1 到 {max_cell_count} 之间（现在是 {grid_count}）", side = .direction.side_label())]
+    GridCountOutOfRange {
+        direction: Direction,
+        grid_count: u32,
+        max_cell_count: usize,
+    },
+    #[error(
+        "{side}：按报价精度 {price_tick} 分不出正好 {grid_count} 格；减少格数 N 或放宽价格范围",
+        side = .direction.side_label()
+    )]
+    GridCountUnreachable {
+        direction: Direction,
+        grid_count: u32,
+        price_tick: Price,
+    },
+    #[error("{side}：价差倍数 g ÷ d 须在 0.01 到 100 之间（现在是 {ratio}）", side = .direction.side_label())]
+    GridSpreadRatioOutOfRange { direction: Direction, ratio: Rate },
+    #[error("{side}：投入资金须大于 0（现在是 {capital}）", side = .direction.side_label())]
+    CapitalNotPositive {
+        direction: Direction,
+        capital: Notional,
+    },
+    #[error(
+        "{side}：投入资金 {capital} 买不到一个最小数量单位 {quantity_step}",
+        side = .direction.side_label()
+    )]
+    CapitalBelowOneStep {
+        direction: Direction,
+        capital: Notional,
+        quantity_step: Quantity,
+    },
+    #[error(
+        "{side}：失效后保留主仓的比例须在 0 到 100% 之间（现在是 {ratio}）",
+        side = .direction.side_label()
+    )]
+    InvalidationRemainingRatioOutOfRange { direction: Direction, ratio: Rate },
     #[error("taker 费率 {taker_fee_rate} 不低于 1，任何网格都不赚钱")]
     TakerFeeRateTooHigh { taker_fee_rate: Rate },
 }

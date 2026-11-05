@@ -259,7 +259,7 @@ describe('运行详情', () => {
     const paused = summary({ status: 'paused' })
     paused.config = {
       ...paused.config,
-      long: { ...longSide, invalidation: { price: '70000', remaining: '0', max_slippage: '0.01' } },
+      long: { ...longSide, invalidation: { price: '70000', remaining: '0', remaining_ratio: null, max_slippage: '0.01' } },
     }
     detailRoutes({ 'GET /api/strategies/s-1': { body: detail({ summary: paused }) } })
     renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
@@ -985,7 +985,7 @@ describe('运行详情', () => {
     await screen.findByText('主仓批次表')
 
     await userEvent.type(screen.getByLabelText('做多侧观点失效价'), '70000')
-    await userEvent.type(screen.getByLabelText('做多侧失效后剩余数量 R'), '0.3')
+    await userEvent.type(screen.getByLabelText('做多侧失效后保留主仓（%）'), '30')
     await userEvent.clear(screen.getByLabelText('做多侧失效平仓滑点上限（%）'))
     await userEvent.type(screen.getByLabelText('做多侧失效平仓滑点上限（%）'), '0.5')
     await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
@@ -994,9 +994,50 @@ describe('运行详情', () => {
     expect(server.lastBody('PUT', '/api/strategies/s-1/config')).toMatchObject({
       long: {
         throttle_interval: null,
-        invalidation: { price: '70000', remaining: '0.3', max_slippage: '0.005' },
+        invalidation: { price: '70000', remaining: '0', remaining_ratio: '0.3', max_slippage: '0.005' },
       },
       short: null,
+    })
+  })
+
+  it('旧策略按数量写的 R：保留百分比留空，提示原来的数量，保存时原样提交', async () => {
+    const legacy = {
+      ...config,
+      long: { ...longSide, invalidation: { price: '70000', remaining: '0.3', remaining_ratio: null, max_slippage: '0.01' } },
+    }
+    const server = detailRoutes({
+      'GET /api/strategies/s-1': { body: detail({ summary: summary({ config: legacy }) }) },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
+
+    expect(await screen.findByLabelText('做多侧失效后保留主仓（%）')).toHaveValue('')
+    expect(screen.getByText('原为数量 0.3，留空不变')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
+
+    await waitFor(() => expect(server.count('PUT', '/api/strategies/s-1/config')).toBe(1))
+    expect(server.lastBody('PUT', '/api/strategies/s-1/config')).toMatchObject({
+      long: { invalidation: { price: '70000', remaining: '0.3', remaining_ratio: null } },
+    })
+  })
+
+  it('旧策略剩余 0 显示成保留 0%，不改就原样提交，不多出一个参数版本', async () => {
+    const legacy = {
+      ...config,
+      long: { ...longSide, invalidation: { price: '70000', remaining: '0', remaining_ratio: null, max_slippage: '0.01' } },
+    }
+    const server = detailRoutes({
+      'GET /api/strategies/s-1': { body: detail({ summary: summary({ config: legacy }) }) },
+    })
+    renderWithQuery(<StrategyDetailView strategyId="s-1" onBack={() => {}} />)
+    await openParams()
+
+    expect(await screen.findByLabelText('做多侧失效后保留主仓（%）')).toHaveValue('0')
+    await userEvent.click(screen.getByRole('button', { name: '保存运行参数' }))
+
+    await waitFor(() => expect(server.count('PUT', '/api/strategies/s-1/config')).toBe(1))
+    expect(server.lastBody('PUT', '/api/strategies/s-1/config')).toMatchObject({
+      long: { invalidation: { remaining: '0', remaining_ratio: null } },
     })
   })
 
@@ -1178,7 +1219,7 @@ describe('运行详情', () => {
   it('设了失效价：读数里列出交易所上的兜底止损单，没挂时显示未挂；没设失效价不显示这一项', async () => {
     const guarded = {
       ...config,
-      long: { ...longSide, invalidation: { price: '70000', remaining: '0.3', max_slippage: '0.01' } },
+      long: { ...longSide, invalidation: { price: '70000', remaining: '0.3', remaining_ratio: null, max_slippage: '0.01' } },
     }
     fakeServer({
       'GET /api/strategies/s-1': {

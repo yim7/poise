@@ -24,7 +24,7 @@ use crate::grid::{Cell, CellIndex, GridShape, cell_quantity, exit_price};
 use crate::instrument::InstrumentSpec;
 use crate::side::Direction;
 use crate::units::{
-    Price, Quantity, Rate, SCALE, div_ceil, div_round, split_steps, split_steps_by_weight,
+    Notional, Price, Quantity, Rate, SCALE, div_ceil, div_round, split_steps, split_steps_by_weight,
 };
 
 /// 批次在划分中的下标，0 是最靠近空隙的一批。
@@ -126,15 +126,11 @@ pub(crate) fn build_batches(
     spec: &InstrumentSpec,
 ) -> Result<(BatchPlan, Vec<Cell>), ConfigError> {
     let count = batch_count as usize;
-    let batch_prices = batch_prices(direction, shape, batch_count, spec)?;
-    let following = following_batches(direction, prices, &batch_prices);
-    let members: Vec<Vec<CellIndex>> = (0..count)
-        .map(|index| members_of(&following, index))
-        .collect();
-    let quantities = match shape.core_skew {
-        None => split_by_batch(shape, &members, spec),
-        Some(skew) => split_core_and_grid(shape, skew, &members, prices.len(), spec),
-    };
+    let Layout {
+        batch_prices,
+        members,
+        quantities,
+    } = layout(direction, prices, shape, batch_count, spec)?;
 
     let mut batches = Vec::with_capacity(count);
     let mut cells = Vec::with_capacity(prices.len());
@@ -178,6 +174,82 @@ pub(crate) fn build_batches(
     }
 
     Ok((BatchPlan::from_batches(batches), cells))
+}
+
+/// 批次价、每批跟随的格子和数量划分：划分批次与估算满仓总价值共用这一步，后者不做校验。
+struct Layout {
+    batch_prices: Vec<Price>,
+    members: Vec<Vec<CellIndex>>,
+    quantities: Quantities,
+}
+
+fn layout(
+    direction: Direction,
+    prices: &[Price],
+    shape: &GridShape,
+    batch_count: u32,
+    spec: &InstrumentSpec,
+) -> Result<Layout, ConfigError> {
+    let batch_prices = batch_prices(direction, shape, batch_count, spec)?;
+    let following = following_batches(direction, prices, &batch_prices);
+    let members: Vec<Vec<CellIndex>> = (0..batch_count as usize)
+        .map(|index| members_of(&following, index))
+        .collect();
+    let quantities = match shape.core_skew {
+        None => split_by_batch(shape, &members, spec),
+        Some(skew) => split_core_and_grid(shape, skew, &members, prices.len(), spec),
+    };
+    Ok(Layout {
+        batch_prices,
+        members,
+        quantities,
+    })
+}
+
+/// 满仓时按挂单价算的总价值：主仓按批次价，格子按建仓价（第 2.2 节）。
+///
+/// 按投入资金反推 `M` 时用：只按划分规则分数量，不做最低金额、每批都有格子这些校验，
+/// 那些留给反推出 `M` 之后的正式划分。`batch_count` 为 `None` 表示没有主仓，格子自成单位。
+pub(crate) fn planned_notional(
+    direction: Direction,
+    prices: &[Price],
+    shape: &GridShape,
+    batch_count: Option<u32>,
+    spec: &InstrumentSpec,
+) -> Result<Notional, ConfigError> {
+    let Some(batch_count) = batch_count else {
+        let step = spec.quantity_step();
+        return Ok(prices
+            .iter()
+            .enumerate()
+            .fold(Notional::ZERO, |total, (index, price)| {
+                total
+                    + Notional::of(
+                        cell_quantity(index, prices.len(), shape.max_position, step),
+                        *price,
+                    )
+            }));
+    };
+    let Layout {
+        batch_prices,
+        quantities,
+        ..
+    } = layout(direction, prices, shape, batch_count, spec)?;
+    let core = quantities
+        .core
+        .iter()
+        .zip(&batch_prices)
+        .fold(Notional::ZERO, |total, (quantity, price)| {
+            total + Notional::of(*quantity, *price)
+        });
+    let grid = quantities
+        .cells
+        .iter()
+        .zip(prices)
+        .fold(Notional::ZERO, |total, (quantity, price)| {
+            total + Notional::of(*quantity, *price)
+        });
+    Ok(core + grid)
 }
 
 /// 数量划分的结果：每批的主仓数量，以及按格子下标排列的每格数量。

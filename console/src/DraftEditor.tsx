@@ -11,11 +11,14 @@ import { HttpError, api } from './api'
 import {
   DEFAULT_FORM,
   DraftForm,
+  changeGridMode,
   changeSideField,
   fromConfig,
   toConfig,
   type FormValues,
+  type GridMode,
   type SideFieldName,
+  type SizeMode,
 } from './DraftForm'
 import { PreviewPanel } from './PreviewPanel'
 import type { Direction, DraftPreview } from './types'
@@ -107,6 +110,16 @@ export function DraftEditor({ draftId, onStarted, onBack, onCreated }: DraftEdit
       ...current,
       [direction]: changeSideField(current[direction], name, value),
     }))
+    changed()
+  }
+
+  function changeSizeMode(direction: Direction, sizeMode: SizeMode) {
+    setValues((current) => ({ ...current, [direction]: { ...current[direction], sizeMode } }))
+    changed()
+  }
+
+  function changeGrid(direction: Direction, mode: GridMode) {
+    setValues((current) => ({ ...current, [direction]: changeGridMode(current[direction], mode) }))
     changed()
   }
 
@@ -222,6 +235,8 @@ export function DraftEditor({ draftId, onStarted, onBack, onCreated }: DraftEdit
         onInstrument={changeInstrument}
         onChange={changeSide}
         onToggle={toggleSide}
+        onSizeMode={changeSizeMode}
+        onGridMode={changeGrid}
       />
 
       {preview === null ? null : <PreviewPanel preview={preview} config={previewConfig} />}

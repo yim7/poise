@@ -10,6 +10,13 @@ export function decimal(value: string | null | undefined): string {
   return value === null || value === undefined || value === '' ? '—' : value
 }
 
+/** 金额按 USDC 显示到分：小数第三位起截掉，不做浮点运算。 */
+export function usdc(value: string): string {
+  const [whole, fraction = ''] = value.split('.')
+  const cents = fraction.slice(0, 2).replace(/0+$/, '')
+  return cents === '' ? whole : `${whole}.${cents}`
+}
+
 /**
  * 比率按百分比显示，例如 0.3 显示成 30%。只换写法，不改数：小数点右移两位。
  * 没读到时（null）显示「读不到」。
@@ -85,28 +92,47 @@ export function parseThrottle(minutes: string): ThrottleInput {
   return { interval: [Math.round(parsed * 60), 0] }
 }
 
-/** 失效设置输入框里的三个值。 */
+/** 失效设置输入框里的值。 */
 export interface InvalidationInput {
   price: string
-  remaining: string
+  /** 失效后保留主仓的百分比；留空按 0，全部平仓。 */
+  keepPercent: string
   /** 滑点上限，百分比。 */
   slippage: string
+  /**
+   * 旧配置直接按数量写的 R（没有比例）。百分比留空时原样提交，不把它改成别的数；
+   * 填了百分比就按百分比。
+   */
+  legacyRemaining: string | null
 }
 
 /** 失效设置在输入框里的写法；没启用时滑点上限给默认的 1%。 */
 export function invalidationInput(invalidation: Invalidation | null): InvalidationInput {
-  if (invalidation === null) return { price: '', remaining: '', slippage: '1' }
+  if (invalidation === null) return { price: '', keepPercent: '', slippage: '1', legacyRemaining: null }
+  const slippage = ratioToPercentInput(invalidation.max_slippage)
+  if (invalidation.remaining_ratio !== null) {
+    return {
+      price: invalidation.price,
+      keepPercent: ratioToPercentInput(invalidation.remaining_ratio),
+      slippage,
+      legacyRemaining: null,
+    }
+  }
+  // 旧配置：剩余 0 就是保留 0%，显示成 0；不是 0 的数量换不成准确的百分比，留空。两种都记下
+  // 原来的数量，没改的时候原样提交，不平白多出一个参数版本。
+  const zero = Number(invalidation.remaining) === 0
   return {
     price: invalidation.price,
-    remaining: invalidation.remaining,
-    slippage: ratioToPercentInput(invalidation.max_slippage),
+    keepPercent: zero ? '0' : '',
+    slippage,
+    legacyRemaining: invalidation.remaining,
   }
 }
 
 /**
- * 输入框里的失效设置换成提交的参数。失效价留空就是不启用；剩余数量留空按 0；中性网格
- * 剩余数量按 0 提交（任一侧失效都全部平仓，第 7.5 节）。滑点上限填的是百分比，只移动
- * 小数点换成比率。价格和数量是否合理由服务端校验。
+ * 输入框里的失效设置换成提交的参数。失效价留空就是不启用；保留主仓的百分比留空按 0；
+ * 中性网格按 0 提交（任一侧失效都全部平仓，第 7.5 节）。百分比只移动小数点换成比率，
+ * R 由服务端按主仓总量算出。价格和比例是否合理由服务端校验。
  */
 export function parseInvalidation(
   input: InvalidationInput,
@@ -116,13 +142,19 @@ export function parseInvalidation(
   if (price === '') return { invalidation: null }
   const slippage = percentInputToRatio(input.slippage)
   if (slippage === null) return { problem: '失效滑点上限填百分比数字。' }
-  const remaining = input.remaining.trim()
+  const keep = input.keepPercent.trim()
+  if (!neutral && keep === '' && input.legacyRemaining !== null) {
+    return {
+      invalidation: { price, remaining: input.legacyRemaining, remaining_ratio: null, max_slippage: slippage },
+    }
+  }
+  const ratio = neutral || keep === '' ? '0' : percentInputToRatio(keep)
+  if (ratio === null) return { problem: '失效后保留主仓填百分比数字。' }
+  if (ratio === '0' && input.legacyRemaining !== null && Number(input.legacyRemaining) === 0) {
+    return { invalidation: { price, remaining: '0', remaining_ratio: null, max_slippage: slippage } }
+  }
   return {
-    invalidation: {
-      price,
-      remaining: neutral || remaining === '' ? '0' : remaining,
-      max_slippage: slippage,
-    },
+    invalidation: { price, remaining: '0', remaining_ratio: ratio, max_slippage: slippage },
   }
 }
 
@@ -133,11 +165,21 @@ export function sideSummary(side: SideConfig, hideAmounts = false): string {
     side.batch_count === null || Number(side.core_ratio) === 0
       ? '无主仓'
       : `主仓 ${side.core_ratio}×${side.batch_count} 批${side.core_skew === null ? '' : `（倾斜 ${side.core_skew}）`}`
+  // 按比例设置的 R 只报比例：草稿里的 R 还没算出来，报数量会是 0。
+  const remaining = (invalidation: Invalidation) =>
+    invalidation.remaining_ratio === null
+      ? `剩 ${amount(invalidation.remaining)}`
+      : `留主仓 ${percent(invalidation.remaining_ratio)}`
   const invalidation =
     side.invalidation === null
       ? ''
-      : `，失效价 ${side.invalidation.price}（剩 ${amount(side.invalidation.remaining)}，滑点 ≤${percent(side.invalidation.max_slippage)}）`
-  return `${side.price_low}–${side.price_high}，间距 ${side.grid_spacing}，价差 ${side.grid_spread}，上限 ${amount(side.max_position)}，${core}${invalidation}`
+      : `，失效价 ${side.invalidation.price}（${remaining(side.invalidation)}，滑点 ≤${percent(side.invalidation.max_slippage)}）`
+  const grid =
+    side.grid_count === null
+      ? `间距 ${side.grid_spacing}，价差 ${side.grid_spread}`
+      : `${side.grid_count} 格，价差 ${side.grid_spread_ratio ?? '1'}×间距`
+  const size = side.capital === null ? `上限 ${amount(side.max_position)}` : `投入 ${amount(side.capital)}`
+  return `${side.price_low}–${side.price_high}，${grid}，${size}，${core}${invalidation}`
 }
 
 /** 参数摘要：列表和版本记录里用一句话说清两侧的关键参数。 */

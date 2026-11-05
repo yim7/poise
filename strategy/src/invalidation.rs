@@ -413,6 +413,7 @@ mod backstop_tests {
             price: Price::parse(price).unwrap(),
             remaining: Quantity::parse(remaining).unwrap(),
             max_slippage: Rate::parse("0.01").unwrap(),
+            remaining_ratio: None,
         });
         for side in [config.long.as_mut(), config.short.as_mut()]
             .into_iter()
@@ -516,6 +517,7 @@ mod tests {
             price: Price::parse(price).unwrap(),
             remaining: Quantity::parse(remaining).unwrap(),
             max_slippage: Rate::parse("0.01").unwrap(),
+            remaining_ratio: None,
         }
     }
 
@@ -811,6 +813,7 @@ mod tests {
             price: price("97"),
             remaining: Quantity::ZERO,
             max_slippage: Rate::parse("0.01").unwrap(),
+            remaining_ratio: None,
         });
         let strategy = Strategy::new(config, cheap_spec(), btc_fees()).unwrap();
 

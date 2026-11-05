@@ -44,6 +44,58 @@ pub struct BatchSummary {
     pub grid_shortfall: Quantity,
 }
 
+/// 一侧的仓位与网格读数：按格数、按投入资金设置时，算出来的数量和间距都在这里（第 2.2 节）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SideSizing {
+    pub direction: Direction,
+    /// 最大仓位 `M`：按资金设置时是反推出来的。
+    pub max_position: Quantity,
+    /// 主仓总量。
+    pub core_quantity: Quantity,
+    /// 网格间距 `d` 与价差 `g`：按格数设置时是算出来的；没有网格时照配置原样。
+    pub grid_spacing: Price,
+    pub grid_spread: Price,
+    pub cell_count: usize,
+    /// 满仓时按挂单价算的总价值，以及其中主仓的部分。
+    pub notional: Notional,
+    pub core_notional: Notional,
+    /// 失效后剩余数量 `R`：按主仓比例设置时是算出来的；没设观点失效时是 `None`。
+    pub invalidation_remaining: Option<Quantity>,
+    /// 满仓总价值按交易所上当前杠杆要占的保证金（不含手续费）。
+    pub margin: Notional,
+}
+
+impl Strategy {
+    /// 两侧的仓位与网格读数，按 [`Direction::ALL`] 的顺序。`leverage` 是交易所上当前的倍数。
+    pub fn side_sizing(&self, leverage: u32) -> Vec<SideSizing> {
+        self.sides()
+            .iter()
+            .map(|side| {
+                let config = side.config();
+                let notional = side.planned_notional();
+                SideSizing {
+                    direction: side.direction(),
+                    max_position: config.max_position,
+                    core_quantity: side
+                        .batches()
+                        .batches()
+                        .iter()
+                        .fold(Quantity::ZERO, |total, batch| total + batch.core_quantity),
+                    grid_spacing: config.grid_spacing,
+                    grid_spread: config.grid_spread,
+                    cell_count: side.grid().cells().len(),
+                    notional,
+                    core_notional: side.core_notional(),
+                    invalidation_remaining: config
+                        .invalidation
+                        .map(|invalidation| invalidation.remaining),
+                    margin: notional.div_ceil(leverage.max(1)),
+                }
+            })
+            .collect()
+    }
+}
+
 /// 一个格子在格子表里的状态（第 11 节）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -416,6 +468,24 @@ mod tests {
     use crate::state::StrategyState;
     use crate::units::{Notional, Price, Quantity};
     use chrono::Duration;
+
+    /// 设计第 3.2 节的例子：满仓总价值 86900，主仓 61250；10 倍杠杆占 8690。
+    #[test]
+    fn the_sizing_reports_the_full_position_value_and_its_margin() {
+        let sizing = core_long_strategy().side_sizing(10);
+
+        assert_eq!(sizing.len(), 1);
+        let side = &sizing[0];
+        assert_eq!(side.direction, Direction::Long);
+        assert_eq!(side.max_position, Quantity::parse("1").unwrap());
+        assert_eq!(side.core_quantity, Quantity::parse("0.7").unwrap());
+        assert_eq!(side.grid_spacing, Price::parse("1000").unwrap());
+        assert_eq!(side.cell_count, 20);
+        assert_eq!(side.notional, Notional::parse("86900").unwrap());
+        assert_eq!(side.core_notional, Notional::parse("61250").unwrap());
+        assert_eq!(side.margin, Notional::parse("8690").unwrap());
+        assert_eq!(side.invalidation_remaining, None);
+    }
 
     fn fill(unit: Unit, limit_price: &str, quantity: &str) -> ImmediateFill {
         ImmediateFill {

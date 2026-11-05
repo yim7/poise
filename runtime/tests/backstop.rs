@@ -24,6 +24,7 @@ fn config() -> StrategyConfig {
         price: price("70000"),
         remaining: quantity("0.3"),
         max_slippage: Rate::parse("0.01").unwrap(),
+        remaining_ratio: None,
     });
     config
 }

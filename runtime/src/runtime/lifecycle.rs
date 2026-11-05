@@ -103,6 +103,7 @@ impl Runtime {
             market_price,
             position,
             available_collateral,
+            sizing: Vec::new(),
             batches: Vec::new(),
             cells: Vec::new(),
             immediate_fills: Vec::new(),
@@ -123,6 +124,11 @@ impl Runtime {
                 return Ok(preview);
             }
         };
+        // 读数先算：接管不了（比如已有仓位超过按资金反推出的 M）时，用户正要看算出来的 M。
+        // 杠杆读不到只少了保证金占用这一列，不必整份预览失败；压力测试会报出读不到。
+        if let Ok(leverage) = self.account.leverage(strategy.spec().instrument()).await {
+            preview.sizing = strategy.side_sizing(leverage.value);
+        }
         let state = match strategy.takeover_state(position) {
             Ok(state) => state,
             Err(error) => {
@@ -241,7 +247,8 @@ impl Runtime {
                 settings.margin_alert_ratio,
             ) {
                 Suggestion::Max(suggested) => format!(
-                    "建议最大仓位 M ≤ {suggested}（保证金率不超过 {}）。",
+                    "建议最大仓位 M ≤ {suggested}（满仓约 {} USDC，保证金率不超过 {}）。",
+                    suggested_notional(strategy, side.direction, suggested),
                     percent(settings.margin_alert_ratio)
                 ),
                 Suggestion::HeldPositionTooLarge => "已有仓位本身就超过提醒阈值：先处理已有仓位或增加资金。".to_string(),
@@ -567,6 +574,20 @@ pub(super) fn preview_fingerprint(
         hasher.update(b"\n");
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+/// 建议的最大仓位满仓时约值多少：按这一侧现在的满仓总价值成比例换算。按资金设置的用户
+/// 照着它改投入资金就行，不用自己换算数量。
+fn suggested_notional(strategy: &Strategy, direction: Direction, suggested: Quantity) -> Notional {
+    let Some(side) = strategy.side(direction) else {
+        return Notional::ZERO;
+    };
+    let notional = side
+        .planned_notional()
+        .scale(suggested.units(), side.config().max_position.units());
+    // 只是一个参考数，保留到分。
+    let cents = SCALE / 100;
+    Notional::from_scaled(notional.scaled_floor() / cents * cents)
 }
 
 /// 除限速间隔之外，新配置改动了的第一个字段。
