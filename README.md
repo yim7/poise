@@ -26,7 +26,7 @@ network = "testnet"
 account_address = "0x…"          # 主账户地址
 api_wallet_private_key = "0x…"   # 在 Hyperliquid 网页上为这个账户授权的 API 钱包私钥
 data_dir = "data"                # 数据库放在这里（相对实例目录）
-listen = "127.0.0.1:8010"        # 网页控制台地址，只接受本机地址
+listen = "127.0.0.1:8020"        # 网页控制台地址，只接受本机地址（测试网 8020、正式网 8021）
 feishu_webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/…"   # 可选：提醒推到这个飞书机器人
 ```
 
@@ -66,6 +66,21 @@ target/release/poise --instance testnet service install   # 常驻运行（见�
 
 ## 常驻运行
 
+### Linux 服务器（systemd + SSH 隧道，推荐）
+
+模板和升级脚本在 [deploy/](deploy/)：
+
+- **服务端**：参考 [deploy/poise.service](deploy/poise.service) 为 `testnet`（`127.0.0.1:8020`）和 `mainnet`（`127.0.0.1:8021`）分别建 systemd 单元，只放开对应实例的 `data/` 写入权限。后续升级运行：
+
+  ```bash
+  deploy/deploy.sh <ssh-host> testnet   # 只重启测试网
+  deploy/deploy.sh <ssh-host> all       # 同时重启测试网与正式网
+  ```
+
+- **本机访问**：用受限专用公钥（仅允许转发 `8020` / `8021`，禁止登录 shell）配常驻 SSH 隧道，参考 [deploy/com.poise.tunnel.plist](deploy/com.poise.tunnel.plist)。隧道拉起后在浏览器打开 `http://127.0.0.1:8020`（测试网）或 `http://127.0.0.1:8021`（正式网）。
+
+### macOS 本机（launchd）
+
 `service install` 把当前的 `poise` 程序和网页控制台（`console/dist`）复制进实例目录的 `bin/`、`console/`，写一份 launchd 用户级配置 `~/Library/LaunchAgents/com.poise.<实例名>.plist` 并启动：登录后自动启动，崩溃后 10 秒内自动拉起，运行期间用 `caffeinate` 挡住系统睡眠（合上笔记本盖子挡不住）。日志在实例目录的 `logs/poise.log`。
 
 ```bash
@@ -101,7 +116,7 @@ cargo test --workspace
 (cd console && npx tsc --noEmit && npx vitest run && npm run build)
 ```
 
-前端开发服务器把 `/api` 转给 `POISE_API`（默认 `http://127.0.0.1:8010`）：
+前端开发服务器把 `/api` 转给 `POISE_API`（默认 `http://127.0.0.1:8020`）：
 
 ```bash
 (cd console && npm run dev)
@@ -114,4 +129,5 @@ cargo test --workspace
 - [hyperliquid/](hyperliquid/)：Hyperliquid 适配：签名、下单撤单、订单与成交查询、账户读数。
 - [cli/](cli/)：命令行 `poise`。
 - [console/](console/)：网页控制台（React + TypeScript + Vite，shadcn/ui + Tailwind CSS，TanStack Query）。
+- [deploy/](deploy/)：Linux systemd 单元模板、macOS SSH 隧道模板与升级部署脚本。
 - [docs/](docs/)：设计与系统说明。

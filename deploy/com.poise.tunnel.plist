@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS 上的 Poise 常驻 SSH 隧道（launchd 用户级守护）。
+  把远程服务器上的 Poise 测试网（127.0.0.1:8020）与正式网（127.0.0.1:8021）映射到本地同名端口：
+    - 测试网：http://127.0.0.1:8020
+    - 正式网：http://127.0.0.1:8021
+
+  建议安全做法（在服务器 ~/.ssh/authorized_keys 中为隧道专用公钥加上限制，只允许转发这两个端口、禁止登录 shell）：
+    restrict,port-forwarding,permitopen="127.0.0.1:8020",permitopen="127.0.0.1:8021",command="/usr/sbin/nologin" ssh-ed25519 AAAA... poise-tunnel
+
+  安装步骤（在 macOS 上）：
+    1. 修改下面 ProgramArguments 与 StandardErrorPath 中的本地用户名、私钥路径与服务器地址。
+    2. 复制到 ~/Library/LaunchAgents/com.poise.tunnel.plist
+    3. 启动并设为开机自启：
+         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.poise.tunnel.plist
+    4. 验证：
+         curl -fsS http://127.0.0.1:8020/api/instance
+         curl -fsS http://127.0.0.1:8021/api/instance
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.poise.tunnel</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/ssh</string>
+        <string>-N</string>
+        <string>-o</string>
+        <string>BatchMode=yes</string>
+        <string>-o</string>
+        <string>IdentitiesOnly=yes</string>
+        <string>-o</string>
+        <string>ExitOnForwardFailure=yes</string>
+        <string>-o</string>
+        <string>ServerAliveInterval=15</string>
+        <string>-o</string>
+        <string>ServerAliveCountMax=3</string>
+        <string>-i</string>
+        <string>/Users/LOCAL_USER/.ssh/poise_tunnel_ed25519</string>
+        <string>-L</string>
+        <string>127.0.0.1:8020:127.0.0.1:8020</string>
+        <string>-L</string>
+        <string>127.0.0.1:8021:127.0.0.1:8021</string>
+        <string>REMOTE_USER@SERVER_HOST</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/LOCAL_USER/.poise/tunnel.log</string>
+</dict>
+</plist>

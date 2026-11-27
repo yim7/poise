@@ -1,0 +1,39 @@
+# Poise Hyperliquid 策略服务的 systemd 单元（模板）。
+#
+# 用法（在 Linux 服务器上）：
+#   1. 把编译好的二进制放到 ~/poise/bin/poise，前端静态文件放到 ~/poise/console。
+#   2. 准备实例目录 ~/.poise/<instance>/，放好权限 600 的 poise.toml（listen 设 127.0.0.1:8020 或 8021）。
+#   3. 把下面 <user>、<instance> 替换成实际值，复制到 /etc/systemd/system/poise-<instance>.service：
+#        sudo systemctl daemon-reload && sudo systemctl enable --now poise-<instance>.service
+#   4. 查看状态与日志：
+#        systemctl status poise-<instance>.service
+#        sudo journalctl -u poise-<instance>.service -f
+#
+# 停止（systemctl stop）发的是 SIGTERM：服务会平稳退出并推一条飞书退出提醒，
+# 交易所上的兜底止损单仍留在场上。重启后运行中的策略先进入「恢复中」，收干净遗留挂单再恢复。
+
+[Unit]
+Description=Poise Hyperliquid strategy service (<instance>)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=/home/<user>/.poise/<instance>
+Environment=RUST_LOG=info
+ExecStart=/home/<user>/poise/bin/poise --instance /home/<user>/.poise/<instance> serve --step-interval-secs 5 --web-root /home/<user>/poise/console
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+# 收紧权限：只允许读写本实例的 data/ 目录，poise.toml 和程序目录只读
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/<user>/.poise/<instance>/data
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
